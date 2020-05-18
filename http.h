@@ -27,8 +27,12 @@
 #include <sstream>
 #include <string_view>
 
-#undef DELETE // Windows :/
-#pragma GCC diagnostic ignored "-Wnarrowing"
+#ifndef _WIN32
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wnarrowing"
+#else
+#    undef DELETE // Windows :/
+#endif
 
 namespace qb::http {
 constexpr const char endl[] = "\r\n";
@@ -68,6 +72,10 @@ urlDecode(_IT begin, _IT end) {
 
     return out;
 }
+
+#ifndef _WIN32
+#    pragma GCC diagnostic push
+#endif
 
 template <typename _String>
 std::string
@@ -500,7 +508,7 @@ public:
             template <typename T>
             [[nodiscard]] std::string const &
             header(T &&name, std::size_t const index = 0,
-                  std::string const &not_found = "") const {
+                   std::string const &not_found = "") const {
                 return request.header(std::forward<T>(name), index, not_found);
             }
 
@@ -621,6 +629,11 @@ public:
             return _default_response;
         }
 
+        [[nodiscard]] Response<std::string> &
+        getDefaultResponse() {
+            return _default_response;
+        }
+
         bool
         route(_Session &session, Request const &request) const {
             const auto &it = _routes.find(request.method);
@@ -690,8 +703,7 @@ protected:
     qb::http::Parser<std::remove_const_t<_Trait>> _http_obj;
 
 public:
-    template <typename _Session>
-    using Router = typename _Trait::template Router<_Session>;
+    using Router = typename _Trait::template Router<_IO_>;
 
     base() = delete;
     base(_IO_ &io) noexcept
