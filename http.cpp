@@ -23,7 +23,7 @@ pipe<char> &
 pipe<char>::put<qb::http::Request<std::string>>(
     const qb::http::Request<std::string> &r) {
     // HTTP Status Line
-    *this << ::http_method_str(static_cast<http_method>(r.method)) << qb::http::sep
+    *this << ::llhttp_method_name(static_cast<llhttp_method_t>(r.method)) << qb::http::sep
           << r.path << qb::http::sep << "HTTP/" << r.major_version << "."
           << r.minor_version << qb::http::endl;
     // HTTP Headers
@@ -95,9 +95,9 @@ pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
 }
 } // namespace qb::allocator
 
-extern "C" {
-#include "not-qb/http/http_parser.c"
-}
+//extern "C" {
+//#include "not-qb/http/http_parser.c"
+//}
 
 std::string
 qb::http::urlDecode(const char *str, std::size_t const size) {
@@ -105,7 +105,7 @@ qb::http::urlDecode(const char *str, std::size_t const size) {
 }
 
 template <>
-const http_parser_settings
+const llhttp_settings_s
     qb::http::template Parser<qb::http::Request<std::string>>::settings{
         &Parser::on_message_begin, &Parser::on_url,
         &Parser::on_status,        &Parser::on_header_field,
@@ -114,7 +114,7 @@ const http_parser_settings
         &Parser::on_chunk_header,  &Parser::on_chunk_complete};
 
 template <>
-const http_parser_settings
+const llhttp_settings_s
     qb::http::template Parser<qb::http::Request<std::string_view>>::settings{
         &Parser::on_message_begin, &Parser::on_url,
         &Parser::on_status,        &Parser::on_header_field,
@@ -123,7 +123,7 @@ const http_parser_settings
         &Parser::on_chunk_header,  &Parser::on_chunk_complete};
 
 template <>
-const http_parser_settings
+const llhttp_settings_s
     qb::http::template Parser<qb::http::Response<std::string>>::settings{
         &Parser::on_message_begin, &Parser::on_url,
         &Parser::on_status,        &Parser::on_header_field,
@@ -132,7 +132,7 @@ const http_parser_settings
         &Parser::on_chunk_header,  &Parser::on_chunk_complete};
 
 template <>
-const http_parser_settings
+const llhttp_settings_s
     qb::http::template Parser<qb::http::Response<std::string_view>>::settings{
         &Parser::on_message_begin, &Parser::on_url,
         &Parser::on_status,        &Parser::on_header_field,

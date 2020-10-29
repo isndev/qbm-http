@@ -17,7 +17,7 @@
 
 #ifndef QB_MODULE_HTTP_H_
 #define QB_MODULE_HTTP_H_
-#include "not-qb/http/http_parser.h"
+#include "not-qb/llhttp/include/llhttp.h"
 #include <qb/io/async.h>
 #include <qb/io/transport/file.h>
 #include <qb/system/allocator/pipe.h>
@@ -124,20 +124,20 @@ struct MessageBase {
 } // namespace internal
 
 template <typename _MessageType>
-struct Parser : public http_parser {
+struct Parser : public llhttp_t {
     using _String = typename _MessageType::string_type;
 
     static int
-    on_message_begin(http_parser *) {
+    on_message_begin(llhttp_t *) {
         return 0;
     }
 
     static int
-    on_url(http_parser *parser, const char *at, size_t length) {
+    on_url(llhttp_t *parser, const char *at, size_t length) {
         static const std::regex query_regex("(\\?|&)([^=]*)=([^&]*)");
         if constexpr (_MessageType::type == HTTP_REQUEST) {
             auto &msg = static_cast<Parser *>(parser->data)->msg;
-            msg.method = static_cast<http_method>(parser->method);
+            msg.method = static_cast<llhttp_method>(parser->method);
             msg.url = _String(at, length);
             auto has_query = msg.url.find('?');
             if (has_query != std::string::npos) {
@@ -159,7 +159,7 @@ struct Parser : public http_parser {
     }
 
     static int
-    on_status(http_parser *parser, const char *at, size_t length) {
+    on_status(llhttp_t *parser, const char *at, size_t length) {
         if constexpr (_MessageType::type == HTTP_RESPONSE) {
             auto &msg = static_cast<Parser *>(parser->data)->msg;
             msg.status_code = static_cast<http_status>(parser->status_code);
@@ -169,13 +169,13 @@ struct Parser : public http_parser {
     }
 
     static int
-    on_header_field(http_parser *parser, const char *at, size_t length) {
+    on_header_field(llhttp_t *parser, const char *at, size_t length) {
         static_cast<Parser *>(parser->data)->_last_header_key = _String(at, length);
         return 0;
     }
 
     static int
-    on_header_value(http_parser *parser, const char *at, size_t length) {
+    on_header_value(llhttp_t *parser, const char *at, size_t length) {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
         msg.headers[_String{static_cast<Parser *>(parser->data)->_last_header_key}]
             .push_back(_String(at, length));
@@ -183,7 +183,7 @@ struct Parser : public http_parser {
     }
 
     static int
-    on_headers_complete(http_parser *parser) {
+    on_headers_complete(llhttp_t *parser) {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
         msg.major_version = parser->http_major;
         msg.minor_version = parser->http_major;
@@ -195,13 +195,13 @@ struct Parser : public http_parser {
     }
 
     static int
-    on_body(http_parser *parser, const char *at, size_t length) {
+    on_body(llhttp_t *parser, const char *at, size_t length) {
         static_cast<Parser *>(parser->data)->msg.body = _String(at, length);
         return 0;
     }
 
     static int
-    on_message_complete(http_parser *parser) {
+    on_message_complete(llhttp_t *parser) {
         return 1;
     }
 
@@ -209,13 +209,13 @@ struct Parser : public http_parser {
      * in parser->content_length.
      */
     static int
-    on_chunk_header(http_parser *) {
+    on_chunk_header(llhttp_t *) {
         // TODO : implement this
         return 0;
     }
 
     static int
-    on_chunk_complete(http_parser *) {
+    on_chunk_complete(llhttp_t *) {
         // TODO : implement this
         return 0;
     }
@@ -224,25 +224,24 @@ protected:
     _MessageType msg;
 
 private:
-    static const http_parser_settings settings;
+    static const llhttp_settings_s settings;
     _String _last_header_key;
     bool _headers_completed = false;
 
 public:
     Parser() noexcept {
-        this->data = this;
         reset();
     };
 
-    std::size_t
+    llhttp_errno_t
     parse(const char *buffer, std::size_t const size) {
-        return http_parser_execute(static_cast<http_parser *>(this), &settings, buffer,
-                                   size);
+        return llhttp_execute(static_cast<llhttp_t *>(this), buffer, size);
     }
 
     void
     reset() noexcept {
-        http_parser_init(static_cast<http_parser *>(this), _MessageType::type);
+        llhttp_init(static_cast<llhttp_t *>(this), _MessageType::type, &settings);
+        this->data = this;
         msg.reset();
         _headers_completed = false;
     }
@@ -377,7 +376,7 @@ public:
 
 template <typename _String = std::string>
 struct Response : public internal::MessageBase<_String> {
-    constexpr static const http_parser_type type = HTTP_RESPONSE;
+    constexpr static const llhttp_type_t type = HTTP_RESPONSE;
     http_status status_code;
     _String status;
 
@@ -464,8 +463,8 @@ struct Response : public internal::MessageBase<_String> {
 
 template <typename _String = std::string>
 struct Request : public internal::MessageBase<_String> {
-    constexpr static const http_parser_type type = HTTP_REQUEST;
-    http_method method;
+    constexpr static const llhttp_type_t type = HTTP_REQUEST;
+    llhttp_method method;
     _String url;
     _String path;
     qb::icase_unordered_map<std::vector<std::string>> queries;
@@ -713,9 +712,8 @@ public:
     getMessageSize() noexcept final {
         if (!_http_obj.headers_completed()) {
             // parse headers
-            const auto ret =
-                _http_obj.parse(this->_io.in().begin(), this->_io.in().size());
-            if (!_http_obj.headers_completed()) {
+            const auto ret = _http_obj.parse(this->_io.in().begin(), this->_io.in().size());
+            if (ret == HPE_OK) {
                 // restart parsing for next time;
                 _http_obj.reset();
                 return 0;
@@ -723,13 +721,13 @@ public:
 
             auto &msg = _http_obj.getParsedMessage();
 
-            if (msg.headers.has("Transfer-Encoding")) {
+            if (!_http_obj.headers_completed() || msg.headers.has("Transfer-Encoding")) {
                 // not implemented
                 this->not_ok();
                 return 0;
             }
 
-            body_offset = ret;
+            body_offset = _http_obj.error_pos - this->_io.in().begin();
         }
 
         auto &msg = _http_obj.getParsedMessage();
