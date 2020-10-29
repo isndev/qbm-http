@@ -20,8 +20,14 @@ project(qbm-http)
 qb_register_module(
         NAME http
         VERSION 1.0.0
-        SOURCES http.cpp
+        SOURCES
+        not-qb/llhttp/src/llhttp.c
+        not-qb/llhttp/src/api.c
+        not-qb/llhttp/src/http.c
+        http.cpp
 )
+
+target_include_directories(qbm-http PRIVATE not-qb/llhttp/include)
 
 if (QB_BUILD_TEST)
 add_subdirectory(tests)
