@@ -28,7 +28,7 @@ pipe<char>::put<qb::http::Request<std::string>>(
           << r.minor_version << qb::http::endl;
     // HTTP Headers
     for (const auto &it : r.headers) {
-        for (const auto value : it.second)
+        for (const auto &value : it.second)
             *this << it.first << ": " << value << qb::http::endl;
     }
     // Body
@@ -55,7 +55,7 @@ pipe<char>::put<qb::http::Response<std::string>>(
           << qb::http::endl;
     // HTTP Headers
     for (const auto &it : r.headers) {
-        for (const auto value : it.second)
+        for (const auto &value : it.second)
             *this << it.first << ": " << value << qb::http::endl;
     }
     // Body
