@@ -17,6 +17,7 @@
 
 #include <qb/actor.h>
 #include <qb/io/async.h>
+#include <qb/io/async/tcp/connector.h>
 
 #include "../http.h"
 #include "../tag/ClientTag.h"
@@ -32,43 +33,66 @@ namespace qb::http {
         class ISession {
         public:
             virtual ~ISession() = default;
-            virtual bool connect(io::uri const &) = 0;
-            virtual void send(Request<> const &) = 0;
+            virtual void connect(io::uri const &) = 0;
         };
 
         template <typename Transport>
-        class Session
+        struct Session
                 : public io::async::tcp::client<Session<Transport>, Transport>
                         , public ISession {
             ClientActor &actor;
-            const ActorId reply_to;
             const uint64_t id_request;
+            const Request<> request;
+            const ActorId reply_to;
 
         public:
             using Protocol = protocol<Session<Transport>>;
-            Session(ClientActor &actor, uint64_t req_id, ActorId reply)
+            Session(ClientActor &actor,
+                    uint64_t req_id,
+                    Request<> &request,
+                    ActorId reply)
                     : actor(actor)
                     , id_request(req_id)
+                    , request(std::move(request))
                     , reply_to(reply){}
             ~Session() = default;
 
-            bool connect(qb::io::uri const &remote) final {
-                if (qb::io::SocketStatus::Done != this->transport().connect(remote))
-                    return false;
-
-                this->start();
-                return true;
-            }
-
-            void send(Request<> const &request) {
-                *this << request;
+            void connect(qb::io::uri const &remote) final {
+                qb::io::async::tcp::connect<typename Transport::transport_io_type>(
+                        remote, [this](auto &transport) {
+                            if (!transport.is_open()) {
+                                auto &e = actor.push<ResponseEvent>(reply_to);
+                                e.id_request = id_request;
+                                e.data.response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE;
+                                LOG_WARN(actor << "[Fail] request "
+                                                  << llhttp_method_name(request.method) << " " << request.url
+                                                  << " unresolved");
+                                delete this;
+                            } else {
+                                this->transport() = transport;
+                                this->start();
+                                *this << request;
+                            }
+                        });
             }
 
             void on(typename Protocol::response &&event) {
                 auto &e = actor.template push<ResponseEvent>(reply_to);
                 e.id_request = id_request;
                 e.data.response = std::move(event.http);
-                this->disconnect();
+                this->disconnect(1);
+                LOG_INFO(actor << "[Success] request " << llhttp_method_name(request.method) << " " << request.url);
+            }
+
+            void on(qb::io::async::event::disconnected const &event) {
+                if (!event.reason) {
+                    auto &e = actor.push<ResponseEvent>(reply_to);
+                    e.id_request = id_request;
+                    e.data.response.status_code = HTTP_STATUS_REQUEST_TIMEOUT;
+                    LOG_WARN(actor << "[Fail] request "
+                                   << llhttp_method_name(request.method) << " " << request.url
+                                   << " lost connection");
+                }
             }
 
             void on(qb::io::async::event::dispose const &) {
@@ -87,24 +111,17 @@ namespace qb::http {
             const auto &uri = event.data.uri;
             auto &request = event.data.request;
             ISession *session = nullptr;
-            if (scheme == "http") {
-                session = new Session<io::transport::tcp>(*this, event.id_request, event.getSource());
-            } else if (scheme == "https")
-                session = new Session<io::transport::stcp>(*this, event.id_request, event.getSource());
 
-            if (session && session->connect(uri)){
-                request.path = uri.full_path();
-                request.headers["host"].emplace_back(uri.host());
-                session->send(request);
-                LOG_INFO(*this << "[Success] request " << llhttp_method_name(request.method) << " " << uri.source());
-            } else {
-                delete session;
-                auto &e = push<ResponseEvent>(event.getSource());
-                e.id_request = event.id_request;
-                e.data.response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE;
-                //Todo: may be send error in body
-                LOG_WARN(*this << "[Fail] cannot resolve " << uri.source());
-            }
+            request.url = uri.source();
+            request.path = uri.full_path();
+            request.headers["host"].emplace_back(uri.host());
+
+            if (scheme == "http") {
+                session = new Session<io::transport::tcp>(*this, event.id_request, request, event.getSource());
+            } else if (scheme == "https")
+                session = new Session<io::transport::stcp>(*this, event.id_request, request, event.getSource());
+
+            session->connect(uri);
         }
     };
 }
