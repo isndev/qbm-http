@@ -19,6 +19,7 @@
 #define QB_MODULE_HTTP_H_
 #include "not-qb/llhttp/include/llhttp.h"
 #include <qb/io/async.h>
+#include <qb/io/async/tcp/connector.h>
 #include <qb/io/transport/file.h>
 #include <qb/system/allocator/pipe.h>
 #include <qb/system/container/unordered_map.h>
@@ -35,6 +36,7 @@
 #endif
 
 namespace qb::http {
+using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
 constexpr const char endl[] = "\r\n";
 constexpr const char sep = ' ';
 
@@ -879,6 +881,102 @@ using protocol = typename internal::side<_IO_>::protocol;
 template <typename _IO_>
 using protocol_view = typename internal::side<_IO_>::protocol_view;
 
+    namespace async {
+
+        template <typename _Func, typename Transport>
+        class Session
+                : public io::async::tcp::client<Session<_Func, Transport>, Transport> {
+            _Func _func;
+            const Request<> _request;
+        public:
+
+            struct result {
+                const Request<> &request;
+                Response<> &response;
+            };
+
+            using http_protocol = http::protocol<Session<_Func, Transport>>;
+
+            Session(_Func &&func, Request<> &request)
+                : _func(std::forward<_Func>(func))
+                , _request(std::move(request))
+            {
+                this->template switch_protocol<http_protocol>(*this);
+            }
+            ~Session() = default;
+
+            void connect(qb::io::uri const &remote, double timeout = 0) {
+                qb::io::async::tcp::connect<typename Transport::transport_io_type>(
+                        remote, [this](auto &transport) {
+                            if (!transport.is_open()) {
+                                Response<> response;
+                                response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE;
+
+                                _func(result{_request, response});
+                                delete this;
+                            } else {
+                                this->transport() = transport;
+                                this->start();
+                                *this << _request;
+                            }
+                        });
+            }
+
+            void on(typename http_protocol::response &&event) {
+                _func(result{_request, event.http});
+                this->disconnect(1);
+            }
+
+            void on(qb::io::async::event::disconnected const &event) {
+                if (!event.reason) {
+                    Response<> response;
+                    response.status_code = HTTP_STATUS_GONE;
+
+                    _func(result{_request, response});
+                }
+            }
+
+            void on(qb::io::async::event::dispose const &) {
+                delete this;
+            }
+        };
+
+        template <typename _Func>
+        using HTTP = Session<_Func, qb::io::transport::tcp>;
+
+#ifdef QB_IO_WITH_SSL
+        template <typename _Func>
+        using HTTPS = Session<_Func, qb::io::transport::stcp>;
+
+#define EXEC_REQUEST()                                                                     \
+    if (remote.scheme() == "https")                                                        \
+        (new HTTPS<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout);  \
+    else                                                                                   \
+        (new HTTP<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout);
+
+#else
+#define EXEC_REQUEST()                                                                     \
+        (new HTTP<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout);
+#endif
+
+#define REGISTER_HTTP_ASYNC_FUNCTION(num, name, description)           \
+    template <typename _Func>                                          \
+    void name(Request<> &request, _Func &&func, double timeout = 0.) { \
+         qb::io::uri remote(request.url);                              \
+         if (num >=0)                                                  \
+             request.method = static_cast<llhttp_method>(num);         \
+         request.path = remote.full_path();                            \
+         request.headers["host"].emplace_back(remote.host());          \
+         EXEC_REQUEST()                                                \
+    }
+
+        REGISTER_HTTP_ASYNC_FUNCTION(-1, REQUEST, USER_DEFINED)
+        HTTP_METHOD_MAP(REGISTER_HTTP_ASYNC_FUNCTION)
+
+#undef REGISTER_HTTP_ASYNC_FUNCTION
+#undef EXEC_REQUEST
+
+    }
 } // namespace qb::http
 
 namespace qb::allocator {
