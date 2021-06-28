@@ -119,10 +119,12 @@ TEST(Session, HTTP_OVER_TCP) {
         r.path = "/?happy=true";
         r.headers["Host"] = {"www.isndev.test:60123"};
         r.headers["Connection"] = {"keep-alive"};
+        r.headers["Transfer-Encoding"] = {"chunked"};
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
-            r.body = STRING_MESSAGE;
             client << r;
+            client << qb::http::Chunk(STRING_MESSAGE, sizeof(STRING_MESSAGE) - 1)
+                   << qb::http::Chunk();
         }
 
         for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
