@@ -107,6 +107,11 @@ struct MessageBase {
         reset();
     }
 
+    MessageBase(MessageBase const &) = default;
+    MessageBase(MessageBase &&) = default;
+    MessageBase &operator=(MessageBase const &) = default;
+    MessageBase &operator=(MessageBase &&) = default;
+
     template <typename T>
     const auto &
     header(T &&name, std::size_t const index = 0, _String const &not_found = "") const {
@@ -193,17 +198,23 @@ struct Parser : public llhttp_t {
             msg.content_length = parser->content_length;
         msg.upgrade = static_cast<bool>(parser->upgrade);
         static_cast<Parser *>(parser->data)->_headers_completed = true;
-        return 1;
+        return HPE_PAUSED;
     }
 
     static int
     on_body(llhttp_t *parser, const char *at, size_t length) {
-        static_cast<Parser *>(parser->data)->msg.body = _String(at, length);
+        auto &chunked = static_cast<Parser *>(parser->data)->_chunked;
+        const auto begin = chunked.size();
+        chunked.resize(begin + length);
+        std::copy_n(at, length, chunked.begin() + begin);
+        //static_cast<Parser *>(parser->data)->msg.body = _String(at, length);
         return 0;
     }
 
     static int
     on_message_complete(llhttp_t *parser) {
+        auto p = static_cast<Parser *>(parser->data);
+        p->msg.body = _String(&(*(p->_chunked.begin())), p->_chunked.size());
         return 1;
     }
 
@@ -212,13 +223,11 @@ struct Parser : public llhttp_t {
      */
     static int
     on_chunk_header(llhttp_t *) {
-        // TODO : implement this
         return 0;
     }
 
     static int
     on_chunk_complete(llhttp_t *) {
-        // TODO : implement this
         return 0;
     }
 
@@ -229,6 +238,7 @@ private:
     static const llhttp_settings_s settings;
     _String _last_header_key;
     bool _headers_completed = false;
+    std::vector<char> _chunked;
 
 public:
     Parser() noexcept {
@@ -246,6 +256,12 @@ public:
         this->data = this;
         msg.reset();
         _headers_completed = false;
+        _chunked.clear();
+    }
+    
+    void
+    resume() noexcept {
+        llhttp_resume(static_cast<llhttp_t *>(this));
     }
 
     [[nodiscard]] _MessageType &
@@ -474,6 +490,10 @@ struct Request : public internal::MessageBase<_String> {
 public:
     Request() noexcept
         : method(HTTP_GET) {}
+    Request(Request const &) = default;
+    Request(Request &&) = default;
+    Request &operator=(Request const &) = default;
+    Request &operator=(Request &&) = default;
 
     template <typename T>
     [[nodiscard]] std::string const &
@@ -502,7 +522,7 @@ public:
     public:
         struct Context {
             _Session &session;
-            const Request &request;
+            Request &request;
             PathParameters parameters;
             Response<std::string> response;
 
@@ -636,7 +656,7 @@ public:
         }
 
         bool
-        route(_Session &session, Request const &request) const {
+        route(_Session &session, Request &request) const {
             const auto &it = _routes.find(request.method);
             if (it != _routes.end()) {
                 for (const auto route : it->second) {
@@ -722,9 +742,7 @@ public:
             }
 
             auto &msg = _http_obj.getParsedMessage();
-
-            if (!_http_obj.headers_completed() || msg.headers.has("Transfer-Encoding")) {
-                // not implemented
+            if (!_http_obj.headers_completed()) {
                 this->not_ok();
                 return 0;
             }
@@ -733,6 +751,27 @@ public:
         }
 
         auto &msg = _http_obj.getParsedMessage();
+
+
+        if (msg.headers.has("Transfer-Encoding")) {
+            _http_obj.resume();
+            const auto ret =
+                _http_obj.parse(this->_io.in().begin() + body_offset, this->_io.in().size() - body_offset);
+
+            if (ret == HPE_CB_MESSAGE_COMPLETE) {
+                body_offset = 0;
+                return _http_obj.error_pos - this->_io.in().begin();
+            } else if (ret == HPE_OK) {
+                if constexpr (std::is_same_v<std::string_view, _String>) {
+                    _http_obj.reset();
+                    body_offset = 0;
+                } else
+                    body_offset = this->_io.in().size();
+            } else
+                this->not_ok();
+            return 0;
+        }
+
         const auto full_size = body_offset + msg.content_length;
         if (this->_io.in().size() < full_size) {
             // if is protocol view reset parser for next read
@@ -919,7 +958,7 @@ using protocol_view = typename internal::side<_IO_>::protocol_view;
                                 this->start();
                                 *this << _request;
                             }
-                        });
+                        }, timeout);
             }
 
             void on(typename http_protocol::response &&event) {
