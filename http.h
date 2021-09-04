@@ -25,6 +25,7 @@
 #include <qb/system/container/unordered_map.h>
 #include <qb/system/timestamp.h>
 #include <regex>
+#include <random>
 #include <sstream>
 #include <string_view>
 
@@ -125,6 +126,87 @@ struct MessageBase {
     reset() {
         headers.clear();
         body = {};
+    };
+
+    class FormData {
+        friend MessageBase;
+    public:
+        struct Data {
+            _String content;
+            _String file_name;
+            _String content_type;
+        };
+
+        using DataMap = qb::unordered_map<_String, std::vector<Data>>;
+
+    private:
+        std::string _boundary;
+        std::size_t _content_length;
+        DataMap _data_map;
+
+        std::string
+        parseBoundary(MessageBase const &base) const {
+            static const std::regex boundary_regex(
+                "^multipart/form-data;\\s{0,}boundary=(.+)$");
+            std::smatch what;
+
+            return std::regex_match(base.header("Content-Type"), what, boundary_regex)
+                       ? what[1].str()
+                       : "";
+        }
+
+        std::string
+        generateBoundary() const {
+            std::mt19937 generator{std::random_device{}()};
+            std::uniform_int_distribution<int> distribution{'0', '9'};
+
+            std::string result =
+                "----------------------------qb00000000000000000000000000000000";
+            for (auto i = result.begin() + 30; i != result.end(); ++i)
+                *i = distribution(generator);
+
+            return result;
+        }
+
+    public:
+        FormData()
+            : _boundary(generateBoundary())
+            , _content_length(_boundary.size() + 4) {}
+        FormData(MessageBase const &base)
+            : _boundary(parseBoundary(base)) {}
+
+        void
+        add(std::string const &name, Data data) {
+            if (name.empty())
+                return; // do nothing
+            _content_length += _boundary.size()
+                               + 8 // -- and \r\n + 2 \r\n at the end
+                               + 39 // Content-Disposition: form-data; name=""
+                               + name.size();
+            if (!data.file_name.empty()) {
+                _content_length += data.file_name.size()
+                + 13; // ; filename=""
+            }
+
+            if (!data.content_type.empty()) {
+                _content_length += data.content_type.size()
+                                   + 16; // Content-Type: + \r\n
+            }
+
+            _content_length += data.content.size() + 2;
+
+            _data_map[name].emplace_back(std::move(data));
+        }
+
+        std::string const &boundary() const { return _boundary; }
+        DataMap const &map() const { return _data_map; }
+        std::size_t length() const { return _content_length; }
+    };
+
+    FormData form;
+    FormData &new_form() {
+        headers["Content-Type"] = {"multipart/form-data;boundary=" + form.boundary()};
+        return form;
     }
 };
 
@@ -522,7 +604,7 @@ public:
     public:
         struct Context {
             _Session &session;
-            Request &request;
+            const Request &request;
             PathParameters parameters;
             Response<std::string> response;
 
@@ -656,7 +738,7 @@ public:
         }
 
         bool
-        route(_Session &session, Request &request) const {
+        route(_Session &session, Request const &request) const {
             const auto &it = _routes.find(request.method);
             if (it != _routes.end()) {
                 for (const auto route : it->second) {
@@ -812,7 +894,7 @@ public:
     struct request {
         const std::size_t size;
         const char *data;
-        qb::http::Request<std::string> http;
+        const qb::http::Request<std::string> http;
     };
 
     void
@@ -1030,6 +1112,9 @@ pipe<char> &pipe<char>::put<qb::http::Response<std::string>>(
 
 template <>
 pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
+
+template<>
+pipe<char> &pipe<char>::put<qb::http::Request<std::string>::FormData>(const qb::http::Response<std::string>::FormData &f);
 
 } // namespace qb::allocator
 

@@ -32,11 +32,15 @@ pipe<char>::put<qb::http::Request<std::string>>(
             *this << it.first << ": " << value << qb::http::endl;
     }
     // Body
-    auto length = r.content_length + r.body.size();
+    const auto has_form = static_cast<bool>(r.form.map().size());
+    auto length = has_form ? r.form.length() : r.content_length + r.body.size();
     if (length) {
         *this << "Content-Length: " << length << qb::http::endl
-              << qb::http::endl
-              << r.body;
+              << qb::http::endl;
+        if (has_form)
+            *this << r.form;
+        else
+            *this << r.body;
     } else
         *this << qb::http::endl;
     return *this;
@@ -93,6 +97,35 @@ pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
     *this << qb::http::endl;
     return *this;
 }
+
+template<>
+pipe<char> &
+pipe<char>::put<qb::http::Request<std::string>::FormData>(const qb::http::Response<std::string>::FormData &f) {
+    this->reserve(f.length());
+    const auto &map = f.map();
+
+    for (const auto &[name, vec] : map) {
+        for (const auto &data : vec) {
+            *this << "--" << f.boundary() << qb::http::endl
+                  << "Content-Disposition: form-data; name=\"" << name << "\"";
+
+            if (!data.file_name.empty())
+                *this << "; filename=\"" << data.file_name << "\"";
+
+            *this << qb::http::endl;
+
+            if (!data.content_type.empty())
+                *this << "Content-Type: " << data.content_type << qb::http::endl;
+
+            *this << qb::http::endl << data.content << qb::http::endl;
+        }
+    }
+
+    *this << "--" << f.boundary() << "--";
+
+    return *this;
+}
+
 } // namespace qb::allocator
 
 //extern "C" {
