@@ -1118,4 +1118,9 @@ pipe<char> &pipe<char>::put<qb::http::Request<std::string>::FormData>(const qb::
 
 } // namespace qb::allocator
 
+
+#if defined(_WIN32)
+#    define DELETE (0x00010000L)
+#endif
+
 #endif // QB_MODULE_HTTP_H_
