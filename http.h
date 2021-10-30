@@ -1,6 +1,6 @@
 /*
  * qb - C++ Actor Framework
- * Copyright (C) 2011-2020 isndev (www.qbaf.io). All rights reserved.
+ * Copyright (C) 2011-2021 isndev (www.qbaf.io). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 
 #ifndef QB_MODULE_HTTP_H_
 #define QB_MODULE_HTTP_H_
-#include "not-qb/llhttp/include/llhttp.h"
 #include <qb/io/async.h>
 #include <qb/io/async/tcp/connector.h>
 #include <qb/io/transport/file.h>
@@ -28,11 +27,9 @@
 #include <random>
 #include <sstream>
 #include <string_view>
+#include "not-qb/llhttp/include/llhttp.h"
 
-#ifndef _WIN32
-#    pragma GCC diagnostic push
-#    pragma GCC diagnostic ignored "-Wnarrowing"
-#else
+#if defined(_WIN32)
 #    undef DELETE // Windows :/
 #endif
 
@@ -40,53 +37,6 @@ namespace qb::http {
 using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
 constexpr const char endl[] = "\r\n";
 constexpr const char sep = ' ';
-
-template <typename _IT>
-std::string
-urlDecode(_IT begin, _IT end) {
-    static const char tbl[256] = {
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, 0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  -1, -1,
-        -1, -1, -1, -1, -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 10, 11, 12,
-        13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
-
-    std::string out;
-    char c, v1, v2;
-    while (begin != end) {
-        c = *(begin++);
-        if (c == '%') {
-            if ((v1 = tbl[(unsigned char)*(begin++)]) < 0 ||
-                (v2 = tbl[(unsigned char)*(begin++)]) < 0) {
-                break;
-            }
-            c = (v1 << 4) | v2;
-        }
-        out += (c);
-    }
-
-    return out;
-}
-
-#ifndef _WIN32
-#    pragma GCC diagnostic push
-#endif
-
-template <typename _String>
-std::string
-urlDecode(_String const &str) {
-    return urlDecode(str.cbegin(), str.cend());
-}
-
-std::string urlDecode(const char *str, std::size_t size);
 
 namespace internal {
 
@@ -237,8 +187,8 @@ struct Parser : public llhttp_t {
                 while (std::regex_search(search, at + length, what, query_regex)) {
                     msg.queries[_String(what[2].first,
                                         static_cast<std::size_t>(what[2].length()))]
-                        .push_back(std::move(urlDecode(
-                            what[3].first, static_cast<std::size_t>(what[3].length()))));
+                        .push_back(io::uri::decode(
+                            what[3].first, static_cast<std::size_t>(what[3].length())));
                     search += what[0].length();
                 }
             } else
@@ -317,7 +267,12 @@ protected:
     _MessageType msg;
 
 private:
-    static const llhttp_settings_s settings;
+    static const llhttp_settings_s inline settings{
+        &Parser::on_message_begin, &Parser::on_url,
+        &Parser::on_status,        &Parser::on_header_field,
+        &Parser::on_header_value,  &Parser::on_headers_complete,
+        &Parser::on_body,          &Parser::on_message_complete,
+        &Parser::on_chunk_header,  &Parser::on_chunk_complete};
     _String _last_header_key;
     bool _headers_completed = false;
     std::vector<char> _chunked;
@@ -675,7 +630,7 @@ public:
                 if (ret) {
                     for (size_t i = 1; i < what.size(); ++i) {
                         _parameters[_param_names[i - 1]] =
-                            std::move(qb::http::urlDecode(what[i].str()));
+                            std::move(io::uri::decode(what[i].str()));
                     }
                 }
                 return ret;
@@ -1028,7 +983,7 @@ using protocol_view = typename internal::side<_IO_>::protocol_view;
 
             void connect(qb::io::uri const &remote, double timeout = 0) {
                 qb::io::async::tcp::connect<typename Transport::transport_io_type>(
-                        remote, [this](auto &transport) {
+                        remote, [this](auto &&transport) {
                             if (!transport.is_open()) {
                                 Response<> response;
                                 response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE;
@@ -1036,7 +991,7 @@ using protocol_view = typename internal::side<_IO_>::protocol_view;
                                 _func(result{_request, response});
                                 delete this;
                             } else {
-                                this->transport() = transport;
+                                this->transport() = std::move(transport);
                                 this->start();
                                 *this << _request;
                             }
