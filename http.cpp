@@ -1,6 +1,6 @@
 /*
  * qb - C++ Actor Framework
- * Copyright (C) 2011-2020 isndev (www.qbaf.io). All rights reserved.
+ * Copyright (C) 2011-2021 isndev (www.qbaf.io). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -128,57 +128,9 @@ pipe<char>::put<qb::http::Request<std::string>::FormData>(const qb::http::Respon
 
 } // namespace qb::allocator
 
-//extern "C" {
-//#include "not-qb/http/http_parser.c"
-//}
-
-std::string
-qb::http::urlDecode(const char *str, std::size_t const size) {
-    return urlDecode(str, str + size);
-}
-
-template <>
-const llhttp_settings_s
-    qb::http::template Parser<qb::http::Request<std::string>>::settings{
-        &Parser::on_message_begin, &Parser::on_url,
-        &Parser::on_status,        &Parser::on_header_field,
-        &Parser::on_header_value,  &Parser::on_headers_complete,
-        &Parser::on_body,          &Parser::on_message_complete,
-        &Parser::on_chunk_header,  &Parser::on_chunk_complete};
-
-template <>
-const llhttp_settings_s
-    qb::http::template Parser<qb::http::Request<std::string_view>>::settings{
-        &Parser::on_message_begin, &Parser::on_url,
-        &Parser::on_status,        &Parser::on_header_field,
-        &Parser::on_header_value,  &Parser::on_headers_complete,
-        &Parser::on_body,          &Parser::on_message_complete,
-        &Parser::on_chunk_header,  &Parser::on_chunk_complete};
-
-template <>
-const llhttp_settings_s
-    qb::http::template Parser<qb::http::Response<std::string>>::settings{
-        &Parser::on_message_begin, &Parser::on_url,
-        &Parser::on_status,        &Parser::on_header_field,
-        &Parser::on_header_value,  &Parser::on_headers_complete,
-        &Parser::on_body,          &Parser::on_message_complete,
-        &Parser::on_chunk_header,  &Parser::on_chunk_complete};
-
-template <>
-const llhttp_settings_s
-    qb::http::template Parser<qb::http::Response<std::string_view>>::settings{
-        &Parser::on_message_begin, &Parser::on_url,
-        &Parser::on_status,        &Parser::on_header_field,
-        &Parser::on_header_value,  &Parser::on_headers_complete,
-        &Parser::on_body,          &Parser::on_message_complete,
-        &Parser::on_chunk_header,  &Parser::on_chunk_complete};
-
 // templates instantiation
 // objects
 template class qb::http::Request<std::string>;
 template class qb::http::Request<std::string_view>;
 template class qb::http::Response<std::string>;
 template class qb::http::Response<std::string_view>;
-// functions
-template std::string qb::http::urlDecode<std::string>(const std::string &str);
-template std::string qb::http::urlDecode<std::string_view>(const std::string_view &str);

@@ -1,6 +1,6 @@
 /*
  * qb - C++ Actor Framework
- * Copyright (C) 2011-2020 isndev (www.qbaf.io). All rights reserved.
+ * Copyright (C) 2011-2021 isndev (www.qbaf.io). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -103,13 +103,13 @@ TEST(Session, HTTP_OVER_TCP) {
     msg_count_client_side = 0;
 
     TestServer server;
-    server.transport().listen(60123);
+    server.transport().listen_v4(60666);
     server.start();
 
     std::thread t([]() {
         async::init();
         TestClient client;
-        if (SocketStatus::Done != client.transport().connect("127.0.0.1", 60123)) {
+        if (SocketStatus::Done != client.transport().connect_v4("127.0.0.1", 60666)) {
             throw std::runtime_error("could not connect");
         }
         client.start();
@@ -117,7 +117,7 @@ TEST(Session, HTTP_OVER_TCP) {
         qb::http::Request r;
         r.method = HTTP_GET;
         r.path = "/?happy=true";
-        r.headers["Host"] = {"www.isndev.test:60123"};
+        r.headers["Host"] = {"www.isndev.test:60666"};
         r.headers["Connection"] = {"keep-alive"};
         r.headers["Transfer-Encoding"] = {"chunked"};
 
@@ -209,13 +209,13 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
     TestSecureServer server;
     server.transport().init(
         ssl::create_server_context(SSLv23_server_method(), "cert.pem", "key.pem"));
-    server.transport().listen(60123);
+    server.transport().listen_v6(60666);
     server.start();
 
     std::thread t([]() {
         async::init();
         TestSecureClient client;
-        if (SocketStatus::Done != client.transport().connect("127.0.0.1", 60123)) {
+        if (SocketStatus::Done != client.transport().connect(uri{"localhost:60666", AF_INET6})) {
             throw std::runtime_error("could not connect");
         }
         client.start();
@@ -223,7 +223,7 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
         qb::http::Request r;
         r.method = HTTP_GET;
         r.path = "/?happy=true";
-        r.headers["Host"] = {"www.isndev.test:60123"};
+        r.headers["Host"] = {"www.isndev.test:60666"};
         r.headers["Connection"] = {"keep-alive"};
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
