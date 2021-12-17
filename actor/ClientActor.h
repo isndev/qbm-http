@@ -57,7 +57,7 @@ namespace qb::http {
                                        << " lost connection");
                         break;
                     default:
-                        LOG_DEBUG(*this << "[Succes] request "
+                        LOG_DEBUG(*this << "[Success] request "
                                        << llhttp_method_name(result.request.method) << " " << result.request.url);
                         break;
                 }
