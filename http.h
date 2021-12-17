@@ -516,6 +516,21 @@ struct Response : public internal::MessageBase<_String> {
     };
 };
 
+#define REGISTER_ROUTE_FUNCTION(num, name, description) \
+    template <typename _Func>                           \
+    struct name {                                       \
+        std::string _path;                              \
+        mutable _Func _func;                                    \
+        const int _num = num;                           \
+        name(std::string path, _Func &&func)            \
+            : _path(std::move(path))                    \
+            , _func(std::move(func)) {}                 \
+    };
+
+HTTP_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
+
+#undef REGISTER_ROUTE_FUNCTION
+
 template <typename _String = std::string>
 struct Request : public internal::MessageBase<_String> {
     constexpr static const llhttp_type_t type = HTTP_REQUEST;
@@ -677,8 +692,8 @@ public:
         }
 
         Router &
-        setDefaultResponse(Response<std::string> const &res) {
-            _default_response = {res};
+        setDefaultResponse(Response<std::string> res) {
+            _default_response = std::move(res);
             return *this;
         }
 
@@ -723,6 +738,14 @@ public:
         HTTP_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
 
 #undef REGISTER_ROUTE_FUNCTION
+
+        template <typename T>
+        Router &
+        operator|(T &&r) {
+            using Func = decltype(r._func);
+            _routes[r._num].push_back(new Route<Func>(std::move(r._path), std::move(r._func)));
+            return *this;
+        }
     };
 };
 
