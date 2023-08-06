@@ -130,7 +130,7 @@ pipe<char>::put<qb::http::Request<std::string>::FormData>(const qb::http::Respon
 
 // templates instantiation
 // objects
-template class qb::http::Request<std::string>;
-template class qb::http::Request<std::string_view>;
-template class qb::http::Response<std::string>;
-template class qb::http::Response<std::string_view>;
+template struct qb::http::Request<std::string>;
+template struct qb::http::Request<std::string_view>;
+template struct qb::http::Response<std::string>;
+template struct qb::http::Response<std::string_view>;

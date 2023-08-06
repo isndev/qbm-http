@@ -98,7 +98,7 @@ struct MessageBase {
 
     private:
         std::string _boundary;
-        std::size_t _content_length;
+        std::size_t _content_length{};
         DataMap _data_map;
 
         [[nodiscard]] std::string
@@ -116,7 +116,7 @@ struct MessageBase {
 
             std::string result = "----------------------------qb00000000000000000000000000000000";
             for (auto i = result.begin() + 30; i != result.end(); ++i)
-                *i = distribution(generator);
+                *i = static_cast<char>(distribution(generator));
 
             return result;
         }
@@ -125,7 +125,7 @@ struct MessageBase {
         FormData()
             : _boundary(generateBoundary())
             , _content_length(_boundary.size() + 4) {}
-        FormData(MessageBase const &base)
+        explicit FormData(MessageBase const &base)
             : _boundary(parseBoundary(base)) {}
 
         void
@@ -195,9 +195,8 @@ struct Parser : public llhttp_t {
                 const char *search = at + has_query;
                 std::cmatch what;
                 while (std::regex_search(search, at + length, what, query_regex)) {
-                    msg._queries[String(what[2].first, static_cast<std::size_t>(what[2].length()))]
-                        .push_back(
-                            io::uri::decode(what[3].first, static_cast<std::size_t>(what[3].length())));
+                    msg._queries[String(what[2].first, static_cast<std::size_t>(what[2].length()))].push_back(
+                        io::uri::decode(what[3].first, static_cast<std::size_t>(what[3].length())));
                     search += what[0].length();
                 }
             } else
@@ -225,8 +224,7 @@ struct Parser : public llhttp_t {
     static int
     on_header_value(llhttp_t *parser, const char *at, size_t length) {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
-        msg.headers[String{static_cast<Parser *>(parser->data)->_last_header_key}].push_back(
-            String(at, length));
+        msg.headers[String{static_cast<Parser *>(parser->data)->_last_header_key}].push_back(String(at, length));
         return 0;
     }
 
@@ -579,9 +577,9 @@ public:
     Request() noexcept
         : method(HTTP_GET) {}
     Request(Request const &) = default;
-    Request(Request &&) = default;
+    Request(Request &&) noexcept = default;
     Request &operator=(Request const &) = default;
-    Request &operator=(Request &&) = default;
+    Request &operator=(Request &&) noexcept = default;
 
     template <typename T>
     [[nodiscard]] std::string const &
@@ -593,7 +591,7 @@ public:
     queries() {
         return _queries;
     }
-    Queries const &
+    [[nodiscard]] Queries const &
     queries() const {
         return _queries;
     }
@@ -624,9 +622,7 @@ public:
             }
 
             [[nodiscard]] std::string
-            auth(
-                std::string const &auth_type, std::size_t const index = 0,
-                std::string const &not_found = "") const {
+            auth(std::string const &auth_type, std::size_t const index = 0, std::string const &not_found = "") const {
                 const auto h_value = request.header("Authorization", index, not_found);
                 if (h_value.size() > auth_type.size() &&
                     std::equal(auth_type.begin(), auth_type.end(), h_value.begin(), [](auto c1, auto c2) {
@@ -680,7 +676,7 @@ public:
                     search = what.suffix();
                 }
 
-                return std::move(build_regex);
+                return build_regex;
             }
 
         public:
@@ -802,7 +798,7 @@ public:
         return *this;                                                                             \
     }                                                                                             \
     template <typename _Func>                                                                     \
-    Router &name(std::vector<std::string> paths, _Func &&func) {                                  \
+    Router &name(std::vector<std::string> const &paths, _Func &&func) {                           \
         for (const auto &path : paths)                                                            \
             name(path, std::forward<_Func>(func));                                                \
         return *this;                                                                             \
@@ -874,7 +870,6 @@ public:
                 return 0;
             }
 
-            auto &msg = _http_obj.getParsedMessage();
             if (!_http_obj.headers_completed()) {
                 this->not_ok();
                 return 0;
@@ -887,8 +882,7 @@ public:
 
         if (msg.headers.has("Transfer-Encoding")) {
             _http_obj.resume();
-            const auto ret =
-                _http_obj.parse(this->_io.in().begin() + body_offset, this->_io.in().size() - body_offset);
+            const auto ret = _http_obj.parse(this->_io.in().begin() + body_offset, this->_io.in().size() - body_offset);
 
             if (ret == HPE_CB_MESSAGE_COMPLETE) {
                 body_offset = 0;
@@ -915,8 +909,7 @@ public:
         }
 
         if (msg.content_length)
-            _http_obj.getParsedMessage().body =
-                String(this->_io.in().cbegin() + body_offset, msg.content_length);
+            _http_obj.getParsedMessage().body = String(this->_io.in().cbegin() + body_offset, msg.content_length);
 
         body_offset = 0;
 
@@ -1170,8 +1163,8 @@ template <>
 pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
 
 template <>
-pipe<char> &pipe<char>::put<qb::http::Request<std::string>::FormData>(
-    const qb::http::Response<std::string>::FormData &f);
+pipe<char> &
+pipe<char>::put<qb::http::Request<std::string>::FormData>(const qb::http::Response<std::string>::FormData &f);
 
 } // namespace qb::allocator
 

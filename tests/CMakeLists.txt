@@ -15,7 +15,11 @@
 #         limitations under the License.
 #
 
-cxx_gtest(${PROJECT_NAME}-gtest-session "qb-io qbm-http" test-session-http.cpp)
+qb_register_module_gtest(
+    NAME http
+    TESTNAME session
+    SOURCES test-session-http.cpp
+)
 
 if (OPENSSL_FOUND)
     file(COPY ${QB_SSL_RESOURCES} DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

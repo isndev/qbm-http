@@ -30,5 +30,5 @@ qb_register_module(
 target_include_directories(qbm-http PRIVATE not-qb/llhttp/include)
 
 if (QB_BUILD_TEST)
-add_subdirectory(tests)
-endif()
+    add_subdirectory(tests)
+endif ()
