@@ -8517,7 +8517,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_body;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_body;
+      state->_span_cb0 = (void *) llhttp__on_body;
       goto s_n_llhttp__internal__n_consume_content_length;
       /* UNREACHABLE */;
       abort();
@@ -8865,7 +8865,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_body_1;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_body;
+      state->_span_cb0 = (void*) llhttp__on_body;
       goto s_n_llhttp__internal__n_consume_content_length_1;
       /* UNREACHABLE */;
       abort();
@@ -8886,7 +8886,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_body_2;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_body;
+      state->_span_cb0 = (void*) llhttp__on_body;
       goto s_n_llhttp__internal__n_eof;
       /* UNREACHABLE */;
       abort();
@@ -8926,7 +8926,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_header_value;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_header_value;
+      state->_span_cb0 = (void*) llhttp__on_header_value;
       goto s_n_llhttp__internal__n_span_end_llhttp__on_header_value;
       /* UNREACHABLE */;
       abort();
@@ -9385,7 +9385,6 @@ static llparse_state_t llhttp__internal__run(
       if (endp - p >= 16) {
         __m128i ranges;
         __m128i input;
-        int avail;
         int match_len;
       
         /* Load input */
@@ -9486,7 +9485,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_header_value_1;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_header_value;
+      state->_span_cb0 = (void*) llhttp__on_header_value;
       goto s_n_llhttp__internal__n_invoke_load_header_state_2;
       /* UNREACHABLE */;
       abort();
@@ -9563,7 +9562,6 @@ static llparse_state_t llhttp__internal__run(
       if (endp - p >= 16) {
         __m128i ranges;
         __m128i input;
-        int avail;
         int match_len;
       
         /* Load input */
@@ -9832,7 +9830,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_header_field;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_header_field;
+      state->_span_cb0 = (void*) llhttp__on_header_field;
       goto s_n_llhttp__internal__n_header_field;
       /* UNREACHABLE */;
       abort();
@@ -10341,7 +10339,6 @@ static llparse_state_t llhttp__internal__run(
       if (endp - p >= 16) {
         __m128i ranges;
         __m128i input;
-        int avail;
         int match_len;
       
         /* Load input */
@@ -10658,7 +10655,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_url_1;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_url;
+      state->_span_cb0 = (void*) llhttp__on_url;
       goto s_n_llhttp__internal__n_url_start;
       /* UNREACHABLE */;
       abort();
@@ -10669,7 +10666,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_url;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_url;
+      state->_span_cb0 = (void*) llhttp__on_url;
       goto s_n_llhttp__internal__n_url_server;
       /* UNREACHABLE */;
       abort();
@@ -12436,7 +12433,7 @@ static llparse_state_t llhttp__internal__run(
         return s_n_llhttp__internal__n_span_start_llhttp__on_status;
       }
       state->_span_pos0 = (void*) p;
-      state->_span_cb0 = llhttp__on_status;
+      state->_span_cb0 = (void*) llhttp__on_status;
       goto s_n_llhttp__internal__n_res_status;
       /* UNREACHABLE */;
       abort();
