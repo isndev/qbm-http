@@ -26,7 +26,7 @@ namespace qb::http {
         uint64_t id_request;
         struct Data {
             qb::io::uri uri;
-            Request<> request;
+            Request request;
         } &data;
 
         RequestEvent () : data(*new Data()) {}

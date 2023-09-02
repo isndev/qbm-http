@@ -26,7 +26,7 @@ namespace qb::http {
     struct ResponseEvent : public qb::Event {
         uint64_t id_request;
         struct Data {
-            Response<> response;
+            Response response;
         } &data;
         ResponseEvent () : data(*new Data()) {}
         ~ResponseEvent() {

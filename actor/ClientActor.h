@@ -48,17 +48,17 @@ namespace qb::http {
                 switch(result.response.status_code) {
                     case HTTP_STATUS_SERVICE_UNAVAILABLE:
                         LOG_WARN(*this << "[Fail] request "
-                                       << llhttp_method_name(result.request.method) << " " << result.request.url
+                                       << http_method_name(result.request.method) << " " << result.request.url
                                        << " couldn't connect");
                         break;
                     case HTTP_STATUS_GONE:
                         LOG_WARN(*this << "[Fail] request "
-                                       << llhttp_method_name(result.request.method) << " " << result.request.url
+                                       << http_method_name(result.request.method) << " " << result.request.url
                                        << " lost connection");
                         break;
                     default:
                         LOG_DEBUG(*this << "[Success] request "
-                                       << llhttp_method_name(result.request.method) << " " << result.request.url);
+                                       << http_method_name(result.request.method) << " " << result.request.url);
                         break;
                 }
                 auto &e = this->template push<ResponseEvent>(reply_to);
