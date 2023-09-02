@@ -110,7 +110,7 @@ enum llhttp_finish {
 };
 typedef enum llhttp_finish llhttp_finish_t;
 
-enum llhttp_method {
+enum http_method {
   HTTP_DELETE = 0,
   HTTP_GET = 1,
   HTTP_HEAD = 2,
@@ -158,7 +158,7 @@ enum llhttp_method {
   HTTP_RECORD = 44,
   HTTP_FLUSH = 45
 };
-typedef enum llhttp_method llhttp_method_t;
+typedef enum http_method http_method_t;
 
 #define HTTP_ERRNO_MAP(XX) \
   XX(0, OK, OK) \
@@ -455,7 +455,7 @@ const char* llhttp_get_error_pos(const llhttp_t* parser);
 const char* llhttp_errno_name(llhttp_errno_t err);
 
 /* Returns textual name of HTTP method */
-const char* llhttp_method_name(llhttp_method_t method);
+const char* http_method_name(http_method_t method);
 
 /* Returns textual name of HTTP status */
 const char *

@@ -117,7 +117,7 @@ const char* llhttp_errno_name(llhttp_errno_t err) {
 }
 
 
-const char* llhttp_method_name(llhttp_method_t method) {
+const char* http_method_name(http_method_t method) {
 #define HTTP_METHOD_GEN(NUM, NAME, STRING) case HTTP_##NAME: return #STRING;
   switch (method) {
     HTTP_METHOD_MAP(HTTP_METHOD_GEN)

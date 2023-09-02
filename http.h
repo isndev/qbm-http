@@ -18,19 +18,21 @@
 #ifndef QB_MODULE_HTTP_H_
 #define QB_MODULE_HTTP_H_
 #include <qb/io/async.h>
+#include <qb/io/async/listener.h>
 #include <qb/io/async/tcp/connector.h>
 #include <qb/io/transport/file.h>
 #include <qb/system/allocator/pipe.h>
 #include <qb/system/container/unordered_map.h>
 #include <qb/system/timestamp.h>
 #ifdef QB_IO_WITH_ZLIB
-#    include <qb/io/gzip.h>
+#    include <qb/io/compression.h>
 #endif
 #include <regex>
 #include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include "not-qb/llhttp/include/llhttp.h"
 
 #if defined(_WIN32)
@@ -38,135 +40,476 @@
 #endif
 
 namespace qb::http {
-using method = llhttp_method;
+using method = http_method;
 using status = http_status;
 using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
 constexpr const char endl[] = "\r\n";
 constexpr const char sep = ' ';
+constexpr const uint32_t COOKIE_NAME_MAX = 1024;            // 1 KB
+constexpr const uint32_t COOKIE_VALUE_MAX = 1024 * 1024;    // 1 MB
+constexpr const uint32_t ATTRIBUTE_NAME_MAX = 1024;         // 1 KB
+constexpr const uint32_t ATTRIBUTE_VALUE_MAX = 1024 * 1024; // 1 MB
 
-namespace internal {
-
+namespace utility {
+inline bool
+is_char(int c) {
+    return (c >= 0 && c <= 127);
+}
+inline bool
+is_control(int c) {
+    return ((c >= 0 && c <= 31) || c == 127);
+}
+inline bool
+is_special(int c) {
+    switch (c) {
+    case '(':
+    case ')':
+    case '<':
+    case '>':
+    case '@':
+    case ',':
+    case ';':
+    case ':':
+    case '\\':
+    case '"':
+    case '/':
+    case '[':
+    case ']':
+    case '?':
+    case '=':
+    case '{':
+    case '}':
+    case ' ':
+    case '\t':
+        return true;
+    default:
+        return false;
+    }
+}
+inline bool
+is_digit(int c) {
+    return (c >= '0' && c <= '9');
+}
+inline bool
+is_hex_digit(int c) {
+    return ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'));
+}
+inline bool
+iequals(const std::string &a, const std::string &b) {
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](char a, char b) {
+        return tolower(a) == tolower(b);
+    });
+}
+inline bool
+is_http_whitespace(const char ch) {
+    return ch == ' ' || ch == '\t';
+}
 template <typename String>
-struct MessageBase {
-    using string_type = String;
+std::vector<String>
+split_string(String const &str, std::string const &delimiters, std::size_t reserve = 5) {
+    std::vector<String> ret;
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    bool flag_delim = true;
 
-    uint16_t major_version;
-    uint16_t minor_version;
-    qb::icase_unordered_map<std::vector<String>> headers;
-    uint64_t content_length;
-    bool upgrade{};
-    String body;
-
-    MessageBase() noexcept
-        : major_version(1)
-        , minor_version(1)
-        , content_length(0) {
-        reset();
+    ret.reserve(reserve);
+    while (begin != str.size()) {
+        if (flag_delim) {
+            begin = str.find_first_not_of(delimiters, begin);
+            begin = begin == std::string::npos ? str.size() : begin;
+            flag_delim = false;
+        } else {
+            end = str.find_first_of(delimiters, begin);
+            end = end == std::string::npos ? str.size() : end;
+            ret.push_back({str.data() + begin, end - begin});
+            begin = end;
+            flag_delim = true;
+        }
     }
 
-    MessageBase(MessageBase const &) = default;
-    MessageBase(MessageBase &&) noexcept = default;
-    MessageBase &operator=(MessageBase const &) = default;
-    MessageBase &operator=(MessageBase &&) noexcept = default;
+    return ret;
+}
+template <typename String>
+std::vector<String>
+split_string_by(String const &str, std::string const &boundary, std::size_t reserve = 5) {
+    std::vector<String> ret;
+    auto begin = str.begin();
+    auto end = str.end();
+    bool flag_delim = true;
+
+    ret.reserve(reserve);
+    while (begin != str.end()) {
+        if (flag_delim) {
+            auto p = std::mismatch(begin, str.end(), boundary.begin(), boundary.end());
+            if (static_cast<std::size_t>(p.first - begin) == boundary.size())
+                begin = p.first;
+            flag_delim = false;
+        } else {
+            const auto pos = str.find(boundary, begin - str.begin());
+            if (pos != std::string::npos)
+                end = str.begin() + pos;
+            else
+                end = str.end();
+            ret.push_back({&(*begin), static_cast<std::size_t>(end - begin)});
+            begin = end;
+            flag_delim = true;
+        }
+    }
+
+    return ret;
+}
+} // namespace utility
+
+[[nodiscard]] std::string parse_boundary(std::string const &content_type);
+[[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(const char *ptr, size_t len, bool set_cookie_header);
+[[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(std::string const &header, bool set_cookie_header);
+[[nodiscard]] qb::icase_unordered_map<std::string>
+parse_cookies(std::string_view const &header, bool set_cookie_header);
+[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attributes(const char *ptr, size_t len);
+[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attributes(std::string const &header);
+[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attributes(std::string_view const &header);
+[[nodiscard]] std::string accept_encoding();
+[[nodiscard]] std::string content_encoding(std::string_view const &accept_encoding);
+
+template <typename String>
+class THeaders {
+public:
+    constexpr static const char default_content_type[] = "application/octet-stream";
+    constexpr static const char default_charset[] = "utf8";
+    using headers_map_type = qb::icase_unordered_map<std::vector<String>>;
+
+    class ContentType {
+    public:
+        static std::pair<String, String>
+        parse(String const &content_type) {
+            std::pair<String, String> ret{default_content_type, default_charset};
+
+            auto words = utility::split_string<String>(content_type, " \t;=");
+            if (!words.size())
+                return ret;
+            ret.first = std::move(words.front());
+            if (words.size() == 3 && words[1] == "charset") {
+                auto &charset = words[2];
+                ret.second = charset.substr(
+                    charset.front() == '"' ? 1 : 0,
+                    charset.back() == '"' ? charset.size() - 2 : std::string::npos);
+            }
+            return ret;
+        }
+
+    private:
+        std::pair<String, String> type_charset;
+
+    public:
+        explicit ContentType(String const &content_type = "")
+            : type_charset{parse(content_type)} {}
+
+        ContentType(ContentType const &rhs) = default;
+        ContentType(ContentType &&rhs) noexcept = default;
+
+        ContentType &operator=(ContentType const &rhs) = default;
+        ContentType &operator=(ContentType &&rhs) noexcept = default;
+
+        [[nodiscard]] String const &
+        type() const {
+            return type_charset.first;
+        }
+
+        [[nodiscard]] String const &
+        charset() const {
+            return type_charset.second;
+        }
+    };
+
+protected:
+    headers_map_type _headers;
+    ContentType _content_type;
+
+public:
+    THeaders() = default;
+    THeaders(qb::icase_unordered_map<std::vector<String>> headers)
+        : _headers(std::move(headers))
+        , _content_type(header("Content-Type", 0, default_content_type)) {}
+    THeaders(THeaders const &) = default;
+    THeaders(THeaders &&) noexcept = default;
+    THeaders &operator=(THeaders const &) = default;
+    THeaders &operator=(THeaders &&) noexcept = default;
+
+    [[nodiscard]] headers_map_type &
+    headers() noexcept {
+        return _headers;
+    }
+
+    [[nodiscard]] headers_map_type const &
+    headers() const noexcept {
+        return _headers;
+    }
 
     template <typename T>
-    const auto &
+    [[nodiscard]] const auto &
     header(T &&name, std::size_t const index = 0, String const &not_found = "") const {
-        const auto &it = this->headers.find(std::forward<T>(name));
-        if (it != this->headers.cend() && index < it->second.size())
+        const auto &it = this->_headers.find(std::forward<T>(name));
+        if (it != this->_headers.cend() && index < it->second.size())
             return it->second[index];
         return not_found;
     }
 
+    template <typename T>
+    [[nodiscard]] auto
+    attributes(T &&name, std::size_t const index = 0, String const &not_found = "") const {
+        return parse_header_attributes(header(std::forward<T>(name), index, not_found));
+    }
+
+    template <typename T>
+    [[nodiscard]] inline bool
+    has_header(T &&key) const noexcept {
+        return this->_headers.has(std::forward<T>(key));
+    }
+
+    void
+    set_content_type(String const &value) {
+        _content_type = ContentType{value};
+    }
+
+    [[nodiscard]] ContentType const &
+    content_type() const noexcept {
+        return _content_type;
+    }
+};
+
+using Headers = THeaders<std::string>;
+using HeadersView = THeaders<std::string_view>;
+using headers = THeaders<std::string>;
+using headers_view = THeaders<std::string_view>;
+
+class Body {
+    qb::allocator::pipe<char> _data;
+
+public:
+    Body() = default;
+    Body(Body const &) = default;
+    Body(Body &&) noexcept = default;
+    Body &operator=(Body &&rhs) noexcept = default;
+
+    template <typename... Args>
+    Body(Args &&...args) {
+        (_data << ... << std::forward<Args>(args));
+    }
+
+    template <typename... Args>
+    Body &
+    operator<<(Args &&...args) {
+        (_data << ... << std::forward<Args>(args));
+        return *this;
+    }
+
+    template <typename T>
+    inline Body &
+    operator=(T &rhs) {
+        return operator=(static_cast<T const &>(rhs));
+    }
+    template <typename T>
+    Body &operator=(T const &);
+    template <typename T>
+    Body &operator=(T &&) noexcept;
+    template <std::size_t N>
+    Body &
+    operator=(const char (&str)[N]) noexcept {
+        _data.clear();
+        _data << str;
+        return *this;
+    }
+
+#ifdef QB_IO_WITH_ZLIB
+    static std::unique_ptr<qb::compression::compress_provider> get_compressor_from_header(const std::string &encoding);
+    std::size_t compress(std::string const &encoding);
+
+    static std::unique_ptr<qb::compression::decompress_provider>
+    get_decompressor_from_header(const std::string &encoding);
+    std::size_t uncompress(const std::string &encoding);
+#endif
+
+    [[nodiscard]] inline qb::allocator::pipe<char> const &
+    raw() const noexcept {
+        return _data;
+    }
+
+    [[nodiscard]] inline qb::allocator::pipe<char> &
+    raw() noexcept {
+        return _data;
+    }
+
+    [[nodiscard]] inline auto
+    begin() const {
+        return _data.begin();
+    }
+
+    [[nodiscard]] inline auto
+    end() const {
+        return _data.end();
+    }
+
+    [[nodiscard]] inline std::size_t
+    size() const {
+        return _data.size();
+    }
+
+    [[nodiscard]] inline bool
+    empty() const {
+        return _data.empty();
+    }
+
+    template <typename T>
+    [[nodiscard]] T
+    as() const {
+        static_assert("cannot convert http body to a not implemented type");
+        return {};
+    }
+};
+using body = Body;
+
+template <>
+Body &Body::operator=<std::string>(std::string &&str) noexcept;
+template <>
+Body &Body::operator=<std::string_view>(std::string_view &&str) noexcept;
+template <>
+Body &Body::operator=<std::string>(std::string const &str);
+template <>
+Body &Body::operator=<std::vector<char>>(std::vector<char> const &str);
+template <>
+Body &Body::operator=<std::vector<char>>(std::vector<char> &&str) noexcept;
+
+template <>
+std::string_view Body::as<std::string_view>() const;
+template <>
+std::string Body::as<std::string>() const;
+template <>
+std::string_view Body::as<std::string_view>() const;
+
+template <typename String>
+class TMultiPart {
+    friend class Body;
+
+public:
+    struct Part : public THeaders<String> {
+        String body;
+
+        [[nodiscard]] std::size_t
+        size() const {
+            std::size_t length = body.size() + sizeof(http::endl) + 1;
+            for (const auto &[key, values] : this->_headers) {
+                for (const auto &value : values)
+                    length += key.size() + value.size() + sizeof(http::endl) + 1; // ': '
+            }
+            return length;
+        }
+    };
+
+private:
+    std::string _boundary;
+    std::vector<Part> _parts;
+
+    [[nodiscard]] static std::string
+    generate_boundary() {
+        std::mt19937 generator{std::random_device{}()};
+        std::uniform_int_distribution<int> distribution{'0', '9'};
+
+        std::string result = "----------------------------qb00000000000000000000000000000000";
+        for (auto i = result.begin() + 30; i != result.end(); ++i)
+            *i = static_cast<char>(distribution(generator));
+
+        return result;
+    }
+
+public:
+    TMultiPart()
+        : _boundary(generate_boundary()) {}
+    explicit TMultiPart(std::string boundary)
+        : _boundary(std::move(boundary)) {}
+
+    [[nodiscard]] Part &
+    create_part() {
+        return _parts.emplace_back();
+    }
+
+    [[nodiscard]] std::size_t
+    content_length() const {
+        std::size_t ret = 0;
+
+        for (const auto &part : _parts)
+            ret += _boundary.size() + part.size() + 4;
+        ret += _boundary.size() + 4; // end
+
+        return ret;
+    }
+
+    [[nodiscard]] std::string const &
+    boundary() const {
+        return _boundary;
+    }
+    [[nodiscard]] std::vector<Part> const &
+    parts() const {
+        return _parts;
+    }
+
+    [[nodiscard]] std::vector<Part> &
+    parts() {
+        return _parts;
+    }
+};
+using Multipart = TMultiPart<std::string>;
+using multipart = TMultiPart<std::string>;
+using MultipartView = TMultiPart<std::string_view>;
+using multipart_view = TMultiPart<std::string_view>;
+
+template <>
+Body &Body::operator=<Multipart>(Multipart const &mp);
+template <>
+Multipart Body::as<Multipart>() const;
+
+namespace internal {
+
+template <typename String>
+struct MessageBase
+    : public THeaders<String>
+    , Body {
+    using string_type = String;
+
+    uint16_t major_version;
+    uint16_t minor_version;
+
+    bool upgrade{};
+
+    MessageBase() noexcept
+        : major_version(1)
+        , minor_version(1) {
+        reset();
+    }
+
+    MessageBase(MessageBase const &) = default;
+    MessageBase(qb::icase_unordered_map<std::vector<String>> headers, Body body)
+        : THeaders<String>(std::move(headers))
+        , Body(std::move(body))
+        , major_version(1)
+        , minor_version(1) {}
+    MessageBase(MessageBase &&) noexcept = default;
+    MessageBase &operator=(MessageBase const &) = default;
+    MessageBase &operator=(MessageBase &&) noexcept = default;
+
     void
     reset() {
-        headers.clear();
-        body = {};
+        this->_headers.clear();
     };
 
-    class FormData {
-        friend MessageBase;
+public:
+    [[nodiscard]] inline Body &
+    body() {
+        return static_cast<Body &>(*this);
+    }
 
-    public:
-        struct Data {
-            String content;
-            String file_name;
-            String content_type;
-        };
-
-        using DataMap = qb::unordered_map<String, std::vector<Data>>;
-
-    private:
-        std::string _boundary;
-        std::size_t _content_length{};
-        DataMap _data_map;
-
-        [[nodiscard]] std::string
-        parseBoundary(MessageBase const &base) const {
-            static const std::regex boundary_regex("^multipart/form-data;\\s{0,}boundary=(.+)$");
-            std::smatch what;
-
-            return std::regex_match(base.header("Content-Type"), what, boundary_regex) ? what[1].str() : "";
-        }
-
-        [[nodiscard]] std::string
-        generateBoundary() const {
-            std::mt19937 generator{std::random_device{}()};
-            std::uniform_int_distribution<int> distribution{'0', '9'};
-
-            std::string result = "----------------------------qb00000000000000000000000000000000";
-            for (auto i = result.begin() + 30; i != result.end(); ++i)
-                *i = static_cast<char>(distribution(generator));
-
-            return result;
-        }
-
-    public:
-        FormData()
-            : _boundary(generateBoundary())
-            , _content_length(_boundary.size() + 4) {}
-        explicit FormData(MessageBase const &base)
-            : _boundary(parseBoundary(base)) {}
-
-        void
-        add(std::string const &name, Data data) {
-            if (name.empty())
-                return;                             // do nothing
-            _content_length += _boundary.size() + 8 // -- and \r\n + 2 \r\n at the end
-                               + 39                 // Content-Disposition: form-data; name=""
-                               + name.size();
-            if (!data.file_name.empty()) {
-                _content_length += data.file_name.size() + 13; // ; filename=""
-            }
-
-            if (!data.content_type.empty()) {
-                _content_length += data.content_type.size() + 16; // Content-Type: + \r\n
-            }
-
-            _content_length += data.content.size() + 2;
-
-            _data_map[name].emplace_back(std::move(data));
-        }
-
-        [[nodiscard]] std::string const &
-        boundary() const {
-            return _boundary;
-        }
-        [[nodiscard]] DataMap const &
-        map() const {
-            return _data_map;
-        }
-        [[nodiscard]] std::size_t
-        length() const {
-            return _content_length;
-        }
-    };
-
-    FormData form;
-    FormData &
-    new_form() {
-        headers["Content-Type"] = {"multipart/form-data;boundary=" + form.boundary()};
-        return form;
+    [[nodiscard]] inline Body const &
+    body() const {
+        return static_cast<Body const &>(*this);
     }
 };
 
@@ -183,24 +526,26 @@ struct Parser : public llhttp_t {
 
     static int
     on_url(llhttp_t *parser, const char *at, size_t length) {
-        static const std::regex query_regex("(\\?|&)([^=]*)=([^&]*)");
         if constexpr (MessageType::type == HTTP_REQUEST) {
+            static const std::regex query_regex("(\\?|&)([^=]*)=([^&]*)");
             auto &msg = static_cast<Parser *>(parser->data)->msg;
-            msg.method = static_cast<llhttp_method>(parser->method);
-            msg.url = String(at, length);
-            auto has_query = msg.url.find('?');
-            if (has_query != std::string::npos) {
-                msg.path = String(at, has_query);
-
-                const char *search = at + has_query;
-                std::cmatch what;
-                while (std::regex_search(search, at + length, what, query_regex)) {
-                    msg._queries[String(what[2].first, static_cast<std::size_t>(what[2].length()))].push_back(
-                        io::uri::decode(what[3].first, static_cast<std::size_t>(what[3].length())));
-                    search += what[0].length();
-                }
-            } else
-                msg.path = msg.url;
+            msg.method = static_cast<http_method>(parser->method);
+            msg._uri = "localhost" + std::string{at, length};
+            //            msg.url = String(at, length);
+            //            auto has_query = msg.url.find('?');
+            //            if (has_query != std::string::npos) {
+            //                msg.path = String(at, has_query);
+            //
+            //                const char *search = at + has_query;
+            //                std::cmatch what;
+            //                while (std::regex_search(search, at + length, what, query_regex)) {
+            //                    msg._queries[String(what[2].first,
+            //                    static_cast<std::size_t>(what[2].length()))].push_back(
+            //                        io::uri::decode(what[3].first, static_cast<std::size_t>(what[3].length())));
+            //                    search += what[0].length();
+            //                }
+            //            } else
+            //                msg.path = msg.url;
         }
         return 0;
     }
@@ -224,7 +569,7 @@ struct Parser : public llhttp_t {
     static int
     on_header_value(llhttp_t *parser, const char *at, size_t length) {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
-        msg.headers[String{static_cast<Parser *>(parser->data)->_last_header_key}].push_back(String(at, length));
+        msg.headers()[String{static_cast<Parser *>(parser->data)->_last_header_key}].push_back(String(at, length));
         return 0;
     }
 
@@ -233,8 +578,9 @@ struct Parser : public llhttp_t {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
         msg.major_version = parser->http_major;
         msg.minor_version = parser->http_major;
-        if (parser->content_length != ULLONG_MAX)
-            msg.content_length = parser->content_length;
+        if (parser->content_length != ULLONG_MAX) {
+            msg.body().raw().reserve(parser->content_length);
+        }
         msg.upgrade = static_cast<bool>(parser->upgrade);
         static_cast<Parser *>(parser->data)->_headers_completed = true;
         return HPE_PAUSED;
@@ -243,17 +589,15 @@ struct Parser : public llhttp_t {
     static int
     on_body(llhttp_t *parser, const char *at, size_t length) {
         auto &chunked = static_cast<Parser *>(parser->data)->_chunked;
-        const auto begin = chunked.size();
-        chunked.resize(begin + length);
-        std::copy_n(at, length, chunked.begin() + begin);
-        // static_cast<Parser *>(parser->data)->msg.body = String(at, length);
+        std::copy_n(at, length, chunked.allocate_back(length));
         return 0;
     }
 
     static int
     on_message_complete(llhttp_t *parser) {
         auto p = static_cast<Parser *>(parser->data);
-        p->msg.body = String(&(*(p->_chunked.begin())), p->_chunked.size());
+        p->msg.set_content_type(p->msg.header("Content-Type"));
+        p->msg.body().raw() = std::move(p->_chunked);
         return 1;
     }
 
@@ -287,7 +631,7 @@ private:
         &Parser::on_chunk_complete};
     String _last_header_key;
     bool _headers_completed = false;
-    std::vector<char> _chunked;
+    qb::allocator::pipe<char> _chunked;
 
 public:
     Parser() noexcept
@@ -315,7 +659,7 @@ public:
     }
 
     [[nodiscard]] MessageType &
-    getParsedMessage() noexcept {
+    get_parsed_message() noexcept {
         return msg;
     }
 
@@ -437,14 +781,15 @@ public:
         return result;
     }
 };
+using date = Date;
 
 template <typename String = std::string>
-struct Response : public internal::MessageBase<String> {
+struct TResponse : public internal::MessageBase<String> {
     constexpr static const llhttp_type_t type = HTTP_RESPONSE;
     http_status status_code;
     String status;
 
-    Response() noexcept
+    TResponse() noexcept
         : status_code(HTTP_STATUS_OK) {}
 
     void
@@ -459,7 +804,7 @@ struct Response : public internal::MessageBase<String> {
     public:
         struct Context {
             Session &session;
-            Response &response;
+            TResponse &response;
 
             const auto &
             header(String const &name, String const &not_found = "") const {
@@ -501,7 +846,7 @@ struct Response : public internal::MessageBase<String> {
         }
 
         bool
-        route(Session &session, Response &response) const {
+        route(Session &session, TResponse &response) const {
             const auto &it = _routes.find(response.status_code);
             if (it != _routes.end()) {
                 Context ctx{session, response};
@@ -522,8 +867,17 @@ struct Response : public internal::MessageBase<String> {
 
 #undef REGISTER_ROUTE_FUNCTION
     };
+
+    template <typename session>
+    using router = Router<session>;
 };
 
+using Response = TResponse<std::string>;
+using response = TResponse<std::string>;
+using ResponseView = TResponse<std::string_view>;
+using response_view = TResponse<std::string_view>;
+
+namespace route {
 #define REGISTER_ROUTE_FUNCTION(num, name, description) \
     template <typename _Func>                           \
     struct name {                                       \
@@ -538,21 +892,23 @@ struct Response : public internal::MessageBase<String> {
 HTTP_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
 
 #undef REGISTER_ROUTE_FUNCTION
+} // namespace route
 
-class Queries : public qb::icase_unordered_map<std::vector<std::string>> {
-public:
-    Queries() = default;
-
-    template <typename T>
-    [[nodiscard]] std::string const &
-    query(T &&name, std::size_t const index = 0, std::string const &not_found = "") const {
-        const auto &it = find(std::forward<T>(name));
-        if (it != cend() && index < it->second.size())
-            return it->second[index];
-
-        return not_found;
-    }
-};
+// class Queries : public qb::icase_unordered_map<std::vector<std::string>> {
+// public:
+//     Queries() = default;
+//
+//     template <typename T>
+//     [[nodiscard]] std::string const &
+//     query(T &&name, std::size_t const index = 0, std::string const &not_found = "") const {
+//         const auto &it = find(std::forward<T>(name));
+//         if (it != cend() && index < it->second.size())
+//             return it->second[index];
+//
+//         return not_found;
+//     }
+// };
+// using queries = Queries;
 
 class PathParameters : public qb::unordered_map<std::string, std::string> {
 public:
@@ -564,44 +920,60 @@ public:
         return it != cend() ? it->second : not_found;
     }
 };
+using path_parameters = PathParameters;
 
 template <typename String = std::string>
-struct Request : public internal::MessageBase<String> {
+struct TRequest : public internal::MessageBase<String> {
     constexpr static const llhttp_type_t type = HTTP_REQUEST;
-    llhttp_method method;
-    String url;
-    String path;
-    Queries _queries;
+    http_method method;
+    qb::io::uri _uri;
 
 public:
-    Request() noexcept
+    TRequest() noexcept
         : method(HTTP_GET) {}
-    Request(Request const &) = default;
-    Request(Request &&) noexcept = default;
-    Request &operator=(Request const &) = default;
-    Request &operator=(Request &&) noexcept = default;
+    TRequest(
+        http::method method, qb::io::uri url, qb::icase_unordered_map<std::vector<String>> headers = {}, Body body = {})
+        : internal::MessageBase<String>(std::move(headers), std::move(body))
+        , method(method)
+        , _uri{std::move(url)} {}
+    TRequest(qb::io::uri url, qb::icase_unordered_map<std::vector<String>> headers = {}, Body body = {})
+        : internal::MessageBase<String>(std::move(headers), std::move(body))
+        , method(HTTP_GET)
+        , _uri{std::move(url)} {}
+    TRequest(TRequest const &) = default;
+    TRequest(TRequest &&) noexcept = default;
+    TRequest &operator=(TRequest const &) = default;
+    TRequest &operator=(TRequest &&) noexcept = default;
+
+    qb::io::uri const &
+    uri() const {
+        return _uri;
+    }
+
+    qb::io::uri &
+    uri() {
+        return _uri;
+    }
 
     template <typename T>
     [[nodiscard]] std::string const &
     query(T &&name, std::size_t const index = 0, std::string const &not_found = "") const {
-        return _queries.query<T>(std::forward<T>(name), index, not_found);
+        return _uri.query<T>(std::forward<T>(name), index, not_found);
     }
 
-    Queries &
+    auto &
     queries() {
-        return _queries;
+        return _uri.queries();
     }
-    [[nodiscard]] Queries const &
+    [[nodiscard]] auto const &
     queries() const {
-        return _queries;
+        return _uri.queries();
     }
 
     void
     reset() {
         method = HTTP_GET;
-        url = {};
-        path = {};
-        _queries.clear();
+        _uri = qb::io::uri{};
         static_cast<internal::MessageBase<String> &>(*this).reset();
     }
 
@@ -610,10 +982,11 @@ public:
 
     public:
         struct Context {
+            String match;
             Session &session;
-            const Request &request;
+            TRequest &request;
             PathParameters parameters;
-            Response<std::string> response;
+            Response &response;
 
             template <typename T>
             [[nodiscard]] std::string const &
@@ -660,6 +1033,7 @@ public:
             using ParameterNames = std::vector<std::string>;
 
         private:
+            const std::string _path;
             ParameterNames _param_names;
             PathParameters _parameters;
             const std::regex _regex;
@@ -667,12 +1041,16 @@ public:
             std::string
             init(std::string const &request_path) {
                 std::string build_regex = request_path, search = request_path;
-                const std::regex pieces_regex("/:(\\w+)");
+                const std::regex pieces_regex(R"(/:((\w+)(\(.+\))?))");
                 std::smatch what;
                 while (std::regex_search(search, what, pieces_regex)) {
-                    _param_names.push_back(what[1]);
+                    _param_names.push_back(what[2]);
                     _parameters.emplace(*_param_names.rbegin(), "");
-                    build_regex = build_regex.replace(build_regex.find(what[0]), what[0].length(), "/(.+)");
+                    const auto user_regex = "/" + (what[3].length() ? what[3].str() : "(.+)");
+                    build_regex = build_regex.replace(
+                        build_regex.find(what[0]),
+                        what[0].length(),
+                        what[2] == "controller" ? "(/?.*)" : user_regex);
                     search = what.suffix();
                 }
 
@@ -681,7 +1059,8 @@ public:
 
         public:
             explicit ARoute(std::string const &path)
-                : _regex(init(path)) {}
+                : _path(path)
+                , _regex(init(path)) {}
 
             virtual ~ARoute() = default;
 
@@ -698,7 +1077,12 @@ public:
                 return ret;
             }
 
-            PathParameters &
+            [[nodiscard]] std::string const &
+            path() const {
+                return _path;
+            }
+
+            [[nodiscard]] PathParameters &
             parameters() {
                 return _parameters;
             }
@@ -720,14 +1104,15 @@ public:
 
             void
             process(Context &ctx) final {
-                ctx.parameters = std::move(this->parameters());
+                for (auto &p : this->parameters())
+                    ctx.parameters.template insert_or_assign(p.first, std::move(p.second));
                 _func(ctx);
             }
         };
 
         using Routes = std::vector<ARoute *>;
         qb::unordered_map<int, Routes> _routes;
-        Response<std::string> _default_response;
+        Response _default_response;
 
     public:
         class Route {
@@ -753,29 +1138,64 @@ public:
             }
         }
 
+        class Controller : public Route {
+            Router _router;
+
+        public:
+            explicit Controller(std::string const &path)
+                : Route(path + "/:controller", [this](auto &ctx) {
+                    ctx.match = ctx.param("controller");
+                    if (!_router.route(ctx)) {
+                        ctx.response.status_code = HTTP_STATUS_NOT_FOUND;
+                        ctx.session << ctx.response;
+                    }
+                }) {}
+
+            Router &
+            router() {
+                return _router;
+            }
+        };
+        friend class Controler;
+
         Router &
-        setDefaultResponse(Response<std::string> res) {
-            _default_response = std::move(res);
+        set_default_response(Response &&res) {
+            _default_response = std::forward<Response>(res);
             return *this;
         }
 
-        [[nodiscard]] Response<std::string> const &
-        getDefaultResponse() const {
+        [[nodiscard]] Response const &
+        default_response() const {
             return _default_response;
         }
 
-        [[nodiscard]] Response<std::string> &
-        getDefaultResponse() {
+        [[nodiscard]] Response &
+        default_response() {
             return _default_response;
+        }
+
+        qb::unordered_map<int, Routes> const &
+        routes() const {
+            return _routes;
         }
 
         bool
-        route(Session &session, Request const &request) const {
-            const auto &it = _routes.find(request.method);
+        route(Session &session, TRequest &request) const {
+            Context ctx{
+                {request.uri().path().data(), request.uri().path().size()},
+                session,
+                request,
+                {},
+                session.response()};
+            return route(ctx);
+        }
+
+        bool
+        route(Context &ctx) const {
+            const auto &it = _routes.find(ctx.request.method);
             if (it != _routes.end()) {
                 for (const auto route : it->second) {
-                    if (route->match(request.path)) {
-                        Context ctx{session, request, {}, _default_response};
+                    if (route->match(ctx.match)) {
                         route->process(ctx);
                         return true;
                     }
@@ -790,10 +1210,10 @@ public:
         _routes[num].push_back(new TRoute<_Func>(path, std::forward<_Func>(func)));               \
         return *this;                                                                             \
     }                                                                                             \
-    template <typename T, typename... _Args>                                                      \
-    Router &name(_Args &&...args) {                                                               \
+    template <typename T, typename... Args>                                                       \
+    Router &name(Args &&...args) {                                                                \
         static_assert(std::is_base_of_v<Route, T>, "Router registering Route not base of Route"); \
-        auto route = new T{std::forward<_Args>(args)...};                                         \
+        auto route = new T{std::forward<Args>(args)...};                                          \
         _routes[num].push_back(route->get());                                                     \
         return *this;                                                                             \
     }                                                                                             \
@@ -803,6 +1223,19 @@ public:
             name(path, std::forward<_Func>(func));                                                \
         return *this;                                                                             \
     }
+
+        template <typename T, typename... Args>
+        Router &
+        controller(Args &&...args) {
+            static_assert(std::is_base_of_v<Controller, T>, "Router registering Route not base of Route");
+            auto ctr = new T(std::forward<Args>(args)...);
+            qb::unordered_set<int> methods;
+            for (auto [key, route] : ctr->router().routes()) {
+                if (methods.emplace(key).second)
+                    _routes[key].push_back(ctr->get());
+            }
+            return *this;
+        }
 
         HTTP_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
 
@@ -817,6 +1250,11 @@ public:
         }
     };
 };
+
+using Request = TRequest<std::string>;
+using request = TRequest<std::string>;
+using RequestView = TRequest<std::string_view>;
+using request_view = TRequest<std::string_view>;
 
 class Chunk {
     const char *_data;
@@ -838,6 +1276,7 @@ public:
         return _size;
     }
 };
+using chunk = Chunk;
 
 } // namespace qb::http
 
@@ -854,6 +1293,7 @@ protected:
 
 public:
     using Router = typename Trait::template Router<IO_Handler>;
+    typedef String string_type;
 
     base() = delete;
     explicit base(IO_Handler &io) noexcept
@@ -878,9 +1318,9 @@ public:
             body_offset = _http_obj.error_pos - this->_io.in().begin();
         }
 
-        auto &msg = _http_obj.getParsedMessage();
+        auto &msg = _http_obj.get_parsed_message();
 
-        if (msg.headers.has("Transfer-Encoding")) {
+        if (msg.has_header("Transfer-Encoding")) {
             _http_obj.resume();
             const auto ret = _http_obj.parse(this->_io.in().begin() + body_offset, this->_io.in().size() - body_offset);
 
@@ -898,7 +1338,7 @@ public:
             return 0;
         }
 
-        const auto full_size = body_offset + msg.content_length;
+        const auto full_size = body_offset + _http_obj.content_length;
         if (this->_io.in().size() < full_size) {
             // if is protocol view reset parser for next read
             if constexpr (std::is_same_v<std::string_view, String>) {
@@ -908,8 +1348,9 @@ public:
             return 0; // incomplete body
         }
 
-        if (msg.content_length)
-            _http_obj.getParsedMessage().body = String(this->_io.in().cbegin() + body_offset, msg.content_length);
+        if (_http_obj.content_length)
+            _http_obj.get_parsed_message().body() =
+                std::string_view(this->_io.in().cbegin() + body_offset, _http_obj.content_length);
 
         body_offset = 0;
 
@@ -926,8 +1367,8 @@ public:
 } // namespace http_internal
 
 template <typename IO_Handler>
-class http_server : public http_internal::base<IO_Handler, qb::http::Request<std::string>> {
-    using base_t = http_internal::base<IO_Handler, qb::http::Request<std::string>>;
+class http_server : public http_internal::base<IO_Handler, qb::http::Request> {
+    using base_t = http_internal::base<IO_Handler, qb::http::Request>;
 
 public:
     http_server() = delete;
@@ -937,19 +1378,19 @@ public:
     struct request {
         const std::size_t size{};
         const char *data{};
-        const qb::http::Request<std::string> http;
+        qb::http::Request http;
     };
 
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(request{size, this->_io.in().begin(), std::move(this->_http_obj.getParsedMessage())});
+        this->_io.on(request{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
 
 template <typename IO_Handler>
-class http_server_view : public http_internal::base<IO_Handler, qb::http::Request<std::string_view>> {
-    using base_t = http_internal::base<IO_Handler, qb::http::Request<std::string_view>>;
+class http_server_view : public http_internal::base<IO_Handler, qb::http::RequestView> {
+    using base_t = http_internal::base<IO_Handler, qb::http::RequestView>;
 
 public:
     http_server_view() = delete;
@@ -959,19 +1400,19 @@ public:
     struct request {
         const std::size_t size{};
         const char *data{};
-        const qb::http::Request<std::string_view> http;
+        qb::http::RequestView http;
     };
 
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(request{size, this->_io.in().begin(), std::move(this->_http_obj.getParsedMessage())});
+        this->_io.on(request{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
 
 template <typename IO_Handler>
-class http_client : public http_internal::base<IO_Handler, qb::http::Response<std::string>> {
-    using base_t = http_internal::base<IO_Handler, qb::http::Response<std::string>>;
+class http_client : public http_internal::base<IO_Handler, qb::http::Response> {
+    using base_t = http_internal::base<IO_Handler, qb::http::Response>;
 
 public:
     http_client() = delete;
@@ -981,19 +1422,19 @@ public:
     struct response {
         const std::size_t size{};
         const char *data{};
-        qb::http::Response<std::string> http;
+        qb::http::Response http;
     };
 
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(response{size, this->_io.in().begin(), std::move(this->_http_obj.getParsedMessage())});
+        this->_io.on(response{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
 
 template <typename IO_Handler>
-class http_client_view : public http_internal::base<IO_Handler, qb::http::Response<std::string_view>> {
-    using base_t = http_internal::base<IO_Handler, qb::http::Response<std::string_view>>;
+class http_client_view : public http_internal::base<IO_Handler, qb::http::ResponseView> {
+    using base_t = http_internal::base<IO_Handler, qb::http::ResponseView>;
 
 public:
     http_client_view() = delete;
@@ -1003,12 +1444,12 @@ public:
     struct response {
         const std::size_t size{};
         const char *data{};
-        const qb::http::Response<std::string_view> http;
+        qb::http::ResponseView http;
     };
 
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(response{size, this->_io.in().begin(), std::move(this->_http_obj.getParsedMessage())});
+        this->_io.on(response{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
@@ -1041,30 +1482,30 @@ using protocol_view = typename internal::side<IO_Handler>::protocol_view;
 
 namespace async {
 
-struct result {
-    const Request<> &request;
-    Response<> &response;
+struct Reply {
+    Request request;
+    Response response;
 };
 
 template <typename Func, typename Transport>
-class Session : public io::async::tcp::client<Session<Func, Transport>, Transport> {
+class session : public io::async::tcp::client<session<Func, Transport>, Transport> {
     Func _func;
-    const Request<> _request;
+    Request _request;
 
 public:
-    using http_protocol = http::protocol<Session<Func, Transport>>;
+    using http_protocol = http::protocol<session<Func, Transport>>;
 
-    Session(Func &&func, Request<> &request)
+    session(Func &&func, Request &request)
         : _func(std::forward<Func>(func))
-        , _request(std::move([](auto &r) -> auto & {
-#ifdef QB_IO_WITH_ZLIB
-            r.headers["Accept-Encoding"] = {"gzip"};
-#endif
-            return r;
+        , _request(std::move([](auto &req) -> auto & {
+            if (!req.has_header("User-Agent"))
+                req.headers()["User-Agent"] = {"qb/1.0.0"};
+            req.headers()["Accept-Encoding"] = {accept_encoding()};
+            return req;
         }(request))) {
         this->template switch_protocol<http_protocol>(*this);
     }
-    ~Session() = default;
+    ~session() = default;
 
     void
     connect(qb::io::uri const &remote, double timeout = 0) {
@@ -1072,10 +1513,10 @@ public:
             remote,
             [this](auto &&transport) {
                 if (!transport.is_open()) {
-                    Response<> response;
+                    Response response;
                     response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE;
 
-                    _func(result{_request, response});
+                    _func(Reply{std::move(_request), std::move(response)});
                     delete this;
                 } else {
                     this->transport() = std::forward<decltype(transport)>(transport);
@@ -1091,20 +1532,26 @@ public:
     on(typename http_protocol::response event) {
         auto &response = event.http;
 #ifdef QB_IO_WITH_ZLIB
-        if (response.header("Content-Encoding").find("gzip") != std::string::npos)
-            response.body = qb::gzip::uncompress(response.body.c_str(), response.body.size());
+        try {
+            if (response.has_header("Content-Encoding")) {
+                response.body().uncompress(response.header("Content-Encoding"));
+            }
+        } catch (std::exception &e) {
+            LOG_WARN("[http] failed to decompress: " << e.what());
+            response.status_code = HTTP_STATUS_BAD_REQUEST;
+        }
 #endif
-        _func(result{_request, event.http});
+        _func(Reply{std::move(_request), std::move(event.http)});
         this->disconnect(1);
     }
 
     void
     on(qb::io::async::event::disconnected const &event) {
         if (!event.reason) {
-            Response<> response;
+            Response response;
             response.status_code = HTTP_STATUS_GONE;
 
-            _func(result{_request, response});
+            _func(Reply{std::move(_request), std::move(response)});
         }
     }
 
@@ -1115,58 +1562,281 @@ public:
 };
 
 template <typename Func>
-using HTTP = Session<Func, qb::io::transport::tcp>;
+using HTTP = session<Func, qb::io::transport::tcp>;
 
 #ifdef QB_IO_WITH_SSL
 template <typename Func>
-using HTTPS = Session<Func, qb::io::transport::stcp>;
+using HTTPS = session<Func, qb::io::transport::stcp>;
 
-#    define EXEC_REQUEST()                                                                    \
-        if (remote.scheme() == "https")                                                       \
-            (new HTTPS<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout); \
-        else                                                                                  \
-            (new HTTP<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout);
+} // namespace async
+
+#    define EXEC_REQUEST()                                                                                  \
+        if (request.uri().scheme() == "https")                                                              \
+            (new async::HTTPS<_Func>(std::forward<_Func>(func), request))->connect(request.uri(), timeout); \
+        else                                                                                                \
+            (new async::HTTP<_Func>(std::forward<_Func>(func), request))->connect(request.uri(), timeout);
 
 #else
 #    define EXEC_REQUEST() (new HTTP<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout);
 #endif
 
-#define REGISTER_HTTP_ASYNC_FUNCTION(num, name, description)           \
-    template <typename _Func>                                          \
-    void name(Request<> &request, _Func &&func, double timeout = 0.) { \
-        qb::io::uri remote(request.url);                               \
-        if (num >= 0)                                                  \
-            request.method = static_cast<llhttp_method>(num);          \
-        request.path = remote.full_path();                             \
-        request.headers["host"].emplace_back(remote.host());           \
-        EXEC_REQUEST()                                                 \
+#define REGISTER_HTTP_ASYNC_FUNCTION(num, name, description)                  \
+    template <typename _Func>                                                 \
+    std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void> name( \
+        Request request,                                                      \
+        _Func &&func,                                                         \
+        double timeout = 0.) {                                                \
+                                                                              \
+        if constexpr ((num) >= 0)                                             \
+            request.method = static_cast<http_method>(num);                   \
+                                                                              \
+        request.headers()["host"].emplace_back(request.uri().host());         \
+        EXEC_REQUEST()                                                        \
     }
 
+#define REGISTER_HTTP_SYNC_FUNCTION_P(num, name, description) Response name(Request request, double timeout = 3.);
+
 REGISTER_HTTP_ASYNC_FUNCTION(-1, REQUEST, USER_DEFINED)
+
 HTTP_METHOD_MAP(REGISTER_HTTP_ASYNC_FUNCTION)
 
+REGISTER_HTTP_SYNC_FUNCTION_P(-1, REQUEST, USER_DEFINED)
+
+HTTP_METHOD_MAP(REGISTER_HTTP_SYNC_FUNCTION_P)
+
 #undef REGISTER_HTTP_ASYNC_FUNCTION
+#undef REGISTER_HTTP_SYNC_FUNCTION_P
 #undef EXEC_REQUEST
 
-} // namespace async
 } // namespace qb::http
 
 namespace qb::allocator {
 
 template <>
-pipe<char> &pipe<char>::put<qb::http::Request<std::string>>(const qb::http::Request<std::string> &r);
+pipe<char> &pipe<char>::put<qb::http::Request>(const qb::http::Request &r);
 
 template <>
-pipe<char> &pipe<char>::put<qb::http::Response<std::string>>(const qb::http::Response<std::string> &r);
+pipe<char> &pipe<char>::put<qb::http::Response>(const qb::http::Response &r);
 
 template <>
 pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
 
 template <>
-pipe<char> &
-pipe<char>::put<qb::http::Request<std::string>::FormData>(const qb::http::Response<std::string>::FormData &f);
+pipe<char> &pipe<char>::put<qb::http::Multipart>(const qb::http::Multipart &f);
 
 } // namespace qb::allocator
+
+namespace qb::http {
+enum DisconnectedReason : int {
+    ByUser = 0,
+    ByTimeout,
+    ResponseTransmitted,
+    ServerError,
+    Undefined // should never happen
+};
+
+namespace event {
+using eos = qb::io::async::event::eos;
+using disconnected = qb::io::async::event::disconnected;
+struct request {};
+struct timeout {};
+} // namespace event
+
+namespace internal {
+template <typename Derived, typename Transport, template <typename T> typename TProtocol, typename Handler>
+class session
+    : public qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>, Transport, Handler>
+    , public qb::io::use<session<Derived, Transport, TProtocol, Handler>>::timeout {
+public:
+    using Protocol = TProtocol<session<Derived, Transport, TProtocol, Handler>>;
+    using string_type = typename Protocol::string_type;
+
+private:
+    friend qb::io::async::io<session>;
+    friend class has_method_on<session, void, qb::io::async::event::pending_write>;
+    friend class has_method_on<session, void, qb::io::async::event::eos>;
+    friend class has_method_on<session, void, qb::io::async::event::disconnected>;
+    friend Protocol;
+    friend qb::io::async::with_timeout<session>;
+
+    std::string _host;
+    qb::http::TRequest<string_type> _request;
+    qb::http::Response _response;
+
+    // client is receiving a new message
+    void
+    on(typename Protocol::request &&msg) {
+        // get real host if in proxy
+        _host = msg.http.header("x-real-ip", 0, this->transport().peer_endpoint().ip());
+        _request = std::move(msg.http);
+        // has compression ?
+        auto ce = qb::http::content_encoding(_request.header("Accept-Encoding", 0, "identity"));
+        if (!ce.empty())
+            _response.headers()["Content-Encoding"] = {std::move(ce)};
+
+        // handle your message here
+        LOG_DEBUG(
+            "HttpSession(" << this->id() << ") " << _host << " request " << http_method_name(_request.method) << " "
+                           << _request.uri().path());
+        if constexpr (has_method_on<Derived, void, event::request>::value) {
+            static_cast<Derived &>(*this).on(event::request{});
+        }
+        // reset session time out
+        this->updateTimeout();
+        try {
+            if (!this->server().router().route(*this, _request)) {
+                _response.status_code = HTTP_STATUS_NOT_FOUND;
+                this->publish(_response);
+            }
+        } catch (std::exception &e) {
+            LOG_WARN("HttpSession(" << this->id() << ") " << _host << " error: " << e.what());
+
+            qb::http::Response &res = _response;
+            res.status_code = HTTP_STATUS_BAD_REQUEST;
+            *this << res;
+        }
+    }
+    // client is receiving timeout
+    void
+    on(qb::io::async::event::timeout const &e) {
+        // disconnect session on timeout
+        // add reason for timeout
+        if constexpr (has_method_on<Derived, void, event::timeout const &>::value) {
+            static_cast<Derived &>(*this).on(e);
+        } else
+            this->disconnect(DisconnectedReason::ByTimeout);
+    }
+    // client write buffer has pending bytes
+    void
+    on(qb::io::async::event::pending_write &&) {
+        this->updateTimeout();
+    }
+    // client write buffer is empty
+    void
+    on(event::eos &&e) {
+        if constexpr (has_method_on<Derived, void, event::eos>::value) {
+            static_cast<Derived &>(*this).on(std::forward<event::eos>(e));
+        } else
+            this->disconnect(ResponseTransmitted);
+    }
+    // client is being disconnected
+    void
+    on(qb::io::async::event::disconnected &&e) {
+        if constexpr (has_method_on<Derived, void, event::disconnected>::value) {
+            static_cast<Derived &>(*this).on(std::forward<event::disconnected>(e));
+        } else {
+            static const auto reason = [](auto why) {
+                switch (why) {
+                case DisconnectedReason::ByUser:
+                    return "by user";
+                case DisconnectedReason::ByTimeout:
+                    return "by timeout";
+                case DisconnectedReason::ResponseTransmitted:
+                    return "response transmitted";
+                case DisconnectedReason::ServerError:
+                    return "server error";
+                default:
+                    return "unhandled reason";
+                }
+            };
+            LOG_DEBUG("HttpSession(" << this->id() << ") " << host() << " disconnected -> " << reason(e.reason));
+        }
+    }
+
+public:
+    using handler_type = Handler;
+
+    session() = delete;
+    explicit session(Handler &server)
+        : qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>, Transport, Handler>(server)
+        , _response(server.router().default_response()) {
+        this->setTimeout(60);
+    }
+
+    [[nodiscard]] std::string const &
+    host() const {
+        return _host;
+    }
+    [[nodiscard]] qb::http::TRequest<string_type> &
+    request() {
+        return _request;
+    }
+    [[nodiscard]] qb::http::Response &
+    response() {
+        return _response;
+    }
+};
+
+template <typename Derived, typename Session>
+class io_handler : public qb::io::async::io_handler<Derived, Session> {
+public:
+    using Router = typename Session::Protocol::Router;
+    using Route = typename Session::Protocol::Router::Route;
+    using Controller = typename Session::Protocol::Router::Controller;
+
+private:
+    Router _router;
+
+public:
+    io_handler() noexcept = default;
+
+    Router &
+    router() {
+        return _router;
+    }
+};
+
+template <typename Derived, typename Session, typename Transport>
+class server
+    : public qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>
+    , public io_handler<Derived, Session> {
+    friend qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>;
+    friend io_handler<Derived, Session>;
+    using acceptor_type = qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>;
+
+    void
+    on(typename acceptor_type::accepted_socket_type &&new_io) {
+        this->registerSession(std::forward<typename acceptor_type::accepted_socket_type>(new_io));
+    }
+
+    void
+    on(event::disconnected &&event) {
+        if constexpr (has_method_on<Derived, void, event::disconnected>::value) {
+            static_cast<Derived &>(*this).on(std::forward<event::disconnected>(event));
+        }
+        LOG_WARN("HttpServer disconnected");
+    }
+
+public:
+    server() = default;
+};
+} // namespace internal
+
+template <typename Derived>
+struct use {
+    template <typename Server>
+    using session = internal::session<Derived, qb::io::transport::tcp, qb::protocol::http_server, Server>;
+    template <typename Server>
+    using session_view = internal::session<Derived, qb::io::transport::tcp, qb::protocol::http_server_view, Server>;
+    template <typename Session>
+    using io_handler = internal::io_handler<Derived, Session>;
+    template <typename Session>
+    using server = internal::server<Derived, Session, qb::io::transport::accept>;
+
+    struct ssl {
+        template <typename Server>
+        using session = internal::session<Derived, qb::io::transport::stcp, qb::protocol::http_server, Server>;
+        template <typename Server>
+        using session_view =
+            internal::session<Derived, qb::io::transport::stcp, qb::protocol::http_server_view, Server>;
+        template <typename Session>
+        using io_handler = internal::io_handler<Derived, Session>;
+        template <typename Session>
+        using server = internal::server<Derived, Session, qb::io::transport::saccept>;
+    };
+};
+
+} // namespace qb::http
 
 #if defined(_WIN32)
 #    define DELETE (0x00010000L)
