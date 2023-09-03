@@ -263,7 +263,7 @@ parse_cookies(const char *ptr, const size_t len,
                 if (! cookie_name.empty()) {
                     // value is empty (OK)
                     if (! is_cookie_attribute(cookie_name, set_cookie_header))
-                        dict.insert( std::make_pair(cookie_name, cookie_value) );
+                        dict.emplace(cookie_name, cookie_value);
                     cookie_name.erase();
                 }
             } else if (*ptr != ' ') {   // ignore whitespace
@@ -282,7 +282,7 @@ parse_cookies(const char *ptr, const size_t len,
                 if (*ptr == ';' || *ptr == ',') {
                     // end of value found (OK if empty)
                     if (! is_cookie_attribute(cookie_name, set_cookie_header))
-                        dict.insert( std::make_pair(cookie_name, cookie_value) );
+                        dict.emplace(cookie_name, cookie_value);
                     cookie_name.erase();
                     cookie_value.erase();
                     parse_state = COOKIE_PARSE_NAME;
@@ -309,7 +309,7 @@ parse_cookies(const char *ptr, const size_t len,
                 if (*ptr == value_quote_character) {
                     // end of value found (OK if empty)
                     if (! is_cookie_attribute(cookie_name, set_cookie_header))
-                        dict.insert( std::make_pair(cookie_name, cookie_value) );
+                        dict.emplace(cookie_name, cookie_value);
                     cookie_name.erase();
                     cookie_value.erase();
                     parse_state = COOKIE_PARSE_IGNORE;
@@ -335,7 +335,7 @@ parse_cookies(const char *ptr, const size_t len,
 
     // handle last cookie in string
     if (! is_cookie_attribute(cookie_name, set_cookie_header))
-        dict.insert( std::make_pair(cookie_name, cookie_value) );
+        dict.emplace(cookie_name, cookie_value);
 
     return dict;
 }
@@ -378,7 +378,7 @@ parse_header_attributes(const char *ptr, const size_t len) {
                 // when quoted values are encountered
                 if (! attribute_name.empty()) {
                     // value is empty (OK)
-                    dict.insert( std::make_pair(attribute_name, attribute_value) );
+                    dict.emplace(attribute_name, attribute_value);
                     attribute_name.erase();
                 }
             } else if (*ptr != ' ') {   // ignore whitespace
@@ -396,7 +396,7 @@ parse_header_attributes(const char *ptr, const size_t len) {
                 // value is not (yet) quoted
                 if (*ptr == ';' || *ptr == ',') {
                     // end of value found (OK if empty)
-                    dict.insert( std::make_pair(attribute_name, attribute_value) );
+                    dict.emplace(attribute_name, attribute_value);
                     attribute_name.erase();
                     attribute_value.erase();
                     parse_state = ATTRIBUTE_PARSE_NAME;
@@ -422,7 +422,7 @@ parse_header_attributes(const char *ptr, const size_t len) {
                 // value is quoted
                 if (*ptr == value_quote_character) {
                     // end of value found (OK if empty)
-                    dict.insert( std::make_pair(attribute_name, attribute_value) );
+                    dict.emplace(attribute_name, attribute_value);
                     attribute_name.erase();
                     attribute_value.erase();
                     parse_state = ATTRIBUTE_PARSE_IGNORE;
@@ -447,7 +447,7 @@ parse_header_attributes(const char *ptr, const size_t len) {
     }
 
     // handle last attribute in string
-    dict.insert( std::make_pair(attribute_name, attribute_value) );
+    dict.emplace(attribute_name, attribute_value);
 
     return dict;
 }
