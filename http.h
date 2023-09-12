@@ -530,7 +530,7 @@ struct Parser : public llhttp_t {
             static const std::regex query_regex("(\\?|&)([^=]*)=([^&]*)");
             auto &msg = static_cast<Parser *>(parser->data)->msg;
             msg.method = static_cast<http_method>(parser->method);
-            msg._uri = "localhost" + std::string{at, length};
+            msg._uri = std::string{at, length};
             //            msg.url = String(at, length);
             //            auto has_query = msg.url.find('?');
             //            if (has_query != std::string::npos) {

@@ -521,17 +521,19 @@ Body::compress(std::string const &encoding) {
     std::size_t i_processed{}, o_processed{};
     bool done{};
 
-    while (!done) {
+    while (!done && i_processed != body.size()) {
         std::size_t alloc = (body.size() + 32);
         out.allocate_back(alloc);
+        std::size_t i_tmp;
         o_processed += compressor->compress(
             reinterpret_cast<uint8_t const *>(body.begin()) + i_processed,
             body.size() - i_processed,
             reinterpret_cast<uint8_t *>(out.begin()) + o_processed,
             out.size() - o_processed,
             qb::compression::is_last,
-            i_processed,
+            i_tmp,
             done);
+        i_processed += i_tmp;
     }
     out.free_back(out.size() - o_processed);
     _data = std::move(out);
@@ -578,17 +580,19 @@ Body::uncompress(const std::string &encoding) {
     std::size_t i_processed{}, o_processed{};
     bool done{};
 
-    while (!done) {
+    while (!done && i_processed != body.size()) {
         std::size_t alloc = (body.size() * 2);
         out.allocate_back(alloc);
+        std::size_t i_tmp;
         o_processed += decompressor->decompress(
             reinterpret_cast<uint8_t const *>(body.begin()) + i_processed,
             body.size() - i_processed,
             reinterpret_cast<uint8_t *>(out.begin()) + o_processed,
             out.size() - o_processed,
             qb::compression::is_last,
-            i_processed,
+            i_tmp,
             done);
+        i_processed += i_tmp;
     }
     out.free_back(out.size() - o_processed);
     _data = std::move(out);
@@ -695,7 +699,13 @@ template <>
 pipe<char> &
 pipe<char>::put<qb::http::Request>(const qb::http::Request &r) {
     // HTTP Status Line
-    *this << ::http_method_name(static_cast<http_method_t>(r.method)) << qb::http::sep << r.uri().full_path() << qb::http::sep
+    *this << ::http_method_name(static_cast<http_method_t>(r.method)) << qb::http::sep
+          << r.uri().path();
+    if (r.uri().encoded_queries().size())
+        *this << "?" << r.uri().encoded_queries();
+    if (r.uri().fragment().size())
+        *this << "#" << r.uri().fragment();
+    *this << qb::http::sep
           << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::endl;
     // HTTP Headers
     for (const auto &it : r.headers()) {
