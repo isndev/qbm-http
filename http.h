@@ -546,7 +546,10 @@ struct Parser : public llhttp_t {
             //                }
             //            } else
             //                msg.path = msg.url;
-        }
+        } else {
+	  (void)at;
+	  (void)length;
+	}
         return 0;
     }
 
@@ -1778,7 +1781,7 @@ private:
     Router _router;
 
 public:
-    io_handler() noexcept = default;
+    io_handler() = default;
 
     Router &
     router() {
