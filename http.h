@@ -1639,8 +1639,10 @@ enum DisconnectedReason : int {
 };
 
 namespace event {
-using eos = qb::io::async::event::eos;
-using disconnected = qb::io::async::event::disconnected;
+struct eos {};
+struct disconnected {
+    int reason;
+};
 struct request {};
 struct timeout {};
 } // namespace event
@@ -1705,7 +1707,7 @@ private:
         // disconnect session on timeout
         // add reason for timeout
         if constexpr (has_method_on<Derived, void, event::timeout const &>::value) {
-            static_cast<Derived &>(*this).on(e);
+            static_cast<Derived &>(*this).on(event::timeout{});
         } else
             this->disconnect(DisconnectedReason::ByTimeout);
     }
@@ -1716,9 +1718,9 @@ private:
     }
     // client write buffer is empty
     void
-    on(event::eos &&e) {
+    on(qb::io::async::event::eos &&e) {
         if constexpr (has_method_on<Derived, void, event::eos>::value) {
-            static_cast<Derived &>(*this).on(std::forward<event::eos>(e));
+            static_cast<Derived &>(*this).on(event::eos{});
         } else
             this->disconnect(ResponseTransmitted);
     }
@@ -1726,7 +1728,7 @@ private:
     void
     on(qb::io::async::event::disconnected &&e) {
         if constexpr (has_method_on<Derived, void, event::disconnected>::value) {
-            static_cast<Derived &>(*this).on(std::forward<event::disconnected>(e));
+            static_cast<Derived &>(*this).on(event::disconnected{e.reason});
         } else {
             static const auto reason = [](auto why) {
                 switch (why) {
@@ -1803,9 +1805,9 @@ class server
     }
 
     void
-    on(event::disconnected &&event) {
+    on(qb::io::async::event::disconnected &&event) {
         if constexpr (has_method_on<Derived, void, event::disconnected>::value) {
-            static_cast<Derived &>(*this).on(std::forward<event::disconnected>(event));
+            static_cast<Derived &>(*this).on(event::disconnected{event.reason});
         }
         LOG_WARN("HttpServer disconnected");
     }
