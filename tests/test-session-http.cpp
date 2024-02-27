@@ -331,7 +331,7 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
     std::thread t([]() {
         async::init();
         TestSecureClient client;
-        if (SocketStatus::Done != client.transport().connect(uri{"localhost:9999", AF_INET6})) {
+        if (SocketStatus::Done != client.transport().connect(uri{"tcp://localhost:9999", AF_INET6})) {
             throw std::runtime_error("could not connect");
         }
         client.start();
