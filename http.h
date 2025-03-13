@@ -1134,12 +1134,7 @@ public:
         };
 
         Router() = default;
-        ~Router() noexcept {
-            for (auto const &it : _routes) {
-                for (auto route : it.second)
-                    delete route;
-            }
-        }
+        ~Router() = default;
 
         class Controller : public Route {
             Router _router;
