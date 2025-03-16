@@ -1108,7 +1108,7 @@ public:
             void
             process(Context &ctx) final {
                 for (auto &p : this->parameters())
-                    ctx.parameters.template insert_or_assign(p.first, std::move(p.second));
+                    ctx.parameters.template insert_or_assign<>(p.first, std::move(p.second));
                 _func(ctx);
             }
         };
