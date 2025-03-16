@@ -1698,7 +1698,7 @@ private:
     }
     // client is receiving timeout
     void
-    on(qb::io::async::event::timeout const &e) {
+    on(qb::io::async::event::timeout const &) {
         // disconnect session on timeout
         // add reason for timeout
         if constexpr (has_method_on<Derived, void, event::timeout const &>::value) {
@@ -1713,7 +1713,7 @@ private:
     }
     // client write buffer is empty
     void
-    on(qb::io::async::event::eos &&e) {
+    on(qb::io::async::event::eos &&) {
         if constexpr (has_method_on<Derived, void, event::eos>::value) {
             static_cast<Derived &>(*this).on(event::eos{});
         } else

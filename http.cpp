@@ -75,7 +75,7 @@ private:
     }
 
     static void
-    cbPartBegin(const char *buffer, size_t start, size_t end, void *userData) {
+    cbPartBegin(const char *, size_t, size_t, void *userData) {
         MultipartReader *self = (MultipartReader *)userData;
         self->headersProcessed = false;
         self->currentHeaders.headers().clear();
@@ -96,7 +96,7 @@ private:
     }
 
     static void
-    cbHeaderEnd(const char *buffer, size_t start, size_t end, void *userData) {
+    cbHeaderEnd(const char *, size_t, size_t, void *userData) {
         MultipartReader *self = (MultipartReader *)userData;
         self->currentHeaders.headers()[self->currentHeaderName].push_back(self->currentHeaderValue);
         self->currentHeaderName.clear();
@@ -104,7 +104,7 @@ private:
     }
 
     static void
-    cbHeadersEnd(const char *buffer, size_t start, size_t end, void *userData) {
+    cbHeadersEnd(const char *, size_t, size_t, void *userData) {
         MultipartReader *self = (MultipartReader *)userData;
         if (self->onPartBegin != NULL) {
             self->onPartBegin(self->currentHeaders, self->userData);
@@ -123,7 +123,7 @@ private:
     }
 
     static void
-    cbPartEnd(const char *buffer, size_t start, size_t end, void *userData) {
+    cbPartEnd(const char *, size_t, size_t, void *userData) {
         MultipartReader *self = (MultipartReader *)userData;
         if (self->onPartEnd != NULL) {
             self->onPartEnd(self->userData);
@@ -131,7 +131,7 @@ private:
     }
 
     static void
-    cbEnd(const char *buffer, size_t start, size_t end, void *userData) {
+    cbEnd(const char *, size_t, size_t, void *userData) {
         MultipartReader *self = (MultipartReader *)userData;
         if (self->onEnd != NULL) {
             self->onEnd(self->userData);
@@ -545,7 +545,7 @@ Body::get_decompressor_from_header(const std::string &encoding) {
     std::unique_ptr<qb::compression::decompress_provider> decompressor;
 
     auto tokens = utility::split_string(encoding, ", \t");
-    auto i = 1;
+    auto i = 1u;
     for (const auto &token : tokens) {
         auto d = qb::compression::builtin::make_decompressor(token);
         if (d) {
@@ -680,8 +680,8 @@ Body::as<Multipart>() const {
         auto &part = reinterpret_cast<Multipart *>(userData)->parts().back();
         part.body = std::string(buffer, size);
     };
-    reader.onPartEnd = [](void *userData) {};
-    reader.onEnd = [](void *userData) {};
+    reader.onPartEnd = [](void *) {};
+    reader.onEnd = [](void *) {};
 
     reader.feed(_data.begin(), _data.size());
     if (reader.hasError())

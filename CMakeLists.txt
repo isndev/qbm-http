@@ -17,17 +17,21 @@
 
 project(qbm-http)
 
+add_library(llhttp STATIC
+        not-qb/llhttp/src/llhttp.c
+        not-qb/llhttp/src/api.c
+        not-qb/llhttp/src/http.c
+)
+target_include_directories(llhttp PRIVATE not-qb/llhttp/include)
+
 qb_register_module(
         NAME http
         VERSION 1.0.0
         SOURCES
-        not-qb/llhttp/src/llhttp.c
-        not-qb/llhttp/src/api.c
-        not-qb/llhttp/src/http.c
         http.cpp
+        DEPENDENCIES
+        llhttp
 )
-
-target_include_directories(qbm-http PRIVATE not-qb/llhttp/include)
 
 if (QB_BUILD_TEST)
     add_subdirectory(tests)
