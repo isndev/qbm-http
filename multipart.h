@@ -10,11 +10,26 @@ DISABLE_WARNING_PUSH
 DISABLE_WARNING_IMPLICIT_FALLTHROUGH
 namespace qb::http {
 
+/**
+ * @brief Parser for multipart/form-data content
+ * 
+ * The MultipartParser processes multipart form data streams according to
+ * RFC 7578. It uses a state machine to track the parsing process and calls
+ * appropriate callbacks for different events during parsing.
+ */
 class MultipartParser {
 public:
+    /**
+     * @brief Callback function type for parser events
+     * @param buffer The data buffer being parsed
+     * @param start Start offset of the current segment
+     * @param end End offset of the current segment
+     * @param userData User data passed to the callback
+     */
     typedef void (*Callback)(const char *buffer, size_t start, size_t end, void *userData);
 
 private:
+    // Character constants used in parsing
     static const char CR = 13;
     static const char LF = 10;
     static const char SPACE = 32;
@@ -22,6 +37,7 @@ private:
     static const char COLON = 58;
     static const size_t UNMARKED = (size_t)-1;
 
+    // Parser states
     enum State {
         ERROR,
         START,
@@ -54,6 +70,9 @@ private:
     size_t partDataMark;
     const char *errorReason;
 
+    /**
+     * @brief Reset all callback pointers to NULL
+     */
     void
     resetCallbacks() {
         onPartBegin = NULL;
@@ -67,18 +86,32 @@ private:
         userData = NULL;
     }
 
+    /**
+     * @brief Build boundary character lookup table
+     * 
+     * Creates a lookup table for quick checking if a character
+     * is part of the boundary string.
+     */
     void
     indexBoundary() {
         const char *current;
         const char *end = boundaryData + boundarySize;
 
-        memset(boundaryIndex, 0, sizeof(boundaryIndex));
+        std::memset(boundaryIndex, 0, sizeof(boundaryIndex));
 
         for (current = boundaryData; current < end; current++) {
             boundaryIndex[(unsigned char)*current] = true;
         }
     }
 
+    /**
+     * @brief Execute a callback function
+     * @param cb The callback function to call
+     * @param buffer The data buffer
+     * @param start Start offset
+     * @param end End offset
+     * @param allowEmpty Whether to allow empty segments
+     */
     void
     callback(
         Callback cb, const char *buffer = NULL, size_t start = UNMARKED, size_t end = UNMARKED,
@@ -91,6 +124,16 @@ private:
         }
     }
 
+    /**
+     * @brief Execute a data callback
+     * @param cb The callback function
+     * @param mark Reference to mark position
+     * @param buffer Data buffer
+     * @param i Current position
+     * @param bufferLen Buffer length
+     * @param clear Whether to clear the mark
+     * @param allowEmpty Whether to allow empty segments
+     */
     void
     dataCallback(
         Callback cb, size_t &mark, const char *buffer, size_t i, size_t bufferLen, bool clear,
@@ -108,27 +151,62 @@ private:
         }
     }
 
+    /**
+     * @brief Convert a character to lowercase
+     * @param c Character to convert
+     * @return Lowercase version of the character
+     */
     char
     lower(char c) const {
         return c | 0x20;
     }
 
+    /**
+     * @brief Check if a character is part of the boundary
+     * @param c Character to check
+     * @return true if the character is part of the boundary
+     */
     inline bool
     isBoundaryChar(char c) const {
         return boundaryIndex[(unsigned char)c];
     }
 
+    /**
+     * @brief Check if a character is valid in a header field name
+     * @param c Character to check
+     * @return true if the character is valid for header field
+     */
     bool
     isHeaderFieldCharacter(char c) const {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == HYPHEN;
     }
 
+    /**
+     * @brief Set parser error state with message
+     * @param message Error message
+     */
     void
     setError(const char *message) {
         state = ERROR;
         errorReason = message;
     }
 
+    /**
+     * @brief Process part data
+     * 
+     * Core processing function for part data that detects boundaries
+     * and transitions between states.
+     * 
+     * @param prevIndex Previous index value
+     * @param l_index Current index value
+     * @param buffer Data buffer
+     * @param len Buffer length
+     * @param boundaryEnd Boundary end position
+     * @param i Current position
+     * @param c Current character
+     * @param l_state Current state
+     * @param l_flags Current flags
+     */
     void
     processPartData(
         size_t &prevIndex, size_t &l_index, const char *buffer, size_t len, size_t boundaryEnd, size_t &i, char c,
@@ -235,6 +313,7 @@ private:
     }
 
 public:
+    // Callback functions for parser events
     Callback onPartBegin;
     Callback onHeaderField;
     Callback onHeaderValue;
@@ -245,22 +324,45 @@ public:
     Callback onEnd;
     void *userData;
 
+    /**
+     * @brief Default constructor
+     * 
+     * Creates an uninitialized parser. SetBoundary must be called
+     * before using the parser.
+     */
     MultipartParser() {
         lookbehind = NULL;
         resetCallbacks();
         reset();
     }
 
+    /**
+     * @brief Constructor with boundary
+     * @param boundary The multipart boundary string
+     * 
+     * Creates a parser initialized with the specified boundary.
+     */
     MultipartParser(const std::string &boundary) {
         lookbehind = NULL;
         resetCallbacks();
         setBoundary(boundary);
     }
 
+    /**
+     * @brief Destructor
+     * 
+     * Frees any allocated resources.
+     */
     ~MultipartParser() {
         delete[] lookbehind;
     }
 
+    /**
+     * @brief Reset the parser to initial state
+     * 
+     * Clears all state and frees resources. SetBoundary must
+     * be called again before using the parser.
+     */
     void
     reset() {
         delete[] lookbehind;
@@ -278,6 +380,13 @@ public:
         errorReason = "Parser uninitialized.";
     }
 
+    /**
+     * @brief Set the boundary for parsing
+     * @param l_boundary The boundary string
+     * 
+     * Initializes the parser with the specified boundary string.
+     * Must be called before feeding data to the parser.
+     */
     void
     setBoundary(const std::string &l_boundary) {
         reset();
@@ -291,6 +400,15 @@ public:
         errorReason = "No error.";
     }
 
+    /**
+     * @brief Feed data to the parser
+     * @param buffer Data buffer to parse
+     * @param len Length of the data
+     * @return Number of bytes processed
+     * 
+     * Processes the provided data and advances the parser state.
+     * Returns the number of bytes successfully processed.
+     */
     size_t
     feed(const char *buffer, size_t len) {
         if (state == ERROR || len == 0) {
@@ -424,21 +542,37 @@ public:
         return len;
     }
 
+    /**
+     * @brief Check if parsing completed successfully
+     * @return true if parsing is complete and successful
+     */
     bool
     succeeded() const {
         return state == END;
     }
 
+    /**
+     * @brief Check if parser encountered an error
+     * @return true if an error occurred during parsing
+     */
     bool
     hasError() const {
         return state == ERROR;
     }
 
+    /**
+     * @brief Check if parser is stopped
+     * @return true if parser is in ERROR or END state
+     */
     bool
     stopped() const {
         return state == ERROR || state == END;
     }
 
+    /**
+     * @brief Get error message if an error occurred
+     * @return Error message string
+     */
     const char *
     getErrorMessage() const {
         return errorReason;
