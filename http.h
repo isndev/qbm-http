@@ -39,6 +39,13 @@
 #    undef DELETE // Windows :/
 #endif
 
+/**
+ * @brief HTTP module namespace for the QB C++ Actor Framework
+ *
+ * This namespace provides a comprehensive set of classes and functions for HTTP protocol
+ * handling, including client and server implementations, request/response processing,
+ * header management, and more.
+ */
 namespace qb::http {
 using method = http_method;
 using status = http_status;
@@ -50,15 +57,35 @@ constexpr const uint32_t COOKIE_VALUE_MAX = 1024 * 1024;    // 1 MB
 constexpr const uint32_t ATTRIBUTE_NAME_MAX = 1024;         // 1 KB
 constexpr const uint32_t ATTRIBUTE_VALUE_MAX = 1024 * 1024; // 1 MB
 
+/**
+ * @brief Utility functions for HTTP protocol handling
+ */
 namespace utility {
+/**
+ * @brief Check if a character is a valid ASCII character
+ * @param c Character to check
+ * @return true if character is in 0-127 range
+ */
 inline bool
 is_char(int c) {
     return (c >= 0 && c <= 127);
 }
+
+/**
+ * @brief Check if a character is a control character
+ * @param c Character to check
+ * @return true if character is a control character
+ */
 inline bool
 is_control(int c) {
     return ((c >= 0 && c <= 31) || c == 127);
 }
+
+/**
+ * @brief Check if a character is a special character in HTTP
+ * @param c Character to check
+ * @return true if character is special
+ */
 inline bool
 is_special(int c) {
     switch (c) {
@@ -86,24 +113,57 @@ is_special(int c) {
         return false;
     }
 }
+
+/**
+ * @brief Check if a character is a digit
+ * @param c Character to check
+ * @return true if character is a digit
+ */
 inline bool
 is_digit(int c) {
     return (c >= '0' && c <= '9');
 }
+
+/**
+ * @brief Check if a character is a hexadecimal digit
+ * @param c Character to check
+ * @return true if character is a hex digit
+ */
 inline bool
 is_hex_digit(int c) {
     return ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'));
 }
+
+/**
+ * @brief Case-insensitive string comparison
+ * @param a First string
+ * @param b Second string
+ * @return true if strings are equal ignoring case
+ */
 inline bool
 iequals(const std::string &a, const std::string &b) {
     return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](char a, char b) {
         return tolower(a) == tolower(b);
     });
 }
+
+/**
+ * @brief Check if a character is an HTTP whitespace character
+ * @param ch Character to check
+ * @return true if character is a space or tab
+ */
 inline bool
 is_http_whitespace(const char ch) {
     return ch == ' ' || ch == '\t';
 }
+
+/**
+ * @brief Split a string by delimiters
+ * @param str String to split
+ * @param delimiters Delimiter characters
+ * @param reserve Number of elements to reserve in the result vector
+ * @return Vector of substrings
+ */
 template <typename String>
 std::vector<String>
 split_string(String const &str, std::string const &delimiters, std::size_t reserve = 5) {
@@ -129,6 +189,14 @@ split_string(String const &str, std::string const &delimiters, std::size_t reser
 
     return ret;
 }
+
+/**
+ * @brief Split a string by boundary string
+ * @param str String to split
+ * @param boundary Boundary string
+ * @param reserve Number of elements to reserve in the result vector
+ * @return Vector of substrings
+ */
 template <typename String>
 std::vector<String>
 split_string_by(String const &str, std::string const &boundary, std::size_t reserve = 5) {
@@ -160,17 +228,78 @@ split_string_by(String const &str, std::string const &boundary, std::size_t rese
 }
 } // namespace utility
 
+/**
+ * @brief Parse boundary from Content-Type header
+ * @param content_type Content-Type header value
+ * @return Boundary string
+ */
 [[nodiscard]] std::string parse_boundary(std::string const &content_type);
+
+/**
+ * @brief Parse cookies from a header
+ * @param ptr Header data pointer
+ * @param len Header data length
+ * @param set_cookie_header true if parsing Set-Cookie header
+ * @return Map of cookie names to values
+ */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(const char *ptr, size_t len, bool set_cookie_header);
+
+/**
+ * @brief Parse cookies from a string header
+ * @param header Header string
+ * @param set_cookie_header true if parsing Set-Cookie header
+ * @return Map of cookie names to values
+ */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(std::string const &header, bool set_cookie_header);
+
+/**
+ * @brief Parse cookies from a string_view header
+ * @param header Header string_view
+ * @param set_cookie_header true if parsing Set-Cookie header
+ * @return Map of cookie names to values
+ */
 [[nodiscard]] qb::icase_unordered_map<std::string>
 parse_cookies(std::string_view const &header, bool set_cookie_header);
+
+/**
+ * @brief Parse header attributes from a header
+ * @param ptr Header data pointer
+ * @param len Header data length
+ * @return Map of attribute names to values
+ */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attributes(const char *ptr, size_t len);
+
+/**
+ * @brief Parse header attributes from a string header
+ * @param header Header string
+ * @return Map of attribute names to values
+ */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attributes(std::string const &header);
+
+/**
+ * @brief Parse header attributes from a string_view header
+ * @param header Header string_view
+ * @return Map of attribute names to values
+ */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attributes(std::string_view const &header);
+
+/**
+ * @brief Get the Accept-Encoding header for the client
+ * @return Accept-Encoding header value
+ */
 [[nodiscard]] std::string accept_encoding();
+
+/**
+ * @brief Get the Content-Encoding value based on Accept-Encoding
+ * @param accept_encoding Accept-Encoding header value
+ * @return Content-Encoding header value
+ */
 [[nodiscard]] std::string content_encoding(std::string_view const &accept_encoding);
 
+/**
+ * @brief Template class for HTTP headers
+ * @tparam String String type (std::string or std::string_view)
+ */
 template <typename String>
 class THeaders {
 public:
@@ -178,8 +307,16 @@ public:
     constexpr static const char default_charset[] = "utf8";
     using headers_map_type = qb::icase_unordered_map<std::vector<String>>;
 
+    /**
+     * @brief Class for handling Content-Type header
+     */
     class ContentType {
     public:
+        /**
+         * @brief Parse a Content-Type header value
+         * @param content_type Content-Type header value
+         * @return Pair of mime type and charset
+         */
         static std::pair<String, String>
         parse(String const &content_type) {
             std::pair<String, String> ret{default_content_type, default_charset};
@@ -201,6 +338,10 @@ public:
         std::pair<String, String> type_charset;
 
     public:
+        /**
+         * @brief Constructor
+         * @param content_type Content-Type header value
+         */
         explicit ContentType(String const &content_type = "")
             : type_charset{parse(content_type)} {}
 
@@ -210,11 +351,19 @@ public:
         ContentType &operator=(ContentType const &rhs) = default;
         ContentType &operator=(ContentType &&rhs) noexcept = default;
 
+        /**
+         * @brief Get the mime type
+         * @return Mime type
+         */
         [[nodiscard]] String const &
         type() const {
             return type_charset.first;
         }
 
+        /**
+         * @brief Get the charset
+         * @return Charset
+         */
         [[nodiscard]] String const &
         charset() const {
             return type_charset.second;
@@ -227,6 +376,10 @@ protected:
 
 public:
     THeaders() = default;
+    /**
+     * @brief Constructor with headers
+     * @param headers Headers map
+     */
     THeaders(qb::icase_unordered_map<std::vector<String>> headers)
         : _headers(std::move(headers))
         , _content_type(header("Content-Type", 0, default_content_type)) {}
@@ -235,16 +388,31 @@ public:
     THeaders &operator=(THeaders const &) = default;
     THeaders &operator=(THeaders &&) noexcept = default;
 
+    /**
+     * @brief Get the headers map
+     * @return Headers map
+     */
     [[nodiscard]] headers_map_type &
     headers() noexcept {
         return _headers;
     }
 
+    /**
+     * @brief Get the headers map (const)
+     * @return Headers map
+     */
     [[nodiscard]] headers_map_type const &
     headers() const noexcept {
         return _headers;
     }
 
+    /**
+     * @brief Get a header value
+     * @param name Header name
+     * @param index Index for multiple values
+     * @param not_found Value to return if not found
+     * @return Header value
+     */
     template <typename T>
     [[nodiscard]] const auto &
     header(T &&name, std::size_t const index = 0, String const &not_found = "") const {
@@ -254,23 +422,43 @@ public:
         return not_found;
     }
 
+    /**
+     * @brief Get a header's attributes
+     * @param name Header name
+     * @param index Index for multiple values
+     * @param not_found Value to return if not found
+     * @return Map of attributes
+     */
     template <typename T>
     [[nodiscard]] auto
     attributes(T &&name, std::size_t const index = 0, String const &not_found = "") const {
         return parse_header_attributes(header(std::forward<T>(name), index, not_found));
     }
 
+    /**
+     * @brief Check if a header exists
+     * @param key Header name
+     * @return true if header exists
+     */
     template <typename T>
     [[nodiscard]] inline bool
     has_header(T &&key) const noexcept {
         return this->_headers.has(std::forward<T>(key));
     }
 
+    /**
+     * @brief Set the Content-Type header
+     * @param value Content-Type value
+     */
     void
     set_content_type(String const &value) {
         _content_type = ContentType{value};
     }
 
+    /**
+     * @brief Get the Content-Type object
+     * @return Content-Type object
+     */
     [[nodiscard]] ContentType const &
     content_type() const noexcept {
         return _content_type;
@@ -282,6 +470,12 @@ using HeadersView = THeaders<std::string_view>;
 using headers = THeaders<std::string>;
 using headers_view = THeaders<std::string_view>;
 
+/**
+ * @brief HTTP message body class
+ * 
+ * This class represents the body of an HTTP message, providing methods
+ * for manipulating and accessing the body data.
+ */
 class Body {
     qb::allocator::pipe<char> _data;
 
@@ -291,11 +485,20 @@ public:
     Body(Body &&) noexcept = default;
     Body &operator=(Body &&rhs) noexcept = default;
 
+    /**
+     * @brief Constructor with variadic arguments
+     * @param args Arguments to add to the body
+     */
     template <typename... Args>
     Body(Args &&...args) {
         (_data << ... << std::forward<Args>(args));
     }
 
+    /**
+     * @brief Append data to the body
+     * @param args Data to append
+     * @return Reference to this body
+     */
     template <typename... Args>
     Body &
     operator<<(Args &&...args) {
@@ -303,15 +506,28 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Assign data to the body
+     * @param rhs Data to assign
+     * @return Reference to this body
+     */
     template <typename T>
     inline Body &
     operator=(T &rhs) {
         return operator=(static_cast<T const &>(rhs));
     }
+    
     template <typename T>
     Body &operator=(T const &);
+    
     template <typename T>
     Body &operator=(T &&) noexcept;
+    
+    /**
+     * @brief Assign a C string to the body
+     * @param str C string to assign
+     * @return Reference to this body
+     */
     template <std::size_t N>
     Body &
     operator=(const char (&str)[N]) noexcept {
@@ -321,44 +537,95 @@ public:
     }
 
 #ifdef QB_IO_WITH_ZLIB
+    /**
+     * @brief Get a compressor for the given encoding
+     * @param encoding Encoding type
+     * @return Compressor provider
+     */
     static std::unique_ptr<qb::compression::compress_provider> get_compressor_from_header(const std::string &encoding);
+    
+    /**
+     * @brief Compress the body
+     * @param encoding Encoding type
+     * @return Compressed size
+     */
     std::size_t compress(std::string const &encoding);
 
+    /**
+     * @brief Get a decompressor for the given encoding
+     * @param encoding Encoding type
+     * @return Decompressor provider
+     */
     static std::unique_ptr<qb::compression::decompress_provider>
     get_decompressor_from_header(const std::string &encoding);
+    
+    /**
+     * @brief Decompress the body
+     * @param encoding Encoding type
+     * @return Decompressed size
+     */
     std::size_t uncompress(const std::string &encoding);
 #endif
 
+    /**
+     * @brief Get the raw data buffer
+     * @return Raw data buffer
+     */
     [[nodiscard]] inline qb::allocator::pipe<char> const &
     raw() const noexcept {
         return _data;
     }
 
+    /**
+     * @brief Get the raw data buffer (non-const)
+     * @return Raw data buffer
+     */
     [[nodiscard]] inline qb::allocator::pipe<char> &
     raw() noexcept {
         return _data;
     }
 
+    /**
+     * @brief Get iterator to the beginning of the body
+     * @return Begin iterator
+     */
     [[nodiscard]] inline auto
     begin() const {
         return _data.begin();
     }
 
+    /**
+     * @brief Get iterator to the end of the body
+     * @return End iterator
+     */
     [[nodiscard]] inline auto
     end() const {
         return _data.end();
     }
 
+    /**
+     * @brief Get the size of the body
+     * @return Body size
+     */
     [[nodiscard]] inline std::size_t
     size() const {
         return _data.size();
     }
 
+    /**
+     * @brief Check if the body is empty
+     * @return true if body is empty
+     */
     [[nodiscard]] inline bool
     empty() const {
         return _data.empty();
     }
 
+    /**
+     * @brief Convert the body to a specific type
+     * @tparam T Type to convert to
+     * @return Converted value
+     */
     template <typename T>
     [[nodiscard]] T
     as() const {
@@ -368,6 +635,7 @@ public:
 };
 using body = Body;
 
+// Spécialisations des templates pour Body
 template <>
 Body &Body::operator=<std::string>(std::string &&str) noexcept;
 template <>
@@ -386,14 +654,30 @@ std::string Body::as<std::string>() const;
 template <>
 std::string_view Body::as<std::string_view>() const;
 
+/**
+ * @brief Template class for multipart form data handling
+ * @tparam String String type (std::string or std::string_view)
+ * 
+ * Provides functionality for creating and managing multipart/form-data content
+ * as defined in RFC 7578.
+ */
 template <typename String>
 class TMultiPart {
     friend class Body;
 
 public:
+    /**
+     * @brief A single part in a multipart message
+     * 
+     * Contains headers and body for one part of a multipart message.
+     */
     struct Part : public THeaders<String> {
         String body;
 
+        /**
+         * @brief Get the total size of this part
+         * @return Size in bytes
+         */
         [[nodiscard]] std::size_t
         size() const {
             std::size_t length = body.size() + sizeof(http::endl) + 1;
@@ -409,6 +693,10 @@ private:
     std::string _boundary;
     std::vector<Part> _parts;
 
+    /**
+     * @brief Generate a random boundary string
+     * @return Generated boundary string
+     */
     [[nodiscard]] static std::string
     generate_boundary() {
         std::mt19937 generator{std::random_device{}()};
@@ -422,16 +710,34 @@ private:
     }
 
 public:
+    /**
+     * @brief Default constructor
+     * 
+     * Creates a multipart object with a random boundary.
+     */
     TMultiPart()
         : _boundary(generate_boundary()) {}
+    
+    /**
+     * @brief Constructor with custom boundary
+     * @param boundary Boundary string to use
+     */
     explicit TMultiPart(std::string boundary)
         : _boundary(std::move(boundary)) {}
 
+    /**
+     * @brief Create a new part
+     * @return Reference to the newly created part
+     */
     [[nodiscard]] Part &
     create_part() {
         return _parts.emplace_back();
     }
 
+    /**
+     * @brief Calculate the total content length
+     * @return Total content length in bytes
+     */
     [[nodiscard]] std::size_t
     content_length() const {
         std::size_t ret = 0;
@@ -443,15 +749,28 @@ public:
         return ret;
     }
 
+    /**
+     * @brief Get the boundary string
+     * @return Boundary string
+     */
     [[nodiscard]] std::string const &
     boundary() const {
         return _boundary;
     }
+    
+    /**
+     * @brief Get the parts collection
+     * @return Vector of parts
+     */
     [[nodiscard]] std::vector<Part> const &
     parts() const {
         return _parts;
     }
 
+    /**
+     * @brief Get the parts collection (non-const)
+     * @return Vector of parts
+     */
     [[nodiscard]] std::vector<Part> &
     parts() {
         return _parts;
@@ -469,6 +788,12 @@ Multipart Body::as<Multipart>() const;
 
 namespace internal {
 
+/**
+ * @brief Base class for HTTP messages
+ * @tparam String String type (std::string or std::string_view)
+ * 
+ * Common base class for both Request and Response message types.
+ */
 template <typename String>
 struct MessageBase
     : public THeaders<String>
@@ -480,6 +805,11 @@ struct MessageBase
 
     bool upgrade{};
 
+    /**
+     * @brief Default constructor
+     * 
+     * Initializes a message with HTTP/1.1
+     */
     MessageBase() noexcept
         : major_version(1)
         , minor_version(1) {
@@ -487,6 +817,12 @@ struct MessageBase
     }
 
     MessageBase(MessageBase const &) = default;
+    
+    /**
+     * @brief Constructor with headers and body
+     * @param headers Headers map
+     * @param body Message body
+     */
     MessageBase(qb::icase_unordered_map<std::vector<String>> headers, Body body)
         : THeaders<String>(std::move(headers))
         , Body(std::move(body))
@@ -496,17 +832,30 @@ struct MessageBase
     MessageBase &operator=(MessageBase const &) = default;
     MessageBase &operator=(MessageBase &&) noexcept = default;
 
+    /**
+     * @brief Reset the message state
+     * 
+     * Clears all headers while preserving body content.
+     */
     void
     reset() {
         this->_headers.clear();
     };
 
 public:
+    /**
+     * @brief Get the body object
+     * @return Reference to the body
+     */
     [[nodiscard]] inline Body &
     body() {
         return static_cast<Body &>(*this);
     }
 
+    /**
+     * @brief Get the body object (const)
+     * @return Const reference to the body
+     */
     [[nodiscard]] inline Body const &
     body() const {
         return static_cast<Body const &>(*this);
@@ -515,15 +864,35 @@ public:
 
 } // namespace internal
 
+/**
+ * @brief HTTP message parser
+ * @tparam MessageType The message type to parse (Request or Response)
+ * 
+ * Parser based on llhttp that handles HTTP messages. It processes
+ * headers, body chunks, and status information according to the
+ * HTTP protocol.
+ */
 template <typename MessageType>
 struct Parser : public llhttp_t {
     using String = typename MessageType::string_type;
 
+    /**
+     * @brief Called when a message begins
+     * @param parser The parser instance
+     * @return 0 for success
+     */
     static int
     on_message_begin(llhttp_t *) {
         return 0;
     }
 
+    /**
+     * @brief Called when URL data is received
+     * @param parser The parser instance
+     * @param at Pointer to URL data
+     * @param length Length of URL data
+     * @return 0 for success
+     */
     static int
     on_url(llhttp_t *parser, const char *at, size_t length) {
         if constexpr (MessageType::type == HTTP_REQUEST) {
@@ -553,6 +922,13 @@ struct Parser : public llhttp_t {
         return 0;
     }
 
+    /**
+     * @brief Called when status data is received
+     * @param parser The parser instance
+     * @param at Pointer to status data
+     * @param length Length of status data
+     * @return 0 for success
+     */
     static int
     on_status(llhttp_t *parser, const char *at, size_t length) {
         if constexpr (MessageType::type == HTTP_RESPONSE) {
@@ -563,12 +939,26 @@ struct Parser : public llhttp_t {
         return 0;
     }
 
+    /**
+     * @brief Called when a header field is received
+     * @param parser The parser instance
+     * @param at Pointer to header field data
+     * @param length Length of header field data
+     * @return 0 for success
+     */
     static int
     on_header_field(llhttp_t *parser, const char *at, size_t length) {
         static_cast<Parser *>(parser->data)->_last_header_key = String(at, length);
         return 0;
     }
 
+    /**
+     * @brief Called when a header value is received
+     * @param parser The parser instance
+     * @param at Pointer to header value data
+     * @param length Length of header value data
+     * @return 0 for success
+     */
     static int
     on_header_value(llhttp_t *parser, const char *at, size_t length) {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
@@ -576,6 +966,11 @@ struct Parser : public llhttp_t {
         return 0;
     }
 
+    /**
+     * @brief Called when all headers have been received
+     * @param parser The parser instance
+     * @return HPE_PAUSED to pause parsing
+     */
     static int
     on_headers_complete(llhttp_t *parser) {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
@@ -589,6 +984,13 @@ struct Parser : public llhttp_t {
         return HPE_PAUSED;
     }
 
+    /**
+     * @brief Called when body data is received
+     * @param parser The parser instance
+     * @param at Pointer to body data
+     * @param length Length of body data
+     * @return 0 for success
+     */
     static int
     on_body(llhttp_t *parser, const char *at, size_t length) {
         auto &chunked = static_cast<Parser *>(parser->data)->_chunked;
@@ -596,6 +998,11 @@ struct Parser : public llhttp_t {
         return 0;
     }
 
+    /**
+     * @brief Called when a message is complete
+     * @param parser The parser instance
+     * @return 1 to indicate message completion
+     */
     static int
     on_message_complete(llhttp_t *parser) {
         auto p = static_cast<Parser *>(parser->data);
@@ -604,14 +1011,21 @@ struct Parser : public llhttp_t {
         return 1;
     }
 
-    /* When on_chunk_header is called, the current chunk length is stored
-     * in parser->content_length.
+    /**
+     * @brief Called when a chunk header is received in chunked encoding
+     * @param parser The parser instance
+     * @return 0 for success
      */
     static int
     on_chunk_header(llhttp_t *) {
         return 0;
     }
 
+    /**
+     * @brief Called when a chunk is complete in chunked encoding
+     * @param parser The parser instance
+     * @return 0 for success
+     */
     static int
     on_chunk_complete(llhttp_t *) {
         return 0;
@@ -647,6 +1061,11 @@ public:
         return llhttp_execute(static_cast<llhttp_t *>(this), buffer, size);
     }
 
+    /**
+     * @brief Initialize the parser
+     * 
+     * Resets the parser state and prepares it for parsing a new message.
+     */
     void
     reset() noexcept {
         llhttp_init(static_cast<llhttp_t *>(this), MessageType::type, &settings);
@@ -656,16 +1075,29 @@ public:
         _chunked.clear();
     }
 
+    /**
+     * @brief Resume parsing after a pause
+     * 
+     * Continues parsing after it was paused.
+     */
     void
     resume() noexcept {
         llhttp_resume(static_cast<llhttp_t *>(this));
     }
 
+    /**
+     * @brief Get the parsed message
+     * @return Reference to the parsed message
+     */
     [[nodiscard]] MessageType &
     get_parsed_message() noexcept {
         return msg;
     }
 
+    /**
+     * @brief Check if headers are completed
+     * @return true if headers have been completely parsed
+     */
     [[nodiscard]] bool
     headers_completed() const noexcept {
         return _headers_completed;
@@ -675,8 +1107,11 @@ public:
 /// Date class working with formats specified in RFC 7231 Date/Time Formats
 class Date {
 public:
-    /// Returns the given std::chrono::system_clock::time_point as a string with the
-    /// following format: Wed, 31 Jul 2019 11:34:23 GMT.
+    /**
+     * @brief Convert a timestamp to RFC 7231 formatted date string
+     * @param ts Timestamp to format
+     * @return String in format "Wed, 31 Jul 2019 11:34:23 GMT"
+     */
     static std::string
     to_string(qb::Timestamp const ts) noexcept {
         std::string result;
@@ -786,6 +1221,13 @@ public:
 };
 using date = Date;
 
+/**
+ * @brief HTTP response message
+ * @tparam String String type (std::string or std::string_view)
+ * 
+ * Represents an HTTP response with status code, reason phrase,
+ * headers, and body.
+ */
 template <typename String = std::string>
 struct TResponse : public internal::MessageBase<String> {
     constexpr static const llhttp_type_t type = HTTP_RESPONSE;
@@ -802,9 +1244,22 @@ struct TResponse : public internal::MessageBase<String> {
         static_cast<internal::MessageBase<String> &>(*this).reset();
     }
 
+    /**
+     * @brief Router for handling HTTP status responses
+     * @tparam Session Session type
+     * 
+     * Maps HTTP status codes to handler functions for generating
+     * appropriate responses.
+     */
     template <typename Session>
     class Router {
     public:
+        /**
+         * @brief Context for response handlers
+         * 
+         * Contains references to the session and response
+         * for use by handler functions.
+         */
         struct Context {
             Session &session;
             TResponse &response;
@@ -874,7 +1329,6 @@ struct TResponse : public internal::MessageBase<String> {
     template <typename session>
     using router = Router<session>;
 };
-
 using Response = TResponse<std::string>;
 using response = TResponse<std::string>;
 using ResponseView = TResponse<std::string_view>;
@@ -1275,7 +1729,6 @@ public:
     }
 };
 using chunk = Chunk;
-
 } // namespace qb::http
 
 namespace qb::protocol {
@@ -1453,7 +1906,6 @@ public:
 };
 
 } // namespace qb::protocol
-
 namespace qb::http {
 
 namespace internal {
@@ -1464,6 +1916,12 @@ struct side {
     using protocol_view = qb::protocol::http_server_view<IO_Handler>;
 };
 
+/**
+ * @brief Protocol selector specialization for client-side IO handlers
+ * @tparam IO_Handler The IO handler type
+ * 
+ * Selects client protocol implementations for client-side IO handlers.
+ */
 template <typename IO_Handler>
 struct side<IO_Handler, false> {
     using protocol = qb::protocol::http_client<IO_Handler>;
@@ -1472,19 +1930,45 @@ struct side<IO_Handler, false> {
 
 } // namespace internal
 
+/**
+ * @brief Get the appropriate protocol type for an IO handler
+ * @tparam IO_Handler The IO handler type
+ */
 template <typename IO_Handler>
 using protocol = typename internal::side<IO_Handler>::protocol;
 
+/**
+ * @brief Get the appropriate string_view-based protocol type for an IO handler
+ * @tparam IO_Handler The IO handler type
+ */
 template <typename IO_Handler>
 using protocol_view = typename internal::side<IO_Handler>::protocol_view;
 
+/**
+ * @brief Asynchronous HTTP client implementation namespace
+ * 
+ * Contains classes and functions for asynchronous HTTP client operations.
+ */
 namespace async {
 
+/**
+ * @brief HTTP reply container
+ * 
+ * Contains both the original request and the server's response.
+ */
 struct Reply {
     Request request;
     Response response;
 };
 
+/**
+ * @brief HTTP session implementation
+ * @tparam Func Callback function type
+ * @tparam Transport Transport layer type
+ * 
+ * Handles an HTTP client session, including connection establishment,
+ * request transmission, and response handling.
+ */
 template <typename Func, typename Transport>
 class session : public io::async::tcp::client<session<Func, Transport>, Transport> {
     Func _func;
@@ -1493,6 +1977,11 @@ class session : public io::async::tcp::client<session<Func, Transport>, Transpor
 public:
     using http_protocol = http::protocol<session<Func, Transport>>;
 
+    /**
+     * @brief Constructor
+     * @param func Callback function for the response
+     * @param request HTTP request to send
+     */
     session(Func &&func, Request &request)
         : _func(std::forward<Func>(func))
         , _request(std::move([](auto &req) -> auto & {
@@ -1505,6 +1994,11 @@ public:
     }
     ~session() = default;
 
+    /**
+     * @brief Connect to a remote server
+     * @param remote URI to connect to
+     * @param timeout Connection timeout
+     */
     void
     connect(qb::io::uri const &remote, double timeout = 0) {
         qb::io::async::tcp::connect<typename Transport::transport_io_type>(
@@ -1526,6 +2020,10 @@ public:
             timeout);
     }
 
+    /**
+     * @brief Handle response event
+     * @param event Response event
+     */
     void
     on(typename http_protocol::response event) {
         auto &response = event.http;
@@ -1543,6 +2041,10 @@ public:
         this->disconnect(1);
     }
 
+    /**
+     * @brief Handle disconnection event
+     * @param event Disconnection event
+     */
     void
     on(qb::io::async::event::disconnected const &event) {
         if (!event.reason) {
@@ -1553,16 +2055,28 @@ public:
         }
     }
 
+    /**
+     * @brief Handle disposal event
+     * @param event Disposal event
+     */
     void
     on(qb::io::async::event::dispose const &) {
         delete this;
     }
 };
 
+/**
+ * @brief HTTP client using TCP transport
+ * @tparam Func Callback function type
+ */
 template <typename Func>
 using HTTP = session<Func, qb::io::transport::tcp>;
 
 #ifdef QB_IO_WITH_SSL
+/**
+ * @brief HTTPS client using SSL/TLS transport
+ * @tparam Func Callback function type
+ */
 template <typename Func>
 using HTTPS = session<Func, qb::io::transport::stcp>;
 
@@ -1626,23 +2140,58 @@ pipe<char> &pipe<char>::put<qb::http::Multipart>(const qb::http::Multipart &f);
 
 namespace qb::http {
 enum DisconnectedReason : int {
-    ByUser = 0,
-    ByTimeout,
-    ResponseTransmitted,
-    ServerError,
-    Undefined // should never happen
+    ByUser = 0,              ///< Disconnected by user request
+    ByTimeout,               ///< Disconnected due to timeout
+    ResponseTransmitted,     ///< Disconnected after response was transmitted
+    ServerError,             ///< Disconnected due to server error
+    Undefined                ///< Undefined reason (should never happen)
 };
 
+/**
+ * @brief Event types for HTTP session
+ */
 namespace event {
+/**
+ * @brief End-of-stream event
+ * 
+ * Triggered when all buffered data has been sent.
+ */
 struct eos {};
+
+/**
+ * @brief Disconnection event
+ * 
+ * Triggered when a session is disconnected.
+ */
 struct disconnected {
-    int reason;
+    int reason;  ///< Disconnection reason code
 };
+
+/**
+ * @brief Request event
+ * 
+ * Triggered when a complete request is received.
+ */
 struct request {};
+
+/**
+ * @brief Timeout event
+ * 
+ * Triggered when a session times out.
+ */
 struct timeout {};
 } // namespace event
-
 namespace internal {
+/**
+ * @brief Base HTTP session implementation
+ * @tparam Derived Derived class type (CRTP pattern)
+ * @tparam Transport Transport layer type
+ * @tparam TProtocol Protocol template type
+ * @tparam Handler Handler type
+ * 
+ * Implements core HTTP session functionality for both client and
+ * server side. Handles request processing, timeouts, and transmission.
+ */
 template <typename Derived, typename Transport, template <typename T> typename TProtocol, typename Handler>
 class session
     : public qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>, Transport, Handler>
@@ -1663,7 +2212,13 @@ private:
     qb::http::TRequest<string_type> _request;
     qb::http::Response _response;
 
-    // client is receiving a new message
+    /**
+     * @brief Handle incoming request
+     * @param msg Request message
+     * 
+     * Processes an incoming HTTP request by extracting host information,
+     * handling compression, and routing to the appropriate handler.
+     */
     void
     on(typename Protocol::request &&msg) {
         // get real host if in proxy
@@ -1689,14 +2244,20 @@ private:
                 this->publish(_response);
             }
         } catch (std::exception &e) {
-            LOG_WARN("HttpSession(" << this->id() << ") " << _host << " error: " << e.what());
+            LOG_WARN("HttpSession(" << this->id() << ") " << host() << " error: " << e.what());
 
             qb::http::Response &res = _response;
             res.status_code = HTTP_STATUS_BAD_REQUEST;
             *this << res;
         }
     }
-    // client is receiving timeout
+    /**
+     * @brief Handle session timeout
+     * @param _ Timeout event
+     * 
+     * Called when the session timer expires. By default, disconnects
+     * the session with a timeout reason.
+     */
     void
     on(qb::io::async::event::timeout const &) {
         // disconnect session on timeout
@@ -1706,12 +2267,24 @@ private:
         } else
             this->disconnect(DisconnectedReason::ByTimeout);
     }
-    // client write buffer has pending bytes
+    /**
+     * @brief Handle pending write operation
+     * @param _ Pending write event
+     * 
+     * Called when data is waiting to be written to the socket.
+     * Updates the session timeout to prevent premature disconnection.
+     */
     void
     on(qb::io::async::event::pending_write &&) {
         this->updateTimeout();
     }
-    // client write buffer is empty
+    /**
+     * @brief Handle end-of-stream event
+     * @param _ End-of-stream event
+     * 
+     * Called when all pending data has been written to the socket.
+     * By default, disconnects the session with ResponseTransmitted reason.
+     */
     void
     on(qb::io::async::event::eos &&) {
         if constexpr (has_method_on<Derived, void, event::eos>::value) {
@@ -1719,7 +2292,13 @@ private:
         } else
             this->disconnect(ResponseTransmitted);
     }
-    // client is being disconnected
+    /**
+     * @brief Handle disconnection event
+     * @param e Disconnection event
+     * 
+     * Called when the session is disconnected. Logs the reason
+     * for disconnection if not handled by the derived class.
+     */
     void
     on(qb::io::async::event::disconnected &&e) {
         if constexpr (has_method_on<Derived, void, event::disconnected>::value) {
@@ -1767,6 +2346,14 @@ public:
     }
 };
 
+/**
+ * @brief IO handler for HTTP sessions
+ * @tparam Derived Derived class type (CRTP pattern)
+ * @tparam Session Session type
+ * 
+ * Handles IO operations for HTTP sessions including routing
+ * and event dispatching.
+ */
 template <typename Derived, typename Session>
 class io_handler : public qb::io::async::io_handler<Derived, Session> {
 public:
@@ -1786,6 +2373,15 @@ public:
     }
 };
 
+/**
+ * @brief HTTP server implementation
+ * @tparam Derived Derived class type (CRTP pattern)
+ * @tparam Session Session type
+ * @tparam Transport Transport type for accepting connections
+ * 
+ * Implements an HTTP server that accepts connections and
+ * creates sessions to handle requests.
+ */
 template <typename Derived, typename Session, typename Transport>
 class server
     : public qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>
@@ -1812,6 +2408,14 @@ public:
 };
 } // namespace internal
 
+/**
+ * @brief HTTP server/client session utility namespace
+ * 
+ * This namespace provides template utilities for creating HTTP server and client sessions 
+ * with different transport options.
+ * 
+ * @tparam T The type implementing the session
+ */
 template <typename Derived>
 struct use {
     template <typename Server>
