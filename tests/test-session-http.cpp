@@ -247,7 +247,7 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
         }
     });
 
-    for (auto i = 0; !all_done(); ++i)
+    while (!all_done())
         async::run(EVRUN_ONCE);
     t.join();
 }
