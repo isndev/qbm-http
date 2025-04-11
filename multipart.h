@@ -1,11 +1,59 @@
-#ifndef _MULTIPART_PARSER_H_
-#define _MULTIPART_PARSER_H_
+/**
+ * @file multipart.h
+ * @brief Multipart form-data parser for the QB Actor Framework
+ *
+ * This file implements a parser for multipart/form-data content according to RFC 7578.
+ * Multipart form data is commonly used in HTTP for file uploads and complex form submissions.
+ * The implementation provides a state machine based parser with callback functionality for
+ * efficient processing of multipart content.
+ *
+ * Key features:
+ * - Streaming parser that processes data incrementally
+ * - Callback-based event system for efficient memory management
+ * - Robust error handling with detailed error messages
+ * - Boundary detection and validation
+ * - Header parsing and normalization
+ * - Support for both string and binary content
+ *
+ * The MultipartParser is primarily used internally by the HTTP module to process
+ * multipart form data in incoming requests, but can also be used directly for
+ * custom multipart content processing needs.
+ *
+ * @see qb::http::Multipart
+ * @see qb::http::internal::MultipartReader
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2021 isndev (www.qbaf.io)
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *         http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
 
 #include <sys/types.h>
+#include <cstring>
 #include <string>
 #include <stdexcept>
-#include <cstring>
+#include <regex>
+#include <iostream>
+#include <cassert>
+#include <random>
+#include <vector>
+
 #include <qb/utility/build_macros.h>
+#include <qb/system/allocator/pipe.h>
+
+#include "./headers.h"
+
 DISABLE_WARNING_PUSH
 DISABLE_WARNING_IMPLICIT_FALLTHROUGH
 namespace qb::http {
@@ -29,46 +77,95 @@ public:
     typedef void (*Callback)(const char *buffer, size_t start, size_t end, void *userData);
 
 private:
-    // Character constants used in parsing
+    /**
+     * @brief Carriage Return character (ASCII 13)
+     * 
+     * Used in HTTP line endings (CR+LF) and multipart boundaries.
+     */
     static const char CR = 13;
+    
+    /**
+     * @brief Line Feed character (ASCII 10)
+     * 
+     * Used in HTTP line endings (CR+LF) and multipart boundaries.
+     */
     static const char LF = 10;
+    
+    /**
+     * @brief Space character (ASCII 32)
+     * 
+     * Used in header parsing for whitespace detection.
+     */
     static const char SPACE = 32;
+    
+    /**
+     * @brief Hyphen character (ASCII 45)
+     * 
+     * Used in multipart boundaries which begin with two hyphens.
+     */
     static const char HYPHEN = 45;
+    
+    /**
+     * @brief Colon character (ASCII 58)
+     * 
+     * Used to separate header field names from values.
+     */
     static const char COLON = 58;
+    
+    /**
+     * @brief Special value indicating an unmarked position
+     * 
+     * Used to indicate that no mark has been set for a segment.
+     */
     static const size_t UNMARKED = (size_t)-1;
 
-    // Parser states
+    /**
+     * @brief Parser state machine states
+     * 
+     * These states track the current position in the parsing process,
+     * from initial state to end of parsing, including various stages
+     * of header and data processing.
+     */
     enum State {
-        ERROR,
-        START,
-        START_BOUNDARY,
-        HEADER_FIELD_START,
-        HEADER_FIELD,
-        HEADER_VALUE_START,
-        HEADER_VALUE,
-        HEADER_VALUE_ALMOST_DONE,
-        HEADERS_ALMOST_DONE,
-        PART_DATA_START,
-        PART_DATA,
-        PART_END,
-        END
+        ERROR,               ///< Error occurred during parsing
+        START,               ///< Initial state before any data is processed
+        START_BOUNDARY,      ///< Processing the first boundary
+        HEADER_FIELD_START,  ///< Start of a header field name
+        HEADER_FIELD,        ///< Processing a header field name
+        HEADER_VALUE_START,  ///< Start of a header field value
+        HEADER_VALUE,        ///< Processing a header field value
+        HEADER_VALUE_ALMOST_DONE, ///< Found CR at end of header value
+        HEADERS_ALMOST_DONE, ///< Found CR at end of header section
+        PART_DATA_START,     ///< Start of a part's data section
+        PART_DATA,           ///< Processing a part's data
+        PART_END,            ///< End of a part
+        END                  ///< End of the multipart data
     };
 
-    enum Flags { PART_BOUNDARY = 1, LAST_BOUNDARY = 2 };
+    /**
+     * @brief Parser flags to track boundary types
+     * 
+     * Used to distinguish between part boundaries and the final boundary
+     * that ends the entire multipart content.
+     */
+    enum Flags { 
+        PART_BOUNDARY = 1,   ///< Found a boundary between parts
+        LAST_BOUNDARY = 2    ///< Found the final boundary
+    };
 
-    std::string boundary;
-    const char *boundaryData;
-    size_t boundarySize;
-    bool boundaryIndex[256];
-    char *lookbehind;
-    size_t lookbehindSize;
-    State state;
-    int flags;
-    size_t index;
-    size_t headerFieldMark;
-    size_t headerValueMark;
-    size_t partDataMark;
-    const char *errorReason;
+    std::string boundary;    ///< Complete boundary string (including CR+LF and dashes)
+    const char *boundaryData; ///< Pointer to boundary string data
+    size_t boundarySize;     ///< Length of the boundary string
+    bool boundaryIndex[256]; ///< Lookup table for quick boundary character checks
+    char *lookbehind;        ///< Buffer for boundary detection lookahead
+    size_t lookbehindSize;   ///< Size of the lookbehind buffer
+    State state;             ///< Current parser state
+    int flags;               ///< Current parser flags
+    size_t index;            ///< Current index in the boundary string
+    size_t headerFieldMark;  ///< Mark for start of header field
+    size_t headerValueMark;  ///< Mark for start of header value
+    size_t partDataMark;     ///< Mark for start of part data
+    const char *errorReason; ///< Error message if state is ERROR
 
     /**
      * @brief Reset all callback pointers to NULL
@@ -313,15 +410,76 @@ private:
     }
 
 public:
-    // Callback functions for parser events
+    /**
+     * @brief Callback for when a new part begins
+     * 
+     * Called after the boundary is detected but before any headers are processed.
+     * Note that the first part has this callback called after the initial boundary,
+     * and subsequent parts have it called after the previous part's end.
+     */
     Callback onPartBegin;
+    
+    /**
+     * @brief Callback for header field name
+     * 
+     * Called with the name of a header field (e.g., "Content-Type").
+     * May be called multiple times if the header name comes in multiple chunks.
+     */
     Callback onHeaderField;
+    
+    /**
+     * @brief Callback for header field value
+     * 
+     * Called with the value of a header field (e.g., "text/plain").
+     * May be called multiple times if the header value comes in multiple chunks.
+     */
     Callback onHeaderValue;
+    
+    /**
+     * @brief Callback for when a header is complete
+     * 
+     * Called after a complete header (field + value) has been processed.
+     */
     Callback onHeaderEnd;
+    
+    /**
+     * @brief Callback for when all headers for a part are complete
+     * 
+     * Called after all headers for a part have been processed,
+     * just before the part data begins.
+     */
     Callback onHeadersEnd;
+    
+    /**
+     * @brief Callback for part data
+     * 
+     * Called with chunks of part data. For large parts, this
+     * may be called multiple times as data becomes available.
+     */
     Callback onPartData;
+    
+    /**
+     * @brief Callback for when a part is complete
+     * 
+     * Called after all data for a part has been processed,
+     * when a new boundary is detected.
+     */
     Callback onPartEnd;
+    
+    /**
+     * @brief Callback for when the entire multipart message is complete
+     * 
+     * Called after the final boundary is detected, indicating
+     * the end of the multipart content.
+     */
     Callback onEnd;
+    
+    /**
+     * @brief User data pointer passed to callbacks
+     * 
+     * This pointer is passed unchanged to all callbacks, allowing
+     * context to be maintained across callback invocations.
+     */
     void *userData;
 
     /**
@@ -342,10 +500,10 @@ public:
      * 
      * Creates a parser initialized with the specified boundary.
      */
-    MultipartParser(const std::string &boundary) {
+    MultipartParser(std::string boundary) {
         lookbehind = NULL;
         resetCallbacks();
-        setBoundary(boundary);
+        setBoundary(std::move(boundary));
     }
 
     /**
@@ -388,9 +546,9 @@ public:
      * Must be called before feeding data to the parser.
      */
     void
-    setBoundary(const std::string &l_boundary) {
+    setBoundary(std::string l_boundary) {
         reset();
-        this->boundary = "\r\n--" + l_boundary;
+        this->boundary = "\r\n--" + std::move(l_boundary);
         boundaryData = this->boundary.c_str();
         boundarySize = this->boundary.size();
         indexBoundary();
@@ -579,6 +737,209 @@ public:
     }
 };
 
+/**
+ * @brief Find the boundary in multipart content
+ * @param str Content to search
+ * @param boundary Boundary string to find
+ * @return Iterator to the start of the boundary, or str.end() if not found
+ * 
+ * Searches for a multipart boundary string in HTTP content.
+ * This is used for parsing multipart/form-data content where
+ * parts are separated by boundary markers.
+ */
+[[nodiscard]] std::string::const_iterator
+find_boundary(std::string const &str, std::string const &boundary);
+
+/**
+ * @brief Parse boundary from Content-Type header
+ * @param content_type Content-Type header value
+ * @return Boundary string
+ * 
+ * Extracts the boundary string from a multipart/form-data Content-Type header.
+ * The boundary is used to separate different parts in the multipart body.
+ * Returns an empty string if the Content-Type is not multipart/form-data
+ * or if the boundary is not found.
+ * 
+ * Example: from "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW"
+ * extracts "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+ */
+[[nodiscard]] std::string parse_boundary(std::string const &content_type);
+
+/**
+ * @brief Template class for multipart form data handling
+ * @tparam String String type (std::string or std::string_view)
+ * 
+ * Provides functionality for creating and managing multipart/form-data content
+ * as defined in RFC 7578. This class supports:
+ *
+ * - Creating and parsing multipart form data with proper boundary handling
+ * - Managing individual parts with their headers and body content
+ * - Automatic boundary generation for new multipart content
+ * - Content-Length calculation for efficient transmission
+ * - Support for file uploads and form field data
+ * - Proper MIME type handling for each part
+ * 
+ * The implementation follows standards for multipart MIME types and supports
+ * both client-side content creation and server-side content parsing.
+ */
+template <typename String>
+class TMultiPart {
+    friend class Body;
+
+public:
+    /**
+     * @brief A single part in a multipart message
+     * 
+     * Contains headers and body for one part of a multipart message.
+     */
+    struct Part : public THeaders<String> {
+        String body;
+
+        /**
+         * @brief Get the total size of this part
+         * @return Size in bytes
+         */
+        [[nodiscard]] std::size_t
+        size() const {
+            std::size_t length = body.size() + sizeof(http::endl) + 1;
+            for (const auto &[key, values] : this->_headers) {
+                for (const auto &value : values)
+                    length += key.size() + value.size() + sizeof(http::endl) + 1; // ': '
+            }
+            return length;
+        }
+    };
+
+private:
+    std::string _boundary;
+    std::vector<Part> _parts;
+
+    /**
+     * @brief Generate a random boundary string
+     * @return Generated boundary string
+     */
+    [[nodiscard]] static std::string
+    generate_boundary() {
+        std::mt19937 generator{std::random_device{}()};
+        std::uniform_int_distribution<int> distribution{'0', '9'};
+
+        std::string result = "----------------------------qb00000000000000000000000000000000";
+        for (auto i = result.begin() + 30; i != result.end(); ++i)
+            *i = static_cast<char>(distribution(generator));
+
+        return result;
+    }
+
+public:
+    /**
+     * @brief Default constructor
+     * 
+     * Creates a multipart object with a random boundary.
+     */
+    TMultiPart()
+        : _boundary(generate_boundary()) {}
+    
+    /**
+     * @brief Constructor with custom boundary
+     * @param boundary Boundary string to use
+     */
+    explicit TMultiPart(std::string boundary)
+        : _boundary(std::move(boundary)) {}
+
+    /**
+     * @brief Create a new part
+     * @return Reference to the newly created part
+     */
+    [[nodiscard]] Part &
+    create_part() {
+        return _parts.emplace_back();
+    }
+
+    /**
+     * @brief Calculate the total content length
+     * @return Total content length in bytes
+     */
+    [[nodiscard]] std::size_t
+    content_length() const {
+        std::size_t ret = 0;
+
+        for (const auto &part : _parts)
+            ret += _boundary.size() + part.size() + 4;
+        ret += _boundary.size() + 4; // end
+
+        return ret;
+    }
+
+    /**
+     * @brief Get the boundary string
+     * @return Boundary string
+     */
+    [[nodiscard]] std::string const &
+    boundary() const {
+        return _boundary;
+    }
+    
+    /**
+     * @brief Get the parts collection
+     * @return Vector of parts
+     */
+    [[nodiscard]] std::vector<Part> const &
+    parts() const {
+        return _parts;
+    }
+
+    /**
+     * @brief Get the parts collection (non-const)
+     * @return Vector of parts
+     */
+    [[nodiscard]] std::vector<Part> &
+    parts() {
+        return _parts;
+    }
+};
+using Multipart = TMultiPart<std::string>;
+using multipart = Multipart;
+using MultipartView = TMultiPart<std::string_view>;
+using multipart_view = MultipartView;
+
 } // namespace qb::http
 DISABLE_WARNING_POP
-#endif /* _MULTIPART_PARSER_H_ */
+
+namespace qb::allocator {
+/**
+ * @brief HTTP Multipart content serialization specialization
+ * 
+ * Specialization of the pipe<char>::put template for HTTP multipart content.
+ * This function formats multipart/form-data content according to RFC 7578.
+ * 
+ * The formatted multipart content includes:
+ * - Boundary markers between parts
+ * - Headers for each part (Content-Type, Content-Disposition, etc.)
+ * - Content for each part
+ * - Final boundary marker to indicate the end of the multipart content
+ * 
+ * @param f Multipart form data to serialize
+ * @return Reference to the pipe for method chaining
+ */
+template <>
+pipe<char> &pipe<char>::put<qb::http::Multipart>(const qb::http::Multipart &f);
+
+/**
+ * @brief HTTP Multipart content serialization specialization
+ * 
+ * Specialization of the pipe<char>::put template for HTTP multipart content.
+ * This function formats multipart/form-data content according to RFC 7578.
+ * 
+ * The formatted multipart content includes:
+ * - Boundary markers between parts
+ * - Headers for each part (Content-Type, Content-Disposition, etc.)
+ * - Content for each part
+ * - Final boundary marker to indicate the end of the multipart content
+ * 
+ * @param f MultipartView form data to serialize
+ * @return Reference to the pipe for method chaining
+ */
+template <>
+pipe<char> &pipe<char>::put<qb::http::MultipartView>(const qb::http::MultipartView  &f);
+
+}

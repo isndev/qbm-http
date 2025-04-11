@@ -1,6 +1,6 @@
 #
 # qb - C++ Actor Framework
-# Copyright (C) 2011-2021 isndev (www.qbaf.io). All rights reserved.
+# Copyright (c) 2011-2025 qb - isndev (cpp.actor). All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,21 +17,25 @@
 
 project(qbm-http)
 
-add_library(llhttp STATIC
-        not-qb/llhttp/src/llhttp.c
-        not-qb/llhttp/src/api.c
-        not-qb/llhttp/src/http.c
-)
-target_include_directories(llhttp PRIVATE not-qb/llhttp/include)
+add_subdirectory(not-qb/llhttp)
 
 qb_register_module(
         NAME http
         VERSION 1.0.0
         SOURCES
+        headers.cpp
+        date.cpp
+        cookie.cpp
+        multipart.cpp
+        body.cpp
+        auth.cpp        
         http.cpp
         DEPENDENCIES
         llhttp
 )
+
+# Add example directory
+# add_subdirectory(examples)
 
 if (QB_BUILD_TEST)
     add_subdirectory(tests)
