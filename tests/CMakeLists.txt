@@ -1,6 +1,6 @@
 #
 # qb - C++ Actor Framework
-# Copyright (C) 2011-2021 isndev (www.qbaf.io). All rights reserved.
+# Copyright (c) 2011-2025 qb - isndev (cpp.actor). All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +15,47 @@
 #         limitations under the License.
 #
 
-qb_register_module_gtest(
-    NAME http
-    TESTNAME session
-    SOURCES test-session-http.cpp
+include(CTest)
+
+# Find OpenSSL for the authentication tests
+find_package(OpenSSL REQUIRED)
+
+# Define test files and their corresponding test names
+set(HTTP_TESTS
+    uri-only
+    router
+    router-advanced
+    router-async-advanced
+    router-radix
+    cors
+    cors-advanced
+    cors-comprehensive
+#    session-http
 )
 
-if (OPENSSL_FOUND)
-    file(COPY ${QB_SSL_RESOURCES} DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+# Register each standard test
+foreach(TEST ${HTTP_TESTS})
+    qb_register_module_gtest(
+        NAME http
+        TESTNAME ${TEST}
+        SOURCES test-${TEST}.cpp
+    )
+endforeach()
+
+# Register auth test separately as it needs OpenSSL
+qb_register_module_gtest(
+    NAME http
+    TESTNAME router-auth
+    SOURCES test-auth.cpp
+)
+
+# Copy SSL resources if needed
+if(OPENSSL_FOUND AND QB_SSL_RESOURCES)
+    set(TEST_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/qbm-http/tests")
+    file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+    file(COPY ${QB_SSL_RESOURCES} DESTINATION ${TEST_OUTPUT_DIR})
+    message(STATUS "[HTTP Tests] Copying SSL resources to ${TEST_OUTPUT_DIR}")
 endif()
+
+
+

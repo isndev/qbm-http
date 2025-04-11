@@ -1,14 +1,14 @@
 #include <stdio.h>
-#ifndef LLHTTP__TEST
+#ifndef http__TEST
 # include "llhttp.h"
 #else
-# define llhttp_t llparse_t
+# define http_t llparse_t
 #endif  /* */
 
-int llhttp_message_needs_eof(const llhttp_t* parser);
-int llhttp_should_keep_alive(const llhttp_t* parser);
+int http_message_needs_eof(const http_t* parser);
+int http_should_keep_alive(const http_t* parser);
 
-int llhttp__before_headers_complete(llhttp_t* parser, const char* p,
+int http__before_headers_complete(http_t* parser, const char* p,
                                     const char* endp) {
   /* Set this here so that on_headers_complete() callbacks can see it */
   if ((parser->flags & F_UPGRADE) &&
@@ -34,24 +34,46 @@ int llhttp__before_headers_complete(llhttp_t* parser, const char* p,
  * 4 - body_identity_eof
  * 5 - invalid transfer-encoding for request
  */
-int llhttp__after_headers_complete(llhttp_t* parser, const char* p,
+int http__after_headers_complete(http_t* parser, const char* p,
                                    const char* endp) {
   int hasBody;
 
   hasBody = parser->flags & F_CHUNKED || parser->content_length > 0;
-  if (parser->upgrade && (parser->method == HTTP_CONNECT ||
-                          (parser->flags & F_SKIPBODY) || !hasBody)) {
+  if (
+      (parser->upgrade && (parser->method == HTTP_CONNECT ||
+                          (parser->flags & F_SKIPBODY) || !hasBody)) ||
+      /* See RFC 2616 section 4.4 - 1xx e.g. Continue */
+      (parser->type == HTTP_RESPONSE && parser->status_code == 101)
+  ) {
     /* Exit, the rest of the message is in a different protocol. */
     return 1;
   }
 
-  if (parser->flags & F_SKIPBODY) {
+  if (parser->type == HTTP_RESPONSE && parser->status_code == 100) {
+    /* No body, restart as the message is complete */
+    return 0;
+  }
+
+  /* See RFC 2616 section 4.4 */
+  if (
+    parser->flags & F_SKIPBODY ||         /* response to a HEAD request */
+    (
+      parser->type == HTTP_RESPONSE && (
+        parser->status_code == 102 ||     /* Processing */
+        parser->status_code == 103 ||     /* Early Hints */
+        parser->status_code == 204 ||     /* No Content */
+        parser->status_code == 304        /* Not Modified */
+      )
+    )
+  ) {
     return 0;
   } else if (parser->flags & F_CHUNKED) {
     /* chunked encoding - ignore Content-Length header, prepare for a chunk */
     return 2;
   } else if (parser->flags & F_TRANSFER_ENCODING) {
-    if (parser->type == HTTP_REQUEST && (parser->flags & F_LENIENT) == 0) {
+    if (parser->type == HTTP_REQUEST &&
+        (parser->lenient_flags & LENIENT_CHUNKED_LENGTH) == 0 &&
+        (parser->lenient_flags & LENIENT_TRANSFER_ENCODING) == 0) {
       /* RFC 7230 3.3.3 */
 
       /* If a Transfer-Encoding header field
@@ -73,7 +95,7 @@ int llhttp__after_headers_complete(llhttp_t* parser, const char* p,
     }
   } else {
     if (!(parser->flags & F_CONTENT_LENGTH)) {
-      if (!llhttp_message_needs_eof(parser)) {
+      if (!http_message_needs_eof(parser)) {
         /* Assume content-length 0 - read the next */
         return 0;
       } else {
@@ -91,22 +113,20 @@ int llhttp__after_headers_complete(llhttp_t* parser, const char* p,
 }
 
 
-int llhttp__after_message_complete(llhttp_t* parser, const char* p,
+int http__after_message_complete(http_t* parser, const char* p,
                                    const char* endp) {
   int should_keep_alive;
 
-  should_keep_alive = llhttp_should_keep_alive(parser);
+  should_keep_alive = http_should_keep_alive(parser);
   parser->finish = HTTP_FINISH_SAFE;
-
-  /* Keep `F_LENIENT` flag between messages, but reset every other flag */
-  parser->flags &= F_LENIENT;
+  parser->flags = 0;
 
   /* NOTE: this is ignored in loose parsing mode */
   return should_keep_alive;
 }
 
 
-int llhttp_message_needs_eof(const llhttp_t* parser) {
+int http_message_needs_eof(const http_t* parser) {
   if (parser->type == HTTP_REQUEST) {
     return 0;
   }
@@ -119,7 +139,7 @@ int llhttp_message_needs_eof(const llhttp_t* parser) {
     return 0;
   }
 
-  /* RFC 7230 3.3.3, see `llhttp__after_headers_complete` */
+  /* RFC 7230 3.3.3, see `http__after_headers_complete` */
   if ((parser->flags & F_TRANSFER_ENCODING) &&
       (parser->flags & F_CHUNKED) == 0) {
     return 1;
@@ -133,7 +153,7 @@ int llhttp_message_needs_eof(const llhttp_t* parser) {
 }
 
 
-int llhttp_should_keep_alive(const llhttp_t* parser) {
+int http_should_keep_alive(const http_t* parser) {
   if (parser->http_major > 0 && parser->http_minor > 0) {
     /* HTTP/1.1 */
     if (parser->flags & F_CONNECTION_CLOSE) {
@@ -146,5 +166,5 @@ int llhttp_should_keep_alive(const llhttp_t* parser) {
     }
   }
 
-  return !llhttp_message_needs_eof(parser);
+  return !http_message_needs_eof(parser);
 }

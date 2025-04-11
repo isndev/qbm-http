@@ -5,7 +5,7 @@ The HTTP module for the QB C++ Actor Framework provides a comprehensive, high-pe
 ## Features
 
 - **HTTP/1.1 Protocol Support**: Complete implementation of the HTTP/1.1 protocol.
-- **High Performance**: Built on top of the llhttp parser for maximum efficiency.
+- **High Performance**: Built on top of the http parser for maximum efficiency.
 - **Asynchronous API**: Event-driven architecture for non-blocking operations.
 - **Synchronous API**: Simple request/response API for ease of use.
 - **Content Compression**: Support for gzip, deflate and other compression algorithms when built with zlib support.
@@ -180,7 +180,7 @@ router.POST("/upload", [](auto& ctx) {
 
 ## Architecture
 
-The HTTP module is built on top of the llhttp parser and integrated with the QB C++ Actor Framework's asynchronous I/O system. It provides:
+The HTTP module is built on top of the http parser and integrated with the QB C++ Actor Framework's asynchronous I/O system. It provides:
 
 - **Protocol Handlers**: Implementation of HTTP protocol parsing and generation
 - **Transport Abstraction**: Support for different transport layers (TCP, SSL/TLS)
