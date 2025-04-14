@@ -27,6 +27,8 @@ set(HTTP_TESTS
     router-advanced
     router-async-advanced
     router-radix
+    router-sync-middleware
+    router-async-middleware
     cors
     cors-advanced
     cors-comprehensive
