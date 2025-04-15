@@ -28,7 +28,10 @@ qb_register_module(
         cookie.cpp
         multipart.cpp
         body.cpp
-        auth.cpp        
+        auth.cpp
+        routing/cors_options.cpp
+        routing/radix_tree.cpp
+        routing/router.cpp
         http.cpp
         DEPENDENCIES
         llhttp
