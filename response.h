@@ -7,30 +7,30 @@ namespace qb::http {
 /**
  * @brief HTTP response message template
  * @tparam String String type used for storage (std::string or std::string_view)
- * 
- * Represents an HTTP response message with status code, reason phrase, headers, and body.
- * This template class can use either std::string or std::string_view as the
+ *
+ * Represents an HTTP response message with status code, reason phrase, headers, and
+ * body. This template class can use either std::string or std::string_view as the
  * underlying storage type, allowing for efficient memory management depending
  * on the use case:
- * 
+ *
  * - std::string for mutable responses that may be modified
  * - std::string_view for immutable responses that are processed once
- * 
+ *
  * The class provides comprehensive functionality for HTTP response handling:
  * - Status code and reason phrase management
  * - Header manipulation with case-insensitive keys
  * - Protocol version control
  * - Content type handling with charset management
  * - Flexible body content manipulation
- * 
+ *
  * It also implements a Router system for status code-based response handling,
  * allowing for customized responses to different HTTP status codes.
  */
 template <typename String>
 struct TResponse : public internal::MessageBase<String> {
     constexpr static const http_type_t type = HTTP_RESPONSE;
-    http_status status_code;
-    String status;
+    http_status                        status_code;
+    String                             status;
 
     TResponse() noexcept
         : status_code(HTTP_STATUS_OK) {}
@@ -38,14 +38,14 @@ struct TResponse : public internal::MessageBase<String> {
     void
     reset() {
         status_code = HTTP_STATUS_OK;
-        status = {};
+        status      = {};
         static_cast<internal::MessageBase<String> &>(*this).reset();
     }
 
     /**
      * @brief Router for handling HTTP status responses
      * @tparam Session Session type
-     * 
+     *
      * Maps HTTP status codes to handler functions for generating
      * appropriate responses.
      */
@@ -54,12 +54,12 @@ struct TResponse : public internal::MessageBase<String> {
     public:
         /**
          * @brief Context for response handlers
-         * 
+         *
          * Contains references to the session and response
          * for use by handler functions.
          */
         struct Context {
-            Session &session;
+            Session   &session;
             TResponse &response;
 
             const auto &
@@ -71,7 +71,7 @@ struct TResponse : public internal::MessageBase<String> {
     private:
         /**
          * @brief Interface for all route handlers
-         * 
+         *
          * Base class for routes that defines the common interface
          * for processing HTTP requests. All route implementations
          * must inherit from this class and implement the process method.
@@ -80,15 +80,15 @@ struct TResponse : public internal::MessageBase<String> {
         public:
             /**
              * @brief Virtual destructor
-             * 
+             *
              * Ensures proper cleanup of derived classes.
              */
             virtual ~IRoute() = default;
-            
+
             /**
              * @brief Process an HTTP request
              * @param ctx Request context with all necessary information
-             * 
+             *
              * Abstract method that must be implemented by derived classes
              * to handle the actual request processing. Implementations will
              * typically extract information from the request and populate
@@ -100,7 +100,7 @@ struct TResponse : public internal::MessageBase<String> {
         /**
          * @brief Templated route handler for HTTP status responses
          * @tparam Func Function type for handling routes
-         * 
+         *
          * Implements the IRoute interface with a specific function type.
          * Routes are used to handle HTTP responses based on their status code.
          */
@@ -113,7 +113,7 @@ struct TResponse : public internal::MessageBase<String> {
             /**
              * @brief Constructor for TRoute
              * @param func Function or callable to handle the route
-             * 
+             *
              * Creates a route handler with the specified function.
              */
             explicit TRoute(Func &&func)
@@ -124,7 +124,7 @@ struct TResponse : public internal::MessageBase<String> {
             /**
              * @brief Process a context through this route
              * @param ctx Context containing session and response
-             * 
+             *
              * Invokes the function stored in this route with the provided context.
              */
             void
@@ -135,7 +135,7 @@ struct TResponse : public internal::MessageBase<String> {
 
         /**
          * @brief Map of status codes to route handlers
-         * 
+         *
          * Stores route handlers indexed by HTTP status codes.
          */
         qb::unordered_map<int, IRoute *> _routes;
@@ -143,14 +143,14 @@ struct TResponse : public internal::MessageBase<String> {
     public:
         /**
          * @brief Default constructor
-         * 
+         *
          * Creates an empty router with no routes.
          */
         Router() = default;
-        
+
         /**
          * @brief Destructor
-         * 
+         *
          * Cleans up all registered route handlers.
          */
         ~Router() noexcept {
@@ -163,7 +163,7 @@ struct TResponse : public internal::MessageBase<String> {
          * @param session Current HTTP session
          * @param response HTTP response to route
          * @return true if a route handler was found and executed, false otherwise
-         * 
+         *
          * Looks up the response's status code in the route map and
          * executes the corresponding handler if found.
          */
@@ -178,20 +178,21 @@ struct TResponse : public internal::MessageBase<String> {
             return false;
         }
 
-#define REGISTER_ROUTE_FUNCTION(num, name, description)                                               \
-    /**                                                                                               \
-     * @brief Register a handler for HTTP status: description                                         \
-     * @tparam _Func Function type                                                                    \
-     * @param func Function or callable to handle the route                                           \
-     * @return Reference to this router                                                               \
-     *                                                                                                \
-     * Associates a function with HTTP status code num.                                               \
-     * When a response with this status code is processed, the function will be called.               \
-     */                                                                                               \
-    template <typename _Func>                                                                         \
-    Router &name(_Func &&func) {                                                                      \
-        _routes.emplace(static_cast<http_status>(num), new TRoute<_Func>(std::forward<_Func>(func))); \
-        return *this;                                                                                 \
+#define REGISTER_ROUTE_FUNCTION(num, name, description)                                 \
+    /**                                                                                 \
+     * @brief Register a handler for HTTP status: description                           \
+     * @tparam _Func Function type                                                      \
+     * @param func Function or callable to handle the route                             \
+     * @return Reference to this router                                                 \
+     *                                                                                  \
+     * Associates a function with HTTP status code num.                                 \
+     * When a response with this status code is processed, the function will be called. \
+     */                                                                                 \
+    template <typename _Func>                                                           \
+    Router &name(_Func &&func) {                                                        \
+        _routes.emplace(static_cast<http_status>(num),                                  \
+                        new TRoute<_Func>(std::forward<_Func>(func)));                  \
+        return *this;                                                                   \
     }
 
         HTTP_STATUS_MAP(REGISTER_ROUTE_FUNCTION)
@@ -203,9 +204,9 @@ struct TResponse : public internal::MessageBase<String> {
     using router = Router<session>;
 };
 
-using Response = TResponse<std::string>;
-using response = TResponse<std::string>;
-using ResponseView = TResponse<std::string_view>;
+using Response      = TResponse<std::string>;
+using response      = TResponse<std::string>;
+using ResponseView  = TResponse<std::string_view>;
 using response_view = TResponse<std::string_view>;
 
-}
+} // namespace qb::http

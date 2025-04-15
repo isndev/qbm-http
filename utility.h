@@ -1,16 +1,16 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <algorithm>
-#include <cctype>
 
 namespace qb::http {
 
 /**
  * @brief Utility functions for HTTP protocol handling
- * 
+ *
  * Contains helper functions for character validation, string manipulation,
  * and HTTP-specific operations to support the HTTP implementation.
  * These utilities follow RFC specifications for HTTP protocol elements.
@@ -20,7 +20,7 @@ namespace utility {
  * @brief Check if a character is a valid HTTP character
  * @param c Character to check
  * @return true if the character is valid for HTTP
- * 
+ *
  * Checks if a character is a valid HTTP character according to
  * RFC 7230. Valid HTTP characters are those with ASCII codes between
  * 0 and 127 inclusive.
@@ -34,7 +34,7 @@ is_char(int c) {
  * @brief Check if a character is a control character
  * @param c Character to check
  * @return true if the character is a control character
- * 
+ *
  * Checks if a character is a control character according to
  * RFC 7230. Control characters are those with ASCII codes
  * between 0 and 31, or 127 (DEL).
@@ -48,7 +48,7 @@ is_control(int c) {
  * @brief Check if a character is a special HTTP character
  * @param c Character to check
  * @return true if the character is a special HTTP character
- * 
+ *
  * Checks if a character is one of the special characters used in
  * HTTP syntax as defined in RFC 7230. These include characters
  * used as delimiters or separators in HTTP headers and request line.
@@ -56,28 +56,28 @@ is_control(int c) {
 inline bool
 is_special(int c) {
     switch (c) {
-    case '(':
-    case ')':
-    case '<':
-    case '>':
-    case '@':
-    case ',':
-    case ';':
-    case ':':
-    case '\\':
-    case '"':
-    case '/':
-    case '[':
-    case ']':
-    case '?':
-    case '=':
-    case '{':
-    case '}':
-    case ' ':
-    case '\t':
-        return true;
-    default:
-        return false;
+        case '(':
+        case ')':
+        case '<':
+        case '>':
+        case '@':
+        case ',':
+        case ';':
+        case ':':
+        case '\\':
+        case '"':
+        case '/':
+        case '[':
+        case ']':
+        case '?':
+        case '=':
+        case '{':
+        case '}':
+        case ' ':
+        case '\t':
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -85,7 +85,7 @@ is_special(int c) {
  * @brief Check if a character is a digit
  * @param c Character to check
  * @return true if the character is a digit (0-9)
- * 
+ *
  * Checks if a character is a decimal digit (0-9).
  * This is used for parsing numeric values in HTTP headers.
  */
@@ -98,9 +98,9 @@ is_digit(int c) {
  * @brief Check if a character is a hexadecimal digit
  * @param c Character to check
  * @return true if the character is a hex digit (0-9, A-F, a-f)
- * 
+ *
  * Checks if a character is a valid hexadecimal digit.
- * This includes the decimal digits 0-9 and the letters 
+ * This includes the decimal digits 0-9 and the letters
  * A-F and a-f (case-insensitive). Used for parsing hexadecimal
  * values in HTTP, such as chunk sizes in chunked encoding.
  */
@@ -114,22 +114,21 @@ is_hex_digit(int c) {
  * @param a First string
  * @param b Second string
  * @return true if strings are equal ignoring case
- * 
+ *
  * Performs character by character case-insensitive comparison of two strings.
  * This is useful for HTTP header names which are case-insensitive according to RFC 7230.
  */
 inline bool
 iequals(const std::string &a, const std::string &b) {
-    return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](char a, char b) {
-        return tolower(a) == tolower(b);
-    });
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                      [](char a, char b) { return tolower(a) == tolower(b); });
 }
 
 /**
  * @brief Check if a character is HTTP whitespace
  * @param ch Character to check
  * @return true if character is a space or horizontal tab
- * 
+ *
  * According to RFC 7230 section 3.2.3, HTTP whitespace is defined as
  * space (SP) or horizontal tab (HTAB).
  */
@@ -145,12 +144,12 @@ is_http_whitespace(const char ch) {
  * @param delimiters Delimiter characters
  * @param reserve Number of elements to reserve in the result vector
  * @return Vector of substrings
- * 
+ *
  * Splits the input string into a vector of substrings based on
  * any of the specified delimiter characters. Empty segments are
  * skipped, and the result vector is pre-allocated for efficiency
  * if a reserve size is specified.
- * 
+ *
  * Example:
  * ```
  * auto parts = split_string("header; param=value", "; =");
@@ -159,15 +158,16 @@ is_http_whitespace(const char ch) {
  */
 template <typename String>
 std::vector<String>
-split_string(std::string_view str, std::string_view delimiters, std::size_t reserve = 0) {
+split_string(std::string_view str, std::string_view delimiters,
+             std::size_t reserve = 0) {
     std::vector<String> result;
     if (reserve)
         result.reserve(reserve);
 
     auto first = str.begin();
     while (first != str.end()) {
-        const auto second = std::find_first_of(first, std::cend(str), std::cbegin(delimiters),
-                                               std::cend(delimiters));
+        const auto second = std::find_first_of(
+            first, std::cend(str), std::cbegin(delimiters), std::cend(delimiters));
         if (first != second)
             result.emplace_back(first, std::distance(first, second));
         if (second == str.end())
@@ -185,11 +185,11 @@ split_string(std::string_view str, std::string_view delimiters, std::size_t rese
  * @param pred Predicate function to determine split points
  * @param reserve Number of elements to reserve in the result vector
  * @return Vector of substrings
- * 
+ *
  * Splits the input string into a vector of substrings based on
  * a custom predicate function. The predicate should return true
  * for characters that should be treated as delimiters.
- * 
+ *
  * This version allows for more complex splitting logic than
  * the delimiter-based version.
  */
@@ -221,11 +221,12 @@ split_string(std::string_view str, Pred pred, std::size_t reserve = 0) {
  */
 template <typename String>
 std::vector<String>
-split_string_by(String const &str, std::string const &boundary, std::size_t reserve = 5) {
+split_string_by(String const &str, std::string const &boundary,
+                std::size_t reserve = 5) {
     std::vector<String> ret;
-    auto begin = str.begin();
-    auto end = str.end();
-    bool flag_delim = true;
+    auto                begin      = str.begin();
+    auto                end        = str.end();
+    bool                flag_delim = true;
 
     ret.reserve(reserve);
     while (begin != str.end()) {
@@ -241,7 +242,7 @@ split_string_by(String const &str, std::string const &boundary, std::size_t rese
             else
                 end = str.end();
             ret.push_back({&(*begin), static_cast<std::size_t>(end - begin)});
-            begin = end;
+            begin      = end;
             flag_delim = true;
         }
     }
@@ -249,5 +250,24 @@ split_string_by(String const &str, std::string const &boundary, std::size_t rese
     return ret;
 }
 
-} // namespace utility
+/**
+ * @brief Join strings with a delimiter
+ * @param strings Vector of strings to join
+ * @param delimiter Delimiter to use between strings
+ * @return Joined string
+ */
+template <typename T>
+std::string
+join(const std::vector<T> &strings, const std::string &delimiter) {
+    std::string result;
+    for (size_t i = 0; i < strings.size(); ++i) {
+        if (i > 0) {
+            result += delimiter;
+        }
+        result += strings[i];
+    }
+    return result;
 }
+
+} // namespace utility
+} // namespace qb::http

@@ -220,8 +220,8 @@ router
     })
     .DELETE("/users/:id", [](auto& ctx) {
         // Delete a user
-        ctx.session << ctx.response;
-    });
+    ctx.session << ctx.response;
+});
 ```
 
 ### Route Parameters
@@ -616,13 +616,13 @@ The Radix Tree offers faster routing than regular expressions for a large number
 
 ```cpp
 // Enable Radix Tree (enabled by default)
-router.enableRadixTree(true);
+router.enable_radix_tree(true);
 
 // Force Radix Tree for a specific method
-router.forceEnableRadixTreeForMethod(qb::http::HTTP_GET);
+router.force_enable_radix_tree_for_method(qb::http::HTTP_GET);
 
 // Build Radix Trees for all methods
-router.buildRadixTrees();
+router.build_radix_trees();
 ```
 
 ### String_view to Reduce Copying
@@ -680,7 +680,7 @@ router.GET("/get-session", [](auto& ctx) {
         
         // Update the counter
         ctx.set<int>("visit_count", visit_count);
-        
+    
         ctx.response.body() = "Session ID: " + session_id + 
                              ", Visits: " + std::to_string(visit_count);
     } else {

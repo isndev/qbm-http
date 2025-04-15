@@ -2,8 +2,9 @@
  * @file http.h
  * @brief HTTP client and server implementation for the QB Actor Framework
  *
- * This file implements a comprehensive HTTP client and server stack integrated with the QB Actor
- * Framework. It provides a non-blocking, asynchronous interface for HTTP operations including:
+ * This file implements a comprehensive HTTP client and server stack integrated with the
+ * QB Actor Framework. It provides a non-blocking, asynchronous interface for HTTP
+ * operations including:
  *
  * - HTTP 1.1 client and server implementations
  * - Request and response handling with full header support
@@ -54,33 +55,34 @@
 #include <qb/io/async/listener.h>
 #include <qb/io/async/tcp/connector.h>
 #include <qb/io/transport/file.h>
+#include <qb/json.h>
 #include <qb/system/allocator/pipe.h>
 #include <qb/system/container/unordered_map.h>
 #include <qb/system/timestamp.h>
-#include <qb/json.h>
 #ifdef QB_IO_WITH_ZLIB
-#    include <qb/io/compression.h>
+#include <qb/io/compression.h>
 #endif
-#include <regex>
 #include <random>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
 
-#include "./types.h"
-#include "./utility.h"
+#include "./auth.h"
+#include "./body.h"
+#include "./cookie.h"
 #include "./date.h"
 #include "./headers.h"
-#include "./cookie.h"
-#include "./body.h"
 #include "./message_base.h"
-#include "./response.h"
 #include "./request.h"
-#include "./router.h"
+#include "./response.h"
+#include "./routing.h"
+#include "./types.h"
+#include "./utility.h"
 
 #if defined(_WIN32)
-#    undef DELETE // Windows :/
+#undef DELETE // Windows :/
 #endif
 
 /**
@@ -88,9 +90,9 @@
  *
  * This namespace provides a comprehensive set of classes and functions for HTTP protocol
  * handling, including client and server implementations, request/response processing,
- * header management, content negotiation, and routing. The implementation follows HTTP/1.1
- * standards and supports advanced features such as:
- * 
+ * header management, content negotiation, and routing. The implementation follows
+ * HTTP/1.1 standards and supports advanced features such as:
+ *
  * - Complete HTTP request and response handling with headers and body processing
  * - Content compression and decompression (with zlib support)
  * - Cookie parsing and management (RFC 6265)
@@ -98,8 +100,9 @@
  * - Date handling for HTTP headers (RFC 7231)
  * - RESTful API routing with path parameter extraction
  * - Asynchronous client and server implementations
- * - Support for both string and string_view based operations for performance optimization
- * 
+ * - Support for both string and string_view based operations for performance
+ * optimization
+ *
  * The HTTP module is built on top of the QB Actor Framework's asynchronous I/O system,
  * making it fully non-blocking and suitable for high-performance applications.
  */
@@ -108,7 +111,7 @@ namespace qb::http {
 /**
  * @brief HTTP message parser
  * @tparam MessageType The message type to parse (Request or Response)
- * 
+ *
  * Parser based on http that handles HTTP messages. It processes
  * headers, body chunks, and status information according to the
  * HTTP protocol specification. Key features include:
@@ -130,11 +133,13 @@ template <typename MessageType>
 struct Parser : public http_t {
     using String = typename MessageType::string_type;
 
-    static int default_http_data_cb(http_t*, const char *, size_t) {
+    static int
+    default_http_data_cb(http_t *, const char *, size_t) {
         return 0;
     }
 
-    static int default_http_cb(http_t*) {
+    static int
+    default_http_cb(http_t *) {
         return 0;
     }
 
@@ -144,20 +149,20 @@ struct Parser : public http_t {
      * @param at Pointer to URL data
      * @param length Length of URL data
      * @return Result code (0 for success)
-     * 
+     *
      * Called when the URL portion of a request is parsed.
      * Extracts and stores the URL for further processing.
      */
     static int
     on_url(http_t *parser, const char *at, size_t length) {
         if constexpr (MessageType::type == HTTP_REQUEST) {
-            auto &msg = static_cast<Parser *>(parser->data)->msg;
+            auto &msg  = static_cast<Parser *>(parser->data)->msg;
             msg.method = static_cast<http_method>(parser->method);
-            msg._uri = std::string{at, length};
+            msg._uri   = std::string{at, length};
         } else {
-	  (void)at;
-	  (void)length;
-	}
+            (void) at;
+            (void) length;
+        }
         return 0;
     }
 
@@ -167,16 +172,16 @@ struct Parser : public http_t {
      * @param at Pointer to status message data
      * @param length Length of status message data
      * @return Result code (0 for success)
-     * 
+     *
      * Called when the status message portion of a response is parsed.
      * Extracts and stores the status message for the response.
      */
     static int
     on_status(http_t *parser, const char *at, size_t length) {
         if constexpr (MessageType::type == HTTP_RESPONSE) {
-            auto &msg = static_cast<Parser *>(parser->data)->msg;
+            auto &msg       = static_cast<Parser *>(parser->data)->msg;
             msg.status_code = static_cast<http_status>(parser->status_code);
-            msg.status = String(at, length);
+            msg.status      = String(at, length);
         }
         return 0;
     }
@@ -187,7 +192,7 @@ struct Parser : public http_t {
      * @param at Pointer to header field name data
      * @param length Length of header field name data
      * @return Result code (0 for success)
-     * 
+     *
      * Called when a header field name is parsed.
      * Stores the header field name for association with its value.
      */
@@ -203,14 +208,15 @@ struct Parser : public http_t {
      * @param at Pointer to header value data
      * @param length Length of header value data
      * @return Result code (0 for success)
-     * 
+     *
      * Called when a header value is parsed.
      * Associates the value with the previously parsed header field name.
      */
     static int
     on_header_value(http_t *parser, const char *at, size_t length) {
         auto &msg = static_cast<Parser *>(parser->data)->msg;
-        msg.headers()[String{static_cast<Parser *>(parser->data)->_last_header_key}].push_back(String(at, length));
+        msg.headers()[String{static_cast<Parser *>(parser->data)->_last_header_key}]
+            .push_back(String(at, length));
         return 0;
     }
 
@@ -218,13 +224,13 @@ struct Parser : public http_t {
      * @brief Headers complete callback
      * @param parser Parser instance
      * @return Result code (0 for success)
-     * 
+     *
      * Called when all headers have been parsed.
      * Finalizes header processing and prepares for body parsing.
      */
     static int
     on_headers_complete(http_t *parser) {
-        auto &msg = static_cast<Parser *>(parser->data)->msg;
+        auto &msg         = static_cast<Parser *>(parser->data)->msg;
         msg.major_version = parser->http_major;
         msg.minor_version = parser->http_major;
         if (parser->content_length != ULLONG_MAX) {
@@ -241,7 +247,7 @@ struct Parser : public http_t {
      * @param at Pointer to body data
      * @param length Length of body data
      * @return Result code (0 for success)
-     * 
+     *
      * Called when a portion of the message body is parsed.
      * Accumulates the body data for the message.
      */
@@ -256,7 +262,7 @@ struct Parser : public http_t {
      * @brief Message complete callback
      * @param parser Parser instance
      * @return Result code (0 for success)
-     * 
+     *
      * Called when the entire HTTP message has been parsed.
      * Finalizes message processing and signals completion.
      */
@@ -273,34 +279,34 @@ protected:
 
 private:
     static const http_settings_s inline settings{
-        &Parser::default_http_cb, // on message begin
+        &Parser::default_http_cb,      // on message begin
         &Parser::default_http_data_cb, // on protocol
-        &Parser::on_url, // on url
-        &Parser::on_status, // on status
+        &Parser::on_url,               // on url
+        &Parser::on_status,            // on status
         &Parser::default_http_data_cb, // on method
         &Parser::default_http_data_cb, // on version
-        &Parser::on_header_field, // on header field
-        &Parser::on_header_value, // on header value
+        &Parser::on_header_field,      // on header field
+        &Parser::on_header_value,      // on header value
         &Parser::default_http_data_cb, // on chunk extention name
         &Parser::default_http_data_cb, // on chunk extension value
-        &Parser::on_headers_complete, // on headers complete
-        &Parser::on_body, // on body
-        &Parser::on_message_complete, // on message complete
-        &Parser::default_http_cb, // on protocol complete  
-        &Parser::default_http_cb, // on url complete
-        &Parser::default_http_cb, // on status complete
-        &Parser::default_http_cb, // on method complete
-        &Parser::default_http_cb, // on version complete
-        &Parser::default_http_cb, // on header field complete
-        &Parser::default_http_cb, // on header value complete
-        &Parser::default_http_cb, // on chunk extention name complete
-        &Parser::default_http_cb, // on chunk extension value complete
-        &Parser::default_http_cb, // on chunk header
-        &Parser::default_http_cb, // on chunk complete 
-        &Parser::default_http_cb  // on reset
-        };
-    String _last_header_key;
-    bool _headers_completed = false;
+        &Parser::on_headers_complete,  // on headers complete
+        &Parser::on_body,              // on body
+        &Parser::on_message_complete,  // on message complete
+        &Parser::default_http_cb,      // on protocol complete
+        &Parser::default_http_cb,      // on url complete
+        &Parser::default_http_cb,      // on status complete
+        &Parser::default_http_cb,      // on method complete
+        &Parser::default_http_cb,      // on version complete
+        &Parser::default_http_cb,      // on header field complete
+        &Parser::default_http_cb,      // on header value complete
+        &Parser::default_http_cb,      // on chunk extention name complete
+        &Parser::default_http_cb,      // on chunk extension value complete
+        &Parser::default_http_cb,      // on chunk header
+        &Parser::default_http_cb,      // on chunk complete
+        &Parser::default_http_cb       // on reset
+    };
+    String                    _last_header_key;
+    bool                      _headers_completed = false;
     qb::allocator::pipe<char> _chunked;
 
 public:
@@ -314,12 +320,12 @@ public:
      * @param buffer Buffer containing the message data
      * @param size Size of the buffer
      * @return HTTP parser error code or HPE_OK on success
-     * 
+     *
      * Parses HTTP message data according to HTTP/1.1 specification.
      * This method can handle both full messages and partial messages.
-     * For partial messages, it can be called multiple times with 
+     * For partial messages, it can be called multiple times with
      * subsequent chunks of data until a complete message is parsed.
-     * 
+     *
      * When a parsing error occurs, the error_pos field is set to point
      * to the position in the buffer where the error occurred, which
      * can be useful for debugging.
@@ -331,11 +337,11 @@ public:
 
     /**
      * @brief Reset the parser state
-     * 
+     *
      * Clears all parser state and prepares it for parsing a new message.
      * This includes resetting internal fields like header name/value,
      * content length, message flags, and parser callbacks.
-     * 
+     *
      * This method should be called before reusing the parser for a new
      * message or after an error occurs to restore the parser to a clean state.
      */
@@ -350,12 +356,12 @@ public:
 
     /**
      * @brief Resume parsing after headers are completed
-     * 
+     *
      * Transitions the parser from header parsing mode to body parsing mode.
      * This is typically called after headers_completed() returns true and
-     * the application has processed the headers but wants to continue 
+     * the application has processed the headers but wants to continue
      * parsing the message body.
-     * 
+     *
      * This is particularly useful for handling chunked transfer encoding
      * or when processing a message in multiple stages.
      */
@@ -367,12 +373,12 @@ public:
     /**
      * @brief Get the parsed message
      * @return Reference to the parsed message
-     * 
+     *
      * Provides access to the message object (Request or Response) that has
      * been constructed from the parsed HTTP data. After successful parsing,
      * this message contains all headers, body content, and metadata such as
      * status code or HTTP method.
-     * 
+     *
      * This method is typically used after parsing is complete to retrieve
      * the resulting HTTP message for further processing or response generation.
      */
@@ -384,7 +390,7 @@ public:
     /**
      * @brief Check if headers have been completely parsed
      * @return true if headers are fully parsed
-     * 
+     *
      * Indicates whether the parser has finished parsing the headers
      * section of the HTTP message. This is useful for determining
      * when header information is available for processing but before
@@ -407,9 +413,9 @@ namespace route {
      */                                                 \
     template <typename _Func>                           \
     struct name {                                       \
-        std::string _path;                              \
+        std::string   _path;                            \
         mutable _Func _func;                            \
-        const int _num = num;                           \
+        const int     _num = num;                       \
         /**                                             \
          * @brief Constructor                           \
          * @param path URL path pattern                 \
@@ -437,43 +443,44 @@ namespace http_internal {
  * @brief Base protocol implementation for HTTP
  * @tparam IO_Handler Handler type for I/O operations
  * @tparam Trait Message trait type (Request or Response)
- * 
+ *
  * This class implements the core HTTP protocol handling functionality.
  * It parses incoming HTTP messages and extracts headers and body content
  * according to the HTTP/1.1 specification. It handles:
- * 
+ *
  * - Message header parsing
  * - Content length detection
  * - Chunked transfer encoding
  * - Message completion detection
  * - Buffer management for partial messages
- * 
+ *
  * The class is used as a base for both client-side (response parsing)
  * and server-side (request parsing) protocol handlers.
  */
 template <typename IO_Handler, typename Trait>
 class base : public qb::io::async::AProtocol<IO_Handler> {
     using String = typename qb::http::Parser<std::remove_const_t<Trait>>::String;
-    std::size_t body_offset = 0;  ///< Current offset for body parsing
+    std::size_t body_offset = 0; ///< Current offset for body parsing
 
 protected:
-    qb::http::Parser<std::remove_const_t<Trait>> _http_obj;  ///< HTTP parser
+    qb::http::Parser<std::remove_const_t<Trait>> _http_obj; ///< HTTP parser
 
 public:
-    using Router = typename Trait::template Router<IO_Handler>;  ///< Router type for this protocol
-    typedef String string_type;  ///< String type used for storage
+    using Router =
+        typename Trait::template Router<IO_Handler>; ///< Router type for this protocol
+    typedef String string_type;                      ///< String type used for storage
 
     /**
      * @brief Default constructor is deleted
-     * 
+     *
      * A base protocol must be constructed with an IO handler.
      */
     base() = delete;
-    
+
     /**
      * @brief Construct a protocol handler with an IO handler
      * @param io IO handler to use for I/O operations
-     * 
+     *
      * Creates a protocol handler that uses the given IO handler
      * for reading and writing data.
      */
@@ -483,15 +490,15 @@ public:
     /**
      * @brief Calculate the size of a complete HTTP message
      * @return Size of the complete message if available, 0 otherwise
-     * 
+     *
      * This method implements the AProtocol interface by parsing the
      * input buffer to determine if a complete HTTP message is available.
-     * 
+     *
      * For HTTP, this involves:
      * 1. Parsing headers if not already parsed
      * 2. Determining the body length from Content-Length or Transfer-Encoding
      * 3. Checking if the entire message (headers + body) is available
-     * 
+     *
      * If a complete message is available, returns its size. Otherwise,
      * returns 0 to indicate more data is needed.
      */
@@ -499,7 +506,8 @@ public:
     getMessageSize() noexcept final {
         if (!_http_obj.headers_completed()) {
             // parse headers
-            const auto ret = _http_obj.parse(this->_io.in().begin(), this->_io.in().size());
+            const auto ret =
+                _http_obj.parse(this->_io.in().begin(), this->_io.in().size());
             if (ret == HPE_OK) {
                 // restart parsing for next time;
                 _http_obj.reset();
@@ -518,7 +526,8 @@ public:
 
         if (msg.has_header("Transfer-Encoding")) {
             _http_obj.resume();
-            const auto ret = _http_obj.parse(this->_io.in().begin() + body_offset, this->_io.in().size() - body_offset);
+            const auto ret = _http_obj.parse(this->_io.in().begin() + body_offset,
+                                             this->_io.in().size() - body_offset);
 
             if (ret == HPE_CB_MESSAGE_COMPLETE) {
                 body_offset = 0;
@@ -545,8 +554,8 @@ public:
         }
 
         if (_http_obj.content_length)
-            _http_obj.get_parsed_message().body() =
-                std::string_view(this->_io.in().cbegin() + body_offset, _http_obj.content_length);
+            _http_obj.get_parsed_message().body() = std::string_view(
+                this->_io.in().cbegin() + body_offset, _http_obj.content_length);
 
         body_offset = 0;
 
@@ -555,7 +564,7 @@ public:
 
     /**
      * @brief Reset the protocol handler
-     * 
+     *
      * Resets the internal state of the protocol handler, clearing
      * any partially parsed message data and preparing for a new message.
      * This is called when a message is completed or when an error occurs.
@@ -572,11 +581,11 @@ public:
 /**
  * @brief HTTP server protocol implementation
  * @tparam IO_Handler Handler type for I/O operations
- * 
+ *
  * This class implements the HTTP protocol for server-side operations.
  * It handles HTTP request parsing and dispatches the parsed requests
- * to the IO handler for processing. 
- * 
+ * to the IO handler for processing.
+ *
  * This implementation uses std::string for storing request data,
  * which means the request objects can be modified and stored
  * independently of the input buffer.
@@ -590,7 +599,7 @@ public:
     /**
      * @brief Constructor with IO handler
      * @param io IO handler for network operations
-     * 
+     *
      * Creates an HTTP server protocol handler attached to the provided
      * IO handler, which manages the underlying socket connections.
      */
@@ -599,20 +608,20 @@ public:
 
     /**
      * @brief Container for HTTP request data
-     * 
+     *
      * Stores information about a received HTTP request including
      * the raw data pointer, message size, and parsed HTTP request.
      */
     struct request {
-        const std::size_t size{};    ///< Size of the request data
-        const char *data{};          ///< Pointer to raw request data
-        qb::http::Request http;      ///< Parsed HTTP request object
+        const std::size_t size{}; ///< Size of the request data
+        const char       *data{}; ///< Pointer to raw request data
+        qb::http::Request http;   ///< Parsed HTTP request object
     };
 
     /**
      * @brief Process an incoming HTTP request
      * @param size Size of the incoming message
-     * 
+     *
      * This method is called when a complete HTTP request is received.
      * It parses the request data using the HTTP parser, then routes it
      * to the appropriate handler based on the request path and method.
@@ -620,7 +629,8 @@ public:
      */
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(request{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
+        this->_io.on(request{size, this->_io.in().begin(),
+                             std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
@@ -628,7 +638,7 @@ public:
 /**
  * @brief HTTP server protocol implementation using string_view
  * @tparam IO_Handler Handler type for I/O operations
- * 
+ *
  * Similar to http_server, but uses string_view instead of string
  * for better performance when the request data doesn't need to be
  * modified or stored independently of the input buffer.
@@ -642,7 +652,7 @@ public:
     /**
      * @brief Constructor with IO handler
      * @param io IO handler for network operations
-     * 
+     *
      * Creates an HTTP server protocol handler with view semantics,
      * attached to the provided IO handler.
      */
@@ -651,21 +661,21 @@ public:
 
     /**
      * @brief Container for HTTP request data using views
-     * 
+     *
      * Stores information about a received HTTP request including
      * the raw data pointer, message size, and parsed HTTP request
      * using string_view for better performance.
      */
     struct request {
-        const std::size_t size{};       ///< Size of the request data
-        const char *data{};             ///< Pointer to raw request data
-        qb::http::RequestView http;     ///< Parsed HTTP request object with views
+        const std::size_t     size{}; ///< Size of the request data
+        const char           *data{}; ///< Pointer to raw request data
+        qb::http::RequestView http;   ///< Parsed HTTP request object with views
     };
 
     /**
      * @brief Process an incoming HTTP request with view semantics
      * @param size Size of the incoming message
-     * 
+     *
      * This method is called when a complete HTTP request is received.
      * It parses the request data using the HTTP parser, then routes it
      * to the appropriate handler based on the request path and method.
@@ -673,7 +683,8 @@ public:
      */
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(request{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
+        this->_io.on(request{size, this->_io.in().begin(),
+                             std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
@@ -685,15 +696,15 @@ class http_client : public http_internal::base<IO_Handler, qb::http::Response> {
 public:
     /**
      * @brief Default constructor is deleted
-     * 
+     *
      * HTTP client must be constructed with an IO handler.
      */
     http_client() = delete;
-    
+
     /**
      * @brief Constructor with IO handler
      * @param io IO handler for network operations
-     * 
+     *
      * Creates an HTTP client protocol handler attached to the provided
      * IO handler, which manages the underlying socket connections.
      */
@@ -702,27 +713,28 @@ public:
 
     /**
      * @brief Container for HTTP response data
-     * 
+     *
      * Stores information about a received HTTP response including
      * the raw data pointer, message size, and parsed HTTP response.
      */
     struct response {
-        const std::size_t size{};    ///< Size of the response data
-        const char *data{};          ///< Pointer to raw response data
-        qb::http::Response http;     ///< Parsed HTTP response object
+        const std::size_t  size{}; ///< Size of the response data
+        const char        *data{}; ///< Pointer to raw response data
+        qb::http::Response http;   ///< Parsed HTTP response object
     };
 
     /**
      * @brief Process an incoming HTTP response
      * @param size Size of the incoming message
-     * 
+     *
      * This method is called when a complete HTTP response is received from a server.
      * It parses the response data using the HTTP parser, then passes the
      * response to the client's callback handler.
      */
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(response{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
+        this->_io.on(response{size, this->_io.in().begin(),
+                              std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
@@ -734,15 +746,15 @@ class http_client_view : public http_internal::base<IO_Handler, qb::http::Respon
 public:
     /**
      * @brief Default constructor is deleted
-     * 
+     *
      * HTTP client view must be constructed with an IO handler.
      */
     http_client_view() = delete;
-    
+
     /**
      * @brief Constructor with IO handler
      * @param io IO handler for network operations
-     * 
+     *
      * Creates an HTTP client protocol handler with view semantics,
      * attached to the provided IO handler.
      */
@@ -751,28 +763,29 @@ public:
 
     /**
      * @brief Container for HTTP response data using views
-     * 
+     *
      * Stores information about a received HTTP response including
      * the raw data pointer, message size, and parsed HTTP response
      * using string_view for better performance.
      */
     struct response {
-        const std::size_t size{};          ///< Size of the response data
-        const char *data{};                ///< Pointer to raw response data
-        qb::http::ResponseView http;       ///< Parsed HTTP response object with views
+        const std::size_t      size{}; ///< Size of the response data
+        const char            *data{}; ///< Pointer to raw response data
+        qb::http::ResponseView http;   ///< Parsed HTTP response object with views
     };
 
     /**
      * @brief Process an incoming HTTP response with view semantics
      * @param size Size of the incoming message
-     * 
+     *
      * This method is called when a complete HTTP response is received from a server.
      * It parses the response data using the HTTP parser with string_view semantics,
      * then passes the response to the client's callback handler.
      */
     void
     onMessage(std::size_t size) noexcept final {
-        this->_io.on(response{size, this->_io.in().begin(), std::move(this->_http_obj.get_parsed_message())});
+        this->_io.on(response{size, this->_io.in().begin(),
+                              std::move(this->_http_obj.get_parsed_message())});
         this->_http_obj.reset();
     }
 };
@@ -784,19 +797,19 @@ namespace internal {
 
 template <typename IO_Handler, bool has_server = IO_Handler::has_server>
 struct side {
-    using protocol = qb::protocol::http_server<IO_Handler>;
+    using protocol      = qb::protocol::http_server<IO_Handler>;
     using protocol_view = qb::protocol::http_server_view<IO_Handler>;
 };
 
 /**
  * @brief Protocol selector specialization for client-side IO handlers
  * @tparam IO_Handler The IO handler type
- * 
+ *
  * Selects client protocol implementations for client-side IO handlers.
  */
 template <typename IO_Handler>
 struct side<IO_Handler, false> {
-    using protocol = qb::protocol::http_client<IO_Handler>;
+    using protocol      = qb::protocol::http_client<IO_Handler>;
     using protocol_view = qb::protocol::http_client_view<IO_Handler>;
 };
 
@@ -818,7 +831,7 @@ using protocol_view = typename internal::side<IO_Handler>::protocol_view;
 
 /**
  * @brief Asynchronous HTTP client implementation namespace
- * 
+ *
  * Contains classes and functions for asynchronous HTTP client operations.
  * This namespace provides a complete asynchronous HTTP client implementation
  * using the QB Actor Framework's event-driven I/O system. Key features include:
@@ -839,11 +852,11 @@ namespace async {
 
 /**
  * @brief HTTP reply container
- * 
+ *
  * Contains both the original request and the server's response.
  */
 struct Reply {
-    Request request;
+    Request  request;
     Response response;
 };
 
@@ -851,13 +864,13 @@ struct Reply {
  * @brief HTTP session implementation
  * @tparam Func Callback function type
  * @tparam Transport Transport layer type
- * 
+ *
  * Handles an HTTP client session, including connection establishment,
  * request transmission, and response handling.
  */
 template <typename Func, typename Transport>
 class session : public io::async::tcp::client<session<Func, Transport>, Transport> {
-    Func _func;
+    Func    _func;
     Request _request;
 
 public:
@@ -968,27 +981,30 @@ using HTTPS = session<Func, qb::io::transport::stcp>;
 
 } // namespace async
 
-#    define EXEC_REQUEST()                                                                                  \
-        if (request.uri().scheme() == "https")                                                              \
-            (new async::HTTPS<_Func>(std::forward<_Func>(func), request))->connect(request.uri(), timeout); \
-        else                                                                                                \
-            (new async::HTTP<_Func>(std::forward<_Func>(func), request))->connect(request.uri(), timeout);
+#define EXEC_REQUEST()                                                \
+    if (request.uri().scheme() == "https")                            \
+        (new async::HTTPS<_Func>(std::forward<_Func>(func), request)) \
+            ->connect(request.uri(), timeout);                        \
+    else                                                              \
+        (new async::HTTP<_Func>(std::forward<_Func>(func), request))  \
+            ->connect(request.uri(), timeout);
 
 #else
-#    define EXEC_REQUEST() (new HTTP<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout);
+#define EXEC_REQUEST() \
+    (new HTTP<_Func>(std::forward<_Func>(func), request))->connect(remote, timeout);
 #endif
 
 /**
  * @brief Macro for registering asynchronous HTTP API functions
- * 
+ *
  * This macro defines template functions for each HTTP method that accept:
  * - A request object
  * - A callback function to handle the response
  * - An optional timeout parameter
- * 
- * The macro creates functions like GET(), POST(), etc. that execute 
+ *
+ * The macro creates functions like GET(), POST(), etc. that execute
  * the request asynchronously and call the provided callback when done.
- * 
+ *
  * @param num HTTP method code (from http_method enum)
  * @param name Function name (e.g., GET, POST, etc.)
  * @param description HTTP method description
@@ -996,10 +1012,7 @@ using HTTPS = session<Func, qb::io::transport::stcp>;
 #define REGISTER_HTTP_ASYNC_FUNCTION(num, name, description)                  \
     template <typename _Func>                                                 \
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void> name( \
-        Request request,                                                      \
-        _Func &&func,                                                         \
-        double timeout = 0.) {                                                \
-                                                                              \
+        Request request, _Func &&func, double timeout = 0.) {                 \
         if constexpr ((num) >= 0)                                             \
             request.method = static_cast<http_method>(num);                   \
                                                                               \
@@ -1009,20 +1022,21 @@ using HTTPS = session<Func, qb::io::transport::stcp>;
 
 /**
  * @brief Macro for declaring synchronous HTTP API functions
- * 
+ *
  * This macro declares template functions for each HTTP method that accept:
  * - A request object
  * - An optional timeout parameter
- * 
+ *
  * The declared functions will be implemented elsewhere and provide
  * a synchronous interface for HTTP operations, returning a Response
  * object directly instead of using callbacks.
- * 
+ *
  * @param num HTTP method code (from http_method enum)
  * @param name Function name (e.g., GET, POST, etc.)
  * @param description HTTP method description
  */
-#define REGISTER_HTTP_SYNC_FUNCTION_P(num, name, description) Response name(Request request, double timeout = 3.);
+#define REGISTER_HTTP_SYNC_FUNCTION_P(num, name, description) \
+    Response name(Request request, double timeout = 3.);
 
 REGISTER_HTTP_ASYNC_FUNCTION(-1, REQUEST, USER_DEFINED)
 
@@ -1042,17 +1056,17 @@ namespace qb::allocator {
 
 /**
  * @brief HTTP Request serialization specialization
- * 
+ *
  * Formats the HTTP request according to the HTTP/1.1 specification,
  * including method, URI, headers, and body. Used to serialize requests
  * for transmission over the network.
- * 
+ *
  * The implementation handles all aspects of HTTP request formatting:
  * - Request line with method, URI path, query parameters, and HTTP version
  * - Header fields with proper formatting
  * - Content-Length header for the body
  * - Body content if present
- * 
+ *
  * @param r HTTP request to serialize
  * @return Reference to the pipe for method chaining
  */
@@ -1061,18 +1075,18 @@ pipe<char> &pipe<char>::put<qb::http::Request>(const qb::http::Request &r);
 
 /**
  * @brief HTTP Response serialization specialization
- * 
+ *
  * Formats the HTTP response according to the HTTP/1.1 specification,
  * including status line, headers, and body. Used to serialize responses
  * for transmission over the network.
- * 
+ *
  * The implementation handles all aspects of HTTP response formatting:
  * - Status line with HTTP version, status code, and reason phrase
  * - Header fields with proper formatting
  * - Content compression if requested in Content-Encoding header
  * - Content-Length header for the body
  * - Body content if present
- * 
+ *
  * @param r HTTP response to serialize
  * @return Reference to the pipe for method chaining
  */
@@ -1081,15 +1095,15 @@ pipe<char> &pipe<char>::put<qb::http::Response>(const qb::http::Response &r);
 
 /**
  * @brief HTTP Chunk serialization specialization
- * 
+ *
  * Specialization of the pipe<char>::put template for HTTP chunks.
  * This function formats an HTTP chunk according to the chunked transfer encoding
  * specification in HTTP/1.1.
- * 
+ *
  * This is used for implementing chunked transfer encoding in HTTP/1.1, allowing
  * the server to send data in chunks without knowing the total size in advance.
  * A zero-size chunk (0\r\n\r\n) indicates the end of the chunked data.
- * 
+ *
  * @param c HTTP chunk to serialize
  * @return Reference to the pipe for method chaining
  */
@@ -1101,23 +1115,23 @@ pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
 namespace qb::http {
 /**
  * @brief HTTP disconnection reason codes
- * 
+ *
  * Defines possible reasons for disconnection of HTTP sessions.
  * These codes help with debugging and proper handling of session termination.
  * Used to provide context when a disconnection event is triggered, allowing
  * the application to react appropriately based on the reason.
  */
 enum DisconnectedReason : int {
-    ByUser = 0,              ///< Disconnected by user request
-    ByTimeout,               ///< Disconnected due to timeout
-    ResponseTransmitted,     ///< Disconnected after response was transmitted
-    ServerError,             ///< Disconnected due to server error
-    Undefined                ///< Undefined reason (should never happen)
+    ByUser = 0,          ///< Disconnected by user request
+    ByTimeout,           ///< Disconnected due to timeout
+    ResponseTransmitted, ///< Disconnected after response was transmitted
+    ServerError,         ///< Disconnected due to server error
+    Undefined            ///< Undefined reason (should never happen)
 };
 
 /**
  * @brief Event types for HTTP session
- * 
+ *
  * Contains event structures used in the HTTP event-driven architecture.
  * These events facilitate non-blocking I/O operations and session management.
  * The event system enables asynchronous handling of HTTP sessions, allowing
@@ -1126,7 +1140,7 @@ enum DisconnectedReason : int {
 namespace event {
 /**
  * @brief End-of-stream event
- * 
+ *
  * Triggered when all buffered data has been sent.
  * Usually indicates that a response has been fully transmitted.
  * This event allows the application to perform actions once transmission
@@ -1136,19 +1150,19 @@ struct eos {};
 
 /**
  * @brief Disconnection event
- * 
+ *
  * Triggered when a session is disconnected.
  * Contains the reason for disconnection from DisconnectedReason enum.
  * Applications can use this event to properly handle session termination,
  * such as logging, cleanup, or attempting reconnection when appropriate.
  */
 struct disconnected {
-    int reason;  ///< Disconnection reason code
+    int reason; ///< Disconnection reason code
 };
 
 /**
  * @brief Request event
- * 
+ *
  * Triggered when a complete HTTP request is received.
  * Indicates that the request is ready for processing.
  * This event allows the application to handle incoming requests
@@ -1158,7 +1172,7 @@ struct request {};
 
 /**
  * @brief Timeout event
- * 
+ *
  * Triggered when a session times out due to inactivity.
  * Used to clean up resources for idle connections.
  * Timeouts help prevent resource leaks when clients disconnect
@@ -1173,16 +1187,18 @@ namespace internal {
  * @tparam Transport Transport layer type
  * @tparam TProtocol Protocol template type
  * @tparam Handler Handler type
- * 
+ *
  * Implements core HTTP session functionality for both client and
  * server side. Handles request processing, timeouts, and transmission.
  */
-template <typename Derived, typename Transport, template <typename T> typename TProtocol, typename Handler>
+template <typename Derived, typename Transport, template <typename T> typename TProtocol,
+          typename Handler>
 class session
-    : public qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>, Transport, Handler>
+    : public qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>,
+                                        Transport, Handler>
     , public qb::io::use<session<Derived, Transport, TProtocol, Handler>>::timeout {
 public:
-    using Protocol = TProtocol<session<Derived, Transport, TProtocol, Handler>>;
+    using Protocol    = TProtocol<session<Derived, Transport, TProtocol, Handler>>;
     using string_type = typename Protocol::string_type;
 
 private:
@@ -1193,14 +1209,14 @@ private:
     friend Protocol;
     friend qb::io::async::with_timeout<session>;
 
-    std::string _host;
+    std::string                     _host;
     qb::http::TRequest<string_type> _request;
-    qb::http::Response _response;
+    qb::http::Response              _response;
 
     /**
      * @brief Handle incoming HTTP request
      * @param msg HTTP request message
-     * 
+     *
      * Processes an incoming HTTP request by extracting host information,
      * handling compression, and routing the request to the appropriate handler.
      * The method performs the following steps:
@@ -1217,14 +1233,15 @@ private:
         _host = msg.http.header("x-real-ip", 0, this->transport().peer_endpoint().ip());
         _request = std::move(msg.http);
         // has compression ?
-        auto ce = qb::http::content_encoding(_request.header("Accept-Encoding", 0, "identity"));
+        auto ce = qb::http::content_encoding(
+            _request.header("Accept-Encoding", 0, "identity"));
         if (!ce.empty())
             _response.headers()["Content-Encoding"] = {std::move(ce)};
 
         // handle your message here
-        LOG_DEBUG(
-            "HttpSession(" << this->id() << ") " << _host << " request " << http_method_name(_request.method) << " "
-                           << _request.uri().path());
+        LOG_DEBUG("HttpSession(" << this->id() << ") " << _host << " request "
+                                 << http_method_name(_request.method) << " "
+                                 << _request.uri().path());
         if constexpr (has_method_on<Derived, void, event::request>::value) {
             static_cast<Derived &>(*this).on(event::request{});
         }
@@ -1236,10 +1253,11 @@ private:
                 this->publish(_response);
             }
         } catch (std::exception &e) {
-            LOG_WARN("HttpSession(" << this->id() << ") " << host() << " error: " << e.what());
+            LOG_WARN("HttpSession(" << this->id() << ") " << host()
+                                    << " error: " << e.what());
 
             qb::http::Response &res = _response;
-            res.status_code = HTTP_STATUS_BAD_REQUEST;
+            res.status_code         = HTTP_STATUS_BAD_REQUEST;
             *this << res;
         }
     }
@@ -1247,12 +1265,12 @@ private:
     /**
      * @brief Handle session timeout
      * @param _ Timeout event information
-     * 
+     *
      * Called when the session timer expires without activity. This method
      * either:
      * 1. Calls the derived class's timeout handler if one exists
      * 2. Disconnects the session with a timeout reason code
-     * 
+     *
      * Timeouts are used to prevent idle connections from consuming
      * server resources indefinitely.
      */
@@ -1269,7 +1287,7 @@ private:
     /**
      * @brief Handle pending write operation
      * @param _ Pending write event information
-     * 
+     *
      * Called when data is being written to the client socket. This
      * method updates the session timeout timer to prevent disconnection
      * during active data transfer operations.
@@ -1282,7 +1300,7 @@ private:
     /**
      * @brief Handle end-of-stream event
      * @param _ End-of-stream event
-     * 
+     *
      * Called when all pending data has been written to the socket.
      * By default, disconnects the session with ResponseTransmitted reason.
      */
@@ -1293,11 +1311,11 @@ private:
         } else
             this->disconnect(ResponseTransmitted);
     }
-    
+
     /**
      * @brief Handle disconnection event
      * @param e Disconnection event
-     * 
+     *
      * Called when the session is disconnected. Logs the reason
      * for disconnection if not handled by the derived class.
      */
@@ -1308,19 +1326,20 @@ private:
         } else {
             static const auto reason = [](auto why) {
                 switch (why) {
-                case DisconnectedReason::ByUser:
-                    return "by user";
-                case DisconnectedReason::ByTimeout:
-                    return "by timeout";
-                case DisconnectedReason::ResponseTransmitted:
-                    return "response transmitted";
-                case DisconnectedReason::ServerError:
-                    return "server error";
-                default:
-                    return "unhandled reason";
+                    case DisconnectedReason::ByUser:
+                        return "by user";
+                    case DisconnectedReason::ByTimeout:
+                        return "by timeout";
+                    case DisconnectedReason::ResponseTransmitted:
+                        return "response transmitted";
+                    case DisconnectedReason::ServerError:
+                        return "server error";
+                    default:
+                        return "unhandled reason";
                 }
             };
-            LOG_DEBUG("HttpSession(" << this->id() << ") " << host() << " disconnected -> " << reason(e.reason));
+            LOG_DEBUG("HttpSession(" << this->id() << ") " << host()
+                                     << " disconnected -> " << reason(e.reason));
         }
     }
 
@@ -1329,24 +1348,25 @@ public:
 
     /**
      * @brief Default constructor is deleted
-     * 
+     *
      * Sessions must be created with a server reference.
      * This enforces the requirement that each session belongs to a server,
      * ensuring proper lifecycle management and access to server resources.
      */
     session() = delete;
-    
+
     /**
      * @brief Constructor with server handler
      * @param server Server handler reference
-     * 
+     *
      * Initializes the session with a reference to the server handler,
      * sets the default response, and configures a 60-second timeout.
      * The server handler provides access to shared resources like the router,
      * which is needed to process incoming requests.
      */
     explicit session(Handler &server)
-        : qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>, Transport, Handler>(server)
+        : qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>,
+                                     Transport, Handler>(server)
         , _response(server.router().default_response()) {
         this->setTimeout(60);
     }
@@ -1354,7 +1374,7 @@ public:
     /**
      * @brief Get the client host
      * @return Host string (IP address)
-     * 
+     *
      * Returns the client's IP address, either from X-Real-IP header
      * (if behind a proxy) or from the transport connection.
      * This is useful for logging, access control, and rate limiting.
@@ -1363,11 +1383,11 @@ public:
     host() const {
         return _host;
     }
-    
+
     /**
      * @brief Access the current HTTP request
      * @return Reference to the current request
-     * 
+     *
      * Provides mutable access to the current HTTP request being processed.
      * This allows handlers to examine and potentially modify the request
      * before it's fully processed.
@@ -1376,11 +1396,11 @@ public:
     request() {
         return _request;
     }
-    
+
     /**
      * @brief Access the response object
      * @return Reference to the response
-     * 
+     *
      * Provides mutable access to the response object for this session.
      * The response is initially set to the server's default response,
      * and handlers can modify it to generate a custom response.
@@ -1395,11 +1415,11 @@ public:
  * @brief IO handler for HTTP sessions
  * @tparam Derived Derived class type (CRTP pattern)
  * @tparam Session Session type
- * 
+ *
  * Handles IO operations for HTTP sessions including routing
  * and event dispatching. Maintains the router instance and provides
  * access to it for configuring routes and handling requests.
- * 
+ *
  * This class follows the Curiously Recurring Template Pattern (CRTP)
  * to allow specialized behavior in derived classes while maintaining
  * static polymorphism for better performance.
@@ -1407,8 +1427,8 @@ public:
 template <typename Derived, typename Session>
 class io_handler : public qb::io::async::io_handler<Derived, Session> {
 public:
-    using Router = typename Session::Protocol::Router;
-    using Route = typename Session::Protocol::Router::Route;
+    using Router     = typename Session::Protocol::Router;
+    using Route      = typename Session::Protocol::Router::Route;
     using Controller = typename Session::Protocol::Router::Controller;
 
 private:
@@ -1417,7 +1437,7 @@ private:
 public:
     /**
      * @brief Default constructor
-     * 
+     *
      * Initializes the IO handler with an empty router.
      * The router will need to be configured with routes before
      * the server can handle requests.
@@ -1427,7 +1447,7 @@ public:
     /**
      * @brief Access the router
      * @return Reference to the router
-     * 
+     *
      * Provides access to the HTTP router for configuring routes
      * and handling HTTP requests. Routes can be added to the router
      * to define how different URI paths should be handled.
@@ -1443,7 +1463,7 @@ public:
  * @tparam Derived Derived class type (CRTP pattern)
  * @tparam Session Session type
  * @tparam Transport Transport type for accepting connections
- * 
+ *
  * Implements an HTTP server that accepts connections and
  * creates sessions to handle requests.
  */
@@ -1453,25 +1473,27 @@ class server
     , public io_handler<Derived, Session> {
     friend qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>;
     friend io_handler<Derived, Session>;
-    using acceptor_type = qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>;
+    using acceptor_type =
+        qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>;
 
     /**
      * @brief Handle new client connection
      * @param new_io Socket IO object for the new connection
-     * 
+     *
      * Called when a new client connects to the server. Creates a new
      * session to handle the client's requests using the provided IO object.
      * The session is registered with the server and started immediately.
      */
     void
     on(typename acceptor_type::accepted_socket_type &&new_io) {
-        this->registerSession(std::forward<typename acceptor_type::accepted_socket_type>(new_io));
+        this->registerSession(
+            std::forward<typename acceptor_type::accepted_socket_type>(new_io));
     }
 
     /**
      * @brief Handle server disconnection event
      * @param event Disconnection event information
-     * 
+     *
      * Called when the server is disconnected. If the derived class
      * implements a handler for disconnection events, it will be called.
      * Otherwise, a warning is logged.
@@ -1487,7 +1509,7 @@ class server
 public:
     /**
      * @brief Default constructor
-     * 
+     *
      * Initializes the HTTP server with default configurations.
      * The server must be started separately by binding to a port
      * and calling the listen method.
@@ -1498,10 +1520,10 @@ public:
 
 /**
  * @brief HTTP server/client session utility namespace
- * 
- * This namespace provides template utilities for creating HTTP server and client sessions 
- * with different transport options.
- * 
+ *
+ * This namespace provides template utilities for creating HTTP server and client
+ * sessions with different transport options.
+ *
  * @tparam T The type implementing the session
  */
 template <typename Derived>
@@ -1511,22 +1533,24 @@ struct use {
      * @tparam Server Server handler type
      */
     template <typename Server>
-    using session = internal::session<Derived, qb::io::transport::tcp, qb::protocol::http_server, Server>;
-    
+    using session = internal::session<Derived, qb::io::transport::tcp,
+                                      qb::protocol::http_server, Server>;
+
     /**
      * @brief Standard TCP HTTP session type with string_view optimization
      * @tparam Server Server handler type
      */
     template <typename Server>
-    using session_view = internal::session<Derived, qb::io::transport::tcp, qb::protocol::http_server_view, Server>;
-    
+    using session_view = internal::session<Derived, qb::io::transport::tcp,
+                                           qb::protocol::http_server_view, Server>;
+
     /**
      * @brief Standard HTTP IO handler
      * @tparam Session Session type
      */
     template <typename Session>
     using io_handler = internal::io_handler<Derived, Session>;
-    
+
     /**
      * @brief Standard HTTP server
      * @tparam Session Session type
@@ -1543,23 +1567,24 @@ struct use {
          * @tparam Server Server handler type
          */
         template <typename Server>
-        using session = internal::session<Derived, qb::io::transport::stcp, qb::protocol::http_server, Server>;
-        
+        using session = internal::session<Derived, qb::io::transport::stcp,
+                                          qb::protocol::http_server, Server>;
+
         /**
          * @brief Secure HTTPS session type with string_view optimization
          * @tparam Server Server handler type
          */
         template <typename Server>
-        using session_view =
-            internal::session<Derived, qb::io::transport::stcp, qb::protocol::http_server_view, Server>;
-        
+        using session_view = internal::session<Derived, qb::io::transport::stcp,
+                                               qb::protocol::http_server_view, Server>;
+
         /**
          * @brief Secure HTTPS IO handler
          * @tparam Session Session type
          */
         template <typename Session>
         using io_handler = internal::io_handler<Derived, Session>;
-        
+
         /**
          * @brief Secure HTTPS server
          * @tparam Session Session type
@@ -1572,7 +1597,7 @@ struct use {
 } // namespace qb::http
 
 #if defined(_WIN32)
-#    define DELETE (0x00010000L)
+#define DELETE (0x00010000L)
 #endif
 
 #endif // QB_MODULE_HTTP_H_

@@ -2,8 +2,8 @@
 #pragma once
 
 #include <qb/io/uri.h>
-#include "headers.h"
 #include "body.h"
+#include "headers.h"
 
 namespace qb::http {
 
@@ -12,7 +12,7 @@ namespace internal {
 /**
  * @brief Base class for HTTP messages
  * @tparam String String type (std::string or std::string_view)
- * 
+ *
  * Common base class for both Request and Response message types.
  */
 template <typename String>
@@ -28,7 +28,7 @@ struct MessageBase
 
     /**
      * @brief Default constructor
-     * 
+     *
      * Initializes a message with HTTP/1.1
      */
     MessageBase() noexcept
@@ -40,12 +40,12 @@ struct MessageBase
     /**
      * @brief Copy constructor
      * @param other Message to copy from
-     * 
+     *
      * Creates a deep copy of another message including all headers and body content.
      * This ensures each message instance maintains its own independent data.
      */
     MessageBase(MessageBase const &) = default;
-    
+
     /**
      * @brief Constructor with headers and body
      * @param headers Headers map
@@ -56,31 +56,31 @@ struct MessageBase
         , Body(std::move(body))
         , major_version(1)
         , minor_version(1) {}
-    
+
     /**
      * @brief Move constructor
      * @param other Message to move from
-     * 
+     *
      * Efficiently transfers ownership of resources from the source message
      * to this message without copying data.
      */
     MessageBase(MessageBase &&) noexcept = default;
-    
+
     /**
      * @brief Copy assignment operator
      * @param other Message to copy from
      * @return Reference to this message
-     * 
+     *
      * Creates a deep copy of the source message including all headers
      * and body content.
      */
     MessageBase &operator=(MessageBase const &) = default;
-    
+
     /**
      * @brief Move assignment operator
      * @param other Message to move from
      * @return Reference to this message
-     * 
+     *
      * Efficiently transfers ownership of resources from the source message
      * to this message without copying data, and releases any previous
      * resources held by this message.
@@ -89,7 +89,7 @@ struct MessageBase
 
     /**
      * @brief Reset the message state
-     * 
+     *
      * Clears all headers while preserving body content.
      */
     void
@@ -119,4 +119,4 @@ public:
 
 } // namespace internal
 
-}
+} // namespace qb::http

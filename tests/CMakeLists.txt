@@ -22,42 +22,42 @@ find_package(OpenSSL REQUIRED)
 
 # Define test files and their corresponding test names
 set(HTTP_TESTS
-    uri-only
-    router
-    router-advanced
-    router-async-advanced
-    router-radix
-    router-sync-middleware
-    router-async-middleware
-    cors
-    cors-advanced
-    cors-comprehensive
-#    session-http
+        uri-only
+        router
+        cors
+        cors-advanced
+        cors-comprehensive
+        router-radix
+        router-advanced
+        router-async-advanced
+        router-sync-middleware
+        router-async-middleware
+        #    session-http
 )
 
 # Register each standard test
-foreach(TEST ${HTTP_TESTS})
+foreach (TEST ${HTTP_TESTS})
     qb_register_module_gtest(
-        NAME http
-        TESTNAME ${TEST}
-        SOURCES test-${TEST}.cpp
+            NAME http
+            TESTNAME ${TEST}
+            SOURCES test-${TEST}.cpp
     )
-endforeach()
+endforeach ()
 
 # Register auth test separately as it needs OpenSSL
 qb_register_module_gtest(
-    NAME http
-    TESTNAME router-auth
-    SOURCES test-auth.cpp
+        NAME http
+        TESTNAME router-auth
+        SOURCES test-auth.cpp
 )
 
 # Copy SSL resources if needed
-if(OPENSSL_FOUND AND QB_SSL_RESOURCES)
+if (OPENSSL_FOUND AND QB_SSL_RESOURCES)
     set(TEST_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/qbm-http/tests")
     file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
     file(COPY ${QB_SSL_RESOURCES} DESTINATION ${TEST_OUTPUT_DIR})
     message(STATUS "[HTTP Tests] Copying SSL resources to ${TEST_OUTPUT_DIR}")
-endif()
+endif ()
 
 
 

@@ -1,16 +1,16 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <memory>
 
-#include <qb/system/allocator/pipe.h>
 #include <qb/json.h>
+#include <qb/system/allocator/pipe.h>
 #include <qb/utility/build_macros.h>
 #ifdef QB_IO_WITH_ZLIB
-#    include <qb/io/compression.h>
+#include <qb/io/compression.h>
 #endif
 
 #include "./multipart.h"
@@ -19,34 +19,34 @@ namespace qb::http {
 
 /**
  * @brief HTTP chunk for use with chunked transfer encoding
- * 
+ *
  * Represents a single chunk in HTTP chunked transfer encoding.
  * This lightweight class stores a reference to chunk data without
  * owning the memory, making it efficient for handling streaming data.
- * 
+ *
  * Chunks are used with chunked transfer encoding, where the body of a
  * message is transferred as a series of chunks, each with its own size.
  * This allows for streaming data without knowing the total size in advance.
  */
 class Chunk {
-    const char *_data;    ///< Pointer to chunk data (not owned)
-    std::size_t _size;    ///< Size of the chunk in bytes
+    const char *_data; ///< Pointer to chunk data (not owned)
+    std::size_t _size; ///< Size of the chunk in bytes
 
 public:
     /**
      * @brief Default constructor
-     * 
+     *
      * Creates an empty chunk with null data and zero size.
      */
     Chunk()
         : _data(nullptr)
         , _size(0) {}
-    
+
     /**
      * @brief Construct a chunk with data pointer and size
      * @param data Pointer to chunk data (not owned)
      * @param size Size of the chunk in bytes
-     * 
+     *
      * Creates a chunk referencing the provided data.
      * The chunk does not take ownership of the data,
      * so the caller must ensure the data remains valid.
@@ -54,7 +54,7 @@ public:
     Chunk(const char *data, std::size_t size)
         : _data(data)
         , _size(size) {}
-    
+
     /**
      * @brief Get the chunk data
      * @return Pointer to the chunk data
@@ -63,7 +63,7 @@ public:
     data() const {
         return _data;
     }
-    
+
     /**
      * @brief Get the chunk size
      * @return Size of the chunk in bytes
@@ -78,7 +78,7 @@ using chunk = Chunk;
 
 /**
  * @brief HTTP message body class
- * 
+ *
  * This class represents the body of an HTTP message, providing methods
  * for manipulating and accessing the body data. It serves as a central
  * component for both requests and responses in the HTTP protocol.
@@ -98,10 +98,10 @@ class Body {
     qb::allocator::pipe<char> _data;
 
 public:
-    Body() = default;
-    ~Body() = default;
+    Body()                    = default;
+    ~Body()                   = default;
     Body(Body &&rhs) noexcept = default;
-    Body(Body const &rhs) = default;
+    Body(Body const &rhs)     = default;
 
     Body &operator=(Body &&rhs) noexcept = default;
 
@@ -136,32 +136,32 @@ public:
     operator=(T &rhs) {
         return operator=(static_cast<T const &>(rhs));
     }
-    
+
     /**
      * @brief Assign data to the body (const reference version)
      * @tparam T Type of data to assign
      * @param rhs Data to assign
      * @return Reference to this body
-     * 
+     *
      * Copies the content of the provided data into the body.
      * This generic template handles any type that can be stored in the body.
      */
     template <typename T>
     Body &operator=(T const &);
-    
+
     /**
      * @brief Assign data to the body (rvalue reference version)
-     * @tparam T Type of data to assign  
+     * @tparam T Type of data to assign
      * @param rhs Data to move
      * @return Reference to this body
-     * 
+     *
      * Moves the content of the provided data into the body.
      * This version is more efficient for temporary values as it
      * avoids unnecessary copying when possible.
      */
     template <typename T>
     Body &operator=(T &&) noexcept;
-    
+
     /**
      * @brief Assign a C string to the body
      * @param str C string to assign
@@ -180,30 +180,31 @@ public:
      * @brief Get a compressor for the given encoding
      * @param encoding Compression encoding name (e.g., "gzip", "deflate")
      * @return Unique pointer to a compression provider
-     * 
+     *
      * Creates a compressor based on the specified encoding type.
      * Supported encodings include "gzip" and "deflate".
      * Returns nullptr for unsupported or unknown encodings.
-     * 
+     *
      * This method is only available when the library is compiled
      * with zlib support (when QB_IO_WITH_ZLIB is defined).
      */
-    static std::unique_ptr<qb::compression::compress_provider> get_compressor_from_header(const std::string &encoding);
+    static std::unique_ptr<qb::compression::compress_provider>
+    get_compressor_from_header(const std::string &encoding);
 
     /**
      * @brief Compress the body
      * @param encoding Encoding type
      * @return Compressed size
-     * 
+     *
      * Compresses the body content using the specified encoding algorithm.
      * If the body is empty or encoding is empty, returns the original size.
-     * 
+     *
      * The compression process works as follows:
      * 1. A compressor is created for the specified encoding
      * 2. The original content is compressed into a temporary buffer
      * 3. The original data is replaced with the compressed data
      * 4. The size of the compressed data is returned
-     * 
+     *
      * This method is typically called automatically when sending a response
      * with a Content-Encoding header.
      */
@@ -213,38 +214,38 @@ public:
      * @brief Get a decompressor for the given encoding
      * @param encoding Encoding type
      * @return Decompressor provider
-     * 
+     *
      * Creates a decompression provider based on the specified encoding type.
      * Supported encodings include "gzip", "deflate", and others depending
      * on the build configuration.
-     * 
+     *
      * This method is used internally by the uncompress() method to handle
      * Content-Encoding requirements from incoming requests or responses.
-     * 
+     *
      * @throws std::runtime_error if an unsupported encoding is specified
      * @throws std::runtime_error if multiple compression algorithms are specified
      */
     static std::unique_ptr<qb::compression::decompress_provider>
     get_decompressor_from_header(const std::string &encoding);
-    
+
     /**
      * @brief Decompress the body
      * @param encoding Encoding type
      * @return Decompressed size
-     * 
+     *
      * Decompresses the body content that was compressed with the specified
      * encoding algorithm. If the body is empty or encoding is empty,
      * returns the original size.
-     * 
+     *
      * The decompression process works as follows:
      * 1. A decompressor is created for the specified encoding
      * 2. The compressed content is decompressed into a temporary buffer
      * 3. The compressed data is replaced with the decompressed data
      * 4. The size of the decompressed data is returned
-     * 
+     *
      * This method is typically called automatically when receiving a request
      * or response with a Content-Encoding header.
-     * 
+     *
      * @throws std::runtime_error if decompression fails or the encoding is unsupported
      */
     std::size_t uncompress(const std::string &encoding);
@@ -320,19 +321,19 @@ using body = Body;
 
 // Specializations of templates for Body
 template <>
-Body &Body::operator=<std::string>(std::string &&str) noexcept;
+Body &Body::operator= <std::string>(std::string &&str) noexcept;
 template <>
-Body &Body::operator=<std::string_view>(std::string_view &&str) noexcept;
+Body &Body::operator= <std::string_view>(std::string_view &&str) noexcept;
 template <>
-Body &Body::operator=<std::string>(std::string const &str);
+Body &Body::operator= <std::string>(std::string const &str);
 template <>
-Body &Body::operator=<std::vector<char>>(std::vector<char> const &str);
+Body &Body::operator= <std::vector<char>>(std::vector<char> const &str);
 template <>
-Body &Body::operator=<std::vector<char>>(std::vector<char> &&str) noexcept;
+Body &Body::operator= <std::vector<char>>(std::vector<char> &&str) noexcept;
 template <>
-Body &Body::operator=<qb::json>(qb::json const &json);
+Body &Body::operator= <qb::json>(qb::json const &json);
 template <>
-Body &Body::operator=<Multipart>(Multipart const &mp);
+Body &Body::operator= <Multipart>(Multipart const &mp);
 // template <>
 // Body &Body::operator=<MultipartView>(MultipartView const &mp);
 
@@ -347,4 +348,4 @@ Multipart Body::as<Multipart>() const;
 template <>
 MultipartView Body::as<MultipartView>() const;
 
-}
+} // namespace qb::http

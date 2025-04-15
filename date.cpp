@@ -125,7 +125,7 @@ Date::to_string(qb::Timestamp const ts) noexcept {
  * @brief Parse an HTTP date string into a timestamp
  * @param str HTTP date string to parse
  * @return Parsed timestamp
- *   
+ *
  * Parses an HTTP date string into a timestamp according to RFC 7231.
  */
 qb::Timestamp
@@ -137,12 +137,12 @@ Date::parse(std::string_view const str) noexcept {
  * @brief Parse an HTTP date string into a timestamp
  * @param str HTTP date string to parse
  * @return Parsed timestamp
- *   
- * Parses an HTTP date string into a timestamp according to RFC 7231.   
+ *
+ * Parses an HTTP date string into a timestamp according to RFC 7231.
  */
 qb::Timestamp
 Date::parse(std::string const &str) noexcept {
     return {};
-}   
+}
 
 } // namespace qb::http
