@@ -798,7 +798,11 @@ Router<Session, String>::is_rate_limited(const Context &ctx) {
     if (client_id.empty()) {
         // Try to get the client IP from the session if available
         if constexpr (has_client_ip_method<Session>::value) {
+            client_id = ctx.session->get_client_ip();
+        } else if constexpr (has_client_ip_method<std::shared_ptr<Session>>::value) {
             client_id = ctx.session.get_client_ip();
+        } else if constexpr (has_ip_method<Session>::value) {
+            client_id = ctx.session->ip();
         } else {
             // Use a generic ID if no IP is available
             client_id = "unknown";

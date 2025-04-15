@@ -45,6 +45,12 @@ qb_register_module(
         validation/json_schema.cpp
         validation/query_validator.cpp
         validation/sanitizer.cpp
+
+        # Middleware
+        middleware/rate_limit.cpp
+        #middleware/logger.cpp
+        #middleware/compression.cpp
+
         # JWT
         # jwt/jwt.cpp
         # jwt/jwt_options.cpp

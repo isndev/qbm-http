@@ -388,6 +388,15 @@ private:
                                 std::void_t<decltype(std::declval<S>().get_client_ip())>>
         : std::true_type {};
     
+    // Helper type trait to check if session has an ip() method
+    template <typename S, typename = void>
+    struct has_ip_method : std::false_type {};
+
+    template <typename S>
+    struct has_ip_method<S, 
+                        std::void_t<decltype(std::declval<S>().ip())>>
+        : std::true_type {};
+    
     // Helper type trait to check if session has an id() method
     template <typename S, typename = void>
     struct has_id_method : std::false_type {};
