@@ -32,6 +32,12 @@ qb_register_module(
         routing/cors_options.cpp
         routing/radix_tree.cpp
         routing/router.cpp
+        validation/validator.cpp
+        validation/json_schema.cpp
+        validation/query_validator.cpp
+        validation/sanitizer.cpp
+        validation/validation_context.cpp
+        validation/validation_types.cpp
         http.cpp
         DEPENDENCIES
         llhttp

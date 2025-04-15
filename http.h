@@ -69,6 +69,7 @@
 #include <string_view>
 #include <utility>
 
+#include "./types.h"
 #include "./auth.h"
 #include "./body.h"
 #include "./cookie.h"
@@ -78,9 +79,8 @@
 #include "./request.h"
 #include "./response.h"
 #include "./routing.h"
-#include "./types.h"
 #include "./utility.h"
-
+#include "./validation.h"
 #if defined(_WIN32)
 #undef DELETE // Windows :/
 #endif

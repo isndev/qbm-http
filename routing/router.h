@@ -303,7 +303,7 @@ public:
      * @brief Get all active async requests
      * @return Map of active requests (request ID to context)
      */
-    const qb::unordered_map<std::uintptr_t, std::shared_ptr<Context>> &
+    const std::map<std::uintptr_t, std::shared_ptr<Context>> &
     get_active_requests() const;
 
     /**
@@ -317,7 +317,7 @@ public:
 
 private:
     // Map of HTTP methods to route handlers
-    qb::unordered_map<http_method, std::vector<std::unique_ptr<IRoute>>> _routes;
+    std::map<http_method, std::vector<std::unique_ptr<IRoute>>> _routes;
     // Controllers for hierarchical routing
     std::vector<std::shared_ptr<Controller>> _controllers;
     // Global middleware functions
@@ -325,9 +325,9 @@ private:
     // Asynchronous middleware functions
     std::vector<AsyncMiddleware> _async_middleware;
     // Error handlers for different status codes
-    qb::unordered_map<int, std::function<void(Context &)>> _error_handlers;
+    std::map<int, std::function<void(Context &)>> _error_handlers;
     // Default responses for different HTTP methods (if no route matches)
-    qb::unordered_map<http_method, Response> _default_responses;
+    std::map<http_method, Response> _default_responses;
     // Whether to enable logging
     bool _enable_logging{false};
     // Current route group being configured
@@ -336,7 +336,7 @@ private:
     std::unique_ptr<CorsOptions> _cors_options;
 
     // Map to track active async requests
-    qb::unordered_map<std::uintptr_t, std::shared_ptr<Context>> _active_async_requests;
+    std::map<std::uintptr_t, std::shared_ptr<Context>> _active_async_requests;
     
     // Timestamp of last cleanup
     std::chrono::steady_clock::time_point _last_cleanup;
@@ -351,8 +351,8 @@ private:
     std::set<std::uintptr_t> _cancelled_requests;
 
     // New radix tree-based routes
-    qb::unordered_map<http_method, RadixTree> _radix_routes;
-    qb::unordered_map<http_method, bool>      _radix_enabled;
+    std::unordered_map<http_method, RadixTree> _radix_routes;
+    std::unordered_map<http_method, bool>      _radix_enabled;
 
     // Whether to use radix tree for route matching
     bool _use_radix_tree;
@@ -377,7 +377,7 @@ private:
     struct RateLimit {
         size_t                                                      requests_per_window;
         std::chrono::seconds                                        window_size;
-        qb::unordered_map<std::string, std::pair<size_t, Clock::time_point>> client_counters;
+        std::map<std::string, std::pair<size_t, Clock::time_point>> client_counters;
     };
 
     std::unique_ptr<RateLimit> _rate_limit;
