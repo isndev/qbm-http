@@ -554,7 +554,7 @@ public:
         }
 
         if (_http_obj.content_length)
-            _http_obj.get_parsed_message().body() = std::string_view(
+            msg.body() = std::string_view(
                 this->_io.in().cbegin() + body_offset, _http_obj.content_length);
 
         body_offset = 0;
@@ -629,8 +629,11 @@ public:
      */
     void
     onMessage(std::size_t size) noexcept final {
+        auto& request_obj = this->_http_obj.get_parsed_message();
+        // Parse cookies from the Cookie header
+        request_obj.parse_cookie_header();
         this->_io.on(request{size, this->_io.in().begin(),
-                             std::move(this->_http_obj.get_parsed_message())});
+                             std::move(request_obj)});
         this->_http_obj.reset();
     }
 };
@@ -683,8 +686,11 @@ public:
      */
     void
     onMessage(std::size_t size) noexcept final {
+        auto& request_obj = this->_http_obj.get_parsed_message();
+        // Parse cookies from the Cookie header
+        request_obj.parse_cookie_header();
         this->_io.on(request{size, this->_io.in().begin(),
-                             std::move(this->_http_obj.get_parsed_message())});
+                             std::move(request_obj)});
         this->_http_obj.reset();
     }
 };
@@ -733,8 +739,11 @@ public:
      */
     void
     onMessage(std::size_t size) noexcept final {
+        auto& response_obj = this->_http_obj.get_parsed_message();
+        // Parse cookies from the Set-Cookie headers
+        response_obj.parse_set_cookie_headers();
         this->_io.on(response{size, this->_io.in().begin(),
-                              std::move(this->_http_obj.get_parsed_message())});
+                              std::move(response_obj)});
         this->_http_obj.reset();
     }
 };
@@ -784,8 +793,11 @@ public:
      */
     void
     onMessage(std::size_t size) noexcept final {
+        auto& response_obj = this->_http_obj.get_parsed_message();
+        // Parse cookies from the Set-Cookie headers
+        response_obj.parse_set_cookie_headers();
         this->_io.on(response{size, this->_io.in().begin(),
-                              std::move(this->_http_obj.get_parsed_message())});
+                              std::move(response_obj)});
         this->_http_obj.reset();
     }
 };

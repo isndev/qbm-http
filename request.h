@@ -1,7 +1,7 @@
-
 #pragma once
 
 #include "./message_base.h"
+#include "./cookie.h"
 
 namespace qb::http {
 
@@ -13,6 +13,7 @@ struct TRequest : public internal::MessageBase<String> {
     constexpr static const http_type_t type = HTTP_REQUEST;
     http_method                        method;
     qb::io::uri                        _uri;
+    CookieJar                          _cookies;
 
 public:
     /**
@@ -149,6 +150,76 @@ public:
     }
 
     /**
+     * @brief Parse cookies from the Cookie header
+     * 
+     * Extracts cookies from the Cookie header and makes them
+     * available through the cookie management functions.
+     * This is automatically called when a request is received.
+     */
+    void parse_cookie_header() {
+        _cookies.clear();
+        const auto& cookie_header = this->header("Cookie", 0, "");
+        if (!cookie_header.empty()) {
+            auto cookies_map = parse_cookies(cookie_header, false);
+            for (const auto& [name, value] : cookies_map) {
+                _cookies.add(name, value);
+            }
+        }
+    }
+
+    /**
+     * @brief Get a cookie from the request
+     * @param name Cookie name
+     * @return Pointer to the cookie, or nullptr if not found
+     * 
+     * Retrieves a cookie from the request by name. Returns nullptr
+     * if the cookie doesn't exist.
+     */
+    [[nodiscard]] const Cookie* cookie(const std::string& name) const {
+        return _cookies.get(name);
+    }
+
+    /**
+     * @brief Get a cookie value
+     * @param name Cookie name
+     * @param default_value Value to return if cookie not found
+     * @return Cookie value or default value
+     * 
+     * Convenience method to get a cookie value directly. Returns
+     * the default_value if the cookie doesn't exist.
+     */
+    [[nodiscard]] std::string cookie_value(const std::string& name, 
+                                          const std::string& default_value = "") const {
+        const Cookie* cookie = _cookies.get(name);
+        return cookie ? cookie->value() : default_value;
+    }
+
+    /**
+     * @brief Check if a cookie exists
+     * @param name Cookie name
+     * @return true if the cookie exists
+     */
+    [[nodiscard]] bool has_cookie(const std::string& name) const {
+        return _cookies.has(name);
+    }
+
+    /**
+     * @brief Get all cookies
+     * @return Reference to the cookie jar
+     */
+    [[nodiscard]] const CookieJar& cookies() const {
+        return _cookies;
+    }
+
+    /**
+     * @brief Get the cookie jar
+     * @return Mutable reference to the cookie jar
+     */
+    CookieJar& cookies() {
+        return _cookies;
+    }
+
+    /**
      * @brief Reset the request to its default state
      *
      * Resets the HTTP method to GET, clears the URI,
@@ -159,6 +230,7 @@ public:
     reset() {
         method = HTTP_GET;
         _uri   = qb::io::uri{};
+        _cookies.clear();
         static_cast<internal::MessageBase<String> &>(*this).reset();
     }
 
