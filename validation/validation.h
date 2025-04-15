@@ -1,11 +1,11 @@
 #pragma once
 
-#include "./validation/validator.h"
-#include "./validation/json_schema.h"
-#include "./validation/query_validator.h"
-#include "./validation/sanitizer.h"
-#include "./validation/validation_context.h"
-#include "./validation/validation_types.h"
+#include "./validator.h"
+#include "./json_schema.h"
+#include "./query_validator.h"
+#include "./sanitizer.h"
+#include "./validation_context.h"
+#include "./validation_types.h"
 
 // This is the main include file for all validation-related types
 namespace qb::http {

@@ -78,9 +78,10 @@
 #include "./message_base.h"
 #include "./request.h"
 #include "./response.h"
-#include "./routing.h"
 #include "./utility.h"
-#include "./validation.h"
+#include "./routing/routing.h"
+#include "./cors/cors.h"
+#include "./validation/validation.h"
 #if defined(_WIN32)
 #undef DELETE // Windows :/
 #endif

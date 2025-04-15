@@ -21,10 +21,10 @@
 #include "./async_completion_handler.h"
 #include "./async_types.h"
 #include "./context.h"
-#include "./cors_options.h"
 #include "./path_parameters.h"
 #include "./radix_tree.h"
 #include "./route_types.h"
+#include "../cors/cors.h"
 // #include "../request_path_view.h"
 
 #if defined(_WIN32)
@@ -227,33 +227,6 @@ public:
                      const std::string &note = "");
 
     /**
-     * @brief Enable CORS with the given options
-     * @param options CORS options
-     * @return Reference to this router
-     */
-    Router &enable_cors(const CorsOptions &options);
-
-    /**
-     * @brief Enable CORS with advanced options including regex-based origin matching
-     * @param regex_patterns Regex patterns for origin matching
-     * @param methods Allowed methods
-     * @param headers Allowed headers
-     * @param allow_credentials Whether to allow credentials
-     * @return Reference to this router
-     */
-    Router &enable_cors_with_patterns(
-        const std::vector<std::string> &regex_patterns,
-        const std::vector<std::string> &methods = {"GET", "POST", "PUT", "DELETE"},
-        const std::vector<std::string> &headers = {"Content-Type", "Authorization"},
-        bool                            allow_credentials = true);
-
-    /**
-     * @brief Enable permissive CORS for development
-     * @return Reference to this router
-     */
-    Router &enable_dev_cors();
-
-    /**
      * @brief Enable or disable the radix tree for route matching
      * @param enable Whether to enable radix tree matching
      * @return Reference to this router
@@ -332,8 +305,6 @@ private:
     bool _enable_logging{false};
     // Current route group being configured
     std::unique_ptr<RouteGroup> _current_group;
-    // CORS options (if enabled)
-    std::unique_ptr<CorsOptions> _cors_options;
 
     // Map to track active async requests
     std::map<std::uintptr_t, std::shared_ptr<Context>> _active_async_requests;
