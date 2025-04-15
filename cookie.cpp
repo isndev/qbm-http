@@ -1,5 +1,14 @@
+#include <algorithm>
+#include <sstream>
 
 #include "./cookie.h"
+#include "./date.h"
+#include "./utility.h"
+
+#include <qb/system/timestamp.h>
+#include <chrono>
+#include <string>
+#include <vector>
 
 namespace qb::http {
 
@@ -34,7 +43,8 @@ is_cookie_attribute(const std::string &name, bool set_cookie_header) {
              utility::iequals(name, "Comment") || utility::iequals(name, "Domain") ||
              utility::iequals(name, "Max-Age") || utility::iequals(name, "Path") ||
              utility::iequals(name, "Secure") || utility::iequals(name, "Version") ||
-             utility::iequals(name, "Expires") || utility::iequals(name, "HttpOnly"))));
+             utility::iequals(name, "Expires") || utility::iequals(name, "HttpOnly") ||
+             utility::iequals(name, "SameSite"))));
 }
 
 /**
@@ -99,7 +109,7 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
                     }
                 } else if (*ptr != ' ') { // ignore whitespace
                     // check if control character detected, or max sized exceeded
-                    if (utility::is_control(*ptr) ||
+                    if (qb::http::utility::is_control(*ptr) ||
                         cookie_name.size() >= COOKIE_NAME_MAX)
                         throw std::runtime_error(
                             "ctrl in name found or max cookie name length");
@@ -134,7 +144,7 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
                                !cookie_value
                                     .empty()) { // ignore leading unquoted whitespace
                         // check if control character detected, or max sized exceeded
-                        if (utility::is_control(*ptr) ||
+                        if (qb::http::utility::is_control(*ptr) ||
                             cookie_value.size() >= COOKIE_VALUE_MAX)
                             throw std::runtime_error(
                                 "ctrl in value found or max cookie value length");
@@ -209,5 +219,194 @@ qb::icase_unordered_map<std::string>
 parse_cookies(std::string_view const &header, bool set_cookie_header) {
     return parse_cookies(header.data(), header.size(), set_cookie_header);
 }
+
+/**
+ * @brief Parse a Set-Cookie header into a Cookie object
+ * @param header Set-Cookie header value
+ * @return Cookie object with parsed attributes
+ */
+std::optional<Cookie> parse_set_cookie(std::string_view header) {
+    // First, parse the basic cookie data to get name/value
+    auto cookies = parse_cookies(header.data(), header.size(), true);
+    if (cookies.empty()) {
+        return std::nullopt;
+    }
+    
+    // Use the first entry for the cookie name/value
+    auto it = cookies.begin();
+    Cookie cookie(it->first, it->second);
+    
+    // Now parse all the attributes
+    std::string_view remaining = header;
+    
+    // Find the position after the first name=value pair
+    size_t pos = remaining.find(';');
+    if (pos != std::string_view::npos) {
+        remaining = remaining.substr(pos + 1);
+        
+        // Parse each attribute
+        while (!remaining.empty()) {
+            // Remove leading whitespace
+            while (!remaining.empty() && (remaining.front() == ' ' || remaining.front() == '\t')) {
+                remaining = remaining.substr(1);
+            }
+            
+            if (remaining.empty()) {
+                break;
+            }
+            
+            // Find attribute name
+            pos = remaining.find('=');
+            size_t end = remaining.find(';');
+            if (end == std::string_view::npos) {
+                end = remaining.size();
+            }
+            
+            if (pos != std::string_view::npos && pos < end) {
+                // Name=Value attribute
+                std::string_view name = remaining.substr(0, pos);
+                std::string_view value = remaining.substr(pos + 1, end - pos - 1);
+                
+                // Trim whitespace
+                while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
+                    name = name.substr(0, name.size() - 1);
+                }
+                
+                while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+                    value = value.substr(1);
+                }
+                
+                // Remove quotes from value if present
+                if (!value.empty() && (value.front() == '"' || value.front() == '\'')) {
+                    if (value.size() > 1 && value.back() == value.front()) {
+                        value = value.substr(1, value.size() - 2);
+                    }
+                }
+                
+                // Process attribute
+                if (qb::http::utility::iequals(std::string(name), "Path")) {
+                    cookie.path(std::string(value));
+                } else if (qb::http::utility::iequals(std::string(name), "Domain")) {
+                    cookie.domain(std::string(value));
+                } else if (qb::http::utility::iequals(std::string(name), "Expires")) {
+                    try {
+                        auto tp = qb::http::date::parse_http_date(std::string(value));
+                        if (tp) {
+                            cookie.expires(tp.value());
+                        }
+                    } catch (...) {
+                        // Invalid date, ignore
+                    }
+                } else if (qb::http::utility::iequals(std::string(name), "Max-Age")) {
+                    try {
+                        int seconds = std::stoi(std::string(value));
+                        cookie.max_age(seconds);
+                    } catch (...) {
+                        // Invalid integer, ignore
+                    }
+                } else if (qb::http::utility::iequals(std::string(name), "SameSite")) {
+                    if (qb::http::utility::iequals(std::string(value), "Strict")) {
+                        cookie.same_site(SameSite::Strict);
+                    } else if (qb::http::utility::iequals(std::string(value), "Lax")) {
+                        cookie.same_site(SameSite::Lax);
+                    } else if (qb::http::utility::iequals(std::string(value), "None")) {
+                        cookie.same_site(SameSite::None);
+                    }
+                }
+            } else {
+                // Flag attribute (no value)
+                std::string_view flag = remaining.substr(0, end);
+                
+                // Trim whitespace
+                while (!flag.empty() && (flag.back() == ' ' || flag.back() == '\t')) {
+                    flag = flag.substr(0, flag.size() - 1);
+                }
+                
+                if (qb::http::utility::iequals(std::string(flag), "Secure")) {
+                    cookie.secure(true);
+                } else if (qb::http::utility::iequals(std::string(flag), "HttpOnly")) {
+                    cookie.http_only(true);
+                }
+            }
+            
+            // Move to next attribute
+            if (end < remaining.size()) {
+                remaining = remaining.substr(end + 1);
+            } else {
+                break;
+            }
+        }
+    }
+    
+    return cookie;
+}
+
+/**
+ * @brief Convert a Cookie to a Set-Cookie header value
+ * @return Formatted header value according to RFC 6265
+ */
+std::string Cookie::to_header() const {
+    std::ostringstream ss;
+    
+    // Cookie name and value (required)
+    ss << _name << "=" << _value;
+    
+    // Expires attribute (optional)
+    if (_expires) {
+        ss << "; Expires=" << qb::http::date::format_http_date(*_expires);
+    }
+    
+    // Max-Age attribute (optional)
+    if (_max_age) {
+        ss << "; Max-Age=" << *_max_age;
+    }
+    
+    // Domain attribute (optional)
+    if (!_domain.empty()) {
+        ss << "; Domain=" << _domain;
+    }
+    
+    // Path attribute (optional, but defaults to "/" so it's always present)
+    ss << "; Path=" << _path;
+    
+    // Secure flag (optional)
+    if (_secure) {
+        ss << "; Secure";
+    }
+    
+    // HttpOnly flag (optional)
+    if (_http_only) {
+        ss << "; HttpOnly";
+    }
+    
+    // SameSite attribute (optional)
+    if (_same_site) {
+        ss << "; SameSite=";
+        switch (*_same_site) {
+            case qb::http::SameSite::Strict:
+                ss << "Strict";
+                break;
+            case qb::http::SameSite::Lax:
+                ss << "Lax";
+                break;
+            case qb::http::SameSite::None:
+                ss << "None";
+                break;
+            case qb::http::SameSite::NOT_SET:
+                // This case should never be reached since we're using empty optionals now
+                break;
+        }
+    }
+    
+    return ss.str();
+}
+
+std::string Cookie::serialize() const {
+    return _name + "=" + _value;
+}
+
+Cookie::Cookie(std::string name, std::string value)
+    : _name(std::move(name)), _value(std::move(value)), _path("/"),
+      _secure(false), _http_only(false), _same_site() {}
 
 } // namespace qb::http

@@ -32,6 +32,7 @@ set(HTTP_TESTS
         router-async-advanced
         router-sync-middleware
         router-async-middleware
+        cookie
         #    session-http
 )
 
