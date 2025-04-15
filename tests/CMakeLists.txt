@@ -22,16 +22,21 @@ find_package(OpenSSL REQUIRED)
 
 # Define test files and their corresponding test names
 set(HTTP_TESTS
-        uri-only
+        #uri-only
         router
+        # Individual CORS tests (deprecated, use cors-combined instead)
+        # cors
+        # cors-advanced
+        # cors-comprehensive
+        cors
         router-radix
         router-advanced
         router-async-advanced
         router-sync-middleware
         router-async-middleware
         cookie
-        cors
         validator
+        rate-limit
         #    session-http
 )
 

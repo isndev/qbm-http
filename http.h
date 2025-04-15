@@ -82,6 +82,7 @@
 #include "./routing/routing.h"
 #include "./cors/cors.h"
 #include "./validation/validation.h"
+#include "./middleware/rate_limit.h"
 #if defined(_WIN32)
 #undef DELETE // Windows :/
 #endif
