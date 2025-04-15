@@ -1056,7 +1056,7 @@ Router<Session, String>::cancel_request(std::uintptr_t request_id) {
 
 // Method to get all active async requests
 template <typename Session, typename String>
-const qb::unordered_map<std::uintptr_t,
+const std::map<std::uintptr_t,
                std::shared_ptr<typename Router<Session, String>::Context>> &
 Router<Session, String>::get_active_requests() const {
     return _active_async_requests;

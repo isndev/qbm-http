@@ -24,7 +24,7 @@ struct AuthUser {
     std::string                                  id;
     std::string                                  username;
     std::vector<std::string>                     roles;
-    qb::unordered_map<std::string, std::string> metadata;
+    std::unordered_map<std::string, std::string> metadata;
 
     /**
      * @brief Vérifier si l'utilisateur a un rôle spécifique

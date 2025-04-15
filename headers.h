@@ -299,6 +299,17 @@ public:
     }
 
     /**
+     * @brief Add a header with a value
+     * @param name Header name
+     * @param value Header value
+     */
+    template <typename T>
+    void
+    remove_header(T &&name) {
+        this->_headers.erase(std::forward<T>(name));
+    }
+
+    /**
      * @brief Set a header with a value, replacing any existing values
      * @param name Header name
      * @param value Header value

@@ -33,6 +33,7 @@ set(HTTP_TESTS
         router-sync-middleware
         router-async-middleware
         cookie
+        validator
         #    session-http
 )
 

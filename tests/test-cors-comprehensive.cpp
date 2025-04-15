@@ -1,13 +1,15 @@
 #include <gtest/gtest.h>
 #include "../routing.h"
 
+
+
 // Mock session for testing - same as in test-cors-advanced.cpp
 class MockSession {
 public:
     qb::http::Response                 _response;
     bool                               _closed = false;
     std::vector<qb::http::Response>    _responses;
-    qb::unordered_map<std::string, std::string> _cors_headers;
+    std::map<std::string, std::string> _cors_headers;
     std::string                        _captured_body;
     qb::uuid                           _id; // Add session ID member
 

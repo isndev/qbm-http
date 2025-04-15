@@ -114,7 +114,7 @@ std::string format_http_date(qb::Timestamp const ts) noexcept {
     // Second (2 digits)
     result += gmtime->tm_sec < 10 ? '0' : static_cast<char>(gmtime->tm_sec / 10 + 48);
     result += static_cast<char>(gmtime->tm_sec % 10 + 48);
-    
+
     result += " GMT";
 
     return result;

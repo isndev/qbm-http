@@ -346,7 +346,7 @@ TEST_F(RouterAdvancedTest, RateLimiting) {
     // Simple rate limiter that allows max N requests per IP
     struct RateLimiter {
         int                        max_requests;
-        qb::unordered_map<std::string, int> counters;
+        std::map<std::string, int> counters;
 
         explicit RateLimiter(int max)
             : max_requests(max) {}
