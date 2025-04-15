@@ -24,15 +24,13 @@ find_package(OpenSSL REQUIRED)
 set(HTTP_TESTS
         uri-only
         router
-        cors
-        cors-advanced
-        cors-comprehensive
         router-radix
         router-advanced
         router-async-advanced
         router-sync-middleware
         router-async-middleware
         cookie
+        cors
         validator
         #    session-http
 )

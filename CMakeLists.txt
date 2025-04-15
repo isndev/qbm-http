@@ -22,25 +22,32 @@ add_subdirectory(not-qb/llhttp)
 qb_register_module(
         NAME http
         VERSION 1.0.0
+        DEPENDENCIES
+        llhttp
         SOURCES
+        # Core files
         headers.cpp
         date.cpp
         cookie.cpp
         multipart.cpp
-        body.cpp
         auth.cpp
-        routing/cors_options.cpp
+        http.cpp
+        # Body
+        body.cpp
+        # Routing
         routing/radix_tree.cpp
-        routing/router.cpp
-        validation/validator.cpp
+        routing/routing.cpp
+        # CORS
+        cors/cors_options.cpp
+        cors/cors.cpp
+        # Validation
+        validation/validation.cpp
         validation/json_schema.cpp
         validation/query_validator.cpp
         validation/sanitizer.cpp
-        validation/validation_context.cpp
-        validation/validation_types.cpp
-        http.cpp
-        DEPENDENCIES
-        llhttp
+        # JWT
+        # jwt/jwt.cpp
+        # jwt/jwt_options.cpp
 )
 
 # Add example directory

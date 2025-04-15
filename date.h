@@ -160,6 +160,9 @@ parse(std::string const &str) noexcept {
     return tp ? date::to_timestamp(*tp) : qb::Timestamp{};
 }
 
+std::string
+format_timestamp(const std::chrono::system_clock::time_point &tp);
+
 } // namespace date
 
 } // namespace qb::http

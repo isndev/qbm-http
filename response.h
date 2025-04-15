@@ -83,7 +83,7 @@ struct TResponse : public internal::MessageBase<String> {
      * Move version of add_cookie that takes ownership of the cookie.
      */
     void add_cookie(Cookie&& cookie) {
-        String header_value = cookie.to_header();
+        std::string header_value = cookie.to_header();
         _cookies.add(std::move(cookie));
         this->add_header("Set-Cookie", std::move(header_value));
     }
