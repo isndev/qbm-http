@@ -48,6 +48,7 @@ qb_register_module(
 
         # Middleware
         middleware/rate_limit.cpp
+        #middleware/recaptcha.cpp
         #middleware/logger.cpp
         #middleware/compression.cpp
 

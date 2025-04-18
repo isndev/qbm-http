@@ -24,10 +24,6 @@ find_package(OpenSSL REQUIRED)
 set(HTTP_TESTS
         #uri-only
         router
-        # Individual CORS tests (deprecated, use cors-combined instead)
-        # cors
-        # cors-advanced
-        # cors-comprehensive
         cors
         router-radix
         router-advanced
@@ -35,8 +31,9 @@ set(HTTP_TESTS
         router-sync-middleware
         router-async-middleware
         cookie
-        validator
-        rate-limit
+        middleware-validator
+        middleware-rate-limit
+        middleware-jwt
         #    session-http
 )
 
