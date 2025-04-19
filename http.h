@@ -70,7 +70,7 @@
 #include <utility>
 
 #include "./types.h"
-#include "./auth.h"
+#include "./auth/auth.h"
 #include "./body.h"
 #include "./cookie.h"
 #include "./date.h"
