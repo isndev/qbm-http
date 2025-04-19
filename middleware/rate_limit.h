@@ -1,5 +1,6 @@
 #pragma once
 
+#include "middleware_interface.h"
 #include <chrono>
 #include <functional>
 #include <map>
@@ -12,7 +13,7 @@
 namespace qb::http {
 
 /**
- * @brief Rate limiting configuration
+ * @brief Rate limiting configuration options
  */
 class RateLimitOptions {
 public:
@@ -86,10 +87,11 @@ public:
      * @brief Create permissive rate limit options for development
      * @return Rate limit options with permissive settings
      */
-    static RateLimitOptions dev() {
+    static RateLimitOptions permissive() {
         return RateLimitOptions()
             .max_requests(1000)
-            .window(std::chrono::minutes(1));
+            .window(std::chrono::minutes(1))
+            .message("You have reached the rate limit. Please try again later.");
     }
 
     /**
@@ -122,24 +124,29 @@ public:
         }
 
         // Default extraction logic: X-Forwarded-For or client IP
-        std::string client_id = ctx.header("X-Forwarded-For");
-        if (client_id.empty()) {
-            // Try to get IP from the session if available
-            if constexpr (has_get_client_ip_method<Session>::value) {
-                return ctx.session->get_client_ip();
-            } else if constexpr (has_remote_endpoint_method<Session>::value) {
-                return ctx.session->remote_endpoint();
-            } else {
-                // Use session ID as a fallback
-                if constexpr (has_id_method<Session>::value) {
-                    return ctx.session->id().to_string();
-                } else {
-                    // Last resort: use pointer address as a string
-                    return std::to_string(reinterpret_cast<std::uintptr_t>(ctx.session.get()));
-                }
-            }
+        std::string client_id = ctx.request.header("X-Forwarded-For");
+        if (!client_id.empty()) {
+            return client_id;
         }
-        return client_id;
+
+        // Try to get IP from the session if available
+        if constexpr (has_get_client_ip_method<Session>::value) {
+            return ctx.session->get_client_ip();
+        } 
+        else if constexpr (has_remote_endpoint_method<Session>::value) {
+            return ctx.session->remote_endpoint();
+        } 
+        else if constexpr (has_ip_method<Session>::value) {
+            return ctx.session->ip();
+        }
+        // Use session ID as a fallback
+        else if constexpr (has_id_method<Session>::value) {
+            return ctx.session->id();
+        } 
+        else {
+            // Last resort: use pointer address as a string
+            return std::to_string(reinterpret_cast<std::uintptr_t>(ctx.session.get()));
+        }
     }
 
 private:
@@ -163,6 +170,13 @@ private:
     template <typename S>
     struct has_remote_endpoint_method<S, std::void_t<decltype(std::declval<S>().remote_endpoint())>>
         : std::true_type {};
+        
+    template <typename S, typename = void>
+    struct has_ip_method : std::false_type {};
+
+    template <typename S>
+    struct has_ip_method<S, std::void_t<decltype(std::declval<S>().ip())>>
+        : std::true_type {};
 
     template <typename S, typename = void>
     struct has_id_method : std::false_type {};
@@ -175,49 +189,41 @@ private:
 /**
  * @brief Rate limiting middleware for HTTP requests
  * 
- * This class provides rate limiting functionality based on client ID
- * (typically IP address) to prevent abuse.
- * 
- * @tparam Session HTTP session type
- * @tparam String String type (std::string or std::string_view)
+ * This middleware prevents abuse by limiting the number of requests a client can make
+ * in a specified time window. It supports:
+ * - Configurable request limits and time windows
+ * - Custom client ID extraction
+ * - Rate limit headers in responses
  */
 template <typename Session, typename String = std::string>
-class RateLimit {
+class RateLimitMiddleware : public ISyncMiddleware<Session, String> {
 public:
-    using Context = RouterContext<Session, String>;
-    using Request = TRequest<String>;
-    using Response = TResponse<String>;
-
+    using Context = typename ISyncMiddleware<Session, String>::Context;
+    
     /**
      * @brief Default constructor with default options
      */
-    RateLimit() : _options(std::make_shared<RateLimitOptions>()) {}
-
+    RateLimitMiddleware() 
+        : _options(std::make_shared<RateLimitOptions>()),
+          _name("RateLimitMiddleware") {}
+    
     /**
      * @brief Constructor with custom rate limit options
      * @param options Rate limit options
+     * @param name Middleware name
      */
-    explicit RateLimit(const RateLimitOptions& options)
-        : _options(std::make_shared<RateLimitOptions>(options)) {}
-
+    explicit RateLimitMiddleware(
+        const RateLimitOptions& options,
+        std::string name = "RateLimitMiddleware"
+    ) : _options(std::make_shared<RateLimitOptions>(options)), 
+        _name(std::move(name)) {}
+    
     /**
-     * @brief Constructor with direct parameters
-     * @param max_requests Maximum requests per window
-     * @param window Time window
+     * @brief Process a request
+     * @param ctx Request context
+     * @return Middleware result
      */
-    template <typename Duration>
-    RateLimit(size_t max_requests, Duration window)
-        : _options(std::make_shared<RateLimitOptions>()) {
-        _options->max_requests(max_requests)
-                .window(window);
-    }
-
-    /**
-     * @brief Check if request is rate limited
-     * @param ctx Router context
-     * @return true if the request should continue, false if rate limited
-     */
-    bool apply(Context& ctx) const {
+    MiddlewareResult process(Context& ctx) override {
         const std::string client_id = _options->extract_client_id(ctx);
         
         {
@@ -243,7 +249,7 @@ public:
                 
                 // Mark as handled
                 ctx.mark_handled();
-                return false;
+                return MiddlewareResult::Stop();
             }
 
             // Increment request counter
@@ -253,54 +259,37 @@ public:
             add_rate_limit_headers(ctx, client_data);
         }
 
-        return true;
+        return MiddlewareResult::Continue();
     }
-
+    
     /**
-     * @brief Create middleware function for the router
-     * @return Middleware function
+     * @brief Get the middleware name
      */
-    auto middleware() const {
-        return [this](Context& ctx) {
-            return apply(ctx);
-        };
+    std::string name() const override {
+        return _name;
     }
-
+    
     /**
-     * @brief Get options
-     * @return Reference to rate limit options
+     * @brief Reset rate limiter data for all clients
+     * @return Reference to this middleware
      */
-    const RateLimitOptions& options() const {
-        return *_options;
-    }
-
-    /**
-     * @brief Update rate limit options
-     * @param options New options
-     * @return Reference to this rate limiter
-     */
-    RateLimit& update_options(const RateLimitOptions& options) {
-        _options = std::make_shared<RateLimitOptions>(options);
-        return *this;
-    }
-
-    /**
-     * @brief Reset rate limiter data
-     */
-    void reset() {
+    RateLimitMiddleware& reset() {
         std::lock_guard<std::mutex> lock(_mutex);
         _client_data.clear();
+        return *this;
     }
-
+    
     /**
      * @brief Reset rate limit for a specific client
      * @param client_id Client ID
+     * @return Reference to this middleware
      */
-    void reset_client(const std::string& client_id) {
+    RateLimitMiddleware& reset_client(const std::string& client_id) {
         std::lock_guard<std::mutex> lock(_mutex);
         _client_data.erase(client_id);
+        return *this;
     }
-
+    
 private:
     struct ClientData {
         size_t count = 0;
@@ -308,6 +297,7 @@ private:
     };
 
     std::shared_ptr<RateLimitOptions> _options;
+    std::string _name;
     mutable std::mutex _mutex;
     mutable std::map<std::string, ClientData> _client_data;
 
@@ -336,32 +326,52 @@ private:
 };
 
 /**
- * @brief Create a rate limiter with default options
- * @return Rate limiter instance
+ * @brief Create a rate limit middleware with default options
+ * @return Rate limit middleware adapter with default settings
  */
 template <typename Session, typename String = std::string>
-inline auto create_rate_limit() {
-    return RateLimit<Session, String>();
+auto rate_limit_middleware() {
+    auto middleware = std::make_shared<RateLimitMiddleware<Session, String>>();
+    return std::make_shared<SyncMiddlewareAdapter<Session, String>>(std::move(middleware));
 }
 
 /**
- * @brief Create a rate limiter with custom options
- * @param options Rate limit options
- * @return Rate limiter instance
+ * @brief Create a rate limit middleware with custom options
+ * @param options Rate limit options to use
+ * @param name Middleware name
+ * @return Rate limit middleware adapter with the specified options
  */
 template <typename Session, typename String = std::string>
-inline auto create_rate_limit(const RateLimitOptions& options) {
-    return RateLimit<Session, String>(options);
+auto rate_limit_middleware(
+    const RateLimitOptions& options,
+    const std::string& name = "RateLimitMiddleware"
+) {
+    auto middleware = std::make_shared<RateLimitMiddleware<Session, String>>(options, name);
+    return std::make_shared<SyncMiddlewareAdapter<Session, String>>(std::move(middleware));
 }
 
 /**
- * @brief Create a rate limiter middleware function
- * @param options Rate limit options
- * @return Middleware function
+ * @brief Create a rate limit middleware with permissive options for development
+ * @param name Middleware name
+ * @return Rate limit middleware adapter with permissive settings
  */
 template <typename Session, typename String = std::string>
-inline auto rate_limit_middleware(const RateLimitOptions& options) {
-    return RateLimit<Session, String>(options).middleware();
+auto rate_limit_dev_middleware(const std::string& name = "DevRateLimitMiddleware") {
+    auto middleware = std::make_shared<RateLimitMiddleware<Session, String>>(
+        RateLimitOptions::permissive(), name);
+    return std::make_shared<SyncMiddlewareAdapter<Session, String>>(std::move(middleware));
+}
+
+/**
+ * @brief Create a rate limit middleware with secure options for production
+ * @param name Middleware name
+ * @return Rate limit middleware adapter with secure settings
+ */
+template <typename Session, typename String = std::string>
+auto rate_limit_secure_middleware(const std::string& name = "SecureRateLimitMiddleware") {
+    auto middleware = std::make_shared<RateLimitMiddleware<Session, String>>(
+        RateLimitOptions::secure(), name);
+    return std::make_shared<SyncMiddlewareAdapter<Session, String>>(std::move(middleware));
 }
 
 } // namespace qb::http 

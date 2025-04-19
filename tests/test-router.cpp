@@ -1,7 +1,5 @@
 #include <gtest/gtest.h>
 #include "../http.h"
-#include <memory> // Include necessary header for std::shared_ptr
-#include "qb/actor.h" // Ensure qb::uuid is available
 
 // Mock session for testing
 struct MockSession {
@@ -59,27 +57,27 @@ TEST_F(RouterTest, BasicRouting) {
     bool del_called  = false;
 
     // Register routes using lambda functions
-    router->GET("/test", [&](Context &ctx) {
+    router->get("/test", [&](Context &ctx) {
         get_called               = true;
         ctx.response.status_code = HTTP_STATUS_OK;
     });
 
-    router->POST("/test", [&](Context &ctx) {
+    router->post("/test", [&](Context &ctx) {
         post_called              = true;
         ctx.response.status_code = HTTP_STATUS_CREATED;
     });
 
-    router->PUT("/test", [&](Context &ctx) {
+    router->put("/test", [&](Context &ctx) {
         put_called               = true;
         ctx.response.status_code = HTTP_STATUS_OK;
     });
 
-    router->DELETE("/test", [&](Context &ctx) {
+    router->del("/test", [&](Context &ctx) {
         del_called               = true;
         ctx.response.status_code = HTTP_STATUS_NO_CONTENT;
     });
 
-    // Test GET
+    // Test get
     TestRequest req;
     req.method = HTTP_GET;
     req._uri   = qb::io::uri("/test");
@@ -87,7 +85,7 @@ TEST_F(RouterTest, BasicRouting) {
     EXPECT_TRUE(get_called);
     EXPECT_EQ(session->_response.status_code, HTTP_STATUS_OK);
 
-    // Test POST
+    // Test post
     req.method = HTTP_POST;
     EXPECT_TRUE(router->route(session, req)); // Pass shared_ptr directly
     EXPECT_TRUE(post_called);
@@ -111,7 +109,7 @@ TEST_F(RouterTest, RouteParameters) {
     std::string user_id;
     std::string post_id;
 
-    router->GET("/users/:id/posts/:post_id", [&](Context &ctx) {
+    router->get("/users/:id/posts/:post_id", [&](Context &ctx) {
         user_id                  = ctx.param("id");
         post_id                  = ctx.param("post_id");
         ctx.response.status_code = HTTP_STATUS_OK;
@@ -132,12 +130,12 @@ TEST_F(RouterTest, Controller) {
     public:
         UserController()
             : TestRouter::Controller("/users") {
-            router().GET("/", [](TestRouter::Context &ctx) {
+            router().get("/", [](TestRouter::Context &ctx) {
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "List of users";
             });
 
-            router().GET("/:id", [](TestRouter::Context &ctx) {
+            router().get("/:id", [](TestRouter::Context &ctx) {
                 auto id                  = ctx.param("id");
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "User details for ID: " + id;
@@ -182,7 +180,7 @@ TEST_F(RouterTest, CustomRoute) {
         }
     };
 
-    router->GET<CustomRoute>();
+    router->get<CustomRoute>();
 
     TestRequest req;
     req.method = HTTP_GET;
@@ -198,12 +196,12 @@ TEST_F(RouterTest, NestedControllers) {
     public:
         ProductController()
             : TestRouter::Controller("/products") {
-            router().GET("/", [](TestRouter::Context &ctx) {
+            router().get("/", [](TestRouter::Context &ctx) {
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "List of products";
             });
 
-            router().GET("/:id", [](TestRouter::Context &ctx) {
+            router().get("/:id", [](TestRouter::Context &ctx) {
                 auto id                  = ctx.param("id");
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "Product details for ID: " + id;
@@ -213,12 +211,12 @@ TEST_F(RouterTest, NestedControllers) {
         // Constructor with a route prefix for nesting
         explicit ProductController(const std::string &prefix)
             : TestRouter::Controller(prefix + "/products") {
-            router().GET("/", [](TestRouter::Context &ctx) {
+            router().get("/", [](TestRouter::Context &ctx) {
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "List of products";
             });
 
-            router().GET("/:id", [](TestRouter::Context &ctx) {
+            router().get("/:id", [](TestRouter::Context &ctx) {
                 auto id                  = ctx.param("id");
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "Product details for ID: " + id;
@@ -230,25 +228,25 @@ TEST_F(RouterTest, NestedControllers) {
     public:
         CategoryController()
             : TestRouter::Controller("/categories") {
-            router().GET("/", [](TestRouter::Context &ctx) {
+            router().get("/", [](TestRouter::Context &ctx) {
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "List of categories";
             });
 
-            router().GET("/:id", [](TestRouter::Context &ctx) {
+            router().get("/:id", [](TestRouter::Context &ctx) {
                 auto id                  = ctx.param("id");
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "Category details for ID: " + id;
             });
 
             // Add products under a specific category
-            router().GET("/:category_id/products", [](TestRouter::Context &ctx) {
+            router().get("/:category_id/products", [](TestRouter::Context &ctx) {
                 auto category_id         = ctx.param("category_id");
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "Products in category: " + category_id;
             });
 
-            router().GET("/:category_id/products/:id", [](TestRouter::Context &ctx) {
+            router().get("/:category_id/products/:id", [](TestRouter::Context &ctx) {
                 auto category_id         = ctx.param("category_id");
                 auto id                  = ctx.param("id");
                 ctx.response.status_code = HTTP_STATUS_OK;
@@ -319,14 +317,14 @@ TEST_F(RouterTest, NestedControllers) {
 // Test multiple levels of nested controllers
 TEST_F(RouterTest, MultiLevelNestedControllers) {
     // Route de niveau 1 - Magasin
-    router->GET("/stores/:store_id", [](Context &ctx) {
+    router->get("/stores/:store_id", [](Context &ctx) {
         std::string store_id     = ctx.param("store_id");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Store: " + store_id;
     });
 
     // Route de niveau 2 - Produit dans un magasin
-    router->GET("/stores/:store_id/products/:product_id", [](Context &ctx) {
+    router->get("/stores/:store_id/products/:product_id", [](Context &ctx) {
         std::string store_id     = ctx.param("store_id");
         std::string product_id   = ctx.param("product_id");
         ctx.response.status_code = HTTP_STATUS_OK;
@@ -334,7 +332,7 @@ TEST_F(RouterTest, MultiLevelNestedControllers) {
     });
 
     // Route de niveau 3 - Avis sur un produit dans un magasin
-    router->GET("/stores/:store_id/products/:product_id/reviews/:review_id",
+    router->get("/stores/:store_id/products/:product_id/reviews/:review_id",
                 [](Context &ctx) {
                     std::string store_id   = ctx.param("store_id");
                     std::string product_id = ctx.param("product_id");
@@ -397,27 +395,27 @@ TEST_F(RouterTest, ControllerWithMultipleMethods) {
     public:
         ApiController()
             : TestRouter::Controller("/api") {
-            // GET request
-            router().GET("/resources", [](TestRouter::Context &ctx) {
+            // get request
+            router().get("/resources", [](TestRouter::Context &ctx) {
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "List resources";
             });
 
-            // POST request
-            router().POST("/resources", [](TestRouter::Context &ctx) {
+            // post request
+            router().post("/resources", [](TestRouter::Context &ctx) {
                 ctx.response.status_code = HTTP_STATUS_CREATED;
                 ctx.response.body()      = "Create resource";
             });
 
             // PUT request
-            router().PUT("/resources/:id", [](TestRouter::Context &ctx) {
+            router().put("/resources/:id", [](TestRouter::Context &ctx) {
                 auto id                  = ctx.param("id");
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "Update resource: " + id;
             });
 
             // DELETE request
-            router().DELETE("/resources/:id", [](TestRouter::Context &ctx) {
+            router().del("/resources/:id", [](TestRouter::Context &ctx) {
                 auto id                  = ctx.param("id");
                 ctx.response.status_code = HTTP_STATUS_NO_CONTENT;
             });
@@ -426,7 +424,7 @@ TEST_F(RouterTest, ControllerWithMultipleMethods) {
 
     router->controller<ApiController>();
 
-    // Test GET
+    // Test get
     {
         TestRequest req;
         req.method = HTTP_GET;
@@ -436,7 +434,7 @@ TEST_F(RouterTest, ControllerWithMultipleMethods) {
         EXPECT_EQ(session->_response.body().as<std::string>(), "List resources");
     }
 
-    // Test POST
+    // Test post
     {
         TestRequest req;
         req.method = HTTP_POST;
@@ -472,14 +470,14 @@ TEST_F(RouterTest, ParameterExtractionInNestedRoutes) {
     public:
         UserOrdersController()
             : TestRouter::Controller("/users") {
-            router().GET("/:user_id", [](TestRouter::Context &ctx) {
+            router().get("/:user_id", [](TestRouter::Context &ctx) {
                 auto user_id             = ctx.param("user_id");
                 ctx.response.status_code = HTTP_STATUS_OK;
                 ctx.response.body()      = "User: " + user_id;
             });
 
             // Nested orders under users
-            router().GET("/:user_id/orders/:order_id", [](TestRouter::Context &ctx) {
+            router().get("/:user_id/orders/:order_id", [](TestRouter::Context &ctx) {
                 auto user_id  = ctx.param("user_id");
                 auto order_id = ctx.param("order_id");
 
@@ -487,7 +485,7 @@ TEST_F(RouterTest, ParameterExtractionInNestedRoutes) {
                 ctx.response.body() = "Order: " + order_id + " for user: " + user_id;
             });
 
-            router().GET("/:user_id/orders/:order_id/items/:item_id",
+            router().get("/:user_id/orders/:order_id/items/:item_id",
                          [](TestRouter::Context &ctx) {
                              auto user_id  = ctx.param("user_id");
                              auto order_id = ctx.param("order_id");

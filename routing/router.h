@@ -15,16 +15,17 @@
 #include <vector>
 #include <qb/uuid.h>
 
+#include "../types.h"
 #include "../request.h"
 #include "../response.h"
-#include "../types.h"
 #include "./async_completion_handler.h"
 #include "./async_types.h"
 #include "./context.h"
 #include "./path_parameters.h"
 #include "./radix_tree.h"
 #include "./route_types.h"
-#include "../cors/cors.h"
+#include "../middleware/middleware_interface.h"
+#include "../middleware/middleware_chain.h"
 // #include "../request_path_view.h"
 
 #if defined(_WIN32)
@@ -32,6 +33,10 @@
 #endif
 
 namespace qb::http {
+
+// Prédéclaration pour permettre l'amitié
+template <typename Session, typename String>
+class RouterImpl;
 
 /**
  * @brief HTTP Router for handling requests
@@ -46,6 +51,7 @@ public:
     // Friend declarations
     friend class AsyncCompletionHandler<Session, String>;
     friend class RouteGroup<Session, String>;
+    friend class RouterImpl<Session, String>;
 
     // Type aliases for external types
     using Context    = RouterContext<Session, String>;
@@ -54,11 +60,10 @@ public:
     using RouteGroup = RouteGroup<Session, String>;
     using IRoute     = IRoute<Session, String>;
 
-    // Middleware function type
+    // Middleware type definitions
     using Middleware = std::function<bool(Context &)>;
-
-    // Add an asynchronous middleware function
     using AsyncMiddleware = std::function<void(Context &, std::function<void(bool)>)>;
+    using TypedMiddlewarePtr = MiddlewarePtr<Session, String>;
 
     // Template for route implementation
     template <typename Func>
@@ -74,7 +79,7 @@ public:
     template <typename T, typename... Args>              \
     Router &name(Args &&...args);
 
-    HTTP_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
+    HTTP_SERVER_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
 
 #undef REGISTER_ROUTE_FUNCTION
 
@@ -104,11 +109,38 @@ public:
     Router &set_default_response(http_method method, Response response);
 
     /**
-     * @brief Add a global middleware function
+     * @brief Add a global middleware function (legacy way)
      * @param middleware Middleware function
      * @return Reference to this router
      */
     Router &use(Middleware middleware);
+
+    /**
+     * @brief Add an asynchronous middleware function
+     * @param middleware Asynchronous middleware function
+     * @return Reference to this router
+     */
+    Router &use(AsyncMiddleware middleware);
+
+    /**
+     * @brief Add a typed middleware to the router
+     * @param middleware Middleware to add
+     * @return Reference to this router for chaining
+     */
+    Router &use(TypedMiddlewarePtr middleware);
+    
+    /**
+     * @brief Create and add a typed middleware to the router
+     * @tparam M Type of middleware to create
+     * @tparam Args Types of arguments to construct the middleware
+     * @param args Arguments to construct the middleware
+     * @return Reference to this router for chaining
+     */
+    template <template<typename, typename> class M, typename... Args>
+    Router &use(Args&&... args) {
+        auto middleware = std::make_shared<M<Session, String>>(std::forward<Args>(args)...);
+        return use(middleware);
+    }
 
     /**
      * @brief Set an error handler for a specific status code
@@ -129,7 +161,11 @@ public:
      * @brief Clear all middleware functions
      * @return Reference to this router
      */
-    Router &clear_middleware();
+    Router &clear_middleware() {
+        _middleware.clear();
+        _async_middleware.clear();  // Vider aussi les middlewares asynchrones
+        return *this;
+    }
 
     /**
      * @brief Configure the timeout for async requests
@@ -162,27 +198,6 @@ public:
      * @return The number of disconnected sessions that were cleaned up
      */
     size_t clean_disconnected_sessions();
-
-    /**
-     * @brief Add an asynchronous middleware function
-     * @param middleware Asynchronous middleware function
-     * @return Reference to this router
-     */
-    Router &use_async(AsyncMiddleware middleware);
-
-    /**
-     * @brief Clear all async middleware functions
-     * @return Reference to this router
-     */
-    Router &clear_async_middleware();
-
-    /**
-     * @brief Configure rate limiting
-     * @param requests_per_window Maximum requests per time window
-     * @param window_size Time window in seconds
-     * @return Reference to this router
-     */
-    Router &configure_rate_limit(size_t requests_per_window, int window_size_seconds);
 
     /**
      * @brief Defer request processing for a specific duration
@@ -293,10 +308,12 @@ private:
     std::map<http_method, std::vector<std::unique_ptr<IRoute>>> _routes;
     // Controllers for hierarchical routing
     std::vector<std::shared_ptr<Controller>> _controllers;
-    // Global middleware functions
+    // Global middleware functions (legacy)
     std::vector<Middleware> _middleware;
-    // Asynchronous middleware functions
+    // Asynchronous middleware functions (legacy)
     std::vector<AsyncMiddleware> _async_middleware;
+    // Typed middleware chain
+    std::shared_ptr<MiddlewareChain<Session, String>> _typed_middleware_chain;
     // Error handlers for different status codes
     std::map<int, std::function<void(Context &)>> _error_handlers;
     // Default responses for different HTTP methods (if no route matches)
@@ -344,15 +361,6 @@ private:
     std::vector<EventQueueItem> _event_queue;
     bool                        _processing_event_queue = false;
 
-    // Rate limiting
-    struct RateLimit {
-        size_t                                                      requests_per_window;
-        std::chrono::seconds                                        window_size;
-        std::map<std::string, std::pair<size_t, Clock::time_point>> client_counters;
-    };
-
-    std::unique_ptr<RateLimit> _rate_limit;
-
     /**
      * @brief Sort routes by priority
      * @param method HTTP method to sort routes for
@@ -375,9 +383,6 @@ private:
 
     // Route to appropriate handler (extracted from the route method)
     void route_to_handler(Context &ctx, const std::string &path);
-
-    // Check if a request is rate limited
-    bool is_rate_limited(const Context &ctx);
 
     // Helper type trait to check if session has a get_client_ip method
     template <typename S, typename = void>
@@ -414,6 +419,24 @@ private:
     struct has_method_is_connected<S, 
         std::void_t<decltype(std::declval<S>().is_connected())>>
         : std::true_type {};
+};
+
+// Implementation wrapper to enable the complete interface of Router
+template <typename Session, typename String = std::string>
+class RouterImpl : public Router<Session, String> {
+public:
+    using BaseRouter = Router<Session, String>;
+    using Context = typename BaseRouter::Context;
+    using RouteGroup = typename BaseRouter::RouteGroup;
+    using TypedMiddlewarePtr = typename BaseRouter::TypedMiddlewarePtr;
+    
+    // Inherit constructors from base class
+    using BaseRouter::BaseRouter;
+    
+    // Factory method to create router instance
+    static std::unique_ptr<RouterImpl> create() {
+        return std::make_unique<RouterImpl>();
+    }
 };
 
 } // namespace qb::http

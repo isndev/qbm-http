@@ -37,11 +37,43 @@ Router<Session, String>::set_default_response(http_method method, Response respo
     return *this;
 }
 
-// Method to add a middleware
+// Method to add a middleware (legacy)
 template <typename Session, typename String>
 Router<Session, String> &
 Router<Session, String>::use(Middleware middleware) {
     _middleware.push_back(std::move(middleware));
+    return *this;
+}
+
+// Method to add a typed middleware
+template <typename Session, typename String>
+Router<Session, String> &
+Router<Session, String>::use(TypedMiddlewarePtr middleware) {
+    // Lazily create the typed middleware chain if it doesn't exist
+    if (!_typed_middleware_chain) {
+        _typed_middleware_chain = std::make_shared<MiddlewareChain<Session, String>>();
+    }
+    
+    // Add the middleware to the chain
+    _typed_middleware_chain->add(std::move(middleware));
+    
+    // Register adapters for the middleware chain with the legacy system
+    // For synchronous middleware
+    use([chain = _typed_middleware_chain](Context& ctx) -> bool {
+        auto result = chain->process(ctx);
+        if (result.is_async()) {
+            return true; // Continue to async handler
+        }
+        return !result.should_stop();
+    });
+    
+    // For asynchronous middleware
+    use([chain = _typed_middleware_chain](Context& ctx, std::function<void(bool)> done) {
+        chain->process(ctx, [done](MiddlewareResult result) {
+            done(!result.should_stop());
+        });
+    });
+    
     return *this;
 }
 
@@ -59,14 +91,6 @@ template <typename Session, typename String>
 Router<Session, String> &
 Router<Session, String>::enable_logging(bool enable) {
     _enable_logging = enable;
-    return *this;
-}
-
-// Method to clear all middlewares
-template <typename Session, typename String>
-Router<Session, String> &
-Router<Session, String>::clear_middleware() {
-    _middleware.clear();
     return *this;
 }
 
@@ -210,15 +234,6 @@ Router<Session, String>::route_context(std::shared_ptr<Session> session, Context
     }
 
     ctx.add_event("route_context");
-
-    if (_rate_limit && is_rate_limited(ctx)) {
-        ctx.add_event("rate_limited");
-        Response response;
-        response.status_code = HTTP_STATUS_TOO_MANY_REQUESTS;
-        response.body()      = "Rate limit exceeded";
-        *session << response;
-        return true;
-    }
 
     // Handle async middleware if present and not being skipped
     if (!_async_middleware.empty() && !skip_async_middleware) {
@@ -392,7 +407,7 @@ Router<Session, String>::log_request(const Context &ctx, int status, double dura
         return *this;                                                                  \
     }
 
-HTTP_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
+HTTP_SERVER_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
 
 #undef REGISTER_ROUTE_FUNCTION
 
@@ -490,27 +505,8 @@ Router<Session, String>::clean_disconnected_sessions() {
 // Method to add an asynchronous middleware
 template <typename Session, typename String>
 Router<Session, String> &
-Router<Session, String>::use_async(AsyncMiddleware middleware) {
+Router<Session, String>::use(AsyncMiddleware middleware) {
     _async_middleware.push_back(std::move(middleware));
-    return *this;
-}
-
-// Method to remove all asynchronous middleware
-template <typename Session, typename String>
-Router<Session, String> &
-Router<Session, String>::clear_async_middleware() {
-    _async_middleware.clear();
-    return *this;
-}
-
-// Method to configure rate limiting
-template <typename Session, typename String>
-Router<Session, String> &
-Router<Session, String>::configure_rate_limit(size_t requests_per_window,
-                                              int    window_size_seconds) {
-    _rate_limit                      = std::make_unique<RateLimit>();
-    _rate_limit->requests_per_window = requests_per_window;
-    _rate_limit->window_size         = std::chrono::seconds(window_size_seconds);
     return *this;
 }
 
@@ -783,50 +779,6 @@ Router<Session, String>::route_to_handler(Context &ctx, const std::string &path)
         ctx.handled = true; // Mark request as handled after error handler
         return;
     }
-}
-
-// Method to check if a request is limited by the rate limiter
-template <typename Session, typename String>
-bool
-Router<Session, String>::is_rate_limited(const Context &ctx) {
-    if (!_rate_limit) {
-        return false;
-    }
-
-    // Use client IP as identifier for rate limiting
-    std::string client_id = ctx.header("X-Forwarded-For");
-    if (client_id.empty()) {
-        // Try to get the client IP from the session if available
-        if constexpr (has_client_ip_method<Session>::value) {
-            client_id = ctx.session->get_client_ip();
-        } else if constexpr (has_client_ip_method<std::shared_ptr<Session>>::value) {
-            client_id = ctx.session.get_client_ip();
-        } else if constexpr (has_ip_method<Session>::value) {
-            client_id = ctx.session->ip();
-        } else {
-            // Use a generic ID if no IP is available
-            client_id = "unknown";
-        }
-    }
-
-    auto  now     = Clock::now();
-    auto &counter = _rate_limit->client_counters[client_id];
-
-    // Reset counter if the window has passed
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - counter.second).count() >
-        _rate_limit->window_size.count()) {
-        counter.first  = 0;
-        counter.second = now;
-    }
-
-    // Check if rate limit is exceeded
-    if (counter.first >= _rate_limit->requests_per_window) {
-        return true;
-    }
-
-    // Increment counter
-    counter.first++;
-    return false;
 }
 
 // Method to enable/disable radix tree for route matching

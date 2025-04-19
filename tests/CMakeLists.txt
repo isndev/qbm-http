@@ -33,7 +33,12 @@ set(HTTP_TESTS
         cookie
         middleware-validator
         middleware-rate-limit
+        middleware-logging
         middleware-jwt
+        middleware-transform
+        middleware-conditional
+        middleware-timing
+        middleware-error-handling
         #    session-http
 )
 

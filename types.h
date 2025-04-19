@@ -35,3 +35,14 @@ constexpr const char endl[] = "\r\n";
 constexpr const char sep = ' ';
 
 } // namespace qb::http
+
+#define HTTP_SERVER_METHOD_MAP(XX) \
+  XX(0, del, DELETE) \
+  XX(1, get, GET) \
+  XX(2, head, HEAD) \
+  XX(3, post, POST) \
+  XX(4, put, PUT) \
+  XX(5, connect, CONNECT) \
+  XX(6, options, OPTIONS) \
+  XX(7, trace, TRACE) \
+  XX(28, patch, PATCH)

@@ -50,6 +50,12 @@ private:
         bool                            is_async = false;
         bool is_deferred = false; // New flag for deferred processing
 
+        // Callbacks for different lifecycle hooks
+        std::vector<std::function<void(RouterContext&)>> done_callbacks;
+        std::vector<std::function<void(RouterContext&)>> before_callbacks;
+        std::vector<std::function<void(RouterContext&)>> after_callbacks;
+        std::vector<std::function<void(RouterContext&, const std::string&)>> error_callbacks;
+
         // Metrics
         Clock::time_point     start_time;
         std::optional<double> duration;
@@ -335,6 +341,97 @@ public:
         return _state->is_async;
     }
 
+    // Lifecycle hooks
+
+    /**
+     * @brief Register a callback to be executed after request processing is complete
+     * @param callback Function to call when request is done
+     * @return Reference to this context
+     */
+    RouterContext& 
+    on_done(std::function<void(RouterContext&)> callback) {
+        _state->done_callbacks.push_back(std::move(callback));
+        return *this;
+    }
+
+    /**
+     * @brief Execute all registered 'done' callbacks
+     */
+    void 
+    execute_done_callbacks() {
+        for (auto& callback : _state->done_callbacks) {
+            callback(*this);
+        }
+        _state->done_callbacks.clear();
+    }
+
+    /**
+     * @brief Register a callback to be executed before request handling
+     * @param callback Function to call before handling
+     * @return Reference to this context
+     */
+    RouterContext& 
+    before_handling(std::function<void(RouterContext&)> callback) {
+        _state->before_callbacks.push_back(std::move(callback));
+        return *this;
+    }
+
+    /**
+     * @brief Execute all registered 'before' callbacks
+     */
+    void 
+    execute_before_callbacks() {
+        for (auto& callback : _state->before_callbacks) {
+            callback(*this);
+        }
+        _state->before_callbacks.clear();
+    }
+
+    /**
+     * @brief Register a callback to be executed after request handling
+     * @param callback Function to call after handling
+     * @return Reference to this context
+     */
+    RouterContext& 
+    after_handling(std::function<void(RouterContext&)> callback) {
+        _state->after_callbacks.push_back(std::move(callback));
+        return *this;
+    }
+
+    /**
+     * @brief Execute all registered 'after' callbacks
+     */
+    void 
+    execute_after_callbacks() {
+        for (auto& callback : _state->after_callbacks) {
+            callback(*this);
+        }
+        _state->after_callbacks.clear();
+    }
+
+    /**
+     * @brief Register a callback to be executed on error
+     * @param callback Function to call on error (passes error message)
+     * @return Reference to this context
+     */
+    RouterContext& 
+    on_error(std::function<void(RouterContext&, const std::string&)> callback) {
+        _state->error_callbacks.push_back(std::move(callback));
+        return *this;
+    }
+
+    /**
+     * @brief Execute all registered 'error' callbacks
+     * @param error_message Error message to pass to callbacks
+     */
+    void 
+    execute_error_callbacks(const std::string& error_message) {
+        for (auto& callback : _state->error_callbacks) {
+            callback(*this, error_message);
+        }
+        _state->error_callbacks.clear();
+    }
+
     // Metrics methods
 
     /**
@@ -382,6 +479,10 @@ public:
      */
     void
     complete() {
+        // Exécuter les callbacks après traitement
+        execute_after_callbacks();
+        execute_done_callbacks();
+        
         if (router) {
             router->log_request(*this);
         }
@@ -445,8 +546,9 @@ public:
                 }
             }
 
-            // Handle deferred completion (this logic seems to belong to the external handler, not context.h)
-            // Assuming this method within context.h should complete immediately if conditions are met.
+            // Exécuter les callbacks après traitement
+            ctx.execute_after_callbacks();
+            ctx.execute_done_callbacks();
 
             // Complete the request immediately by sending the response
             if (router) {
@@ -482,6 +584,10 @@ public:
         cancel(http_status status_code, const std::string &error_message) {
             ctx.response.status_code = status_code;
             ctx.response.body()      = error_message;
+            
+            // Exécuter les callbacks d'erreur
+            ctx.execute_error_callbacks(error_message);
+            
             if (router) {
                 router->complete_async_request(reinterpret_cast<std::uintptr_t>(&ctx),
                                                ctx.response,

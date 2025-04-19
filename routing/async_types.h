@@ -25,8 +25,7 @@ enum class AsyncRequestState {
     CANCELED,     // Request was canceled (e.g., by timeout)
     DISCONNECTED, // Client disconnected before completion
     TIMEOUT,      // Request timed out
-    DEFERRED,     // Request processing is deferred
-    RATE_LIMITED  // Request was rate limited
+    DEFERRED      // Request processing is deferred
 };
 
 // Define Clock type for consistent time measurement
