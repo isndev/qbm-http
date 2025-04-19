@@ -1,4 +1,4 @@
-#include "auth.h"
+#include "manager.h"
 #include <ctime>
 #include <iomanip>
 #include <qb/io/crypto_jwt.h>
@@ -7,63 +7,60 @@
 
 namespace qb {
 namespace http {
+namespace auth {
 
 using json = qb::json;
 
-// Convertir un timestamp epoch en ISO8601
-std::string
-timestamp_to_iso8601(uint64_t timestamp) {
-    std::time_t        time = static_cast<std::time_t>(timestamp);
-    std::tm            tm   = *std::gmtime(&time);
+// Convert epoch timestamp to ISO8601
+static std::string timestamp_to_iso8601(uint64_t timestamp) {
+    std::time_t time = static_cast<std::time_t>(timestamp);
+    std::tm tm = *std::gmtime(&time);
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
     return oss.str();
 }
 
-// Convertir ISO8601 en timestamp epoch
-uint64_t
-iso8601_to_timestamp(const std::string &iso8601) {
-    std::tm            tm = {};
+// Convert ISO8601 to epoch timestamp
+static uint64_t iso8601_to_timestamp(const std::string &iso8601) {
+    std::tm tm = {};
     std::istringstream iss(iso8601);
     iss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
     return static_cast<uint64_t>(std::mktime(&tm));
 }
 
-// Obtenir le timestamp actuel
-uint64_t
-current_timestamp() {
+// Get current timestamp
+static uint64_t current_timestamp() {
     return static_cast<uint64_t>(std::time(nullptr));
 }
 
-// Implémentation de generate_token_payload
-std::string
-AuthManager::generate_token_payload(const AuthUser &user) const {
+// Implementation of generate_token_payload
+std::string Manager::generate_token_payload(const User &user) const {
     json payload;
 
-    // Claims standard
+    // Standard claims
     payload["sub"] = user.id;
     payload["iat"] = current_timestamp();
 
-    // Expiration si activée
+    // Expiration if enabled
     if (_options.get_verify_expiration()) {
         payload["exp"] = current_timestamp() + _options.get_token_expiration().count();
     }
 
-    // Ajout de l'émetteur si configuré
+    // Add issuer if configured
     if (_options.get_verify_issuer()) {
         payload["iss"] = _options.get_token_issuer();
     }
 
-    // Ajout de l'audience si configurée
+    // Add audience if configured
     if (_options.get_verify_audience()) {
         payload["aud"] = _options.get_token_audience();
     }
 
-    // Informations utilisateur spécifiques
+    // User-specific information
     payload["username"] = user.username;
-    payload["roles"]    = user.roles;
+    payload["roles"] = user.roles;
 
-    // Métadonnées supplémentaires
+    // Additional metadata
     if (!user.metadata.empty()) {
         json meta;
         for (const auto &[key, value] : user.metadata) {
@@ -75,9 +72,8 @@ AuthManager::generate_token_payload(const AuthUser &user) const {
     return payload.dump();
 }
 
-// Implémentation de generate_token
-std::string
-AuthManager::generate_token(const AuthUser &user) const {
+// Implementation of generate_token
+std::string Manager::generate_token(const User &user) const {
     std::string payload = generate_token_payload(user);
 
     // Parse the payload JSON
@@ -98,34 +94,34 @@ AuthManager::generate_token(const AuthUser &user) const {
 
     // Map the algorithm
     switch (_options.get_algorithm()) {
-        case AuthOptions::Algorithm::HMAC_SHA256:
+        case Options::Algorithm::HMAC_SHA256:
             options.algorithm = qb::jwt::Algorithm::HS256;
             break;
-        case AuthOptions::Algorithm::HMAC_SHA384:
+        case Options::Algorithm::HMAC_SHA384:
             options.algorithm = qb::jwt::Algorithm::HS384;
             break;
-        case AuthOptions::Algorithm::HMAC_SHA512:
+        case Options::Algorithm::HMAC_SHA512:
             options.algorithm = qb::jwt::Algorithm::HS512;
             break;
-        case AuthOptions::Algorithm::RSA_SHA256:
+        case Options::Algorithm::RSA_SHA256:
             options.algorithm = qb::jwt::Algorithm::RS256;
             break;
-        case AuthOptions::Algorithm::RSA_SHA384:
+        case Options::Algorithm::RSA_SHA384:
             options.algorithm = qb::jwt::Algorithm::RS384;
             break;
-        case AuthOptions::Algorithm::RSA_SHA512:
+        case Options::Algorithm::RSA_SHA512:
             options.algorithm = qb::jwt::Algorithm::RS512;
             break;
-        case AuthOptions::Algorithm::ECDSA_SHA256:
+        case Options::Algorithm::ECDSA_SHA256:
             options.algorithm = qb::jwt::Algorithm::ES256;
             break;
-        case AuthOptions::Algorithm::ECDSA_SHA384:
+        case Options::Algorithm::ECDSA_SHA384:
             options.algorithm = qb::jwt::Algorithm::ES384;
             break;
-        case AuthOptions::Algorithm::ECDSA_SHA512:
+        case Options::Algorithm::ECDSA_SHA512:
             options.algorithm = qb::jwt::Algorithm::ES512;
             break;
-        case AuthOptions::Algorithm::ED25519:
+        case Options::Algorithm::ED25519:
             options.algorithm = qb::jwt::Algorithm::EdDSA;
             break;
         default:
@@ -149,10 +145,9 @@ AuthManager::generate_token(const AuthUser &user) const {
     return qb::jwt::create(jwt_payload, options);
 }
 
-// Implémentation de extract_token_from_header
-std::string
-AuthManager::extract_token_from_header(const std::string &auth_header) const {
-    // Format attendu: "<scheme> <token>"
+// Implementation of extract_token_from_header
+std::string Manager::extract_token_from_header(const std::string &auth_header) const {
+    // Expected format: "<scheme> <token>"
     const auto &scheme = _options.get_auth_scheme();
     if (auth_header.length() <= scheme.length() + 1) {
         return "";
@@ -162,46 +157,45 @@ AuthManager::extract_token_from_header(const std::string &auth_header) const {
         return "";
     }
 
-    // Skip le schéma et l'espace
+    // Skip the scheme and space
     return auth_header.substr(scheme.length() + 1);
 }
 
-// Implémentation de verify_token
-std::optional<AuthUser>
-AuthManager::verify_token(const std::string &token) const {
+// Implementation of verify_token
+std::optional<User> Manager::verify_token(const std::string &token) const {
     // Configure JWT verification options
     qb::jwt::VerifyOptions options;
 
     // Map the algorithm
     switch (_options.get_algorithm()) {
-        case AuthOptions::Algorithm::HMAC_SHA256:
+        case Options::Algorithm::HMAC_SHA256:
             options.algorithm = qb::jwt::Algorithm::HS256;
             break;
-        case AuthOptions::Algorithm::HMAC_SHA384:
+        case Options::Algorithm::HMAC_SHA384:
             options.algorithm = qb::jwt::Algorithm::HS384;
             break;
-        case AuthOptions::Algorithm::HMAC_SHA512:
+        case Options::Algorithm::HMAC_SHA512:
             options.algorithm = qb::jwt::Algorithm::HS512;
             break;
-        case AuthOptions::Algorithm::RSA_SHA256:
+        case Options::Algorithm::RSA_SHA256:
             options.algorithm = qb::jwt::Algorithm::RS256;
             break;
-        case AuthOptions::Algorithm::RSA_SHA384:
+        case Options::Algorithm::RSA_SHA384:
             options.algorithm = qb::jwt::Algorithm::RS384;
             break;
-        case AuthOptions::Algorithm::RSA_SHA512:
+        case Options::Algorithm::RSA_SHA512:
             options.algorithm = qb::jwt::Algorithm::RS512;
             break;
-        case AuthOptions::Algorithm::ECDSA_SHA256:
+        case Options::Algorithm::ECDSA_SHA256:
             options.algorithm = qb::jwt::Algorithm::ES256;
             break;
-        case AuthOptions::Algorithm::ECDSA_SHA384:
+        case Options::Algorithm::ECDSA_SHA384:
             options.algorithm = qb::jwt::Algorithm::ES384;
             break;
-        case AuthOptions::Algorithm::ECDSA_SHA512:
+        case Options::Algorithm::ECDSA_SHA512:
             options.algorithm = qb::jwt::Algorithm::ES512;
             break;
-        case AuthOptions::Algorithm::ED25519:
+        case Options::Algorithm::ED25519:
             options.algorithm = qb::jwt::Algorithm::EdDSA;
             break;
         default:
@@ -223,10 +217,10 @@ AuthManager::verify_token(const std::string &token) const {
 
     // Configure verification options
     options.verify_expiration = _options.get_verify_expiration();
-    options.verify_issuer     = _options.get_verify_issuer();
-    options.verify_audience   = _options.get_verify_audience();
+    options.verify_issuer = _options.get_verify_issuer();
+    options.verify_audience = _options.get_verify_audience();
     options.verify_not_before = _options.get_verify_not_before();
-    options.clock_skew        = _options.get_clock_skew_tolerance();
+    options.clock_skew = _options.get_clock_skew_tolerance();
 
     if (_options.get_verify_issuer()) {
         options.issuer = _options.get_token_issuer();
@@ -244,7 +238,7 @@ AuthManager::verify_token(const std::string &token) const {
     }
 
     // Extract user data
-    AuthUser user;
+    User user;
 
     // Extract standard claims
     if (result.payload.find("sub") != result.payload.end()) {
@@ -291,5 +285,6 @@ AuthManager::verify_token(const std::string &token) const {
     return user;
 }
 
+} // namespace auth
 } // namespace http
-} // namespace qb
+} // namespace qb 

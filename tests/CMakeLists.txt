@@ -39,6 +39,7 @@ set(HTTP_TESTS
         middleware-conditional
         middleware-timing
         middleware-error-handling
+        middleware-auth
         #    session-http
 )
 

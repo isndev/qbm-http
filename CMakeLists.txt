@@ -30,7 +30,7 @@ qb_register_module(
         date.cpp
         cookie.cpp
         multipart.cpp
-        auth.cpp
+        auth/manager.cpp
         http.cpp
         # Body
         body.cpp
