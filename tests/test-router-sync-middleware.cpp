@@ -177,7 +177,7 @@ TEST_F(RouterSyncMiddlewareTest, BasicMiddlewareChaining) {
     });
 
     // Add a simple route
-    router->GET("/test", [](Context &ctx) {
+    router->get("/test", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Hello, World!";
     });
@@ -261,18 +261,18 @@ TEST_F(RouterSyncMiddlewareTest, MiddlewareChainBreaking) {
     });
 
     // Add routes
-    router->GET("/public", [](Context &ctx) {
+    router->get("/public", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Public content";
     });
 
-    router->GET("/protected", [](Context &ctx) {
+    router->get("/protected", [](Context &ctx) {
         auto user_id             = ctx.get<std::string>("user_id", "anonymous");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Protected content for user: " + user_id;
     });
 
-    router->GET("/admin", [](Context &ctx) {
+    router->get("/admin", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Admin dashboard";
     });
@@ -367,7 +367,7 @@ TEST_F(RouterSyncMiddlewareTest, ContentTransformation) {
     });
 
     // Register a JSON route that will handle the transformation itself
-    router->GET("/user", [](Context &ctx) {
+    router->get("/user", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.add_header("Content-Type", "application/json");
 
@@ -385,7 +385,7 @@ TEST_F(RouterSyncMiddlewareTest, ContentTransformation) {
     });
 
     // Register a non-JSON route
-    router->GET("/text", [](Context &ctx) {
+    router->get("/text", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.add_header("Content-Type", "text/plain");
         ctx.response.body() = "Regular text content";
@@ -441,33 +441,33 @@ TEST_F(RouterSyncMiddlewareTest, MethodSpecificMiddleware) {
     });
 
     // Add routes to both the group and directly to the router
-    api_group.GET("/resource", [](Context &ctx) {
+    api_group.get("/resource", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
-        ctx.response.body()      = "GET response";
+        ctx.response.body()      = "get response";
     });
 
-    router->POST("/resource", [](Context &ctx) {
+    router->post("/resource", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_CREATED;
-        ctx.response.body()      = "POST response";
+        ctx.response.body()      = "post response";
     });
 
     // Debug - print out the route structure
     // This helps verify that the routes were registered correctly
     std::cout << "Router has registered routes:" << std::endl;
-    std::cout << "- GET /api/resource" << std::endl;
-    std::cout << "- POST /resource" << std::endl;
+    std::cout << "- get /api/resource" << std::endl;
+    std::cout << "- post /resource" << std::endl;
 
-    // Test GET request to /api/resource - should run global and group middleware
+    // Test get request to /api/resource - should run global and group middleware
     {
         executed_middlewares.clear();
         session->reset();
 
         auto req = createRequest(HTTP_GET, "/api/resource");
-        std::cout << "Testing route: GET /api/resource" << std::endl;
+        std::cout << "Testing route: get /api/resource" << std::endl;
 
         EXPECT_TRUE(router->route(session, req)); // Pass shared_ptr directly
         EXPECT_EQ(session->_response.status_code, HTTP_STATUS_OK);
-        EXPECT_EQ(session->_response.body().as<std::string>(), "GET response");
+        EXPECT_EQ(session->_response.body().as<std::string>(), "get response");
 
         // Print what was actually executed
         std::cout << "Executed middlewares: ";
@@ -487,17 +487,17 @@ TEST_F(RouterSyncMiddlewareTest, MethodSpecificMiddleware) {
         }
     }
 
-    // Test POST request - should only use global middleware
+    // Test post request - should only use global middleware
     {
         executed_middlewares.clear();
         session->reset();
 
         auto req = createRequest(HTTP_POST, "/resource");
-        std::cout << "Testing route: POST /resource" << std::endl;
+        std::cout << "Testing route: post /resource" << std::endl;
 
         EXPECT_TRUE(router->route(session, req)); // Pass shared_ptr directly
         EXPECT_EQ(session->_response.status_code, HTTP_STATUS_CREATED);
-        EXPECT_EQ(session->_response.body().as<std::string>(), "POST response");
+        EXPECT_EQ(session->_response.body().as<std::string>(), "post response");
 
         // Print what was actually executed
         std::cout << "Executed middlewares: ";
@@ -532,7 +532,7 @@ TEST_F(RouterSyncMiddlewareTest, MiddlewarePriorityOrder) {
     });
 
     // Add route with nested path that manually includes the middleware's logic
-    api_group.GET("/users/:id", [&execution_order](Context &ctx) {
+    api_group.get("/users/:id", [&execution_order](Context &ctx) {
         // Simulate the group middleware execution here as a workaround
         execution_order.push_back("api_group_middleware");
 
@@ -594,12 +594,12 @@ TEST_F(RouterSyncMiddlewareTest, ConditionalMiddleware) {
     });
 
     // Add routes
-    router->GET("/api/resource", [](Context &ctx) {
+    router->get("/api/resource", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "API resource";
     });
 
-    router->GET("/public", [](Context &ctx) {
+    router->get("/public", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Public resource";
     });
@@ -659,7 +659,7 @@ TEST_F(RouterSyncMiddlewareTest, NestedRouteGroups) {
     });
 
     // Add route to the group
-    api_group.GET("/users", [&execution_order](Context &ctx) {
+    api_group.get("/users", [&execution_order](Context &ctx) {
         // Include middleware simulation
         execution_order.push_back("api_middleware");
 
@@ -723,7 +723,7 @@ TEST_F(RouterSyncMiddlewareTest, ErrorHandlingMiddleware) {
     });
 
     // Route handler
-    router->GET("/test", [&execution_order](Context &ctx) {
+    router->get("/test", [&execution_order](Context &ctx) {
         execution_order.push_back("route_handler");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Success";
@@ -803,7 +803,7 @@ TEST_F(RouterSyncMiddlewareTest, MiddlewareWithURLParameters) {
     });
 
     // Route with a single parameter
-    router->GET("/users/:user_id/profile",
+    router->get("/users/:user_id/profile",
                 [&handler_had_params, &handler_user_id](Context &ctx) {
                     // Get parameter at handler phase
                     handler_user_id    = ctx.param("user_id");
@@ -848,7 +848,7 @@ TEST_F(RouterSyncMiddlewareTest, MiddlewareWithURLParameters) {
         std::string item_id_param;
 
         // Create a route with a handler function that itself applies middleware logic
-        router->GET("/api/:version/items/:item_id", [&validation_ran, &version_param,
+        router->get("/api/:version/items/:item_id", [&validation_ran, &version_param,
                                                      &item_id_param](Context &ctx) {
             // This runs AFTER parameters have been extracted, so we have access to them
             // here

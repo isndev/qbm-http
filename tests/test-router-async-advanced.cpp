@@ -229,7 +229,7 @@ struct TestHelpers {
 // Test basic async request/response flow
 TEST_F(RouterAsyncTest, BasicAsyncRequestResponse) {
     // Setup a basic async route
-    router->GET("/async-data", [this](Context &ctx) {
+    router->get("/async-data", [this](Context &ctx) {
         auto completion = ctx.make_async();
 
         qb::Actor::post([completion, this]() mutable {
@@ -265,7 +265,7 @@ TEST_F(RouterAsyncTest, AsyncCallbackTest) {
     qb::io::async::init();
 
     // Setup d'une route asynchrone utilisant qb::io::async::callback
-    router->GET("/callback-async", [](Context &ctx) {
+    router->get("/callback-async", [](Context &ctx) {
         auto completion = ctx.make_async();
 
         qb::io::async::callback(
@@ -303,7 +303,7 @@ TEST_F(RouterAsyncTest, ChainedAsyncCallbackTest) {
     qb::io::async::init();
 
     // Setup d'une route avec opérations asynchrones chaînées
-    router->GET("/chained-callback", [](Context &ctx) {
+    router->get("/chained-callback", [](Context &ctx) {
         auto completion = ctx.make_async();
 
         // Première opération asynchrone
@@ -356,7 +356,7 @@ TEST_F(RouterAsyncTest, ChainedAsyncCallbackTest) {
 // Test chained async operations
 TEST_F(RouterAsyncTest, ChainedAsyncOperations) {
     // Setup a route that triggers multiple async operations in sequence
-    router->GET("/chained-async", [this](Context &ctx) {
+    router->get("/chained-async", [this](Context &ctx) {
         auto completion = ctx.make_async();
 
         // First async operation
@@ -433,7 +433,7 @@ TEST_F(RouterAsyncTest, AsyncMiddleware) {
     });
 
     // Simple route that should be protected by the middleware
-    router->GET("/protected-resource", [](Context &ctx) {
+    router->get("/protected-resource", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Protected resource accessed";
     });
@@ -482,7 +482,7 @@ TEST_F(RouterAsyncTest, AsyncMiddleware) {
 // Test concurrent async requests
 TEST_F(RouterAsyncTest, ConcurrentAsyncRequests) {
     // Setup endpoint that handles multiple concurrent requests
-    router->GET("/concurrent/:id", [](Context &ctx) {
+    router->get("/concurrent/:id", [](Context &ctx) {
         std::string id = ctx.param("id");
         ctx.make_async();
 
@@ -519,7 +519,7 @@ TEST_F(RouterAsyncTest, ConcurrentAsyncRequests) {
 // Test async error handling
 TEST_F(RouterAsyncTest, AsyncErrorHandling) {
     // Setup a route that simulates different error scenarios
-    router->GET("/async-error/:scenario", [this](Context &ctx) {
+    router->get("/async-error/:scenario", [this](Context &ctx) {
         std::string scenario = ctx.param("scenario");
         ctx.make_async();
 
@@ -611,7 +611,7 @@ TEST_F(RouterAsyncTest, AsyncErrorHandling) {
 // Test async data processing
 TEST_F(RouterAsyncTest, AsyncDataProcessing) {
     // Setup a route that simulates async data processing
-    router->POST("/process-data", [this](Context &ctx) {
+    router->post("/process-data", [this](Context &ctx) {
         // Extract data from request
         std::string data = ctx.request.body().as<std::string>();
 
@@ -682,7 +682,7 @@ TEST_F(RouterAsyncTest, AsyncDataProcessing) {
 // Test event-driven communication between async handlers
 TEST_F(RouterAsyncTest, EventDrivenCommunication) {
     // Setup a route that waits for an external event
-    router->GET("/wait-for-event/:event_id", [](Context &ctx) {
+    router->get("/wait-for-event/:event_id", [](Context &ctx) {
         std::string event_id   = ctx.param("event_id");
         auto        completion = ctx.make_async();
 
@@ -713,7 +713,7 @@ TEST_F(RouterAsyncTest, StreamingResponseSimulation) {
     // In a real streaming setup, we'd have a way to send parts of a response
     // Here we'll simulate by updating response content directly
 
-    router->GET("/stream", [this](Context &ctx) {
+    router->get("/stream", [this](Context &ctx) {
         auto completion = ctx.make_async();
 
         // Send first chunk
@@ -750,7 +750,7 @@ TEST_F(RouterAsyncTest, StreamingResponseSimulation) {
 // Test disconnected sessions handling
 TEST_F(RouterAsyncTest, DisconnectedSessionHandling) {
     // Setup a route with delayed async processing
-    router->GET("/long-process", [this](Context &ctx) {
+    router->get("/long-process", [this](Context &ctx) {
         auto completion = ctx.make_async();
 
         // First stage of processing
@@ -890,7 +890,7 @@ TEST_F(RouterAsyncTest, DisconnectedSessionHandling) {
 // Test request timeouts
 TEST_F(RouterAsyncTest, AsyncRequestTimeouts) {
     // Setup a route that never completes (simulating a stalled process)
-    router->GET("/stalled-process", [](Context &ctx) {
+    router->get("/stalled-process", [](Context &ctx) {
         auto completion = ctx.make_async();
 
         // This request will never complete on its own
@@ -924,7 +924,7 @@ TEST_F(RouterAsyncTest, ExplicitHandlerInvalidation) {
     TestHelpers::resetRouterState(router.get());
 
     // Setup a route that allows explicit invalidation of completion handlers
-    router->GET("/invalidate-handler/:mode", [this](Context &ctx) {
+    router->get("/invalidate-handler/:mode", [this](Context &ctx) {
         std::string    mode       = ctx.param("mode");
         auto           completion = ctx.make_async();
         auto context_id = reinterpret_cast<std::uintptr_t>(&ctx);
@@ -1045,7 +1045,7 @@ TEST_F(RouterAsyncTest, ConcurrentRequestLimits) {
     int completed_count = 0;
 
     // Setup a route that takes a while to complete
-    router->GET("/slow-request/:id", [ &completed_count](Context &ctx) {
+    router->get("/slow-request/:id", [ &completed_count](Context &ctx) {
         auto        completion = ctx.make_async();
         std::string id         = ctx.param("id");
 
@@ -1114,7 +1114,7 @@ TEST_F(RouterAsyncTest, ErrorPropagation) {
     TestHelpers::resetRouterState(router.get());
 
     // Setup a route with nested error handling
-    router->GET("/nested-errors/:mode", [this](Context &ctx) {
+    router->get("/nested-errors/:mode", [this](Context &ctx) {
         std::string mode       = ctx.param("mode");
         auto        completion = ctx.make_async();
 
@@ -1237,7 +1237,7 @@ TEST_F(RouterAsyncTest, RequestCancellation) {
     int processed_count = 0;
 
     // Setup a route that can be canceled
-    router->GET("/cancellable/:id", [&processed_count, this](Context &ctx) {
+    router->get("/cancellable/:id", [&processed_count, this](Context &ctx) {
         std::string id         = ctx.param("id");
         auto        completion = ctx.make_async();
 
@@ -1278,7 +1278,7 @@ TEST_F(RouterAsyncTest, RequestCancellation) {
     });
 
     // Add cancel endpoint
-    router->DELETE("/cancel/:id", [this](Context &ctx) {
+    router->del("/cancel/:id", [this](Context &ctx) {
         std::string    id         = ctx.param("id");
         std::uintptr_t request_id = std::stoull(id);
 
@@ -1372,7 +1372,7 @@ TEST_F(RouterAsyncTest, RaceConditions) {
     TestHelpers::resetRouterState(router.get());
 
     // Setup a route that might complete right as it times out
-    router->GET("/race-condition", [this](Context &ctx) {
+    router->get("/race-condition", [this](Context &ctx) {
         // Use a fixed delay value to avoid string parsing issues
         int  delay_ms   = 50;
         auto completion = ctx.make_async();
@@ -1428,7 +1428,7 @@ TEST_F(RouterAsyncTest, CancellationStateBehavior) {
     int cancel_count    = 0;
 
     // Setup a route that explicitly handles the CANCELED state
-    router->GET("/with-explicit-cancel/:mode", [ &processed_count,
+    router->get("/with-explicit-cancel/:mode", [ &processed_count,
                                                 &cancel_count](Context &ctx) {
         std::string mode       = ctx.param("mode");
         auto        completion = ctx.make_async();
@@ -1558,7 +1558,7 @@ TEST_F(RouterAsyncTest, SimpleCancellation) {
     session->reset();
 
     // Create a simple route that will become async
-    router->GET("/simple-cancel-api", [](Context &ctx) {
+    router->get("/simple-cancel-api", [](Context &ctx) {
         // Just mark the context as async
         ctx.mark_async();
     });
@@ -1597,7 +1597,7 @@ TEST_F(RouterAsyncTest, MultipleCancellations) {
     int processed_count = 0;
 
     // Setup a route that can be canceled
-    router->GET("/multi-cancel/:id", [&processed_count, this](Context &ctx) {
+    router->get("/multi-cancel/:id", [&processed_count, this](Context &ctx) {
         std::string id         = ctx.param("id");
         auto        completion = ctx.make_async();
 
@@ -1708,7 +1708,7 @@ TEST_F(RouterAsyncTest, NonExistentRequestCancellation) {
 
     // Create an actual request
     session->reset();
-    router->GET("/simple-cancel-api", [](Context &ctx) {
+    router->get("/simple-cancel-api", [](Context &ctx) {
         // Just mark the context as async
         ctx.mark_async();
     });

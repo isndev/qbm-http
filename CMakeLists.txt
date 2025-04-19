@@ -37,9 +37,6 @@ qb_register_module(
         # Routing
         routing/radix_tree.cpp
         routing/routing.cpp
-        # CORS
-        cors/cors_options.cpp
-        cors/cors.cpp
         # Validation
         validation/validation.cpp
         validation/json_schema.cpp
@@ -47,7 +44,7 @@ qb_register_module(
         validation/sanitizer.cpp
 
         # Middleware
-        middleware/rate_limit.cpp
+        #middleware/rate_limit.cpp
         #middleware/recaptcha.cpp
         #middleware/logger.cpp
         #middleware/compression.cpp

@@ -101,7 +101,7 @@ TEST_F(RouterAdvancedTest, Middleware) {
     });
 
     // Register a protected route
-    router->GET("/protected", [](Context &ctx) {
+    router->get("/protected", [](Context &ctx) {
         auto user_id             = ctx.get<std::string>("user_id");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Protected content for user: " + user_id;
@@ -144,12 +144,12 @@ TEST_F(RouterAdvancedTest, Middleware) {
 TEST_F(RouterAdvancedTest, RouteGroups) {
     // API v1 group
     auto &v1 = router->group("/api/v1", 10);
-    v1.GET("/users", [](Context &ctx) {
+    v1.get("/users", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "API v1 - Users list";
     });
 
-    v1.GET("/users/:id", [](Context &ctx) {
+    v1.get("/users/:id", [](Context &ctx) {
         auto id                  = ctx.param("id");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "API v1 - User details: " + id;
@@ -157,7 +157,7 @@ TEST_F(RouterAdvancedTest, RouteGroups) {
 
     // API v2 group with higher priority
     auto &v2 = router->group("/api/v2", 20);
-    v2.GET("/users", [](Context &ctx) {
+    v2.get("/users", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "API v2 - Users list (improved)";
     });
@@ -204,7 +204,7 @@ TEST_F(RouterAdvancedTest, RoutePriorities) {
     // ensure they have priority
 
     // Catch-all route (registered first - lower priority)
-    router->GET("/:any", [](Context &ctx) {
+    router->get("/:any", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Catch-all route: " + ctx.param("any");
     });
@@ -212,7 +212,7 @@ TEST_F(RouterAdvancedTest, RoutePriorities) {
     // Specific route (registered second - higher priority)
     // In many router implementations, more specific routes are given higher priority
     // or routes registered later override more general routes
-    router->GET("/users", [](Context &ctx) {
+    router->get("/users", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Users list";
     });
@@ -244,7 +244,7 @@ TEST_F(RouterAdvancedTest, RoutePriorities) {
 TEST_F(RouterAdvancedTest, Cache) {
     int counter = 0;
 
-    router->GET("/expensive", [&counter](Context &ctx) {
+    router->get("/expensive", [&counter](Context &ctx) {
         counter++;
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Expensive operation: " + std::to_string(counter);
@@ -287,7 +287,7 @@ TEST_F(RouterAdvancedTest, ErrorHandlers) {
     });
 
     // Route that triggers a 500 error
-    router->GET("/error", [](Context &ctx) {
+    router->get("/error", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
         throw std::runtime_error("Simulated server error");
     });
@@ -318,7 +318,7 @@ TEST_F(RouterAdvancedTest, DefaultResponses) {
     method_not_allowed.body()      = "Method not allowed";
     router->set_default_response(HTTP_POST, method_not_allowed);
 
-    // Test default GET response
+    // Test default get response
     {
         TestRequest req;
         req.method = HTTP_GET;
@@ -329,7 +329,7 @@ TEST_F(RouterAdvancedTest, DefaultResponses) {
         EXPECT_EQ(session->_response.body().as<std::string>(), "Resource not found");
     }
 
-    // Test default POST response
+    // Test default post response
     {
         TestRequest req;
         req.method = HTTP_POST;
@@ -397,7 +397,7 @@ TEST_F(RouterAdvancedTest, RateLimiting) {
     });
 
     // Add a simple route
-    router->GET("/limited", [](Context &ctx) {
+    router->get("/limited", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Success";
     });
@@ -471,7 +471,7 @@ TEST_F(RouterAdvancedTest, ClearMiddleware) {
         req.method = HTTP_GET;
         req._uri   = qb::io::uri("/");
 
-        router->GET("/", [](Context &ctx) {
+        router->get("/", [](Context &ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body()      = "Success";
         });
@@ -502,7 +502,7 @@ TEST_F(RouterAdvancedTest, AsyncRequestHandling) {
     bool request_processed = false;
 
     // Set up async handler
-    router->GET("/async", [&request_processed](Context &ctx) {
+    router->get("/async", [&request_processed](Context &ctx) {
         // Mark request as asynchronous
         ctx.mark_async();
 

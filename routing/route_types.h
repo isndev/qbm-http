@@ -7,6 +7,9 @@
 #include <vector>
 #include "../types.h"
 #include "./path_parameters.h"
+#include "./context.h"
+#include "../middleware/middleware_interface.h"
+#include "../middleware/middleware_chain.h"
 
 #if defined(_WIN32)
 #undef DELETE // Windows :/
@@ -154,11 +157,15 @@ class RouteGroup {
     Router<Session, String>                                  &_router;
     std::string                                               _prefix;
     std::vector<typename Router<Session, String>::Middleware> _middleware;
+    std::shared_ptr<MiddlewareChain<Session, String>>         _typed_middleware_chain;
     int                                                       _priority;
 
 public:
     using RouterType = Router<Session, String>;
+    using Context = RouterContext<Session, String>;
     using Middleware = typename RouterType::Middleware;
+    using Handler = typename RouterType::Middleware;
+    using TypedMiddlewarePtr = MiddlewarePtr<Session, String>;
 
     RouteGroup(RouterType &router, std::string prefix, int priority = 0)
         : _router(router)
@@ -176,25 +183,81 @@ public:
         return *this;                                              \
     }
 
-    HTTP_METHOD_MAP(REGISTER_GROUP_ROUTE_FUNCTION)
+    HTTP_SERVER_METHOD_MAP(REGISTER_GROUP_ROUTE_FUNCTION)
 
 #undef REGISTER_GROUP_ROUTE_FUNCTION
 
-    RouteGroup &
-    use(Middleware middleware) {
+    /**
+     * @brief Add a middleware to this route group (legacy way)
+     * @param middleware Middleware function to add
+     * @return Reference to this group for chaining
+     */
+    RouteGroup &use(Middleware middleware) {
         _middleware.push_back(std::move(middleware));
         return *this;
     }
+    
+    /**
+     * @brief Add a typed middleware to this route group
+     * @param middleware Middleware to add
+     * @return Reference to this group for chaining
+     */
+    RouteGroup &use(TypedMiddlewarePtr middleware) {
+        // Lazily create the typed middleware chain if it doesn't exist
+        if (!_typed_middleware_chain) {
+            _typed_middleware_chain = std::make_shared<MiddlewareChain<Session, String>>();
+        }
+        
+        // Add the middleware to the chain
+        _typed_middleware_chain->add(std::move(middleware));
+        
+        // Register adapters for the middleware chain with the legacy system
+        // For synchronous middleware
+        use([chain = _typed_middleware_chain](Context& ctx) -> bool {
+            auto result = chain->process(ctx);
+            if (result.is_async()) {
+                return true; // Continue to async handler
+            }
+            return !result.should_stop();
+        });
+        
+        return *this;
+    }
+    
+    /**
+     * @brief Create and add a typed middleware to this route group
+     * @tparam M Type of middleware to create
+     * @tparam Args Types of arguments to construct the middleware
+     * @param args Arguments to construct the middleware
+     * @return Reference to this group for chaining
+     */
+    template <template<typename, typename> class M, typename... Args>
+    RouteGroup &use(Args&&... args) {
+        auto middleware = std::make_shared<M<Session, String>>(std::forward<Args>(args)...);
+        return use(middleware);
+    }
 
-    RouteGroup &
-    set_priority(int priority) {
+    /**
+     * @brief Create a nested route group
+     * @param prefix Sub-prefix for this group
+     * @param priority Priority for routes in this group
+     * @return The newly created route group
+     */
+    RouteGroup group(const String& subprefix, int priority = 0) {
+        return _router.group(_prefix + subprefix, priority > 0 ? priority : _priority);
+    }
+
+    RouteGroup &set_priority(int priority) {
         _priority = priority;
         return *this;
     }
 
-    const std::vector<Middleware> &
-    middleware() const {
+    const std::vector<Middleware> &middleware() const {
         return _middleware;
+    }
+    
+    std::shared_ptr<MiddlewareChain<Session, String>> typed_middleware_chain() const {
+        return _typed_middleware_chain;
     }
 };
 

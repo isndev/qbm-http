@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 #include "../http.h"
-#include <chrono>
 
 using namespace qb::http;
 

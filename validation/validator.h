@@ -35,6 +35,7 @@ class Validator {
 public:
     using Context = RouterContext<Session, String>;
     using RuleCallback = std::function<bool(ValidationContext&, const TRequest<String>&)>;
+    using ErrorHandler = std::function<void(Context&, const ValidationErrors&)>;
     
     /**
      * @brief Default constructor
@@ -111,7 +112,7 @@ public:
      * @param handler Error handler function
      * @return Reference to this validator
      */
-    Validator& with_error_handler(std::function<void(Context&, const ValidationErrors&)> handler) {
+    Validator& with_error_handler(ErrorHandler handler) {
         _error_handler = std::move(handler);
         return *this;
     }
@@ -176,22 +177,12 @@ public:
         return valid;
     }
     
-    /**
-     * @brief Create a middleware function for the router
-     * @return Middleware function that performs validation
-     */
-    auto middleware() const {
-        return [this](Context& ctx) {
-            return validate(ctx);
-        };
-    }
-    
 private:
     std::shared_ptr<JsonSchemaValidator> _json_schema_validator;
     std::shared_ptr<QueryValidator> _query_validator;
     std::shared_ptr<Sanitizer> _sanitizer;
     std::vector<std::pair<std::string, RuleCallback>> _custom_rules;
-    std::function<void(Context&, const ValidationErrors&)> _error_handler;
+    ErrorHandler _error_handler;
     
     /**
      * @brief Default error handler for validation errors
@@ -240,16 +231,6 @@ inline auto validate_with_schema(const qb::json& schema) {
 template <typename Session, typename String = std::string>
 inline auto validate_with_schema(const std::string& schema_str) {
     return Validator<Session, String>(schema_str);
-}
-
-/**
- * @brief Create a middleware that validates request against a JSON schema
- * @param schema JSON schema
- * @return Middleware function
- */
-template <typename Session, typename String = std::string>
-inline auto validate_middleware(const qb::json& schema) {
-    return Validator<Session, String>(schema).middleware();
 }
 
 } // namespace qb::http 

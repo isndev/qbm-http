@@ -172,7 +172,7 @@ public:
 TEST(Session, HTTP_OVER_TCP) {
     async::init();
 
-    auto res = qb::http::GET(qb::http::Request{{"https://isndev.com"}});
+    auto res = qb::http::get(qb::http::Request{{"https://isndev.com"}});
 
     msg_count_server_side = 0;
     msg_count_client_side = 0;
@@ -229,7 +229,7 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
                             {STRING_MESSAGE}};
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
-            auto res = qb::http::GET(r);
+            auto res = qb::http::get(r);
             EXPECT_EQ(res.status_code, HTTP_STATUS_OK);
             ++msg_count_client_side;
         }
@@ -388,7 +388,7 @@ class HttpServer : public qb::http::use<HttpServer>::server<HttpSession> {
     public:
         Posts()
             : Controller("/posts") {
-            router().GET<GetAllPosts>().GET<GetPostById>();
+            router().get<GetAllPosts>().get<GetPostById>();
         }
     };
 
@@ -401,7 +401,7 @@ public:
         router().set_default_response(std::move(initial));
         router()
             // classic just with lambda
-            .GET("/",
+            .get("/",
                  [](auto &ctx) {
                      auto msg = ctx.request.body().template as<std::string>();
                      EXPECT_EQ(msg, STRING_MESSAGE);
@@ -431,27 +431,27 @@ TEST(HTTP_SERVER, TCP_ADVANCED_ROUTING) {
 
         request.uri()  = "http://localhost:9999";
         request.body() = STRING_MESSAGE;
-        auto response  = qb::http::GET(request);
+        auto response  = qb::http::get(request);
         EXPECT_EQ(response.status_code, HTTP_STATUS_OK);
         EXPECT_EQ(response.body().as<std::string>(), STRING_MESSAGE);
 
         request.uri() = "http://localhost:9999/posts/?offset=10";
-        response      = qb::http::GET(request);
+        response      = qb::http::get(request);
         EXPECT_EQ(response.status_code, HTTP_STATUS_OK);
         EXPECT_EQ(response.body().as<std::string>(), "all posts with offset=10");
 
         request.uri() = "http://localhost:9999/posts?offset=10";
-        response      = qb::http::GET(request);
+        response      = qb::http::get(request);
         EXPECT_EQ(response.status_code, HTTP_STATUS_OK);
         EXPECT_EQ(response.body().as<std::string>(), "all posts with offset=10");
 
         request.uri() = "http://localhost:9999/posts/1000";
-        response      = qb::http::GET(request);
+        response      = qb::http::get(request);
         EXPECT_EQ(response.status_code, HTTP_STATUS_OK);
         EXPECT_EQ(response.body().as<std::string>(), "one post id=1000");
 
         request.uri() = "http://localhost:9999/bad_route";
-        response      = qb::http::GET(request);
+        response      = qb::http::get(request);
         EXPECT_EQ(response.status_code, HTTP_STATUS_NOT_FOUND);
 
         msg_count_client_side = 1;
@@ -479,7 +479,7 @@ class HttpSecureServer
     : public qb::http::use<HttpSecureServer>::ssl::server<HttpSecureSession> {
 public:
     HttpSecureServer() {
-        router().GET("/secure", [](auto &ctx) {
+        router().get("/secure", [](auto &ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body()      = STRING_MESSAGE;
 
@@ -507,7 +507,7 @@ TEST(HTTP_SERVER, OVER_SECURE_TCP) {
             qb::http::Request request;
             request.uri()  = "https://localhost:9999/secure";
             request.body() = STRING_MESSAGE;
-            auto response  = qb::http::GET(request);
+            auto response  = qb::http::get(request);
             EXPECT_EQ(response.body().as<std::string>(), STRING_MESSAGE);
             ++msg_count_client_side;
         }
@@ -536,7 +536,7 @@ public:
 class HttpServerView : public qb::http::use<HttpServerView>::server<HttpSessionView> {
 public:
     HttpServerView() {
-        router().GET("/", [](auto &ctx) {
+        router().get("/", [](auto &ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body()      = STRING_MESSAGE;
 
@@ -562,7 +562,7 @@ TEST(HTTP_SERVER_VIEW, OVER_TCP) {
             qb::http::Request request;
             request.uri()  = "http://localhost:9999";
             request.body() = STRING_MESSAGE;
-            auto response  = qb::http::GET(request);
+            auto response  = qb::http::get(request);
             EXPECT_EQ(response.body().as<std::string>(), STRING_MESSAGE);
             ++msg_count_client_side;
         }

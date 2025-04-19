@@ -130,7 +130,7 @@ protected:
 // Test basic async middleware chaining
 TEST_F(RouterAsyncMiddlewareTest, BasicAsyncMiddlewareChaining) {
     // Add async authentication middleware
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("auth_middleware_start");
 
         // Create safe references for the async operation
@@ -159,7 +159,7 @@ TEST_F(RouterAsyncMiddlewareTest, BasicAsyncMiddlewareChaining) {
     });
 
     // Add async logging middleware
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("logging_middleware_start");
 
         // Create safe references for the async operation
@@ -178,7 +178,7 @@ TEST_F(RouterAsyncMiddlewareTest, BasicAsyncMiddlewareChaining) {
     });
 
     // Add a regular route
-    router->GET("/api/resource", [&](Context &ctx) {
+    router->get("/api/resource", [&](Context &ctx) {
         execution_order.push_back("route_handler");
 
         auto user_id             = ctx.get<std::string>("user_id", "anonymous");
@@ -256,7 +256,7 @@ TEST_F(RouterAsyncMiddlewareTest, BasicAsyncMiddlewareChaining) {
 // Test async middleware with error handling
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithErrorHandling) {
     // Add async middleware that might fail
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("error_prone_middleware_start");
 
         // Check if request has header to trigger error
@@ -287,7 +287,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithErrorHandling) {
     });
 
     // Another async middleware that should only run if first one succeeds
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("second_middleware_start");
 
         // Create safe references for the async operation
@@ -306,7 +306,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithErrorHandling) {
     });
 
     // Add a route handler
-    router->GET("/protected", [&](Context &ctx) {
+    router->get("/protected", [&](Context &ctx) {
         execution_order.push_back("route_handler");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Success";
@@ -385,7 +385,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithErrorHandling) {
 // Test async middleware with deferred request handling
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithDeferredProcessing) {
     // Add middleware that processes requests with specific criteria asynchronously
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         std::string defer_type = ctx.request.header("X-Defer-Type");
 
         if (defer_type.empty()) {
@@ -432,7 +432,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithDeferredProcessing) {
     });
 
     // Regular route handler
-    router->GET("/deferred", [&](Context &ctx) {
+    router->get("/deferred", [&](Context &ctx) {
         execution_order.push_back("route_handler");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Normal response";
@@ -525,7 +525,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithRouteParameters) {
     std::string middleware_user_id;
 
     // A much simpler middleware implementation
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("param_middleware_start");
 
         // Continue the middleware chain without any async operations
@@ -533,7 +533,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithRouteParameters) {
     });
 
     // Route with parameters
-    router->GET("/users/:user_id/profile", [&](Context &ctx) {
+    router->get("/users/:user_id/profile", [&](Context &ctx) {
         execution_order.push_back("route_handler_start");
 
         // Parameters should be available here
@@ -571,13 +571,13 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithRouteParameters) {
 // Test disconnected session handling with async middleware
 TEST_F(RouterAsyncMiddlewareTest, DisconnectedSessionHandling) {
     // Simple middleware without async operations
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("middleware_start");
         next(true);
     });
 
     // Route handler with a simplified approach
-    router->GET("/delayed", [&](Context &ctx) {
+    router->get("/delayed", [&](Context &ctx) {
         execution_order.push_back("handler_start");
 
         // If we can check session directly, do a simple response
@@ -624,21 +624,21 @@ TEST_F(RouterAsyncMiddlewareTest, DisconnectedSessionHandling) {
 // Test middleware execution priority with async middleware
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewarePriority) {
     // High-priority middleware (synchronous for simplicity)
-    router->use_async([&](Context &ctx, std::function<void(bool)> next) {
+    router->use([&](Context &ctx, std::function<void(bool)> next) {
         execution_order.push_back("high_priority_middleware");
         ctx.response.add_header("X-Priority", "high");
         next(true);
     });
 
     // Low-priority middleware (synchronous for simplicity)
-    router->use_async([&](Context &ctx, std::function<void(bool)> next) {
+    router->use([&](Context &ctx, std::function<void(bool)> next) {
         execution_order.push_back("low_priority_middleware");
         ctx.response.add_header("X-Secondary", "applied");
         next(true);
     });
 
     // Route handler with make_async for low priority requests
-    router->GET("/priority", [&](Context &ctx) {
+    router->get("/priority", [&](Context &ctx) {
         execution_order.push_back("handler_start");
 
         // Determine if request is high priority
@@ -729,7 +729,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewarePriority) {
 // Test serialization of parameters in async middleware context
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareParametersSerialization) {
     // Add middleware that adds data to the request context
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("middleware_start");
 
         // Create safe references for the async operation
@@ -748,7 +748,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareParametersSerialization) {
     });
 
     // Add route that uses parameters and context data
-    router->GET("/api/users/:id", [&](Context &ctx) {
+    router->get("/api/users/:id", [&](Context &ctx) {
         execution_order.push_back("route_handler");
 
         std::string id              = ctx.params().param("id");
@@ -787,7 +787,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareParametersSerialization) {
 // Test error recovery in async middleware chain
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareErrorRecovery) {
     // Middleware that will trigger an error sometimes
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("error_middleware_start");
 
         // Check if we should trigger an error
@@ -821,7 +821,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareErrorRecovery) {
     });
 
     // Error recovery middleware
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("recovery_middleware_start");
 
         // Check if previous middleware set an error
@@ -866,7 +866,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareErrorRecovery) {
     });
 
     // Final route handler
-    router->GET("/recovery-test", [&](Context &ctx) {
+    router->get("/recovery-test", [&](Context &ctx) {
         execution_order.push_back("route_handler");
 
         // Check if we had a recovered error
@@ -965,7 +965,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareErrorRecovery) {
 // Test nested async operations in middleware
 TEST_F(RouterAsyncMiddlewareTest, NestedAsyncOperations) {
     // Middleware that performs nested async operations
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("outer_async_start");
 
         // Create safe references for the async operation
@@ -1013,7 +1013,7 @@ TEST_F(RouterAsyncMiddlewareTest, NestedAsyncOperations) {
     });
 
     // Second middleware that depends on the first middleware's nested operations
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("dependent_middleware_start");
 
         // Get data set by previous middleware's nested operations
@@ -1045,7 +1045,7 @@ TEST_F(RouterAsyncMiddlewareTest, NestedAsyncOperations) {
     });
 
     // Final route handler
-    router->GET("/nested-async", [&](Context &ctx) {
+    router->get("/nested-async", [&](Context &ctx) {
         execution_order.push_back("route_handler");
 
         // Get data from both middlewares
@@ -1113,7 +1113,7 @@ TEST_F(RouterAsyncMiddlewareTest, NestedAsyncOperations) {
 // Test timeout and cancellation handling in async middleware
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareTimeoutHandling) {
     // Middleware that can timeout
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("timeout_middleware_start");
 
         // Get request timeout setting
@@ -1217,7 +1217,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareTimeoutHandling) {
     });
 
     // Final route handler
-    router->GET("/timeout-test", [&](Context &ctx) {
+    router->get("/timeout-test", [&](Context &ctx) {
         execution_order.push_back("route_handler");
 
         ctx.response.status_code = HTTP_STATUS_OK;
@@ -1357,7 +1357,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareTimeoutHandling) {
 // Test parallel operations in async middleware
 TEST_F(RouterAsyncMiddlewareTest, ParallelAsyncOperations) {
     // First middleware that initiates independent parallel operations
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("parallel_middleware_start");
 
         // Create safe references
@@ -1410,7 +1410,7 @@ TEST_F(RouterAsyncMiddlewareTest, ParallelAsyncOperations) {
     });
 
     // Second middleware uses results from parallel operations
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("results_middleware_start");
 
         auto data1 = ctx.get<std::string>("parallel_data_1", "missing");
@@ -1433,7 +1433,7 @@ TEST_F(RouterAsyncMiddlewareTest, ParallelAsyncOperations) {
     });
 
     // Final route handler
-    router->GET("/parallel-test", [&](Context &ctx) {
+    router->get("/parallel-test", [&](Context &ctx) {
         execution_order.push_back("route_handler");
 
         // Get data from parallel operations
@@ -1499,7 +1499,7 @@ TEST_F(RouterAsyncMiddlewareTest, ParallelAsyncOperations) {
 // Test middleware that handles request cancellation
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareCancellation) {
     // Middleware that can handle cancellation
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("cancellable_middleware_start");
 
         std::string behavior = ctx.request.header("X-Behavior");
@@ -1555,7 +1555,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareCancellation) {
     });
 
     // Route handler
-    router->GET("/cancellation-test", [&](Context &ctx) {
+    router->get("/cancellation-test", [&](Context &ctx) {
         execution_order.push_back("route_handler");
 
         ctx.response.status_code = HTTP_STATUS_OK;
@@ -1629,7 +1629,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareCancellation) {
 // Test proper handling of early returns from async middleware with multiple operations
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareEarlyReturnsAndCancellation) {
     // Add middleware with parallel operations that can return early
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("parallel_middleware_start");
 
         // Shared state for cancellation and completion tracking
@@ -1705,7 +1705,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareEarlyReturnsAndCancellation) {
     });
 
     // Second middleware that should not run if the first middleware returns early
-    router->use_async([&](Context &ctx, auto next) {
+    router->use([&](Context &ctx, auto next) {
         execution_order.push_back("second_middleware_executed");
 
         // Add header to prove this middleware ran
@@ -1716,7 +1716,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareEarlyReturnsAndCancellation) {
     });
 
     // Define a route
-    router->GET("/parallel-ops", [&](Context &ctx) {
+    router->get("/parallel-ops", [&](Context &ctx) {
         execution_order.push_back("route_handler_executed");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "All operations completed successfully";

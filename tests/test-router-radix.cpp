@@ -62,7 +62,7 @@ protected:
 TEST_F(RouterRadixTest, RadixEnabledByDefault) {
     // Add a simple route
     bool route_called = false;
-    router->GET("/test", [&](Context &ctx) {
+    router->get("/test", [&](Context &ctx) {
         route_called             = true;
         ctx.response.status_code = HTTP_STATUS_OK;
     });
@@ -79,27 +79,27 @@ TEST_F(RouterRadixTest, BasicPathMatching) {
     std::vector<std::string> called_routes;
 
     // Register several routes with different paths
-    router->GET("/", [&](Context &ctx) {
+    router->get("/", [&](Context &ctx) {
         called_routes.push_back("/");
         ctx.response.status_code = HTTP_STATUS_OK;
     });
 
-    router->GET("/users", [&](Context &ctx) {
+    router->get("/users", [&](Context &ctx) {
         called_routes.push_back("/users");
         ctx.response.status_code = HTTP_STATUS_OK;
     });
 
-    router->GET("/users/admins", [&](Context &ctx) {
+    router->get("/users/admins", [&](Context &ctx) {
         called_routes.push_back("/users/admins");
         ctx.response.status_code = HTTP_STATUS_OK;
     });
 
-    router->GET("/posts", [&](Context &ctx) {
+    router->get("/posts", [&](Context &ctx) {
         called_routes.push_back("/posts");
         ctx.response.status_code = HTTP_STATUS_OK;
     });
 
-    router->GET("/posts/featured", [&](Context &ctx) {
+    router->get("/posts/featured", [&](Context &ctx) {
         called_routes.push_back("/posts/featured");
         ctx.response.status_code = HTTP_STATUS_OK;
     });
@@ -160,20 +160,20 @@ TEST_F(RouterRadixTest, BasicPathMatching) {
 // Test path parameters with radix tree
 TEST_F(RouterRadixTest, PathParameters) {
     // Register routes with parameters
-    router->GET("/users/:id", [](Context &ctx) {
+    router->get("/users/:id", [](Context &ctx) {
         std::string id           = ctx.param("id");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "User ID: " + id;
     });
 
-    router->GET("/users/:user_id/posts/:post_id", [](Context &ctx) {
+    router->get("/users/:user_id/posts/:post_id", [](Context &ctx) {
         std::string user_id      = ctx.param("user_id");
         std::string post_id      = ctx.param("post_id");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "User: " + user_id + ", Post: " + post_id;
     });
 
-    router->GET("/products/:category/:product_id", [](Context &ctx) {
+    router->get("/products/:category/:product_id", [](Context &ctx) {
         std::string category     = ctx.param("category");
         std::string product_id   = ctx.param("product_id");
         ctx.response.status_code = HTTP_STATUS_OK;
@@ -213,19 +213,19 @@ TEST_F(RouterRadixTest, PathParameters) {
 
 // Test mixed static and dynamic segments
 TEST_F(RouterRadixTest, MixedSegments) {
-    router->GET("/api/:version/users", [](Context &ctx) {
+    router->get("/api/:version/users", [](Context &ctx) {
         std::string version      = ctx.param("version");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "API version: " + version + ", Users endpoint";
     });
 
-    router->GET("/api/:version/posts", [](Context &ctx) {
+    router->get("/api/:version/posts", [](Context &ctx) {
         std::string version      = ctx.param("version");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "API version: " + version + ", Posts endpoint";
     });
 
-    router->GET("/static/files/:filename", [](Context &ctx) {
+    router->get("/static/files/:filename", [](Context &ctx) {
         std::string filename     = ctx.param("filename");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Serving file: " + filename;
@@ -267,12 +267,12 @@ TEST_F(RouterRadixTest, MixedSegments) {
 // Test route conflict resolution
 TEST_F(RouterRadixTest, RouteConflicts) {
     // Routes with parameters should be lower priority than static routes
-    router->GET("/users/profile", [](Context &ctx) {
+    router->get("/users/profile", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Static profile route";
     });
 
-    router->GET("/users/:id", [](Context &ctx) {
+    router->get("/users/:id", [](Context &ctx) {
         std::string id           = ctx.param("id");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "User ID: " + id;
@@ -306,7 +306,7 @@ TEST_F(RouterRadixTest, LargeNumberOfRoutes) {
 
     for (int i = 0; i < 15; i++) {
         std::string path = "/item/" + std::to_string(i);
-        router->GET(path, [i](Context &ctx) {
+        router->get(path, [i](Context &ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body()      = "Item " + std::to_string(i);
         });
@@ -331,23 +331,23 @@ TEST_F(RouterRadixTest, PerformanceBenchmark) {
     auto regexRouter = std::make_unique<TestRouter>();
 
     // Add a variety of routes for a realistic test
-    radixRouter->GET("/",
+    radixRouter->get("/",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    radixRouter->GET("/users",
+    radixRouter->get("/users",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    radixRouter->GET("/users/:id",
+    radixRouter->get("/users/:id",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
     // Same routes for regex router
-    regexRouter->GET("/",
+    regexRouter->get("/",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    regexRouter->GET("/users",
+    regexRouter->get("/users",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    regexRouter->GET("/users/:id",
+    regexRouter->get("/users/:id",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
     // Enable radix tree for one router
@@ -389,47 +389,47 @@ TEST_F(RouterRadixTest, PerformanceBenchmark) {
 // Test manual enabling of radix routing for specific HTTP methods
 TEST_F(RouterRadixTest, SelectiveEnabling) {
     // Add routes for different HTTP methods
-    router->GET("/test", [](Context &ctx) {
+    router->get("/test", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
-        ctx.response.body()      = "GET response";
+        ctx.response.body()      = "get response";
     });
 
-    router->POST("/test", [](Context &ctx) {
+    router->post("/test", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_CREATED;
-        ctx.response.body()      = "POST response";
+        ctx.response.body()      = "post response";
     });
 
-    // Enable radix routing only for GET
+    // Enable radix routing only for get
     router->force_enable_radix_tree_for_method(HTTP_GET);
 
-    // Test GET request (should use radix routing)
+    // Test get request (should use radix routing)
     {
         auto req = createRequest(HTTP_GET, "/test");
         EXPECT_TRUE(router->route(session, req)); // Pass shared_ptr directly
         EXPECT_EQ(session->_response.status_code, HTTP_STATUS_OK);
-        EXPECT_EQ(session->_response.body().as<std::string>(), "GET response");
+        EXPECT_EQ(session->_response.body().as<std::string>(), "get response");
     }
 
-    // Test POST request (should use regex routing)
+    // Test post request (should use regex routing)
     {
         session->_response = qb::http::Response(); // Reset the response
         auto req           = createRequest(HTTP_POST, "/test");
         EXPECT_TRUE(router->route(session, req)); // Pass shared_ptr directly
         EXPECT_EQ(session->_response.status_code, HTTP_STATUS_CREATED);
-        EXPECT_EQ(session->_response.body().as<std::string>(), "POST response");
+        EXPECT_EQ(session->_response.body().as<std::string>(), "post response");
     }
 }
 
 // Test path parameters with special characters
 TEST_F(RouterRadixTest, ParametersWithSpecialChars) {
     // Register routes that expect parameters with special characters
-    router->GET("/users/:username", [](Context &ctx) {
+    router->get("/users/:username", [](Context &ctx) {
         std::string username     = ctx.param("username");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Username: " + username;
     });
 
-    router->GET("/files/:filename", [](Context &ctx) {
+    router->get("/files/:filename", [](Context &ctx) {
         std::string filename     = ctx.param("filename");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Filename: " + filename;
@@ -472,12 +472,12 @@ TEST_F(RouterRadixTest, ParametersWithSpecialChars) {
 // Test for slash handling in routes
 TEST_F(RouterRadixTest, SlashHandling) {
     // Register routes with and without trailing slashes
-    router->GET("/empty/", [](Context &ctx) {
+    router->get("/empty/", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Empty trailing slash";
     });
 
-    router->GET("/empty", [](Context &ctx) {
+    router->get("/empty", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "No trailing slash";
     });
@@ -506,7 +506,7 @@ TEST_F(RouterRadixTest, SlashHandling) {
 TEST_F(RouterRadixTest, RoutePriorities) {
     // Both routes could match, but the first one should take precedence due to being
     // more specific
-    router->GET("/exact/route", [](Context &ctx) {
+    router->get("/exact/route", [](Context &ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Exact route";
     });
@@ -515,7 +515,7 @@ TEST_F(RouterRadixTest, RoutePriorities) {
     // expected)
     router->enable_radix_tree(false);
 
-    router->GET("/exact/:param", [](Context &ctx) {
+    router->get("/exact/:param", [](Context &ctx) {
         std::string param        = ctx.param("param");
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body()      = "Parameter route: " + param;
@@ -543,7 +543,7 @@ TEST_F(RouterRadixTest, RoutePriorities) {
 // Test simplified parameter paths
 TEST_F(RouterRadixTest, SimpleParameters) {
     // Register a simple route with one parameter
-    router->GET("/users/:id", [](Context &ctx) {
+    router->get("/users/:id", [](Context &ctx) {
         std::string id = ctx.param("id");
 
         ctx.response.status_code = HTTP_STATUS_OK;
@@ -569,23 +569,23 @@ TEST_F(RouterRadixTest, SimpleBenchmark) {
     auto regexRouter = std::make_unique<TestRouter>();
 
     // Add a few simple routes for benchmarking
-    radixRouter->GET("/",
+    radixRouter->get("/",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    radixRouter->GET("/users",
+    radixRouter->get("/users",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    radixRouter->GET("/posts",
+    radixRouter->get("/posts",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
     // Add the same routes to the regex router
-    regexRouter->GET("/",
+    regexRouter->get("/",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    regexRouter->GET("/users",
+    regexRouter->get("/users",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
-    regexRouter->GET("/posts",
+    regexRouter->get("/posts",
                      [](Context &ctx) { ctx.response.status_code = HTTP_STATUS_OK; });
 
     // Enable radix tree for one router
