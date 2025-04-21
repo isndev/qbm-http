@@ -221,7 +221,7 @@ content_encoding(std::string_view const &accept_encoding) {
     return "";
 }
 
-template struct qb::http::THeaders<std::string>;
-template struct qb::http::THeaders<std::string_view>;
+template class qb::http::THeaders<std::string>;
+template class qb::http::THeaders<std::string_view>;
 
 } // namespace qb::http

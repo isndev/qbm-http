@@ -303,14 +303,6 @@ Router<Session, String>::route_context(std::shared_ptr<Session> session, Context
     return ctx.handled;
 }
 
-// Legacy method to route a context (alias of route_context)
-// template <typename Session, typename String>
-// bool Router<Session, String>::route(Session &session, Context& ctx,
-// std::shared_ptr<Context> context_ptr,
-//                           bool skip_async_middleware) {
-//    return route_context(session, ctx, context_ptr, skip_async_middleware);
-//}
-
 // Method to log a request
 template <typename Session, typename String>
 void

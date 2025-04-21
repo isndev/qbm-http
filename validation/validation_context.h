@@ -12,14 +12,14 @@ namespace qb::http {
  * 
  * Maps error codes to error messages for a specific field.
  */
-using FieldErrors = std::unordered_map<std::string, std::string>;
+using FieldErrors = qb::unordered_map<std::string, std::string>;
 
 /**
  * @brief Type definition for validation errors
  * 
  * Maps field names to their validation errors.
  */
-using ValidationErrors = std::unordered_map<std::string, FieldErrors>;
+using ValidationErrors = qb::unordered_map<std::string, FieldErrors>;
 
 /**
  * @brief Context for validation operations

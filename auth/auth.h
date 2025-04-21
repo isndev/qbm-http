@@ -1,6 +1,7 @@
 #ifndef QBM_HTTP_AUTH_AUTH_H
 #define QBM_HTTP_AUTH_AUTH_H
 
+#include <qb/io/crypto_jwt.h>
 #include "user.h"
 #include "options.h"
 #include "manager.h"

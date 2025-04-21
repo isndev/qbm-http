@@ -1,10 +1,10 @@
-#ifndef QBM_HTTP_AUTH_USER_H
-#define QBM_HTTP_AUTH_USER_H
+
+#pragma once
 
 #include <string>
-#include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <qb/system/container/unordered_map.h>
 
 namespace qb {
 namespace http {
@@ -20,7 +20,7 @@ struct User {
     std::string                                  id;
     std::string                                  username;
     std::vector<std::string>                     roles;
-    std::unordered_map<std::string, std::string> metadata;
+    qb::unordered_map<std::string, std::string> metadata;
 
     /**
      * @brief Check if the user has a specific role
@@ -64,5 +64,3 @@ using AuthUser = User;
 } // namespace auth
 } // namespace http
 } // namespace qb
-
-#endif // QBM_HTTP_AUTH_USER_H 

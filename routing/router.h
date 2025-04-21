@@ -339,8 +339,8 @@ private:
     std::set<std::uintptr_t> _cancelled_requests;
 
     // New radix tree-based routes
-    std::unordered_map<http_method, RadixTree> _radix_routes;
-    std::unordered_map<http_method, bool>      _radix_enabled;
+    qb::unordered_map<http_method, RadixTree> _radix_routes;
+    qb::unordered_map<http_method, bool>      _radix_enabled;
 
     // Whether to use radix tree for route matching
     bool _use_radix_tree;
