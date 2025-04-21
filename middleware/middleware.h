@@ -13,6 +13,7 @@
 #include "rate_limit.h" 
 #include "recaptcha.h"
 #include "jwt.h"
+#include "auth.h"
 
 // Additional middleware components can be added here
 

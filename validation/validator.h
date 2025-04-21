@@ -148,7 +148,7 @@ public:
         // Apply query parameter validation if configured
         if (_query_validator) {
             // Convert URI query parameters to the format needed by the validator
-            std::unordered_map<std::string, std::string> query_params;
+            qb::unordered_map<std::string, std::string> query_params;
             for (const auto& [param, values] : request.queries()) {
                 if (!values.empty()) {
                     query_params[param] = values[0];

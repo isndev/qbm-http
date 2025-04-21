@@ -1,9 +1,9 @@
 #pragma once
 
-#include <qb/json.h>
 #include <functional>
 #include <string>
-#include <unordered_map>
+#include <qb/json.h>
+#include <qb/system/container/unordered_map.h>
 
 #include "./validation_types.h"
 
@@ -49,7 +49,7 @@ public:
     [[nodiscard]] static SanitizerFunc get_predefined_sanitizer(const std::string& name);
     
 private:
-    std::unordered_map<std::string, SanitizerFunc> _rules;
+    qb::unordered_map<std::string, SanitizerFunc> _rules;
     
     /**
      * @brief Apply a sanitizer to a JSON value at the specified path

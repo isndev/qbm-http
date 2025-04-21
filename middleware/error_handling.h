@@ -1,10 +1,10 @@
 #pragma once
 
-#include "middleware_interface.h"
 #include <memory>
 #include <functional>
 #include <string>
-#include <unordered_map>
+#include <qb/system/container/unordered_map.h>
+#include "./middleware_interface.h"
 
 namespace qb::http {
 
@@ -114,7 +114,7 @@ private:
     }
     
     std::string _name;
-    std::unordered_map<http_status, StatusHandler> _status_handlers;
+    qb::unordered_map<http_status, StatusHandler> _status_handlers;
     ErrorHandler _generic_handler;
 };
 

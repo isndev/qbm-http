@@ -1,9 +1,9 @@
 #pragma once
 
-#include "middleware_interface.h"
-#include "../validation/validator.h"
 #include <memory>
 #include <string>
+#include "./middleware_interface.h"
+#include "../validation/validator.h"
 
 namespace qb::http {
 

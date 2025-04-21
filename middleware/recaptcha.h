@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "middleware_interface.h"
+#include "./middleware_interface.h"
 #include "../http.h"
 
 namespace qb::http {

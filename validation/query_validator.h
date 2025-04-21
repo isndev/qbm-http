@@ -35,20 +35,20 @@ public:
      * @param ctx Validation context for error reporting
      * @return true if validation passed, false otherwise
      */
-    bool validate(const std::unordered_map<std::string, std::string>& params, 
+    bool validate(const qb::unordered_map<std::string, std::string>& params, 
                 ValidationContext& ctx) const;
     
     /**
      * @brief Get all parameter rules
      * @return Map of parameter names to their rules
      */
-    [[nodiscard]] const std::unordered_map<std::string, QueryParamRules>& 
+    [[nodiscard]] const qb::unordered_map<std::string, QueryParamRules>& 
     param_rules() const {
         return _param_rules;
     }
     
 private:
-    std::unordered_map<std::string, QueryParamRules> _param_rules;
+    qb::unordered_map<std::string, QueryParamRules> _param_rules;
     
     /**
      * @brief Validate a parameter value

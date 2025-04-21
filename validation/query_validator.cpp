@@ -9,7 +9,7 @@ void QueryValidator::add_param(const std::string& param_name, const QueryParamRu
     _param_rules[param_name] = rules;
 }
 
-bool QueryValidator::validate(const std::unordered_map<std::string, std::string>& params,
+bool QueryValidator::validate(const qb::unordered_map<std::string, std::string>& params,
                             ValidationContext& ctx) const {
     bool valid = true;
     

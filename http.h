@@ -12,7 +12,7 @@
  * - Form data and multipart content handling
  * - Cookie management and parsing
  * - RESTful routing with parameter extraction
- * - High-performance message parsing using http
+ * - High-performance message parsing using llhttp
  * - Support for both string and string_view based operations
  * - WebSocket upgrade support
  *
@@ -35,7 +35,7 @@
  * @see qb::http::async
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2021 isndev (www.qbaf.io)
+ * @copyright Copyright (c) 2011-2025 isndev (www.qbaf.io)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -112,11 +112,11 @@ namespace qb::http {
  * @brief HTTP message parser
  * @tparam MessageType The message type to parse (Request or Response)
  *
- * Parser based on http that handles HTTP messages. It processes
+ * Parser based on llhttp that handles HTTP messages. It processes
  * headers, body chunks, and status information according to the
  * HTTP protocol specification. Key features include:
  *
- * - High-performance message parsing using the http library
+ * - High-performance message parsing using the llhttp library
  * - Event-driven callback architecture for efficient processing
  * - Support for chunked transfer encoding
  * - Header field and value parsing with case-insensitive handling
@@ -133,11 +133,31 @@ template <typename MessageType>
 struct Parser : public http_t {
     using String = typename MessageType::string_type;
 
+    /**
+     * @brief Default callback for HTTP data
+     * 
+     * This is a placeholder callback that does nothing with the data.
+     * It's used as a default for callbacks that aren't explicitly implemented.
+     * 
+     * @param parser Parser instance
+     * @param at Pointer to data
+     * @param length Length of data
+     * @return Always returns 0 (success)
+     */
     static int
     default_http_data_cb(http_t *, const char *, size_t) {
         return 0;
     }
 
+    /**
+     * @brief Default callback for HTTP events
+     * 
+     * This is a placeholder callback for HTTP events that don't need
+     * special handling in this implementation.
+     * 
+     * @param parser Parser instance
+     * @return Always returns 0 (success)
+     */
     static int
     default_http_cb(http_t *) {
         return 0;
@@ -152,6 +172,8 @@ struct Parser : public http_t {
      *
      * Called when the URL portion of a request is parsed.
      * Extracts and stores the URL for further processing.
+     * This is only used for request messages; for response
+     * messages, this callback does nothing.
      */
     static int
     on_url(http_t *parser, const char *at, size_t length) {
@@ -175,6 +197,8 @@ struct Parser : public http_t {
      *
      * Called when the status message portion of a response is parsed.
      * Extracts and stores the status message for the response.
+     * This is only used for response messages; for request
+     * messages, this callback does nothing.
      */
     static int
     on_status(http_t *parser, const char *at, size_t length) {
@@ -195,6 +219,7 @@ struct Parser : public http_t {
      *
      * Called when a header field name is parsed.
      * Stores the header field name for association with its value.
+     * Header field names are case-insensitive as per HTTP specification.
      */
     static int
     on_header_field(http_t *parser, const char *at, size_t length) {
@@ -211,6 +236,7 @@ struct Parser : public http_t {
      *
      * Called when a header value is parsed.
      * Associates the value with the previously parsed header field name.
+     * Multiple values for the same header are stored as a vector.
      */
     static int
     on_header_value(http_t *parser, const char *at, size_t length) {
@@ -223,10 +249,18 @@ struct Parser : public http_t {
     /**
      * @brief Headers complete callback
      * @param parser Parser instance
-     * @return Result code (0 for success)
+     * @return HPE_PAUSED to pause the parser after headers
      *
      * Called when all headers have been parsed.
      * Finalizes header processing and prepares for body parsing.
+     * This callback:
+     * 1. Sets the HTTP version
+     * 2. Reserves memory for the body based on Content-Length if available
+     * 3. Sets the upgrade flag if applicable
+     * 4. Marks headers as completed and pauses the parser
+     * 
+     * The parser is paused to allow the application to process headers
+     * before continuing with the body.
      */
     static int
     on_headers_complete(http_t *parser) {
@@ -249,7 +283,9 @@ struct Parser : public http_t {
      * @return Result code (0 for success)
      *
      * Called when a portion of the message body is parsed.
-     * Accumulates the body data for the message.
+     * Accumulates the body data in the chunked buffer.
+     * This is efficient for handling large bodies or
+     * chunked transfer encoding.
      */
     static int
     on_body(http_t *parser, const char *at, size_t length) {
@@ -261,10 +297,13 @@ struct Parser : public http_t {
     /**
      * @brief Message complete callback
      * @param parser Parser instance
-     * @return Result code (0 for success)
+     * @return 1 to signal message completion
      *
      * Called when the entire HTTP message has been parsed.
-     * Finalizes message processing and signals completion.
+     * Finalizes message processing by:
+     * 1. Setting the content type from the Content-Type header
+     * 2. Moving the accumulated body data to the message body
+     * 3. Returning 1 to signal message completion
      */
     static int
     on_message_complete(http_t *parser) {
@@ -275,9 +314,17 @@ struct Parser : public http_t {
     }
 
 protected:
-    MessageType msg;
+    MessageType msg;  ///< The message being constructed (Request or Response)
 
 private:
+    /**
+     * @brief HTTP parser settings with callback functions
+     * 
+     * This static configuration defines all the callbacks used by the
+     * llhttp parser. Most callbacks are set to default no-op functions,
+     * while the essential ones are set to the specific handlers defined
+     * in this class.
+     */
     static const http_settings_s inline settings{
         &Parser::default_http_cb,      // on message begin
         &Parser::default_http_data_cb, // on protocol
@@ -305,11 +352,17 @@ private:
         &Parser::default_http_cb,      // on chunk complete
         &Parser::default_http_cb       // on reset
     };
-    String                    _last_header_key;
-    bool                      _headers_completed = false;
-    qb::allocator::pipe<char> _chunked;
+    String                    _last_header_key;   ///< Storage for the current header field name
+    bool                      _headers_completed = false; ///< Flag indicating if headers have been fully parsed
+    qb::allocator::pipe<char> _chunked;          ///< Buffer for body content
 
 public:
+    /**
+     * @brief Constructor
+     * 
+     * Initializes the parser and immediately calls reset() to prepare
+     * it for parsing a new message.
+     */
     Parser() noexcept
         : http__internal_s() {
         reset();
@@ -339,8 +392,12 @@ public:
      * @brief Reset the parser state
      *
      * Clears all parser state and prepares it for parsing a new message.
-     * This includes resetting internal fields like header name/value,
-     * content length, message flags, and parser callbacks.
+     * This includes:
+     * 1. Reinitializing the parser with the appropriate message type
+     * 2. Setting the data pointer to this instance for callbacks
+     * 3. Resetting the message object
+     * 4. Clearing the headers_completed flag
+     * 5. Clearing any accumulated body data
      *
      * This method should be called before reusing the parser for a new
      * message or after an error occurs to restore the parser to a clean state.
@@ -363,7 +420,11 @@ public:
      * parsing the message body.
      *
      * This is particularly useful for handling chunked transfer encoding
-     * or when processing a message in multiple stages.
+     * or when processing a message in multiple stages, such as:
+     * 1. Parse headers
+     * 2. Examine Content-Type, Content-Length, etc.
+     * 3. Decide how to handle the body
+     * 4. Resume parsing to process the body
      */
     void
     resume() noexcept {
@@ -395,6 +456,11 @@ public:
      * section of the HTTP message. This is useful for determining
      * when header information is available for processing but before
      * the full message (including body) has been parsed.
+     * 
+     * Common uses include:
+     * - Early rejection of requests with invalid headers
+     * - Content negotiation before processing the body
+     * - Determining if a request should be upgraded (e.g., to WebSockets)
      */
     [[nodiscard]] bool
     headers_completed() const noexcept {

@@ -2,13 +2,10 @@
 #include <thread>
 #include <filesystem>
 #include <fstream>
-#include <qb/io/crypto_jwt.h>
-#include <qb/json.h>
 #include "../auth/auth.h"
-#include "../middleware/auth_middleware.h"
-#include "../middleware/middleware_interface.h"
+#include "../middleware/auth.h"
 #include "../routing/router.h"
-#include "../not-qb/llhttp/include/llhttp.h"
+#include "../routing/router.tpp"
 
 // Forward declarations for helper functions 
 std::string readFileContents(const std::string &filename);
@@ -41,7 +38,7 @@ public:
 class AuthMiddlewareTest : public ::testing::Test {
 protected:
     std::string keys_path;
-    std::shared_ptr<qb::http::auth::Manager> auth_manager;
+    qb::http::auth::Options auth_options;
     qb::http::auth::User test_user;
     std::string token;
     bool done_callbacks_executed = false;
@@ -51,12 +48,12 @@ protected:
         keys_path = "/tmp/qb_auth_test_keys";
         generateTestKeys(keys_path);
 
-        // Setup auth manager with HMAC algorithm for simplicity
-        qb::http::auth::Options options;
-        options.algorithm(qb::http::auth::Options::Algorithm::HMAC_SHA256);
-        options.secret_key("test-secret-key");
+        // Setup auth options with HMAC algorithm for simplicity
+        auth_options.algorithm(qb::http::auth::Options::Algorithm::HMAC_SHA256);
+        auth_options.secret_key("test-secret-key");
 
-        auth_manager = std::make_shared<qb::http::auth::Manager>(options);
+        // Create auth manager to generate tokens for testing
+        qb::http::auth::Manager auth_manager(auth_options);
 
         // Create test user
         test_user.id = "user123";
@@ -65,7 +62,7 @@ protected:
         test_user.metadata["email"] = "testuser@example.com";
 
         // Generate token
-        token = auth_manager->generate_token(test_user);
+        token = auth_manager.generate_token(test_user);
     }
 
     void TearDown() override {
@@ -95,12 +92,18 @@ protected:
 
 // Test authentication middleware with valid token
 TEST_F(AuthMiddlewareTest, ValidTokenAuthentication) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
     
+    // Create context with valid token
     auto ctx = createContext("Bearer " + token);
-    bool result = middleware.authenticate()(ctx);
     
-    EXPECT_TRUE(result);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_continue());
+    EXPECT_FALSE(result.should_stop());
     EXPECT_TRUE(ctx.has("user"));
     
     // Verify that user data was properly set in context
@@ -112,87 +115,121 @@ TEST_F(AuthMiddlewareTest, ValidTokenAuthentication) {
 
 // Test authentication middleware with missing token
 TEST_F(AuthMiddlewareTest, MissingToken) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
     
-    auto ctx = createContext(); // No authorization header
-    bool result = middleware.authenticate()(ctx);
+    // Create context without authorization header
+    auto ctx = createContext();
     
-    EXPECT_FALSE(result);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_stop());
+    EXPECT_FALSE(result.should_continue());
     EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
     EXPECT_FALSE(ctx.has("user"));
 }
 
 // Test authentication middleware with invalid token
 TEST_F(AuthMiddlewareTest, InvalidToken) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
     
+    // Create context with invalid token
     auto ctx = createContext("Bearer invalid.token.here");
-    bool result = middleware.authenticate()(ctx);
     
-    EXPECT_FALSE(result);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_stop());
+    EXPECT_FALSE(result.should_continue());
     EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
     EXPECT_FALSE(ctx.has("user"));
 }
 
 // Test authorization middleware with valid roles
 TEST_F(AuthMiddlewareTest, ValidRoleAuthorization) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options and required role
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+    middleware.with_roles({"editor"});
     
-    // First authenticate to set user in context
+    // Create context with valid token
     auto ctx = createContext("Bearer " + token);
-    middleware.authenticate()(ctx);
     
-    // Then authorize with a role the user has
-    bool result = middleware.authorize({"editor"})(ctx);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
     
-    EXPECT_TRUE(result);
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_continue());
+    EXPECT_FALSE(result.should_stop());
+    EXPECT_TRUE(ctx.has("user"));
     EXPECT_NE(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
 }
 
 // Test authorization middleware with invalid roles
 TEST_F(AuthMiddlewareTest, InvalidRoleAuthorization) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options and required role
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+    middleware.with_roles({"admin"});
     
-    // First authenticate to set user in context
+    // Create context with valid token but insufficient roles
     auto ctx = createContext("Bearer " + token);
-    middleware.authenticate()(ctx);
     
-    // Then authorize with a role the user doesn't have
-    bool result = middleware.authorize({"admin"})(ctx);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
     
-    EXPECT_FALSE(result);
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_stop());
+    EXPECT_FALSE(result.should_continue());
     EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
 }
 
 // Test authorization middleware requiring all roles
 TEST_F(AuthMiddlewareTest, RequireAllRoles) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Test when user has all required roles
+    {
+        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+        middleware.with_roles({"user", "editor"}, true); // require_all = true
+        
+        auto ctx = createContext("Bearer " + token);
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_continue());
+        EXPECT_FALSE(result.should_stop());
+        EXPECT_TRUE(ctx.has("user"));
+    }
     
-    // First authenticate to set user in context
-    auto ctx = createContext("Bearer " + token);
-    middleware.authenticate()(ctx);
-    
-    // User has both of these roles
-    bool result = middleware.authorize({"user", "editor"}, true)(ctx);
-    EXPECT_TRUE(result);
-    
-    // User doesn't have all of these roles
-    auto ctx2 = createContext("Bearer " + token);
-    middleware.authenticate()(ctx2);
-    bool result2 = middleware.authorize({"user", "admin"}, true)(ctx2);
-    EXPECT_FALSE(result2);
-    EXPECT_EQ(ctx2.response.status_code, HTTP_STATUS_FORBIDDEN);
+    // Test when user doesn't have all required roles
+    {
+        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+        middleware.with_roles({"user", "admin"}, true); // require_all = true
+        
+        auto ctx = createContext("Bearer " + token);
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_stop());
+        EXPECT_FALSE(result.should_continue());
+        EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
+    }
 }
 
 // Test custom user context key
 TEST_F(AuthMiddlewareTest, CustomUserContextKey) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(
-        auth_manager->get_options(), "custom_user");
+    // Create middleware with custom user context key
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+    middleware.with_user_context_key("custom_user");
     
+    // Create context with valid token
     auto ctx = createContext("Bearer " + token);
-    bool result = middleware.authenticate()(ctx);
     
-    EXPECT_TRUE(result);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_continue());
+    EXPECT_FALSE(result.should_stop());
     EXPECT_FALSE(ctx.has("user")); // Default key not used
     EXPECT_TRUE(ctx.has("custom_user")); // Custom key used instead
     
@@ -203,24 +240,28 @@ TEST_F(AuthMiddlewareTest, CustomUserContextKey) {
 // Test token expiration within middleware
 TEST_F(AuthMiddlewareTest, ExpiredTokenMiddleware) {
     // Create options with short expiration
-    qb::http::auth::Options options_expired;
-    options_expired.algorithm(qb::http::auth::Options::Algorithm::HMAC_SHA256);
-    options_expired.secret_key("test-secret-key");
+    qb::http::auth::Options options_expired = auth_options;
     options_expired.token_expiration(std::chrono::seconds(1));
     
-    auto expired_manager = std::make_shared<qb::http::auth::Manager>(options_expired);
-    std::string expired_token = expired_manager->generate_token(test_user);
+    // Create auth manager with short expiration options
+    qb::http::auth::Manager expired_manager(options_expired);
+    std::string expired_token = expired_manager.generate_token(test_user);
     
     // Wait for the token to expire
     std::this_thread::sleep_for(std::chrono::seconds(2));
     
-    // Use the original manager (with default expiration) for middleware verification
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with original auth options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
     
+    // Create context with expired token
     auto ctx = createContext("Bearer " + expired_token);
-    bool result = middleware.authenticate()(ctx);
     
-    EXPECT_FALSE(result);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_stop());
+    EXPECT_FALSE(result.should_continue());
     EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
     EXPECT_FALSE(ctx.has("user"));
 }
@@ -251,13 +292,19 @@ TEST_F(AuthMiddlewareTest, NotYetValidTokenMiddleware) {
     
     std::string nbf_token = qb::jwt::create(claims_map, jwt_options);
     
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
     
+    // Create context with future token
     auto ctx = createContext("Bearer " + nbf_token);
-    bool result = middleware.authenticate()(ctx);
     
-    EXPECT_FALSE(result);
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED); 
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_stop());
+    EXPECT_FALSE(result.should_continue());
+    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
     EXPECT_FALSE(ctx.has("user"));
 }
 
@@ -271,90 +318,125 @@ TEST_F(AuthMiddlewareTest, DISABLED_RSAAlgorithm) {
         GTEST_SKIP() << "Skipping RSA test due to missing key files: " << e.what();
     }
 
+    // Create RSA auth options
     qb::http::auth::Options rsa_options;
     rsa_options.algorithm(qb::http::auth::Options::Algorithm::RSA_SHA256);
     rsa_options.private_key(rsa_private_key);
     rsa_options.public_key(rsa_public_key);
     
-    auto rsa_manager = std::make_shared<qb::http::auth::Manager>(rsa_options);
-    std::string rsa_token = rsa_manager->generate_token(test_user);
+    // Create auth manager with RSA options
+    qb::http::auth::Manager rsa_manager(rsa_options);
+    std::string rsa_token = rsa_manager.generate_token(test_user);
     
-    // Middleware needs public key for verification
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(rsa_options);
+    // Create middleware with RSA options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(rsa_options);
     
+    // Create context with RSA token
     auto ctx = createContext("Bearer " + rsa_token);
-    bool result = middleware.authenticate()(ctx);
     
-    EXPECT_TRUE(result);
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_continue());
+    EXPECT_FALSE(result.should_stop());
     EXPECT_TRUE(ctx.has("user"));
+    
     const auto& user = ctx.get<qb::http::auth::User>("user");
     EXPECT_EQ(user.id, test_user.id);
     
     // Test verification failure with wrong public key
     qb::http::auth::Options wrong_key_options = rsa_options;
     wrong_key_options.public_key("-----BEGIN PUBLIC KEY-----\n...invalid key...\n-----END PUBLIC KEY-----");
-    auto wrong_key_middleware = qb::http::middleware::AuthMiddleware<MockSession>(wrong_key_options);
     
+    auto wrong_key_middleware = qb::http::AuthMiddleware<MockSession>(wrong_key_options);
     auto ctx_fail = createContext("Bearer " + rsa_token);
-    bool result_fail = wrong_key_middleware.authenticate()(ctx_fail);
-    EXPECT_FALSE(result_fail);
+    auto result_fail = wrong_key_middleware.process(ctx_fail);
+    
+    EXPECT_TRUE(result_fail.should_stop());
+    EXPECT_FALSE(result_fail.should_continue());
     EXPECT_EQ(ctx_fail.response.status_code, HTTP_STATUS_UNAUTHORIZED);
 }
 
 // Test Custom Authentication Scheme
 TEST_F(AuthMiddlewareTest, CustomAuthScheme) {
-    qb::http::auth::Options custom_scheme_options;
-    custom_scheme_options.algorithm(qb::http::auth::Options::Algorithm::HMAC_SHA256);
-    custom_scheme_options.secret_key("test-secret-key");
+    // Create options with custom auth scheme
+    qb::http::auth::Options custom_scheme_options = auth_options;
     custom_scheme_options.auth_scheme("JWT"); // Use JWT instead of Bearer
     
-    auto custom_manager = std::make_shared<qb::http::auth::Manager>(custom_scheme_options);
-    std::string custom_token = custom_manager->generate_token(test_user);
+    // Create auth manager with custom scheme
+    qb::http::auth::Manager custom_manager(custom_scheme_options);
+    std::string custom_token = custom_manager.generate_token(test_user);
     
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(custom_scheme_options);
+    // Create middleware with custom scheme options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(custom_scheme_options);
 
     // Test with correct custom scheme
     auto ctx_correct = createContext("JWT " + custom_token); // Note: JWT scheme used
-    bool result_correct = middleware.authenticate()(ctx_correct);
-    EXPECT_TRUE(result_correct);
+    auto result_correct = middleware.process(ctx_correct);
+    
+    EXPECT_TRUE(result_correct.should_continue());
+    EXPECT_FALSE(result_correct.should_stop());
     EXPECT_TRUE(ctx_correct.has("user"));
 
     // Test with default Bearer scheme (should fail)
     auto ctx_wrong_scheme = createContext("Bearer " + custom_token);
-    bool result_wrong_scheme = middleware.authenticate()(ctx_wrong_scheme);
-    EXPECT_FALSE(result_wrong_scheme);
+    auto result_wrong_scheme = middleware.process(ctx_wrong_scheme);
+    
+    EXPECT_TRUE(result_wrong_scheme.should_stop());
+    EXPECT_FALSE(result_wrong_scheme.should_continue());
     EXPECT_EQ(ctx_wrong_scheme.response.status_code, HTTP_STATUS_UNAUTHORIZED);
 }
 
 // Test Authorization with Empty Roles
 TEST_F(AuthMiddlewareTest, AuthorizationEmptyRoles) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
-
     // Create a user with no roles
     qb::http::auth::User user_no_roles;
     user_no_roles.id = "user_no_roles";
     user_no_roles.username = "norolesuser";
-    std::string token_no_roles = auth_manager->generate_token(user_no_roles);
     
-    // Authenticate the user with no roles
-    auto ctx_no_roles = createContext("Bearer " + token_no_roles);
-    middleware.authenticate()(ctx_no_roles);
-    EXPECT_TRUE(ctx_no_roles.has("user"));
-
-    // Test authorizing with an empty required roles list (should succeed)
-    bool result_empty_required = middleware.authorize({}) (ctx_no_roles);
-    EXPECT_TRUE(result_empty_required);
-
-    // Test authorizing with a non-empty required roles list (should fail)
-    bool result_non_empty_required = middleware.authorize({"admin"}) (ctx_no_roles);
-    EXPECT_FALSE(result_non_empty_required);
-    EXPECT_EQ(ctx_no_roles.response.status_code, HTTP_STATUS_FORBIDDEN);
-
-    // Test authorizing a user WITH roles against an empty required list (should succeed)
-    auto ctx_with_roles = createContext("Bearer " + token); // Use original user with roles
-    middleware.authenticate()(ctx_with_roles);
-    bool result_empty_required_with_roles = middleware.authorize({}) (ctx_with_roles);
-    EXPECT_TRUE(result_empty_required_with_roles);
+    // Generate token for user with no roles
+    qb::http::auth::Manager auth_manager(auth_options);
+    std::string token_no_roles = auth_manager.generate_token(user_no_roles);
+    
+    // Test with empty required roles (should succeed)
+    {
+        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+        // No roles specified (empty by default)
+        
+        auto ctx = createContext("Bearer " + token_no_roles);
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_continue());
+        EXPECT_FALSE(result.should_stop());
+        EXPECT_TRUE(ctx.has("user"));
+    }
+    
+    // Test with non-empty required roles (should fail)
+    {
+        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+        middleware.with_roles({"admin"});
+        
+        auto ctx = createContext("Bearer " + token_no_roles);
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_stop());
+        EXPECT_FALSE(result.should_continue());
+        EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
+    }
+    
+    // Test with user WITH roles against an empty required list (should succeed)
+    {
+        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+        // No roles specified (empty by default)
+        
+        auto ctx = createContext("Bearer " + token); // Use original user with roles
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_continue());
+        EXPECT_FALSE(result.should_stop());
+        EXPECT_TRUE(ctx.has("user"));
+    }
 }
 
 // Test Clock Skew Tolerance
@@ -367,23 +449,28 @@ TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
             {"iat", std::time(nullptr) - 60},
             {"exp", std::time(nullptr) - 10} 
         };
+        
         qb::jwt::CreateOptions jwt_options_exp;
         jwt_options_exp.algorithm = qb::jwt::Algorithm::HS256;
         jwt_options_exp.key = "test-secret-key";
+        
         std::map<std::string, std::string> claims_map_exp;
         for (auto it = payload_exp.begin(); it != payload_exp.end(); ++it) {
              claims_map_exp[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
         }
+        
         std::string expired_token = qb::jwt::create(claims_map_exp, jwt_options_exp);
 
         // Configure middleware with 30 seconds tolerance
-        qb::http::auth::Options options_skew = auth_manager->get_options();
+        qb::http::auth::Options options_skew = auth_options;
         options_skew.clock_skew_tolerance(std::chrono::seconds(30));
-        auto middleware_skew = qb::http::middleware::AuthMiddleware<MockSession>(options_skew);
         
+        auto middleware_skew = qb::http::AuthMiddleware<MockSession>(options_skew);
         auto ctx_skew = createContext("Bearer " + expired_token);
-        bool result_skew = middleware_skew.authenticate()(ctx_skew);
-        EXPECT_TRUE(result_skew) << "Token expired recently should be accepted with tolerance";
+        auto result_skew = middleware_skew.process(ctx_skew);
+        
+        EXPECT_TRUE(result_skew.should_continue()) << "Token expired recently should be accepted with tolerance";
+        EXPECT_FALSE(result_skew.should_stop());
         EXPECT_TRUE(ctx_skew.has("user"));
     }
     
@@ -395,23 +482,28 @@ TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
             {"iat", std::time(nullptr)},
             {"nbf", std::time(nullptr) + 10} 
         };
+        
         qb::jwt::CreateOptions jwt_options_nbf;
         jwt_options_nbf.algorithm = qb::jwt::Algorithm::HS256;
         jwt_options_nbf.key = "test-secret-key";
+        
         std::map<std::string, std::string> claims_map_nbf;
         for (auto it = payload_nbf.begin(); it != payload_nbf.end(); ++it) {
              claims_map_nbf[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
         }
+        
         std::string nbf_token = qb::jwt::create(claims_map_nbf, jwt_options_nbf);
 
         // Configure middleware with 30 seconds tolerance
-        qb::http::auth::Options options_skew = auth_manager->get_options();
+        qb::http::auth::Options options_skew = auth_options;
         options_skew.clock_skew_tolerance(std::chrono::seconds(30));
-        auto middleware_skew = qb::http::middleware::AuthMiddleware<MockSession>(options_skew);
         
+        auto middleware_skew = qb::http::AuthMiddleware<MockSession>(options_skew);
         auto ctx_skew_nbf = createContext("Bearer " + nbf_token);
-        bool result_skew_nbf = middleware_skew.authenticate()(ctx_skew_nbf);
-        EXPECT_TRUE(result_skew_nbf) << "Token not yet valid should be accepted with tolerance";
+        auto result_skew_nbf = middleware_skew.process(ctx_skew_nbf);
+        
+        EXPECT_TRUE(result_skew_nbf.should_continue()) << "Token not yet valid should be accepted with tolerance";
+        EXPECT_FALSE(result_skew_nbf.should_stop());
         EXPECT_TRUE(ctx_skew_nbf.has("user"));
     }
 }
@@ -425,44 +517,54 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
             {"iss", "my-issuer"},
             {"aud", "my-audience"}
         };
+        
         qb::jwt::CreateOptions jwt_options_with;
         jwt_options_with.algorithm = qb::jwt::Algorithm::HS256;
         jwt_options_with.key = "test-secret-key";
+        
         std::map<std::string, std::string> claims_map_with;
         for (auto it = payload_with.begin(); it != payload_with.end(); ++it) {
              claims_map_with[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
         }
+        
         std::string token_with = qb::jwt::create(claims_map_with, jwt_options_with);
 
         // Middleware with default options (no verification)
-        auto middleware_no_verify = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+        auto middleware_no_verify = qb::http::AuthMiddleware<MockSession>(auth_options);
         auto ctx_no_verify = createContext("Bearer " + token_with);
-        bool result_no_verify = middleware_no_verify.authenticate()(ctx_no_verify);
-        EXPECT_TRUE(result_no_verify) << "Should pass when iss/aud present but not verified";
+        auto result_no_verify = middleware_no_verify.process(ctx_no_verify);
+        
+        EXPECT_TRUE(result_no_verify.should_continue()) << "Should pass when iss/aud present but not verified";
+        EXPECT_FALSE(result_no_verify.should_stop());
         EXPECT_TRUE(ctx_no_verify.has("user"));
     }
 
     // Case 2: Middleware verifies iss/aud, token doesn't have them
     {
         qb::json payload_without = { {"sub", test_user.id} };
+        
         qb::jwt::CreateOptions jwt_options_without;
         jwt_options_without.algorithm = qb::jwt::Algorithm::HS256;
         jwt_options_without.key = "test-secret-key";
+        
         std::map<std::string, std::string> claims_map_without;
          for (auto it = payload_without.begin(); it != payload_without.end(); ++it) {
              claims_map_without[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
         }
+        
         std::string token_without = qb::jwt::create(claims_map_without, jwt_options_without);
 
         // Middleware configured to verify
-        qb::http::auth::Options options_verify = auth_manager->get_options();
+        qb::http::auth::Options options_verify = auth_options;
         options_verify.token_issuer("my-issuer"); // Enables issuer verification
         options_verify.token_audience("my-audience"); // Enables audience verification
-        auto middleware_verify = qb::http::middleware::AuthMiddleware<MockSession>(options_verify);
         
+        auto middleware_verify = qb::http::AuthMiddleware<MockSession>(options_verify);
         auto ctx_verify = createContext("Bearer " + token_without);
-        bool result_verify = middleware_verify.authenticate()(ctx_verify);
-        EXPECT_FALSE(result_verify) << "Should fail when iss/aud missing but verification enabled";
+        auto result_verify = middleware_verify.process(ctx_verify);
+        
+        EXPECT_TRUE(result_verify.should_stop()) << "Should fail when iss/aud missing but verification enabled";
+        EXPECT_FALSE(result_verify.should_continue());
         EXPECT_EQ(ctx_verify.response.status_code, HTTP_STATUS_UNAUTHORIZED);
         EXPECT_FALSE(ctx_verify.has("user"));
     }
@@ -470,55 +572,64 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
 
 // Test Authorization with require_all=false (explicitly)
 TEST_F(AuthMiddlewareTest, AuthorizeRequireAnyRole) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with roles (at least one required)
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+    middleware.with_roles({"editor", "admin"}, false); // require_all = false
     
-    // Use the default test_user with roles {"user", "editor"}
+    // Create context with valid token (user has "editor" role)
     auto ctx = createContext("Bearer " + token);
-    middleware.authenticate()(ctx);
+    
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_continue()) << "User should be authorized having one of the required roles";
+    EXPECT_FALSE(result.should_stop());
     EXPECT_TRUE(ctx.has("user"));
-
-    // Authorize checking for "editor" or "admin". User has "editor". require_all is false by default.
-    bool result = middleware.authorize({"editor", "admin"}) (ctx);
-    EXPECT_TRUE(result) << "User should be authorized having one of the required roles";
     EXPECT_NE(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
 
-    // Authorize checking for roles the user doesn't have ("manager", "admin")
-    bool result_fail = middleware.authorize({"manager", "admin"}) (ctx);
-    EXPECT_FALSE(result_fail) << "User should not be authorized without any required roles";
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
+    // Try with roles the user doesn't have
+    auto middleware_fail = qb::http::AuthMiddleware<MockSession>(auth_options);
+    middleware_fail.with_roles({"manager", "admin"}, false);
+    
+    auto ctx_fail = createContext("Bearer " + token);
+    auto result_fail = middleware_fail.process(ctx_fail);
+    
+    EXPECT_TRUE(result_fail.should_stop()) << "User should not be authorized without any required roles";
+    EXPECT_FALSE(result_fail.should_continue());
+    EXPECT_EQ(ctx_fail.response.status_code, HTTP_STATUS_FORBIDDEN);
 }
 
 // Test Case-Insensitive Header Name
 TEST_F(AuthMiddlewareTest, CaseInsensitiveHeader) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
     
-    // Create context and add token with lowercase header name
+    // Create context with lowercase header name
     auto session_ci = std::make_shared<MockSession>();
     qb::http::Request req_ci;
     req_ci.headers()["authorization"].push_back("Bearer " + token); // Lowercase header
     qb::http::Router<MockSession> router_ci;
     auto ctx_ci = qb::http::RouterContext<MockSession>(session_ci, std::move(req_ci), &router_ci);
     
-    bool result = middleware.authenticate()(ctx_ci);
+    // Process request through middleware
+    auto result = middleware.process(ctx_ci);
     
-    // Standard header lookup might be case-sensitive by default in TRequest.
-    // If TRequest/Headers handles case-insensitivity, this should pass.
-    // If TRequest/Headers is case-sensitive, AuthMiddleware needs adjustment or this test will fail.
-    // Assuming TRequest/Headers lookup IS case-sensitive as per typical map behavior:
-    // EXPECT_FALSE(result) << "Authentication should fail if header lookup is case-sensitive";
-    // EXPECT_EQ(ctx_ci.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-    
-    // --- OR --- Assuming TRequest/Headers OR Middleware handles case-insensitivity:
-    EXPECT_TRUE(result) << "Authentication should succeed if header lookup is case-insensitive";
+    // The test should pass if the middleware handles case-insensitivity correctly
+    EXPECT_TRUE(result.should_continue()) << "Authentication should succeed if header lookup is case-insensitive";
+    EXPECT_FALSE(result.should_stop());
     EXPECT_TRUE(ctx_ci.has("user"));
 }
 
 // Test Multiple Authorization Headers
 TEST_F(AuthMiddlewareTest, MultipleAuthHeaders) {
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(auth_manager->get_options());
+    // Create middleware with auth options
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
     
+    // Create context with multiple auth headers
     auto session_multi = std::make_shared<MockSession>();
     qb::http::Request req_multi;
+    
     // Add the valid header first
     req_multi.headers()["Authorization"].push_back("Bearer " + token);
     // Add another invalid/dummy header with the same key
@@ -527,42 +638,102 @@ TEST_F(AuthMiddlewareTest, MultipleAuthHeaders) {
     qb::http::Router<MockSession> router_multi;
     auto ctx_multi = qb::http::RouterContext<MockSession>(session_multi, std::move(req_multi), &router_multi);
     
-    bool result = middleware.authenticate()(ctx_multi);
+    // Process request through middleware
+    auto result = middleware.process(ctx_multi);
     
-    // Check if authentication succeeded using the first valid token
-    EXPECT_TRUE(result) << "Middleware should use the first valid Authorization header found";
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_continue()) << "Middleware should use the first valid Authorization header found";
+    EXPECT_FALSE(result.should_stop());
     EXPECT_TRUE(ctx_multi.has("user"));
+    
     const auto& user = ctx_multi.get<qb::http::auth::User>("user");
     EXPECT_EQ(user.id, test_user.id);
 }
 
 // Test Empty Secret Key Handling
 TEST_F(AuthMiddlewareTest, EmptySecretKey) {
+    // Create options with empty secret key
     qb::http::auth::Options empty_secret_options;
     empty_secret_options.algorithm(qb::http::auth::Options::Algorithm::HMAC_SHA256);
     empty_secret_options.secret_key(""); // Empty secret
 
-    // Manager instantiation should be fine
-    auto empty_manager = std::make_shared<qb::http::auth::Manager>(empty_secret_options);
-
-    // Token generation with an empty secret might return an empty string or throw.
-    // We won't assert on generation behavior here, focus on verification.
-    // std::string token = empty_manager->generate_token(test_user);
-    // EXPECT_TRUE(token.empty()) << "Token generation should ideally yield empty string with empty HMAC secret";
-
-    // Middleware instantiation should be fine
-    auto middleware = qb::http::middleware::AuthMiddleware<MockSession>(empty_secret_options);
+    // Create middleware with empty secret
+    auto middleware = qb::http::AuthMiddleware<MockSession>(empty_secret_options);
     
-    // Create context with a dummy header (verification won't happen with empty key)
+    // Create context with dummy token
     auto ctx = createContext("Bearer some-token"); 
     
-    // Verification within authenticate() should fail because key is missing/invalid
-    // We expect it to return false and set UNAUTHORIZED status.
-    // Note: verify_token might throw, but authenticate() should catch it or handle gracefully.
-    bool result = middleware.authenticate()(ctx);
-    EXPECT_FALSE(result) << "Authenticate should fail when configured with an empty secret for HMAC";
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_stop()) << "Authenticate should fail when configured with an empty secret for HMAC";
+    EXPECT_FALSE(result.should_continue());
     EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
     EXPECT_FALSE(ctx.has("user"));
+}
+
+// Test Custom Error Handler
+TEST_F(AuthMiddlewareTest, CustomErrorHandler) {
+    // Create middleware with custom error handler
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+    middleware.with_error_handler([](auto& ctx, int status_code, const std::string& message) {
+        // Custom error response
+        ctx.response.status_code = HTTP_STATUS_PAYMENT_REQUIRED; // Different status code
+        ctx.response.add_header("Content-Type", "application/json");
+        ctx.response.body() = "{\"custom_error\":\"" + message + "\"}";
+        return qb::http::MiddlewareResult::Stop();
+    });
+    
+    // Create context without auth header
+    auto ctx = createContext();
+    
+    // Process request through middleware
+    auto result = middleware.process(ctx);
+    
+    // Check middleware result and context state
+    EXPECT_TRUE(result.should_stop());
+    EXPECT_FALSE(result.should_continue());
+    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_PAYMENT_REQUIRED); // Custom status code
+    EXPECT_EQ(ctx.response.header("Content-Type"), "application/json");
+    EXPECT_FALSE(ctx.has("user"));
+}
+
+// Test Optional Authentication
+TEST_F(AuthMiddlewareTest, OptionalAuthentication) {
+    // Create middleware with optional authentication
+    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+    middleware.with_auth_required(false);
+    
+    // Test with no token (should pass)
+    {
+        auto ctx = createContext(); // No auth header
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_continue()) << "Should continue when auth is optional and no token provided";
+        EXPECT_FALSE(result.should_stop());
+        EXPECT_FALSE(ctx.has("user"));
+    }
+    
+    // Test with valid token (should pass and set user)
+    {
+        auto ctx = createContext("Bearer " + token);
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_continue()) << "Should continue when auth is optional and valid token provided";
+        EXPECT_FALSE(result.should_stop());
+        EXPECT_TRUE(ctx.has("user"));
+    }
+    
+    // Test with invalid token (should pass but not set user)
+    {
+        auto ctx = createContext("Bearer invalid-token");
+        auto result = middleware.process(ctx);
+        
+        EXPECT_TRUE(result.should_continue()) << "Should continue when auth is optional and invalid token provided";
+        EXPECT_FALSE(result.should_stop());
+        EXPECT_FALSE(ctx.has("user"));
+    }
 }
 
 // Helper function to read file contents

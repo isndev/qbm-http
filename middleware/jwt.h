@@ -8,8 +8,8 @@
 #include <qb/json.h>
 #include <qb/io/crypto_jwt.h>
 
-#include "middleware_interface.h"
 #include "../http.h"
+#include "./middleware_interface.h"
 
 namespace qb::http {
 
