@@ -207,7 +207,7 @@ accept_encoding() {
  * which typically represents client preference.
  */
 [[nodiscard]] std::string
-content_encoding(std::string_view const &accept_encoding) {
+content_encoding(std::string_view accept_encoding) {
 #ifdef QB_IO_WITH_ZLIB
     auto tokens    = utility::split_string<std::string>(accept_encoding, ",; \t");
     auto factories = qb::compression::builtin::get_compress_factories();
@@ -221,7 +221,7 @@ content_encoding(std::string_view const &accept_encoding) {
     return "";
 }
 
-template class qb::http::THeaders<std::string>;
-template class qb::http::THeaders<std::string_view>;
+template class THeaders<std::string>;
+template class THeaders<std::string_view>;
 
 } // namespace qb::http

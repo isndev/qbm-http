@@ -169,7 +169,7 @@ split_string(std::string_view str, std::string_view delimiters,
         const auto second = std::find_first_of(
             first, std::cend(str), std::cbegin(delimiters), std::cend(delimiters));
         if (first != second)
-            result.emplace_back(first, std::distance(first, second));
+            result.emplace_back(String{&(*first), static_cast<size_t>(std::distance(first, second))});
         if (second == str.end())
             break;
         first = std::next(second);

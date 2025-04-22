@@ -29,7 +29,7 @@ enum class AsyncRequestState {
 };
 
 // Define Clock type for consistent time measurement
-using Clock = std::chrono::high_resolution_clock;
+using Clock = std::chrono::steady_clock;
 
 /**
  * @brief Helper class for async middleware result handling

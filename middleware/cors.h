@@ -393,7 +393,6 @@ public:
         }
 
         bool origin_allowed = false;
-        bool using_wildcard = false;
 
         // Check if origin is allowed and determine response header
         if (_options->allow_all_origins() &&
@@ -402,13 +401,11 @@ public:
             // For wildcard origins without custom function and without credentials,
             // we can use "*"
             origin_allowed = true;
-            using_wildcard = true;
             ctx.response.add_header("Access-Control-Allow-Origin", "*");
         } else if (_options->is_origin_allowed(origin)) {
             // For specific origins, origins with custom matcher,
             // or with credentials, we must return the exact origin
             origin_allowed = true;
-            using_wildcard = false;
             ctx.response.add_header("Access-Control-Allow-Origin", origin);
 
             // If credentials are allowed, add the header

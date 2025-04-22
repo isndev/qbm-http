@@ -158,7 +158,7 @@ public:
      */
     void parse_cookie_header() {
         _cookies.clear();
-        const auto& cookie_header = this->header("Cookie", 0, "");
+        const auto cookie_header = this->header("Cookie", 0, "");
         if (!cookie_header.empty()) {
             auto cookies_map = parse_cookies(cookie_header, false);
             for (const auto& [name, value] : cookies_map) {

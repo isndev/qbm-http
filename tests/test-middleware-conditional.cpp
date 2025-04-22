@@ -59,15 +59,15 @@ public:
     void reset() {
         _executed = false;
     }
-    
-    // Custom process function that can be set by tests
-    CustomProcessFunction custom_process;
-    
+
 private:
     std::string _name;
     bool _executed;
     bool _should_continue;
     bool _mark_handled;
+public:
+    // Custom process function that can be set by tests
+    CustomProcessFunction custom_process;
 };
 
 // Test fixture
