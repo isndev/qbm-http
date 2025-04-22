@@ -17,6 +17,16 @@
 
 project(qbm-http)
 
+if (NOT QB_FOUND)
+    message(STATUS "qb project not found, skipping HTTP module")
+    return()
+endif ()
+
+if (NOT OPENSSL_FOUND OR NOT QB_IO_WITH_SSL)
+    message(INFO: qbm-http will not be loaded, missing openssl)
+    return()
+endif ()
+
 add_subdirectory(not-qb/llhttp)
 
 qb_register_module(
@@ -42,20 +52,7 @@ qb_register_module(
         validation/json_schema.cpp
         validation/query_validator.cpp
         validation/sanitizer.cpp
-
-        # Middleware
-        #middleware/rate_limit.cpp
-        #middleware/recaptcha.cpp
-        #middleware/logger.cpp
-        #middleware/compression.cpp
-
-        # JWT
-        # jwt/jwt.cpp
-        # jwt/jwt_options.cpp
 )
-
-# Add example directory
-# add_subdirectory(examples)
 
 if (QB_BUILD_TEST)
     add_subdirectory(tests)

@@ -230,7 +230,7 @@ Router<Session, String>::route_context(std::shared_ptr<Session> session, Context
 
     // Record start time if not already set
     if (ctx.start_time() == Clock::time_point()) {
-        ctx.start_time() = std::chrono::high_resolution_clock::now();
+        ctx.start_time() = std::chrono::steady_clock::now();
     }
 
     ctx.add_event("route_context");
@@ -258,10 +258,6 @@ Router<Session, String>::route_context(std::shared_ptr<Session> session, Context
 
                 // Synchronous response
                 *session << ctx.response;
-                auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration<double, std::milli>(
-                                    end_time - ctx.start_time())
-                                    .count();
                 log_request(ctx);
                 return true;
             }
@@ -292,11 +288,6 @@ Router<Session, String>::route_context(std::shared_ptr<Session> session, Context
     // Send response for handled requests that aren't async
     if (ctx.handled) {
         *session << ctx.response;
-
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration =
-            std::chrono::duration<double, std::milli>(end_time - ctx.start_time())
-                .count();
         log_request(ctx);
     }
 
@@ -327,19 +318,11 @@ Router<Session, String>::log_request(const Context &ctx) {
     std::cout << std::endl;
 }
 
-// For backward compatibility with existing implementation
-template <typename Session, typename String>
-void
-Router<Session, String>::log_request(const Context &ctx, int status, double duration,
-                                     const std::string &note) {
-    log_request(ctx);
-}
-
 #define REGISTER_ROUTE_FUNCTION(num, name, description)                                \
     template <typename Session, typename String>                                       \
     template <typename _Func>                                                          \
     Router<Session, String> &Router<Session, String>::name(std::string const &path,    \
-                                                           _Func            &&func) {             \
+                                                           _Func            &&func) {  \
         auto route = std::make_unique<TRoute<_Func>>(path, std::forward<_Func>(func)); \
         http_method method = static_cast<http_method>(num);                            \
                                                                                        \
@@ -619,11 +602,6 @@ Router<Session, String>::run_async_middleware_chain(std::shared_ptr<Context> con
                 if (!continue_chain) {
                     // Send response immediately
                     *ctx.session << ctx.response;
-
-                    auto end_time = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration<double, std::milli>(
-                                        end_time - ctx.start_time())
-                                        .count();
                     log_request(ctx);
 
                     // Remove from active requests
@@ -673,10 +651,6 @@ Router<Session, String>::route_to_handler(Context &ctx, const std::string &path)
 
                 // Note: We don't send the response here
                 // Let the caller (route_context) handle that
-                auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration<double, std::milli>(
-                                    end_time - ctx.start_time())
-                                    .count();
                 log_request(ctx);
                 return;
             }
@@ -692,10 +666,6 @@ Router<Session, String>::route_to_handler(Context &ctx, const std::string &path)
 
                     // Note: We don't send the response here
                     // Let the caller (route_context) handle that
-                    auto end_time = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration<double, std::milli>(
-                                        end_time - ctx.start_time())
-                                        .count();
                     log_request(ctx);
                     return;
                 }
@@ -726,10 +696,6 @@ Router<Session, String>::route_to_handler(Context &ctx, const std::string &path)
             ctx.request._uri = qb::io::uri(original_path);
 
             if (result) {
-                auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration<double, std::milli>(
-                                    end_time - ctx.start_time())
-                                    .count();
                 log_request(ctx);
                 return;
             }
@@ -745,10 +711,6 @@ Router<Session, String>::route_to_handler(Context &ctx, const std::string &path)
 
         // Note: We don't send the response here
         // Let the caller (route_context) handle that
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration =
-            std::chrono::duration<double, std::milli>(end_time - ctx.start_time())
-                .count();
         log_request(ctx);
         ctx.handled = true; // Mark request as handled when using default response
         return;
@@ -763,10 +725,6 @@ Router<Session, String>::route_to_handler(Context &ctx, const std::string &path)
 
         // Note: We don't send the response here
         // Let the caller (route_context) handle that
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration =
-            std::chrono::duration<double, std::milli>(end_time - ctx.start_time())
-                .count();
         log_request(ctx);
         ctx.handled = true; // Mark request as handled after error handler
         return;

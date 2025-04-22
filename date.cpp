@@ -23,9 +23,9 @@ constexpr std::array<const char*, 7> DAY_NAMES = {
     "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 };
 
-constexpr std::array<const char*, 7> DAY_NAMES_LONG = {
-    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
-};
+//constexpr std::array<const char*, 7> DAY_NAMES_LONG = {
+//    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+//};
 
 /**
  * @brief Convert a string month name to its numeric value (0-11)

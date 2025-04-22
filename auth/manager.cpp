@@ -12,21 +12,21 @@ namespace auth {
 using json = qb::json;
 
 // Convert epoch timestamp to ISO8601
-static std::string timestamp_to_iso8601(uint64_t timestamp) {
-    std::time_t time = static_cast<std::time_t>(timestamp);
-    std::tm tm = *std::gmtime(&time);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return oss.str();
-}
+// static std::string timestamp_to_iso8601(uint64_t timestamp) {
+//     std::time_t time = static_cast<std::time_t>(timestamp);
+//     std::tm tm = *std::gmtime(&time);
+//     std::ostringstream oss;
+//     oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+//     return oss.str();
+// }
 
 // Convert ISO8601 to epoch timestamp
-static uint64_t iso8601_to_timestamp(const std::string &iso8601) {
-    std::tm tm = {};
-    std::istringstream iss(iso8601);
-    iss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-    return static_cast<uint64_t>(std::mktime(&tm));
-}
+// static uint64_t iso8601_to_timestamp(const std::string &iso8601) {
+//     std::tm tm = {};
+//     std::istringstream iss(iso8601);
+//     iss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+//     return static_cast<uint64_t>(std::mktime(&tm));
+// }
 
 // Get current timestamp
 static uint64_t current_timestamp() {

@@ -1,5 +1,4 @@
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "misc-no-recursion"
+
 #include "radix_tree.h"
 
 namespace qb::http {
@@ -124,4 +123,3 @@ RadixTree::match(const std::string &path, PathParameters &params) const {
 }
 
 } // namespace qb::http
-#pragma clang diagnostic pop

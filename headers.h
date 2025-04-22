@@ -103,7 +103,7 @@ parse_header_attributes(std::string_view const &header);
  * an empty string if no matching encoding is found or if compression
  * is not supported.
  */
-[[nodiscard]] std::string content_encoding(std::string_view const &accept_encoding);
+[[nodiscard]] std::string content_encoding(std::string_view accept_encoding);
 
 /**
  * @brief Template class for HTTP headers
@@ -140,7 +140,7 @@ public:
          * @return Pair of mime type and charset
          */
         static std::pair<String, String>
-        parse(String const &content_type) {
+        parse(std::string_view content_type) {
             std::pair<String, String> ret{default_content_type, default_charset};
 
             auto words = utility::split_string<String>(content_type, " \t;=");
@@ -164,7 +164,7 @@ public:
          * @brief Constructor
          * @param content_type Content-Type header value
          */
-        explicit ContentType(String const &content_type = "")
+        explicit ContentType(std::string_view content_type = "")
             : type_charset{parse(content_type)} {}
 
         ContentType(ContentType const &rhs)     = default;
@@ -274,7 +274,7 @@ public:
      * @param value Content-Type value
      */
     void
-    set_content_type(String const &value) {
+    set_content_type(std::string_view value) {
         _content_type = ContentType{value};
     }
 

@@ -56,6 +56,8 @@
 
 DISABLE_WARNING_PUSH
 DISABLE_WARNING_IMPLICIT_FALLTHROUGH
+
+#undef ERROR
 namespace qb::http {
 
 /**
