@@ -54,17 +54,31 @@ protected:
 
     void
     compile_pattern() {
-        std::string                 pattern = _path;
-        std::regex                  param_regex(":([^/]+)");
-        std::smatch                 matches;
-        std::string::const_iterator search_start(pattern.cbegin());
-
-        while (std::regex_search(search_start, pattern.cend(), matches, param_regex)) {
+        std::string pattern = _path;
+        std::regex param_regex(":([^/]+)");
+        std::smatch matches;
+        std::string::const_iterator start = pattern.begin();
+        std::string::const_iterator end = pattern.end();
+        
+        // Process all parameter placeholders
+        while (std::regex_search(start, end, matches, param_regex)) {
             _param_names.push_back(matches[1].str());
-            pattern.replace(matches[0].first - pattern.cbegin(), matches[0].length(),
-                            "([^/]+)");
-            search_start = matches[0].first + 1;
+            
+            // Calculate the current position and length
+            size_t match_pos = matches[0].first - pattern.begin();
+            size_t match_len = matches[0].length();
+            
+            // Replace the pattern with a regex capture group
+            pattern.replace(match_pos, match_len, "([^/]+)");
+            
+            // Set up iterators for the next search
+            start = pattern.begin();
+            end = pattern.end();
+            
+            // Advance the start iterator to just after the replacement
+            start += match_pos + 7; // Skip the inserted "([^/]+)"
         }
+        
         _pattern = std::regex("^" + pattern + "$");
     }
 
