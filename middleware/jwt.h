@@ -420,6 +420,7 @@ private:
         ctx.response.status_code = HTTP_STATUS_UNAUTHORIZED;
         ctx.response.add_header("Content-Type", "application/json");
         ctx.response.body() = response.dump();
+        ctx.execute_error_callbacks(error.message);
         ctx.mark_handled();
     }
 };

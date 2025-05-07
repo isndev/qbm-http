@@ -214,10 +214,12 @@ private:
             return _error_handler(ctx, status_code, message);
         }
         
-        // Default error handling
+        // Default error handling: Set status code and delegate to ErrorHandlingMiddleware
         ctx.response.status_code = static_cast<http_status>(status_code);
         ctx.response.add_header("Content-Type", "application/json");
         ctx.response.body() = "{\"error\":\"" + message + "\"}";
+        ctx.execute_error_callbacks(message); // Trigger generic error handlers
+        ctx.mark_handled(); // Mark as handled since we are stopping
         return MiddlewareResult::Stop();
     }
     
