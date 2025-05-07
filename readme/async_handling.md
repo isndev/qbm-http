@@ -32,15 +32,22 @@ Inside your route handler, call `ctx.make_async()`:
 ```cpp
 router.get("/async-task", [](Context& ctx) {
     // 1. Mark as async & get completion handler
-    auto completion = ctx.make_async();
+    auto completion_handler_ptr = ctx.make_async();
+    if (!completion_handler_ptr) {
+        // Handle error: router might not be available, or other issue
+        ctx.response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        ctx.response.body() = "Failed to initialize async operation";
+        ctx.complete();
+        return;
+    }
 
-    // ... rest of the handler ...
+    // ... rest of the handler, using completion_handler_ptr->method() ...
 });
 ```
 
 *   This tells the router **not** to send a response automatically when the handler function returns.
 *   It registers the request context (`ctx`) with the router's internal tracking for active asynchronous requests.
-*   It returns an `AsyncCompletionHandler` object.
+*   It returns a `std::shared_ptr<AsyncCompletionHandler<Session, String>>` (or `nullptr` if it fails, e.g. if the router pointer in context is null).
 
 **2. Perform Asynchronous Work:**
 
@@ -49,6 +56,8 @@ Use mechanisms like `qb::io::async::callback` (if running within `qb-core`) or o
 ```cpp
 router.get("/async-task", [](Context& ctx) {
     auto completion = ctx.make_async();
+    if (!completion) { /* ... error handling ... */ return; }
+
     std::string user_id = ctx.get<std::string>("user_id"); // From auth middleware
 
     // 2. Schedule async work (e.g., using qb::io::async::callback)
@@ -74,7 +83,7 @@ router.get("/async-task", [](Context& ctx) {
 
 **3. Complete the Request:**
 
-Once the asynchronous operation finishes, use the captured `AsyncCompletionHandler` object (`completion` in the example) to build and send the final response.
+Once the asynchronous operation finishes, use the captured `std::shared_ptr<AsyncCompletionHandler>` object (`completion` in the example) to build and send the final response.
 
 *   **`completion->status(code)`:** Sets the HTTP status code.
 *   **`completion->header(name, value)`:** Adds response headers.

@@ -299,7 +299,7 @@ private:
     std::shared_ptr<RateLimitOptions> _options;
     std::string _name;
     mutable std::mutex _mutex;
-    mutable std::map<std::string, ClientData> _client_data;
+    mutable qb::unordered_map<std::string, ClientData> _client_data;
 
     /**
      * @brief Add rate limit headers to the response

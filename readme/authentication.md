@@ -47,7 +47,7 @@ This is the primary way to integrate authentication into the routing process.
 
 *   **Creation:**
     ```cpp
-    #include <qbm/http/middleware/auth.h>
+    #include <http/middleware/auth.h>
 
     qb::http::auth::Options auth_options; // Configure as needed
     // ... setup options.secret_key() or public/private keys ...

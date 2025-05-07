@@ -20,7 +20,7 @@ The primary way to handle incoming multipart data is using the `Body::as<T>()` m
 *   **`Body::as<qb::http::MultipartView>()`:** Parses the request body and returns a `qb::http::MultipartView` object. Each `Part` in this view uses `std::string_view` for its body. This avoids copying the body data for each part, making it more efficient for large uploads, but the `string_view`s are only valid as long as the original request body buffer is valid.
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 #include <fstream>
 
 // Inside a route handler (e.g., POST /upload)
@@ -96,7 +96,7 @@ While less common for responses, you might create multipart content on the clien
 6.  **Set Main Content-Type Header:** Set the main request/response `Content-Type` header correctly, including the boundary: `request.add_header("Content-Type", "multipart/form-data; boundary=" + multipart.boundary());`
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 #include <fstream>
 
 // ... client code ...
@@ -137,8 +137,8 @@ req.add_header("Content-Type", "multipart/form-data; boundary=" + multipart_data
 
 ## Internal Parser (`MultipartParser`)
 
-(`qbm/http/multipart.cpp`)
+(`qbm/http/multipart.h` for `MultipartParser` class, `qbm/http/body.cpp` for `internal::MultipartReader`)
 
-The `Body::as<Multipart>()` methods use `qb::http::internal::MultipartReader` which wraps the lower-level `qb::http::MultipartParser`. This parser is a state machine that processes the input stream byte-by-byte and invokes callbacks (`onPartBegin`, `onHeaderField`, `onHeaderValue`, `onPartData`, `onPartEnd`, etc.) as different elements are encountered. Direct use of `MultipartParser` is generally not necessary unless building custom low-level parsing logic.
+The `Body::as<Multipart>()` methods use `qb::http::internal::MultipartReader` (defined in `body.cpp`) which wraps the lower-level `qb::http::MultipartParser` (defined in `multipart.h`). This parser is a state machine that processes the input stream byte-by-byte and invokes callbacks (`onPartBegin`, `onHeaderField`, `onHeaderValue`, `onPartData`, `onPartEnd`, etc.) as different elements are encountered. Direct use of `MultipartParser` is generally not necessary unless building custom low-level parsing logic.
 
 **(See also:** `test-http-multipart.cpp`**)** 

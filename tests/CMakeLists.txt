@@ -29,6 +29,7 @@ set(HTTP_TESTS
         router-async-advanced
         router-sync-middleware
         router-async-middleware
+        router-groups
         cookie
         middleware-cors
         middleware-validator
@@ -40,7 +41,10 @@ set(HTTP_TESTS
         middleware-timing
         middleware-error-handling
         middleware-auth
+#        middleware-recaptcha
+        openapi
         #    session-http
+        openapi-complex
 )
 
 # Register each standard test
@@ -66,6 +70,3 @@ if (OPENSSL_FOUND AND QB_SSL_RESOURCES)
     file(COPY ${QB_SSL_RESOURCES} DESTINATION ${TEST_OUTPUT_DIR})
     message(STATUS "[HTTP Tests] Copying SSL resources to ${TEST_OUTPUT_DIR}")
 endif ()
-
-
-

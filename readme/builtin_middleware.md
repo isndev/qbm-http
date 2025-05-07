@@ -13,15 +13,15 @@ The `qbm-http` module provides several pre-built middleware components for commo
 *   **Dependencies:** `qbm/http/auth/auth.h`, `qb/io/crypto_jwt.h` (requires OpenSSL).
 *   **Key Features:**
     *   Integrates with `qb::http::auth::Manager` and `Options`.
-    *   Extracts tokens from headers (e.g., `Authorization: Bearer ...`), cookies, or query parameters.
-    *   Verifies token signature, expiration, issuer, audience using `qb::jwt::verify`.
+    *   Primarily extracts tokens from HTTP headers (e.g., `Authorization: Bearer ...`) as configured by `auth::Options`. Direct support for cookie or query parameter token extraction via `AuthMiddleware` typically requires custom `auth::Manager` logic or specific `auth::Options` setup if the manager supports it. (For more direct cookie/query JWT handling, see `JwtMiddleware`).
+    *   Verifies token signature, expiration, issuer, audience using the configured `auth::Manager` (which often uses `qb::jwt::verify` internally).
     *   Stores the authenticated `qb::http::auth::User` object in the request context (default key: "user").
     *   Optional role-based authorization (`with_roles(roles, require_all)`).
     *   Customizable error handling.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/auth.h>
-    #include <qbm/http/auth/auth.h>
+    #include <http/middleware/auth.h>
+    #include <http/auth/auth.h>
 
     // Setup Auth Options
     qb::http::auth::Options auth_options;
@@ -58,7 +58,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Allows custom validators and error handlers.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/jwt.h>
+    #include <http/middleware/jwt.h>
 
     qb::http::JwtOptions jwt_options;
     jwt_options.secret = "your-secret";
@@ -85,7 +85,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Includes presets: `CorsOptions::permissive()` and `CorsOptions::secure(origins)`.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/cors.h>
+    #include <http/middleware/cors.h>
 
     // Permissive (Development)
     // router.use(qb::http::cors_dev_middleware<MySession>());
@@ -106,7 +106,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Handlers can modify the response (e.g., render a custom error page).
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/error_handling.h>
+    #include <http/middleware/error_handling.h>
 
     auto error_mw = qb::http::error_handling_middleware<MySession>();
     error_mw->on_status(HTTP_STATUS_NOT_FOUND, [](Context& ctx){
@@ -133,7 +133,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Logs method, URI, and response status code by default.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/logging.h>
+    #include <http/middleware/logging.h>
     #include <iostream> // Or your logging library
 
     auto logger = [](qb::http::LogLevel level, const std::string& msg){
@@ -156,7 +156,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Includes presets: `RateLimitOptions::permissive()` and `RateLimitOptions::secure()`.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/rate_limit.h>
+    #include <http/middleware/rate_limit.h>
 
     // Secure default: 60 requests per minute per IP
     // router.use(qb::http::rate_limit_secure_middleware<MySession>());
@@ -175,7 +175,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Requires a callback function (`std::function<void(std::chrono::milliseconds)>`) to receive the duration.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/timing.h>
+    #include <http/middleware/timing.h>
     #include <iostream>
 
     auto timing_callback = [](std::chrono::milliseconds duration){
@@ -219,18 +219,18 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Handles error responses automatically or via a custom error handler.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/validator.h>
-    #include <qbm/http/validation/validation.h>
+    #include <http/middleware/validator.h>
+    #include <http/validation/validation.h>
 
     // Validate JSON body against a schema
     // qb::json schema = { ... };
-    // router.use(qb::http::validator_middleware<MySession>(schema));
+    // auto validator_mw = qb::http::validator_middleware<MySession>(schema);
+    // router.use(validator_mw);
 
-    // Validate query parameters
-    // auto query_validator = std::make_shared<qb::http::QueryValidator>();
-    // query_validator->add_param("page", qb::http::QueryParamRules().as_integer().min_value(1));
-    // // Note: Need a way to pass QueryValidator to middleware or have middleware build it.
-    // // The current factory functions don't directly support QueryValidator setup.
+    // Validate query parameters by configuring the middleware instance
+    // auto validator_mw_for_query = qb::http::validator_middleware<MySession>();
+    // validator_mw_for_query->validator()->with_query_param("page", qb::http::QueryParamRules().as_integer().min_value(1));
+    // router.use(validator_mw_for_query);
     ```
 *   **(See also:** [`validation.md`](./validation.md)**)**
 
@@ -244,7 +244,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Takes an optional `else_middleware` (executed if predicate is false).
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/conditional.h>
+    #include <http/middleware/conditional.h>
 
     auto is_admin_request = [](const Context& ctx) {
         return ctx.request.uri().path().find("/admin") == 0;
@@ -269,7 +269,7 @@ The `qbm-http` module provides several pre-built middleware components for commo
     *   Stores verification result (`RecaptchaResult`) in context.
 *   **Usage:**
     ```cpp
-    #include <qbm/http/middleware/recaptcha.h>
+    #include <http/middleware/recaptcha.h>
 
     // qb::http::RecaptchaOptions recaptcha_options("YOUR_RECAPTCHA_SECRET_KEY");
     // recaptcha_options.min_score(0.5f);

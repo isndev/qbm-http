@@ -25,8 +25,14 @@ Router<Session, String>::controller(Args &&...args) {
 template <typename Session, typename String>
 typename Router<Session, String>::RouteGroup &
 Router<Session, String>::group(const std::string &prefix, int priority) {
-    _current_group = std::make_unique<RouteGroup>(*this, prefix, priority);
-    return *_current_group;
+    // Create a new group and store it in our stable container
+    auto group_ptr = std::make_shared<RouteGroup>(*this, prefix, priority);
+    _groups.push_back(group_ptr);
+    
+    // Initialize the group hierarchy entry for this new group
+    _group_hierarchy[group_ptr.get()] = std::vector<RouteGroup*>();
+    
+    return *group_ptr;
 }
 
 // Method to set a default response
@@ -823,7 +829,7 @@ Router<Session, String>::cancel_request(std::uintptr_t request_id) {
 
 // Method to get all active async requests
 template <typename Session, typename String>
-const std::map<std::uintptr_t,
+const qb::unordered_map<std::uintptr_t,
                std::shared_ptr<typename Router<Session, String>::Context>> &
 Router<Session, String>::get_active_requests() const {
     return _active_async_requests;

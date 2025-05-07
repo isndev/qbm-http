@@ -60,7 +60,7 @@ post_req.body() = post_body; // Assign JSON object to body
 Blocks the calling thread until the response is received or timeout occurs.
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 #include <qb/io.h>
 #include <iostream>
 
@@ -90,7 +90,7 @@ try {
 Does not block. Requires an event loop (like `qb::io::async::run()` or the one inside `qb-core`) to process the callback.
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 #include <qb/io.h>
 #include <iostream>
 #include <atomic>

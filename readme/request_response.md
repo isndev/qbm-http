@@ -6,7 +6,7 @@ These are the core classes for representing HTTP messages.
 
 (`qbm/http/request.h`, `qbm/http/message_base.h`)
 
-Represents an HTTP request. It inherits from `MessageBase` (for common features like headers and body) and `THeaders`.
+Represents an HTTP request. It inherits from `MessageBase` (for common features like headers and body).
 
 *   **Template:** `TRequest<String>` where `String` is `std::string` (default, mutable) or `std::string_view` (read-only).
 *   **Key Members:**
@@ -40,7 +40,7 @@ Represents an HTTP request. It inherits from `MessageBase` (for common features 
 
 (`qbm/http/response.h`, `qbm/http/message_base.h`)
 
-Represents an HTTP response. Inherits from `MessageBase` and `THeaders`.
+Represents an HTTP response. Inherits from `MessageBase` (for common features like headers and body).
 
 *   **Template:** `TResponse<String>` where `String` is `std::string` (default) or `std::string_view`.
 *   **Key Members:**
@@ -84,7 +84,7 @@ Manages the message body content efficiently.
 
 (`qbm/http/headers.h`, `qbm/http/headers.cpp`)
 
-Manages HTTP headers.
+Manages HTTP headers. This class is inherited by `MessageBase`.
 
 *   **Storage:** `qb::icase_unordered_map<std::vector<String>>`.
 *   **Case-Insensitive:** Header names are treated case-insensitively.

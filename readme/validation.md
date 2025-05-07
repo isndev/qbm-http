@@ -49,7 +49,7 @@ This middleware integrates the `Validator` class into the request processing cha
 
 *   **Creation:**
     ```cpp
-    #include <qbm/http/middleware/validator.h>
+    #include <http/middleware/validator.h>
 
     // 1. Create middleware, then configure validator
     auto validator_mw = qb::http::validator_middleware<MySession>();
@@ -74,9 +74,9 @@ This middleware integrates the `Validator` class into the request processing cha
 ### Validating Request Body with JSON Schema
 
 ```cpp
-#include <qb/http.h>
-#include <qbm/http/middleware/validator.h>
-#include <qbm/http/validation/validation.h>
+#include <http/http.h>
+#include <http/middleware/validator.h>
+#include <http/validation/validation.h>
 
 // Define your JSON schema
 qb::json user_schema = {
@@ -111,9 +111,9 @@ router.post("/register", [](Context& ctx) {
 ### Validating Query Parameters
 
 ```cpp
-#include <qb/http.h>
-#include <qbm/http/middleware/validator.h>
-#include <qbm/http/validation/validation.h>
+#include <http/http.h>
+#include <http/middleware/validator.h>
+#include <http/validation/validation.h>
 
 // ... inside server setup ...
 
@@ -153,9 +153,9 @@ router.get("/items", [](Context& ctx) {
 ### Input Sanitization
 
 ```cpp
-#include <qb/http.h>
-#include <qbm/http/middleware/validator.h>
-#include <qbm/http/validation/validation.h>
+#include <http/http.h>
+#include <http/middleware/validator.h>
+#include <http/validation/validation.h>
 
 // ... inside server setup ...
 
