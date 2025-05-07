@@ -53,7 +53,7 @@ This module provides a comprehensive, high-performance, and flexible HTTP/1.1 cl
 ### Simple HTTP Server
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 #include <qb/main.h>
 #include <qb/actor.h>
 #include <iostream>
@@ -117,7 +117,7 @@ int main() {
 ### Simple HTTP Client
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 #include <qb/io.h> // For qb::io::cout()
 #include <iostream>
 
@@ -161,23 +161,24 @@ int main() {
 Detailed documentation for specific features can also be found directly in the `readme/` directory:
 
 *   **Core Concepts:**
-    *   [`request_response.md`](./readme/request_response.md): Details on `Request`, `Response`, `Headers`, `Body`.
-    *   [`routing.md`](./readme/routing.md): The routing system, parameters, groups, controllers.
-    *   [`middleware.md`](./readme/middleware.md): Middleware concepts, chaining, sync/async.
-    *   [`async_handling.md`](./readme/async_handling.md): Asynchronous route handlers, `AsyncCompletionHandler`.
-    *   [`cookies.md`](./readme/cookies.md): Cookie parsing and management.
-    *   [`multipart.md`](./readme/multipart.md): Handling `multipart/form-data`.
-*   **Built-in Middleware:**
-    *   [`builtin_middleware.md`](./readme/builtin_middleware.md): Overview of provided middleware.
-    *   [`authentication.md`](./readme/authentication.md): `AuthManager`, `AuthMiddleware`.
-    *   [`validation.md`](./readme/validation.md): `Validator`, JSON Schema, Query Params.
-    *   (Links to individual middleware files like `cors.md`, `jwt.md`, `logging.md`, `rate_limit.md` etc. should be added here as they are created).
+    *   [`Core Concepts`](./readme/core_concepts.md): Fundamental ideas (Request/Response, Routing, Middleware, Async).
+    *   [`Request & Response`](./readme/request_response.md): Details on `Request`, `Response`, `Headers`, `Body` classes.
+    *   [`Routing System`](./readme/routing.md): In-depth look at the router, path parameters, groups, controllers, and Radix Tree matching.
+    *   [`Middleware`](./readme/middleware.md): Explains the middleware concept, chain execution, synchronous vs. asynchronous middleware, and how to create custom middleware.
+    *   [`Asynchronous Handling`](./readme/async_handling.md): Covers handling long-running tasks in route handlers using `make_async` and `AsyncCompletionHandler`, including timeouts and cancellation.
+    *   [`Cookie Management`](./readme/cookies.md): Details on parsing, creating, and managing HTTP cookies using `Cookie` and `CookieJar`.
+    *   [`Multipart/form-data Handling`](./readme/multipart.md): Parsing and creating multipart messages.
+*   **Built-in Components:**
+    *   [`Built-in Middleware`](./readme/builtin_middleware.md): Documentation for provided middleware like CORS, Logging, Rate Limiting, etc.
+    *   [`Authentication & Authorization`](./readme/authentication.md): Details on the `AuthManager`, JWT integration, and the `AuthMiddleware`.
+    *   [`Validation`](./readme/validation.md): How to use the `Validator` system, JSON Schema, query parameter validation, and sanitizers.
 *   **Client & Server:**
-    *   [`client.md`](./readme/client.md): Using the global functions (`qb::http::GET`, `POST`, etc.) for making requests.
-    *   [`server.md`](./readme/server.md): Building servers using the `use<...>::server` and `use<...>::session` templates.
+    *   [`HTTP Client`](./readme/client.md): Using the global functions (`qb::http::GET`, `POST`, etc.) for making requests.
+    *   [`HTTP Server`](./readme/server.md): Building servers using the `use<...>::server` and `use<...>::session` templates.
 *   **Utilities & Reference:**
-    *   [`utils.md`](./readme/utils.md): Covers `qb::http::date`, `qb::http::utility`, and other helpers.
-    *   [`dependencies.md`](./readme/dependencies.md): Lists the required and optional dependencies for the module.
+    *   [`Utilities`](./readme/utils.md): Covers `qb::http::date`, `qb::http::utility`, and other helpers.
+    *   [`OpenAPI/Swagger Integration`](./readme/openapi.md): Generating API documentation.
+    *   [`Dependencies`](./readme/dependencies.md): Lists the required and optional dependencies for the module.
 
 ## Building
 
@@ -200,6 +201,24 @@ Ensure `qb-core` is built or installed. Then, include this module in your CMake 
 *   `llhttp` (Bundled)
 *   OpenSSL (Optional, required for HTTPS client/server and JWT asymmetric algorithms)
 *   Zlib (Optional, required for content compression)
+
+## API Documentation
+
+- [Core Concepts](./readme/core_concepts.md)
+- [Routing](./readme/routing.md)
+- [Request/Response](./readme/request_response.md)
+- [Middleware](./readme/middleware.md)
+- [Authentication](./readme/authentication.md)
+- [Built-in Middleware](./readme/builtin_middleware.md)
+- [Validation](./readme/validation.md)
+- [Async Handling](./readme/async_handling.md)
+- [Cookies](./readme/cookies.md)
+- [Multipart](./readme/multipart.md)
+- [OpenAPI/Swagger Integration](./readme/openapi.md)
+- [HTTP Client](./readme/client.md)
+- [Server](./readme/server.md)
+- [Utilities](./readme/utils.md)
+- [Dependencies](./readme/dependencies.md)
 
 ```
 Copyright (c) 2011-2025 qb - isndev (cpp.actor). All rights reserved.

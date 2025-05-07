@@ -80,6 +80,49 @@
 #include "./response.h"
 #include "./utility.h"
 #include "./routing/routing.h"
+#include "./multipart.h"
+
+// Routing-related headers
+#include "./routing/path_parameters.h"
+#include "./routing/context.h"
+#include "./routing/route_types.h"
+#include "./routing/radix_tree.h"
+#include "./routing/async_types.h"
+#include "./routing/async_completion_handler.h"
+#include "./routing/router.h"
+
+// Middleware headers
+// #include "./middleware/middleware_interface.h"
+// #include "./middleware/middleware.h"
+// #include "./middleware/middleware_chain.h"
+// #include "./middleware/jwt.h"
+// #include "./middleware/auth.h"
+// #include "./middleware/logging.h"
+// #include "./middleware/error_handling.h"
+// #include "./middleware/validator.h"
+// #include "./middleware/conditional.h"
+// #include "./middleware/transform.h"
+// #include "./middleware/cors.h"
+// #include "./middleware/rate_limit.h"
+// #include "./middleware/timing.h"
+
+// Authentication and authorization
+#include "./auth/auth.h"
+#include "./auth/user.h"
+#include "./auth/manager.h"
+#include "./auth/options.h"
+
+// Validation
+#include "./validation/validation.h"
+#include "./validation/validation_types.h"
+#include "./validation/validator.h"
+#include "./validation/validation_context.h"
+#include "./validation/json_schema.h"
+#include "./validation/query_validator.h"
+#include "./validation/sanitizer.h"
+
+// OpenAPI/Swagger integration
+#include "./openapi/document.h"
 
 #if defined(_WIN32)
 #undef DELETE // Windows :/

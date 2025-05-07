@@ -44,7 +44,7 @@ private:
     // Internal state encapsulation
     struct ContextState {
         PathParameters                  path_params;
-        std::map<std::string, std::any> data;
+        qb::unordered_map<std::string, std::any> data;
         std::string                     match;
         bool                            handled  = false;
         bool                            is_async = false;

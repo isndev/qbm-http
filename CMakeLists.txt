@@ -52,6 +52,9 @@ qb_register_module(
         validation/json_schema.cpp
         validation/query_validator.cpp
         validation/sanitizer.cpp
+        # OpenAPI Documentation
+        openapi/document.cpp
+        openapi/swagger_ui.cpp
 )
 
 if (QB_BUILD_TEST)

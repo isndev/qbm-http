@@ -16,14 +16,14 @@ HTTP interactions are modeled using two primary classes:
 
 **(See also:** [`request_response.md`](./request_response.md)**)**
 
-## Routing (`qb::http::Router`)
+## Routing (`qb::http::Router` and `qb::http::RouterContext`)
 
-(`routing/router.h`, `routing/route_types.h`)
+(`routing/router.h`, `routing/route_types.h`, `routing/context.h`)
 
-The `Router` is the core component for mapping incoming server requests to specific handler logic based on the HTTP method and URI path.
+The `Router` is the core component for mapping incoming server requests to specific handler logic based on the HTTP method and URI path. The `RouterContext` (often aliased as `Context`) encapsulates the request, response, session, and routing-specific data for each request.
 
 *   **Route Definition:** Routes are registered using methods like `router.get("/path", handler)`, `router.post(...)`, etc.
-*   **Handlers:** Can be lambda functions, function pointers, or functors taking a `Context&`.
+*   **Handlers:** Can be lambda functions, function pointers, or functors taking a `Context& ctx`.
 *   **Path Parameters:** Defined using `:name` syntax (e.g., `/users/:id`) and accessed via `ctx.param("id")`.
 *   **Route Groups:** Organize routes under a common path prefix and apply middleware to the group.
 *   **Controllers:** Class-based organization for related routes under a base path.
@@ -35,44 +35,44 @@ The `Router` is the core component for mapping incoming server requests to speci
 
 (`middleware/middleware_interface.h`, `middleware/middleware_chain.h`)
 
-Middleware provides a mechanism to intercept and process requests and responses in a chain before or after the main route handler executes.
+Middleware provides a mechanism to intercept and process requests and responses in a chain before or after the main route handler executes. Middleware functions also operate on the `RouterContext`.
 
 *   **Purpose:** Used for cross-cutting concerns like logging, authentication, authorization, validation, CORS, rate limiting, request/response transformation, etc.
-*   **Types:** Supports both **synchronous** (`ISyncMiddleware`) and **asynchronous** (`IAsyncMiddleware`) middleware.
-*   **Chaining:** Middleware functions are executed sequentially. A middleware can choose to:
-    *   **Continue:** Pass control to the next middleware or handler.
-    *   **Stop:** Handle the request completely and prevent further processing.
-    *   **Error:** Signal an error condition.
-*   **Context Sharing:** Middleware functions share the same `RouterContext` object, allowing them to pass data between each other (e.g., storing authenticated user info).
+*   **Types:** Supports both **synchronous** (`ISyncMiddleware`) and **asynchronous** (`IAsyncMiddleware`) middleware, unified under `IMiddleware`. Adapters like `SyncMiddlewareAdapter` and `AsyncMiddlewareAdapter` facilitate their use.
+*   **Chaining:** Middleware functions are executed sequentially via `MiddlewareChain`. A middleware can choose to:
+    *   **Continue:** Pass control to the next middleware or handler (e.g., `MiddlewareResult::Continue()`).
+    *   **Stop:** Handle the request completely and prevent further processing (e.g., `MiddlewareResult::Stop()`).
+    *   **Error:** Signal an error condition (e.g., `MiddlewareResult::Error("message")`).
+*   **Context Sharing:** Middleware functions share the same `RouterContext` object, allowing them to pass data between each other (e.g., `ctx.set("user", user_object)`).
 
 **(See also:** [`middleware.md`](./middleware.md), [`builtin_middleware.md`](./builtin_middleware.md)**)**
 
 ## Asynchronous Handling
 
-(`routing/async_completion_handler.h`, `routing/async_types.h`)
+(`routing/async_completion_handler.h`, `routing/async_types.h`, `routing/context.h`)
 
 Route handlers and asynchronous middleware can perform non-blocking operations.
 
-*   **`Context::make_async()`:** Marks the request context as asynchronous, preventing the router from sending an immediate response.
-*   **`AsyncCompletionHandler`:** Returned by `make_async()`. This handler *must* be captured (e.g., in a lambda) and used later to send the response via its `complete()` method.
-*   **Integration:** Typically used with `qb::io::async::callback` or actor message passing to perform background work and then call `completion.complete()` when the result is ready.
-*   **Timeouts:** The router manages timeouts for async requests, automatically sending a timeout response if `complete()` isn't called within the configured duration.
+*   **`RouterContext::make_async()`:** Marks the request context as asynchronous, preventing the router from sending an immediate response. It returns a `std::shared_ptr<AsyncCompletionHandler<Session, String>>`.
+*   **`AsyncCompletionHandler`:** This handler *must* be captured (e.g., in a lambda) and used later to send the response via its methods like `status()`, `header()`, `body()`, and finally `complete()` or `cancel()`.
+*   **Integration:** Typically used with `qb::io::async::callback` or actor message passing to perform background work and then call the `AsyncCompletionHandler` methods when the result is ready.
+*   **Timeouts:** The `Router` manages timeouts for async requests (`configure_async_timeout`), automatically sending a timeout response if `complete()` isn\'t called within the configured duration.
 
 **(See also:** [`async_handling.md`](./async_handling.md)**)**
 
 ## Server and Session
 
-(`http.h`, integration with `qb/io/async/tcp/server.h` etc.)
+(`http.h`, integration with `qb/io/async/tcp/server.h`, `qb/io/async/tcp/client.h`)
 
-The `qbm-http` module integrates with `qb-io` server components.
+The `qbm-http` module integrates with `qb-io` server components to handle HTTP communication.
 
-*   **`qb::http::use<...>::server<SessionType>`:** A base class template (used via CRTP) that combines an underlying `qb-io` TCP or SSL server (`acceptor` + `io_handler`) with the HTTP `Router`.
-*   **`qb::http::use<...>::session<ServerType>`:** A base class template for handling individual client connections (sessions). It integrates the HTTP protocol parser (`qb::protocol::http_server`) with the underlying `qb-io` TCP or SSL client transport.
-*   **Workflow:** The `server` accepts connections, creates `session` instances, and the `session` uses its internal protocol parser to parse incoming data into `Request` objects, which are then passed to the `server`'s `router` for handling.
+*   **`qb::http::use<...>::server<SessionType>`:** A CRTP base class template for the main server logic. It typically combines an underlying `qb-io` TCP or SSL server (which includes an `acceptor` for new connections and an `io_handler` for managing sessions) with the HTTP `Router`.
+*   **`qb::http::use<...>::session<ServerType>`:** A CRTP base class template for handling individual client connections (sessions). It typically inherits from a `qb-io` client transport (like `qb::io::async::tcp::client`) and integrates an HTTP protocol parser (like `qb::protocol::http_server` or `qb::protocol::http_server_view`).
+*   **Workflow:** The `server` component listens for and accepts new connections. For each connection, it creates a `session` instance. The `session` then uses its internal HTTP protocol parser to parse incoming byte streams into `Request` objects. These `Request` objects, along with the session and response objects, are encapsulated in a `RouterContext` and passed to the `server`'s `router` for processing by the appropriate route handlers or middleware.
 
 ## Key Utilities
 
-*   **`qb::http::Cookie` / `CookieJar`:** Managing HTTP cookies.
-*   **`qb::http::Multipart` / `MultipartView`:** Handling `multipart/form-data`.
-*   **`qb::http::date`:** Parsing and formatting HTTP-compliant dates.
-*   **`qb::http::utility`:** Helper functions for string splitting, case-insensitive comparison etc. 
+*   **`qb::http::Cookie` / `CookieJar` (`cookie.h`):** Managing HTTP cookies.
+*   **`qb::http::Multipart` / `MultipartView` (`multipart.h`):** Handling `multipart/form-data`.
+*   **`qb::http::date` (`date.h`):** Parsing and formatting HTTP-compliant dates.
+*   **`qb::http::utility` (`utility.h`):** Helper functions for string splitting, case-insensitive comparison etc. 

@@ -35,7 +35,7 @@ The easiest way to build an HTTP server is by using the `qb::http::use<>` helper
 ## Basic Server Example (within an Actor)
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 #include <qb/main.h>
 #include <qb/actor.h>
 #include <iostream>

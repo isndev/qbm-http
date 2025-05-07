@@ -21,7 +21,7 @@ This is the main class for defining routes and middleware.
 Routes map an HTTP method and a path pattern to a handler.
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 
 // Assume 'router' is an instance of qb::http::Router<MySession>
 
@@ -115,7 +115,7 @@ admin_group.get("/settings", [](Context& ctx){ /* ... */ ctx.complete(); });
 Provide class-based organization for routes, typically grouping all routes related to a specific resource.
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
 
 class ProductController : public qb::http::Controller<MySession> {
 public:

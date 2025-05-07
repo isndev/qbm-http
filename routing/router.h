@@ -291,7 +291,7 @@ public:
      * @brief Get all active async requests
      * @return Map of active requests (request ID to context)
      */
-    const std::map<std::uintptr_t, std::shared_ptr<Context>> &
+    const qb::unordered_map<std::uintptr_t, std::shared_ptr<Context>> &
     get_active_requests() const;
 
     /**
@@ -303,9 +303,84 @@ public:
     void complete_async_request(std::uintptr_t context_id, Response response,
                                 AsyncRequestState state = AsyncRequestState::COMPLETED);
 
+    /**
+     * @brief Get the routes for a specific HTTP method (for introspection)
+     * @param method HTTP method to get routes for
+     * @return Reference to the vector of routes
+     */
+    const std::vector<std::unique_ptr<IRoute>>& getRoutes(http_method method) const {
+        static std::vector<std::unique_ptr<IRoute>> empty;
+        auto it = _routes.find(method);
+        if (it != _routes.end()) {
+            return it->second;
+        }
+        return empty;
+    }
+    
+    /**
+     * @brief Get all HTTP methods with registered routes
+     * @return Vector of HTTP methods
+     */
+    std::vector<http_method> getRegisteredMethods() const {
+        std::vector<http_method> methods;
+        for (const auto& pair : _routes) {
+            if (!pair.second.empty()) {
+                methods.push_back(pair.first);
+            }
+        }
+        return methods;
+    }
+    
+    /**
+     * @brief Get all controllers registered with this router
+     * @return Reference to the vector of controllers
+     */
+    const std::vector<std::shared_ptr<Controller>>& getControllers() const {
+        return _controllers;
+    }
+    
+    /**
+     * @brief Get the current route group
+     * @return Pointer to the current route group, or nullptr if none
+     */
+    RouteGroup* getCurrentGroup() const {
+        // Return the last added group or nullptr if no groups exist
+        return _groups.empty() ? nullptr : _groups.back().get();
+    }
+    
+    /**
+     * @brief Get all route groups (for OpenAPI introspection)
+     * @return Vector of RouteGroup pointers
+     */
+    std::vector<RouteGroup*> getGroups() const {
+        std::vector<RouteGroup*> groups;
+        for (const auto& group : _groups) {
+            groups.push_back(group.get());
+        }
+        return groups;
+    }
+    
+    /**
+     * @brief Route metadata for OpenAPI documentation
+     * @return Reference to the route metadata
+     */
+    RouteMetadata& metadata() {
+        static RouteMetadata _metadata;
+        return _metadata;
+    }
+    
+    /**
+     * @brief Route metadata for OpenAPI documentation (const)
+     * @return Const reference to the route metadata
+     */
+    const RouteMetadata& metadata() const {
+        static RouteMetadata _metadata;
+        return _metadata;
+    }
+
 private:
     // Map of HTTP methods to route handlers
-    std::map<http_method, std::vector<std::unique_ptr<IRoute>>> _routes;
+    qb::unordered_map<http_method, std::vector<std::unique_ptr<IRoute>>> _routes;
     // Controllers for hierarchical routing
     std::vector<std::shared_ptr<Controller>> _controllers;
     // Global middleware functions (legacy)
@@ -315,16 +390,19 @@ private:
     // Typed middleware chain
     std::shared_ptr<MiddlewareChain<Session, String>> _typed_middleware_chain;
     // Error handlers for different status codes
-    std::map<int, std::function<void(Context &)>> _error_handlers;
+    qb::unordered_map<int, std::function<void(Context &)>> _error_handlers;
     // Default responses for different HTTP methods (if no route matches)
-    std::map<http_method, Response> _default_responses;
+    qb::unordered_map<http_method, Response> _default_responses;
     // Whether to enable logging
     bool _enable_logging{false};
-    // Current route group being configured
-    std::unique_ptr<RouteGroup> _current_group;
+    
+    // Store all route groups in a stable container to prevent dangling references
+    std::vector<std::shared_ptr<RouteGroup>> _groups;
+    // Store the parent-child relationships between groups
+    qb::unordered_map<RouteGroup*, std::vector<RouteGroup*>> _group_hierarchy;
 
     // Map to track active async requests
-    std::map<std::uintptr_t, std::shared_ptr<Context>> _active_async_requests;
+    qb::unordered_map<std::uintptr_t, std::shared_ptr<Context>> _active_async_requests;
     
     // Timestamp of last cleanup
     std::chrono::steady_clock::time_point _last_cleanup;

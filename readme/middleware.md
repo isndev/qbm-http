@@ -66,7 +66,8 @@ Middleware can be applied at different levels:
 Inherit from `ISyncMiddleware` and implement `process`.
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
+#include <http/middleware/middleware.h>
 
 class CustomHeaderMiddleware : public qb::http::ISyncMiddleware<MySession> {
 public:
@@ -101,7 +102,8 @@ router.use(qb::http::make_middleware<MySession>([](qb::http::Context<MySession>&
 Inherit from `IAsyncMiddleware` and implement `process_async`.
 
 ```cpp
-#include <qb/http.h>
+#include <http/http.h>
+#include <http/middleware/middleware.h>
 #include <qb/io/async.h>
 
 class AsyncDataFetchMiddleware : public qb::http::IAsyncMiddleware<MySession> {
