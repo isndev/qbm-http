@@ -103,6 +103,7 @@ public:
     Body(Body &&rhs) noexcept = default;
     Body(Body const &rhs)     = default;
 
+    Body &operator=(Body const &rhs) = default;
     Body &operator=(Body &&rhs) noexcept = default;
 
     /**

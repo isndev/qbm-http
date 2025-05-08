@@ -246,6 +246,7 @@ qb::json DocumentGenerator::extractSecurityRequirements(
     const std::shared_ptr<MiddlewareChain<Session, String>>& middlewareChain
 ) const {
     // TODO: Implement security requirements extraction from middleware
+    (void)middlewareChain;
     return qb::json::array();
 }
 

@@ -69,7 +69,7 @@ struct MockSession {
 
     MockSession &
     operator<<(qb::http::Response const &response) {
-        _response = std::move(qb::http::Response(response));
+        _response = response;
         _all_responses.push_back(_response);
         return *this;
     }
@@ -169,6 +169,7 @@ TEST_F(RouterSyncMiddlewareTest, BasicMiddlewareChaining) {
         // Get request info from context
         auto request_id = ctx.get<std::string>("request_id", "unknown");
         auto timestamp  = ctx.get<time_t>("timestamp", 0);
+        (void)timestamp; // Silenced warning
 
         // In a real app, we'd log to a file or service
         // For test, just add another header to verify

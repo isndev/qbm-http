@@ -101,7 +101,7 @@ struct AdvancedMockSession {
             return *this;
         }
 
-        _response = std::move(qb::http::Response(response));
+        _response = response;
         _responses.push_back(_response);
         return *this;
     }
@@ -202,6 +202,7 @@ protected:
     void
     simulateRandomDelay() {
         int delay = delay_dist(gen);
+        (void)delay; // Silenced warning
         // In a real implementation, this would use actual sleep
         // Here we just use it to simulate varying completion times
     }
@@ -928,6 +929,7 @@ TEST_F(RouterAsyncTest, ExplicitHandlerInvalidation) {
         std::string    mode       = ctx.param("mode");
         auto           completion = ctx.make_async();
         auto context_id = reinterpret_cast<std::uintptr_t>(&ctx);
+        (void)context_id; // Silenced warning
 
         qb::Actor::post([completion, mode, this]() mutable {
             simulateRandomDelay();

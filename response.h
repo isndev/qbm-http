@@ -35,6 +35,10 @@ struct TResponse : public internal::MessageBase<String> {
 
     TResponse() noexcept
         : status_code(HTTP_STATUS_OK) {}
+    TResponse(TResponse const &) = default;
+    TResponse(TResponse &&)      = default;
+    TResponse &operator=(TResponse const &) = default;
+    TResponse &operator=(TResponse &&)      = default;
 
     void
     reset() {
