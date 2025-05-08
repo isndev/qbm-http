@@ -12,7 +12,7 @@ struct MockSession {
 
     MockSession &
     operator<<(qb::http::Response const &response) {
-        _response = std::move(qb::http::Response(response));
+        _response = response;
         return *this;
     }
     

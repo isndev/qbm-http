@@ -12,7 +12,7 @@ struct MockSession {
 
     MockSession &
     operator<<(qb::http::Response const &response) {
-        _response = std::move(qb::http::Response(response));
+        _response = response;
         return *this;
     }
     
@@ -309,15 +309,18 @@ TEST_F(RouterGroupTest, ComplexNestedStructure) {
     auto& v1 = api.group("/v1");
     auto& v1_users = v1.group("/users");
     auto& v1_posts = v1.group("/posts");
+    (void) v1_posts;
     
     // Branch 2: Version 2 API
     auto& v2 = api.group("/v2");
     auto& v2_users = v2.group("/users");
     auto& v2_posts = v2.group("/posts");
-    
+    (void) v2_posts;
+
     // Branch 3: Admin API
     auto& admin = api.group("/admin");
     auto& admin_users = admin.group("/users");
+    (void)admin_users;
     auto& admin_settings = admin.group("/settings");
     
     // Branch 4: Super deep nesting
@@ -458,6 +461,7 @@ TEST_F(RouterGroupTest, OpenAPITagPropagation) {
     api.withTag("API");
     
     auto& v1 = api.group("/v1");
+    (void)v1;
     v1.withTag("v1");
     
     auto& users = v1.group("/users");
@@ -546,6 +550,7 @@ TEST_F(RouterGroupTest, MixedGroupsAndControllers) {
     // Create external groups
     auto& api = router->group("/api");
     auto& v1 = api.group("/v1");
+    (void)v1;
     
     // Register controller under the v1 group prefix path
     router->controller<ComplexController>();

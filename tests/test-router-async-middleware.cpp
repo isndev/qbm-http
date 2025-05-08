@@ -54,7 +54,7 @@ struct MockSession {
 
     MockSession &
     operator<<(qb::http::Response const &response) {
-        _response = std::move(qb::http::Response(response));
+        _response = response;
         _all_responses.push_back(_response);
         return *this;
     }
@@ -522,6 +522,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithDeferredProcessing) {
 // Test async middleware with route parameters
 TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareWithRouteParameters) {
     bool        middleware_had_params = false;
+    (void)middleware_had_params;
     std::string middleware_user_id;
 
     // A much simpler middleware implementation
@@ -995,7 +996,7 @@ TEST_F(RouterAsyncMiddlewareTest, NestedAsyncOperations) {
                     (*state_exec_order)->push_back("outer_async_operation_2");
 
                     // Set up second nested operation on a different "thread"
-                    simulateAsyncDelay([this, state_exec_order, ctx_ptr, &ctx,
+                    simulateAsyncDelay([state_exec_order, ctx_ptr, &ctx,
                                         next_cb]() mutable {
                         (*state_exec_order)->push_back("nested_async_operation_2");
 
@@ -1027,7 +1028,7 @@ TEST_F(RouterAsyncMiddlewareTest, NestedAsyncOperations) {
         auto next_cb = std::make_shared<std::function<void(bool)>>(next);
 
         // Do something with the nested data from previous middleware
-        simulateAsyncDelay([this, state_exec_order, ctx_ptr, &ctx, nested_data_1,
+        simulateAsyncDelay([state_exec_order, ctx_ptr, &ctx, nested_data_1,
                             nested_data_2, next_cb]() mutable {
             (*state_exec_order)->push_back("dependent_middleware_process");
 
@@ -1547,7 +1548,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareCancellation) {
 
         // Normal non-cancelled behavior
         simulateAsyncDelay(
-            [state_exec_order, ctx_ptr, &ctx, next_cb]() mutable {
+            [state_exec_order, next_cb]() mutable {
                 (*state_exec_order)->push_back("normal_operation_complete");
                 (*next_cb)(true);
             },
@@ -1639,7 +1640,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareEarlyReturnsAndCancellation) {
 
         // First parallel operation
         simulateAsyncDelay(
-            [this, cancelled, operations_completed, total_operations, &ctx, next]() {
+            [this, cancelled, operations_completed, total_operations, next]() {
                 if (*cancelled) {
                     execution_order.push_back("operation_1_skipped_due_to_cancellation");
                     return;
@@ -1687,7 +1688,7 @@ TEST_F(RouterAsyncMiddlewareTest, AsyncMiddlewareEarlyReturnsAndCancellation) {
 
         // Third parallel operation
         simulateAsyncDelay(
-            [this, cancelled, operations_completed, total_operations, &ctx, next]() {
+            [this, cancelled, operations_completed, total_operations, next]() {
                 if (*cancelled) {
                     execution_order.push_back("operation_3_skipped_due_to_cancellation");
                     return;
