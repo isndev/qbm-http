@@ -11,10 +11,10 @@
 namespace qb::http {
 
 /**
- * @brief Chaîne de middlewares synchrones et asynchrones
+ * @brief Chain of synchronous and asynchronous middlewares
  * 
- * Cette classe permet de combiner plusieurs middlewares en une séquence
- * d'exécution, gérant à la fois les middlewares synchrones et asynchrones.
+ * This class allows combining multiple middlewares into an execution sequence,
+ * managing both synchronous and asynchronous middlewares.
  */
 template <typename Session, typename String = std::string>
 class MiddlewareChain : public IMiddleware<Session, String> {
@@ -23,21 +23,21 @@ public:
     using CompletionCallback = typename IMiddleware<Session, String>::CompletionCallback;
     
     /**
-     * @brief Constructeur par défaut
+     * @brief Default constructor
      */
     MiddlewareChain() = default;
     
     /**
-     * @brief Constructeur avec liste de middlewares initiale
-     * @param middlewares Liste de middlewares à ajouter
+     * @brief Constructor with initial list of middlewares
+     * @param middlewares List of middlewares to add
      */
     explicit MiddlewareChain(std::vector<MiddlewarePtr<Session, String>> middlewares)
         : _middlewares(std::move(middlewares)) {}
     
     /**
-     * @brief Ajoute un middleware à la chaîne
-     * @param middleware Middleware à ajouter
-     * @return Référence à cette chaîne pour chaînage
+     * @brief Adds a middleware to the chain
+     * @param middleware Middleware to add
+     * @return Reference to this chain for chaining
      */
     MiddlewareChain& add(MiddlewarePtr<Session, String> middleware) {
         _middlewares.push_back(std::move(middleware));
@@ -45,10 +45,10 @@ public:
     }
     
     /**
-     * @brief Traiter une requête à travers la chaîne de middlewares
-     * @param ctx Contexte de la requête
-     * @param completion_callback Callback à appeler à la fin du traitement
-     * @return Résultat du traitement
+     * @brief Process a request through the middleware chain
+     * @param ctx Request context
+     * @param completion_callback Callback to call at the end of processing
+     * @return Processing result
      */
     MiddlewareResult process(Context& ctx, CompletionCallback completion_callback = nullptr) override {
         if (_middlewares.empty()) {
@@ -57,7 +57,7 @@ public:
             return result;
         }
         
-        // Créer un contexte de traitement pour suivre la progression dans la chaîne
+        // Create a processing context to track progress in the chain
         auto chain_context = std::make_shared<ChainExecutionContext>(
             ctx,
             _middlewares,
@@ -66,14 +66,14 @@ public:
             _error_handler
         );
         
-        // Démarrer l'exécution de la chaîne
+        // Start chain execution
         return process_next(*chain_context);
     }
     
     /**
-     * @brief Définit un gestionnaire d'erreurs pour la chaîne
-     * @param handler Fonction à appeler en cas d'erreur
-     * @return Référence à cette chaîne pour chaînage
+     * @brief Defines an error handler for the chain
+     * @param handler Function to call in case of error
+     * @return Reference to this chain for chaining
      */
     MiddlewareChain& on_error(std::function<void(Context&, const std::string&)> handler) {
         _error_handler = std::move(handler);
@@ -81,20 +81,20 @@ public:
     }
     
     /**
-     * @brief Récupère le nom de la chaîne
+     * @brief Gets the chain name
      */
     std::string name() const override {
         return "MiddlewareChain";
     }
     
 private:
-    // Liste des middlewares
+    // List of middlewares
     std::vector<MiddlewarePtr<Session, String>> _middlewares;
     
-    // Gestionnaire d'erreurs optionnel
+    // Optional error handler
     std::function<void(Context&, const std::string&)> _error_handler;
     
-    // Contexte d'exécution pour suivre l'état de la chaîne
+    // Execution context to track chain state
     struct ChainExecutionContext {
         Context& ctx;
         const std::vector<MiddlewarePtr<Session, String>>& middlewares;
@@ -113,12 +113,12 @@ private:
     };
     
     /**
-     * @brief Traite le prochain middleware dans la chaîne
-     * @param chain_ctx Contexte d'exécution de la chaîne
-     * @return Résultat du traitement
+     * @brief Processes the next middleware in the chain
+     * @param chain_ctx Chain execution context
+     * @return Processing result
      */
     MiddlewareResult process_next(ChainExecutionContext& chain_ctx) {
-        // Si tous les middlewares ont été traités ou si le contexte est déjà géré
+        // If all middlewares have been processed or if the context is already handled
         if (chain_ctx.current_index >= chain_ctx.middlewares.size() || chain_ctx.ctx.is_handled()) {
             auto result = MiddlewareResult::Continue();
             if (chain_ctx.final_callback) {
@@ -127,21 +127,21 @@ private:
             return result;
         }
         
-        // Récupérer le middleware actuel
+        // Get the current middleware
         auto& middleware = chain_ctx.middlewares[chain_ctx.current_index];
         
-        // Préparer le callback pour le middleware suivant
+        // Prepare the callback for the next middleware
         auto next_callback = [chain_ctx_ptr = std::make_shared<ChainExecutionContext>(chain_ctx)](MiddlewareResult result) mutable {
             auto& chain_ctx = *chain_ctx_ptr;
             
-            // Vérifier le résultat du middleware
+            // Check the middleware result
             if (result.is_error()) {
-                // Appeler le gestionnaire d'erreurs s'il existe
+                // Call the error handler if it exists
                 if (chain_ctx.error_handler) {
                     chain_ctx.error_handler(chain_ctx.ctx, result.error_message());
                 }
                 
-                // Transmettre l'erreur au callback final
+                // Pass the error to the final callback
                 if (chain_ctx.final_callback) {
                     chain_ctx.final_callback(result);
                 }
@@ -149,7 +149,7 @@ private:
             }
             
             if (result.should_stop()) {
-                // Middleware a demandé d'arrêter le traitement
+                // Middleware requested to stop processing
                 if (chain_ctx.final_callback) {
                     chain_ctx.final_callback(result);
                 }
@@ -157,26 +157,26 @@ private:
             }
             
             if (result.should_skip()) {
-                // Middleware a demandé de sauter au handler final
+                // Middleware requested to skip to the final handler
                 chain_ctx.current_index = chain_ctx.middlewares.size();
             } else {
-                // Passer au middleware suivant
+                // Move to the next middleware
                 chain_ctx.current_index++;
             }
             
-            // Récursivement traiter le prochain middleware
+            // Recursively process the next middleware
             MiddlewareChain<Session, String>::process_next_static(chain_ctx);
         };
         
-        // Exécuter le middleware actuel
+        // Execute the current middleware
         MiddlewareResult result = middleware->process(chain_ctx.ctx, next_callback);
         
-        // Si le middleware est asynchrone, simplement retourner Async
+        // If the middleware is asynchronous, simply return Async
         if (result.is_async()) {
             return MiddlewareResult::Async();
         }
         
-        // Pour les middlewares synchrones, vérifier le résultat immédiatement
+        // For synchronous middlewares, check the result immediately
         if (result.is_error()) {
             if (chain_ctx.error_handler) {
                 chain_ctx.error_handler(chain_ctx.ctx, result.error_message());
@@ -196,7 +196,7 @@ private:
         }
         
         if (result.should_skip()) {
-            // Sauter au handler final
+            // Skip to the final handler
             auto final_result = MiddlewareResult::Skip();
             if (chain_ctx.final_callback) {
                 chain_ctx.final_callback(final_result);
@@ -204,12 +204,12 @@ private:
             return final_result;
         }
         
-        // Passer au middleware suivant
+        // Move to the next middleware
         chain_ctx.current_index++;
         return process_next(chain_ctx);
     }
     
-    // Version statique pour être appelée depuis des lambdas capturant chain_ctx par valeur
+    // Static version to be called from lambdas capturing chain_ctx by value
     static void process_next_static(ChainExecutionContext& chain_ctx) {
         MiddlewareChain<Session, String> chain;
         chain.process_next(chain_ctx);
@@ -217,7 +217,7 @@ private:
 };
 
 /**
- * @brief Fonction d'aide pour créer une chaîne de middlewares
+ * @brief Helper function to create a middleware chain
  */
 template <typename Session, typename String = std::string>
 auto make_middleware_chain(std::vector<MiddlewarePtr<Session, String>> middlewares = {}) {

@@ -12,24 +12,24 @@
 namespace qb::http {
 
 /**
- * @brief Résultat d'un middleware indiquant comment la chaîne doit procéder
+ * @brief Result of a middleware indicating how the chain should proceed
  */
 enum class MiddlewareAction {
-    CONTINUE,   ///< Continue vers le middleware suivant
-    SKIP,       ///< Sauter le reste des middlewares et exécuter le handler final
-    STOP,       ///< Arrêter le traitement (la réponse a été définie)
-    ERROR       ///< Arrêter avec une erreur
+    CONTINUE,   ///< Continue to the next middleware
+    SKIP,       ///< Skip the rest of the middlewares and execute the final handler
+    STOP,       ///< Stop processing (the response has been defined)
+    ERROR       ///< Stop with an error
 };
 
 /**
- * @brief Résultat d'exécution d'un middleware avec support asynchrone intégré
+ * @brief Execution result of a middleware with integrated asynchronous support
  */
 class MiddlewareResult {
 public:
     /**
-     * @brief Constructeur pour un résultat synchrone
-     * @param action Action à prendre pour la suite du traitement
-     * @param error_message Message d'erreur optionnel (si action est ERROR)
+     * @brief Constructor for a synchronous result
+     * @param action Action to take for the rest of the processing
+     * @param error_message Optional error message (if action is ERROR)
      */
     explicit MiddlewareResult(MiddlewareAction action, 
                       std::string error_message = {})
@@ -38,21 +38,21 @@ public:
           _error_message(std::move(error_message)) {}
     
     /**
-     * @brief Constructeur pour un résultat asynchrone
-     * @param is_async Indique si le traitement est asynchrone
+     * @brief Constructor for an asynchronous result
+     * @param is_async Indicates if the processing is asynchronous
      */
     explicit MiddlewareResult(bool is_async = true)
         : _action(MiddlewareAction::CONTINUE), 
           _is_async(is_async) {}
     
-    // Méthodes d'usine pour créer les différents types de résultats
+    // Factory methods to create the different types of results
     static MiddlewareResult Continue() { return MiddlewareResult(MiddlewareAction::CONTINUE); }
     static MiddlewareResult Skip() { return MiddlewareResult(MiddlewareAction::SKIP); }
     static MiddlewareResult Stop() { return MiddlewareResult(MiddlewareAction::STOP); }
     static MiddlewareResult Error(std::string message) { return MiddlewareResult(MiddlewareAction::ERROR, std::move(message)); }
     static MiddlewareResult Async() { return MiddlewareResult(true); }
     
-    // Accesseurs
+    // Accessors
     bool is_async() const { return _is_async; }
     bool should_continue() const { return _action == MiddlewareAction::CONTINUE; }
     bool should_skip() const { return _action == MiddlewareAction::SKIP; }
@@ -68,9 +68,9 @@ private:
 };
 
 /**
- * @brief Interface pour les middlewares synchrones
+ * @brief Interface for synchronous middlewares
  * 
- * Ce middleware traite de manière synchrone et retourne immédiatement un résultat.
+ * This middleware processes synchronously and returns a result immediately.
  */
 template <typename Session, typename String = std::string>
 class ISyncMiddleware {
@@ -80,23 +80,23 @@ public:
     virtual ~ISyncMiddleware() = default;
     
     /**
-     * @brief Traite une requête à travers ce middleware de manière synchrone
-     * @param ctx Contexte de la requête
-     * @return Résultat du middleware
+     * @brief Processes a request through this middleware synchronously
+     * @param ctx Request context
+     * @return Middleware result
      */
     virtual MiddlewareResult process(Context& ctx) = 0;
     
     /**
-     * @brief Récupère le nom du middleware (pour logging/débogage)
+     * @brief Gets the middleware name (for logging/debugging)
      */
     virtual std::string name() const = 0;
 };
 
 /**
- * @brief Interface pour les middlewares asynchrones
+ * @brief Interface for asynchronous middlewares
  * 
- * Ce middleware peut retarder son traitement et appeler le callback
- * lorsqu'il est terminé.
+ * This middleware can delay its processing and call the callback
+ * when it is finished.
  */
 template <typename Session, typename String = std::string>
 class IAsyncMiddleware {
@@ -107,23 +107,23 @@ public:
     virtual ~IAsyncMiddleware() = default;
     
     /**
-     * @brief Traite une requête à travers ce middleware de manière asynchrone
-     * @param ctx Contexte de la requête
-     * @param callback Fonction à appeler lorsque le traitement est terminé
+     * @brief Processes a request through this middleware asynchronously
+     * @param ctx Request context
+     * @param callback Function to call when processing is complete
      */
     virtual void process_async(Context& ctx, CompletionCallback callback) = 0;
     
     /**
-     * @brief Récupère le nom du middleware (pour logging/débogage)
+     * @brief Gets the middleware name (for logging/debugging)
      */
     virtual std::string name() const = 0;
 };
 
 /**
- * @brief Interface unifiée pour les middlewares
+ * @brief Unified interface for middlewares
  * 
- * Cette interface combine les comportements synchrones et asynchrones.
- * Les classes peuvent implémenter une ou les deux méthodes selon leurs besoins.
+ * This interface combines synchronous and asynchronous behaviors.
+ * Classes can implement one or both methods according to their needs.
  */
 template <typename Session, typename String = std::string>
 class IMiddleware {
@@ -134,30 +134,30 @@ public:
     virtual ~IMiddleware() = default;
     
     /**
-     * @brief Traite une requête synchrone ou asynchrone selon le type de middleware
-     * @param ctx Contexte de la requête
-     * @param callback Fonction à appeler si le traitement est asynchrone
-     * @return Résultat du middleware (ignoré si asynchrone)
+     * @brief Processes a request synchronously or asynchronously depending on the middleware type
+     * @param ctx Request context
+     * @param callback Function to call if processing is asynchronous
+     * @return Middleware result (ignored if asynchronous)
      * 
-     * Cette méthode doit être implémentée par toutes les classes dérivées.
-     * Pour un middleware synchrone, elle doit retourner le résultat et ignorer le callback.
-     * Pour un middleware asynchrone, elle doit retourner MiddlewareResult::Async() et 
-     * appeler le callback plus tard.
+     * This method must be implemented by all derived classes.
+     * For a synchronous middleware, it must return the result and ignore the callback.
+     * For an asynchronous middleware, it must return MiddlewareResult::Async() and 
+     * call the callback later.
      */
     virtual MiddlewareResult process(Context& ctx, CompletionCallback callback = nullptr) = 0;
     
     /**
-     * @brief Récupère le nom du middleware (pour logging/débogage)
+     * @brief Gets the middleware name (for logging/debugging)
      */
     virtual std::string name() const = 0;
 };
 
-// Type alias pour simplifier la création de middlewares partagés
+// Type alias to simplify the creation of shared middlewares
 template <typename Session, typename String = std::string>
 using MiddlewarePtr = std::shared_ptr<IMiddleware<Session, String>>;
 
 /**
- * @brief Adaptateur pour convertir un middleware synchrone en middleware unifié
+ * @brief Adapter to convert a synchronous middleware into a unified middleware
  */
 template <typename Session, typename String = std::string>
 class SyncMiddlewareAdapter : public IMiddleware<Session, String> {
@@ -183,7 +183,7 @@ private:
 };
 
 /**
- * @brief Adaptateur pour convertir un middleware asynchrone en middleware unifié
+ * @brief Adapter to convert an asynchronous middleware into a unified middleware
  */
 template <typename Session, typename String = std::string>
 class AsyncMiddlewareAdapter : public IMiddleware<Session, String> {
@@ -212,7 +212,7 @@ private:
 };
 
 /**
- * @brief Adaptateur pour utiliser une fonction lambda comme middleware synchrone
+ * @brief Adapter to use a lambda function as a synchronous middleware
  */
 template <typename Session, typename String = std::string>
 class FunctionMiddleware : public IMiddleware<Session, String> {
@@ -222,11 +222,11 @@ public:
     using SyncFunction = std::function<MiddlewareResult(Context&)>;
     using AsyncFunction = std::function<void(Context&, CompletionCallback)>;
     
-    // Constructeur pour fonction synchrone
+    // Constructor for synchronous function
     explicit FunctionMiddleware(SyncFunction func, std::string name = "FunctionMiddleware")
         : _sync_func(std::move(func)), _name(std::move(name)) {}
     
-    // Constructeur pour fonction asynchrone
+    // Constructor for asynchronous function
     explicit FunctionMiddleware(AsyncFunction func, std::string name = "AsyncFunctionMiddleware")
         : _async_func(std::move(func)), _name(std::move(name)) {}
     
@@ -261,13 +261,13 @@ private:
     std::string _name;
 };
 
-// Fonctions d'aide pour créer des middlewares basés sur des fonctions
+// Helper functions to create function-based middlewares
 template <typename Session, typename String = std::string, typename Func>
 std::shared_ptr<IMiddleware<Session, String>> make_middleware(Func&& func, const std::string& name = "Middleware") {
     return std::make_shared<FunctionMiddleware<Session, String>>(std::forward<Func>(func), name);
 }
 
-// Adaptateur pour la compatibilité avec le système original de middleware
+// Adapter for compatibility with the original middleware system
 template <typename Session, typename String = std::string>
 class LegacyMiddlewareAdapter : public IMiddleware<Session, String> {
 public:
@@ -276,11 +276,11 @@ public:
     using LegacySyncMiddleware = std::function<bool(Context&)>;
     using LegacyAsyncMiddleware = std::function<void(Context&, std::function<void(bool)>)>;
     
-    // Constructeur pour middleware synchrone hérité
+    // Constructor for inherited synchronous middleware
     explicit LegacyMiddlewareAdapter(LegacySyncMiddleware func, std::string name = "LegacySyncMiddleware")
         : _sync_func(std::move(func)), _name(std::move(name)) {}
     
-    // Constructeur pour middleware asynchrone hérité
+    // Constructor for inherited asynchronous middleware
     explicit LegacyMiddlewareAdapter(LegacyAsyncMiddleware func, std::string name = "LegacyAsyncMiddleware")
         : _async_func(std::move(func)), _name(std::move(name)) {}
     
@@ -321,7 +321,7 @@ private:
     std::string _name;
 };
 
-// Fonctions d'aide pour créer des middlewares compatibles avec l'ancien système
+// Helper functions to create middlewares compatible with the old system
 template <typename Session, typename String = std::string>
 std::shared_ptr<IMiddleware<Session, String>> from_legacy_middleware(
     typename LegacyMiddlewareAdapter<Session, String>::LegacySyncMiddleware func, 
