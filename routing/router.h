@@ -56,9 +56,9 @@ public:
     // Type aliases for external types
     using Context    = RouterContext<Session, String>;
     using Route      = ARoute<Session, String>;
-    using Controller = Controller<Session, String>;
-    using RouteGroup = RouteGroup<Session, String>;
-    using IRoute     = IRoute<Session, String>;
+    using Controller = qb::http::Controller<Session, String>;
+    using RouteGroup = qb::http::RouteGroup<Session, String>;
+    using IRoute     = qb::http::IRoute<Session, String>;
 
     // Middleware type definitions
     using Middleware = std::function<bool(Context &)>;

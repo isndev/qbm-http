@@ -27,7 +27,7 @@ template <typename Session, typename String>
 class AsyncCompletionHandler;
 
 namespace detail {
-// Trait pour détecter si une classe a une méthode is_connected()
+// Trait to detect if a class has an is_connected() method
 template <typename T, typename = void>
 struct has_method_is_connected : std::false_type {};
 
@@ -479,7 +479,7 @@ public:
      */
     void
     complete() {
-        // Exécuter les callbacks après traitement
+        // Execute callbacks after processing
         execute_after_callbacks();
         execute_done_callbacks();
         
@@ -546,7 +546,7 @@ public:
                 }
             }
 
-            // Exécuter les callbacks après traitement
+            // Execute callbacks after processing
             ctx.execute_after_callbacks();
             ctx.execute_done_callbacks();
 
@@ -585,7 +585,7 @@ public:
             ctx.response.status_code = status_code;
             ctx.response.body()      = error_message;
             
-            // Exécuter les callbacks d'erreur
+            // Execute error callbacks
             ctx.execute_error_callbacks(error_message);
             
             if (router) {

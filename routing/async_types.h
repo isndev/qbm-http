@@ -15,7 +15,7 @@ class AsyncCompletionHandler;
 // Forward declaration for async middleware result
 class AsyncMiddlewareResult;
 
-// Type d'identifiant de session -> Session identifier type
+// Session identifier type
 using SessionId = ::qb::uuid;
 
 // Async request state enumerations

@@ -13,7 +13,7 @@ DocumentGenerator::DocumentGenerator(
 ) {
     initialize();
     
-    // Initialiser les informations de l'API
+    // Initialize API information
     setTitle(title);
     setVersion(version);
     if (!description.empty()) {
@@ -22,7 +22,7 @@ DocumentGenerator::DocumentGenerator(
 }
 
 void DocumentGenerator::initialize() {
-    // Initialiser les structures de données
+    // Initialize data structures
     _info = qb::json::object();
     _servers = qb::json::array();
     _paths = qb::json::object();

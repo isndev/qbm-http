@@ -22,7 +22,7 @@ class Router;
 template <typename Session, typename String = std::string>
 class AsyncCompletionHandler {
 private:
-    using Router = Router<Session, String>;
+    using Router = qb::http::Router<Session, String>;
     using Context = typename Router::Context;
 
     Router            &_router;

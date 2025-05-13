@@ -22,7 +22,7 @@ find_package(OpenSSL REQUIRED)
 
 # Define test files and their corresponding test names
 set(HTTP_TESTS
-        #uri-only
+        uri-only
         router
         router-radix
         router-advanced
@@ -30,6 +30,7 @@ set(HTTP_TESTS
         router-sync-middleware
         router-async-middleware
         router-groups
+        router-auth
         cookie
         middleware-cors
         middleware-validator
@@ -43,8 +44,8 @@ set(HTTP_TESTS
         middleware-auth
 #        middleware-recaptcha
         openapi
-        #    session-http
         openapi-complex
+        session-http
 )
 
 # Register each standard test
@@ -55,13 +56,6 @@ foreach (TEST ${HTTP_TESTS})
             SOURCES test-${TEST}.cpp
     )
 endforeach ()
-
-# Register auth test separately as it needs OpenSSL
-qb_register_module_gtest(
-        NAME http
-        TESTNAME router-auth
-        SOURCES test-auth.cpp
-)
 
 # Copy SSL resources if needed
 if (OPENSSL_FOUND AND QB_SSL_RESOURCES)
