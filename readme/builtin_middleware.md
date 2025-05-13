@@ -279,4 +279,39 @@ The `qbm-http` module provides several pre-built middleware components for commo
     // router.use(std::make_shared<qb::http::AsyncMiddlewareAdapter<MySession>>(recaptcha_mw));
     ```
 
+### 12. Compression (`CompressionMiddleware`)
+
+*   **Header:** `middleware/compression.h`
+*   **Purpose:** Automatic compression of HTTP responses and decompression of HTTP requests based on Content-Encoding/Accept-Encoding headers.
+*   **Dependencies:** `qb/io/compression.h` (requires Zlib). Defined with `QB_IO_WITH_ZLIB=ON`.
+*   **Key Features:**
+    *   **Request Decompression**: Automatically decompresses request body data based on `Content-Encoding` header.
+    *   **Response Compression**: Compresses response data based on client's `Accept-Encoding` header.
+    *   **Smart Detection**: Skips compression for already compressed content types (images, videos, etc.)
+    *   **Configurable Options**: Minimum size threshold (default 1024 bytes), preferred encodings order, enable/disable compression or decompression.
+    *   **Optimization Presets**: `max_compression_middleware` (smaller size) and `fast_compression_middleware` (better performance).
+    *   **Vary Header**: Automatically adds proper `Vary: Accept-Encoding` header for cache correctness.
+    *   **Content-Length**: Updates `Content-Length` header after compression/decompression.
+*   **Usage:**
+    ```cpp
+    #include <http/middleware/compression.h>
+
+    // Default middleware (1KB min size, prefers gzip)
+    router.use(qb::http::compression_middleware<MySession>());
+
+    // Maximum compression (smaller threshold, more algorithms)
+    router.use(qb::http::max_compression_middleware<MySession>());
+    
+    // Faster compression (larger threshold, faster algorithms)
+    router.use(qb::http::fast_compression_middleware<MySession>());
+
+    // Custom configuration
+    qb::http::CompressionOptions opts;
+    opts.min_size_to_compress(512)
+        .preferred_encodings({"deflate", "gzip"})
+        .compress_responses(true)
+        .decompress_requests(true);
+    router.use(qb::http::compression_middleware<MySession>(opts, "CustomCompression"));
+    ```
+
 **(See also:** [`middleware.md`](./middleware.md)**)** 

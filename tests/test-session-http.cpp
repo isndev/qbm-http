@@ -345,3 +345,39 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
 }
 
 #endif
+
+// #include <gtest/gtest.h>
+// #include "../http.h"
+// #include <http/routing/routing.h>
+
+// class HttpServer;
+// class HttpSession : public qb::http::use<HttpSession>::session<HttpServer>
+// {
+// public:
+//     HttpSession(HttpServer &server)
+//         : session(server) {}
+// };
+
+// class HttpServer : public qb::http::use<HttpServer>::server<HttpSession> {
+// public:
+//     using Router = qb::http::Router<HttpSession>;
+//     using Context = qb::http::Context<HttpSession>;
+
+//     HttpServer() {
+//         router().enable_logging(true);
+//         router().get("/", [](Context &ctx) {
+//             ctx.response.status_code = HTTP_STATUS_OK;
+//             ctx.response.body()      = "Hello, World!";
+//         });
+//     }
+// };
+
+// TEST(Session, HTTP_SIMPLE_SERVER) {
+//     HttpServer server;
+//     server.transport().listen_v4(9999);
+//     server.start();
+
+//     while (true) {
+//         async::run(EVRUN_ONCE);
+//     }
+// }

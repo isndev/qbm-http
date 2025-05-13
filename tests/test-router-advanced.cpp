@@ -503,17 +503,20 @@ TEST_F(RouterAdvancedTest, AsyncRequestHandling) {
 
     // Set up async handler
     router->get("/async", [&request_processed](Context &ctx) {
-        // Mark request as asynchronous
-        ctx.mark_async();
+        // Get async handler instead of using mark_async()
+        auto async_handler = ctx.make_async();
+        
+        // Make sure we got a valid handler
+        ASSERT_TRUE(async_handler != nullptr);
 
         // Simulate processing in another thread
-        qb::Actor::post([&ctx, &request_processed]() {
-            // After "processing", complete the request
-            ctx.response.status_code          = HTTP_STATUS_OK;
-            ctx.response.body()               = "Async response";
-            ctx.response.headers()["X-Async"] = {"true"};
-            request_processed                 = true;
-            ctx.complete();
+        qb::Actor::post([handler = std::move(async_handler), &request_processed]() {
+            // After "processing", complete the request using the handler
+            handler->status(HTTP_STATUS_OK);
+            handler->body("Async response");
+            handler->header("X-Async", "true");
+            request_processed = true;
+            handler->complete();
         });
     });
 

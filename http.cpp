@@ -153,10 +153,6 @@ pipe<char>::put<qb::http::Response>(const qb::http::Response &r) {
     // Body
     auto length = r.body().size();
     if (length) {
-        if (r.has_header("Content-Encoding"))
-            length = const_cast<qb::http::Response &>(r).body().compress(
-                r.header("Content-Encoding"));
-
         *this << "content-length: " << length << qb::http::endl
               << qb::http::endl
               << r.body().raw();

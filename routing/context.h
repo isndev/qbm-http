@@ -483,10 +483,28 @@ public:
         execute_after_callbacks();
         execute_done_callbacks();
         
+        // Mark the request as handled (important!)
+        handled = true;
+        
+        // CRITICAL FIX: Add a flag to indicate this request has been fully completed
+        // so the router won't try to complete it again
+        set("_completed", true);
+        
+        // In async mode, the router will handle the completion
+        // We should just mark it as handled and not send response directly
+        if (is_async()) {
+            return;
+        }
+        
+        // Only log and send response for synchronous contexts
         if (router) {
             router->log_request(*this);
         }
-        *session << response;
+        
+        // Send response if we have a valid session
+        if (session) {
+            *session << response;
+        }
     }
 
     // For compatibility with existing code

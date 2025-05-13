@@ -288,6 +288,17 @@ public:
     bool cancel_request(std::uintptr_t request_id);
 
     /**
+     * @brief Cancel a request with a custom status code and message
+     * @param request_id ID of the request to cancel
+     * @param status_code HTTP status code to use in the cancellation response
+     * @param message Message to include in the cancellation response body
+     * @return true if the request was found and cancelled, false otherwise
+     */
+    bool cancel_request(std::uintptr_t request_id, 
+                        http_status status_code,
+                        const std::string& message);
+
+    /**
      * @brief Get all active async requests
      * @return Map of active requests (request ID to context)
      */

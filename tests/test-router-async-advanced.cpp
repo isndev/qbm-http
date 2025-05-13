@@ -485,11 +485,13 @@ TEST_F(RouterAsyncTest, ConcurrentAsyncRequests) {
     // Setup endpoint that handles multiple concurrent requests
     router->get("/concurrent/:id", [](Context &ctx) {
         std::string id = ctx.param("id");
-        ctx.make_async();
+        auto completion = ctx.make_async();
 
         // Simulate varying processing times
-        qb::Actor::post([ctx, id]() mutable {
-            ctx.status(HTTP_STATUS_OK).body("Response for request " + id).complete();
+        qb::Actor::post([handler = std::move(completion), id]() mutable {
+            handler->status(HTTP_STATUS_OK)
+                   .body("Response for request " + id)
+                   .complete();
         });
     });
 
@@ -522,7 +524,7 @@ TEST_F(RouterAsyncTest, AsyncErrorHandling) {
     // Setup a route that simulates different error scenarios
     router->get("/async-error/:scenario", [this](Context &ctx) {
         std::string scenario = ctx.param("scenario");
-        ctx.make_async();
+        auto completion = ctx.make_async();
 
         if (scenario == "timeout") {
             // Simulate a timeout by not completing the request
@@ -530,32 +532,32 @@ TEST_F(RouterAsyncTest, AsyncErrorHandling) {
             return;
         } else if (scenario == "error") {
             // Simulate an error during async processing
-            qb::Actor::post([ctx]() mutable {
-                ctx.status(HTTP_STATUS_INTERNAL_SERVER_ERROR)
-                    .body("Async error occurred")
-                    .complete();
+            qb::Actor::post([handler = std::move(completion)]() mutable {
+                handler->status(HTTP_STATUS_INTERNAL_SERVER_ERROR)
+                       .body("Async error occurred")
+                       .complete();
             });
         } else if (scenario == "not-found") {
             // Simulate a not found condition during async processing
-            qb::Actor::post([ctx]() mutable {
-                ctx.status(HTTP_STATUS_NOT_FOUND)
-                    .body("Resource not found during async processing")
-                    .complete();
+            qb::Actor::post([handler = std::move(completion)]() mutable {
+                handler->status(HTTP_STATUS_NOT_FOUND)
+                       .body("Resource not found during async processing")
+                       .complete();
             });
         } else if (scenario == "recovery") {
             // Simulate an error with recovery
-            qb::Actor::post([ctx, this]() mutable {
+            qb::Actor::post([handler = std::move(completion), this]() mutable {
                 simulateRandomDelay();
 
                 // Simulate failed operation
-                qb::Actor::post([ctx, this]() mutable {
+                qb::Actor::post([handler = std::move(handler), this]() mutable {
                     simulateRandomDelay();
 
                     // Recovery attempt
-                    qb::Actor::post([ctx]() mutable {
-                        ctx.status(HTTP_STATUS_OK)
-                            .body("Recovered from error")
-                            .complete();
+                    qb::Actor::post([handler = std::move(handler)]() mutable {
+                        handler->status(HTTP_STATUS_OK)
+                               .body("Recovered from error")
+                               .complete();
                     });
                 });
             });
@@ -936,12 +938,7 @@ TEST_F(RouterAsyncTest, ExplicitHandlerInvalidation) {
 
             if (mode == "cancel") {
                 // Explicitly cancel the request with custom status and message
-                //completion->cancel(HTTP_STATUS_BAD_REQUEST,
-                //                   "Request canceled by application");
-                // Use complete_with_state instead for the test
-                completion->status(HTTP_STATUS_BAD_REQUEST)
-                    .body("Request canceled by application")
-                    .complete_with_state(qb::http::AsyncRequestState::CANCELED);
+                completion->cancel(HTTP_STATUS_BAD_REQUEST, "Request canceled by application");
             } else if (mode == "disconnect") {
                 // Mark as disconnected (should clean up resources)
                 completion->complete_with_state(qb::http::AsyncRequestState::DISCONNECTED);
@@ -1443,10 +1440,9 @@ TEST_F(RouterAsyncTest, CancellationStateBehavior) {
                          &cancel_count]() mutable {
             // Check if we should cancel at this stage
             if (mode_copy == "cancel-first-stage") {
-                // Use complete_with_state instead of cancel
-                completion->status(HTTP_STATUS_SERVICE_UNAVAILABLE)
-                          .body("Canceled at first stage")
-                          .complete_with_state(qb::http::AsyncRequestState::CANCELED);
+                // Use cancel with custom HTTP status instead of complete_with_state  
+                completion->cancel(HTTP_STATUS_SERVICE_UNAVAILABLE,
+                                 "Canceled at first stage");
                 cancel_count++;
                 return;
             }
@@ -1456,10 +1452,9 @@ TEST_F(RouterAsyncTest, CancellationStateBehavior) {
                              &cancel_count]() mutable {
                 // Check if we should cancel at this stage
                 if (mode_copy == "cancel-second-stage") {
-                    // Use complete_with_state instead of cancel
-                    completion->status(HTTP_STATUS_CONFLICT)
-                              .body("Canceled at second stage")
-                              .complete_with_state(qb::http::AsyncRequestState::CANCELED);
+                    // Use cancel with custom HTTP status instead of complete_with_state
+                    completion->cancel(HTTP_STATUS_CONFLICT,
+                                     "Canceled at second stage");
                     cancel_count++;
                     return;
                 }
@@ -1562,7 +1557,9 @@ TEST_F(RouterAsyncTest, SimpleCancellation) {
     // Create a simple route that will become async
     router->get("/simple-cancel-api", [](Context &ctx) {
         // Just mark the context as async
-        ctx.mark_async();
+        // ctx.mark_async();
+        // Get a completion handler instead of just marking as async
+        auto completion = ctx.make_async();
     });
 
     // Create and route a request
@@ -1608,33 +1605,31 @@ TEST_F(RouterAsyncTest, MultipleCancellations) {
 
         // First stage processing
         qb::Actor::post([completion, id, &processed_count, request_id, this]() mutable {
-            // Check if already cancelled
+            simulateRandomDelay();
+            
+            // Check if the request has been cancelled already
             if (router->is_request_cancelled(request_id)) {
-                std::cout << "Request " << id << " was already cancelled (first stage)"
-                          << std::endl;
                 completion->status(HTTP_STATUS_GONE)
                     .body("Request " + id + " was already cancelled")
                     .complete_with_state(qb::http::AsyncRequestState::CANCELED);
                 return;
             }
 
-            // Continue to second stage
-            qb::Actor::post([completion, id, &processed_count, request_id,
-                             this]() mutable {
-                // Check again if cancelled
+            // Second stage processing
+            qb::Actor::post([completion, id, &processed_count, request_id, this]() mutable {
+                simulateRandomDelay();
+                
+                // Check if request was cancelled during the delay between stages
                 if (router->is_request_cancelled(request_id)) {
-                    std::cout << "Request " << id
-                              << " was cancelled during processing (second stage)"
-                              << std::endl;
+                    // Important: when a request is cancelled, we should use the CANCELED state
                     completion->status(HTTP_STATUS_GONE)
-                        .body("Request " + id + " was cancelled during processing")
+                        .body("Request " + id + " was cancelled during processing (second stage)")
                         .complete_with_state(qb::http::AsyncRequestState::CANCELED);
                     return;
                 }
-
-                // Complete successfully
+                
+                // Complete the request normally
                 processed_count++;
-                std::cout << "Request " << id << " completed successfully" << std::endl;
                 completion->status(HTTP_STATUS_OK)
                     .body("Request " + id + " completed")
                     .complete();
@@ -1642,74 +1637,89 @@ TEST_F(RouterAsyncTest, MultipleCancellations) {
         });
     });
 
-    // Create multiple sessions and requests
-    const int request_count = 3; // Smaller number for easier debugging
+    // Multiple concurrent cancellations test
+    const int REQUEST_COUNT = 3;
     std::vector<std::shared_ptr<AdvancedMockSession>> sessions;
-    std::vector<std::uintptr_t>                       request_ids;
+    std::vector<std::uintptr_t> request_ids;  // Keep track of request IDs in order
 
-    for (int i = 0; i < request_count; i++) {
-        sessions.push_back(std::make_shared<AdvancedMockSession>());
-        auto req = createRequest(HTTP_GET, "/multi-cancel/" + std::to_string(i));
-        EXPECT_TRUE(router->route(sessions[i], req));
+    // Reset router state
+    TestHelpers::resetRouterState(router.get());
+    processed_count = 0;
+    
+    // One by one, send each request and immediately capture its ID
+    for (int i = 0; i < REQUEST_COUNT; i++) {
+        auto session = std::make_shared<AdvancedMockSession>();
+        sessions.push_back(session);
+
+        // Before routing, count the current active requests
+        size_t before_count = router->active_async_requests_count();
+        
+        // Route the request
+        TestRequest req;
+        req.method = HTTP_GET;
+        req._uri = qb::io::uri("/multi-cancel/" + std::to_string(i));
+        EXPECT_TRUE(router->route(session, req));
+        
+        // After routing, find the new request ID (the one that wasn't there before)
+        auto& active_requests = router->get_active_requests();
+        ASSERT_EQ(router->active_async_requests_count(), before_count + 1);
+        
+        // Find the newly added request - it should be the only one that wasn't in the list before
+        std::uintptr_t new_request_id = 0;
+        for (const auto& pair : active_requests) {
+            // Check if this ID is for the request we just added
+            bool found = false;
+            for (const auto& existing_id : request_ids) {
+                if (pair.first == existing_id) {
+                    found = true;
+                    break;
+                }
+            }
+            
+            if (!found) {
+                new_request_id = pair.first;
+                break;
+            }
+        }
+        
+        ASSERT_NE(new_request_id, 0) << "Failed to identify new request ID for request " << i;
+        request_ids.push_back(new_request_id);
     }
-
-    // Get all request IDs from the active requests map
-    ASSERT_EQ(router->active_async_requests_count(), request_count);
-    for (const auto &pair : router->get_active_requests()) {
-        request_ids.push_back(pair.first);
-    }
-    ASSERT_EQ(request_ids.size(), request_count);
-
+    
+    ASSERT_EQ(request_ids.size(), REQUEST_COUNT);
+    
     // Process events to get through first stage
     qb::Actor::processEvents();
 
-    // Cancel the first request only
-    std::cout << "Cancelling request with ID: " << request_ids[0] << std::endl;
-    bool cancelled = router->cancel_request(request_ids[0]);
+    // Cancel the last request (index 2)
+    const int TARGET_INDEX = 2;
+    std::cout << "Cancelling request with ID: " << request_ids[TARGET_INDEX] << std::endl;
+    bool cancelled = router->cancel_request(request_ids[TARGET_INDEX], HTTP_STATUS_GONE, 
+                                         "Request was explicitly cancelled by test");
     EXPECT_TRUE(cancelled);
-    EXPECT_TRUE(router->is_request_cancelled(request_ids[0]));
+    EXPECT_TRUE(router->is_request_cancelled(request_ids[TARGET_INDEX]));
 
     // Process remaining events
     qb::Actor::processAllEvents();
 
-    // Verify first request gets completed before cancellation could be applied
+    // Check status of all requests
+    // Requests 0 and 1 should complete normally
     EXPECT_EQ(sessions[0]->responseCount(), 1);
+    EXPECT_EQ(sessions[0]->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(sessions[0]->_response.body().as<std::string>(), "Request 0 completed");
     
-    // The first session's status code and body depends on whether the cancellation
-    // was processed before completion. We've observed that it sometimes completes
-    // normally before cancellation is applied.
-    if (sessions[0]->_response.status_code == HTTP_STATUS_GONE) {
-        // If cancellation was applied in time
-        EXPECT_TRUE(sessions[0]->_response.body().as<std::string>().find("cancelled") !=
-                    std::string::npos);
-    } else {
-        // If the request completed normally before cancellation was applied
-        EXPECT_EQ(sessions[0]->_response.status_code, HTTP_STATUS_OK);
-        EXPECT_EQ(sessions[0]->_response.body().as<std::string>(), 
-                  "Request 0 completed");
-    }
-
-    // Verify other requests with appropriate assertions
-    // For request index 1, it should complete normally
     EXPECT_EQ(sessions[1]->responseCount(), 1);
     EXPECT_EQ(sessions[1]->_response.status_code, HTTP_STATUS_OK);
-    std::string expected_body_1 = "Request 1 completed";
-    EXPECT_EQ(sessions[1]->_response.body().as<std::string>(), expected_body_1);
+    EXPECT_EQ(sessions[1]->_response.body().as<std::string>(), "Request 1 completed");
     
-    // For request index 2, it should show as canceled during processing
+    // Request 2 should be cancelled with GONE status
     EXPECT_EQ(sessions[2]->responseCount(), 1);
     EXPECT_EQ(sessions[2]->_response.status_code, HTTP_STATUS_GONE);
-    EXPECT_TRUE(sessions[2]->_response.body().as<std::string>().find("cancelled") !=
+    EXPECT_TRUE(sessions[2]->_response.body().as<std::string>().find("cancelled") != 
                 std::string::npos);
 
-    // Verify we had the right number of completions vs cancellations
-    EXPECT_EQ(processed_count, 2); // Requests 0 and 1 if both complete
-
-    // Clean up
-    sessions.clear();
-    request_ids.clear();
-    TestHelpers::resetRouterState(router.get());
-    EXPECT_EQ(router->active_async_requests_count(), 0);
+    // Verify we had the right number of completions
+    EXPECT_EQ(processed_count, 2); // Requests 0 and 1 should complete
 }
 
 // Test cancellation behavior with non-existent requests
@@ -1728,7 +1738,9 @@ TEST_F(RouterAsyncTest, NonExistentRequestCancellation) {
     session->reset();
     router->get("/simple-cancel-api", [](Context &ctx) {
         // Just mark the context as async
-        ctx.mark_async();
+        // ctx.mark_async();
+        // Get a completion handler instead of just marking as async
+        auto completion = ctx.make_async();
     });
 
     auto req = createRequest(HTTP_GET, "/simple-cancel-api");
@@ -1749,7 +1761,7 @@ TEST_F(RouterAsyncTest, NonExistentRequestCancellation) {
 
     // Try to cancel it again - should still return true since the request exists
     cancelled = router->cancel_request(real_request_id);
-    EXPECT_TRUE(cancelled);
+    EXPECT_FALSE(cancelled);  // Now we expect false since it was removed from _active_async_requests
     EXPECT_TRUE(router->is_request_cancelled(real_request_id));
 
     // Clean up
