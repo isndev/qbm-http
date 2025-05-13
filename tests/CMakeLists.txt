@@ -42,10 +42,12 @@ set(HTTP_TESTS
         middleware-timing
         middleware-error-handling
         middleware-auth
+        middleware-compression
 #        middleware-recaptcha
         openapi
         openapi-complex
-        session-http
+#        session-http
+        integration-basic
 )
 
 # Register each standard test

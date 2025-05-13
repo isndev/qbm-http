@@ -121,16 +121,19 @@ protected:
         router->get("/api/test", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body() = "Test endpoint";
+            ctx.complete();
         });
 
         router->get("/api/users", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body() = "User list";
+            ctx.complete();
         });
 
         router->post("/api/users", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_CREATED;
             ctx.response.body() = "User created";
+            ctx.complete();
         });
     }
 

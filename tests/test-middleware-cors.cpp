@@ -134,25 +134,30 @@ protected:
         router->get("/api/users", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body() = "List of users";
+            ctx.complete();
         });
 
         router->get("/api/users/:id", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body() = "User: " + ctx.param("id");
+            ctx.complete();
         });
 
         router->post("/api/users", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_CREATED;
             ctx.response.body() = "User created";
+            ctx.complete();
         });
 
         router->put("/api/users/:id", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body() = "User updated: " + ctx.param("id");
+            ctx.complete();
         });
 
         router->del("/api/users/:id", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_NO_CONTENT;
+            ctx.complete();
         });
 
         // Routes for testing authenticated content
@@ -160,12 +165,14 @@ protected:
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body() = "Authenticated content";
             ctx.response.add_header("Set-Cookie", "session=123456; Path=/; HttpOnly");
+            ctx.complete();
         });
 
         // Route for testing origin echo
         router->get("/origin-echo", [](auto& ctx) {
             ctx.response.status_code = HTTP_STATUS_OK;
             ctx.response.body() = "Origin: " + ctx.request.header("Origin");
+            ctx.complete();
         });
     }
 
@@ -515,6 +522,7 @@ TEST_F(CorsTest, FactoryFunctions) {
     router->get("/api/users", [](auto& ctx) {
         ctx.response.status_code = HTTP_STATUS_OK;
         ctx.response.body() = "List of users";
+        ctx.complete();
     });
     
     // Secure CORS middleware in the new implementation is more permissive by default

@@ -6,6 +6,7 @@
 #include <utility>
 #include "../response.h"
 #include "./async_types.h"
+#include <iostream>
 
 namespace qb::http {
 
@@ -31,6 +32,7 @@ private:
     Response           _response;
     bool               _is_deferred   = false;
     int                _defer_time_ms = 0;
+    bool               _cancelled     = false;
 
 public:
     // Constructor for when we have direct access to the context
@@ -130,27 +132,43 @@ public:
     }
 
     /**
+     * @brief Complete the request with a specific state
+     * @param state The completion state
+     */
+    void
+    complete_with_state(AsyncRequestState state) {
+        // First ensure cancellation state is set properly
+        if (state == AsyncRequestState::CANCELED) {
+            _cancelled = true;
+            
+            // Use the current status and body for the cancellation
+            // This preserves custom cancellation messages set with handler->status().body()
+            _router.cancel_request(_context_id, _response.status_code, 
+                                 _response.body().template as<std::string>());
+            return;
+        }
+        
+        // For other states, complete normally
+        _router.complete_async_request(_context_id, std::move(_response), state);
+    }
+
+    /**
      * @brief Cancel the request with a specific status code and message
      * @param status_code HTTP status code for the cancellation response
      * @param message Message explaining the cancellation reason
      */
     void
-    cancel(http_status status_code, const std::string &message = "") {
-        // Set status and message
-        if (_context) {
-            _context->response.status_code = status_code;
-            if (!message.empty()) {
-                _context->response.body() = message;
-            }
-        } else {
-            _response.status_code = status_code;
-            if (!message.empty()) {
-                _response.body() = message;
-            }
-        }
+    cancel(http_status status_code = HTTP_STATUS_BAD_REQUEST, 
+           const std::string &message = "Request canceled by application") {
+        // Set the status and body before cancelling
+        _response.status_code = status_code;
+        _response.body() = message;
         
-        // Complete with CANCELED state
-        complete_with_state(AsyncRequestState::CANCELED);
+        // Mark as cancelled internally
+        _cancelled = true;
+        
+        // Use the custom status and message for cancellation
+        _router.cancel_request(_context_id, status_code, message);
     }
 
     /**
@@ -158,9 +176,8 @@ public:
      */
     void
     complete() {
-        // First check if request is cancelled - skip if cancelled
-        if (_router._cancelled_requests.find(_context_id) !=
-            _router._cancelled_requests.end()) {
+        // First check if request is cancelled
+        if (_cancelled) {
             // Don't do anything for cancelled requests
             return;
         }
@@ -186,24 +203,11 @@ public:
             return;
         }
 
-        // Complete the request immediately
+        // Complete request immediately
         if (_context) {
             _router.complete_async_request(_context_id, _context->response);
         } else {
             _router.complete_async_request(_context_id, std::move(_response));
-        }
-    }
-
-    /**
-     * @brief Complete the request with a specific state
-     * @param state The completion state
-     */
-    void
-    complete_with_state(AsyncRequestState state) {
-        if (_context) {
-            _router.complete_async_request(_context_id, _context->response, state);
-        } else {
-            _router.complete_async_request(_context_id, std::move(_response), state);
         }
     }
 

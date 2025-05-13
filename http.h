@@ -575,8 +575,6 @@ protected:
     qb::http::Parser<std::remove_const_t<Trait>> _http_obj; ///< HTTP parser
 
 public:
-    using Router =
-        typename Trait::template Router<IO_Handler>; ///< Router type for this protocol
     typedef String string_type;                      ///< String type used for storage
 
     /**
@@ -743,6 +741,7 @@ public:
         request_obj.parse_cookie_header();
         this->_io.on(request{size, this->_io.in().begin(),
                              std::move(request_obj)});
+        // Reset the parser without consuming (pipe API might have changed)
         this->_http_obj.reset();
     }
 };
@@ -800,6 +799,7 @@ public:
         request_obj.parse_cookie_header();
         this->_io.on(request{size, this->_io.in().begin(),
                              std::move(request_obj)});
+        // Reset the parser without consuming (pipe API might have changed)
         this->_http_obj.reset();
     }
 };
@@ -1070,7 +1070,6 @@ public:
         if (!event.reason) {
             Response response;
             response.status_code = HTTP_STATUS_GONE;
-
             _func(Reply{std::move(_request), std::move(response)});
         }
     }
@@ -1183,7 +1182,7 @@ namespace qb::allocator {
  * for transmission over the network.
  *
  * The implementation handles all aspects of HTTP request formatting:
- * - Request line with method, URI path, query parameters, and HTTP version
+ * - Request line with method, URI, query parameters, and HTTP version
  * - Header fields with proper formatting
  * - Content-Length header for the body
  * - Body content if present
@@ -1330,56 +1329,17 @@ private:
     friend Protocol;
     friend qb::io::async::with_timeout<session>;
 
-    std::string                     _host;
-    qb::http::TRequest<string_type> _request;
-    qb::http::Response              _response;
-
     /**
      * @brief Handle incoming HTTP request
      * @param msg HTTP request message
      *
-     * Processes an incoming HTTP request by extracting host information,
-     * handling compression, and routing the request to the appropriate handler.
-     * The method performs the following steps:
-     * 1. Extracts and stores the client's IP (from X-Real-IP header or connection)
-     * 2. Sets up content compression if supported by the client
-     * 3. Logs the request details for debugging
-     * 4. Triggers the custom handler in the derived class if it exists
-     * 5. Routes the request through the server's router
-     * 6. Handles exceptions and returns appropriate error responses
+     * Routes the incoming HTTP request to the appropriate handler.
+     * If the request is not routed, the session is disconnected.
      */
     void
     on(typename Protocol::request &&msg) {
-        // get real host if in proxy
-        _host = msg.http.header("x-real-ip", 0, this->transport().peer_endpoint().ip());
-        _request = std::move(msg.http);
-        // has compression ?
-        auto ce = qb::http::content_encoding(
-            _request.header("Accept-Encoding", 0, "identity"));
-        if (!ce.empty())
-            _response.headers()["Content-Encoding"] = {std::move(ce)};
-
-        // handle your message here
-        LOG_DEBUG("HttpSession(" << this->id() << ") " << _host << " request "
-                                 << http_method_name(_request.method) << " "
-                                 << _request.uri().path());
-        if constexpr (has_method_on<Derived, void, event::request>::value) {
-            static_cast<Derived &>(*this).on(event::request{});
-        }
-        // reset session time out
-        this->updateTimeout();
-        try {
-            if (!this->server().router().route(*this, _request)) {
-                _response.status_code = HTTP_STATUS_NOT_FOUND;
-                this->publish(_response);
-            }
-        } catch (std::exception &e) {
-            LOG_WARN("HttpSession(" << this->id() << ") " << host()
-                                    << " error: " << e.what());
-
-            qb::http::Response &res = _response;
-            res.status_code         = HTTP_STATUS_BAD_REQUEST;
-            *this << res;
+        if (!this->server().router().route(this->shared(), msg.http)) {
+            this->disconnect(DisconnectedReason::Undefined);
         }
     }
 
@@ -1437,8 +1397,8 @@ private:
      * @brief Handle disconnection event
      * @param e Disconnection event
      *
-     * Called when the session is disconnected. Logs the reason
-     * for disconnection if not handled by the derived class.
+     * Called when the session is disconnected. If the response was already
+     * received, this should not generate a 410 Gone response.
      */
     void
     on(qb::io::async::event::disconnected &&e) {
@@ -1459,8 +1419,7 @@ private:
                         return "unhandled reason";
                 }
             };
-            LOG_DEBUG("HttpSession(" << this->id() << ") " << host()
-                                     << " disconnected -> " << reason(e.reason));
+            LOG_DEBUG("HttpSession(" << this->id() << ") disconnected -> " << reason(e.reason));
         }
     }
 
@@ -1488,47 +1447,8 @@ public:
     explicit session(Handler &server)
         : qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>,
                                      Transport, Handler>(server)
-        , _response(server.router().default_response()) {
+    {
         this->setTimeout(60);
-    }
-
-    /**
-     * @brief Get the client host
-     * @return Host string (IP address)
-     *
-     * Returns the client's IP address, either from X-Real-IP header
-     * (if behind a proxy) or from the transport connection.
-     * This is useful for logging, access control, and rate limiting.
-     */
-    [[nodiscard]] std::string const &
-    host() const {
-        return _host;
-    }
-
-    /**
-     * @brief Access the current HTTP request
-     * @return Reference to the current request
-     *
-     * Provides mutable access to the current HTTP request being processed.
-     * This allows handlers to examine and potentially modify the request
-     * before it's fully processed.
-     */
-    [[nodiscard]] qb::http::TRequest<string_type> &
-    request() {
-        return _request;
-    }
-
-    /**
-     * @brief Access the response object
-     * @return Reference to the response
-     *
-     * Provides mutable access to the response object for this session.
-     * The response is initially set to the server's default response,
-     * and handlers can modify it to generate a custom response.
-     */
-    [[nodiscard]] qb::http::Response &
-    response() {
-        return _response;
     }
 };
 
@@ -1548,9 +1468,10 @@ public:
 template <typename Derived, typename Session>
 class io_handler : public qb::io::async::io_handler<Derived, Session> {
 public:
-    using Router     = typename Session::Protocol::Router;
-    using Route      = typename Session::Protocol::Router::Route;
-    using Controller = typename Session::Protocol::Router::Controller;
+    using Router     = typename qb::http::Router<Session>;
+    using Route      = typename Router::Route;
+    // using TRoute     = typename Router::TRoute;
+    using Controller = typename Router::Controller;
 
 private:
     Router _router;
