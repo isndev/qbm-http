@@ -462,11 +462,9 @@ public:
                 ctx.response.add_header("Access-Control-Max-Age",
                                     std::to_string(_options->max_age()));
 
-                // Set response for preflight
-                ctx.response.status_code = HTTP_STATUS_NO_CONTENT; // No Content
-                ctx.mark_handled();
-
-                return MiddlewareResult::Stop(); // Skip the rest of middleware chain for preflight
+                ctx.response.status_code = HTTP_STATUS_NO_CONTENT; 
+                ctx.complete(); 
+                return MiddlewareResult::Stop(); 
             }
         }
 

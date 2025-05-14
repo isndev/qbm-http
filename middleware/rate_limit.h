@@ -231,31 +231,31 @@ public:
             auto now = std::chrono::steady_clock::now();
             auto& client_data = _client_data[client_id];
 
-            // Reset counter if the window has expired
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - client_data.last_reset) > _options->window()) {
                 client_data.count = 0;
                 client_data.last_reset = now;
             }
 
-            // Check if rate limit is exceeded
             if (client_data.count >= _options->max_requests()) {
-                // Rate limit exceeded, send error response
                 ctx.response.status_code = _options->status_code();
                 ctx.response.body() = _options->message();
                 
                 // Add rate limit headers
                 add_rate_limit_headers(ctx, client_data);
                 
-                // Mark as handled
+                // Mark the request as handled
                 ctx.mark_handled();
+                
+                // Explicitly complete the context to prevent further processing
+                // This is CRITICAL - it ensures the context's processing_stage is set to RESPONSE_SENT_OR_COMPLETED
+                // and prevents the router from reprocessing this request
+                ctx.complete();
+                
                 return MiddlewareResult::Stop();
             }
 
-            // Increment request counter
             client_data.count++;
-            
-            // Add rate limit headers
             add_rate_limit_headers(ctx, client_data);
         }
 

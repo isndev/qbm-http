@@ -72,6 +72,7 @@
 
 namespace qb::http {
 
+REGISTER_HTTP_SYNC_FUNCTION(-1, REQUEST, "User defined")
 HTTP_METHOD_MAP(REGISTER_HTTP_SYNC_FUNCTION)
 
 } // namespace qb::http

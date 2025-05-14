@@ -6,7 +6,6 @@
 #include <utility>
 #include "../response.h"
 #include "./async_types.h"
-#include <iostream>
 
 namespace qb::http {
 
@@ -29,29 +28,36 @@ private:
     Router            &_router;
     std::uintptr_t     _context_id;
     Context           *_context;  // Store a pointer to the context
-    Response           _response;
+    Response           _fallback_response;   // Only used when context is no longer available
     bool               _is_deferred   = false;
     int                _defer_time_ms = 0;
     bool               _cancelled     = false;
 
 public:
     // Constructor for when we have direct access to the context
-    AsyncCompletionHandler(Context &ctx, Router *router)
-        : _router(*router)
+    AsyncCompletionHandler(Context &ctx, Router *router_ptr)
+        : _router(*router_ptr)
         , _context_id(reinterpret_cast<std::uintptr_t>(&ctx))
-        , _context(&ctx) {}
+        , _context(&ctx) 
+        // Note: The fallback_response is intentionally not initialized with ctx.response
+        // to avoid redundant copying. It will only be used if the context becomes unavailable.
+    {}
 
     /**
-     * @brief Set the status code for the response
-     * @param status_code HTTP status code
-     * @return Reference to this handler
+     * @brief Set the status code for the response.
+     * 
+     * Always updates the context's response if available.
+     * Only falls back to the local copy if context is no longer accessible.
+     *
+     * @param status_code HTTP status code.
+     * @return Reference to this handler for chaining.
      */
     AsyncCompletionHandler &
     status(http_status status_code) {
         // First check if request is still active
         if (!_router.is_active_request(_context_id)) {
-            // Request is no longer active, just update local response
-            _response.status_code = status_code;
+            // Request is no longer active, just update fallback response
+            _fallback_response.status_code = status_code;
             return *this;
         }
         
@@ -59,7 +65,7 @@ public:
         if (_context) {
             _context->response.status_code = status_code;
         } else {
-            _response.status_code = status_code;
+            _fallback_response.status_code = status_code;
         }
         return *this;
     }
@@ -74,8 +80,8 @@ public:
     header(const std::string &name, const std::string &value) {
         // First check if request is still active
         if (!_router.is_active_request(_context_id)) {
-            // Request is no longer active, just update local response
-            _response.add_header(name, value);
+            // Request is no longer active, just update fallback response
+            _fallback_response.add_header(name, value);
             return *this;
         }
         
@@ -83,23 +89,29 @@ public:
         if (_context) {
             _context->response.add_header(name, value);
         } else {
-            _response.add_header(name, value);
+            // Otherwise, add to fallback response
+            _fallback_response.add_header(name, value);
         }
         return *this;
     }
 
     /**
-     * @brief Set the body for the response
-     * @param body Body content
-     * @return Reference to this handler
+     * @brief Set the body for the response.
+     *
+     * Always updates the context's response if available.
+     * Only falls back to the local copy if context is no longer accessible.
+     *
+     * @tparam T Type of the body content.
+     * @param body Body content.
+     * @return Reference to this handler for chaining.
      */
     template <typename T>
     AsyncCompletionHandler &
     body(T &&body) {
         // First check if request is still active and session is connected
         if (!_router.is_active_request(_context_id)) {
-            // Request is no longer active, just update local response
-            _response.body() = std::forward<T>(body);
+            // Request is no longer active, just update fallback response
+            _fallback_response.body() = std::forward<T>(body);
             return *this;
         }
         
@@ -107,7 +119,7 @@ public:
         if (_context) {
             _context->response.body() = std::forward<T>(body);
         } else {
-            _response.body() = std::forward<T>(body);
+            _fallback_response.body() = std::forward<T>(body);
         }
         return *this;
     }
@@ -123,12 +135,12 @@ public:
             return false;
         }
         
-        // If we have a context pointer, check if the session is still connected
+        // If we have a context pointer, check if the session is still connected via the context
         if (_context) {
             return _context->is_session_connected();
         }
         
-        return false; // No context, can't verify connection
+        return false; // No context or request not active, cannot verify connection
     }
 
     /**
@@ -141,15 +153,24 @@ public:
         if (state == AsyncRequestState::CANCELED) {
             _cancelled = true;
             
-            // Use the current status and body for the cancellation
-            // This preserves custom cancellation messages set with handler->status().body()
-            _router.cancel_request(_context_id, _response.status_code, 
-                                 _response.body().template as<std::string>());
+            // Use the appropriate response for cancellation
+            if (_context) {
+                _router.cancel_request(_context_id, _context->response.status_code, 
+                                    _context->response.body().template as<std::string>());
+            } else {
+                // Fallback to the local response only if context is unavailable
+                _router.cancel_request(_context_id, _fallback_response.status_code, 
+                                    _fallback_response.body().template as<std::string>());
+            }
             return;
         }
         
-        // For other states, complete normally
-        _router.complete_async_request(_context_id, std::move(_response), state);
+        // For other states, complete normally using the appropriate response
+        if (_context) {
+            _router.complete_async_request(_context_id, _context->response, state);
+        } else {
+            _router.complete_async_request(_context_id, std::move(_fallback_response), state);
+        }
     }
 
     /**
@@ -160,14 +181,19 @@ public:
     void
     cancel(http_status status_code = HTTP_STATUS_BAD_REQUEST, 
            const std::string &message = "Request canceled by application") {
-        // Set the status and body before cancelling
-        _response.status_code = status_code;
-        _response.body() = message;
+        // Set the cancellation status and message in the appropriate response
+        if (_context) {
+            _context->response.status_code = status_code;
+            _context->response.body() = message;
+        } else {
+            _fallback_response.status_code = status_code;
+            _fallback_response.body() = message;
+        }
         
         // Mark as cancelled internally
         _cancelled = true;
         
-        // Use the custom status and message for cancellation
+        // Use the custom status and message for cancellation via the router
         _router.cancel_request(_context_id, status_code, message);
     }
 
@@ -191,23 +217,27 @@ public:
         // Handle deferred completion
         if (_is_deferred) {
             _router.defer_request(_context_id, _defer_time_ms, [this]() {
-                // Double-check connection status before completing
+                // Double-check connection status before completing the deferred request
                 if (is_session_connected()) {
                     if (_context) {
+                        // Prefer context's response if available
                         _router.complete_async_request(_context_id, _context->response);
                     } else {
-                        _router.complete_async_request(_context_id, std::move(_response));
+                        // Fallback to the locally built response only if context is unavailable
+                        _router.complete_async_request(_context_id, std::move(_fallback_response));
                     }
                 }
             });
             return;
         }
 
-        // Complete request immediately
+        // Complete request immediately with the appropriate response
         if (_context) {
+            // Always use context's response if available
             _router.complete_async_request(_context_id, _context->response);
         } else {
-            _router.complete_async_request(_context_id, std::move(_response));
+            // Fallback to the locally built response only if context is unavailable
+            _router.complete_async_request(_context_id, std::move(_fallback_response));
         }
     }
 
@@ -234,19 +264,34 @@ public:
     template <typename JsonT>
     AsyncCompletionHandler &
     json(const JsonT &json_data) {
+        // First check if request is still active
+        if (!_router.is_active_request(_context_id)) {
+            // Request is no longer active, just update fallback response
+            _fallback_response.add_header("Content-Type", "application/json");
+            if constexpr (std::is_convertible_v<JsonT, std::string>) {
+                _fallback_response.body() = json_data;
+            } else {
+                _fallback_response.body() = json_data.dump();
+            }
+            return *this;
+        }
+
+        // Set Content-Type to application/json
+        // Update response in context if available, otherwise fallback response
         if (_context) {
             _context->response.add_header("Content-Type", "application/json");
             if constexpr (std::is_convertible_v<JsonT, std::string>) {
                 _context->response.body() = json_data;
             } else {
+                // Assuming json_data has a .dump() method (e.g., nlohmann::json)
                 _context->response.body() = json_data.dump();
             }
         } else {
-            _response.add_header("Content-Type", "application/json");
+            _fallback_response.add_header("Content-Type", "application/json");
             if constexpr (std::is_convertible_v<JsonT, std::string>) {
-                _response.body() = json_data;
+                _fallback_response.body() = json_data;
             } else {
-                _response.body() = json_data.dump();
+                _fallback_response.body() = json_data.dump();
             }
         }
         return *this;
@@ -262,12 +307,21 @@ public:
     redirect(const std::string &url, bool permanent = false) {
         auto status = permanent ? HTTP_STATUS_MOVED_PERMANENTLY : HTTP_STATUS_FOUND;
         
+        // First check if request is still active
+        if (!_router.is_active_request(_context_id)) {
+            // Request is no longer active, just update fallback response
+            _fallback_response.status_code = status;
+            _fallback_response.add_header("Location", url);
+            return *this;
+        }
+        
+        // Update response in context if available, otherwise fallback response
         if (_context) {
             _context->response.status_code = status;
             _context->response.add_header("Location", url);
         } else {
-            _response.status_code = status;
-            _response.add_header("Location", url);
+            _fallback_response.status_code = status;
+            _fallback_response.add_header("Location", url);
         }
         return *this;
     }

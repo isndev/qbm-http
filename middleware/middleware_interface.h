@@ -337,3 +337,4 @@ std::shared_ptr<IMiddleware<Session, String>> from_legacy_middleware(
 }
 
 } // namespace qb::http 
+; 
