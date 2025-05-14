@@ -3,8 +3,12 @@
 #include <memory>
 #include <functional>
 #include <string>
+#include <vector>
 #include <qb/system/container/unordered_map.h>
 #include "./middleware_interface.h"
+
+// REMOVE HACK for debugging - This should not be here
+// extern std::vector<std::string> test_mw_middleware_execution_log;
 
 namespace qb::http {
 
@@ -66,23 +70,24 @@ public:
      * @return Middleware result
      */
     MiddlewareResult process(Context& ctx) override {
+        // Using ctx.add_event for internal logging within the middleware
+        ctx.add_event(_name + "_process_CALLED_for_path: " + std::string(ctx.request.uri().path()));
+
         // Set up error handler that runs after response is generated
-        ctx.after_handling([this](Context& ctx) {
-            // Check if the status code indicates an error
-            if (ctx.response.status_code >= 400) {
-                handle_error_response(ctx);
+        ctx.after_handling([this, middleware_name = this->_name](Context& ctx_ref) { 
+            ctx_ref.add_event(middleware_name + "_after_handling_lambda_CALLED_for_path: " + std::string(ctx_ref.request.uri().path()) + "_status: " + std::to_string(ctx_ref.response.status_code));
+            if (ctx_ref.response.status_code >= 400) {
+                this->handle_error_response(ctx_ref);
             }
         });
         
         // Set up error handler for explicit error callbacks
-        ctx.on_error([this](Context& ctx, const std::string& error_message) {
-            // Call the generic error handler if registered
+        ctx.on_error([this, middleware_name = this->_name](Context& ctx_err, const std::string& error_message) {
+            ctx_err.add_event(middleware_name + "_on_error_lambda_CALLED_msg: " + error_message);
             if (_generic_handler) {
-                _generic_handler(ctx, error_message);
+                _generic_handler(ctx_err, error_message);
             }
-            
-            // Then handle the specific status code
-            handle_error_response(ctx);
+            this->handle_error_response(ctx_err);
         });
         
         return MiddlewareResult::Continue();
@@ -97,18 +102,22 @@ public:
     
 private:
     void handle_error_response(Context& ctx) {
+        ctx.add_event(_name + "_handle_error_response_CALLED_status: " + std::to_string(ctx.response.status_code));
         http_status status = ctx.response.status_code;
         
         // Check if we have a specific handler for this status code
         auto it = _status_handlers.find(status);
         if (it != _status_handlers.end()) {
+            ctx.add_event(_name + "_found_specific_status_handler_for_" + std::to_string(status));
             it->second(ctx);
         }
         // Otherwise, check for range handlers (4xx, 5xx)
         else if (status >= 500 && _status_handlers.find(HTTP_STATUS_INTERNAL_SERVER_ERROR) != _status_handlers.end()) {
+            ctx.add_event(_name + "_using_500_range_handler_for_" + std::to_string(status));
             _status_handlers[HTTP_STATUS_INTERNAL_SERVER_ERROR](ctx);
         }
         else if (status >= 400 && _status_handlers.find(HTTP_STATUS_BAD_REQUEST) != _status_handlers.end()) {
+            ctx.add_event(_name + "_using_400_range_handler_for_" + std::to_string(status));
             _status_handlers[HTTP_STATUS_BAD_REQUEST](ctx);
         }
     }

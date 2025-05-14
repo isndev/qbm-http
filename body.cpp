@@ -556,6 +556,20 @@ Body &Body::operator= <qb::json>(qb::json const &json) {
 }
 
 /**
+ * @brief Assign a json object to the body by copying
+ * @param json Json object to copy into the body
+ * @return Reference to this body
+ *
+ * Copy assignment operator for qb::json.
+ */
+template<>
+Body &Body::operator=<qb::json>(qb::json &&json) noexcept {
+    _data.clear();
+    _data << json;
+    return *this;
+}
+
+/**
  * @brief Convert the body to a string_view
  * @return String view of the body content
  *

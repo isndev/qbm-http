@@ -39,11 +39,18 @@ template <typename Session, typename String>
 class RouterImpl;
 
 /**
- * @brief HTTP Router for handling requests
+ * @brief HTTP Router for handling incoming requests, managing routes, middleware, and controllers.
  *
- * This class manages routes, middleware, controllers, and asynchronous request handling.
- * It uses a combination of linear searching/regex matching and optional radix trees
- * for efficient route lookups.
+ * This class is the core of the HTTP routing system. It provides methods for:
+ * - Registering route handlers for different HTTP methods and path patterns.
+ * - Organizing routes into groups with shared prefixes and middleware.
+ * - Integrating modular controllers for hierarchical routing.
+ * - Applying global and route-specific middleware (both synchronous and asynchronous).
+ * - Managing the lifecycle of asynchronous requests, including timeouts and cancellations.
+ * - Optionally using a Radix Tree for high-performance route matching, with a fallback to regex-based matching.
+ *
+ * @tparam Session The type of the session object used to handle client connections (e.g., a TCP session).
+ * @tparam String The string type used for paths, parameters, etc. (defaults to std::string).
  */
 template <typename Session, typename String = std::string>
 class Router {
@@ -74,109 +81,127 @@ public:
     ~Router() = default;
 
 #define REGISTER_ROUTE_FUNCTION(num, name, description)  \
+    /** @brief Registers a ##description## route for the given path with a function handler. */ \
     template <typename _Func>                            \
-    Router &name(std::string const &path, _Func &&func); \
+    Router<Session, String> &name(std::string const &path, _Func &&func); \
+    /** @brief Registers a ##description## route using a custom IRoute-derived class instance. */ \
     template <typename T, typename... Args>              \
-    Router &name(Args &&...args);
+    Router<Session, String> &name(Args &&...args);
 
     HTTP_SERVER_METHOD_MAP(REGISTER_ROUTE_FUNCTION)
 
 #undef REGISTER_ROUTE_FUNCTION
 
     /**
-     * @brief Register a controller for hierarchical routing
-     * @tparam T Controller class type
-     * @tparam Args Constructor argument types
-     * @param args Constructor arguments
+     * @brief Registers a controller instance for hierarchical routing.
+     * All routes defined within the controller will be prefixed by the controller's base path.
+     * @tparam T The controller class type (must derive from qb::http::Controller).
+     * @tparam Args Types of arguments to be forwarded to the controller's constructor.
+     * @param args Arguments for the controller's constructor.
      */
     template <typename T, typename... Args>
     void controller(Args &&...args);
 
     /**
-     * @brief Create a route group with a common prefix
-     * @param prefix Path prefix for all routes in the group
-     * @param priority Priority for all routes in the group
-     * @return Reference to the created route group
+     * @brief Creates and registers a route group with a common path prefix.
+     * Routes added to the returned group will inherit its prefix and middleware.
+     * @param prefix The common path prefix for all routes in this group.
+     * @param priority Default priority for routes added to this group (0 if not specified).
+     * @return Reference to the newly created (or existing if prefix matches) RouteGroup object.
      */
     RouteGroup &group(const std::string &prefix, int priority = 0);
 
     /**
-     * @brief Set the default response for a specific HTTP method
-     * @param method HTTP method
-     * @param response Default response
-     * @return Reference to this router
+     * @brief Sets a default response to be sent if no other route matches for a specific HTTP method.
+     * @param method The HTTP method for which to set the default response.
+     * @param response The qb::http::Response object to use as the default.
+     * @return Reference to this router for chaining.
      */
-    Router &set_default_response(http_method method, Response response);
+    Router<Session, String> &set_default_response(http_method method, Response response);
 
     /**
-     * @brief Add a global middleware function (legacy way)
-     * @param middleware Middleware function
-     * @return Reference to this router
+     * @brief Adds a global legacy synchronous middleware function.
+     * These middlewares are executed in the order they are added, before any route-specific logic.
+     * @param middleware The middleware function (std::function<bool(Context&)>).
+     *                   It should return true to continue to the next middleware/handler, or false to stop processing.
+     * @return Reference to this router for chaining.
      */
-    Router &use(Middleware middleware);
+    Router<Session, String> &use(Middleware middleware);
 
     /**
-     * @brief Add an asynchronous middleware function
-     * @param middleware Asynchronous middleware function
-     * @return Reference to this router
+     * @brief Adds a global legacy asynchronous middleware function.
+     * These are executed after synchronous global middlewares.
+     * @param middleware The asynchronous middleware function (std::function<void(Context&, std::function<void(bool)>)>).
+     *                   The inner callback should be called with true to continue, false to stop.
+     * @return Reference to this router for chaining.
      */
-    Router &use(AsyncMiddleware middleware);
+    Router<Session, String> &use(AsyncMiddleware middleware);
 
     /**
-     * @brief Add a typed middleware to the router
-     * @param middleware Middleware to add
-     * @return Reference to this router for chaining
+     * @brief Adds a global typed middleware (IMiddleware instance) to the router's chain.
+     * Typed middlewares are generally preferred for new development due to better type safety and structure.
+     * @param middleware A shared pointer to the typed middleware (IMiddlewarePtr).
+     * @return Reference to this router for chaining.
      */
-    Router &use(TypedMiddlewarePtr middleware);
+    Router<Session, String> &use(TypedMiddlewarePtr middleware);
     
     /**
-     * @brief Create and add a typed middleware to the router
-     * @tparam M Type of middleware to create
-     * @tparam Args Types of arguments to construct the middleware
-     * @param args Arguments to construct the middleware
-     * @return Reference to this router for chaining
+     * @brief Creates and adds a global typed middleware to the router's chain by type.
+     * @tparam M The middleware class template (e.g., MyMiddleware, expecting Session and String template arguments).
+     * @tparam Args Types of arguments to construct the middleware.
+     * @param args Arguments to forward to the middleware's constructor.
+     * @return Reference to this router for chaining.
      */
     template <template<typename, typename> class M, typename... Args>
-    Router &use(Args&&... args) {
-        auto middleware = std::make_shared<M<Session, String>>(std::forward<Args>(args)...);
-        return use(middleware);
+    Router<Session, String> &use(Args&&... args) {
+        auto middleware_instance = std::make_shared<M<Session, String>>(std::forward<Args>(args)...);
+        return use(std::move(middleware_instance));
     }
 
     /**
-     * @brief Set an error handler for a specific status code
-     * @param status_code HTTP status code
-     * @param handler Error handler function
-     * @return Reference to this router
+     * @brief Sets a custom error handler function for a specific HTTP status code.
+     * If a response is set to this status code and no handler has fully managed the response,
+     * this handler will be invoked.
+     * @param status_code The HTTP status code to handle (e.g., 404, 500).
+     * @param handler A function that takes a Context& and processes the error.
+     * @return Reference to this router for chaining.
      */
-    Router &on_error(int status_code, std::function<void(Context &)> handler);
+    Router<Session, String> &on_error(int status_code, std::function<void(RouterContext<Session, String> &)> handler);
 
     /**
-     * @brief Enable or disable request logging
-     * @param enable Whether to enable logging
-     * @return Reference to this router
+     * @brief Enables or disables request logging for this router instance.
+     * @param enable True to enable logging, false to disable. Defaults to false.
+     * @return Reference to this router for chaining.
      */
-    Router &enable_logging(bool enable);
+    Router<Session, String> &enable_logging(bool enable);
 
     /**
-     * @brief Clear all middleware functions
-     * @return Reference to this router
+     * @brief Clears all registered global middleware functions (synchronous and asynchronous).
+     * This does not affect middleware attached to specific route groups.
+     * @return Reference to this router for chaining.
      */
-    Router &clear_middleware() {
+    Router<Session, String> &clear_middleware() {
         _middleware.clear();
-        _async_middleware.clear();  // Vider aussi les middlewares asynchrones
+        _async_middleware.clear();  // Also clear asynchronous legacy middlewares
+        if (_typed_middleware_chain) { // Also clear typed middleware chain if it exists
+            // Assuming MiddlewareChain has a clear() method or can be reset
+            // _typed_middleware_chain->clear(); // Or _typed_middleware_chain.reset();
+        }
         return *this;
     }
 
     /**
-     * @brief Configure the timeout for async requests
-     * @param timeout_seconds Timeout in seconds
-     * @return Reference to this router
+     * @brief Configures the timeout duration for asynchronous requests managed by this router.
+     * Requests exceeding this duration may be automatically cancelled.
+     * @param timeout_seconds Timeout duration in seconds. A value of 0 or less typically disables timeout.
+     * @return Reference to this router for chaining.
      */
-    Router &configure_async_timeout(int timeout_seconds);
+    Router<Session, String> &configure_async_timeout(int timeout_seconds);
 
     /**
-     * @brief Force timeout of all async requests
-     * @return Number of requests that were timed out
+     * @brief Immediately forces a timeout for all currently active asynchronous requests.
+     * This will attempt to send a timeout response for each.
+     * @return The number of requests that were timed out by this call.
      */
     size_t force_timeout_all_requests();
 
@@ -223,21 +248,25 @@ public:
      * @param session HTTP session
      * @param ctx Context to route
      * @param context_ptr Shared pointer to the context for lifetime management
-     * @param skip_async_middleware Flag to avoid recursive calls when coming from
-     * run_async_middleware_chain
      * @return true if the request was matched and processed
      */
     bool route_context(std::shared_ptr<Session> session, Context &ctx,
-                       std::shared_ptr<Context> context_ptr           = nullptr,
-                       bool                     skip_async_middleware = false);
+                       std::shared_ptr<Context> context_ptr           = nullptr);
 
     /**
-     * @brief Log a request
-     * @param ctx Request context
+     * @brief Logs details of a processed request if logging is enabled.
+     * @param ctx The RouterContext of the request to log.
      */
     void log_request(const Context &ctx);
 
-    // For backwards compatibility with existing implementation
+    /**
+     * @brief Logs details of a processed request with explicit status and duration.
+     * For backward compatibility or specific logging needs.
+     * @param ctx The RouterContext of the request.
+     * @param status The HTTP status code of the response.
+     * @param duration The processing duration in milliseconds.
+     * @param note An optional additional note for the log entry.
+     */
     void log_request(const Context &ctx, int status, double duration,
                      const std::string &note = "");
 
@@ -246,20 +275,20 @@ public:
      * @param enable Whether to enable radix tree matching
      * @return Reference to this router
      */
-    Router &enable_radix_tree(bool enable);
+    Router<Session, String> &enable_radix_tree(bool enable);
 
     /**
      * @brief Force enable radix tree for a specific HTTP method
      * @param method HTTP method to enable radix tree for
      * @return Reference to this router
      */
-    Router &force_enable_radix_tree_for_method(http_method method);
+    Router<Session, String> &force_enable_radix_tree_for_method(http_method method);
 
     /**
      * @brief Build radix trees for all HTTP methods
      * @return Reference to this router
      */
-    Router &build_radix_trees();
+    Router<Session, String> &build_radix_trees();
 
     /**
      * @brief Clear all active async requests
@@ -267,11 +296,12 @@ public:
     void clear_all_active_requests();
 
     /**
-     * @brief Set the maximum number of concurrent requests
-     * @param max_requests Maximum number of concurrent requests
-     * @return Reference to this router
+     * @brief Configures the maximum number of concurrent requests the router will attempt to process.
+     * Requests arriving when this limit is reached may receive an immediate "Too Many Requests" response.
+     * @param max_requests The maximum number of concurrent requests.
+     * @return Reference to this router for chaining.
      */
-    Router &configure_max_concurrent_requests(size_t max_requests);
+    Router<Session, String> &configure_max_concurrent_requests(size_t max_requests);
 
     /**
      * @brief Check if a request has been cancelled
@@ -299,8 +329,10 @@ public:
                         const std::string& message);
 
     /**
-     * @brief Get all active async requests
-     * @return Map of active requests (request ID to context)
+     * @brief Gets a map of all currently active asynchronous requests.
+     * The key is the context ID (uintptr_t), and the value is a shared_ptr to the Context.
+     * Useful for introspection and debugging.
+     * @return Const reference to the map of active async requests.
      */
     const qb::unordered_map<std::uintptr_t, std::shared_ptr<Context>> &
     get_active_requests() const;
@@ -412,6 +444,10 @@ private:
     // Store the parent-child relationships between groups
     qb::unordered_map<RouteGroup*, std::vector<RouteGroup*>> _group_hierarchy;
 
+    // Cache for recently completed request signatures to handle re-processing
+    std::set<std::string> _recently_completed_request_signatures;
+    // TODO: Add a mechanism to prune this cache (e.g., TTL, max size)
+
     // Map to track active async requests
     qb::unordered_map<std::uintptr_t, std::shared_ptr<Context>> _active_async_requests;
     
@@ -468,10 +504,13 @@ private:
     void schedule_event(int delay_ms, std::function<void()> callback);
 
     // Run async middleware chain
-    void run_async_middleware_chain(std::shared_ptr<Context> context_ptr, size_t index);
+    void run_async_middleware_chain(std::shared_ptr<Context> context_ptr, size_t index, bool isGlobalChain);
 
     // Route to appropriate handler (extracted from the route method)
     void route_to_handler(Context &ctx, const std::string &path);
+
+    // Helper to generate a unique signature for a request
+    std::string generate_request_signature(const TRequest<String>& req);
 
     // Helper type trait to check if session has a get_client_ip method
     template <typename S, typename = void>

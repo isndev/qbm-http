@@ -48,6 +48,9 @@ set(HTTP_TESTS
         openapi-complex
 #        session-http
         integration-basic
+        integration-advanced
+        integration-controller
+        integration-middleware
 )
 
 # Register each standard test

@@ -1,4 +1,3 @@
-
 #include "radix_tree.h"
 
 namespace qb::http {
@@ -102,7 +101,8 @@ RadixNode::match(const std::string &path, PathParameters &params) const {
 
 void
 RadixTree::insert(const std::string &path, void *handler_ptr, int priority) {
-    // Normalize the path to always start with /
+    // Normalize the path: ensure it always starts with a leading '/'
+    // to maintain consistency within the tree structure.
     std::string normalized_path = path;
     if (normalized_path.empty() || normalized_path[0] != '/') {
         normalized_path = "/" + normalized_path;
@@ -113,7 +113,8 @@ RadixTree::insert(const std::string &path, void *handler_ptr, int priority) {
 
 void *
 RadixTree::match(const std::string &path, PathParameters &params) const {
-    // Normalize the path to always start with /
+    // Normalize the input path: ensure it always starts with a leading '/'
+    // to match the stored route structure.
     std::string normalized_path = path;
     if (normalized_path.empty() || normalized_path[0] != '/') {
         normalized_path = "/" + normalized_path;

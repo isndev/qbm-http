@@ -24,6 +24,8 @@ class LoggingMiddleware : public ISyncMiddleware<Session, String> {
 public:
     using Context = typename ISyncMiddleware<Session, String>::Context;
     using LogFunction = std::function<void(LogLevel, const std::string&)>;
+    using RequestType = qb::http::TRequest<String>;
+    using ResponseType = qb::http::Response;
     
     /**
      * @brief Constructor
@@ -65,23 +67,23 @@ public:
     }
     
 private:
-    void log_request(const typename Context::Request& request) {
+    void log_request(const RequestType& request) {
         std::string message = "Request: " + format_request(request);
         _log_function(_request_level, message);
     }
     
-    void log_response(const typename Context::Response& response) {
+    void log_response(const ResponseType& response) {
         std::string message = "Response: " + format_response(response);
         _log_function(_response_level, message);
     }
     
-    std::string format_request(const typename Context::Request& request) {
-        return request.method() + " " + request.uri();
+    std::string format_request(const RequestType& request) {
+        return std::string(::http_method_name(static_cast<http_method_t>(request.method))) + " " + std::string(request.uri().path());
     }
     
-    std::string format_response(const typename Context::Response& response) {
-        return std::to_string(response.status_code()) + " " + 
-               response.status_message();
+    std::string format_response(const ResponseType& response) {
+        return std::to_string(response.status_code) + " " + 
+               http_status_name(response.status_code);
     }
     
     LogFunction _log_function;

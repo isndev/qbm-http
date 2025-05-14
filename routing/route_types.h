@@ -33,18 +33,18 @@ struct RouterContext;
  * Stores OpenAPI/Swagger documentation information for a route.
  */
 struct RouteMetadata {
-    std::string summary;                 ///< Short summary of what the operation does
-    std::string description;             ///< Verbose explanation of the operation
-    std::vector<std::string> tags;       ///< Tags for API documentation control
-    qb::json requestBody;                ///< Request body schema
-    qb::json responses;                  ///< Response schemas
-    qb::json parameters;                 ///< Additional parameters (query, header, etc.)
-    bool deprecated = false;             ///< Whether the operation is deprecated
+    std::string summary;                 ///< Short summary of what the operation does.
+    std::string description;             ///< Verbose explanation of the operation.
+    std::vector<std::string> tags;       ///< Tags for API documentation control (e.g., for grouping in Swagger UI).
+    qb::json requestBody;                ///< OpenAPI schema for the request body.
+    qb::json responses;                  ///< OpenAPI schemas for various HTTP responses.
+    qb::json parameters;                 ///< OpenAPI schemas for parameters (e.g., query, header, path).
+    bool deprecated = false;             ///< Whether the operation is marked as deprecated.
     
     /**
-     * @brief Set route summary
-     * @param text Summary text
-     * @return Reference to this metadata object
+     * @brief Sets the summary for the route metadata.
+     * @param text The summary text.
+     * @return Reference to this RouteMetadata object for chaining.
      */
     RouteMetadata& withSummary(const std::string& text) {
         summary = text;
@@ -62,19 +62,19 @@ struct RouteMetadata {
     }
     
     /**
-     * @brief Set request body schema
-     * @param schema JSON schema for the request body
-     * @param required Whether the request body is required
-     * @param contentType Content type (default: application/json)
-     * @return Reference to this metadata object
+     * @brief Sets the request body schema for the route metadata.
+     * @param schema The JSON schema describing the request body.
+     * @param required Indicates if the request body is required. Defaults to true.
+     * @param content_type The content type of the request body. Defaults to "application/json".
+     * @return Reference to this RouteMetadata object for chaining.
      */
     RouteMetadata& withRequestBody(const qb::json& schema, bool required = true, 
-                                 const std::string& contentType = "application/json") {
+                                 const std::string& content_type = "application/json") {
         requestBody = {
             {"description", "Request body"},
             {"required", required},
             {"content", {
-                {contentType, {
+                {content_type, {
                     {"schema", schema}
                 }}
             }}
@@ -87,12 +87,12 @@ struct RouteMetadata {
      * @param statusCode HTTP status code
      * @param description Response description
      * @param schema JSON schema for the response (optional)
-     * @param contentType Content type (default: application/json)
+     * @param content_type Content type (default: application/json)
      * @return Reference to this metadata object
      */
     RouteMetadata& withResponse(int statusCode, const std::string& description, 
                               const qb::json& schema = qb::json::object(),
-                              const std::string& contentType = "application/json") {
+                              const std::string& content_type = "application/json") {
         if (!responses.is_object()) {
             responses = qb::json::object();
         }
@@ -100,7 +100,7 @@ struct RouteMetadata {
         qb::json response = {{"description", description}};
         if (!schema.is_null() && !schema.empty()) {
             response["content"] = {
-                {contentType, {
+                {content_type, {
                     {"schema", schema}
                 }}
             };
@@ -176,11 +176,11 @@ struct RouteMetadata {
     
     /**
      * @brief Add multiple tags to the route
-     * @param newTags Tags to add
+     * @param new_tags Tags to add
      * @return Reference to this metadata object
      */
-    RouteMetadata& withTags(const std::vector<std::string>& newTags) {
-        for (const auto& tag : newTags) {
+    RouteMetadata& withTags(const std::vector<std::string>& new_tags) {
+        for (const auto& tag : new_tags) {
             withTag(tag);
         }
         return *this;
@@ -198,19 +198,32 @@ struct RouteMetadata {
 };
 
 /**
- * @brief Base class for routes
+ * @brief Interface (base class) for all route types.
+ *
+ * Defines the common contract for routes, including processing a request,
+ * and providing priority, path, and metadata information.
+ *
+ * @tparam Session The session type used by the router.
+ * @tparam String The string type (e.g., std::string) used for paths and parameters.
  */
 template <typename Session, typename String = std::string>
 class IRoute {
 public:
-    using Context = RouterContext<Session, String>;
+    using Context = RouterContext<Session, String>; ///< Alias for the router's context type.
 
     virtual ~IRoute() = default;
+
+    /**
+     * @brief Processes an HTTP request using this route's logic.
+     * This is the core method called by the router when a route matches.
+     * @param ctx The RouterContext associated with the current request.
+     */
     virtual void process(Context &ctx) = 0;
     
     /**
-     * @brief Get the route priority
-     * @return Priority value
+     * @brief Gets the priority of this route.
+     * Higher values typically indicate higher precedence in matching.
+     * @return The priority value (default is 0).
      */
     virtual int priority() const {
         return 0;
@@ -229,26 +242,41 @@ public:
      * @return Reference to metadata object
      */
     virtual const RouteMetadata& getMetadata() const {
-        static RouteMetadata empty_metadata;
+        static RouteMetadata empty_metadata; // A default empty metadata object
         return empty_metadata;
     }
 };
 
 /**
- * @brief Base route class with regex-based pattern matching
+ * @brief Abstract base route class providing regex-based path pattern matching
+ *        and parameter extraction capabilities.
+ *
+ * It handles compiling a path string (e.g., "/users/:id") into a regex pattern
+ * and extracting named parameters from matching URLs.
+ *
+ * @tparam Session The session type.
+ * @tparam String The string type for paths.
  */
 template <typename Session, typename String = std::string>
 class ARoute : public IRoute<Session, String> {
 protected:
-    std::string              _path;
-    std::regex               _pattern;
-    std::vector<std::string> _param_names;
-    PathParameters           _parameters;
-    int                      _priority{0};
-    RouteMetadata            _metadata;  // Added OpenAPI metadata
+    std::string              _path;          ///< The original path string for this route (e.g., "/users/:id").
+    std::regex               _pattern;       ///< The compiled regex pattern derived from _path.
+    std::vector<std::string> _param_names;   ///< Names of parameters extracted from the path (e.g., {"id"}).
+    PathParameters           _parameters;    ///< Stores extracted path parameters for the last match.
+    int                      _priority{0};   ///< Priority of this route.
+    RouteMetadata            _metadata;      ///< OpenAPI metadata associated with this route.
 
+    /**
+     * @brief Compiles the route's path string into a regex pattern.
+     * Replaces segments like ":paramName" with regex capture groups "([^/]+)"
+     * and stores the parameter names in _param_names.
+     */
     void
     compile_pattern() {
+        // AMÉLIORATION WORKFLOW POINT 4: Cohérence Radix/Regex
+        // S'assurer que la logique de remplacement des placeholders de paramètres (ex: ":id" par "([^/]+)")
+        // et la capture des noms de paramètres (_param_names) sont cohérentes avec RadixNode::insert.
         std::string pattern = _path;
         std::regex param_regex(":([^/]+)");
         std::smatch matches;
@@ -278,8 +306,13 @@ protected:
     }
 
 public:
-    using Context = typename IRoute<Session, String>::Context;
+    using Context = typename IRoute<Session, String>::Context; ///< Alias for the router's context type.
 
+    /**
+     * @brief Constructs an ARoute with a given path and optional priority.
+     * @param path The path string for the route.
+     * @param priority The priority of the route (default 0).
+     */
     explicit ARoute(std::string path, int priority = 0)
         : _path(std::move(path))
         , _priority(priority) {
@@ -288,6 +321,12 @@ public:
 
     virtual ~ARoute() = default;
 
+    /**
+     * @brief Matches a given path string against the route's compiled regex pattern.
+     * If a match occurs, populates the internal _parameters map.
+     * @param path The path string to match.
+     * @return True if the path matches, false otherwise.
+     */
     bool
     match(const std::string &path) {
         std::smatch matches;
@@ -301,8 +340,19 @@ public:
         return false;
     }
 
+    /**
+     * @brief Matches a given path string against the route's pattern and updates the context.
+     * If a match occurs, populates the internal _parameters map and also updates
+     * the `path_params` and `match` fields in the provided RouterContext.
+     * @param ctx The RouterContext to update upon a successful match.
+     * @param path The path string to match.
+     * @return True if the path matches, false otherwise.
+     */
     bool
     match(Context &ctx, const std::string &path) {
+        // AMÉLIORATION WORKFLOW POINT 4: Cohérence Radix/Regex
+        // S'assurer que la manière dont les paramètres sont extraits des 'matches' et stockés dans ctx.path_params
+        // est cohérente avec la méthode RadixNode::match.
         std::smatch matches;
         if (std::regex_match(path, matches, _pattern)) {
             _parameters.clear();
@@ -322,8 +372,9 @@ public:
     }
     
     /**
-     * @brief Get the route path (override from IRoute)
-     * @return Route path string
+     * @brief Gets the original path string of this route.
+     * Implements the IRoute interface.
+     * @return The route path string.
      */
     std::string getPath() const override {
         return _path;
@@ -334,28 +385,34 @@ public:
         return _parameters;
     }
     
+    /**
+     * @brief Gets the priority of this route.
+     * Implements the IRoute interface.
+     * @return The priority value.
+     */
     [[nodiscard]] int
     priority() const override {
         return _priority;
     }
 
     ARoute &
-    set_priority(int priority) {
-        _priority = priority;
+    set_priority(int new_priority) {
+        _priority = new_priority;
         return *this;
     }
 
     /**
-     * @brief Get the route's OpenAPI metadata
-     * @return Reference to metadata object
+     * @brief Provides mutable access to the route's OpenAPI metadata.
+     * @return Reference to the RouteMetadata object.
      */
     RouteMetadata& metadata() {
         return _metadata;
     }
     
     /**
-     * @brief Get the route's OpenAPI metadata (const)
-     * @return Const reference to metadata object
+     * @brief Provides const access to the route's OpenAPI metadata.
+     * Implements the IRoute interface.
+     * @return Const reference to the RouteMetadata object.
      */
     const RouteMetadata& getMetadata() const override {
         return _metadata;
@@ -363,15 +420,28 @@ public:
 };
 
 /**
- * @brief Route implementation for function handlers
+ * @brief Route implementation that wraps a function-like handler (e.g., lambda).
+ *
+ * This class derives from ARoute to use its regex matching capabilities and
+ * executes the provided function handler when the route is processed.
+ *
+ * @tparam Session The session type.
+ * @tparam String The string type for paths.
+ * @tparam Func The type of the function or callable object that handles the route.
  */
 template <typename Session, typename String, typename Func>
 class TRoute : public ARoute<Session, String> {
-    Func _func;
+    Func _func; ///< The function handler for this route.
 
 public:
-    using Context = typename ARoute<Session, String>::Context;
+    using Context = typename ARoute<Session, String>::Context; ///< Alias for the router's context type.
 
+    /**
+     * @brief Constructs a TRoute.
+     * @param path The path string for the route.
+     * @param func The function handler (rvalue reference, will be moved or copied).
+     * @param priority The priority of the route (default 0).
+     */
     TRoute(std::string const &path, Func &&func, int priority = 0)
         : ARoute<Session, String>(path, priority)
         , _func(std::forward<Func>(func)) {}
@@ -385,30 +455,42 @@ public:
 };
 
 /**
- * @brief A route group for organizing routes
+ * @brief Represents a group of routes that share a common path prefix and/or middleware.
+ *
+ * Route groups help in organizing routes and applying common settings or logic
+ * to multiple related routes.
+ *
+ * @tparam Session The session type.
+ * @tparam String The string type for paths.
  */
 template <typename Session, typename String = std::string>
 class RouteGroup {
-    Router<Session, String>                                  &_router;
-    std::string                                               _prefix;
-    std::vector<typename Router<Session, String>::Middleware> _middleware;
-    std::shared_ptr<MiddlewareChain<Session, String>>         _typed_middleware_chain;
-    int                                                       _priority;
-    std::string _openapi_tag; // OpenAPI tag for this group
-    std::vector<std::shared_ptr<RouteGroup>> _sub_groups;   // Store sub-groups for OpenAPI introspection
-    RouteMetadata _metadata; // Added metadata for the group
+    Router<Session, String>                                  &_router;      ///< Reference to the main router this group belongs to.
+    std::string                                               _prefix;       ///< The common path prefix for all routes in this group.
+    std::vector<typename Router<Session, String>::Middleware> _middleware;   ///< Legacy synchronous middleware specific to this group.
+    std::shared_ptr<MiddlewareChain<Session, String>>         _typed_middleware_chain; ///< Typed middleware chain for this group.
+    int                                                       _priority;     ///< Default priority for routes added to this group.
+    std::string _openapi_tag; ///< Optional OpenAPI tag to apply to all routes in this group.
+    std::vector<std::shared_ptr<RouteGroup>> _sub_groups;   ///< Stores sub-groups for OpenAPI introspection and hierarchical processing.
+    RouteMetadata _metadata; ///< OpenAPI metadata specific to the group itself (e.g., for section documentation).
 
-    // Store routes for each HTTP method for OpenAPI introspection
+    // Stores routes added directly to this group, categorized by HTTP method, primarily for OpenAPI introspection.
     qb::unordered_map<http_method, std::vector<std::shared_ptr<IRoute<Session, String>>>> _routes;
 
 public:
-    using RouterType = Router<Session, String>;
-    using Context = RouterContext<Session, String>;
-    using Middleware = typename RouterType::Middleware;
-    using Handler = typename RouterType::Middleware;
-    using TypedMiddlewarePtr = MiddlewarePtr<Session, String>;
-    using IRoutePtr = std::shared_ptr<IRoute<Session, String>>;
+    using RouterType = Router<Session, String>; ///< Alias for the Router type.
+    using Context = RouterContext<Session, String>;    ///< Alias for the Context type.
+    using Middleware = typename RouterType::Middleware; ///< Alias for legacy synchronous middleware function type.
+    using Handler = typename RouterType::Middleware;    ///< Alias for handler function type (same as Middleware).
+    using TypedMiddlewarePtr = MiddlewarePtr<Session, String>; ///< Alias for a shared pointer to a typed middleware.
+    using IRoutePtr = std::shared_ptr<IRoute<Session, String>>; ///< Alias for a shared pointer to an IRoute.
 
+    /**
+     * @brief Constructs a RouteGroup.
+     * @param router Reference to the parent router.
+     * @param prefix The path prefix for this group.
+     * @param priority Default priority for routes in this group (default 0).
+     */
     RouteGroup(RouterType &router, std::string prefix, int priority = 0)
         : _router(router)
         , _prefix(std::move(prefix))
@@ -444,9 +526,9 @@ public:
     }
     
     /**
-     * @brief Add a typed middleware to this route group
-     * @param middleware Middleware to add
-     * @return Reference to this group for chaining
+     * @brief Adds a typed middleware (IMiddleware instance) to this route group's chain.
+     * @param middleware A shared pointer to the typed middleware to add.
+     * @return Reference to this group for chaining.
      */
     RouteGroup &use(TypedMiddlewarePtr middleware) {
         // Lazily create the typed middleware chain if it doesn't exist
@@ -511,15 +593,23 @@ public:
         return new_group;
     }
 
-    RouteGroup &set_priority(int priority) {
-        _priority = priority;
+    RouteGroup &set_priority(int new_priority) {
+        _priority = new_priority;
         return *this;
     }
 
+    /**
+     * @brief Gets the legacy synchronous middleware functions associated with this group.
+     * @return Const reference to the vector of middleware functions.
+     */
     const std::vector<Middleware> &middleware() const {
         return _middleware;
     }
     
+    /**
+     * @brief Gets the typed middleware chain associated with this group.
+     * @return Shared pointer to the MiddlewareChain, or nullptr if none has been set up.
+     */
     std::shared_ptr<MiddlewareChain<Session, String>> typed_middleware_chain() const {
         return _typed_middleware_chain;
     }
@@ -537,14 +627,14 @@ public:
      * @param tag Tag name
      * @return Reference to this group
      */
-    RouteGroup& withOpenApiTag(const std::string& tag) {
-        _openapi_tag = tag;
+    RouteGroup& withOpenApiTag(const std::string& tag_name) {
+        _openapi_tag = tag_name;
         return *this;
     }
 
     /**
-     * @brief Get the OpenAPI tag for this group
-     * @return Tag name or empty string if not set
+     * @brief Gets the OpenAPI tag defined for this group.
+     * @return The OpenAPI tag string, or an empty string if not set.
      */
     const std::string& getOpenApiTag() const {
         return _openapi_tag;

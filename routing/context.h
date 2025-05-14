@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <type_traits>
 #include "../request.h"
 #include "../response.h"
 #include "./async_types.h"
@@ -18,6 +19,19 @@
 #endif
 
 namespace qb::http {
+
+enum class RequestProcessingStage {
+    INITIAL,
+    PROCESSING_GLOBAL_SYNC_MIDDLEWARE,
+    AWAITING_GLOBAL_ASYNC_MIDDLEWARE,
+    PROCESSING_GROUP_MIDDLEWARE,
+    AWAITING_GROUP_ASYNC_MIDDLEWARE,
+    READY_FOR_HANDLER,
+    HANDLER_PROCESSING,
+    AWAITING_HANDLER_ASYNC_COMPLETION,
+    RESPONSE_SENT_OR_COMPLETED,
+    ERROR_HANDLED
+};
 
 // Forward declarations
 template <typename Session, typename String>
@@ -49,6 +63,7 @@ private:
         bool                            handled  = false;
         bool                            is_async = false;
         bool is_deferred = false; // New flag for deferred processing
+        RequestProcessingStage processing_stage = RequestProcessingStage::INITIAL; // AMÉLIORATION WORKFLOW POINT 5
 
         // Callbacks for different lifecycle hooks
         std::vector<std::function<void(RouterContext&)>> done_callbacks;
@@ -70,11 +85,29 @@ private:
     std::shared_ptr<ContextState> _state;
 
 public:
-    std::shared_ptr<Session>    session;
-    TRequest<String>            request;
-    Response                    response;
-    Router<Session, String>    *router = nullptr;
+    std::shared_ptr<Session>    session;    ///< Shared pointer to the session object.
+    TRequest<String>            request;    ///< The HTTP request object.
+    Response                    response;   ///< The HTTP response object to be populated.
+    Router<Session, String>    *router = nullptr; ///< Pointer to the router instance, if available.
 
+    // AMÉLIORATION WORKFLOW POINT 5: Accesseurs pour processing_stage
+    /**
+     * @brief Gets the current processing stage of the request in the router pipeline.
+     * @return The current RequestProcessingStage.
+     */
+    RequestProcessingStage get_processing_stage() const { return _state->processing_stage; }
+    /**
+     * @brief Sets the current processing stage of the request.
+     * @param stage The new RequestProcessingStage.
+     */
+    void set_processing_stage(RequestProcessingStage stage) { _state->processing_stage = stage; }
+
+    /**
+     * @brief Constructs a RouterContext.
+     * @param s Shared pointer to the session.
+     * @param req The HTTP request object (rvalue reference, will be moved).
+     * @param r Optional pointer to the router handling this context.
+     */
     RouterContext(std::shared_ptr<Session> s, TRequest<String> &&req,
                   Router<Session, String> *r = nullptr)
         : _state(std::make_shared<ContextState>())
@@ -403,7 +436,7 @@ public:
      */
     void 
     execute_after_callbacks() {
-        for (auto& callback : _state->after_callbacks) {
+        for (const auto& callback : _state->after_callbacks) {
             callback(*this);
         }
         _state->after_callbacks.clear();
@@ -479,31 +512,28 @@ public:
      */
     void
     complete() {
-        // Execute callbacks after processing
         execute_after_callbacks();
         execute_done_callbacks();
         
-        // Mark the request as handled (important!)
-        handled = true;
-        
-        // CRITICAL FIX: Add a flag to indicate this request has been fully completed
-        // so the router won't try to complete it again
+        this->handled = true; 
         set("_completed", true);
         
-        // In async mode, the router will handle the completion
-        // We should just mark it as handled and not send response directly
+        // Explicitly set the processing stage to RESPONSE_SENT_OR_COMPLETED
+        // This ensures the context state is correctly marked as completed
+        set_processing_stage(RequestProcessingStage::RESPONSE_SENT_OR_COMPLETED);
+        
         if (is_async()) {
             return;
         }
         
-        // Only log and send response for synchronous contexts
-        if (router) {
-            router->log_request(*this);
-        }
-        
-        // Send response if we have a valid session
         if (session) {
-            *session << response;
+            try {
+                *session << response;
+            } catch (const std::exception& e) {
+                // Handle exception
+            } catch (...) {
+                // Handle unknown exception
+            }
         }
     }
 
@@ -512,124 +542,26 @@ public:
     std::string    &match       = _state->match;
     bool           &handled     = _state->handled;
 
-    // Generate a completion handler for the current context
-    class AsyncCompletionHandler {
-    private:
-        RouterContext           &ctx;
-        Router<Session, String> *router;
-
-    public:
-        AsyncCompletionHandler(RouterContext &context, Router<Session, String> *r)
-            : ctx(context)
-            , router(r) {}
-
-        AsyncCompletionHandler &
-        status(enum http_status status) {
-            ctx.response.status_code = status;
-            return *this;
-        }
-
-        AsyncCompletionHandler &
-        header(const std::string &name, const std::string &value) {
-            ctx.response.add_header(name, value);
-            return *this;
-        }
-
-        AsyncCompletionHandler &
-        body(const std::string &content) {
-            ctx.response.body() = content;
-            return *this;
-        }
-
-        /**
-         * @brief Complete the request asynchronously
-         */
-        void
-        complete() {
-            // First check if request is cancelled - skip if cancelled
-            // Use public API instead of accessing private member
-            if (router->is_request_cancelled(reinterpret_cast<std::uintptr_t>(&ctx))) {
-                // Don't do anything for cancelled requests
-                return;
-            }
-
-            // Check if the session is still connected
-            if (!ctx.session) {
-                return;
-            }
-            if constexpr (detail::has_method_is_connected<Session>::value) {
-                if (!ctx.session->is_connected()) {
-                    // Don't try to complete a disconnected session
-                    return;
-                }
-            }
-
-            // Execute callbacks after processing
-            ctx.execute_after_callbacks();
-            ctx.execute_done_callbacks();
-
-            // Complete the request immediately by sending the response
-            if (router) {
-                router->log_request(ctx); // Log before sending
-            }
-            *ctx.session << ctx.response; // Send the response
-
-            // Important: After sending the response, we need to notify the router
-            // that this async request is complete so it can be removed from the active map.
-            // We use complete_with_state for this, similar to how cancel() does.
-            if (router) {
-                router->complete_async_request(reinterpret_cast<std::uintptr_t>(&ctx),
-                                               ctx.response, // Pass response again (needed by router method)
-                                               AsyncRequestState::COMPLETED);
-            }
-        }
-
-        // For test-router-async-advanced.cpp
-        void
-        complete_with_state(AsyncRequestState state) {
-            if (router) {
-                router->complete_async_request(reinterpret_cast<std::uintptr_t>(&ctx),
-                                               ctx.response, state);
-            }
-        }
-
-        /**
-         * @brief Cancel the request due to an error
-         * @param status_code HTTP status code
-         * @param error_message Error message
-         */
-        void
-        cancel(http_status status_code, const std::string &error_message) {
-            ctx.response.status_code = status_code;
-            ctx.response.body()      = error_message;
-            
-            // Execute error callbacks
-            ctx.execute_error_callbacks(error_message);
-            
-            if (router) {
-                router->complete_async_request(reinterpret_cast<std::uintptr_t>(&ctx),
-                                               ctx.response,
-                                               AsyncRequestState::CANCELED);
-            } else {
-                *ctx.session << ctx.response;
-            }
-        }
-    };
-
     // Method that combines markAsync and creates a completion handler
     std::shared_ptr<::qb::http::AsyncCompletionHandler<Session, String>>
     make_async() {
         mark_async();
         if (router) {
+            // This should correctly instantiate the external AsyncCompletionHandler
+            // The constructor of ::qb::http::AsyncCompletionHandler takes (Context&, Router*)
             return std::make_shared<::qb::http::AsyncCompletionHandler<Session, String>>(*this, router);
         }
         return nullptr;
     }
 
     // For backward compatibility with existing tests
+    // Point 2: Ensure this returns the external ::qb::http::AsyncCompletionHandler
     ::qb::http::AsyncCompletionHandler<Session, String> *
     get_completion_handler(Router<Session, String> &r) {
         mark_async();
+        // This should correctly instantiate the external AsyncCompletionHandler
+        // The constructor of ::qb::http::AsyncCompletionHandler takes (Context&, Router*)
+        // Note: Caller is responsible for deleting the returned raw pointer.
         return new ::qb::http::AsyncCompletionHandler<Session, String>(*this, &r);
     }
 
@@ -681,17 +613,19 @@ public:
         return std::make_shared<AsyncMiddlewareResult>(std::move(callback));
     }
 
-    // Helper method to check if the session is still connected
+    // Helper method to check if the session is still connected.
+    // This checks the session object directly if available and if the session type supports an is_connected() method.
     [[nodiscard]] bool is_session_connected() const {
         if (!session) {
-            return false;
+            return false; // No session associated with the context.
         }
         
+        // Check for is_connected() method on the Session type using SFINAE/type traits.
         if constexpr (detail::has_method_is_connected<Session>::value) {
             return session->is_connected();
         }
         
-        return true; // Assume connected if no is_connected method
+        return true; // Assume connected if no is_connected method is available on the session object.
     }
 };
 
@@ -699,4 +633,4 @@ public:
 template <typename Session, typename String = std::string>
 using Context = RouterContext<Session, String>;
 
-} // namespace qb::http
+}

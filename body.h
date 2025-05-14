@@ -317,6 +317,13 @@ public:
         static_assert("cannot convert http body to a not implemented type");
         return {};
     }
+
+    /**
+     * @brief Clear the body
+     */
+    inline void clear() noexcept {
+        _data.clear();
+    }
 };
 using body = Body;
 
@@ -333,6 +340,8 @@ template <>
 Body &Body::operator= <std::vector<char>>(std::vector<char> &&str) noexcept;
 template <>
 Body &Body::operator= <qb::json>(qb::json const &json);
+template <>
+Body &Body::operator= <qb::json>(qb::json &&json) noexcept;
 template <>
 Body &Body::operator= <Multipart>(Multipart const &mp);
 // template <>
