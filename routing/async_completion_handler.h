@@ -6,6 +6,7 @@
 #include <utility>
 #include "../response.h"
 #include "./async_types.h"
+#include <iostream>
 
 namespace qb::http {
 
@@ -54,6 +55,7 @@ public:
      */
     AsyncCompletionHandler &
     status(http_status status_code) {
+        std::cerr << "[ACH::status] this: " << this << ", _context: " << _context << ", setting status: " << status_code << std::endl;
         // First check if request is still active
         if (!_router.is_active_request(_context_id)) {
             // Request is no longer active, just update fallback response
@@ -108,6 +110,12 @@ public:
     template <typename T>
     AsyncCompletionHandler &
     body(T &&body) {
+        std::string body_str_repr = "<non-string_body_type>";
+        if constexpr (std::is_same_v<std::decay_t<T>, std::string> || std::is_same_v<std::decay_t<T>, const char*>) {
+            body_str_repr = body;
+        }
+        std::cerr << "[ACH::body] this: " << this << ", _context: " << _context << ", setting body (repr): " << body_str_repr.substr(0, 50) << std::endl;
+
         // First check if request is still active and session is connected
         if (!_router.is_active_request(_context_id)) {
             // Request is no longer active, just update fallback response
@@ -202,6 +210,19 @@ public:
      */
     void
     complete() {
+        std::cerr << "[ACH::complete ENTRY] this: " << this << ", _context: " << _context;
+        if (_context && _context->_state) { // Check _state as well for safety
+            std::string current_body_repr = "<body empty or error converting in ACH::complete>";
+            try { if(!_context->response.body().empty()) current_body_repr = _context->response.body().template as<std::string>(); } catch(...) {}
+            std::cerr << ", _context->response.status: " << _context->response.status_code 
+                      << ", _context->response.body (repr): " << current_body_repr.substr(0, 50);
+        } else if (_context) {
+            std::cerr << ", _context exists but _context->_state is NULL";
+        } else {
+            std::cerr << ", _context is NULL";
+        }
+        std::cerr << std::endl;
+
         // First check if request is cancelled
         if (_cancelled) {
             // Don't do anything for cancelled requests
@@ -214,31 +235,30 @@ public:
             return;
         }
 
+        // Make a local copy of the response to ensure safety
+        Response response_to_send;
+        
+        // Prepare the response either from context or fallback
+        if (_context && _context->_state) {
+            response_to_send = _context->response;
+        } else {
+            // If context is no longer valid, use fallback response
+            response_to_send = _fallback_response;
+        }
+        
         // Handle deferred completion
         if (_is_deferred) {
-            _router.defer_request(_context_id, _defer_time_ms, [this]() {
+            _router.defer_request(_context_id, _defer_time_ms, [this, response_to_send]() mutable {
                 // Double-check connection status before completing the deferred request
                 if (is_session_connected()) {
-                    if (_context) {
-                        // Prefer context's response if available
-                        _router.complete_async_request(_context_id, _context->response);
-                    } else {
-                        // Fallback to the locally built response only if context is unavailable
-                        _router.complete_async_request(_context_id, std::move(_fallback_response));
-                    }
+                    _router.complete_async_request(_context_id, std::move(response_to_send));
                 }
             });
             return;
         }
 
-        // Complete request immediately with the appropriate response
-        if (_context) {
-            // Always use context's response if available
-            _router.complete_async_request(_context_id, _context->response);
-        } else {
-            // Fallback to the locally built response only if context is unavailable
-            _router.complete_async_request(_context_id, std::move(_fallback_response));
-        }
+        // Complete request immediately
+        _router.complete_async_request(_context_id, std::move(response_to_send));
     }
 
     /**

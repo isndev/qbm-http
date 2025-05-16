@@ -6,6 +6,10 @@
 #include "./middleware_interface.h"
 #include "../auth/auth.h"
 
+// Assuming these are declared globally in the test file and are accessible here
+// This is not ideal for library code but necessary for this specific debugging request.
+extern std::vector<std::string> adv_test_mw_middleware_execution_log;
+
 namespace qb::http {
 
 /**
@@ -55,54 +59,164 @@ public:
      * @return Middleware result
      */
     MiddlewareResult process(Context& ctx) override {
-        // Extract token from header
-        const auto& auth_header = ctx.request.header(_auth_manager.get_options().get_auth_header_name());
+        if (adv_test_mw_middleware_execution_log.size() < 1000) { 
+            adv_test_mw_middleware_execution_log.push_back(name() + " process_start for " + std::string(ctx.request.uri().path()));
+        }
+
+        std::optional<auth::User> user_opt;
+
+        // Check if JwtMiddleware already processed and set a payload
+        if (ctx.has("jwt_payload")) {
+            if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                adv_test_mw_middleware_execution_log.push_back(name() + " found jwt_payload in context for " + std::string(ctx.request.uri().path()));
+            }
+            try {
+                qb::json jwt_payload = ctx.template get<qb::json>("jwt_payload");
+                auth::User user_from_payload;
+                if (jwt_payload.contains("sub") && jwt_payload["sub"].is_string()) 
+                    user_from_payload.id = jwt_payload["sub"].template get<std::string>();
+                if (jwt_payload.contains("username") && jwt_payload["username"].is_string()) 
+                    user_from_payload.username = jwt_payload["username"].template get<std::string>();
+                
+                // DETAILED LOGGING FOR ROLES:
+                if (jwt_payload.contains("roles")) {
+                    if (jwt_payload["roles"].is_array()) {
+                        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                            adv_test_mw_middleware_execution_log.push_back(name() + " found 'roles' array in jwt_payload. Size: " + std::to_string(jwt_payload["roles"].size()) + ". Content: " + jwt_payload["roles"].dump(2));
+                        }
+                        for (const auto& role_item : jwt_payload["roles"]) { 
+                            if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                                adv_test_mw_middleware_execution_log.push_back(name() + "  - role_item type: " + std::string(role_item.type_name()) + ", value: " + role_item.dump());
+                            }
+                            if (role_item.is_string()) {
+                                user_from_payload.roles.push_back(role_item.template get<std::string>());
+                                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                                    adv_test_mw_middleware_execution_log.push_back(name() + "    -> Added role: " + role_item.template get<std::string>());
+                                }
+                            }
+                        }
+                    } else {
+                        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                            adv_test_mw_middleware_execution_log.push_back(name() + " 'roles' claim found but is NOT an array. Type: " + std::string(jwt_payload["roles"].type_name()) + ", Value: " + jwt_payload["roles"].dump(2));
+                        }
+                    }
+                } else {
+                    if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                        adv_test_mw_middleware_execution_log.push_back(name() + " 'roles' claim NOT found in jwt_payload.");
+                    }
+                }
+
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    std::string roles_str_debug;
+                    for(size_t i=0; i<user_from_payload.roles.size(); ++i) { roles_str_debug += (i>0?",":"") + user_from_payload.roles[i]; }
+                    adv_test_mw_middleware_execution_log.push_back(name() + " constructed user_from_payload: id='" + user_from_payload.id + "', username='" + user_from_payload.username + "', roles_count=" + std::to_string(user_from_payload.roles.size()) + ", roles=[" + roles_str_debug + "]");
+                }
+                user_opt = user_from_payload;
+            } catch (const std::bad_any_cast& e) {
+                 if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " jwt_payload context cast to qb::json failed: " + e.what());
+                }
+                // user_opt remains std::nullopt, will fall through to header check or fail if auth required
+            } catch (const qb::json::exception& e) { // Catch potential JSON parsing/access errors within the payload
+                 if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " jwt_payload json processing error: " + e.what());
+                }
+                 // user_opt remains std::nullopt
+            }
+        }
         
-        // Check if authentication is required and no header is provided
+        // If user was not populated from jwt_payload, try header extraction
+        if (!user_opt) {
+            if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                 if (ctx.has("jwt_payload")) { // Log only if we attempted context payload and it failed
+                    adv_test_mw_middleware_execution_log.push_back(name() + " jwt_payload processing failed, falling back to header for " + std::string(ctx.request.uri().path()));
+                 } else {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " no jwt_payload in context, trying header for " + std::string(ctx.request.uri().path()));
+                 }
+            }
+            const auto& auth_header = ctx.request.header(_auth_manager.get_options().get_auth_header_name());
+            
         if (_require_auth && auth_header.empty()) {
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " stopping: auth required, no header (fallback) for " + std::string(ctx.request.uri().path()));
+                }
             return handle_auth_error(ctx, HTTP_STATUS_UNAUTHORIZED, "Authentication required");
         }
         
-        // If no header is provided and auth is optional, continue without user
         if (auth_header.empty()) {
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " continuing: no auth header (fallback), auth not strictly required by config for " + std::string(ctx.request.uri().path()));
+                }
             return MiddlewareResult::Continue();
         }
         
-        // Extract token from header
         std::string token = _auth_manager.extract_token_from_header(auth_header);
         if (token.empty()) {
-            // Invalid auth format (e.g., missing Bearer)
             if (_require_auth) {
+                    if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                        adv_test_mw_middleware_execution_log.push_back(name() + " stopping: invalid auth format (fallback) for " + std::string(ctx.request.uri().path()));
+                    }
                 return handle_auth_error(ctx, HTTP_STATUS_UNAUTHORIZED, "Invalid authentication format");
             }
-            return MiddlewareResult::Continue();
+                 if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " continuing: invalid auth format (fallback) but auth not strictly required for " + std::string(ctx.request.uri().path()));
+                }
+                return MiddlewareResult::Continue();
+            }
+            user_opt = _auth_manager.verify_token(token); // This verify_token uses AuthManager's options
         }
-        
-        // Verify token and extract user information
-        auto user = _auth_manager.verify_token(token);
-        if (!user) {
-            // Token is invalid or expired
+
+        // Now process the user_opt (which could be from context payload or header token)
+        if (!user_opt) {
             if (_require_auth) {
-                return handle_auth_error(ctx, HTTP_STATUS_UNAUTHORIZED, "Invalid or expired token");
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " stopping: user verification failed (user_opt null) for " + std::string(ctx.request.uri().path()));
+                }
+                // The error message from verify_token in AuthManager might be more specific if it failed there
+                return handle_auth_error(ctx, HTTP_STATUS_UNAUTHORIZED, "Invalid or expired token / User not determinable");
+            }
+            if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                 adv_test_mw_middleware_execution_log.push_back(name() + " continuing: user verification failed (user_opt null) but auth not strictly required for " + std::string(ctx.request.uri().path()));
             }
             return MiddlewareResult::Continue();
         }
         
-        // Store user information in context
-        ctx.set(_user_context_key, *user);
+        // User is present and verified (either from jwt_payload or from header token)
+        ctx.set(_user_context_key, *user_opt);
+        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+            std::string stored_type_name = "UnknownOrNotSet";
+            if (ctx.has(_user_context_key)) {
+                try {
+                    // Try to get it as User to check if set worked as expected by type
+                    [[maybe_unused]] auto temp_user = ctx.template get<auth::User>(_user_context_key);
+                    stored_type_name = "auth::User_confirmed_by_get";
+                } catch (const std::bad_any_cast& e) {
+                    stored_type_name = std::string("std::any_cast_failed: ") + e.what();
+                } catch (...) {
+                    stored_type_name = "Unknown_exception_on_get_check";
+                }
+            } else {
+                stored_type_name = "Not_found_after_set";
+            }
+            adv_test_mw_middleware_execution_log.push_back(name() + " set user in context with key '" + _user_context_key + "'. Type check via get: " + stored_type_name);
+        }
         
-        // Check role-based authorization if required
         if (!_required_roles.empty()) {
             bool authorized = _require_all_roles ? 
-                user->has_all_roles(_required_roles) : 
-                user->has_any_role(_required_roles);
+                user_opt->has_all_roles(_required_roles) : 
+                user_opt->has_any_role(_required_roles);
                 
             if (!authorized) {
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " stopping: insufficient permissions for user '" + user_opt->username + "' for " + std::string(ctx.request.uri().path()));
+                }
                 return handle_auth_error(ctx, HTTP_STATUS_FORBIDDEN, "Insufficient permissions");
             }
         }
         
-        // Authentication and authorization successful
+        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+            adv_test_mw_middleware_execution_log.push_back(name() + " continuing: auth success for user '" + user_opt->username + "' for " + std::string(ctx.request.uri().path()));
+        }
         return MiddlewareResult::Continue();
     }
     

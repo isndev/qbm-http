@@ -35,9 +35,18 @@
 
 #include "http.h"
 #include "multipart.h"
+#include "middleware/middleware.h"
 #if defined(_WIN32)
 #undef DELETE // Windows :/
 #endif
+
+#include <sstream>
+#include <iostream>
+
+namespace qb::http {
+
+// Definition of the external middleware execution log
+std::vector<std::string> adv_test_mw_middleware_execution_log;
 
 /**
  * @brief Macro to register synchronous HTTP functions
@@ -70,8 +79,6 @@
         return response;                                    \
     }
 
-namespace qb::http {
-
 REGISTER_HTTP_SYNC_FUNCTION(-1, REQUEST, "User defined")
 HTTP_METHOD_MAP(REGISTER_HTTP_SYNC_FUNCTION)
 
@@ -96,7 +103,7 @@ template <>
 pipe<char> &
 pipe<char>::put<qb::http::Request>(const qb::http::Request &r) {
     // HTTP Status Line
-    *this << ::http_method_name(static_cast<http_method_t>(r.method)) << qb::http::sep
+    *this << ::http_method_name(r.method) << qb::http::sep
           << r.uri().path();
     if (r.uri().encoded_queries().size())
         *this << "?" << r.uri().encoded_queries();
@@ -143,7 +150,7 @@ pipe<char>::put<qb::http::Response>(const qb::http::Response &r) {
     *this << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep
           << r.status_code << qb::http::sep
           << (r.status.empty()
-                  ? ::http_status_name(static_cast<http_status>(r.status_code))
+                  ? ::http_status_name(r.status_code)
                   : r.status.c_str())
           << qb::http::endl;
     // HTTP Headers

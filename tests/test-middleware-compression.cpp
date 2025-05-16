@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
-// Pour le test d'intégration avec d'autres middlewares
+// For integration testing with other middlewares
 #include "../middleware/error_handling.h"
 #include "../middleware/logging.h"
 
@@ -365,14 +365,14 @@ TEST(CompressionMiddlewareTest, SkipsCompressionWhenDisabled) {
     EXPECT_EQ(response_body, ctx.response.body().template as<std::string>());
 }
 
-// NOUVEAUX TESTS:
+// NEW TESTS:
 
-// Test de multiples encodages dans l'en-tête Content-Encoding
+// Test handling multiple encodings in the Content-Encoding header
 TEST(CompressionMiddlewareTest, HandlesMultipleContentEncodings) {
-    // Actuellement, le middleware ne supporte pas plusieurs encodages dans Content-Encoding
-    // Ce test vérifie que le middleware gère correctement cette situation (devrait échouer proprement)
+    // Currently, the middleware doesn't support multiple encodings in Content-Encoding
+    // This test verifies that the middleware handles this situation properly (should fail gracefully)
     
-    // Créer une requête avec un corps compressé par gzip
+    // Create a request with gzip compressed body
     const std::string original_body = "This is a test body for compression";
     std::string compressed_body = compress_string(original_body, "gzip");
     
@@ -392,7 +392,7 @@ TEST(CompressionMiddlewareTest, HandlesMultipleContentEncodings) {
     EXPECT_TRUE(ctx.is_handled());
 }
 
-// Test de vérification de la mise à jour de Content-Length
+// Test verification of Content-Length update
 TEST(CompressionMiddlewareTest, UpdatesContentLengthAfterCompression) {
     auto req = create_test_request("", "");
     req.add_header("Accept-Encoding", "gzip");
@@ -419,7 +419,7 @@ TEST(CompressionMiddlewareTest, UpdatesContentLengthAfterCompression) {
     EXPECT_NE(std::to_string(response_body.size()), ctx.response.header("Content-Length"));
 }
 
-// Test avec des données JSON réelles
+// Test with real JSON data
 TEST(CompressionMiddlewareTest, CompressesRealJsonData) {
     auto req = create_test_request("", "");
     req.add_header("Accept-Encoding", "gzip");
@@ -427,8 +427,8 @@ TEST(CompressionMiddlewareTest, CompressesRealJsonData) {
     // Use realistic JSON data
     std::string json_data = create_json_data();
     
-    // S'assurer que la taille est supérieure au seuil min_size_to_compress
-    // Répéter le JSON si nécessaire pour dépasser 1024 octets
+    // Ensure the size exceeds the min_size_to_compress threshold
+    // Repeat the JSON if necessary to exceed 1024 bytes
     while (json_data.size() < 1500) {
         json_data += create_json_data();
     }
@@ -453,7 +453,7 @@ TEST(CompressionMiddlewareTest, CompressesRealJsonData) {
     EXPECT_LT(ctx.response.body().size(), json_data.size() * 0.7); // At least 30% smaller
 }
 
-// Test avec des données HTML réelles
+// Test with real HTML data
 TEST(CompressionMiddlewareTest, CompressesRealHtmlData) {
     auto req = create_test_request("", "");
     req.add_header("Accept-Encoding", "gzip");
@@ -481,7 +481,7 @@ TEST(CompressionMiddlewareTest, CompressesRealHtmlData) {
     EXPECT_LT(ctx.response.body().size(), html_data.size() * 0.6); // At least 40% smaller
 }
 
-// Test d'intégration avec d'autres middlewares
+// Test integration with other middlewares
 TEST(CompressionMiddlewareTest, IntegratesWithOtherMiddlewares) {
     // Create a middleware chain with multiple middleware types
     auto chain = make_middleware_chain<MockSession>();
@@ -527,37 +527,37 @@ TEST(CompressionMiddlewareTest, IntegratesWithOtherMiddlewares) {
     EXPECT_EQ("gzip", ctx.response.header("Content-Encoding"));
 }
 
-// Test de performance simple
+// Simple performance benchmark
 TEST(CompressionMiddlewareTest, PerformanceBenchmark) {
     auto req = create_test_request("", "");
     req.add_header("Accept-Encoding", "gzip");
     
-    // Différents types de données avec des caractéristiques de compression différentes
-    std::string text_data(10000, 'a');      // Hautement compressible
+    // Different data types with different compression characteristics
+    std::string text_data(10000, 'a');      // Highly compressible
     std::string json_data = create_json_data();
-    // S'assurer que le JSON est assez gros pour être compressé
+    // Ensure the JSON is large enough to be compressed
     while (json_data.size() < 1500) {
         json_data += create_json_data();
     }
     
     std::string html_data = create_html_data();
-    // S'assurer que l'HTML est assez gros pour être compressé
+    // Ensure the HTML is large enough to be compressed
     while (html_data.size() < 1500) {
         html_data += create_html_data();
     }
     
-    std::string random_data;                // Moins compressible
+    std::string random_data;                // Less compressible
     random_data.reserve(10000);
     for (int i = 0; i < 10000; i++) {
         random_data += static_cast<char>(rand() % 256);
     }
     
-    // Créer le middleware avec un seuil de compression plus bas pour les tests
+    // Create middleware with a lower compression threshold for testing
     CompressionOptions opts;
-    opts.min_size_to_compress(100); // Utiliser un seuil plus bas pour tester
+    opts.min_size_to_compress(100); // Use a lower threshold for testing
     auto middleware = CompressionMiddleware<MockSession>(opts);
     
-    // Tableau pour stocker les résultats
+    // Table to store results
     struct CompressionResult {
         std::string name;
         size_t original_size;
@@ -568,7 +568,7 @@ TEST(CompressionMiddlewareTest, PerformanceBenchmark) {
     
     std::vector<CompressionResult> results;
     
-    // Fonction pour tester la compression
+    // Function to test compression
     auto test_compression = [&](const std::string& name, const std::string& data, const std::string& content_type) {
         auto session = std::make_shared<MockSession>();
         RouterContext<MockSession, std::string> ctx(session, create_test_request("", ""));
@@ -576,24 +576,24 @@ TEST(CompressionMiddlewareTest, PerformanceBenchmark) {
         ctx.response.body() = data;
         ctx.response.add_header("Content-Type", content_type);
         
-        // Mesurer le temps de compression
+        // Measure compression time
         auto start = std::chrono::high_resolution_clock::now();
         middleware.process(ctx);
         ctx.execute_after_callbacks();
         auto end = std::chrono::high_resolution_clock::now();
         
-        // Calculer la durée
+        // Calculate duration
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
         
-        // Calculer le taux de compression
+        // Calculate compression ratio
         double ratio = 0.0;
         if (ctx.response.has_header("Content-Encoding")) {
             ratio = static_cast<double>(ctx.response.body().size()) / static_cast<double>(data.size());
         } else {
-            ratio = 1.0; // Pas de compression
+            ratio = 1.0; // No compression
         }
         
-        // Stocker les résultats
+        // Store results
         results.push_back({
             name,
             data.size(),
@@ -603,23 +603,23 @@ TEST(CompressionMiddlewareTest, PerformanceBenchmark) {
         });
     };
     
-    // Tester les différents types de données
-    test_compression("Texte répétitif", text_data, "text/plain");
+    // Test different data types
+    test_compression("Repetitive text", text_data, "text/plain");
     test_compression("JSON", json_data, "application/json");
     test_compression("HTML", html_data, "text/html");
-    test_compression("Données aléatoires", random_data, "application/octet-stream");
+    test_compression("Random data", random_data, "application/octet-stream");
     
-    // Vérifier les résultats
+    // Verify results
     for (const auto& result : results) {
-        if (result.name == "Texte répétitif" || result.name == "JSON" || result.name == "HTML") {
-            // Les données textuelles devraient avoir un bon taux de compression
+        if (result.name == "Repetitive text" || result.name == "JSON" || result.name == "HTML") {
+            // Text data should have good compression ratio
             EXPECT_LT(result.compression_ratio, 0.8);
         }
         
-        // Le temps de compression devrait être raisonnable
-        EXPECT_LT(result.duration.count(), 100000); // Moins de 100ms
+        // Compression time should be reasonable
+        EXPECT_LT(result.duration.count(), 100000); // Less than 100ms
         
-        // Logger les résultats pour information
+        // Log results for information
         std::cout << "Performance - " << result.name 
                   << ": Size " << result.original_size << " -> " << result.compressed_size 
                   << " (ratio: " << result.compression_ratio 

@@ -1,10 +1,14 @@
-
 #pragma once
 
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <qb/system/container/unordered_map.h>
+#include <iostream> // For debug logging
+#include "../utility.h"
+
+// Assuming these are declared globally in the test file and are accessible here
+extern std::vector<std::string> adv_test_mw_middleware_execution_log;
 
 namespace qb {
 namespace http {
@@ -27,8 +31,14 @@ struct User {
      * @param role Role to check for
      * @return true if the user has the role, false otherwise
      */
-    bool has_role(const std::string &role) const {
-        return std::find(roles.begin(), roles.end(), role) != roles.end();
+    bool has_role(const std::string &role_to_check) const {
+        bool found = std::find(roles.begin(), roles.end(), role_to_check) != roles.end();
+        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+            std::string current_roles_str_debug;
+            for(size_t i=0; i<roles.size(); ++i) { current_roles_str_debug += (i>0?",":"") + roles[i]; }
+            adv_test_mw_middleware_execution_log.push_back("[User::has_role] User '" + username + "' checking for role: '" + role_to_check + "'. User has roles: [" + current_roles_str_debug + "]. Found: " + (found ? "true" : "false"));
+        }
+        return found;
     }
 
     /**
@@ -36,10 +46,16 @@ struct User {
      * @param required_roles Roles to check for
      * @return true if the user has at least one of the roles, false otherwise
      */
-    bool has_any_role(const std::vector<std::string> &required_roles) const {
-        for (const auto &role : required_roles) {
-            if (has_role(role))
+    bool has_any_role(const std::vector<std::string> &required_roles_list) const {
+        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+             std::string req_roles_str;
+             for(size_t i=0; i<required_roles_list.size(); ++i) { req_roles_str += (i>0?",":"") + required_roles_list[i]; }
+             adv_test_mw_middleware_execution_log.push_back("[User::has_any_role] User '" + username + "' checking ANY of roles: [" + req_roles_str + "]");
+        }
+        for (const auto &role_to_check : required_roles_list) {
+            if (has_role(role_to_check)) {
                 return true;
+            }
         }
         return false;
     }
@@ -49,10 +65,18 @@ struct User {
      * @param required_roles Roles to check for
      * @return true if the user has all the roles, false otherwise
      */
-    bool has_all_roles(const std::vector<std::string> &required_roles) const {
-        for (const auto &role : required_roles) {
-            if (!has_role(role))
+    bool has_all_roles(const std::vector<std::string> &required_roles_list) const {
+         if (adv_test_mw_middleware_execution_log.size() < 1000) {
+             std::string req_roles_str;
+             for(size_t i=0; i<required_roles_list.size(); ++i) { req_roles_str += (i>0?",":"") + required_roles_list[i]; }
+             std::string current_roles_str_debug;
+             for(size_t i=0; i<roles.size(); ++i) { current_roles_str_debug += (i>0?",":"") + roles[i]; }
+             adv_test_mw_middleware_execution_log.push_back("[User::has_all_roles] User '" + username + "' checking ALL of roles: [" + req_roles_str + "]. User actually has roles: [" + current_roles_str_debug + "]");
+        }
+        for (const auto &role_to_check : required_roles_list) {
+            if (!has_role(role_to_check)) {
                 return false;
+            }
         }
         return true;
     }

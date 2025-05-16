@@ -29,6 +29,7 @@ set(HTTP_TESTS
         router-async-advanced
         router-sync-middleware
         router-async-middleware
+        router-complex-middleware
         router-groups
         router-auth
         cookie
@@ -51,6 +52,7 @@ set(HTTP_TESTS
         integration-advanced
         integration-controller
         integration-middleware
+        integration-middleware-advanced
 )
 
 # Register each standard test

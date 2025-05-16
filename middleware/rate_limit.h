@@ -141,7 +141,7 @@ public:
         }
         // Use session ID as a fallback
         else if constexpr (has_id_method<Session>::value) {
-            return ctx.session->id();
+            return uuids::to_string(ctx.session->id());
         } 
         else {
             // Last resort: use pointer address as a string
