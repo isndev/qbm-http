@@ -1033,7 +1033,15 @@ public:
                 } else {
                     this->transport() = std::forward<decltype(transport)>(transport);
                     this->start();
-
+#ifdef QB_IO_WITH_ZLIB
+                    if (_request.has_header("Content-Encoding")) {
+                        _request.body().compress(_request.header("Content-Encoding"));
+                    }
+#else
+                    if (_request.header("Content-Encoding") != "chunked") {
+                        _request.remove_header("Content-Encoding");
+                    }
+#endif
                     *this << _request;
                 }
             },

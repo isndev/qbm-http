@@ -1,6 +1,15 @@
 #include <gtest/gtest.h>
 #include "../http.h"
-
+std::atomic<int> adv_test_mw_request_count_server{0};
+std::atomic<int> adv_test_mw_request_count_client{0};
+std::atomic<bool> adv_test_mw_server_ready{false};
+std::atomic<int> adv_test_mw_server_side_assertions{0};
+std::atomic<int> adv_test_mw_expected_server_assertions{0};
+std::atomic<int> adv_test_mw_total_client_ops_expected{0};
+std::atomic<int> adv_test_mw_rate_limited_requests{0};
+std::vector<std::string> adv_test_mw_middleware_execution_log;
+std::stringstream adv_test_mw_captured_log_output;
+std::string adv_test_mw_jwt_token; // For JWT tests
 // Mock for qb::Actor to handle asynchronous operations in tests
 namespace qb {
 class Actor {

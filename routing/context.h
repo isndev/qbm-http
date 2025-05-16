@@ -13,6 +13,8 @@
 #include "../response.h"
 #include "./async_types.h"
 #include "./path_parameters.h"
+#include "./logging_helpers.h"
+#include "./async_completion_handler.h"
 
 # if defined(_WIN32)
 #undef DELETE // Windows :/
@@ -20,18 +22,18 @@
 
 namespace qb::http {
 
-enum class RequestProcessingStage {
-    INITIAL,
-    PROCESSING_GLOBAL_SYNC_MIDDLEWARE,
-    AWAITING_GLOBAL_ASYNC_MIDDLEWARE,
-    PROCESSING_GROUP_MIDDLEWARE,
-    AWAITING_GROUP_ASYNC_MIDDLEWARE,
-    READY_FOR_HANDLER,
-    HANDLER_PROCESSING,
-    AWAITING_HANDLER_ASYNC_COMPLETION,
-    RESPONSE_SENT_OR_COMPLETED,
-    ERROR_HANDLED
-};
+// enum class RequestProcessingStage { // MOVED TO async_types.h
+// INITIAL,
+// PROCESSING_GLOBAL_SYNC_MIDDLEWARE,
+// AWAITING_GLOBAL_ASYNC_MIDDLEWARE,
+// PROCESSING_GROUP_MIDDLEWARE,
+// AWAITING_GROUP_ASYNC_MIDDLEWARE,
+// READY_FOR_HANDLER,
+// HANDLER_PROCESSING,
+// AWAITING_HANDLER_ASYNC_COMPLETION,
+// RESPONSE_SENT_OR_COMPLETED,
+// ERROR_HANDLED
+// };
 
 // Forward declarations
 template <typename Session, typename String>
@@ -45,8 +47,17 @@ namespace detail {
 template <typename T, typename = void>
 struct has_method_is_connected : std::false_type {};
 
+#if __cplusplus >= 201703L
 template <typename T>
 struct has_method_is_connected<T, std::void_t<decltype(std::declval<T>().is_connected())>> : std::true_type {};
+#else
+// Manual void_t for C++11/14 if std::void_t is not found by linter
+// template<typename...> using void_t = void;
+// template <typename T>
+// struct has_method_is_connected<T, void_t<decltype(std::declval<T>().is_connected())>> : std::true_type {};
+// For now, let's assume C++17 as per instructions. The linter error needs to be understood.
+// If std::void_t is truly missing, the project isn't compiling with C++17, or includes are minimal.
+#endif
 } // namespace detail
 
 /**
@@ -54,7 +65,6 @@ struct has_method_is_connected<T, std::void_t<decltype(std::declval<T>().is_conn
  */
 template <typename Session, typename String = std::string>
 struct RouterContext {
-private:
     // Internal state encapsulation
     struct ContextState {
         PathParameters                  path_params;
@@ -64,6 +74,7 @@ private:
         bool                            is_async = false;
         bool is_deferred = false; // New flag for deferred processing
         RequestProcessingStage processing_stage = RequestProcessingStage::INITIAL; // AMÉLIORATION WORKFLOW POINT 5
+        bool _handler_initiated_async = false; // Flag to indicate handler started async
 
         // Callbacks for different lifecycle hooks
         std::vector<std::function<void(RouterContext&)>> done_callbacks;
@@ -207,6 +218,9 @@ public:
     template <typename T>
     void
     set(const std::string &key, T value) {
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] SET Key: '" + key + "'");
+        }
         _state->data[key] = std::move(value);
     }
 
@@ -222,10 +236,19 @@ public:
         auto it = _state->data.find(key);
         if (it != _state->data.end()) {
             try {
+                if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                    adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] GET Key: '" + key + "' - FOUND");
+                }
                 return std::any_cast<T>(it->second);
             } catch (const std::bad_any_cast &) {
+                if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                    adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] GET Key: '" + key + "' - BAD CAST, returning default");
+                }
                 return default_value;
             }
+        }
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] GET Key: '" + key + "' - NOT FOUND, returning default");
         }
         return default_value;
     }
@@ -237,7 +260,11 @@ public:
      */
     [[nodiscard]] bool
     has(const std::string &key) const {
-        return _state->data.find(key) != _state->data.end();
+        bool found = _state->data.find(key) != _state->data.end();
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] HAS Key: '" + key + "' - Result: " + utility::bool_to_string(found));
+        }
+        return found;
     }
 
     /**
@@ -311,10 +338,7 @@ public:
         if constexpr (std::is_convertible_v<JsonT, std::string>) {
             response.body() = json_object;
         } else {
-            // Assuming json_object has a to_string() or similar method
-            // This is just a placeholder and would need to be adapted
-            // to the actual JSON library being used
-            response.body() = json_object.dump();
+            response.body() = qb::json(json_object).dump();
         }
         return *this;
     }
@@ -351,7 +375,7 @@ public:
      */
     [[nodiscard]] bool
     is_handled() const {
-        return _state->handled;
+        return _state && _state->handled;
     }
 
     /**
@@ -371,7 +395,32 @@ public:
      */
     [[nodiscard]] bool
     is_async() const {
-        return _state->is_async;
+        return _state ? _state->is_async : false;
+    }
+
+    /**
+     * @brief Clears the async flag. Typically used internally when an async middleware chain
+     * completes synchronously or an async handler completes its operation and calls back.
+     * This ensures that subsequent synchronous processing steps are not incorrectly
+     * treated as yielding for an async operation that has already concluded.
+     */
+    void clear_async_state_for_chain_completion() {
+        if (_state) {
+            _state->is_async = false;
+        }
+    }
+
+    /**
+     * @brief Clears the async flag when a synchronous handler has executed
+     * after a preceding asynchronous middleware. This signals that the route's
+     * specific synchronous processing is done, even if the broader request
+     * context was initially asynchronous.
+     */
+    void clear_async_for_sync_handler_after_async_middleware() {
+        if (_state) {
+            _state->is_async = false;
+            // Do not modify _state->handled here, as the handler is considered to have handled its part.
+        }
     }
 
     // Lifecycle hooks
@@ -510,30 +559,71 @@ public:
     /**
      * @brief Complete the request and send response
      */
-    void
-    complete() {
+    void complete(bool from_async_completion_handler = false) {
+        if (!_state) {
+            // This case should ideally not happen if context is managed properly
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                 adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete] EARLY EXIT: _state is null. Path: " + std::string(this->request.uri().path()));
+            }
+            return; 
+        }
+
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+             adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete ENTRY] Path: " + std::string(this->request.uri().path()) + ", CtxState@" + utility::pointer_to_string_for_log(_state.get()) + ", from_async_cb: " + utility::bool_to_string(from_async_completion_handler));
+        }
+
+        if (has("_completed")) {
+            if (!has("_completed_by_async_handler")) {
+                add_event("RouterContext::complete() called on ASYNC context BEFORE AsyncCompletionHandler. Callbacks executed, but no response sent by RouterContext.");
+                set("_completed", true); // Marquer comme "callbacks faits", mais pas "réponse envoyée par RouterContext"
+                execute_after_callbacks(); 
+                execute_done_callbacks();
+            }
+            return; 
+        }
+
+        if (has("_response_sent_by_router_context")) { // Sécurité pour éviter double envoi
+            add_event("RouterContext::complete() called but response already marked as sent by RouterContext.");
+            return;
+        }
+
+        add_event("RouterContext::complete() proceeding to finalize response.");
         execute_after_callbacks();
         execute_done_callbacks();
         
-        this->handled = true; 
+        this->_state->handled = true; 
         set("_completed", true);
+        // Si ce complete() est celui qui envoie la réponse, marquer que c'est le handler async qui l'a fait (ou le sync)
+        set("_completed_by_async_handler", true); 
         
-        // Explicitly set the processing stage to RESPONSE_SENT_OR_COMPLETED
-        // This ensures the context state is correctly marked as completed
         set_processing_stage(RequestProcessingStage::RESPONSE_SENT_OR_COMPLETED);
         
-        if (is_async()) {
-            return;
-        }
-        
-        if (session) {
+        if (session && is_session_connected()) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                std::string bdy = "<body is empty>";
+                if (!_state) { // Re-check _state before accessing response.body()
+                    bdy = "<_state became null before body access>";
+                } else if (!response.body().empty()) {
+                    try { bdy = response.body().template as<std::string>(); } catch(...) { bdy = "<error converting body to string>"; }
+                }
+                adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete] Sending to session. Status: " + std::to_string(response.status_code) + ", Body: '" + bdy + "'. CtxState@" + (_state ? utility::pointer_to_string_for_log(_state.get()) : "NULL") );
+            }
+            if (!_state) { // Final check before session send
+                 if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                     adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete] ERROR: _state is null before sending to session. Path: " + std::string(this->request.uri().path()));
+                 }
+                return; // Cannot send without state
+            }
             try {
                 *session << response;
+                set("_response_sent_by_router_context", true); 
             } catch (const std::exception& e) {
-                // Handle exception
+                add_event(std::string("RouterContext::complete() send exception: ") + e.what());
             } catch (...) {
-                // Handle unknown exception
+                add_event("RouterContext::complete() send unknown exception.");
             }
+        } else {
+            add_event("RouterContext::complete(): No session or session not connected, response not sent.");
         }
     }
 
@@ -542,16 +632,73 @@ public:
     std::string    &match       = _state->match;
     bool           &handled     = _state->handled;
 
-    // Method that combines markAsync and creates a completion handler
-    std::shared_ptr<::qb::http::AsyncCompletionHandler<Session, String>>
+    /**
+     * @brief Prepares the context for an asynchronous operation initiated by the handler.
+     * 
+     * This method should be called by a route handler if it intends to complete the
+     * request asynchronously. It marks the context as asynchronous and returns a 
+     * handler object that can be used to complete the request later.
+     * 
+     * @return A shared pointer to an AsyncCompletionHandler, or nullptr if the router
+     *         is not available to manage the async lifecycle.
+     */
+    [[nodiscard]] std::shared_ptr<AsyncCompletionHandler<Session, String>>
     make_async() {
-        mark_async();
-        if (router) {
-            // This should correctly instantiate the external AsyncCompletionHandler
-            // The constructor of ::qb::http::AsyncCompletionHandler takes (Context&, Router*)
-            return std::make_shared<::qb::http::AsyncCompletionHandler<Session, String>>(*this, router);
+        if (!_state) { // Should ideally not happen if context is constructed properly
+            // Log or handle critical error: _state is null
+            return nullptr;
         }
-        return nullptr;
+        if (!router) {
+            // Log or handle error: Router pointer is null, cannot manage async lifecycle
+            // Or, if adv_test_mw_middleware_execution_log is accessible here:
+            // adv_test_mw_middleware_execution_log.push_back("[Ctx::make_async] CRITICAL: Router is null. Cannot return AsyncCompletionHandler.");
+            return nullptr; 
+        }
+
+        _state->is_async = true;
+        _state->handled = true; // <<< Ensure this is set for async operations initiated by handler
+        _state->_handler_initiated_async = true; // Mark that the handler specifically called make_async
+        set_processing_stage(RequestProcessingStage::AWAITING_HANDLER_ASYNC_COMPLETION);
+        
+        // Ensure this context is in the router's active list
+        // The router pointer itself is the key for _active_async_requests in some contexts,
+        // but here, context_id is derived from the context object's address.
+        std::uintptr_t context_id = reinterpret_cast<std::uintptr_t>(this);
+        // This relies on Router having a method to add/get active requests if not already present.
+        // For now, let's assume the router's route_context or similar logic handles adding to _active_async_requests
+        // when it detects is_async is true after the handler runs.
+        // Or, AsyncCompletionHandler's constructor/complete() method interacts with router's active requests.
+        // The AsyncCompletionHandler itself gets the router and context_id, so it can manage this.
+
+        // We need to provide a shared_ptr to *this context for the AsyncCompletionHandler if it needs it.
+        // However, AsyncCompletionHandler takes Context&.
+        // The main thing is that the Router's _active_async_requests map needs to hold a shared_ptr to this context
+        // to keep it alive. This typically happens in Router::route_context when it sees the async flag.
+
+        if (adv_test_mw_middleware_execution_log.size() < 2000 && _state) {
+            adv_test_mw_middleware_execution_log.push_back(std::string("[Ctx@") + utility::pointer_to_string_for_log(this) + "::make_async] Marked async. Stage: " + utility::to_string_for_log(get_processing_stage()) + ". CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "]");
+        }
+        
+        // The AsyncCompletionHandler needs `*this` (the context) and the router pointer.
+        return std::make_shared<AsyncCompletionHandler<Session, String>>(*this, router);
+    }
+
+    /**
+     * @brief Checks if the current asynchronous state was initiated by the route handler.
+     * @return true if the handler called make_async(), false otherwise.
+     */
+    [[nodiscard]] bool handler_initiated_async() const {
+        return _state ? _state->_handler_initiated_async : false;
+    }
+
+    /**
+     * @brief Clears the flag indicating that the handler initiated an async operation.
+     * Typically called by TRoute when a synchronous handler completes after async middleware.
+     */
+    void clear_handler_initiated_async_flag() {
+        if (_state) {
+            _state->_handler_initiated_async = false;
+        }
     }
 
     // For backward compatibility with existing tests
@@ -626,6 +773,14 @@ public:
         }
         
         return true; // Assume connected if no is_connected method is available on the session object.
+    }
+
+    /**
+     * @brief Marks the context as unhandled, for testing purposes only
+     */
+    void
+    mark_unhandled() {
+        if (_state) _state->handled = false;
     }
 };
 

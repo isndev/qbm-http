@@ -125,16 +125,16 @@ protected:
 // Test JSON Schema validation
 TEST_F(ValidatorTest, JsonSchemaValidation) {
     // Define a schema
-    qb::json schema = {
-        {"type", "object"},
-        {"properties", {
-            {"name", {{"type", "string"}, {"minLength", 3}}},
-            {"email", {{"type", "string"}, {"pattern", "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"}}},
-            {"age", {{"type", "integer"}, {"minimum", 18}}},
-            {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}}}
-        }},
-        {"required", {"name", "email"}}
-    };
+    auto schema = R"({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 3},
+            "email": {"type": "string", "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"},
+            "age": {"type": "integer", "minimum": 18},
+            "tags": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["name", "email"]
+    })"_json;
     
     // Create validator
     Validator validator(schema);
@@ -322,14 +322,14 @@ TEST_F(ValidatorTest, QueryParamValidation) {
 // Test sanitization
 TEST_F(ValidatorTest, Sanitization) {
     // Define a schema with sanitization
-    qb::json schema = {
-        {"type", "object"},
-        {"properties", {
-            {"name", {{"type", "string"}}},
-            {"email", {{"type", "string"}}},
-            {"bio", {{"type", "string"}}}
-        }}
-    };
+    auto schema = R"({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "email": {"type": "string"},
+            "bio": {"type": "string"}
+        }
+    })"_json;
     
     // Create validator with sanitization rules
     Validator validator(schema);
@@ -442,14 +442,14 @@ TEST_F(ValidatorTest, CustomValidation) {
 // Test validator middleware integration
 TEST_F(ValidatorTest, MiddlewareIntegration) {
     // Define a schema
-    qb::json schema = {
-        {"type", "object"},
-        {"properties", {
-            {"name", {{"type", "string"}, {"minLength", 3}}},
-            {"email", {{"type", "string"}}}
-        }},
-        {"required", {"name", "email"}}
-    };
+    auto schema = R"({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 3},
+            "email": {"type": "string"}
+        },
+        "required": ["name", "email"]
+    })"_json;
     
     // Create validator middleware directly
     auto middleware = std::make_shared<qb::http::ValidatorMiddleware<MockSession, std::string>>(schema);
@@ -487,23 +487,23 @@ TEST_F(ValidatorTest, MiddlewareIntegration) {
 // Test custom error handler
 TEST_F(ValidatorTest, CustomErrorHandler) {
     // Define a schema
-    qb::json schema = {
-        {"type", "object"},
-        {"properties", {
-            {"name", {{"type", "string"}, {"minLength", 3}}}
-        }},
-        {"required", {"name"}}
-    };
+    auto schema = R"({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 3}
+        },
+        "required": ["name"]
+    })"_json;
     
     // Create validator with custom error handler
     Validator validator(schema);
     validator.with_error_handler([](Context& ctx, const qb::http::ValidationErrors& errors) {
         // Create a custom error response
-        qb::json response = {
-            {"success", false},
-            {"code", "VALIDATION_ERROR"},
-            {"validationErrors", qb::json::array()}
-        };
+        auto response = R"({
+            "success": false,
+            "code": "VALIDATION_ERROR",
+            "validationErrors": []
+        })"_json;
         
         for (const auto& [field, field_errors] : errors) {
             for (const auto& [code, message] : field_errors) {
@@ -551,22 +551,22 @@ TEST_F(ValidatorTest, CustomErrorHandler) {
 // Test nested object validation
 TEST_F(ValidatorTest, NestedObjectValidation) {
     // Define a schema with nested objects
-    qb::json schema = {
-        {"type", "object"},
-        {"properties", {
-            {"name", {{"type", "string"}}},
-            {"address", {
-                {"type", "object"},
-                {"properties", {
-                    {"street", {{"type", "string"}}},
-                    {"city", {{"type", "string"}}},
-                    {"zipCode", {{"type", "string"}, {"pattern", "^\\d{5}$"}}}
-                }},
-                {"required", {"street", "city"}}
-            }}
-        }},
-        {"required", {"name", "address"}}
-    };
+    auto schema = R"({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "address": {
+                "type": "object",
+                "properties": {
+                    "street": {"type": "string"},
+                    "city": {"type": "string"},
+                    "zipCode": {"type": "string", "pattern": "^\\d{5}$"}
+                },
+                "required": ["street", "city"]
+            }
+        },
+        "required": ["name", "address"]
+    })"_json;
     
     // Create validator
     Validator validator(schema);

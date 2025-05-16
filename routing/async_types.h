@@ -19,6 +19,29 @@ class AsyncMiddlewareResult;
 // Session identifier type
 using SessionId = ::qb::uuid;
 
+// Moved from context.h to break include cycle for logging_helpers.h
+enum class RequestProcessingStage {
+    INITIAL,
+    READY_FOR_HANDLER,
+    HANDLER_PROCESSING,
+    AWAITING_HANDLER_ASYNC_COMPLETION,
+    RESPONSE_SENT_OR_COMPLETED,
+    ERROR_HANDLED,
+    // Stages for typed middleware processing (now the only kind)
+    AWAITING_GLOBAL_MIDDLEWARE_CHAIN,
+    PROCESSING_GLOBAL_MIDDLEWARE_CHAIN,
+    AWAITING_GROUP_MIDDLEWARE_CHAIN,
+    PROCESSING_GROUP_MIDDLEWARE_CHAIN
+};
+
+// Moved from middleware_interface.h
+enum class MiddlewareAction {
+    CONTINUE,   ///< Continue to the next middleware
+    SKIP,       ///< Skip the rest of the middlewares and execute the final handler
+    STOP,       ///< Stop processing (the response has been defined)
+    ERROR       ///< Stop with an error
+};
+
 // Async request state enumerations
 /**
  * @brief Enumerates the possible states of an asynchronous request.

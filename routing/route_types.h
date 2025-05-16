@@ -13,6 +13,7 @@
 #include "../middleware/middleware_chain.h"
 #include "../request.h"
 #include "../response.h"
+#include "./logging_helpers.h"
 
 #if defined(_WIN32)
 #undef DELETE // Windows :/
@@ -195,6 +196,73 @@ struct RouteMetadata {
         deprecated = value;
         return *this;
     }
+
+    void merge(const RouteMetadata& other) {
+        if (!other.summary.empty()) {
+            withSummary(other.summary);
+        }
+        if (!other.description.empty()) {
+            withDescription(other.description);
+        }
+        if (!other.requestBody.is_null() && !other.requestBody.empty()) {
+            withRequestBody(other.requestBody);
+        }
+        
+        // Properly handle the responses JSON
+        if (!other.responses.is_null() && !other.responses.empty() && other.responses.is_object()) {
+            // Iterate through all responses
+            for (auto it = other.responses.begin(); it != other.responses.end(); ++it) {
+                int status_code = std::stoi(it.key());
+                
+                // Get description
+                std::string description = "Response";
+                if (it.value().contains("description") && it.value()["description"].is_string()) {
+                    description = it.value()["description"].get<std::string>();
+                }
+                
+                // Get schema and content type if available
+                qb::json schema = qb::json::object();
+                std::string content_type = "application/json";
+                
+                if (it.value().contains("content") && it.value()["content"].is_object() && !it.value()["content"].empty()) {
+                    auto content_it = it.value()["content"].begin();
+                    content_type = content_it.key();
+                    
+                    if (content_it.value().contains("schema")) {
+                        schema = content_it.value()["schema"];
+                    }
+                }
+                
+                withResponse(status_code, description, schema, content_type);
+            }
+        }
+        
+        // Handle parameters
+        if (!other.parameters.is_null() && !other.parameters.is_array() && !other.parameters.empty()) {
+            for (const auto& param : other.parameters) {
+                if (param.contains("name") && param.contains("description")) {
+                    std::string name = param["name"].get<std::string>();
+                    std::string description = param["description"].get<std::string>();
+                    
+                    qb::json schema = param.contains("schema") ? param["schema"] : qb::json({{"type", "string"}});
+                    bool required = param.contains("required") ? param["required"].get<bool>() : false;
+                    
+                    if (param.contains("in") && param["in"].get<std::string>() == "header") {
+                        withHeaderParam(name, description, schema, required);
+                    } else {
+                        withQueryParam(name, description, schema, required);
+                    }
+                }
+            }
+        }
+        
+        if (!other.tags.empty()) {
+            withTags(other.tags);
+        }
+        if (other.deprecated) {
+            isDeprecated();
+        }
+    }
 };
 
 /**
@@ -261,17 +329,13 @@ template <typename Session, typename String = std::string>
 class ARoute : public IRoute<Session, String> {
 protected:
     std::string              _path;          ///< The original path string for this route (e.g., "/users/:id").
-    std::regex               _pattern;       ///< The compiled regex pattern derived from _path.
-    std::vector<std::string> _param_names;   ///< Names of parameters extracted from the path (e.g., {"id"}).
+    // std::regex               _pattern;       ///< The compiled regex pattern derived from _path.
+    // std::vector<std::string> _param_names;   ///< Names of parameters extracted from the path (e.g., {"id"}).
     PathParameters           _parameters;    ///< Stores extracted path parameters for the last match.
     int                      _priority{0};   ///< Priority of this route.
     RouteMetadata            _metadata;      ///< OpenAPI metadata associated with this route.
 
-    /**
-     * @brief Compiles the route's path string into a regex pattern.
-     * Replaces segments like ":paramName" with regex capture groups "([^/]+)"
-     * and stores the parameter names in _param_names.
-     */
+    /* // REMOVE/COMMENT OUT compile_pattern
     void
     compile_pattern() {
         // AMÉLIORATION WORKFLOW POINT 4: Cohérence Radix/Regex
@@ -304,6 +368,7 @@ protected:
         
         _pattern = std::regex("^" + pattern + "$");
     }
+    */
 
 public:
     using Context = typename IRoute<Session, String>::Context; ///< Alias for the router's context type.
@@ -316,17 +381,12 @@ public:
     explicit ARoute(std::string path, int priority = 0)
         : _path(std::move(path))
         , _priority(priority) {
-        compile_pattern();
+        // compile_pattern(); // REMOVE/COMMENT OUT appel
     }
 
     virtual ~ARoute() = default;
 
-    /**
-     * @brief Matches a given path string against the route's compiled regex pattern.
-     * If a match occurs, populates the internal _parameters map.
-     * @param path The path string to match.
-     * @return True if the path matches, false otherwise.
-     */
+    /* // REMOVE/COMMENT OUT match(const std::string &path)
     bool
     match(const std::string &path) {
         std::smatch matches;
@@ -339,15 +399,9 @@ public:
         }
         return false;
     }
+    */
 
-    /**
-     * @brief Matches a given path string against the route's pattern and updates the context.
-     * If a match occurs, populates the internal _parameters map and also updates
-     * the `path_params` and `match` fields in the provided RouterContext.
-     * @param ctx The RouterContext to update upon a successful match.
-     * @param path The path string to match.
-     * @return True if the path matches, false otherwise.
-     */
+    /* // REMOVE/COMMENT OUT match(Context &ctx, const std::string &path)
     bool
     match(Context &ctx, const std::string &path) {
         // AMÉLIORATION WORKFLOW POINT 4: Cohérence Radix/Regex
@@ -365,6 +419,7 @@ public:
         }
         return false;
     }
+    */
 
     [[nodiscard]] std::string const &
     path() const {
@@ -448,9 +503,187 @@ public:
 
     void
     process(Context &ctx) override {
-        ctx.path_params = this->_parameters;
-        _func(ctx);
-        ctx.handled = true;
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[TRoute::process ENTRY] Path: " + this->getPath() + ", CtxState@: " + utility::pointer_to_string_for_log(ctx._state.get()) + ", CtxStage: " + utility::to_string_for_log(ctx.get_processing_stage()) );
+        }
+
+        RequestProcessingStage entry_stage = ctx.get_processing_stage();
+        if (entry_stage == RequestProcessingStage::RESPONSE_SENT_OR_COMPLETED) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back("[TRoute::process] Invoked on already completed context for path: " + this->getPath() + ". Stage: " + utility::to_string_for_log(entry_stage) + ". Skipping further TRoute processing.");
+            }
+            return;
+        }
+
+        // Also check if this handler was already executed to prevent duplicate executions
+        std::string route_execution_key = "__route_executed_" + this->getPath();
+        if (ctx.has(route_execution_key)) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back("[TRoute::process] Handler for path: " + this->getPath() + " was already executed. Skipping duplicate execution.");
+            }
+            return;
+        }
+        
+        // Mark this handler as executed
+        ctx.set(route_execution_key, true);
+
+        ctx.clear_handler_initiated_async_flag(); // Clear any stale flag before handler call
+        bool was_async_before_handler = ctx.is_async(); // Check before _func
+        
+        // Store the original context parameters to restore if the handler doesn't modify them
+        // This helps with parameter inheritance through middleware and nested groups
+        auto original_params = ctx.path_params;
+
+        // Ensure all path parameters from ARoute are merged with context's parameters
+        // This is crucial for correct parameter passing to handlers
+        for (const auto& p : this->_parameters) {
+            ctx.path_params[p.first] = p.second;
+        }
+        
+        // If the route path uses parameters pattern (e.g., /users/:id), extract them from match
+        if (this->getPath().find(':') != std::string::npos || this->getPath().find('{') != std::string::npos) {
+            // Extract parameters from the actual path pattern and match
+            auto match_result = RadixTree::extract_params_from_path_pattern(this->getPath(), ctx.request.uri().path());
+            if (match_result && !match_result->params.empty()) {
+                for (const auto& p : match_result->params) {
+                    ctx.path_params[p.first] = p.second;
+                }
+            }
+        }
+
+        // Log initial state before handler call
+        bool initial_async_state_before_handler_call = ctx.is_async();
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+             adv_test_mw_middleware_execution_log.push_back(
+                "[TRoute::process] BEFORE _func(ctx) for path: " + this->getPath() +
+                ", CtxState@: " + (ctx._state ? utility::pointer_to_string_for_log(ctx._state.get()) : "NULL") +
+                ", CtxStage: " + utility::to_string_for_log(ctx.get_processing_stage()) +
+                ", Path params count: " + std::to_string(ctx.path_params.size())
+             );
+        }
+
+        // Log path parameters before calling handler
+        if (adv_test_mw_middleware_execution_log.size() < 2000 && !ctx.path_params.empty()) {
+            std::string params_str = "Path parameters for handler: ";
+            for (const auto& param : ctx.path_params) {
+                params_str += param.first + "=" + param.second + " ";
+            }
+            adv_test_mw_middleware_execution_log.push_back("[TRoute::process] " + params_str);
+        }
+
+        try {
+            _func(ctx); // Execute the handler lambda
+        } catch (const std::bad_any_cast& e) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back("[TRoute::process] EXCEPTION std::bad_any_cast from _func(ctx) for path: " + this->getPath() + ": " + e.what());
+            }
+            ctx.status(HTTP_STATUS_INTERNAL_SERVER_ERROR).body("Handler exception: bad_any_cast: " + std::string(e.what()));
+            ctx.mark_handled();
+            if (!ctx.has("_completed")) { ctx.complete(); }
+            return;
+        } catch (const std::exception& e) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back("[TRoute::process] EXCEPTION std::exception from _func(ctx) for path: " + this->getPath() + ": " + e.what());
+            }
+            ctx.status(HTTP_STATUS_INTERNAL_SERVER_ERROR).body("Handler exception: " + std::string(e.what()));
+            ctx.mark_handled();
+            if (!ctx.has("_completed")) { ctx.complete(); }
+            return; 
+        } catch (...) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back("[TRoute::process] UNKNOWN EXCEPTION from _func(ctx) for path: " + this->getPath());
+            }
+            ctx.status(HTTP_STATUS_INTERNAL_SERVER_ERROR).body("Unknown handler exception");
+            ctx.mark_handled();
+            if (!ctx.has("_completed")) { ctx.complete(); }
+            return;
+        }
+
+        // Log current state after handler call
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+             adv_test_mw_middleware_execution_log.push_back(
+                "[TRoute::process] AFTER _func(ctx) for path: " + this->getPath() +
+                ", CtxState@: " + (ctx._state ? utility::pointer_to_string_for_log(ctx._state.get()) : "NULL") +
+                ", CtxStage: " + utility::to_string_for_log(ctx.get_processing_stage()) +
+                ", Handler Response Status: " + std::to_string(ctx.response.status_code) +
+                ", ctx.is_async() after handler: " + utility::bool_to_string(ctx.is_async()) +
+                ", ctx.handler_initiated_async(): " + utility::bool_to_string(ctx.handler_initiated_async())
+             );
+        }
+
+        // Ensure parameters from the route context are preserved
+        // Merge any new parameters set by the handler with the original ones
+        for (const auto& [key, value] : original_params) {
+            if (ctx.path_params.find(key) == ctx.path_params.end()) {
+                ctx.path_params[key] = value;
+            }
+        }
+
+        // If the handler itself marked the context as asynchronous by calling make_async(), TRoute should yield.
+        if (ctx.handler_initiated_async()) { 
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back(
+                    "[TRoute::process] Handler for path '" + this->getPath() +
+                    "' INITIATED ASYNC (via make_async). TRoute yielding to AsyncCompletionHandler. CtxState@" +
+                    (ctx._state ? utility::pointer_to_string_for_log(ctx._state.get()) : "NULL")
+                );
+            }
+            // The AsyncCompletionHandler obtained via ctx.make_async() is now responsible for ctx.complete().
+            // TRoute should not call ctx.complete() or modify response status further.
+            return; // CRITICAL: Ensure this return is effective.
+        }
+        
+        // At this point, the handler _func(ctx) itself has completed synchronously.
+        // If it called ctx.make_async(), then ctx.handler_initiated_async() would be true, and we would have returned above.
+        
+        // If the context was marked async due to a *prior* middleware, 
+        // but this handler ran synchronously, we should clear the overarching async state.
+        if (was_async_before_handler) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back(
+                    "[TRoute::process] SYNC handler ('" + this->getPath() +
+                    "') completed after an async middleware chain (was_async_before_handler=true). Clearing broader async state."
+                );
+            }
+            ctx.clear_async_state_for_chain_completion(); // This sets _state->is_async = false
+        }
+        
+        // Now, ctx.is_async() should be false, as this path is for synchronous completion by TRoute.
+        // The old check for `initial_async_state_before_handler_call && !ctx.is_async()` is covered by the logic above.
+
+        // If the request is not handled by the handler itself, set a default status.
+        if (!ctx.is_handled()) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back(
+                    "[TRoute::process] Handler for " + this->getPath() +
+                    " did not explicitly mark as handled and is not async. Setting default status 200 OK."
+                );
+            }
+            ctx.status(HTTP_STATUS_OK);
+            ctx.mark_handled();
+        }
+
+        // Final completion check:
+        // Only complete if it hasn't been completed yet (e.g. by the handler calling ctx.complete() itself,
+        // or if it's an async handler which we returned from above).
+        if (!ctx.has("_completed")) {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back(
+                    "[TRoute::process] TRoute completing request for path: " + this->getPath() +
+                    " with status " + std::to_string(ctx.response.status_code) +
+                    ". CtxState@" + (ctx._state ? utility::pointer_to_string_for_log(ctx._state.get()) : "NULL")
+                );
+            }
+            ctx.complete(); // This will send the response via the session
+        } else {
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                 adv_test_mw_middleware_execution_log.push_back(
+                    "[TRoute::process] Request for path: " + this->getPath() +
+                    " was already marked _completed. TRoute not calling complete() again. CtxState@" +
+                    (ctx._state ? utility::pointer_to_string_for_log(ctx._state.get()) : "NULL")
+                );
+            }
+        }
     }
 };
 
@@ -494,21 +727,56 @@ public:
     RouteGroup(RouterType &router, std::string prefix, int priority = 0)
         : _router(router)
         , _prefix(std::move(prefix))
-        , _priority(priority) {}
+        , _priority(priority) {
+        
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[RouteGroup CONSTRUCTOR] Created group with prefix: " + _prefix + 
+                                                     ", ptr: " + utility::pointer_to_string_for_log(this));
+        }
+    }
 
-#define REGISTER_GROUP_ROUTE_FUNCTION(num, name, description)      \
-    template <typename _Func>                                      \
-    RouteGroup &name(std::string const &path, _Func &&func) {      \
-        std::string full_path = _prefix + path;                    \
-        auto route_ptr = std::make_shared<TRoute<Session, String, _Func>>(      \
-                full_path, std::forward<_Func>(func), _priority);  \
-        _router._routes[static_cast<http_method>(num)].push_back(  \
-            std::unique_ptr<IRoute<Session, String>>(new TRoute<Session, String, _Func>(      \
-                full_path, std::forward<_Func>(func), _priority))); \
-        /* Store route for OpenAPI introspection */                \
-        _routes[static_cast<http_method>(num)].push_back(route_ptr); \
-        _router.sort_routes(static_cast<http_method>(num));        \
-        return *this;                                              \
+#define REGISTER_GROUP_ROUTE_FUNCTION(num, name, description)                      \
+    template <typename _Func>                                                      \
+    RouteGroup &name(std::string const &path, _Func &&func) {                      \
+        std::string full_path = _prefix + path;                                    \
+        http_method method = static_cast<http_method>(num);                        \
+                                                                                   \
+        /* Create route with shared_ptr for our local collection */                \
+        auto route_ptr = std::make_shared<TRoute<Session, String, _Func>>(         \
+            full_path, std::forward<_Func>(func), _priority);                      \
+                                                                                   \
+        /* Store in this group's routes collection for introspection */            \
+        _routes[method].push_back(route_ptr);                                      \
+                                                                                   \
+        /* Add to router's routes collection (which uses unique_ptr) */            \
+        _router._routes[method].push_back(                                         \
+            std::make_unique<TRoute<Session, String, _Func>>(                      \
+                full_path, std::forward<_Func>(func), _priority));                 \
+                                                                                   \
+        /* Also add to router's radix tree */                                      \
+        if (_router._radix_routes.find(method) == _router._radix_routes.end()) {   \
+            _router._radix_routes[method] = RadixTree();                           \
+        }                                                                          \
+                                                                                   \
+        /* Get the route we just added to the router */                            \
+        using Route = ARoute<Session, String>;                                     \
+        Route *ar = dynamic_cast<Route *>(_router._routes[method].back().get());   \
+        if (ar) {                                                                  \
+            _router._radix_routes[method].insert(ar->path(),                       \
+                                              static_cast<void*>(ar),              \
+                                              ar->priority(),                       \
+                                              RadixMatchResult::TargetType::HANDLER); \
+        }                                                                          \
+                                                                                   \
+        /* Log route registration */                                               \
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {                  \
+            adv_test_mw_middleware_execution_log.push_back("REGISTER_GROUP_ROUTE: " + _prefix + " + " + path + " = " + full_path + " (method: " + std::to_string(static_cast<int>(method)) + ")"); \
+        }                                                                          \
+                                                                                   \
+        /* Rebuild RadixTree to include the new route */                           \
+        _router.build_radix_trees();                                               \
+                                                                                   \
+        return *this;                                                              \
     }
 
     HTTP_SERVER_METHOD_MAP(REGISTER_GROUP_ROUTE_FUNCTION)
@@ -539,16 +807,6 @@ public:
         // Add the middleware to the chain
         _typed_middleware_chain->add(std::move(middleware));
         
-        // Register adapters for the middleware chain with the legacy system
-        // For synchronous middleware
-        use([chain = _typed_middleware_chain](Context& ctx) -> bool {
-            auto result = chain->process(ctx);
-            if (result.is_async()) {
-                return true; // Continue to async handler
-            }
-            return !result.should_stop();
-        });
-        
         return *this;
     }
     
@@ -572,8 +830,22 @@ public:
      * @return Reference to the newly created route group
      */
     RouteGroup& group(const String& subprefix, int priority = 0) {
+        // Ensure the subprefix starts with a slash if needed
+        std::string normalized_subprefix = subprefix;
+        if (!normalized_subprefix.empty() && normalized_subprefix[0] != '/' && _prefix.back() != '/') {
+            normalized_subprefix = '/' + normalized_subprefix;
+        }
+        
+        // Calculate the full path for the new group
+        std::string full_prefix = _prefix + normalized_subprefix;
+        
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[RouteGroup::group] Creating subgroup with prefix: " + full_prefix + 
+                                                        " (parent: " + _prefix + ", sub: " + normalized_subprefix + ")");
+        }
+        
         // Use Router's group() method which now stores pointers in a stable container
-        auto& new_group = _router.group(_prefix + subprefix, priority > 0 ? priority : _priority);
+        auto& new_group = _router.group(full_prefix, priority > 0 ? priority : _priority);
         
         // Create an entry in the group hierarchy to maintain parent-child relationship
         auto* group_ptr = &new_group;
@@ -581,8 +853,43 @@ public:
             _router._group_hierarchy[this].push_back(group_ptr);
         }
         
-        // Maintain _sub_groups only for API compatibility
-        // Store a non-owning pointer wrapped in a shared_ptr with empty deleter
+        // Register this group as the parent of the new group for better hierarchy tracking
+        if (_router._group_hierarchy.find(group_ptr) == _router._group_hierarchy.end()) {
+            _router._group_hierarchy[group_ptr] = std::vector<RouteGroup*>();
+        }
+        
+        // Transfer middleware to the child group if option enabled
+        // By default, middleware from parent groups should be inherited
+        if (!new_group.typed_middleware_chain() && _typed_middleware_chain) {
+            // Create a new middleware chain for the child group
+            if (adv_test_mw_middleware_execution_log.size() < 2000) {
+                adv_test_mw_middleware_execution_log.push_back("[RouteGroup::group] Transferring typed middleware from parent group to child");
+            }
+            auto new_chain = std::make_shared<MiddlewareChain<Session, String>>();
+            
+            // Copy each middleware from parent to child
+            for (const auto& mw : _typed_middleware_chain->get_middleware()) {
+                new_chain->add(mw);
+            }
+            
+            // Set the new chain on the child group
+            new_group._typed_middleware_chain = new_chain;
+        }
+        
+        // Transfer legacy middleware as well
+        for (const auto& legacy_mw : _middleware) {
+            new_group._middleware.push_back(legacy_mw);
+        }
+        
+        // Transfer metadata properties like tags
+        if (!_openapi_tag.empty()) {
+            new_group._openapi_tag = _openapi_tag;
+        }
+        
+        // Transfer metadata from parent to child
+        new_group._metadata.merge(_metadata);
+        
+        // Store reference to the sub-group for introspection
         for (const auto& existing : _sub_groups) {
             if (existing.get() == group_ptr) {
                 return new_group; // Group already exists in our list
@@ -755,12 +1062,63 @@ public:
      *
      * @param session HTTP session
      * @param ctx Context to process
+     * @param path_for_controller_router Path for the controller's router
      * @return true if the request was processed successfully
      */
     bool
-    process(std::shared_ptr<Session> session, Context &ctx) {
-        // Process with this controller's router
-        return _router.route_context(session, ctx);
+    process(std::shared_ptr<Session> session, Context &ctx, const std::string& path_for_controller_router) {
+        std::string controller_ptr_str = utility::pointer_to_string_for_log(this);
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[Controller@" + controller_ptr_str + "::process ENTRY] Base: " + _base_path + ", PathForMyRouter: " + path_for_controller_router + ", InitialCtxStage: " + utility::to_string_for_log(ctx.get_processing_stage()));
+        }
+
+        RequestProcessingStage stage_before_reset = ctx.get_processing_stage();
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[Controller@" + controller_ptr_str + "::process] Stage before reset to INITIAL: " + utility::to_string_for_log(stage_before_reset));
+        }
+
+        // Extract and log parameters from the context before processing
+        if (adv_test_mw_middleware_execution_log.size() < 2000 && !ctx.path_params.empty()) {
+            std::string params_str = "Context parameters entering controller: ";
+            for (const auto& param : ctx.path_params) {
+                params_str += param.first + "=" + param.second + " ";
+            }
+            adv_test_mw_middleware_execution_log.push_back("[Controller@" + controller_ptr_str + "::process] " + params_str);
+        }
+
+        // Store a copy of the current parameters to ensure they're preserved
+        PathParameters preserved_params = ctx.path_params;
+
+        // Reset processing stage for the internal router chain
+        ctx.set_processing_stage(RequestProcessingStage::INITIAL);
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[Controller@" + controller_ptr_str + "::process] Stage AFTER reset to INITIAL: " + utility::to_string_for_log(ctx.get_processing_stage()));
+            adv_test_mw_middleware_execution_log.push_back("[Controller@" + controller_ptr_str + "::process] Calling internal router _router.route_context(). ReqPath for internal router: " + path_for_controller_router + ", CtxStage: " + utility::to_string_for_log(ctx.get_processing_stage()));
+        }
+        
+        // Stocker le path relatif que ce contrôleur doit utiliser pour son routeur interne
+        // pour que les appels récursifs à route_context (via run_async_middleware_chain)
+        // puissent le retrouver et l'utiliser.
+        std::string internal_router_scope_key = "__internal_router_path_scope_" + utility::pointer_to_string_for_log(&_router);
+        ctx.set(internal_router_scope_key, path_for_controller_router);
+
+        // Merge preserved parameters back into the context to ensure they're available
+        // to all middleware and handlers in the controller's router chain
+        for (const auto& param : preserved_params) {
+            if (ctx.path_params.find(param.first) == ctx.path_params.end()) {
+                ctx.path_params[param.first] = param.second;
+            }
+        }
+
+        bool internal_router_result = _router.route_context(session, ctx); 
+        
+        // ctx.remove(internal_router_scope_key); // Temporarily comment out to see if it helps with re-entrant calls
+
+        if (adv_test_mw_middleware_execution_log.size() < 2000) {
+            adv_test_mw_middleware_execution_log.push_back("[Controller@" + controller_ptr_str + "::process] Returned from internal router _router.route_context(). Result: " + utility::bool_to_string(internal_router_result) + ", CtxStage: " + utility::to_string_for_log(ctx.get_processing_stage()));
+            adv_test_mw_middleware_execution_log.push_back("[Controller@" + controller_ptr_str + "::process EXIT] Base: " + _base_path + ". Final CtxStage: " + utility::to_string_for_log(ctx.get_processing_stage()));
+        }
+        return internal_router_result;
     }
 
     /**
@@ -843,3 +1201,5 @@ public:
 #if defined(_WIN32)
 #define DELETE (0x00010000L)
 #endif
+
+

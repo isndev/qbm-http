@@ -68,8 +68,8 @@ public:
     using IRoute     = qb::http::IRoute<Session, String>;
 
     // Middleware type definitions
-    using Middleware = std::function<bool(Context &)>;
-    using AsyncMiddleware = std::function<void(Context &, std::function<void(bool)>)>;
+    using Middleware = std::function<bool(Context &)>; // Legacy Sync - REINTRODUCE for API
+    using AsyncMiddleware = std::function<void(Context &, std::function<void(bool)>)>; // Legacy Async - REINTRODUCE for API
     using TypedMiddlewarePtr = MiddlewarePtr<Session, String>;
 
     // Template for route implementation
@@ -126,7 +126,7 @@ public:
      *                   It should return true to continue to the next middleware/handler, or false to stop processing.
      * @return Reference to this router for chaining.
      */
-    Router<Session, String> &use(Middleware middleware);
+    Router<Session, String> &use(Middleware middleware); // REINTRODUCE
 
     /**
      * @brief Adds a global legacy asynchronous middleware function.
@@ -135,7 +135,7 @@ public:
      *                   The inner callback should be called with true to continue, false to stop.
      * @return Reference to this router for chaining.
      */
-    Router<Session, String> &use(AsyncMiddleware middleware);
+    Router<Session, String> &use(AsyncMiddleware middleware); // REINTRODUCE
 
     /**
      * @brief Adds a global typed middleware (IMiddleware instance) to the router's chain.
@@ -181,11 +181,8 @@ public:
      * @return Reference to this router for chaining.
      */
     Router<Session, String> &clear_middleware() {
-        _middleware.clear();
-        _async_middleware.clear();  // Also clear asynchronous legacy middlewares
-        if (_typed_middleware_chain) { // Also clear typed middleware chain if it exists
-            // Assuming MiddlewareChain has a clear() method or can be reset
-            // _typed_middleware_chain->clear(); // Or _typed_middleware_chain.reset();
+        if (_typed_middleware_chain) { 
+            _typed_middleware_chain->clear(); 
         }
         return *this;
     }
@@ -269,20 +266,6 @@ public:
      */
     void log_request(const Context &ctx, int status, double duration,
                      const std::string &note = "");
-
-    /**
-     * @brief Enable or disable the radix tree for route matching
-     * @param enable Whether to enable radix tree matching
-     * @return Reference to this router
-     */
-    Router<Session, String> &enable_radix_tree(bool enable);
-
-    /**
-     * @brief Force enable radix tree for a specific HTTP method
-     * @param method HTTP method to enable radix tree for
-     * @return Reference to this router
-     */
-    Router<Session, String> &force_enable_radix_tree_for_method(http_method method);
 
     /**
      * @brief Build radix trees for all HTTP methods
@@ -426,11 +409,9 @@ private:
     qb::unordered_map<http_method, std::vector<std::unique_ptr<IRoute>>> _routes;
     // Controllers for hierarchical routing
     std::vector<std::shared_ptr<Controller>> _controllers;
-    // Global middleware functions (legacy)
-    std::vector<Middleware> _middleware;
-    // Asynchronous middleware functions (legacy)
-    std::vector<AsyncMiddleware> _async_middleware;
-    // Typed middleware chain
+    // Global middleware functions (legacy) - NO LONGER DIRECTLY STORED
+    // Asynchronous middleware functions (legacy) - NO LONGER DIRECTLY STORED
+    // Typed middleware chain - THIS IS THE SOLE CHAIN
     std::shared_ptr<MiddlewareChain<Session, String>> _typed_middleware_chain;
     // Error handlers for different status codes
     qb::unordered_map<int, std::function<void(Context &)>> _error_handlers;
@@ -465,10 +446,6 @@ private:
 
     // New radix tree-based routes
     qb::unordered_map<http_method, RadixTree> _radix_routes;
-    qb::unordered_map<http_method, bool>      _radix_enabled;
-
-    // Whether to use radix tree for route matching
-    bool _use_radix_tree;
 
     // Event queue for processing deferred requests
     struct EventQueueItem {
@@ -485,6 +462,11 @@ private:
 
     std::vector<EventQueueItem> _event_queue;
     bool                        _processing_event_queue = false;
+
+    // Helper methods for processing global middleware
+    // bool process_global_legacy_sync_middleware(Context &ctx, std::shared_ptr<Session> session, const std::string& path_for_routing_this_instance); // REMOVED
+    // bool process_global_legacy_async_middleware(std::shared_ptr<Context> context_ptr, const std::string& path_for_routing_this_instance); // REMOVED
+    bool process_global_typed_middleware(std::shared_ptr<Context> context_ptr, const std::string& path_for_routing_this_instance);
 
     /**
      * @brief Sort routes by priority
@@ -503,8 +485,8 @@ private:
     // Method to schedule an event after a delay (would integrate with libev)
     void schedule_event(int delay_ms, std::function<void()> callback);
 
-    // Run async middleware chain
-    void run_async_middleware_chain(std::shared_ptr<Context> context_ptr, size_t index, bool isGlobalChain);
+    // Run async middleware chain - NO LONGER NEEDED AS A SEPARATE LEGACY CHAIN RUNNER
+    // void run_legacy_async_middleware_chain(std::shared_ptr<Context> context_ptr, size_t index, bool isGlobalChain); // REMOVED
 
     // Route to appropriate handler (extracted from the route method)
     void route_to_handler(Context &ctx, const std::string &path);

@@ -15,6 +15,7 @@
 #include "jwt.h"
 #include "auth.h"
 #include "compression.h"
+#include "swagger.h"
 
 // Additional middleware components can be added here
 

@@ -7,9 +7,14 @@
 #include <optional>
 #include <qb/json.h>
 #include <qb/io/crypto_jwt.h>
+#include <vector>
 
 #include "../http.h"
 #include "./middleware_interface.h"
+
+// Assuming these are declared globally in the test file and are accessible here
+// This is not ideal for library code but necessary for this specific debugging request.
+extern std::vector<std::string> adv_test_mw_middleware_execution_log;
 
 namespace qb::http {
 
@@ -186,45 +191,58 @@ public:
      * @return Middleware result
      */
     MiddlewareResult process(Context& ctx) override {
-        // Extract token
+        if (adv_test_mw_middleware_execution_log.size() < 1000) { 
+            adv_test_mw_middleware_execution_log.push_back(name() + " process_start for " + std::string(ctx.request.uri().path()));
+        }
+
         auto token = extract_token(ctx.request);
         if (!token) {
+            if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                 adv_test_mw_middleware_execution_log.push_back(name() + " stopping: missing token for " + std::string(ctx.request.uri().path()));
+            }
             handle_error(ctx, {JwtError::MISSING_TOKEN, "JWT token is missing"});
             return MiddlewareResult::Stop();
         }
         
-        // Verify and decode token
         JwtErrorInfo error;
         auto payload = verify_token(*token, error);
         if (!payload) {
+             if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                adv_test_mw_middleware_execution_log.push_back(name() + " stopping: verify_token failed ('" + error.message + "') for " + std::string(ctx.request.uri().path()));
+            }
             handle_error(ctx, error);
             return MiddlewareResult::Stop();
         }
         
-        // Check required claims
         for (const auto& claim : _required_claims) {
             if (!payload->contains(claim)) {
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " stopping: missing required claim '" + claim + "' for " + std::string(ctx.request.uri().path()));
+                }
                 handle_error(ctx, {JwtError::INVALID_CLAIM, "Required claim '" + claim + "' is missing"});
                 return MiddlewareResult::Stop();
             }
         }
         
-        // Apply custom validator
         if (_validator) {
             if (!_validator(*payload, error)) {
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                    adv_test_mw_middleware_execution_log.push_back(name() + " stopping: custom validator failed ('" + error.message + "') for " + std::string(ctx.request.uri().path()));
+                }
                 handle_error(ctx, error);
                 return MiddlewareResult::Stop();
             }
         }
         
-        // Store payload in context
         ctx.template set<qb::json>("jwt_payload", *payload);
         
-        // Call success handler
         if (_success_handler) {
             _success_handler(ctx, *payload);
         }
         
+        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+            adv_test_mw_middleware_execution_log.push_back(name() + " continuing: token valid for " + std::string(ctx.request.uri().path()));
+        }
         return MiddlewareResult::Continue();
     }
     
@@ -316,82 +334,84 @@ private:
      */
     std::optional<qb::json> verify_token(const std::string& token, JwtErrorInfo& error) const {
         try {
-            // Convert middleware options to qb::jwt verify options
             qb::jwt::VerifyOptions options;
             
-            // Set algorithm
-            auto jwt_alg = qb::jwt::algorithm_from_string(_options.algorithm);
-            if (!jwt_alg) {
-                error = {JwtError::ALGORITHM_MISMATCH, "Unsupported algorithm: " + _options.algorithm};
+            auto jwt_alg_opt = qb::jwt::algorithm_from_string(_options.algorithm);
+            if (!jwt_alg_opt) {
+                error = {JwtError::ALGORITHM_MISMATCH, "Unsupported algorithm in JwtOptions: " + _options.algorithm};
+                if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                     adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] error: " + error.message);
+                }
                 return std::nullopt;
             }
-            options.algorithm = *jwt_alg;
+            options.algorithm = *jwt_alg_opt;
             
-            // Set key and verification flags
+            if (options.algorithm == qb::jwt::Algorithm::HS256 ||
+                options.algorithm == qb::jwt::Algorithm::HS384 ||
+                options.algorithm == qb::jwt::Algorithm::HS512) {
+                options.key = _options.secret;
+            } else {
             options.key = _options.secret;
+            }
+
             options.verify_expiration = _options.verify_exp;
             options.verify_not_before = _options.verify_nbf;
             options.verify_issuer = _options.verify_iss;
             options.verify_audience = _options.verify_aud;
             options.verify_subject = _options.verify_sub;
             options.clock_skew = std::chrono::seconds(_options.leeway);
-            
-            // Set expected claim values if verification is enabled
             if (_options.verify_iss && !_options.issuer.empty()) {
                 options.issuer = _options.issuer;
             }
-            
             if (_options.verify_aud && !_options.audience.empty()) {
                 options.audience = _options.audience;
             }
-            
             if (_options.verify_sub && !_options.subject.empty()) {
                 options.subject = _options.subject;
             }
             
-            // Verify the token using qb::jwt
             auto result = qb::jwt::verify(token, options);
             
-            // Map validation errors
             if (!result.is_valid()) {
                 switch (result.error) {
-                    case qb::jwt::ValidationError::INVALID_FORMAT:
-                        error = {JwtError::INVALID_TOKEN, "Invalid token format"};
-                        break;
-                    case qb::jwt::ValidationError::INVALID_SIGNATURE:
-                        error = {JwtError::INVALID_SIGNATURE, "Invalid signature"};
-                        break;
-                    case qb::jwt::ValidationError::TOKEN_EXPIRED:
-                        error = {JwtError::TOKEN_EXPIRED, "Token has expired"};
-                        break;
-                    case qb::jwt::ValidationError::TOKEN_NOT_ACTIVE:
-                        error = {JwtError::TOKEN_NOT_ACTIVE, "Token is not yet active"};
-                        break;
-                    case qb::jwt::ValidationError::INVALID_ISSUER:
-                        error = {JwtError::INVALID_CLAIM, "Invalid issuer"};
-                        break;
-                    case qb::jwt::ValidationError::INVALID_AUDIENCE:
-                        error = {JwtError::INVALID_CLAIM, "Invalid audience"};
-                        break;
-                    case qb::jwt::ValidationError::INVALID_SUBJECT:
-                        error = {JwtError::INVALID_CLAIM, "Invalid subject"};
-                        break;
-                    case qb::jwt::ValidationError::CLAIM_MISMATCH:
-                        error = {JwtError::INVALID_CLAIM, "Claim validation failed"};
-                        break;
-                    default:
-                        error = {JwtError::INVALID_TOKEN, "Unknown validation error"};
+                    case qb::jwt::ValidationError::INVALID_FORMAT: error = {JwtError::INVALID_TOKEN, "Invalid token format"}; break;
+                    case qb::jwt::ValidationError::INVALID_SIGNATURE: error = {JwtError::INVALID_SIGNATURE, "Invalid signature"}; break;
+                    case qb::jwt::ValidationError::TOKEN_EXPIRED: error = {JwtError::TOKEN_EXPIRED, "Token has expired"}; break;
+                    case qb::jwt::ValidationError::TOKEN_NOT_ACTIVE: error = {JwtError::TOKEN_NOT_ACTIVE, "Token is not yet active"}; break;
+                    case qb::jwt::ValidationError::INVALID_ISSUER: error = {JwtError::INVALID_CLAIM, "Invalid issuer"}; break;
+                    case qb::jwt::ValidationError::INVALID_AUDIENCE: error = {JwtError::INVALID_CLAIM, "Invalid audience"}; break;
+                    case qb::jwt::ValidationError::INVALID_SUBJECT: error = {JwtError::INVALID_CLAIM, "Invalid subject"}; break;
+                    case qb::jwt::ValidationError::CLAIM_MISMATCH: error = {JwtError::INVALID_CLAIM, "Claim validation failed"}; break;
+                    default: error = {JwtError::INVALID_TOKEN, "Unknown validation error"};
                 }
                 return std::nullopt;
             }
             
-            // Convert payload to JSON object
-            qb::json payload;
-            for (const auto& [key, value] : result.payload) {
-                payload[key] = value;
+            qb::json payload_to_return; 
+            for (const auto& pair_kv : result.payload) {
+                const std::string& key = pair_kv.first;
+                const std::string& value_str = pair_kv.second;
+
+                if (key == "roles" || key == "aud") {
+                    if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                        adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] attempting to parse value_str for claim '" + key + "': " + value_str);
+                    }
+                    try {
+                        payload_to_return[key] = qb::json::parse(value_str); 
+                        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                            adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] successfully parsed claim '" + key + "'. Resulting type: " + std::string(payload_to_return[key].type_name()));
+                        }
+                    } catch (const qb::json::exception& e) {
+                        if (adv_test_mw_middleware_execution_log.size() < 1000) {
+                            adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] FAILED to parse claim '" + key + "' into JSON object. Error: " + e.what() + ". Storing as string.");
+                        }
+                        payload_to_return[key] = value_str; 
+                    }
+                } else {
+                    payload_to_return[key] = value_str;
             }
-            
-            return payload;
+            }
+            return payload_to_return;
         }
         catch (const std::exception& e) {
             error = {JwtError::INVALID_TOKEN, std::string("Token validation error: ") + e.what()};

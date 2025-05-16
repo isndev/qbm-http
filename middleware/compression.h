@@ -268,7 +268,6 @@ private:
             // Update headers
             ctx.response.add_header("Content-Encoding", encoding);
             ctx.response.add_header("Vary", "Accept-Encoding");
-            ctx.response.set_header("Content-Length", std::to_string(compressed_size));
         } else {
             // If compression didn't help, revert to original
             ctx.response.body().uncompress(encoding);
