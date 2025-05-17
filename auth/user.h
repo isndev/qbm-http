@@ -2,13 +2,10 @@
 
 #include <string>
 #include <vector>
-#include <algorithm>
+#include <algorithm> // For std::find
 #include <qb/system/container/unordered_map.h>
-#include <iostream> // For debug logging
-#include "../utility.h"
-
-// Assuming these are declared globally in the test file and are accessible here
-extern std::vector<std::string> adv_test_mw_middleware_execution_log;
+// #include <iostream> // For debug logging - remove if only used by adv_test_mw_middleware_execution_log
+#include "../utility.h" // Assuming this is for qb::http::utility functions, not directly used in this snippet after removal
 
 namespace qb {
 namespace http {
@@ -24,36 +21,25 @@ struct User {
     std::string                                  id;
     std::string                                  username;
     std::vector<std::string>                     roles;
-    qb::unordered_map<std::string, std::string> metadata;
+    qb::unordered_map<std::string, std::string> metadata; // Assuming qb::unordered_map is the intended type
 
     /**
-     * @brief Check if the user has a specific role
-     * @param role Role to check for
-     * @return true if the user has the role, false otherwise
+     * @brief Check if the user has a specific role.
+     * @param role_to_check The role string to check for.
+     * @return True if the user has the specified role, false otherwise.
      */
     bool has_role(const std::string &role_to_check) const {
-        bool found = std::find(roles.begin(), roles.end(), role_to_check) != roles.end();
-        if (adv_test_mw_middleware_execution_log.size() < 1000) {
-            std::string current_roles_str_debug;
-            for(size_t i=0; i<roles.size(); ++i) { current_roles_str_debug += (i>0?",":"") + roles[i]; }
-            adv_test_mw_middleware_execution_log.push_back("[User::has_role] User '" + username + "' checking for role: '" + role_to_check + "'. User has roles: [" + current_roles_str_debug + "]. Found: " + (found ? "true" : "false"));
-        }
-        return found;
+        return std::find(roles.begin(), roles.end(), role_to_check) != roles.end();
     }
 
     /**
-     * @brief Check if the user has any of the specified roles
-     * @param required_roles Roles to check for
-     * @return true if the user has at least one of the roles, false otherwise
+     * @brief Check if the user has any of the specified roles.
+     * @param required_roles_list A list of roles to check against.
+     * @return True if the user has at least one of the roles in the provided list, false otherwise.
      */
     bool has_any_role(const std::vector<std::string> &required_roles_list) const {
-        if (adv_test_mw_middleware_execution_log.size() < 1000) {
-             std::string req_roles_str;
-             for(size_t i=0; i<required_roles_list.size(); ++i) { req_roles_str += (i>0?",":"") + required_roles_list[i]; }
-             adv_test_mw_middleware_execution_log.push_back("[User::has_any_role] User '" + username + "' checking ANY of roles: [" + req_roles_str + "]");
-        }
         for (const auto &role_to_check : required_roles_list) {
-            if (has_role(role_to_check)) {
+            if (has_role(role_to_check)) { // Calls the User::has_role method
                 return true;
             }
         }
@@ -61,28 +47,23 @@ struct User {
     }
 
     /**
-     * @brief Check if the user has all of the specified roles
-     * @param required_roles Roles to check for
-     * @return true if the user has all the roles, false otherwise
+     * @brief Check if the user has all of the specified roles.
+     * @param required_roles_list A list of roles that the user must possess.
+     * @return True if the user has every role in the provided list, false otherwise.
      */
     bool has_all_roles(const std::vector<std::string> &required_roles_list) const {
-         if (adv_test_mw_middleware_execution_log.size() < 1000) {
-             std::string req_roles_str;
-             for(size_t i=0; i<required_roles_list.size(); ++i) { req_roles_str += (i>0?",":"") + required_roles_list[i]; }
-             std::string current_roles_str_debug;
-             for(size_t i=0; i<roles.size(); ++i) { current_roles_str_debug += (i>0?",":"") + roles[i]; }
-             adv_test_mw_middleware_execution_log.push_back("[User::has_all_roles] User '" + username + "' checking ALL of roles: [" + req_roles_str + "]. User actually has roles: [" + current_roles_str_debug + "]");
-        }
         for (const auto &role_to_check : required_roles_list) {
-            if (!has_role(role_to_check)) {
+            if (!has_role(role_to_check)) { // Calls the User::has_role method
                 return false;
             }
         }
-        return true;
+        // If the list of required roles is empty, this will (correctly) return true.
+        // If it's not empty and all roles were found, it will also return true.
+        return true; 
     }
 };
 
-// Type alias for backward compatibility
+// Type alias for backward compatibility or clearer intent in some contexts
 using AuthUser = User;
 
 } // namespace auth

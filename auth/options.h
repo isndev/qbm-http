@@ -1,5 +1,4 @@
-#ifndef QBM_HTTP_AUTH_OPTIONS_H
-#define QBM_HTTP_AUTH_OPTIONS_H
+#pragma once
 
 #include <chrono>
 #include <string>
@@ -264,5 +263,3 @@ using AuthOptions = Options;
 } // namespace auth
 } // namespace http
 } // namespace qb
-
-#endif // QBM_HTTP_AUTH_OPTIONS_H 

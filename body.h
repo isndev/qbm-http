@@ -1,10 +1,11 @@
-
 #pragma once
 
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <map>
+#include <type_traits>
 
 #include <qb/json.h>
 #include <qb/system/allocator/pipe.h>
@@ -13,68 +14,11 @@
 #include <qb/io/compression.h>
 #endif
 
+#include "./chunk.h"
+#include "./form.h"
 #include "./multipart.h"
 
 namespace qb::http {
-
-/**
- * @brief HTTP chunk for use with chunked transfer encoding
- *
- * Represents a single chunk in HTTP chunked transfer encoding.
- * This lightweight class stores a reference to chunk data without
- * owning the memory, making it efficient for handling streaming data.
- *
- * Chunks are used with chunked transfer encoding, where the body of a
- * message is transferred as a series of chunks, each with its own size.
- * This allows for streaming data without knowing the total size in advance.
- */
-class Chunk {
-    const char *_data; ///< Pointer to chunk data (not owned)
-    std::size_t _size; ///< Size of the chunk in bytes
-
-public:
-    /**
-     * @brief Default constructor
-     *
-     * Creates an empty chunk with null data and zero size.
-     */
-    Chunk()
-        : _data(nullptr)
-        , _size(0) {}
-
-    /**
-     * @brief Construct a chunk with data pointer and size
-     * @param data Pointer to chunk data (not owned)
-     * @param size Size of the chunk in bytes
-     *
-     * Creates a chunk referencing the provided data.
-     * The chunk does not take ownership of the data,
-     * so the caller must ensure the data remains valid.
-     */
-    Chunk(const char *data, std::size_t size)
-        : _data(data)
-        , _size(size) {}
-
-    /**
-     * @brief Get the chunk data
-     * @return Pointer to the chunk data
-     */
-    [[nodiscard]] const char *
-    data() const {
-        return _data;
-    }
-
-    /**
-     * @brief Get the chunk size
-     * @return Size of the chunk in bytes
-     */
-    [[nodiscard]] std::size_t
-    size() const {
-        return _size;
-    }
-};
-
-using chunk = Chunk;
 
 /**
  * @brief HTTP message body class
@@ -101,16 +45,19 @@ public:
     Body()                    = default;
     ~Body()                   = default;
     Body(Body &&rhs) noexcept = default;
-    Body(Body const &rhs)     = default;
+    Body(Body const &rhs);
 
-    Body &operator=(Body const &rhs) = default;
     Body &operator=(Body &&rhs) noexcept = default;
+    Body &operator=(Body const &rhs);
 
     /**
      * @brief Constructor with variadic arguments
      * @param args Arguments to add to the body
      */
-    template <typename... Args>
+    template <typename... Args,
+              typename = std::enable_if_t<
+                  !(std::conjunction_v<std::is_same<std::decay_t<Args>, Body>...> && (sizeof...(Args) == 1))
+              >>
     Body(Args &&...args) {
         (_data << ... << std::forward<Args>(args));
     }
@@ -120,7 +67,10 @@ public:
      * @param args Data to append
      * @return Reference to this body
      */
-    template <typename... Args>
+    template <typename... Args,
+              typename = std::enable_if_t<
+                  !(std::conjunction_v<std::is_same<std::decay_t<Args>, Body>...> && (sizeof...(Args) == 1))
+              >>
     Body &
     operator<<(Args &&...args) {
         (_data << ... << std::forward<Args>(args));
@@ -344,8 +294,18 @@ template <>
 Body &Body::operator= <qb::json>(qb::json &&json) noexcept;
 template <>
 Body &Body::operator= <Multipart>(Multipart const &mp);
-// template <>
-// Body &Body::operator=<MultipartView>(MultipartView const &mp);
+template <>
+Body &Body::operator= <Form>(Form const &form);
+template <>
+Body &Body::operator= <Form>(Form &&form) noexcept;
+template <>
+Body &Body::operator= <std::string_view>(std::string_view const &str);
+template <>
+Body &Body::operator= <const char*>(char const * const &str);
+template <>
+Body &Body::operator= <MultipartView>(MultipartView const &mpv);
+template <>
+Body &Body::operator= <MultipartView>(MultipartView &&mpv) noexcept;
 
 template <>
 std::string_view Body::as<std::string_view>() const;
@@ -357,5 +317,7 @@ template <>
 Multipart Body::as<Multipart>() const;
 template <>
 MultipartView Body::as<MultipartView>() const;
+template <>
+Form Body::as<Form>() const;
 
 } // namespace qb::http

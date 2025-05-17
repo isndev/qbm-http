@@ -70,7 +70,6 @@
 #include <utility>
 
 #include "./types.h"
-#include "./auth/auth.h"
 #include "./body.h"
 #include "./cookie.h"
 #include "./date.h"
@@ -79,50 +78,10 @@
 #include "./request.h"
 #include "./response.h"
 #include "./utility.h"
-#include "./routing/routing.h"
 #include "./multipart.h"
-
-// Routing-related headers
-#include "./routing/path_parameters.h"
-#include "./routing/context.h"
-#include "./routing/route_types.h"
-#include "./routing/radix_tree.h"
-#include "./routing/async_types.h"
-#include "./routing/async_completion_handler.h"
-#include "./routing/router.h"
-
-// Middleware headers
-// #include "./middleware/middleware_interface.h"
-// #include "./middleware/middleware.h"
-// #include "./middleware/middleware_chain.h"
-// #include "./middleware/jwt.h"
-// #include "./middleware/auth.h"
-// #include "./middleware/logging.h"
-// #include "./middleware/error_handling.h"
-// #include "./middleware/validator.h"
-// #include "./middleware/conditional.h"
-// #include "./middleware/transform.h"
-// #include "./middleware/cors.h"
-// #include "./middleware/rate_limit.h"
-// #include "./middleware/timing.h"
-
-// Authentication and authorization
-#include "./auth/auth.h"
-#include "./auth/user.h"
-#include "./auth/manager.h"
-#include "./auth/options.h"
-
-// Validation
-#include "./validation/validation.h"
-#include "./validation/validation_types.h"
-#include "./validation/validator.h"
-#include "./validation/validation_context.h"
-#include "./validation/json_schema.h"
-#include "./validation/query_validator.h"
-#include "./validation/sanitizer.h"
-
-// OpenAPI/Swagger integration
-#include "./openapi/document.h"
+#include "./routing.h"
+#include "./auth.h"
+#include "./validation.h"
 
 #if defined(_WIN32)
 #undef DELETE // Windows :/
@@ -1337,6 +1296,8 @@ private:
     friend Protocol;
     friend qb::io::async::with_timeout<session>;
 
+    std::shared_ptr<Context<Derived>> _context{};
+
     /**
      * @brief Handle incoming HTTP request
      * @param msg HTTP request message
@@ -1346,7 +1307,9 @@ private:
      */
     void
     on(typename Protocol::request &&msg) {
-        if (!this->server().router().route(this->shared(), msg.http)) {
+        _context = this->server().router().route(this->shared(), std::move(msg.http));
+
+        if (!_context) {
             this->disconnect(DisconnectedReason::Undefined);
         }
     }
@@ -1395,10 +1358,15 @@ private:
      */
     void
     on(qb::io::async::event::eos &&) {
+        if (_context) {
+            _context->execute_hook(HookPoint::POST_RESPONSE_SEND);
+            _context.reset();
+        }
+
         if constexpr (has_method_on<Derived, void, event::eos>::value) {
             static_cast<Derived &>(*this).on(event::eos{});
         } else
-            this->disconnect(ResponseTransmitted);
+            this->disconnect(DisconnectedReason::ResponseTransmitted);
     }
 
     /**
@@ -1429,6 +1397,9 @@ private:
             };
             LOG_DEBUG("HttpSession(" << this->id() << ") disconnected -> " << reason(e.reason));
         }
+        if (e.reason == DisconnectedReason::ByUser && _context && !_context->is_completed()) {
+            _context->cancel();
+        }
     }
 
 public:
@@ -1458,6 +1429,17 @@ public:
     {
         this->setTimeout(60);
     }
+
+    /**
+     * @brief Get the context for the session
+     * @return Shared pointer to the context
+     *
+     * Returns a shared pointer to the context for the session.
+     * The context contains information about the current request and response.
+     */
+    std::shared_ptr<Context<Derived>> context() const {
+        return _context;
+    }
 };
 
 /**
@@ -1477,9 +1459,10 @@ template <typename Derived, typename Session>
 class io_handler : public qb::io::async::io_handler<Derived, Session> {
 public:
     using Router     = typename qb::http::Router<Session>;
-    using Route      = typename Router::Route;
-    // using TRoute     = typename Router::TRoute;
-    using Controller = typename Router::Controller;
+    using Route      = typename qb::http::ICustomRoute<Session>;
+    using RouteGroup = typename qb::http::RouteGroup<Session>;
+    using Controller = typename qb::http::Controller<Session>;
+    using Context = typename qb::http::Context<Session>;
 
 private:
     Router _router;

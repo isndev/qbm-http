@@ -137,6 +137,7 @@ enum http_finish {
 typedef enum http_finish http_finish_t;
 
 enum http_method {
+  HTTP_UNINITIALIZED = -1,
   HTTP_DELETE = 0,
   HTTP_GET = 1,
   HTTP_HEAD = 2,

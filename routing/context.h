@@ -1,791 +1,590 @@
 #pragma once
 
-#include <any>
-#include <chrono>
-#include <functional>
-#include <map>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
-#include <type_traits>
+#include <any>
+#include <functional>
+#include <stdexcept>
+#include <iostream> // For temporary logging
+#include <optional>
+#include <map>
+
 #include "../request.h"
 #include "../response.h"
-#include "./async_types.h"
 #include "./path_parameters.h"
-#include "./logging_helpers.h"
-#include "./async_completion_handler.h"
+#include "./types.h" // For HookPoint, AsyncTaskResult
+#include "./async_task.h" // For IAsyncTask
 
-# if defined(_WIN32)
-#undef DELETE // Windows :/
-#endif
+// Forward declaration for RouterCore
+namespace qb::http { 
+template <typename SessionType> class RouterCore; 
+}
 
 namespace qb::http {
 
-// enum class RequestProcessingStage { // MOVED TO async_types.h
-// INITIAL,
-// PROCESSING_GLOBAL_SYNC_MIDDLEWARE,
-// AWAITING_GLOBAL_ASYNC_MIDDLEWARE,
-// PROCESSING_GROUP_MIDDLEWARE,
-// AWAITING_GROUP_ASYNC_MIDDLEWARE,
-// READY_FOR_HANDLER,
-// HANDLER_PROCESSING,
-// AWAITING_HANDLER_ASYNC_COMPLETION,
-// RESPONSE_SENT_OR_COMPLETED,
-// ERROR_HANDLED
-// };
-
-// Forward declarations
-template <typename Session, typename String>
-class Router;
-
-template <typename Session, typename String>
-class AsyncCompletionHandler;
-
-namespace detail {
-// Trait to detect if a class has an is_connected() method
-template <typename T, typename = void>
-struct has_method_is_connected : std::false_type {};
-
-#if __cplusplus >= 201703L
-template <typename T>
-struct has_method_is_connected<T, std::void_t<decltype(std::declval<T>().is_connected())>> : std::true_type {};
-#else
-// Manual void_t for C++11/14 if std::void_t is not found by linter
-// template<typename...> using void_t = void;
-// template <typename T>
-// struct has_method_is_connected<T, void_t<decltype(std::declval<T>().is_connected())>> : std::true_type {};
-// For now, let's assume C++17 as per instructions. The linter error needs to be understood.
-// If std::void_t is truly missing, the project isn't compiling with C++17, or includes are minimal.
-#endif
-} // namespace detail
-
 /**
- * @brief Context for route handlers
+ * @brief Encapsulates all information about a single HTTP request and its processing state.
+ *
+ * The Context object is passed through the entire chain of tasks (middleware and handlers)
+ * and provides access to the request, response, session, and other relevant data.
+ * It also manages lifecycle hooks.
  */
-template <typename Session, typename String = std::string>
-struct RouterContext {
-    // Internal state encapsulation
-    struct ContextState {
-        PathParameters                  path_params;
-        qb::unordered_map<std::string, std::any> data;
-        std::string                     match;
-        bool                            handled  = false;
-        bool                            is_async = false;
-        bool is_deferred = false; // New flag for deferred processing
-        RequestProcessingStage processing_stage = RequestProcessingStage::INITIAL; // AMÉLIORATION WORKFLOW POINT 5
-        bool _handler_initiated_async = false; // Flag to indicate handler started async
-
-        // Callbacks for different lifecycle hooks
-        std::vector<std::function<void(RouterContext&)>> done_callbacks;
-        std::vector<std::function<void(RouterContext&)>> before_callbacks;
-        std::vector<std::function<void(RouterContext&)>> after_callbacks;
-        std::vector<std::function<void(RouterContext&, const std::string&)>> error_callbacks;
-
-        // Metrics
-        Clock::time_point     start_time;
-        std::optional<double> duration;
-
-        // Event tracking
-        std::vector<std::string> events; // Track middleware/handler events
-
-        ContextState()
-            : start_time(Clock::now()) {}
+template <typename SessionType>
+class Context : public std::enable_shared_from_this<Context<SessionType>> {
+public:
+    enum class ProcessingPhase {
+        INITIAL,          // Before any main chain starts or for standalone contexts not tied to a chain
+        NORMAL_CHAIN,     // Executing the primary request task chain
+        NOT_FOUND_CHAIN,  // Executing the "not found" task chain
+        ERROR_CHAIN       // Executing the main error handling task chain
     };
 
-    std::shared_ptr<ContextState> _state;
+    using LifecycleHook = std::function<void(Context<SessionType>&, HookPoint)>;
+    using CustomDataMap = qb::unordered_map<std::string, std::any>;
+
+    // New static logging utility
+    static void log_task_chain_snapshot(
+        const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>& chain,
+        const std::string& chain_description,
+        std::optional<size_t> current_task_idx_opt = std::nullopt
+    ) {
+        std::cerr << "Context Log: Task Chain Snapshot for '" << chain_description << "':" << std::endl;
+        if (chain.empty()) {
+            std::cerr << "  (empty)" << std::endl;
+            return;
+        }
+        for (size_t i = 0; i < chain.size(); ++i) {
+            const auto& task = chain[i];
+            std::string task_name = "Unknown/Null Task";
+            if (task) {
+                try {
+                    task_name = task->name();
+                } catch (const std::exception& e) {
+                    task_name = "Error getting task name";
+                }
+            }
+            
+            std::string current_marker;
+            if (current_task_idx_opt && current_task_idx_opt.value() == i) {
+                current_marker = " (current/next to execute)";
+            }
+            std::cerr << "  [" << i << "] " << task_name << current_marker << std::endl;
+        }
+    }
+
+private:
+    Request _request;
+    Response _response;
+    std::shared_ptr<SessionType> _session;
+    PathParameters _path_parameters;
+    std::vector<LifecycleHook> _lifecycle_hooks;
+    CustomDataMap _custom_data;
+    std::optional<std::string> _cancellation_reason_internal;
+
+    std::vector<std::shared_ptr<IAsyncTask<SessionType>>> _task_chain;
+    size_t _current_task_index = 0;
+    bool _is_cancelled = false;
+    bool _is_completed = false;
+
+    std::function<void(Context<SessionType>&)> _on_finalized_callback;
+    std::weak_ptr<RouterCore<SessionType>> _router_core_wptr;
+    ProcessingPhase _current_processing_phase = ProcessingPhase::INITIAL;
+    AsyncTaskResult _current_task_result = AsyncTaskResult::COMPLETE; // Stores the result of the task that just finished
+    bool _finalize_called = false; // Guard for finalize_processing()
 
 public:
-    std::shared_ptr<Session>    session;    ///< Shared pointer to the session object.
-    TRequest<String>            request;    ///< The HTTP request object.
-    Response                    response;   ///< The HTTP response object to be populated.
-    Router<Session, String>    *router = nullptr; ///< Pointer to the router instance, if available.
-
-    // AMÉLIORATION WORKFLOW POINT 5: Accesseurs pour processing_stage
     /**
-     * @brief Gets the current processing stage of the request in the router pipeline.
-     * @return The current RequestProcessingStage.
+     * @brief Executes lifecycle hooks for a given point.
+     * This is now public to be callable by RouterCore.
      */
-    RequestProcessingStage get_processing_stage() const { return _state->processing_stage; }
-    /**
-     * @brief Sets the current processing stage of the request.
-     * @param stage The new RequestProcessingStage.
-     */
-    void set_processing_stage(RequestProcessingStage stage) { _state->processing_stage = stage; }
-
-    /**
-     * @brief Constructs a RouterContext.
-     * @param s Shared pointer to the session.
-     * @param req The HTTP request object (rvalue reference, will be moved).
-     * @param r Optional pointer to the router handling this context.
-     */
-    RouterContext(std::shared_ptr<Session> s, TRequest<String> &&req,
-                  Router<Session, String> *r = nullptr)
-        : _state(std::make_shared<ContextState>())
-        , session(std::move(s))
-        , request(std::move(req))
-        , response()
-        , router(r) {}
-
-    // Request-related methods
-
-    /**
-     * @brief Get a request header value
-     * @param name Header name
-     * @return Header value
-     */
-    [[nodiscard]] std::string
-    header(const std::string &name) const {
-        return request.header(name);
-    }
-
-    /**
-     * @brief Get a path parameter value
-     * @param name Parameter name
-     * @param default_value Default value if parameter not found
-     * @return Parameter value or default
-     */
-    [[nodiscard]] std::string
-    param(const std::string &name, const std::string &default_value = "") const {
-        auto it = _state->path_params.find(name);
-        if (it != _state->path_params.end()) {
-            return it->second;
-        }
-        return default_value;
-    }
-
-    /**
-     * @brief Get all path parameters
-     * @return Reference to path parameters map
-     */
-    [[nodiscard]] const PathParameters &
-    params() const {
-        return _state->path_params;
-    }
-
-    /**
-     * @brief Set path parameters
-     * @param params Path parameters to set
-     */
-    void
-    set_path_params(const PathParameters &params) {
-        _state->path_params = params;
-    }
-
-    /**
-     * @brief Get the matched path
-     * @return Matched path string
-     */
-    [[nodiscard]] const std::string &
-    matched_path() const {
-        return _state->match;
-    }
-
-    /**
-     * @brief Set the matched path
-     * @param match Matched path
-     */
-    void
-    set_match(const std::string &match) {
-        _state->match = match;
-    }
-
-    /**
-     * @brief Get HTTP method of the request
-     * @return HTTP method
-     */
-    [[nodiscard]] http_method
-    method() const {
-        return request.method;
-    }
-
-    /**
-     * @brief Get request path
-     * @return Request path
-     */
-    [[nodiscard]] std::string
-    path() const {
-        return std::string(request._uri.path());
-    }
-
-    // State management methods
-
-    /**
-     * @brief Set a custom state value
-     * @param key State key
-     * @param value State value
-     */
-    template <typename T>
-    void
-    set(const std::string &key, T value) {
-        if (adv_test_mw_middleware_execution_log.size() < 2000) {
-            adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] SET Key: '" + key + "'");
-        }
-        _state->data[key] = std::move(value);
-    }
-
-    /**
-     * @brief Get a custom state value
-     * @param key State key
-     * @param default_value Default value if key not found
-     * @return State value or default
-     */
-    template <typename T>
-    T
-    get(const std::string &key, T default_value = T{}) const {
-        auto it = _state->data.find(key);
-        if (it != _state->data.end()) {
+    void execute_hook(HookPoint point) {
+        for (const auto& hook : _lifecycle_hooks) {
             try {
-                if (adv_test_mw_middleware_execution_log.size() < 2000) {
-                    adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] GET Key: '" + key + "' - FOUND");
-                }
+                hook(*this, point);
+            } catch (const std::exception& e) {
+                std::cerr << "Context: Exception in lifecycle hook: " << e.what() << std::endl;
+            }
+        }
+    }
+    
+    void finalize_processing() {
+        if (_finalize_called) { // Guard against re-entry
+            std::cerr << "Context::finalize_processing: Already called. Returning." << std::endl;
+            return;
+        }
+        _finalize_called = true; // Mark that finalization has started
+        _is_completed = true;    // Signify that the context's lifecycle is now definitely over.
+        
+        std::cerr << "Context::finalize_processing: EXECUTING. Session: " << _session.get() 
+                  << ", Request: " << _request.uri().path() << std::endl;
+
+        execute_hook(HookPoint::POST_HANDLER_EXECUTION);
+
+        if (_on_finalized_callback) {
+            try {
+                _on_finalized_callback(*this);
+            } catch (const std::exception& e) {
+                 std::cerr << "Context: Exception in _on_finalized_callback: " << e.what() << std::endl;
+            }
+        }
+    }
+
+public:
+    /**
+     * @brief Constructor for Context.
+     * @param session The client session.
+     * @param request The HTTP request (moved into context).
+     */
+    Context(Request request,
+            Response response_prototype,
+            std::shared_ptr<SessionType> session,
+            std::function<void(Context<SessionType>&)> on_finalized_callback,
+            std::weak_ptr<RouterCore<SessionType>> router_core_wptr)
+        : _request(std::move(request)),
+          _response(std::move(response_prototype)),
+          _session(std::move(session)),
+          _on_finalized_callback(std::move(on_finalized_callback)),
+          _router_core_wptr(router_core_wptr) {
+        // execute_hook(HookPoint::PRE_ROUTING); // Moved to RouterCore before matching
+    }
+
+    ~Context() {
+        if (!_finalize_called) {
+             std::cerr << "Context Destructor: Finalizing because _finalize_called is false. IsCancelled: " << _is_cancelled << ", IsCompleted (before this finalize): " << _is_completed << std::endl;
+             finalize_processing();
+        }
+        execute_hook(qb::http::HookPoint::REQUEST_COMPLETE);
+    }
+
+    /**
+     * @brief Get a reference to the HTTP request.
+     */
+    Request& request() { return _request; }
+    const Request& request() const { return _request; }
+
+    /**
+     * @brief Get a reference to the HTTP response.
+     */
+    Response& response() { return _response; }
+    const Response& response() const { return _response; }
+
+    /**
+     * @brief Get a shared pointer to the session.
+     */
+    std::shared_ptr<SessionType> session() { return _session; }
+    std::shared_ptr<const SessionType> session() const { return _session; }
+
+    /**
+     * @brief Get a reference to the path parameters.
+     */
+    PathParameters& path_parameters() { return _path_parameters; }
+    const PathParameters& path_parameters() const { return _path_parameters; }
+
+    /**
+     * @brief Get a specific path parameter by name.
+     * @param name The name of the parameter.
+     * @param not_found The value to return if the parameter is not found.
+     * @return The parameter's value as a string, or the not_found value.
+     */
+    std::string path_param(const std::string& name, const std::string& not_found = "") const {
+        auto value_opt = _path_parameters.get(name);
+        if (value_opt) {
+            return std::string(value_opt.value());
+        }
+        return not_found;
+    }
+
+    /**
+     * @brief Sets the path parameters (typically done by the RadixTree/Matcher).
+     */
+    void set_path_parameters(PathParameters params) {
+        _path_parameters = std::move(params);
+    }
+
+    /**
+     * @brief Adds a hook to a specific point in the request lifecycle.
+     * @param point The lifecycle point to attach the hook to.
+     * @param hook_fn The function to execute at the hook point.
+     */
+    void add_lifecycle_hook(LifecycleHook hook) {
+        _lifecycle_hooks.push_back(std::move(hook));
+    }
+
+    /**
+     * @brief Stores custom data associated with a key.
+     * Useful for passing data between middleware and handlers.
+     * @tparam T The type of the data to store.
+     * @param key The key to associate the data with.
+     * @param value The data to store.
+     */
+    template <typename T>
+    void set(const std::string& key, T value) {
+        _custom_data[key] = std::move(value);
+    }
+
+    /**
+     * @brief Retrieves custom data associated with a key.
+     * @tparam T The type of the data to retrieve.
+     * @param key The key of the data to retrieve.
+     * @return An optional containing the data if found and type matches, otherwise std::nullopt.
+     */
+    template <typename T>
+    std::optional<T> get(const std::string& key) {
+        auto it = _custom_data.find(key);
+        if (it != _custom_data.end()) {
+            try {
                 return std::any_cast<T>(it->second);
-            } catch (const std::bad_any_cast &) {
-                if (adv_test_mw_middleware_execution_log.size() < 2000) {
-                    adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] GET Key: '" + key + "' - BAD CAST, returning default");
-                }
-                return default_value;
+            } catch (const std::bad_any_cast& e) {
+                std::cerr << "Context::get: Bad any_cast for key '" << key << "'. " << e.what() << std::endl;
+                return std::nullopt;
             }
         }
-        if (adv_test_mw_middleware_execution_log.size() < 2000) {
-            adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] GET Key: '" + key + "' - NOT FOUND, returning default");
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Retrieves custom data associated with a key, as a pointer.
+     * Useful for types that should not be copied or for checking existence.
+     * @tparam T The type of the data to retrieve.
+     * @param key The key of the data to retrieve.
+     * @return A pointer to the data if found and type matches, otherwise nullptr.
+     */
+    template <typename T>
+    T* get_ptr(const std::string& key) {
+        auto it = _custom_data.find(key);
+        if (it != _custom_data.end()) {
+            return std::any_cast<T>(&it->second);
         }
-        return default_value;
+        return nullptr;
     }
 
     /**
-     * @brief Check if a state key exists
-     * @param key State key
-     * @return true if key exists, false otherwise
+     * @brief Checks if custom data exists for a given key.
+     * @param key The key to check.
+     * @return True if data exists for the key, false otherwise.
      */
-    [[nodiscard]] bool
-    has(const std::string &key) const {
-        bool found = _state->data.find(key) != _state->data.end();
-        if (adv_test_mw_middleware_execution_log.size() < 2000) {
-            adv_test_mw_middleware_execution_log.push_back("[CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "] HAS Key: '" + key + "' - Result: " + utility::bool_to_string(found));
+    bool has(const std::string& key) const {
+        return _custom_data.count(key);
+    }
+
+    /**
+     * @brief Removes custom data associated with a key.
+     * @param key The key of the data to remove.
+     * @return True if data was found and removed, false otherwise.
+     */
+    bool remove(const std::string& key) {
+        return _custom_data.erase(key) > 0;
+    }
+
+    /**
+     * @brief Sets the task chain and starts processing.
+     * @param chain The task chain to set and start.
+     */
+    void set_task_chain_and_start(std::vector<std::shared_ptr<IAsyncTask<SessionType>>> chain) {
+        if (_is_completed || _is_cancelled) {
+            std::cerr << "Context::set_task_chain_and_start: Called on already completed or cancelled context. Ignoring." << std::endl;
+            return;
         }
-        return found;
-    }
+        _task_chain = std::move(chain);
+        _current_task_index = 0;
 
-    /**
-     * @brief Remove a state key
-     * @param key State key
-     * @return true if key was removed, false if not found
-     */
-    bool
-    remove(const std::string &key) {
-        auto it = _state->data.find(key);
-        if (it != _state->data.end()) {
-            _state->data.erase(it);
-            return true;
+        if (_task_chain.empty()) {
+            std::cerr << "Context::set_task_chain_and_start: Chain is empty, completing context." << std::endl;
+            // If the chain is empty from the start, it implies a no-op or a direct 404 if not handled by RadixTree.
+            // However, RadixTree should provide _compiled_not_found_tasks if no match.
+            // This complete() might result in 200 OK if response wasn't touched, or 404 if it was.
+            complete(AsyncTaskResult::COMPLETE); 
+            return;
         }
-        return false;
+        proceed_to_next_task();
     }
 
+public: // Public API for tasks
     /**
-     * @brief Clear all state data
+     * @brief Signals that the current asynchronous task has finished processing.
+     *
+     * This method is called by IAsyncTask instances (or wrappers around them)
+     * to indicate their outcome. The Context then decides what to do next:
+     * - Proceed to the next task in the chain (if AsyncTaskResult::CONTINUE).
+     * - Finalize the request (if AsyncTaskResult::COMPLETE or AsyncTaskResult::CANCELLED).
+     * - Attempt to execute an error handling chain (if AsyncTaskResult::ERROR).
+     *
+     * @param result The outcome of the asynchronous task.
      */
-    void
-    clear_state() {
-        _state->data.clear();
-    }
+    void complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE) {
+        std::cerr << "Context::complete ENTRY - Result: " << static_cast<int>(result)
+                  << ", CurrentPhase: " << static_cast<int>(_current_processing_phase)
+                  << ", IsCancelled: " << _is_cancelled
+                  << ", IsCompleted: " << _is_completed // IsCompleted refers to overall completion (finalize_called)
+                  << ", FinalizeCalled: " << _finalize_called
+                  << ", CurrentTaskIdx (at entry): " << _current_task_index // Log _current_task_index at entry
+                  << ", TaskChainSize: " << _task_chain.size() << std::endl;
 
-    // Response convenience methods
-
-    /**
-     * @brief Set response status code
-     * @param status_code HTTP status code
-     * @return Reference to this context
-     */
-    RouterContext &
-    status(http_status status_code) {
-        response.status_code = status_code;
-        return *this;
-    }
-
-    /**
-     * @brief Set response body
-     * @param content Body content
-     * @return Reference to this context
-     */
-    RouterContext &
-    body(const std::string &content) {
-        response.body() = content;
-        return *this;
-    }
-
-    /**
-     * @brief Set a response header
-     * @param name Header name
-     * @param value Header value
-     * @return Reference to this context
-     */
-    RouterContext &
-    header(const std::string &name, const std::string &value) {
-        response.add_header(name, value);
-        return *this;
-    }
-
-    /**
-     * @brief Set JSON content type and convert body to JSON
-     * @param json_object JSON object
-     * @return Reference to this context
-     */
-    template <typename JsonT>
-    RouterContext &
-    json(const JsonT &json_object) {
-        response.add_header("Content-Type", "application/json");
-        if constexpr (std::is_convertible_v<JsonT, std::string>) {
-            response.body() = json_object;
-        } else {
-            response.body() = qb::json(json_object).dump();
+        if (_finalize_called && result != AsyncTaskResult::CANCELLED) { 
+             std::cerr << "Context::complete: Already completed. Ignoring result: " << static_cast<int>(result) << std::endl;
+            return;
         }
-        return *this;
-    }
-
-    /**
-     * @brief Set redirect response
-     * @param url URL to redirect to
-     * @param permanent Whether the redirect is permanent (301) or temporary (302)
-     * @return Reference to this context
-     */
-    RouterContext &
-    redirect(const std::string &url, bool permanent = false) {
-        response.status_code =
-            permanent ? HTTP_STATUS_MOVED_PERMANENTLY : HTTP_STATUS_FOUND;
-        response.add_header("Location", url);
-        return *this;
-    }
-
-    // Request flow control methods
-
-    /**
-     * @brief Mark request as handled
-     * @return Reference to this context
-     */
-    RouterContext &
-    mark_handled() {
-        _state->handled = true;
-        return *this;
-    }
-
-    /**
-     * @brief Check if request is marked as handled
-     * @return true if handled, false otherwise
-     */
-    [[nodiscard]] bool
-    is_handled() const {
-        return _state && _state->handled;
-    }
-
-    /**
-     * @brief Mark request as async
-     * @return Reference to this context
-     */
-    RouterContext &
-    mark_async() {
-        _state->is_async = true;
-        _state->handled  = true; // Async requests are also handled
-        return *this;
-    }
-
-    /**
-     * @brief Check if request is marked as async
-     * @return true if async, false otherwise
-     */
-    [[nodiscard]] bool
-    is_async() const {
-        return _state ? _state->is_async : false;
-    }
-
-    /**
-     * @brief Clears the async flag. Typically used internally when an async middleware chain
-     * completes synchronously or an async handler completes its operation and calls back.
-     * This ensures that subsequent synchronous processing steps are not incorrectly
-     * treated as yielding for an async operation that has already concluded.
-     */
-    void clear_async_state_for_chain_completion() {
-        if (_state) {
-            _state->is_async = false;
-        }
-    }
-
-    /**
-     * @brief Clears the async flag when a synchronous handler has executed
-     * after a preceding asynchronous middleware. This signals that the route's
-     * specific synchronous processing is done, even if the broader request
-     * context was initially asynchronous.
-     */
-    void clear_async_for_sync_handler_after_async_middleware() {
-        if (_state) {
-            _state->is_async = false;
-            // Do not modify _state->handled here, as the handler is considered to have handled its part.
-        }
-    }
-
-    // Lifecycle hooks
-
-    /**
-     * @brief Register a callback to be executed after request processing is complete
-     * @param callback Function to call when request is done
-     * @return Reference to this context
-     */
-    RouterContext& 
-    on_done(std::function<void(RouterContext&)> callback) {
-        _state->done_callbacks.push_back(std::move(callback));
-        return *this;
-    }
-
-    /**
-     * @brief Execute all registered 'done' callbacks
-     */
-    void 
-    execute_done_callbacks() {
-        for (auto& callback : _state->done_callbacks) {
-            callback(*this);
-        }
-        _state->done_callbacks.clear();
-    }
-
-    /**
-     * @brief Register a callback to be executed before request handling
-     * @param callback Function to call before handling
-     * @return Reference to this context
-     */
-    RouterContext& 
-    before_handling(std::function<void(RouterContext&)> callback) {
-        _state->before_callbacks.push_back(std::move(callback));
-        return *this;
-    }
-
-    /**
-     * @brief Execute all registered 'before' callbacks
-     */
-    void 
-    execute_before_callbacks() {
-        for (auto& callback : _state->before_callbacks) {
-            callback(*this);
-        }
-        _state->before_callbacks.clear();
-    }
-
-    /**
-     * @brief Register a callback to be executed after request handling
-     * @param callback Function to call after handling
-     * @return Reference to this context
-     */
-    RouterContext& 
-    after_handling(std::function<void(RouterContext&)> callback) {
-        _state->after_callbacks.push_back(std::move(callback));
-        return *this;
-    }
-
-    /**
-     * @brief Execute all registered 'after' callbacks
-     */
-    void 
-    execute_after_callbacks() {
-        for (const auto& callback : _state->after_callbacks) {
-            callback(*this);
-        }
-        _state->after_callbacks.clear();
-    }
-
-    /**
-     * @brief Register a callback to be executed on error
-     * @param callback Function to call on error (passes error message)
-     * @return Reference to this context
-     */
-    RouterContext& 
-    on_error(std::function<void(RouterContext&, const std::string&)> callback) {
-        _state->error_callbacks.push_back(std::move(callback));
-        return *this;
-    }
-
-    /**
-     * @brief Execute all registered 'error' callbacks
-     * @param error_message Error message to pass to callbacks
-     */
-    void 
-    execute_error_callbacks(const std::string& error_message) {
-        for (auto& callback : _state->error_callbacks) {
-            callback(*this, error_message);
-        }
-        _state->error_callbacks.clear();
-    }
-
-    // Metrics methods
-
-    /**
-     * @brief Get elapsed time since request start
-     * @return Elapsed time in milliseconds
-     */
-    [[nodiscard]] double
-    elapsed() const {
-        return std::chrono::duration<double, std::milli>(Clock::now() -
-                                                         _state->start_time)
-            .count();
-    }
-
-    /**
-     * @brief Record duration of request
-     * @param duration_ms Duration in milliseconds
-     */
-    void
-    record_duration(double duration_ms) {
-        _state->duration = duration_ms;
-    }
-
-    /**
-     * @brief Get recorded duration
-     * @return Duration in milliseconds, or std::nullopt if not recorded
-     */
-    [[nodiscard]] std::optional<double>
-    duration() const {
-        return _state->duration;
-    }
-
-    /**
-     * @brief Get request start time
-     * @return Start time
-     */
-    [[nodiscard]] Clock::time_point
-    start_time() const {
-        return _state->start_time;
-    }
-
-    // Completion methods
-
-    /**
-     * @brief Complete the request and send response
-     */
-    void complete(bool from_async_completion_handler = false) {
-        if (!_state) {
-            // This case should ideally not happen if context is managed properly
-            if (adv_test_mw_middleware_execution_log.size() < 2000) {
-                 adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete] EARLY EXIT: _state is null. Path: " + std::string(this->request.uri().path()));
+        if (_is_cancelled && result != AsyncTaskResult::CANCELLED) {
+            std::cerr << "Context::complete: Cancelled, but received non-CANCELLED result: " << static_cast<int>(result) << ". Prioritizing cancellation." << std::endl;
+            // If already cancelled, we should only be processing an AsyncTaskResult::CANCELLED to finalize.
+            // Any other result at this point is likely a late-arriving task completion after cancellation took effect.
+            // We ensure finalization happens based on the cancellation state.
+            if (!_is_completed) { // Finalize if not already done by the cancel path
+                finalize_processing();
             }
-            return; 
-        }
-
-        if (adv_test_mw_middleware_execution_log.size() < 2000) {
-             adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete ENTRY] Path: " + std::string(this->request.uri().path()) + ", CtxState@" + utility::pointer_to_string_for_log(_state.get()) + ", from_async_cb: " + utility::bool_to_string(from_async_completion_handler));
-        }
-
-        if (has("_completed")) {
-            if (!has("_completed_by_async_handler")) {
-                add_event("RouterContext::complete() called on ASYNC context BEFORE AsyncCompletionHandler. Callbacks executed, but no response sent by RouterContext.");
-                set("_completed", true); // Marquer comme "callbacks faits", mais pas "réponse envoyée par RouterContext"
-                execute_after_callbacks(); 
-                execute_done_callbacks();
-            }
-            return; 
-        }
-
-        if (has("_response_sent_by_router_context")) { // Sécurité pour éviter double envoi
-            add_event("RouterContext::complete() called but response already marked as sent by RouterContext.");
             return;
         }
 
-        add_event("RouterContext::complete() proceeding to finalize response.");
-        execute_after_callbacks();
-        execute_done_callbacks();
-        
-        this->_state->handled = true; 
-        set("_completed", true);
-        // Si ce complete() est celui qui envoie la réponse, marquer que c'est le handler async qui l'a fait (ou le sync)
-        set("_completed_by_async_handler", true); 
-        
-        set_processing_stage(RequestProcessingStage::RESPONSE_SENT_OR_COMPLETED);
-        
-        if (session && is_session_connected()) {
-            if (adv_test_mw_middleware_execution_log.size() < 2000) {
-                std::string bdy = "<body is empty>";
-                if (!_state) { // Re-check _state before accessing response.body()
-                    bdy = "<_state became null before body access>";
-                } else if (!response.body().empty()) {
-                    try { bdy = response.body().template as<std::string>(); } catch(...) { bdy = "<error converting body to string>"; }
-                }
-                adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete] Sending to session. Status: " + std::to_string(response.status_code) + ", Body: '" + bdy + "'. CtxState@" + (_state ? utility::pointer_to_string_for_log(_state.get()) : "NULL") );
+        // Mark the current task (if any) as no longer being processed for cancellation purposes
+        if (!_task_chain.empty() && _current_task_index < _task_chain.size()) {
+            auto current_task_ptr = _task_chain[_current_task_index];
+            if(current_task_ptr) {
+                 current_task_ptr->is_being_processed = false;
+                 std::cerr << "Context::complete: Marked task '" << current_task_ptr->name() << "' at index " << _current_task_index << " as no longer processed." << std::endl;
             }
-            if (!_state) { // Final check before session send
-                 if (adv_test_mw_middleware_execution_log.size() < 2000) {
-                     adv_test_mw_middleware_execution_log.push_back("[Ctx@" + utility::pointer_to_string_for_log(this) + "::complete] ERROR: _state is null before sending to session. Path: " + std::string(this->request.uri().path()));
+        }
+
+        _current_task_result = result; // Store the result from the current task
+        std::cerr << "Context::complete: Stored _current_task_result = " << static_cast<int>(_current_task_result) << std::endl;
+
+        try {
+            switch (result) {
+                case AsyncTaskResult::CONTINUE:
+                    if (_is_cancelled) {
+                        std::cerr << "Context::complete: CONTINUE received but context is cancelled. Finalizing. CurrentTaskIdx: " << _current_task_index << std::endl;
+                        finalize_processing();
+                        return;
+                    }
+                    std::cerr << "Context::complete: CONTINUE received. Old _current_task_index: " << _current_task_index << std::endl;
+                    _current_task_index++;
+                    std::cerr << "Context::complete: CONTINUE. New _current_task_index: " << _current_task_index << ". Calling proceed_to_next_task." << std::endl;
+                    proceed_to_next_task();
+                    break;
+
+                case AsyncTaskResult::COMPLETE:
+                    std::cerr << "Context::complete: COMPLETE received. Calling finalize_processing. CurrentTaskIdx: " << _current_task_index << std::endl;
+                    finalize_processing();
+                    break;
+
+                case AsyncTaskResult::CANCELLED:
+                    _is_cancelled = true; 
+                    std::cerr << "Context::complete: CANCELLED received. Calling finalize_processing. CurrentTaskIdx: " << _current_task_index << std::endl;
+                    finalize_processing();
+                    break;
+
+                case AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR:
+                    std::cerr << "Context::complete: FATAL_SPECIAL_HANDLER_ERROR received. Finalizing with 500. CurrentTaskIdx: " << _current_task_index << std::endl;
+                    _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                    finalize_processing();
+                    break;
+
+                case AsyncTaskResult::ERROR:
+                    std::cerr << "Context::complete: ERROR received. CurrentPhase: " 
+                              << static_cast<int>(_current_processing_phase) << std::endl;
+
+                    if (_is_cancelled) {
+                        std::cerr << "Context::complete: ERROR received but context is cancelled. Prioritizing cancellation. Finalizing." << std::endl;
+                        finalize_processing(); // Finalize with cancellation status
+                        return;
+        }
+
+                    if (_current_processing_phase == ProcessingPhase::ERROR_CHAIN) { // Error in error chain is fatal
+                        std::cerr << "Context::complete: ERROR while already in ERROR_CHAIN. Finalizing with 500. CurrentTaskIdx: " << _current_task_index << std::endl;
+                        _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                        finalize_processing();
+                    } else { // INITIAL, NORMAL_CHAIN, or NOT_FOUND_CHAIN - attempt to use main error chain
+                        if (_current_processing_phase == ProcessingPhase::NOT_FOUND_CHAIN) {
+                             std::cerr << "Context::complete: ERROR in NOT_FOUND_CHAIN. Attempting to switch to user-defined error chain." << std::endl;
+                        } else { // INITIAL or NORMAL_CHAIN
+                             std::cerr << "Context::complete: ERROR in INITIAL/NORMAL_CHAIN. Attempting to switch to user-defined error chain." << std::endl;
+                        }
+                        auto router_core_shared = _router_core_wptr.lock();
+                        if (router_core_shared) {
+                            auto error_chain_tasks = router_core_shared->get_compiled_error_tasks();
+                            if (!error_chain_tasks.empty()) {
+                                set_processing_phase(ProcessingPhase::ERROR_CHAIN);
+                                
+                                std::vector<std::shared_ptr<IAsyncTask<SessionType>>> error_chain_vec;
+                                std::copy(error_chain_tasks.begin(), error_chain_tasks.end(), std::back_inserter(error_chain_vec));
+                                
+                                log_task_chain_snapshot(error_chain_vec, "User-Defined Error Handling Chain", 0);
+                                
+                                std::cerr << "Context::complete: ERROR. Switching to user-defined error chain. Old _current_task_index: " << _current_task_index << std::endl;
+                                _task_chain = std::move(error_chain_vec);
+                                _current_task_index = 0;
+                                std::cerr << "Context::complete: ERROR. New _current_task_index: " << _current_task_index << ". Calling proceed_to_next_task." << std::endl;
+                                proceed_to_next_task();
+                            } else {
+                                std::cerr << "Context::complete: Main error chain is set/retrieved but is empty. Finalizing with 500. CurrentTaskIdx: " << _current_task_index << std::endl;
+                                _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                                finalize_processing();
+                            }
+                        } else {
+                            std::cerr << "Context::complete: RouterCore weak_ptr expired. Cannot use error chain. Finalizing with 500." << std::endl;
+                            _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                            finalize_processing();
+                        }
+                    }
+                    break;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Context::complete: Exception during task completion/next task execution: " << e.what() 
+                      << ". CurrentPhase: " << static_cast<int>(_current_processing_phase) << std::endl;
+            
+            if (_is_cancelled) {
+                std::cerr << "Context::complete: Exception occurred but context is cancelled. Finalizing." << std::endl;
+                finalize_processing();
+            } else if (_current_processing_phase == ProcessingPhase::ERROR_CHAIN) { // Exception in error chain is fatal
+                std::cerr << "Context::complete: Exception occurred while in ERROR_CHAIN. Finalizing with 500." << std::endl;
+                _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                finalize_processing();
+            } else { // INITIAL, NORMAL_CHAIN, or NOT_FOUND_CHAIN during exception - attempt to use main error chain
+                 if (_current_processing_phase == ProcessingPhase::NOT_FOUND_CHAIN) {
+                    std::cerr << "Context::complete: Exception occurred in NOT_FOUND_CHAIN. Attempting to switch to error chain." << std::endl;
+                 } else { // INITIAL or NORMAL_CHAIN
+                    std::cerr << "Context::complete: Exception occurred in INITIAL/NORMAL_CHAIN. Attempting to switch to error chain." << std::endl;
                  }
-                return; // Cannot send without state
+                 _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR; // Set a default error status before trying error chain
+                auto router_core_shared = _router_core_wptr.lock();
+                if (router_core_shared) {
+                    auto error_chain_tasks = router_core_shared->get_compiled_error_tasks();
+                     if (!error_chain_tasks.empty()) {
+                        set_processing_phase(ProcessingPhase::ERROR_CHAIN);
+                        std::vector<std::shared_ptr<IAsyncTask<SessionType>>> error_chain_vec;
+                        std::copy(error_chain_tasks.begin(), error_chain_tasks.end(), std::back_inserter(error_chain_vec));
+                        log_task_chain_snapshot(error_chain_vec, "User-Defined Error Handling Chain (due to exception)", 0);
+                        std::cerr << "Context::complete: Exception handling. Switching to user-defined error chain. Old _current_task_index: " << _current_task_index << std::endl;
+                        _task_chain = std::move(error_chain_vec);
+                        _current_task_index = 0;
+                        std::cerr << "Context::complete: Exception handling. New _current_task_index: " << _current_task_index << ". Calling proceed_to_next_task." << std::endl;
+                        proceed_to_next_task();
+                    } else {
+                        std::cerr << "Context::complete: Error chain (due to exception) is set but empty. Finalizing. CurrentTaskIdx: " << _current_task_index << std::endl;
+                        finalize_processing(); // Finalize with the status set before (INTERNAL_SERVER_ERROR)
+                    }
+                } else {
+                     std::cerr << "Context::complete: RouterCore weak_ptr expired (due to exception). Finalizing." << std::endl;
+                    finalize_processing(); // Finalize with the status set before (INTERNAL_SERVER_ERROR)
+                }
             }
-            try {
-                *session << response;
-                set("_response_sent_by_router_context", true); 
-            } catch (const std::exception& e) {
-                add_event(std::string("RouterContext::complete() send exception: ") + e.what());
-            } catch (...) {
-                add_event("RouterContext::complete() send unknown exception.");
+        }
+        std::cerr << "Context::complete EXIT" << std::endl;
+    }
+
+    /**
+     * @brief Cancels the current request processing.
+     *
+     * Marks the context as cancelled, notifies the currently executing task (if any),
+     * and typically sets an appropriate response status. This will also prevent
+     * further tasks in the main chain from executing and trigger finalization.
+     * The error handling chain is NOT invoked by a direct cancellation.
+     *
+     * @param reason A description of why cancellation occurred.
+     */
+    void cancel(const std::string& reason = "Cancelled by application") {
+        std::cerr << "Context::cancel ENTRY - Reason: " << reason 
+                  << ", IsCancelled: " << _is_cancelled
+                  << ", IsCompleted: " << _is_completed 
+                  << ", CurrentTaskIdx: " << _current_task_index << std::endl;
+
+        if (_is_cancelled || _is_completed) {
+            std::cerr << "Context::cancel: Already cancelled or completed. Ignoring." << std::endl;
+            return;
+        }
+        _is_cancelled = true;
+        _cancellation_reason_internal = reason;
+
+        // Notify the current task if it's still marked as being processed
+        if (!_task_chain.empty() && _current_task_index < _task_chain.size()) {
+            auto current_task_shared_ptr = _task_chain[_current_task_index];
+            if (current_task_shared_ptr && current_task_shared_ptr->is_being_processed) {
+                try {
+                    std::cerr << "Context::cancel: Notifying task '" << current_task_shared_ptr->name() << "' to cancel." << std::endl;
+                    current_task_shared_ptr->cancel(); 
+                } catch (const std::exception& e) {
+                    std::cerr << "Context::cancel: Exception during task's cancel() method: " << e.what() << std::endl;
+    }
+            }
+        }
+
+        _response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE; // Default for cancellation
+        // Consider making this configurable or based on the type of cancellation.
+
+        std::cerr << "Context::cancel: Calling complete(CANCELLED). IsCancelled: " << _is_cancelled << ", IsCompleted: " << _is_completed << std::endl;
+        this->complete(AsyncTaskResult::CANCELLED);
+        std::cerr << "Context::cancel EXIT. IsCancelled: " << _is_cancelled << ", IsCompleted: " << _is_completed << std::endl;
+    }
+
+    bool is_cancelled() const {
+        return _is_cancelled;
+    }
+    
+    bool is_completed() const {
+        return _is_completed;
+    }
+
+    std::optional<std::string> cancellation_reason() const {
+        return _cancellation_reason_internal;
+    }
+
+    // Method to explicitly set the processing phase, e.g., by RouterCore
+    void set_processing_phase(ProcessingPhase new_phase) {
+        std::cerr << "Context::set_processing_phase: Transitioning from " 
+                  << static_cast<int>(_current_processing_phase) 
+                  << " to " << static_cast<int>(new_phase) << std::endl;
+        _current_processing_phase = new_phase;
+    }
+
+public: // Ensuring this section is public or continuing a public one
+    void proceed_to_next_task() {
+        std::cerr << "Context::proceed_to_next_task ENTRY. CurrentTaskIdx: " << _current_task_index
+                  << ", TaskChainSize: " << _task_chain.size() 
+                  << ", IsCancelled: " << _is_cancelled 
+                  << ", IsCompleted: " << _is_completed << std::endl;
+
+        if (_is_cancelled || _is_completed) {
+            std::cerr << "Context::proceed_to_next_task: Cancelled or already completed. Finalizing. CurrentTaskIdx: " << _current_task_index << std::endl;
+            if (!_is_completed) finalize_processing(); // Ensure finalization if not already done
+            return;
+        }
+
+        if (_current_task_index < _task_chain.size()) {
+            auto task_to_execute = _task_chain[_current_task_index];
+            if (task_to_execute) {
+                std::cerr << "Context::proceed_to_next_task: Executing task '" << task_to_execute->name()
+                          << "' at index " << _current_task_index << std::endl;
+                task_to_execute->is_being_processed = true;
+                try {
+                    task_to_execute->execute(this->shared_from_this());
+                } catch (const std::exception& e) {
+                    std::cerr << "Context::proceed_to_next_task: Exception during task->execute() for '" 
+                              << task_to_execute->name() << "': " << e.what() << std::endl;
+                    // Mark as not processed before calling complete, as complete() will do it for the *next* index if error leads to chain switch
+                    task_to_execute->is_being_processed = false; 
+                    std::cerr << "Context::proceed_to_next_task: Exception. Calling complete(ERROR). CurrentTaskIdx: " << _current_task_index << std::endl;
+                    this->complete(AsyncTaskResult::ERROR);
+                } catch (...) {
+                    std::cerr << "Context::proceed_to_next_task: Unknown exception during task->execute() for '" 
+                              << task_to_execute->name() << "'." << std::endl;
+                    task_to_execute->is_being_processed = false;
+                    std::cerr << "Context::proceed_to_next_task: Unknown exception. Calling complete(ERROR). CurrentTaskIdx: " << _current_task_index << std::endl;
+                    this->complete(AsyncTaskResult::ERROR);
+                }
+            } else {
+                std::cerr << "Context::proceed_to_next_task: Null task found at index " << _current_task_index << ". Skipping." << std::endl;
+                _current_task_index++; // Skip null task
+                std::cerr << "Context::proceed_to_next_task: Null task. New _current_task_index: " << _current_task_index << ". Calling proceed_to_next_task (recursive)." << std::endl;
+                proceed_to_next_task(); // Try next
             }
         } else {
-            add_event("RouterContext::complete(): No session or session not connected, response not sent.");
+            std::cerr << "Context::proceed_to_next_task: Task chain exhausted. CurrentTaskIdx: " << _current_task_index << ". Finalizing." << std::endl;
+            // If we were in an error chain and it finished, finalize.
+            // If it was a normal chain, this also means successful completion.
+            finalize_processing();
         }
+        std::cerr << "Context::proceed_to_next_task EXIT. CurrentTaskIdx: " << _current_task_index << std::endl;
     }
+}; // End of class Context<SessionType>
 
-    // For compatibility with existing code
-    PathParameters &path_params = _state->path_params;
-    std::string    &match       = _state->match;
-    bool           &handled     = _state->handled;
-
-    /**
-     * @brief Prepares the context for an asynchronous operation initiated by the handler.
-     * 
-     * This method should be called by a route handler if it intends to complete the
-     * request asynchronously. It marks the context as asynchronous and returns a 
-     * handler object that can be used to complete the request later.
-     * 
-     * @return A shared pointer to an AsyncCompletionHandler, or nullptr if the router
-     *         is not available to manage the async lifecycle.
-     */
-    [[nodiscard]] std::shared_ptr<AsyncCompletionHandler<Session, String>>
-    make_async() {
-        if (!_state) { // Should ideally not happen if context is constructed properly
-            // Log or handle critical error: _state is null
-            return nullptr;
-        }
-        if (!router) {
-            // Log or handle error: Router pointer is null, cannot manage async lifecycle
-            // Or, if adv_test_mw_middleware_execution_log is accessible here:
-            // adv_test_mw_middleware_execution_log.push_back("[Ctx::make_async] CRITICAL: Router is null. Cannot return AsyncCompletionHandler.");
-            return nullptr; 
-        }
-
-        _state->is_async = true;
-        _state->handled = true; // <<< Ensure this is set for async operations initiated by handler
-        _state->_handler_initiated_async = true; // Mark that the handler specifically called make_async
-        set_processing_stage(RequestProcessingStage::AWAITING_HANDLER_ASYNC_COMPLETION);
-        
-        // Ensure this context is in the router's active list
-        // The router pointer itself is the key for _active_async_requests in some contexts,
-        // but here, context_id is derived from the context object's address.
-        std::uintptr_t context_id = reinterpret_cast<std::uintptr_t>(this);
-        // This relies on Router having a method to add/get active requests if not already present.
-        // For now, let's assume the router's route_context or similar logic handles adding to _active_async_requests
-        // when it detects is_async is true after the handler runs.
-        // Or, AsyncCompletionHandler's constructor/complete() method interacts with router's active requests.
-        // The AsyncCompletionHandler itself gets the router and context_id, so it can manage this.
-
-        // We need to provide a shared_ptr to *this context for the AsyncCompletionHandler if it needs it.
-        // However, AsyncCompletionHandler takes Context&.
-        // The main thing is that the Router's _active_async_requests map needs to hold a shared_ptr to this context
-        // to keep it alive. This typically happens in Router::route_context when it sees the async flag.
-
-        if (adv_test_mw_middleware_execution_log.size() < 2000 && _state) {
-            adv_test_mw_middleware_execution_log.push_back(std::string("[Ctx@") + utility::pointer_to_string_for_log(this) + "::make_async] Marked async. Stage: " + utility::to_string_for_log(get_processing_stage()) + ". CtxState@" + utility::pointer_to_string_for_log(_state.get()) + "]");
-        }
-        
-        // The AsyncCompletionHandler needs `*this` (the context) and the router pointer.
-        return std::make_shared<AsyncCompletionHandler<Session, String>>(*this, router);
-    }
-
-    /**
-     * @brief Checks if the current asynchronous state was initiated by the route handler.
-     * @return true if the handler called make_async(), false otherwise.
-     */
-    [[nodiscard]] bool handler_initiated_async() const {
-        return _state ? _state->_handler_initiated_async : false;
-    }
-
-    /**
-     * @brief Clears the flag indicating that the handler initiated an async operation.
-     * Typically called by TRoute when a synchronous handler completes after async middleware.
-     */
-    void clear_handler_initiated_async_flag() {
-        if (_state) {
-            _state->_handler_initiated_async = false;
-        }
-    }
-
-    // For backward compatibility with existing tests
-    // Point 2: Ensure this returns the external ::qb::http::AsyncCompletionHandler
-    ::qb::http::AsyncCompletionHandler<Session, String> *
-    get_completion_handler(Router<Session, String> &r) {
-        mark_async();
-        // This should correctly instantiate the external AsyncCompletionHandler
-        // The constructor of ::qb::http::AsyncCompletionHandler takes (Context&, Router*)
-        // Note: Caller is responsible for deleting the returned raw pointer.
-        return new ::qb::http::AsyncCompletionHandler<Session, String>(*this, &r);
-    }
-
-    /**
-     * @brief Mark request as deferred
-     * @return Reference to this context
-     *
-     * Marks a request as deferred for later processing,
-     * allowing for delayed processing in an event-driven system.
-     */
-    RouterContext &
-    mark_deferred() {
-        _state->is_deferred = true;
-        _state->is_async    = true; // Deferred requests are also async
-        _state->handled     = true; // Deferred requests are also handled
-        return *this;
-    }
-
-    /**
-     * @brief Check if request is marked as deferred
-     * @return true if deferred, false otherwise
-     */
-    [[nodiscard]] bool
-    is_deferred() const {
-        return _state->is_deferred;
-    }
-
-    /**
-     * @brief Add an event to the context event log
-     * @param event_name Name of the event
-     */
-    void
-    add_event(const std::string &event_name) {
-        _state->events.push_back(event_name);
-    }
-
-    /**
-     * @brief Get the event log
-     * @return Vector of logged events
-     */
-    [[nodiscard]] const std::vector<std::string> &
-    events() const {
-        return _state->events;
-    }
-
-    // Create an AsyncMiddlewareResult for asynchronous continuation
-    std::shared_ptr<AsyncMiddlewareResult>
-    make_middleware_result(std::function<void(bool)> callback) {
-        return std::make_shared<AsyncMiddlewareResult>(std::move(callback));
-    }
-
-    // Helper method to check if the session is still connected.
-    // This checks the session object directly if available and if the session type supports an is_connected() method.
-    [[nodiscard]] bool is_session_connected() const {
-        if (!session) {
-            return false; // No session associated with the context.
-        }
-        
-        // Check for is_connected() method on the Session type using SFINAE/type traits.
-        if constexpr (detail::has_method_is_connected<Session>::value) {
-            return session->is_connected();
-        }
-        
-        return true; // Assume connected if no is_connected method is available on the session object.
-    }
-
-    /**
-     * @brief Marks the context as unhandled, for testing purposes only
-     */
-    void
-    mark_unhandled() {
-        if (_state) _state->handled = false;
-    }
-};
-
-// Alias for backward compatibility
-template <typename Session, typename String = std::string>
-using Context = RouterContext<Session, String>;
-
-}
+} // namespace qb::http 

@@ -44,17 +44,12 @@ qb_register_module(
         http.cpp
         # Body
         body.cpp
-        # Routing
-        routing/radix_tree.cpp
-        routing/routing.cpp
         # Validation
-        validation/validation.cpp
-        validation/json_schema.cpp
-        validation/query_validator.cpp
+        validation/parameter_validator.cpp
+        validation/request_validator.cpp
+        validation/rule.cpp
         validation/sanitizer.cpp
-        # OpenAPI Documentation
-        openapi/document.cpp
-        openapi/swagger_ui.cpp
+        validation/schema_validator.cpp
 )
 
 if (QB_BUILD_TEST)

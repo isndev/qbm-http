@@ -1,816 +1,1117 @@
 #include <gtest/gtest.h>
-#include <thread>
-#include <filesystem>
-#include <fstream>
-#include "../auth/auth.h"
-#include "../middleware/auth.h"
-#include "../routing/router.h"
-#include "../routing/router.tpp"
+#include "../http.h" // Should provide Router, Request, Response, Context, IMiddleware, MiddlewareTask, etc.
+#include "../middleware/auth.h" // The adapted AuthMiddleware
+#include "../auth.h"       // For qb::http::auth::User, qb::http::auth::Options
 
-// Forward declarations for helper functions 
-std::string readFileContents(const std::string &filename);
-void writeFileContents(const std::string &filename, const std::string &content);
-void generateTestKeys(const std::string &keys_path);
+#include <memory>
+#include <string>
+#include <vector>
+#include <functional>
+#include <sstream> // For ostringstream in session mock
+#include <chrono>  // For time-based tests
+#include <qb/io/crypto_jwt.h> // For qb::jwt::create and options
+#include <qb/json.h>          // For qb::json
+#include <algorithm> // For std::transform
+#include <stdexcept> // For std::runtime_error
+#include <optional> // For std::optional
 
-// Mock session for testing
-class MockSession {
-public:
-    bool is_closed = false;
-    qb::http::Response last_response;
+// --- Mock Session for AuthMiddleware Tests ---
+struct MockAuthSession {
+    qb::http::Response _response;
+    std::string _session_id_str = "auth_test_session";
+    std::ostringstream _trace;
+    std::optional<qb::http::auth::User> _user_in_context;
+    bool _final_handler_called = false;
 
-    MockSession() = default;
+    qb::http::Response& get_response_ref() { return _response; }
 
-    bool is_connected() const {
-        return !is_closed;
-    }
-
-    void close() {
-        is_closed = true;
-    }
-
-    MockSession& operator<<(qb::http::Response res) {
-        last_response = std::move(res);
+    MockAuthSession& operator<<(const qb::http::Response& resp) {
+        _response = resp;
         return *this;
     }
+
+    void reset() {
+        _response = qb::http::Response();
+        _trace.str("");
+        _trace.clear();
+        _user_in_context.reset();
+        _final_handler_called = false;
+    }
+
+    void trace(const std::string& point) {
+        if (!_trace.str().empty()) _trace << ";";
+        _trace << point;
+    }
+    std::string get_trace() const { return _trace.str(); }
 };
 
-// Test fixture for auth middleware tests
+// Helper to get current epoch time
+static uint64_t current_epoch_time() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+               .count());
+}
+
+// --- Test Fixture for AuthMiddleware --- 
 class AuthMiddlewareTest : public ::testing::Test {
 protected:
-    std::string keys_path;
-    qb::http::auth::Options auth_options;
-    qb::http::auth::User test_user;
-    std::string token;
-    bool done_callbacks_executed = false;
+    std::shared_ptr<MockAuthSession> _session;
+    std::unique_ptr<qb::http::Router<MockAuthSession>> _router;
+    qb::http::auth::Options _auth_options;
+    std::shared_ptr<qb::http::AuthMiddleware<MockAuthSession>> _auth_mw;
+
+    // Default secret key for tests
+    const std::string _test_secret = "test_secret_key_for_auth_middleware_123";
 
     void SetUp() override {
-        // Setup test keys
-        keys_path = "/tmp/qb_auth_test_keys";
-        generateTestKeys(keys_path);
-
-        // Setup auth options with HMAC algorithm for simplicity
-        auth_options.algorithm(qb::http::auth::Options::Algorithm::HMAC_SHA256);
-        auth_options.secret_key("test-secret-key");
-
-        // Create auth manager to generate tokens for testing
-        qb::http::auth::Manager auth_manager(auth_options);
-
-        // Create test user
-        test_user.id = "user123";
-        test_user.username = "testuser";
-        test_user.roles = {"user", "editor"};
-        test_user.metadata["email"] = "testuser@example.com";
-
-        // Generate token
-        token = auth_manager.generate_token(test_user);
+        _session = std::make_shared<MockAuthSession>();
+        _router = std::make_unique<qb::http::Router<MockAuthSession>>();
+        _auth_options.secret_key(_test_secret);
+        // Default auth middleware instance, can be replaced in tests
+        _auth_mw = qb::http::create_auth_middleware<MockAuthSession>(_auth_options);
     }
 
-    void TearDown() override {
-        // Optional: Clean up test keys
-        // std::filesystem::remove_all(keys_path);
-    }
-
-    // Helper to create a context with authentication headers
-    qb::http::RouterContext<MockSession> createContext(const std::string& auth_header = "") {
-        auto session = std::make_shared<MockSession>();
+    qb::http::Request create_request(qb::http::method method_val = qb::http::method::HTTP_GET, const std::string& target_path = "/test") {
         qb::http::Request req;
-        
-        if (!auth_header.empty()) {
-            req.headers()["Authorization"].push_back(auth_header);
+        req.method = method_val;
+        try {
+            req.uri() = qb::io::uri(target_path);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "URI parse failure in create_request: " << target_path << " (" << e.what() << ")";
+            req.uri() = qb::io::uri("/_ERROR_URI_");
         }
-        
-        qb::http::Router<MockSession> router;
-        return qb::http::RouterContext<MockSession>(session, std::move(req), &router);
+        return req;
     }
-    
-    // Helper to execute done callbacks
-    void execute_done_callbacks(qb::http::RouterContext<MockSession>& ctx) {
-        done_callbacks_executed = true;
-        ctx.execute_after_callbacks();
+
+    // Handler that runs if authentication passes
+    qb::http::RouteHandlerFn<MockAuthSession> success_handler() {
+        return [this](std::shared_ptr<qb::http::Context<MockAuthSession>> ctx) {
+            _session->trace("SuccessHandlerCalled");
+            _session->_final_handler_called = true;
+            if (ctx->has("user")) {
+                _session->_user_in_context = ctx->template get<qb::http::auth::User>("user");
+            }
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().body() = "Access Granted";
+            ctx->complete();
+        };
+    }
+
+    void configure_router_with_auth_mw(std::shared_ptr<qb::http::AuthMiddleware<MockAuthSession>> auth_mw_to_use) {
+        _router->use(auth_mw_to_use); // Router will wrap this in a MiddlewareTask
+        _router->get("/test", success_handler());
+        _router->compile();
+    }
+
+    void make_request(qb::http::Request request) {
+        _session->reset();
+        _router->route(_session, std::move(request));
+        // Assuming AuthMiddleware is synchronous and doesn't use TaskExecutor for JWT verification itself
+    }
+
+    std::string generate_test_token(const qb::http::auth::User& user, const std::string& secret_override = "") {
+        qb::http::auth::Manager temp_manager(secret_override.empty() ? _auth_options : qb::http::auth::Options().secret_key(secret_override));
+        return temp_manager.generate_token(user);
     }
 };
 
-// Test authentication middleware with valid token
+// --- Test Cases --- 
+
 TEST_F(AuthMiddlewareTest, ValidTokenAuthentication) {
-    // Create middleware with auth options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
+    qb::http::auth::User test_user{"user123", "testuser", {"user"}};
+    std::string token = generate_test_token(test_user);
+
+    configure_router_with_auth_mw(_auth_mw); // Use default auth_mw
     
-    // Create context with valid token
-    auto ctx = createContext("Bearer " + token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_continue());
-    EXPECT_FALSE(result.should_stop());
-    EXPECT_TRUE(ctx.has("user"));
-    
-    // Verify that user data was properly set in context
-    const auto& user = ctx.get<qb::http::auth::User>("user");
-    EXPECT_EQ(user.id, test_user.id);
-    EXPECT_EQ(user.username, test_user.username);
-    EXPECT_EQ(user.roles.size(), test_user.roles.size());
+    auto req = create_request();
+    req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.body().template as<std::string>(), "Access Granted");
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "user123");
 }
 
-// Test authentication middleware with missing token
 TEST_F(AuthMiddlewareTest, MissingToken) {
-    // Create middleware with auth options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    
-    // Create context without authorization header
-    auto ctx = createContext();
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_stop());
-    EXPECT_FALSE(result.should_continue());
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-    EXPECT_FALSE(ctx.has("user"));
+    _auth_mw->with_auth_required(true); // Ensure auth is required
+    configure_router_with_auth_mw(_auth_mw);
+
+    make_request(create_request()); // No token header
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_NE(_session->_response.body().template as<std::string>().find("Authentication required"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
 }
 
-// Test authentication middleware with invalid token
 TEST_F(AuthMiddlewareTest, InvalidToken) {
-    // Create middleware with auth options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    
-    // Create context with invalid token
-    auto ctx = createContext("Bearer invalid.token.here");
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_stop());
-    EXPECT_FALSE(result.should_continue());
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-    EXPECT_FALSE(ctx.has("user"));
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    auto req = create_request();
+    req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " an_invalid_token_string");
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    // The exact message depends on qb::jwt::verify or AuthManager's verify_token
+    EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid or expired token"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
 }
 
-// Test authorization middleware with valid roles
 TEST_F(AuthMiddlewareTest, ValidRoleAuthorization) {
-    // Create middleware with auth options and required role
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    middleware.with_roles({"editor"});
-    
-    // Create context with valid token
-    auto ctx = createContext("Bearer " + token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_continue());
-    EXPECT_FALSE(result.should_stop());
-    EXPECT_TRUE(ctx.has("user"));
-    EXPECT_NE(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
+    _auth_mw->with_auth_required(true).with_roles({"admin"});
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::http::auth::User admin_user{"admin1", "adminuser", {"admin", "user"}};
+    std::string token = generate_test_token(admin_user);
+
+    auto req = create_request();
+    req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->username, "adminuser");
 }
 
-// Test authorization middleware with invalid roles
 TEST_F(AuthMiddlewareTest, InvalidRoleAuthorization) {
-    // Create middleware with auth options and required role
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    middleware.with_roles({"admin"});
-    
-    // Create context with valid token but insufficient roles
-    auto ctx = createContext("Bearer " + token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_stop());
-    EXPECT_FALSE(result.should_continue());
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
+    _auth_mw->with_auth_required(true).with_roles({"admin"});
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::http::auth::User regular_user{"user001", "reguser", {"user"}};
+    std::string token = generate_test_token(regular_user);
+
+    auto req = create_request();
+    req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_NE(_session->_response.body().template as<std::string>().find("Insufficient permissions"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
 }
 
-// Test authorization middleware requiring all roles
-TEST_F(AuthMiddlewareTest, RequireAllRoles) {
-    // Test when user has all required roles
-    {
-        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-        middleware.with_roles({"user", "editor"}, true); // require_all = true
-        
-        auto ctx = createContext("Bearer " + token);
-        auto result = middleware.process(ctx);
-        
-        EXPECT_TRUE(result.should_continue());
-        EXPECT_FALSE(result.should_stop());
-        EXPECT_TRUE(ctx.has("user"));
-    }
-    
-    // Test when user doesn't have all required roles
-    {
-        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-        middleware.with_roles({"user", "admin"}, true); // require_all = true
-        
-        auto ctx = createContext("Bearer " + token);
-        auto result = middleware.process(ctx);
-        
-        EXPECT_TRUE(result.should_stop());
-        EXPECT_FALSE(result.should_continue());
-        EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
-    }
-}
-
-// Test custom user context key
-TEST_F(AuthMiddlewareTest, CustomUserContextKey) {
-    // Create middleware with custom user context key
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    middleware.with_user_context_key("custom_user");
-    
-    // Create context with valid token
-    auto ctx = createContext("Bearer " + token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_continue());
-    EXPECT_FALSE(result.should_stop());
-    EXPECT_FALSE(ctx.has("user")); // Default key not used
-    EXPECT_TRUE(ctx.has("custom_user")); // Custom key used instead
-    
-    const auto& user = ctx.get<qb::http::auth::User>("custom_user");
-    EXPECT_EQ(user.id, test_user.id);
-}
-
-// Test token expiration within middleware
-TEST_F(AuthMiddlewareTest, ExpiredTokenMiddleware) {
-    // Create options with short expiration
-    qb::http::auth::Options options_expired = auth_options;
-    options_expired.token_expiration(std::chrono::seconds(1));
-    
-    // Create auth manager with short expiration options
-    qb::http::auth::Manager expired_manager(options_expired);
-    std::string expired_token = expired_manager.generate_token(test_user);
-    
-    // Wait for the token to expire
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-    
-    // Create middleware with original auth options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    
-    // Create context with expired token
-    auto ctx = createContext("Bearer " + expired_token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_stop());
-    EXPECT_FALSE(result.should_continue());
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-    EXPECT_FALSE(ctx.has("user"));
-}
-
-// Test token not yet valid (nbf claim) within middleware
-TEST_F(AuthMiddlewareTest, NotYetValidTokenMiddleware) {
-    // Create options and generate a token with nbf in the future
-    qb::json payload = {
-        {"sub", test_user.id},
-        {"username", test_user.username},
-        {"roles", test_user.roles},
-        {"iat", std::time(nullptr)},
-        {"nbf", std::time(nullptr) + 3600} // Not valid for 1 hour
-    };
-    
-    qb::jwt::CreateOptions jwt_options;
-    jwt_options.algorithm = qb::jwt::Algorithm::HS256;
-    jwt_options.key = "test-secret-key";
-    
-    std::map<std::string, std::string> claims_map;
-    for (auto it = payload.begin(); it != payload.end(); ++it) {
-        if (it.value().is_string()) {
-            claims_map[it.key()] = it.value().get<std::string>();
-        } else {
-            claims_map[it.key()] = it.value().dump();
-        }
-    }
-    
-    std::string nbf_token = qb::jwt::create(claims_map, jwt_options);
-    
-    // Create middleware with auth options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    
-    // Create context with future token
-    auto ctx = createContext("Bearer " + nbf_token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_stop());
-    EXPECT_FALSE(result.should_continue());
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-    EXPECT_FALSE(ctx.has("user"));
-}
-
-// Test with RSA Algorithm
-TEST_F(AuthMiddlewareTest, DISABLED_RSAAlgorithm) {
-    std::string rsa_private_key, rsa_public_key;
-    try {
-        rsa_private_key = readFileContents(keys_path + "/rsa_private.pem");
-        rsa_public_key = readFileContents(keys_path + "/rsa_public.pem");
-    } catch (const std::exception& e) {
-        GTEST_SKIP() << "Skipping RSA test due to missing key files: " << e.what();
-    }
-
-    // Create RSA auth options
-    qb::http::auth::Options rsa_options;
-    rsa_options.algorithm(qb::http::auth::Options::Algorithm::RSA_SHA256);
-    rsa_options.private_key(rsa_private_key);
-    rsa_options.public_key(rsa_public_key);
-    
-    // Create auth manager with RSA options
-    qb::http::auth::Manager rsa_manager(rsa_options);
-    std::string rsa_token = rsa_manager.generate_token(test_user);
-    
-    // Create middleware with RSA options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(rsa_options);
-    
-    // Create context with RSA token
-    auto ctx = createContext("Bearer " + rsa_token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_continue());
-    EXPECT_FALSE(result.should_stop());
-    EXPECT_TRUE(ctx.has("user"));
-    
-    const auto& user = ctx.get<qb::http::auth::User>("user");
-    EXPECT_EQ(user.id, test_user.id);
-    
-    // Test verification failure with wrong public key
-    qb::http::auth::Options wrong_key_options = rsa_options;
-    wrong_key_options.public_key("-----BEGIN PUBLIC KEY-----\n...invalid key...\n-----END PUBLIC KEY-----");
-    
-    auto wrong_key_middleware = qb::http::AuthMiddleware<MockSession>(wrong_key_options);
-    auto ctx_fail = createContext("Bearer " + rsa_token);
-    auto result_fail = wrong_key_middleware.process(ctx_fail);
-    
-    EXPECT_TRUE(result_fail.should_stop());
-    EXPECT_FALSE(result_fail.should_continue());
-    EXPECT_EQ(ctx_fail.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-}
-
-// Test Custom Authentication Scheme
-TEST_F(AuthMiddlewareTest, CustomAuthScheme) {
-    // Create options with custom auth scheme
-    qb::http::auth::Options custom_scheme_options = auth_options;
-    custom_scheme_options.auth_scheme("JWT"); // Use JWT instead of Bearer
-    
-    // Create auth manager with custom scheme
-    qb::http::auth::Manager custom_manager(custom_scheme_options);
-    std::string custom_token = custom_manager.generate_token(test_user);
-    
-    // Create middleware with custom scheme options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(custom_scheme_options);
-
-    // Test with correct custom scheme
-    auto ctx_correct = createContext("JWT " + custom_token); // Note: JWT scheme used
-    auto result_correct = middleware.process(ctx_correct);
-    
-    EXPECT_TRUE(result_correct.should_continue());
-    EXPECT_FALSE(result_correct.should_stop());
-    EXPECT_TRUE(ctx_correct.has("user"));
-
-    // Test with default Bearer scheme (should fail)
-    auto ctx_wrong_scheme = createContext("Bearer " + custom_token);
-    auto result_wrong_scheme = middleware.process(ctx_wrong_scheme);
-    
-    EXPECT_TRUE(result_wrong_scheme.should_stop());
-    EXPECT_FALSE(result_wrong_scheme.should_continue());
-    EXPECT_EQ(ctx_wrong_scheme.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-}
-
-// Test Authorization with Empty Roles
-TEST_F(AuthMiddlewareTest, AuthorizationEmptyRoles) {
-    // Create a user with no roles
-    qb::http::auth::User user_no_roles;
-    user_no_roles.id = "user_no_roles";
-    user_no_roles.username = "norolesuser";
-    
-    // Generate token for user with no roles
-    qb::http::auth::Manager auth_manager(auth_options);
-    std::string token_no_roles = auth_manager.generate_token(user_no_roles);
-    
-    // Test with empty required roles (should succeed)
-    {
-        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-        // No roles specified (empty by default)
-        
-        auto ctx = createContext("Bearer " + token_no_roles);
-        auto result = middleware.process(ctx);
-        
-        EXPECT_TRUE(result.should_continue());
-        EXPECT_FALSE(result.should_stop());
-        EXPECT_TRUE(ctx.has("user"));
-    }
-    
-    // Test with non-empty required roles (should fail)
-    {
-        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-        middleware.with_roles({"admin"});
-        
-        auto ctx = createContext("Bearer " + token_no_roles);
-        auto result = middleware.process(ctx);
-        
-        EXPECT_TRUE(result.should_stop());
-        EXPECT_FALSE(result.should_continue());
-        EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
-    }
-    
-    // Test with user WITH roles against an empty required list (should succeed)
-    {
-        auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-        // No roles specified (empty by default)
-        
-        auto ctx = createContext("Bearer " + token); // Use original user with roles
-        auto result = middleware.process(ctx);
-        
-        EXPECT_TRUE(result.should_continue());
-        EXPECT_FALSE(result.should_stop());
-        EXPECT_TRUE(ctx.has("user"));
-    }
-}
-
-// Test Clock Skew Tolerance
-TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
-    // 1. Test expiration with positive skew
-    {
-        // Token expired 10 seconds ago
-        qb::json payload_exp = {
-            {"sub", test_user.id},
-            {"iat", std::time(nullptr) - 60},
-            {"exp", std::time(nullptr) - 10} 
-        };
-        
-        qb::jwt::CreateOptions jwt_options_exp;
-        jwt_options_exp.algorithm = qb::jwt::Algorithm::HS256;
-        jwt_options_exp.key = "test-secret-key";
-        
-        std::map<std::string, std::string> claims_map_exp;
-        for (auto it = payload_exp.begin(); it != payload_exp.end(); ++it) {
-             claims_map_exp[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
-        }
-        
-        std::string expired_token = qb::jwt::create(claims_map_exp, jwt_options_exp);
-
-        // Configure middleware with 30 seconds tolerance
-        qb::http::auth::Options options_skew = auth_options;
-        options_skew.clock_skew_tolerance(std::chrono::seconds(30));
-        
-        auto middleware_skew = qb::http::AuthMiddleware<MockSession>(options_skew);
-        auto ctx_skew = createContext("Bearer " + expired_token);
-        auto result_skew = middleware_skew.process(ctx_skew);
-        
-        EXPECT_TRUE(result_skew.should_continue()) << "Token expired recently should be accepted with tolerance";
-        EXPECT_FALSE(result_skew.should_stop());
-        EXPECT_TRUE(ctx_skew.has("user"));
-    }
-    
-    // 2. Test not-before (nbf) with positive skew
-    {
-        // Token not valid for another 10 seconds
-        qb::json payload_nbf = {
-            {"sub", test_user.id},
-            {"iat", std::time(nullptr)},
-            {"nbf", std::time(nullptr) + 10} 
-        };
-        
-        qb::jwt::CreateOptions jwt_options_nbf;
-        jwt_options_nbf.algorithm = qb::jwt::Algorithm::HS256;
-        jwt_options_nbf.key = "test-secret-key";
-        
-        std::map<std::string, std::string> claims_map_nbf;
-        for (auto it = payload_nbf.begin(); it != payload_nbf.end(); ++it) {
-             claims_map_nbf[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
-        }
-        
-        std::string nbf_token = qb::jwt::create(claims_map_nbf, jwt_options_nbf);
-
-        // Configure middleware with 30 seconds tolerance
-        qb::http::auth::Options options_skew = auth_options;
-        options_skew.clock_skew_tolerance(std::chrono::seconds(30));
-        
-        auto middleware_skew = qb::http::AuthMiddleware<MockSession>(options_skew);
-        auto ctx_skew_nbf = createContext("Bearer " + nbf_token);
-        auto result_skew_nbf = middleware_skew.process(ctx_skew_nbf);
-        
-        EXPECT_TRUE(result_skew_nbf.should_continue()) << "Token not yet valid should be accepted with tolerance";
-        EXPECT_FALSE(result_skew_nbf.should_stop());
-        EXPECT_TRUE(ctx_skew_nbf.has("user"));
-    }
-}
-
-// Test Issuer/Audience Verification Flexibility
-TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
-    // Case 1: Token has iss/aud, middleware doesn't verify
-    {
-        qb::json payload_with = {
-            {"sub", test_user.id},
-            {"iss", "my-issuer"},
-            {"aud", "my-audience"}
-        };
-        
-        qb::jwt::CreateOptions jwt_options_with;
-        jwt_options_with.algorithm = qb::jwt::Algorithm::HS256;
-        jwt_options_with.key = "test-secret-key";
-        
-        std::map<std::string, std::string> claims_map_with;
-        for (auto it = payload_with.begin(); it != payload_with.end(); ++it) {
-             claims_map_with[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
-        }
-        
-        std::string token_with = qb::jwt::create(claims_map_with, jwt_options_with);
-
-        // Middleware with default options (no verification)
-        auto middleware_no_verify = qb::http::AuthMiddleware<MockSession>(auth_options);
-        auto ctx_no_verify = createContext("Bearer " + token_with);
-        auto result_no_verify = middleware_no_verify.process(ctx_no_verify);
-        
-        EXPECT_TRUE(result_no_verify.should_continue()) << "Should pass when iss/aud present but not verified";
-        EXPECT_FALSE(result_no_verify.should_stop());
-        EXPECT_TRUE(ctx_no_verify.has("user"));
-    }
-
-    // Case 2: Middleware verifies iss/aud, token doesn't have them
-    {
-        qb::json payload_without = { {"sub", test_user.id} };
-        
-        qb::jwt::CreateOptions jwt_options_without;
-        jwt_options_without.algorithm = qb::jwt::Algorithm::HS256;
-        jwt_options_without.key = "test-secret-key";
-        
-        std::map<std::string, std::string> claims_map_without;
-         for (auto it = payload_without.begin(); it != payload_without.end(); ++it) {
-             claims_map_without[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
-        }
-        
-        std::string token_without = qb::jwt::create(claims_map_without, jwt_options_without);
-
-        // Middleware configured to verify
-        qb::http::auth::Options options_verify = auth_options;
-        options_verify.token_issuer("my-issuer"); // Enables issuer verification
-        options_verify.token_audience("my-audience"); // Enables audience verification
-        
-        auto middleware_verify = qb::http::AuthMiddleware<MockSession>(options_verify);
-        auto ctx_verify = createContext("Bearer " + token_without);
-        auto result_verify = middleware_verify.process(ctx_verify);
-        
-        EXPECT_TRUE(result_verify.should_stop()) << "Should fail when iss/aud missing but verification enabled";
-        EXPECT_FALSE(result_verify.should_continue());
-        EXPECT_EQ(ctx_verify.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-        EXPECT_FALSE(ctx_verify.has("user"));
-    }
-}
-
-// Test Authorization with require_all=false (explicitly)
-TEST_F(AuthMiddlewareTest, AuthorizeRequireAnyRole) {
-    // Create middleware with roles (at least one required)
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    middleware.with_roles({"editor", "admin"}, false); // require_all = false
-    
-    // Create context with valid token (user has "editor" role)
-    auto ctx = createContext("Bearer " + token);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_continue()) << "User should be authorized having one of the required roles";
-    EXPECT_FALSE(result.should_stop());
-    EXPECT_TRUE(ctx.has("user"));
-    EXPECT_NE(ctx.response.status_code, HTTP_STATUS_FORBIDDEN);
-
-    // Try with roles the user doesn't have
-    auto middleware_fail = qb::http::AuthMiddleware<MockSession>(auth_options);
-    middleware_fail.with_roles({"manager", "admin"}, false);
-    
-    auto ctx_fail = createContext("Bearer " + token);
-    auto result_fail = middleware_fail.process(ctx_fail);
-    
-    EXPECT_TRUE(result_fail.should_stop()) << "User should not be authorized without any required roles";
-    EXPECT_FALSE(result_fail.should_continue());
-    EXPECT_EQ(ctx_fail.response.status_code, HTTP_STATUS_FORBIDDEN);
-}
-
-// Test Case-Insensitive Header Name
-TEST_F(AuthMiddlewareTest, CaseInsensitiveHeader) {
-    // Create middleware with auth options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    
-    // Create context with lowercase header name
-    auto session_ci = std::make_shared<MockSession>();
-    qb::http::Request req_ci;
-    req_ci.headers()["authorization"].push_back("Bearer " + token); // Lowercase header
-    qb::http::Router<MockSession> router_ci;
-    auto ctx_ci = qb::http::RouterContext<MockSession>(session_ci, std::move(req_ci), &router_ci);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx_ci);
-    
-    // The test should pass if the middleware handles case-insensitivity correctly
-    EXPECT_TRUE(result.should_continue()) << "Authentication should succeed if header lookup is case-insensitive";
-    EXPECT_FALSE(result.should_stop());
-    EXPECT_TRUE(ctx_ci.has("user"));
-}
-
-// Test Multiple Authorization Headers
-TEST_F(AuthMiddlewareTest, MultipleAuthHeaders) {
-    // Create middleware with auth options
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    
-    // Create context with multiple auth headers
-    auto session_multi = std::make_shared<MockSession>();
-    qb::http::Request req_multi;
-    
-    // Add the valid header first
-    req_multi.headers()["Authorization"].push_back("Bearer " + token);
-    // Add another invalid/dummy header with the same key
-    req_multi.headers()["Authorization"].push_back("Bearer invalid-token"); 
-    
-    qb::http::Router<MockSession> router_multi;
-    auto ctx_multi = qb::http::RouterContext<MockSession>(session_multi, std::move(req_multi), &router_multi);
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx_multi);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_continue()) << "Middleware should use the first valid Authorization header found";
-    EXPECT_FALSE(result.should_stop());
-    EXPECT_TRUE(ctx_multi.has("user"));
-    
-    const auto& user = ctx_multi.get<qb::http::auth::User>("user");
-    EXPECT_EQ(user.id, test_user.id);
-}
-
-// Test Empty Secret Key Handling
-TEST_F(AuthMiddlewareTest, EmptySecretKey) {
-    // Create options with empty secret key
-    qb::http::auth::Options empty_secret_options;
-    empty_secret_options.algorithm(qb::http::auth::Options::Algorithm::HMAC_SHA256);
-    empty_secret_options.secret_key(""); // Empty secret
-
-    // Create middleware with empty secret
-    auto middleware = qb::http::AuthMiddleware<MockSession>(empty_secret_options);
-    
-    // Create context with dummy token
-    auto ctx = createContext("Bearer some-token"); 
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_stop()) << "Authenticate should fail when configured with an empty secret for HMAC";
-    EXPECT_FALSE(result.should_continue());
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_UNAUTHORIZED);
-    EXPECT_FALSE(ctx.has("user"));
-}
-
-// Test Custom Error Handler
-TEST_F(AuthMiddlewareTest, CustomErrorHandler) {
-    // Create middleware with custom error handler
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    middleware.with_error_handler([](auto& ctx, int status_code, const std::string& message) {
-        // Custom error response
-        ctx.response.status_code = HTTP_STATUS_PAYMENT_REQUIRED; // Different status code
-        ctx.response.add_header("Content-Type", "application/json");
-        ctx.response.body() = "{\"custom_error\":\"" + message + "\"}";
-        return qb::http::MiddlewareResult::Stop();
-    });
-    
-    // Create context without auth header
-    auto ctx = createContext();
-    
-    // Process request through middleware
-    auto result = middleware.process(ctx);
-    
-    // Check middleware result and context state
-    EXPECT_TRUE(result.should_stop());
-    EXPECT_FALSE(result.should_continue());
-    EXPECT_EQ(ctx.response.status_code, HTTP_STATUS_PAYMENT_REQUIRED); // Custom status code
-    EXPECT_EQ(ctx.response.header("Content-Type"), "application/json");
-    EXPECT_FALSE(ctx.has("user"));
-}
-
-// Test Optional Authentication
 TEST_F(AuthMiddlewareTest, OptionalAuthentication) {
-    // Create middleware with optional authentication
-    auto middleware = qb::http::AuthMiddleware<MockSession>(auth_options);
-    middleware.with_auth_required(false);
+    // Create a new AuthMiddleware instance configured for optional auth
+    auto optional_auth_mw = qb::http::create_optional_auth_middleware<MockAuthSession>(_auth_options);
+    configure_router_with_auth_mw(optional_auth_mw);
+
+    // Scenario 1: No token provided, should still allow access
+    make_request(create_request());
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.body().template as<std::string>(), "Access Granted");
+    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_FALSE(_session->_user_in_context.has_value()); // No user in context
+
+    _session->reset(); // Reset for next scenario
+
+    // Scenario 2: Valid token provided, user should be in context
+    qb::http::auth::User test_user{"user789", "optional_test", {"viewer"}};
+    std::string token = generate_test_token(test_user);
+    auto req_with_token = create_request();
+    req_with_token.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req_with_token));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "user789");
+}
+
+TEST_F(AuthMiddlewareTest, ExpiredTokenMiddleware) {
+    // Create options for a token that expires quickly
+    qb::http::auth::Options expiring_options = _auth_options; // Start with fixture defaults
+    expiring_options.token_expiration(std::chrono::seconds(-3600)); // Expired one hour ago
+    expiring_options.verify_expiration(true); // Ensure expiration is checked
+
+    _auth_mw->with_options(expiring_options); // Apply to the middleware's manager
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::http::auth::User test_user{"exp_user", "expired", {"user"}};
+    // Generate token with the expiring options (via the auth_mw's manager, which now has expiring_options)
+    std::string expired_token = _auth_mw->generate_token(test_user);
+
+    auto req = create_request();
+    req.set_header(_auth_options.get_auth_header_name(), // Use original _auth_options for header name/scheme consistency if needed, or expiring_options
+                   expiring_options.get_auth_scheme() + " " + expired_token);
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid or expired token"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(AuthMiddlewareTest, NotYetValidTokenMiddleware) {
+    qb::http::auth::Options nbf_options = _auth_options; // Start with fixture defaults
+    nbf_options.verify_not_before(true); // Ensure NBF is checked by the verifier
+    // Clock skew defaults to 0, so NBF has to be exact or in the past
+
+    _auth_mw->with_options(nbf_options);
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::http::auth::User test_user{"user_nbf", "nbf_tester", {"user"}};
+
+    qb::json payload_json;
+    payload_json["sub"] = test_user.id;
+    payload_json["username"] = test_user.username;
+    payload_json["roles"] = test_user.roles; // qb::json handles vector<string> to json array
+    payload_json["iat"] = current_epoch_time();
+    payload_json["nbf"] = current_epoch_time() + 3600; // Valid in 1 hour
+
+    std::map<std::string, std::string> jwt_payload_map;
+    for (auto& [key, value_json] : payload_json.items()) {
+        if (value_json.is_string()) {
+            jwt_payload_map[key] = value_json.get<std::string>();
+        } else {
+            jwt_payload_map[key] = value_json.dump(); // roles will be a JSON array string e.g. "[\"user\"]"
+        }
+    }
     
-    // Test with no token (should pass)
-    {
-        auto ctx = createContext(); // No auth header
-        auto result = middleware.process(ctx);
+    qb::jwt::CreateOptions jwt_create_opts;
+    const auto& current_auth_opts = _auth_mw->auth_manager().get_options();
+    
+    switch (current_auth_opts.get_algorithm()) {
+        case qb::http::auth::Options::Algorithm::HMAC_SHA256:
+            jwt_create_opts.algorithm = qb::jwt::Algorithm::HS256; break;
+        case qb::http::auth::Options::Algorithm::HMAC_SHA384:
+            jwt_create_opts.algorithm = qb::jwt::Algorithm::HS384; break;
+        case qb::http::auth::Options::Algorithm::HMAC_SHA512:
+            jwt_create_opts.algorithm = qb::jwt::Algorithm::HS512; break;
+        // Add other algo mappings if necessary for tests, e.g. RSA
+        default:
+            FAIL() << "Unsupported algorithm for test token creation";
+            return; // Or throw
+    }
+
+    const auto& secret_vec = current_auth_opts.get_secret_key();
+    if (secret_vec.empty() && 
+        (jwt_create_opts.algorithm == qb::jwt::Algorithm::HS256 || 
+         jwt_create_opts.algorithm == qb::jwt::Algorithm::HS384 ||
+         jwt_create_opts.algorithm == qb::jwt::Algorithm::HS512)) {
+        FAIL() << "Secret key is empty for HMAC algorithm in test.";
+        return;
+    }
+    jwt_create_opts.key = std::string(secret_vec.begin(), secret_vec.end());
+
+    std::string token_not_yet_valid = qb::jwt::create(jwt_payload_map, jwt_create_opts);
+
+    auto req = create_request();
+    // Use header name/scheme from the options active in the middleware
+    req.set_header(current_auth_opts.get_auth_header_name(), 
+                   current_auth_opts.get_auth_scheme() + " " + token_not_yet_valid);
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    // This message is generic, qb::jwt might throw specific exception that AuthMiddleware standardizes
+    EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid or expired token"), std::string::npos); 
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// In a real scenario, these would be proper PEM-formatted keys.
+const char* TEST_RSA_PRIVATE_KEY_PEM = 
+    "-----BEGIN PRIVATE KEY-----\n"
+    "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC9XQ6VOHmUCz/d\n"
+    "b5jFqL/5ogkA7Zz6Kt2SR0eWa3lOLMimTcHGMNrkkeXt0vvHBKDiB5Rh8Jg40mar\n"
+    "CJudCO2ngIxh90toXSiZmtQzZwWHgxH3oqQFYw7kVKssVHuXusC+HC40V333kijR\n"
+    "l2xHX+ckFrzMCJu5zeBOTs+D+2w0EfaEmXTF1XRjsaxjXHA4VMzRjymo+XO73Csi\n"
+    "TSfqPfg2z+P3hz9owqamBc9SuJk5Ke1bv0Rzgauy1Po4B8bWJU0rk3KT2XUuAfJl\n"
+    "bumWwHWjM7G5ubhHyIADU7onHAYCucsZkoSqaKMe6K1ZCXTBYQYB9jcSVfhG/eFe\n"
+    "d0fKRA1/AgMBAAECggEAWHDMXUwdmFOytcinuPVKCByyCNFxRfPcPTP2Tt4OL0FC\n"
+    "S024qUhrC2LK2Qr3lalnPHnexulYJv25frsL9slTOa6TojOd7/XGfwstfX5pujMw\n"
+    "opA++9cafvC+a3tfp+tMlt3RhJeyWPzV/KG0rBcx/Ix0C/UfSiXJ07kCOXmlPSGy\n"
+    "H5AJNax1v/RMT1aP4fDUj8VhN9y58GoM+kkKuvrl/hMVdXSpIXtrGR9jDHBQXVjb\n"
+    "MybxAH5FvR1SY0d8rC6cq6Z7kuX9T/mqZYDxqxhxxyj9+tw0lrFyQtUcZ1mAdWKL\n"
+    "VjCAh0W28BCaEM/OmsTxjxfg+OZ5g+aa5Wc26sGw+QKBgQDwoBUHs4/zz93SInp6\n"
+    "S8EBp/T8qDoeUomxvgOPfi9cjOdUpMGm0z8JSca1Y4gIfjPXAjEwR+xK6ok0F7hL\n"
+    "i+XQUSfTJ91itPirRcILQijxahSkvt2BjbD2F+aRqzyRg+3hjLbUEySYNG/WkZNs\n"
+    "HqLFSQ4bC8TPUOH2OvjcOb9nZwKBgQDJdnu2hyTvR6vsDe6gJ4syGhnDk5sbpGlm\n"
+    "ZAyILw4vmMD9r6IGR++xnNf0ZTcOpgRJ2FFtntZIU/K8/gICV19XkNCA8g3X3mRN\n"
+    "CiTvqOBBrkTsrBbk04rYWy3NHGO8nciy5D05r6ox6uo7mIVbUYoqSmKdtwIEIxeX\n"
+    "jUbfzabSKQKBgC3ugNUtg4cI4NDh3/tERp1oUC2Cd0Wef8Y7/TYA4k2KYAYaRRTx\n"
+    "MhE10gaB70+ft4mNU5JhyEsspfAZrwZMuBuhwjZeX7Yd0XHwKPA5OtOKalJgVKwM\n"
+    "PgFb4plf1Hn6cwgg8i1dUhjzuX194GQ9HNkH7vdesbzZNajo7OQs6cp1AoGAFzDE\n"
+    "XOaBoemmKK4R4e2rYEEQ5ip/mFb8qwSpTKPeBiyXSpyFEiQFu3RKh59/DvidVcLI\n"
+    "3M2D7R98ubSjlpFoMDRDTBSQ82BuO1AHoG7YIbdlx7inif+v4+fbBdlWwceH6s/L\n"
+    "HHDULprUC7gq4bApL2UQpQcD/GXtuUxR9EFACsECgYBufXuFy2L7KP5Wh8wk9Ref\n"
+    "M9b9wQF7Lo9gySj6sBSuBOmMLOli0uLnhoiZ1U3dIkOC3tFwMOIhC5sQiB75nnCJ\n"
+    "/SzObI1PFJ0pUYKeHi0rVltHvZQ4tKvJd0l10qI5C/ND+QJoXs74RHElwUM3UdgT\n"
+    "Wr7IeElg/Hj/Xu9vfiTVnw==\n"
+    "-----END PRIVATE KEY-----";
+
+const char* TEST_RSA_PUBLIC_KEY_PEM = 
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvV0OlTh5lAs/3W+Yxai/\n"
+    "+aIJAO2c+irdkkdHlmt5TizIpk3BxjDa5JHl7dL7xwSg4geUYfCYONJmqwibnQjt\n"
+    "p4CMYfdLaF0omZrUM2cFh4MR96KkBWMO5FSrLFR7l7rAvhwuNFd995Io0ZdsR1/n\n"
+    "JBa8zAibuc3gTk7Pg/tsNBH2hJl0xdV0Y7GsY1xwOFTM0Y8pqPlzu9wrIk0n6j34\n"
+    "Ns/j94c/aMKmpgXPUriZOSntW79Ec4GrstT6OAfG1iVNK5Nyk9l1LgHyZW7plsB1\n"
+    "ozOxubm4R8iAA1O6JxwGArnLGZKEqmijHuitWQl0wWEGAfY3ElX4Rv3hXndHykQN\n"
+    "fwIDAQAB\n"
+    "-----END PUBLIC KEY-----";
+
+TEST_F(AuthMiddlewareTest, RSAAlgorithmTokenVerification) {
+    qb::http::auth::User test_user{"user_rsa", "rsatester", {"user"}};
+
+    // 1. Configure AuthManager for RSA token CREATION (using private key)
+    qb::http::auth::Options rsa_sign_options;
+    rsa_sign_options.algorithm(qb::http::auth::Options::Algorithm::RSA_SHA256)
+                    .private_key(TEST_RSA_PRIVATE_KEY_PEM)
+                    .secret_key(""); // Clear HMAC secret key just in case
+
+    qb::http::auth::Manager rsa_token_generator(rsa_sign_options);
+    std::string rsa_token;
+    try {
+        rsa_token = rsa_token_generator.generate_token(test_user);
+    } catch (const std::exception& e) {
+        FAIL() << "RSA Token generation failed: " << e.what();
+        return;
+    }
+    ASSERT_FALSE(rsa_token.empty());
+
+    // 2. Configure AuthMiddleware for RSA token VERIFICATION (using public key)
+    qb::http::auth::Options rsa_verify_options;
+    rsa_verify_options.algorithm(qb::http::auth::Options::Algorithm::RSA_SHA256)
+                      .public_key(TEST_RSA_PUBLIC_KEY_PEM)
+                      .secret_key(""); // Clear HMAC secret key
+    
+    _auth_mw->with_options(rsa_verify_options);
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw); // Uses default success_handler
+
+    // 3. Make request with RSA token
+    _session->reset();
+    auto req = create_request();
+    // Use scheme/header from the verification options active in middleware
+    req.set_header(rsa_verify_options.get_auth_header_name(), 
+                   rsa_verify_options.get_auth_scheme() + " " + rsa_token);
+    make_request(std::move(req));
+
+    // 4. Assert success
+    if (_session->_response.status_code != qb::http::status::HTTP_STATUS_OK) {
+        FAIL() << "RSA Token verification failed. Status: " << _session->_response.status_code
+               << ", Body: " << _session->_response.body().template as<std::string>();
+    }
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "user_rsa");
+
+    // Optional Negative Test: Try to verify RSA token with HMAC config
+    _session->reset();
+    qb::http::auth::Options hmac_options_for_rsa_token = _auth_options; // Fixture default (HMAC)
+     _auth_mw->with_options(hmac_options_for_rsa_token);
+    // Router reconfig with new _auth_mw options (implicitly via configure_router_with_auth_mw)
+    configure_router_with_auth_mw(_auth_mw); 
+
+    auto req_hmac_verify = create_request();
+    req_hmac_verify.set_header(hmac_options_for_rsa_token.get_auth_header_name(), 
+                               hmac_options_for_rsa_token.get_auth_scheme() + " " + rsa_token);
+    make_request(std::move(req_hmac_verify));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+        << "RSA token should not validate with HMAC configuration.";
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(AuthMiddlewareTest, CustomUserContextKey) {
+    const std::string custom_key = "test_custom_user_key";
+    _auth_mw->with_user_context_key(custom_key);
+    _auth_mw->with_auth_required(true);
+    // No need to call _auth_mw->with_options if default _auth_options is fine
+
+    // Reconfigure router with the modified auth_mw and a custom handler for this test
+    _router = std::make_unique<qb::http::Router<MockAuthSession>>(); 
+    _router->use(_auth_mw);
+
+    bool user_found_at_custom_key = false;
+    bool user_found_at_default_key = false;
+    std::optional<qb::http::auth::User> retrieved_user_opt;
+    std::string original_user_id = "user_ctx_key_test";
+
+    auto custom_key_check_handler = 
+        [&](std::shared_ptr<qb::http::Context<MockAuthSession>> ctx) {
+        _session->trace("CustomKeyCheckHandlerCalled");
+        _session->_final_handler_called = true;
+        if (ctx->has(custom_key)) {
+            user_found_at_custom_key = true;
+            retrieved_user_opt = ctx->template get<qb::http::auth::User>(custom_key);
+        }
+        if (ctx->has("user")) { // Check for default key "user"
+            user_found_at_default_key = true;
+        }
+        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().body() = "Custom Key Handler Executed";
+        ctx->complete();
+    };
+
+    _router->get("/test_custom_key", custom_key_check_handler);
+    _router->compile();
+
+    qb::http::auth::User test_user{original_user_id, "customkeyuser", {"user"}};
+    std::string token = generate_test_token(test_user); // Uses _auth_options from fixture
+
+    auto req = create_request(qb::http::method::HTTP_GET, "/test_custom_key");
+    req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    
+    _session->reset(); // Reset session before making the call via router
+    _router->route(_session, std::move(req));
+
+    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_TRUE(user_found_at_custom_key) << "User not found with custom key: " << custom_key;
+    EXPECT_FALSE(user_found_at_default_key) << "User unexpectedly found with default key 'user'.";
+    ASSERT_TRUE(retrieved_user_opt.has_value());
+    EXPECT_EQ(retrieved_user_opt->id, original_user_id);
+    EXPECT_EQ(retrieved_user_opt->username, "customkeyuser");
+}
+
+TEST_F(AuthMiddlewareTest, CustomAuthScheme) {
+    const std::string custom_scheme = "MyAppToken";
+    qb::http::auth::Options custom_scheme_options = _auth_options; // Base on fixture options
+    custom_scheme_options.auth_scheme(custom_scheme);
+    // Ensure other settings like secret_key are inherited from _auth_options
+
+    _auth_mw->with_options(custom_scheme_options);
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw); // Uses the default success_handler
+
+    qb::http::auth::User test_user{"user_scheme", "schemetester", {"user"}};
+    // Token generation itself is scheme-agnostic; it uses the secret from custom_scheme_options via _auth_mw
+    std::string token = _auth_mw->generate_token(test_user);
+
+    // Scenario 1: Valid token with custom scheme
+    _session->reset();
+    auto req_custom_scheme = create_request();
+    // Use the header name defined in custom_scheme_options (likely still "Authorization")
+    req_custom_scheme.set_header(custom_scheme_options.get_auth_header_name(), 
+                               custom_scheme + " " + token);
+    make_request(std::move(req_custom_scheme));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "user_scheme");
+
+    // Scenario 2: Valid token but with default/wrong scheme (should fail)
+    _session->reset();
+    _session->_final_handler_called = false;
+
+    auto req_default_scheme = create_request();
+    req_default_scheme.set_header(custom_scheme_options.get_auth_header_name(), 
+                                  _auth_options.get_auth_scheme() + " " + token); // Using default "Bearer"
+    make_request(std::move(req_default_scheme));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid authentication format"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+    EXPECT_FALSE(_session->_user_in_context.has_value());
+}
+
+TEST_F(AuthMiddlewareTest, RequireAllRoles) {
+    _auth_mw->with_auth_required(true);
+    // scena_options will be reused by reconfiguring _auth_mw
+
+    qb::http::auth::User test_user{"user_all_roles", "allroler", {"editor", "viewer", "commenter"}};
+    std::string token = generate_test_token(test_user); // Uses default _auth_options initially for token
+                                                        // but auth_mw will use its configured options for verification.
+
+    // Scenario 1: User has all required roles
+    _session->reset();
+    _auth_mw->with_roles({"editor", "viewer"}, true);
+    configure_router_with_auth_mw(_auth_mw);
+    
+    auto req1 = create_request();
+    req1.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req1));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "user_all_roles");
+
+    // Scenario 2: User is missing one of the required roles
+    _session->reset();
+    _auth_mw->with_roles({"editor", "admin"}, true); // Requires "admin", user doesn't have it
+    // Router recompilation not strictly needed if only auth_mw config changes and not routes,
+    // but configure_router_with_auth_mw does it, which is safer.
+    configure_router_with_auth_mw(_auth_mw); 
+
+    auto req2 = create_request();
+    req2.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req2));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_NE(_session->_response.body().template as<std::string>().find("Insufficient permissions"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // Scenario 3: User is missing all of the (different) required roles
+    _session->reset();
+    _auth_mw->with_roles({"publisher", "auditor"}, true);
+    configure_router_with_auth_mw(_auth_mw); 
+
+    auto req3 = create_request();
+    req3.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req3));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // Scenario 4: Required roles list is empty, require_all = true (should pass)
+    _session->reset();
+    _auth_mw->with_roles({}, true); // Empty list of required roles
+    configure_router_with_auth_mw(_auth_mw);
+
+    auto req4 = create_request();
+    req4.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req4));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+        << "Access should be granted if require_all_roles is true and required list is empty.";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+}
+
+TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
+    qb::http::auth::User test_user{"user_skew", "skew_tester", {"user"}};
+    const std::chrono::seconds tolerance(20);
+    const std::chrono::seconds small_offset(10); // smaller than tolerance
+    const std::chrono::seconds large_offset(30); // larger than tolerance
+
+    qb::http::auth::Options skew_options = _auth_options;
+    skew_options.clock_skew_tolerance(tolerance);
+    skew_options.verify_expiration(true);
+    skew_options.verify_not_before(true);
+
+    _auth_mw->with_options(skew_options);
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+    
+    const auto& current_auth_opts_for_creation = _auth_mw->auth_manager().get_options();
+    qb::jwt::CreateOptions jwt_create_opts;
+    switch (current_auth_opts_for_creation.get_algorithm()) {
+        case qb::http::auth::Options::Algorithm::HMAC_SHA256:
+            jwt_create_opts.algorithm = qb::jwt::Algorithm::HS256; break;
+        // Add other necessary algorithm mappings here if tests use them
+        default:
+            FAIL() << "Unsupported algorithm for test token creation in ClockSkewTolerance";
+            return;
+    }
+    const auto& secret_vec = current_auth_opts_for_creation.get_secret_key();
+    if (secret_vec.empty()) {
+        FAIL() << "Secret key is empty for HMAC algorithm in ClockSkewTolerance.";
+        return;
+    }
+    jwt_create_opts.key = std::string(secret_vec.begin(), secret_vec.end());
+
+    // --- Scenario 1: Clock skew with 'exp' (token expired but within tolerance) ---
+    _session->reset();
+    qb::json payload_exp_within_tolerance;
+    payload_exp_within_tolerance["sub"] = test_user.id;
+    payload_exp_within_tolerance["username"] = test_user.username;
+    payload_exp_within_tolerance["roles"] = test_user.roles;
+    payload_exp_within_tolerance["iat"] = current_epoch_time() - 7200; // Issued 2 hours ago
+    payload_exp_within_tolerance["exp"] = current_epoch_time() - small_offset.count(); // Expired 10s ago
+
+    std::map<std::string, std::string> map_exp_within_tolerance;
+    for (auto& [k, v] : payload_exp_within_tolerance.items()) { map_exp_within_tolerance[k] = v.is_string() ? v.get<std::string>() : v.dump(); }
+    
+    std::string token_exp_within_tolerance = qb::jwt::create(map_exp_within_tolerance, jwt_create_opts);
+
+    auto req1 = create_request();
+    req1.set_header(current_auth_opts_for_creation.get_auth_header_name(), 
+                    current_auth_opts_for_creation.get_auth_scheme() + " " + token_exp_within_tolerance);
+    make_request(std::move(req1));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+        << "Token expired 10s ago, but should be OK due to 20s tolerance.";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, test_user.id);
+
+    // --- Scenario 2: Clock skew with 'exp' (token expired beyond tolerance) ---
+    _session->reset();
+    qb::json payload_exp_beyond_tolerance;
+    payload_exp_beyond_tolerance["sub"] = test_user.id;
+    payload_exp_beyond_tolerance["username"] = test_user.username;
+    payload_exp_beyond_tolerance["roles"] = test_user.roles;
+    payload_exp_beyond_tolerance["iat"] = current_epoch_time() - 7200;
+    payload_exp_beyond_tolerance["exp"] = current_epoch_time() - large_offset.count(); // Expired 30s ago
+
+    std::map<std::string, std::string> map_exp_beyond_tolerance;
+    for (auto& [k, v] : payload_exp_beyond_tolerance.items()) { map_exp_beyond_tolerance[k] = v.is_string() ? v.get<std::string>() : v.dump(); }
+
+    std::string token_exp_beyond_tolerance = qb::jwt::create(map_exp_beyond_tolerance, jwt_create_opts);
+
+    auto req2 = create_request();
+    req2.set_header(current_auth_opts_for_creation.get_auth_header_name(), 
+                    current_auth_opts_for_creation.get_auth_scheme() + " " + token_exp_beyond_tolerance);
+    make_request(std::move(req2));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+        << "Token expired 30s ago, should be UNAUTHORIZED with 20s tolerance.";
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // --- Scenario 3: Clock skew with 'nbf' (token not yet valid but within tolerance) ---
+    _session->reset();
+    qb::json payload_nbf_within_tolerance;
+    payload_nbf_within_tolerance["sub"] = test_user.id;
+    payload_nbf_within_tolerance["username"] = test_user.username;
+    payload_nbf_within_tolerance["roles"] = test_user.roles;
+    payload_nbf_within_tolerance["iat"] = current_epoch_time();
+    payload_nbf_within_tolerance["nbf"] = current_epoch_time() + small_offset.count(); // NBF in 10s
+    
+    std::map<std::string, std::string> map_nbf_within_tolerance;
+    for (auto& [k, v] : payload_nbf_within_tolerance.items()) { map_nbf_within_tolerance[k] = v.is_string() ? v.get<std::string>() : v.dump(); }
+
+    std::string token_nbf_within_tolerance = qb::jwt::create(map_nbf_within_tolerance, jwt_create_opts);
+
+    auto req3 = create_request();
+    req3.set_header(current_auth_opts_for_creation.get_auth_header_name(), 
+                    current_auth_opts_for_creation.get_auth_scheme() + " " + token_nbf_within_tolerance);
+    make_request(std::move(req3));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+        << "Token NBF in 10s, but should be OK due to 20s tolerance.";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, test_user.id);
+
+    // --- Scenario 4: Clock skew with 'nbf' (token not yet valid beyond tolerance) ---
+    _session->reset();
+    qb::json payload_nbf_beyond_tolerance;
+    payload_nbf_beyond_tolerance["sub"] = test_user.id;
+    payload_nbf_beyond_tolerance["username"] = test_user.username;
+    payload_nbf_beyond_tolerance["roles"] = test_user.roles;
+    payload_nbf_beyond_tolerance["iat"] = current_epoch_time();
+    payload_nbf_beyond_tolerance["nbf"] = current_epoch_time() + large_offset.count(); // NBF in 30s
+
+    std::map<std::string, std::string> map_nbf_beyond_tolerance;
+    for (auto& [k, v] : payload_nbf_beyond_tolerance.items()) { map_nbf_beyond_tolerance[k] = v.is_string() ? v.get<std::string>() : v.dump(); }
+
+    std::string token_nbf_beyond_tolerance = qb::jwt::create(map_nbf_beyond_tolerance, jwt_create_opts);
+    
+    auto req4 = create_request();
+    req4.set_header(current_auth_opts_for_creation.get_auth_header_name(), 
+                    current_auth_opts_for_creation.get_auth_scheme() + " " + token_nbf_beyond_tolerance);
+    make_request(std::move(req4));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+        << "Token NBF in 30s, should be UNAUTHORIZED with 20s tolerance.";
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
+    qb::http::auth::User test_user{"user_iss_aud", "iss_aud_tester", {"user"}};
+    
+    // Helper to create token with specific iss/aud
+    auto create_custom_token = [&](const qb::http::auth::User& user,
+                                   const qb::http::auth::Options& creation_opts,
+                                   const std::optional<std::string>& issuer,
+                                   const std::optional<std::string>& audience) -> std::optional<std::string> {
+        qb::json payload_json;
+        payload_json["sub"] = user.id;
+        payload_json["username"] = user.username;
+        payload_json["roles"] = user.roles;
+        payload_json["iat"] = current_epoch_time();
+        payload_json["exp"] = current_epoch_time() + 3600; // Valid for 1 hour
+
+        if (issuer) payload_json["iss"] = *issuer;
+        if (audience) payload_json["aud"] = *audience;
+
+        std::map<std::string, std::string> jwt_payload_map;
+        for (auto& [key, value_json] : payload_json.items()) {
+            jwt_payload_map[key] = value_json.is_string() ? value_json.get<std::string>() : value_json.dump();
+        }
         
-        EXPECT_TRUE(result.should_continue()) << "Should continue when auth is optional and no token provided";
-        EXPECT_FALSE(result.should_stop());
-        EXPECT_FALSE(ctx.has("user"));
-    }
-    
-    // Test with valid token (should pass and set user)
-    {
-        auto ctx = createContext("Bearer " + token);
-        auto result = middleware.process(ctx);
+        qb::jwt::CreateOptions jwt_create_opts;
+        switch (creation_opts.get_algorithm()) {
+            case qb::http::auth::Options::Algorithm::HMAC_SHA256: {
+                jwt_create_opts.algorithm = qb::jwt::Algorithm::HS256; break;
+            }
+            default: {
+                // Instead of FAIL() here, indicate error via return type
+                // The caller (test body) will use FAIL()
+                return std::nullopt; 
+            }
+        }
+        const auto& secret_vec = creation_opts.get_secret_key();
+        if (secret_vec.empty()) { 
+            // Instead of FAIL() here, indicate error via return type
+            return std::nullopt;
+        }
+        jwt_create_opts.key = std::string(secret_vec.begin(), secret_vec.end());
         
-        EXPECT_TRUE(result.should_continue()) << "Should continue when auth is optional and valid token provided";
-        EXPECT_FALSE(result.should_stop());
-        EXPECT_TRUE(ctx.has("user"));
-    }
-    
-    // Test with invalid token (should pass but not set user)
-    {
-        auto ctx = createContext("Bearer invalid-token");
-        auto result = middleware.process(ctx);
-        
-        EXPECT_TRUE(result.should_continue()) << "Should continue when auth is optional and invalid token provided";
-        EXPECT_FALSE(result.should_stop());
-        EXPECT_FALSE(ctx.has("user"));
-    }
+        // It's possible qb::jwt::create itself throws an exception on error.
+        // If so, the lambda doesn't need to handle it explicitly if the test body 
+        // is not meant to catch it (i.e., an exception means test failure).
+        // For now, assume it returns a string or we are interested in specific pre-checks.
+        try {
+            return qb::jwt::create(jwt_payload_map, jwt_create_opts);
+        } catch (const std::exception& e) {
+            // Log or handle if necessary, then return nullopt to signal failure to caller
+            // For test purposes, usually letting it propagate or returning nullopt is fine.
+            // std::cerr << "qb::jwt::create failed: " << e.what() << std::endl;
+            return std::nullopt;
+        }
+    };
+
+    // --- Part 1: Issuer Tests ---
+    qb::http::auth::Options issuer_verify_opts = _auth_options;
+    issuer_verify_opts.token_issuer("my_app"); // This also sets verify_issuer = true
+
+    // Scenario 1.1: Correct Issuer
+    _session->reset();
+    _auth_mw->with_options(issuer_verify_opts).with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+    std::optional<std::string> token_correct_iss_opt = create_custom_token(test_user, issuer_verify_opts, "my_app", std::nullopt);
+    if (!token_correct_iss_opt) { FAIL() << "S1.1 Token creation failed (correct issuer)."; return; }
+    std::string token_correct_iss = *token_correct_iss_opt;
+    auto req1_1 = create_request();
+    req1_1.set_header(issuer_verify_opts.get_auth_header_name(), issuer_verify_opts.get_auth_scheme() + " " + token_correct_iss);
+    make_request(std::move(req1_1));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S1.1 Correct Issuer";
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    // Scenario 1.2: Incorrect Issuer
+    _session->reset();
+    std::optional<std::string> token_incorrect_iss_opt = create_custom_token(test_user, issuer_verify_opts, "other_app", std::nullopt);
+    if (!token_incorrect_iss_opt) { FAIL() << "S1.2 Token creation failed (incorrect issuer)."; return; }
+    std::string token_incorrect_iss = *token_incorrect_iss_opt;
+    auto req1_2 = create_request();
+    req1_2.set_header(issuer_verify_opts.get_auth_header_name(), issuer_verify_opts.get_auth_scheme() + " " + token_incorrect_iss);
+    make_request(std::move(req1_2));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S1.2 Incorrect Issuer";
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // Scenario 1.3: Missing Issuer in Token, Verification On
+    _session->reset();
+    std::optional<std::string> token_no_iss_opt = create_custom_token(test_user, issuer_verify_opts, std::nullopt, std::nullopt);
+    if (!token_no_iss_opt) { FAIL() << "S1.3 Token creation failed (no issuer)."; return; }
+    std::string token_no_iss = *token_no_iss_opt;
+    auto req1_3 = create_request();
+    req1_3.set_header(issuer_verify_opts.get_auth_header_name(), issuer_verify_opts.get_auth_scheme() + " " + token_no_iss);
+    make_request(std::move(req1_3));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S1.3 Missing Issuer";
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // Scenario 1.4: Issuer in Token, Verification Off
+    _session->reset();
+    qb::http::auth::Options issuer_no_verify_opts = _auth_options;
+    issuer_no_verify_opts.token_issuer(""); 
+    _auth_mw->with_options(issuer_no_verify_opts);
+    configure_router_with_auth_mw(_auth_mw);
+    std::optional<std::string> token_with_iss_verify_off_opt = create_custom_token(test_user, issuer_no_verify_opts, "any_app_iss", std::nullopt);
+    if (!token_with_iss_verify_off_opt) { FAIL() << "S1.4 Token creation failed (issuer present, verify off)."; return; }
+    std::string token_with_iss_verify_off = *token_with_iss_verify_off_opt;
+    auto req1_4 = create_request();
+    req1_4.set_header(issuer_no_verify_opts.get_auth_header_name(), issuer_no_verify_opts.get_auth_scheme() + " " + token_with_iss_verify_off);
+    make_request(std::move(req1_4));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S1.4 Issuer Present, Verification Off";
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    // --- Part 2: Audience Tests ---
+    qb::http::auth::Options audience_verify_opts = _auth_options;
+    audience_verify_opts.token_audience("my_client"); 
+
+    // Scenario 2.1: Correct Audience
+    _session->reset();
+    _auth_mw->with_options(audience_verify_opts);
+    configure_router_with_auth_mw(_auth_mw);
+    std::optional<std::string> token_correct_aud_opt = create_custom_token(test_user, audience_verify_opts, std::nullopt, "my_client");
+    if (!token_correct_aud_opt) { FAIL() << "S2.1 Token creation failed (correct audience)."; return; }
+    std::string token_correct_aud = *token_correct_aud_opt;
+    auto req2_1 = create_request();
+    req2_1.set_header(audience_verify_opts.get_auth_header_name(), audience_verify_opts.get_auth_scheme() + " " + token_correct_aud);
+    make_request(std::move(req2_1));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S2.1 Correct Audience";
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    // Scenario 2.2: Incorrect Audience
+    _session->reset();
+    std::optional<std::string> token_incorrect_aud_opt = create_custom_token(test_user, audience_verify_opts, std::nullopt, "other_client");
+    if (!token_incorrect_aud_opt) { FAIL() << "S2.2 Token creation failed (incorrect audience)."; return; }
+    std::string token_incorrect_aud = *token_incorrect_aud_opt;
+    auto req2_2 = create_request();
+    req2_2.set_header(audience_verify_opts.get_auth_header_name(), audience_verify_opts.get_auth_scheme() + " " + token_incorrect_aud);
+    make_request(std::move(req2_2));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S2.2 Incorrect Audience";
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // Scenario 2.3: Missing Audience in Token, Verification On
+    _session->reset();
+    std::optional<std::string> token_no_aud_opt = create_custom_token(test_user, audience_verify_opts, std::nullopt, std::nullopt);
+    if (!token_no_aud_opt) { FAIL() << "S2.3 Token creation failed (no audience)."; return; }
+    std::string token_no_aud = *token_no_aud_opt;
+    auto req2_3 = create_request();
+    req2_3.set_header(audience_verify_opts.get_auth_header_name(), audience_verify_opts.get_auth_scheme() + " " + token_no_aud);
+    make_request(std::move(req2_3));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S2.3 Missing Audience";
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // Scenario 2.4: Audience in Token, Verification Off
+    _session->reset();
+    qb::http::auth::Options audience_no_verify_opts = _auth_options;
+    audience_no_verify_opts.token_audience(""); 
+    _auth_mw->with_options(audience_no_verify_opts);
+    configure_router_with_auth_mw(_auth_mw);
+    std::optional<std::string> token_with_aud_verify_off_opt = create_custom_token(test_user, audience_no_verify_opts, std::nullopt, "any_client_aud");
+    if (!token_with_aud_verify_off_opt) { FAIL() << "S2.4 Token creation failed (audience present, verify off)."; return; }
+    std::string token_with_aud_verify_off = *token_with_aud_verify_off_opt;
+    auto req2_4 = create_request();
+    req2_4.set_header(audience_no_verify_opts.get_auth_header_name(), audience_no_verify_opts.get_auth_scheme() + " " + token_with_aud_verify_off);
+    make_request(std::move(req2_4));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S2.4 Audience Present, Verification Off";
+    EXPECT_TRUE(_session->_final_handler_called);
 }
 
-// Helper function to read file contents
-std::string readFileContents(const std::string &filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not open file: " + filename);
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
+TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthHeaderName) {
+    const std::string custom_header_name_config = "X-MyApp-AuthToken";
+    qb::http::auth::Options custom_header_options = _auth_options;
+    custom_header_options.auth_header_name(custom_header_name_config);
+    // Scheme remains default "Bearer" or what _auth_options has.
+
+    _auth_mw->with_options(custom_header_options);
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::http::auth::User test_user{"user_header_case", "headercaser", {"user"}};
+    std::string token = _auth_mw->generate_token(test_user); // Token uses middleware's current options
+    std::string token_header_value = custom_header_options.get_auth_scheme() + " " + token;
+
+    // Scenario 1: Exact case match
+    _session->reset();
+    auto req_exact = create_request();
+    req_exact.set_header(custom_header_name_config, token_header_value);
+    make_request(std::move(req_exact));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Exact case";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // Scenario 2: Lowercase header name in request
+    _session->reset();
+    auto req_lower = create_request();
+    std::string lower_case_header = custom_header_name_config;
+    std::transform(lower_case_header.begin(), lower_case_header.end(), lower_case_header.begin(), ::tolower);
+    req_lower.set_header(lower_case_header, token_header_value);
+    make_request(std::move(req_lower));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Lowercase header";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // Scenario 3: Mixed/Upper case header name in request
+    _session->reset();
+    auto req_upper = create_request();
+    std::string upper_case_header = custom_header_name_config;
+    std::transform(upper_case_header.begin(), upper_case_header.end(), upper_case_header.begin(), ::toupper);
+    req_upper.set_header(upper_case_header, token_header_value);
+    make_request(std::move(req_upper));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Uppercase header";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // Scenario 4: Wrong header name (using default "Authorization" when custom is set)
+    _session->reset();
+    auto req_wrong_name = create_request();
+    req_wrong_name.set_header("Authorization", token_header_value); // Default, but should fail
+    make_request(std::move(req_wrong_name));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "Wrong header name";
+    EXPECT_FALSE(_session->_final_handler_called);
 }
 
-// Helper function to write file contents
-void writeFileContents(const std::string &filename, const std::string &content) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not open file for writing: " + filename);
-    }
-    file << content;
+TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
+    // --- Scenario 1: Default "Bearer" scheme --- 
+    _auth_mw->with_auth_required(true);
+    // No need to call _auth_mw->with_options if default _auth_options (HMAC, Bearer) is fine
+    configure_router_with_auth_mw(_auth_mw); // Uses default success_handler
+
+    qb::http::auth::User test_user_bearer{"user_scheme_case", "bearercaser", {"user"}};
+    std::string token_bearer = generate_test_token(test_user_bearer);
+
+    const std::string header_name_bearer = _auth_options.get_auth_header_name();
+
+    // 1.1: "bearer" (lowercase)
+    _session->reset();
+    auto req_lower_bearer = create_request();
+    req_lower_bearer.set_header(header_name_bearer, "bearer " + token_bearer);
+    make_request(std::move(req_lower_bearer));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Lowercase Bearer";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, test_user_bearer.id);
+
+    // 1.2: "BEARER" (uppercase)
+    _session->reset();
+    auto req_upper_bearer = create_request();
+    req_upper_bearer.set_header(header_name_bearer, "BEARER " + token_bearer);
+    make_request(std::move(req_upper_bearer));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Uppercase Bearer";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // 1.3: "BeArEr" (mixed case)
+    _session->reset();
+    auto req_mixed_bearer = create_request();
+    req_mixed_bearer.set_header(header_name_bearer, "BeArEr " + token_bearer);
+    make_request(std::move(req_mixed_bearer));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Mixed case Bearer";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // --- Scenario 2: Custom scheme --- 
+    const std::string custom_scheme_val = "MyAppAuth";
+    qb::http::auth::Options custom_scheme_opts = _auth_options;
+    custom_scheme_opts.auth_scheme(custom_scheme_val);
+
+    _auth_mw->with_options(custom_scheme_opts);
+    // Router is reconfigured by configure_router_with_auth_mw below
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::http::auth::User test_user_custom{"user_custom_scheme_case", "customcaser", {"admin"}};
+    // Token generation uses the options currently in _auth_mw
+    std::string token_custom = _auth_mw->generate_token(test_user_custom); 
+    const std::string header_name_custom = custom_scheme_opts.get_auth_header_name();
+
+    // 2.1: "myappauth" (lowercase custom)
+    _session->reset();
+    auto req_lower_custom = create_request();
+    std::string lower_custom_scheme = custom_scheme_val;
+    std::transform(lower_custom_scheme.begin(), lower_custom_scheme.end(), lower_custom_scheme.begin(), ::tolower);
+    req_lower_custom.set_header(header_name_custom, lower_custom_scheme + " " + token_custom);
+    make_request(std::move(req_lower_custom));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Lowercase Custom Scheme";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, test_user_custom.id);
+
+    // 2.2: "MYAPPAUTH" (uppercase custom)
+    _session->reset();
+    auto req_upper_custom = create_request();
+    std::string upper_custom_scheme = custom_scheme_val;
+    std::transform(upper_custom_scheme.begin(), upper_custom_scheme.end(), upper_custom_scheme.begin(), ::toupper);
+    req_upper_custom.set_header(header_name_custom, upper_custom_scheme + " " + token_custom);
+    make_request(std::move(req_upper_custom));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Uppercase Custom Scheme";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // 2.3: Wrong scheme (should fail, ensuring case insensitivity is not overly permissive)
+    _session->reset();
+    auto req_wrong_scheme = create_request();
+    req_wrong_scheme.set_header(header_name_custom, "Bearer " + token_custom); // Using default Bearer
+    make_request(std::move(req_wrong_scheme));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "Wrong scheme for custom token";
+    EXPECT_FALSE(_session->_final_handler_called);
 }
 
-// Helper function to generate test keys
-void generateTestKeys(const std::string &keys_path) {
-    namespace fs = std::filesystem;
-    
-    // Create directory if it doesn't exist
-    fs::create_directories(keys_path);
-    
-    // Sample RSA keys (for testing only, not for production use)
-    std::string rsa_private_key = 
-        "-----BEGIN PRIVATE KEY-----\n"
-        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
-        "MzEfYyjiWA4R4/M2bS1GB4t7NXp98C3SC6dVMvDuictGeurT8jNbvJZHtCSuYEvu\n"
-        "NMoSfm76oqFvAp8Gy0iz5sxjZmSnXyCdPEovGhLa0VzMaQ8s+CLOyS56YyCFGeJZ\n"
-        "agucPD/rGxUhxhpQpj2tRIBN1r6K/4Rw6h22BfAKSlCxdpQs8AkzYX/7BDgtN3Bd\n"
-        "E+FzYpSgKYpoa4tWvMhVe1+iAPHv/unvlNzxJBhLuPzopUyOU8lmFuYJkXpvC8T/\n"
-        "3FHe+Vsm5kwGYfDYpPgW8sHON5aktYmyABEXZkdE5jAFVJMeGvNrBdmRvP3XJG/j\n"
-        "b2PQdB+vAgMBAAECggEACB/kRV5eXZm3imDQBZQxOxkGBL7ME2cvQ/JGtMQDB9W4\n"
-        "CjmhdqA1BxL9crTrBBbDMHRbGqEa216UfNGTXZpS2eZ8zRxdKCXn+f2y+q7hznXs\n"
-        "eE9qqBh+AZYbY3rnn9JxYdZ7vXfuQn/NUi/3NAFZkp7CyvwNxvFJGbHXBeNzUiFq\n"
-        "Ag84CWlhP8j3HwAykJELEL8TZULHW9OVblChs32JVQEee5h4+6jW4k5hPgEWAYB7\n"
-        "qPGfT8wJPyQYXYjxZ5vY0wISGz/aj5c7dFYHqwn0aKHeBGhzR/iO4SvLy7YYkAG4\n"
-        "WeBHG1MGLm9z2s2oCL8yX2//BxZrGt3RdvZ4hZD7YQKBgQDeRbWkQ6wM1owO3Cn0\n"
-        "6Lfq825xwA6ScyAJ2U7sLWQ+yzZXUBB8HbpTBLvQJVhUBuS5GbPIZGwGzK8ZGzPC\n"
-        "jYQEwbJxNwIfz3gYwD4UNFjbLTKpl8Egw/bNHUlCUDw8++LTcsFxvOoEew0sdTcu\n"
-        "i+6ZWXVCXf6R7FG3REFsBPQ9JQKBgQDYZlNuTnDPODuLjnXh2yCCmw7B0IgVQdnK\n"
-        "iRaDxjX9vGKFkO7Q9i4DxQQo9yByfTP5U7D7hVr9i7285sB5QPvrVs4K3a/w06Ye\n"
-        "paIjLz1CuHwfLLfg2jxHnPpOkx3AQttiBMcS3K+oAEBMZjk7qUjEZJwUNs0/KCVC\n"
-        "zsIVELUJ0wKBgQCXTlPGABE9MJCh5g0kEkWzMQHY5BrjgrdNY0qBQiC2r9Qd7xGg\n"
-        "1ZBCj0qAqRYwXBXGDGjB+WqkizOBJVxs3Sbp3e7YZwcw/xH9r5wXJFYmhuVB/JcI\n"
-        "zPIJaSCuaZajKe5FfQWTvZ/mXKQUGCnAL6YBCAY9Av9yv0LP0Zn8f9IBuQKBgAMr\n"
-        "A4WQH/cV/s7DNbjFRVK4SnvuiDrfECVq4JLq9c8499ickGCJMOb6ymgVGY5Za2oC\n"
-        "qIdy2ZJA2f0XpkU5yrFDYTUvHRZd+X99Y68bKQCwqNmF8UfzR28cRmP6J1rHYYq3\n"
-        "vEezfJ1ZLGNmGKRwpqRExkCRQkUEgFHOJR0OW5/NAoGAO3ReOIoaCqB8u11Vt+6T\n"
-        "dpR9MJG+5KVicXsDATNPiuMSmGcP0QgIKFKJviMo3M1jQoB6UqXCgRLjCiMuKnKJ\n"
-        "KEyKD36/Zb7sf4rj/wpkBNLpbYXRrwmtLVBBQk6I5YPkis4thWGCEHjbeBZcGIPD\n"
-        "f2FoXNBU9vvYUZHzh+aXPfU=\n"
-        "-----END PRIVATE KEY-----\n";
+TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
+    // Configure middleware for optional authentication
+    auto optional_auth_mw = qb::http::create_optional_auth_middleware<MockAuthSession>(_auth_options);
+    // Use default roles (none specified), default user context key ("user")
+    configure_router_with_auth_mw(optional_auth_mw);
 
-    std::string rsa_public_key = 
-        "-----BEGIN PUBLIC KEY-----\n"
-        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu1SU1LfVLPHCozMxH2Mo\n"
-        "4lgOEePzNm0tRgeLezV6ffAt0gunVTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u\n"
-        "+qKhbwKfBstIs+bMY2Zkp18gnTxKLxoS2tFczGkPLPgizskuemMghRniWWoLnDw/\n"
-        "6xsVIcYaUKY9rUSATda+iv+EcOodtgXwCkpQsXaULPAJM2F/+wQ4LTdwXRPhc2KU\n"
-        "oCmKaGuLVrzIVXtfogDx7/7p75Tc8SQYS7j86KVMjlPJZhbmCZF6bwvE/9xR3vlb\n"
-        "JuZMBmHw2KT4FvLBzjeWpLWJsgARF2ZHROYwBVSTHhrzawXZkbz91yRv429j0HQf\n"
-        "rwIDAQAB\n"
-        "-----END PUBLIC KEY-----\n";
+    // Scenario 1: Malformed token
+    _session->reset();
+    auto req_malformed = create_request();
+    req_malformed.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " this_is_not_a_valid_jwt");
+    make_request(std::move(req_malformed));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Malformed token with optional auth";
+    EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with malformed token and optional auth";
+    EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with malformed token";
+
+    // Scenario 2: Expired token (but auth is optional)
+    _session->reset();
+    qb::http::auth::Options expiring_opts = _auth_options;
+    expiring_opts.token_expiration(std::chrono::seconds(-3600)); // Expired 1 hour ago
+    expiring_opts.verify_expiration(true); // Make sure exp is checked by generator/verifier logic
     
-    // Write the keys to files
-    writeFileContents(keys_path + "/rsa_private.pem", rsa_private_key);
-    writeFileContents(keys_path + "/rsa_public.pem", rsa_public_key);
+    // Temporarily use a manager with these options to create an expired token.
+    // The optional_auth_mw itself uses the default _auth_options for verification, 
+    // so it will see the token as expired if verify_expiration is on (which it is by default in Options).
+    qb::http::auth::Manager temp_manager_for_expired_token(expiring_opts);
+    qb::http::auth::User test_user_exp{"user_exp_opt", "expopter", {"user"}};
+    std::string expired_token = temp_manager_for_expired_token.generate_token(test_user_exp);
+
+    auto req_expired = create_request();
+    req_expired.set_header(_auth_options.get_auth_header_name(), 
+                           _auth_options.get_auth_scheme() + " " + expired_token);
+    make_request(std::move(req_expired));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Expired token with optional auth";
+    EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with expired token and optional auth";
+    EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with expired token";
+
+    // Scenario 3: Token with wrong signature (but auth is optional)
+    _session->reset();
+    qb::http::auth::User test_user_sig{"user_sig_opt", "sigopter", {"user"}};
+    // Generate with default secret, but middleware (optional_auth_mw) will verify with a different one if we changed its options.
+    // For this test, we assume optional_auth_mw uses _auth_options which has _test_secret.
+    // So, to make the signature wrong, we generate a token with a *different* secret.
+    std::string token_wrong_sig = generate_test_token(test_user_sig, "a_completely_different_secret_key_!@#");
+
+    auto req_wrong_sig = create_request();
+    req_wrong_sig.set_header(_auth_options.get_auth_header_name(), 
+                             _auth_options.get_auth_scheme() + " " + token_wrong_sig);
+    make_request(std::move(req_wrong_sig));
+
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Wrong signature token with optional auth";
+    EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with wrong signature and optional auth";
+    EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with wrong signature token";
 }
 
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-} 
+TEST_F(AuthMiddlewareTest, TokenAndSchemeWhitespaceTolerance) {
+    _auth_mw->with_auth_required(true);
+    // Using default "Bearer" scheme from _auth_options
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::http::auth::User test_user{"user_ws", "whitespacer", {"user"}};
+    std::string token = generate_test_token(test_user);
+    const std::string header_name = _auth_options.get_auth_header_name();
+    const std::string scheme = _auth_options.get_auth_scheme(); // Should be "Bearer"
+
+    // Scenario 1: Extra space(s) between scheme and token
+    _session->reset();
+    auto req_extra_space_after = create_request();
+    req_extra_space_after.set_header(header_name, scheme + "   " + token); // 3 spaces
+    make_request(std::move(req_extra_space_after));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) 
+        << "Extra spaces between scheme and token should be accepted.";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, test_user.id);
+
+    // Scenario 2: Leading whitespace before the scheme (Authorization header value starts with spaces)
+    // Note: HTTP header parsing by underlying libraries might trim this before it even reaches the middleware.
+    // If this fails, it might be due to the HTTP parser, not necessarily the auth middleware's logic.
+    _session->reset();
+    auto req_leading_space = create_request();
+    req_leading_space.set_header(header_name, "  " + scheme + " " + token); // 2 leading spaces
+    make_request(std::move(req_leading_space));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) 
+        << "Leading spaces before scheme should ideally be accepted or trimmed by HTTP parser.";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // Scenario 3: Trailing whitespace after token
+    // Similar to leading whitespace, this might be handled by general HTTP header trimming.
+    _session->reset();
+    auto req_trailing_space = create_request();
+    req_trailing_space.set_header(header_name, scheme + " " + token + "  "); // 2 trailing spaces
+    make_request(std::move(req_trailing_space));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) 
+        << "Trailing spaces after token should ideally be accepted or trimmed.";
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+
+    // Scenario 4: No space between scheme and token (SHOULD FAIL - invalid format)
+    _session->reset();
+    auto req_no_space = create_request();
+    req_no_space.set_header(header_name, scheme + token); // No space
+    make_request(std::move(req_no_space));
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) 
+        << "No space between scheme and token should be rejected.";
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+//  (CustomErrorHandler might be tricky as the old API differs from new error chain) 
