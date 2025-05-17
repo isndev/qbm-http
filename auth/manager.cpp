@@ -4,6 +4,8 @@
 #include <qb/io/crypto_jwt.h>
 #include <qb/json.h>
 #include <sstream>
+#include <algorithm> // Required for std::transform and std::isspace
+#include <cctype>    // Required for ::tolower and ::isspace
 
 namespace qb {
 namespace http {
@@ -147,18 +149,70 @@ std::string Manager::generate_token(const User &user) const {
 
 // Implementation of extract_token_from_header
 std::string Manager::extract_token_from_header(const std::string &auth_header) const {
-    // Expected format: "<scheme> <token>"
-    const auto &scheme = _options.get_auth_scheme();
-    if (auth_header.length() <= scheme.length() + 1) {
+    // Trim leading whitespace from the input auth_header string
+    size_t first_char_pos = auth_header.find_first_not_of(" \t\n\r\f\v");
+    if (std::string::npos == first_char_pos) {
+        // Header is all whitespace or empty
+        return "";
+    }
+    std::string trimmed_auth_header = auth_header.substr(first_char_pos);
+
+    const std::string& config_scheme = _options.get_auth_scheme();
+    
+    // Minimum length check: scheme + 1 space + at least 1 char for token
+    if (trimmed_auth_header.length() < config_scheme.length() + 2) {
         return "";
     }
 
-    if (auth_header.substr(0, scheme.length()) != scheme) {
+    // Extract the scheme part from the trimmed header
+    std::string header_scheme_part = trimmed_auth_header.substr(0, config_scheme.length());
+
+    // Convert both to lowercase for case-insensitive comparison
+    std::string lower_header_scheme = header_scheme_part;
+    std::transform(lower_header_scheme.begin(), lower_header_scheme.end(), lower_header_scheme.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+
+    std::string lower_config_scheme = config_scheme;
+    std::transform(lower_config_scheme.begin(), lower_config_scheme.end(), lower_config_scheme.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+
+    if (lower_header_scheme != lower_config_scheme) {
         return "";
     }
 
-    // Skip the scheme and space
-    return auth_header.substr(scheme.length() + 1);
+    // After matching the scheme, check if the character immediately following it is a space.
+    // This ensures that "SchemeToken" is rejected, while "Scheme Token" is processed.
+    if (trimmed_auth_header.length() <= config_scheme.length() || 
+        !std::isspace(static_cast<unsigned char>(trimmed_auth_header[config_scheme.length()]))) {
+        // No character after scheme, or the character is not a space.
+        return "";
+    }
+
+    // Find the start of the token part (skip scheme and any following spaces)
+    size_t token_start_pos = config_scheme.length();
+    while (token_start_pos < trimmed_auth_header.length() && std::isspace(static_cast<unsigned char>(trimmed_auth_header[token_start_pos]))) {
+        token_start_pos++;
+    }
+
+    if (token_start_pos >= trimmed_auth_header.length()) {
+        // Only scheme and spaces, no token
+        return "";
+    }
+
+    // Extract the token part from the trimmed header
+    std::string token = trimmed_auth_header.substr(token_start_pos);
+
+    // Trim trailing whitespace from the token (though JWTs are not expected to have it)
+    // Find the last non-whitespace character
+    size_t end_pos = token.find_last_not_of(" \t\n\r\f\v");
+    if (std::string::npos != end_pos) {
+        token = token.substr(0, end_pos + 1);
+    } else {
+        // Token is all whitespace, or empty after leading trim by substr
+        return ""; 
+    }
+    
+    return token;
 }
 
 // Implementation of verify_token

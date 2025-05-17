@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <iomanip>
+#include <sstream>
 
 namespace qb::http {
 
@@ -138,6 +140,51 @@ is_http_whitespace(const char ch) {
 }
 
 /**
+ * @brief Trim leading and trailing HTTP whitespace from a string_view
+ * @param sv The string_view to trim
+ * @return A string_view with whitespace removed from both ends
+ */
+inline std::string_view
+trim_http_whitespace(std::string_view sv) {
+    auto start = sv.begin();
+    while (start != sv.end() && is_http_whitespace(*start)) {
+        ++start;
+    }
+    auto end = sv.end();
+    while (end != start && is_http_whitespace(*(end - 1))) {
+        --end;
+    }
+    return std::string_view(start, std::distance(start, end));
+}
+
+/**
+ * @brief Split a header value string by a delimiter and trim whitespace from each part.
+ * @param header_value The string_view of the header value to split.
+ * @param delimiter The character to split by.
+ * @return Vector of trimmed string parts. Empty parts are omitted.
+ */
+inline std::vector<std::string>
+split_and_trim_header_list(std::string_view header_value, char delimiter) {
+    std::vector<std::string> result;
+    std::string_view remaining = header_value;
+    size_t pos = 0;
+    while ((pos = remaining.find(delimiter)) != std::string_view::npos) {
+        std::string_view token_sv = remaining.substr(0, pos);
+        std::string_view trimmed_token = trim_http_whitespace(token_sv);
+        if (!trimmed_token.empty()) {
+            result.emplace_back(trimmed_token);
+        }
+        remaining = remaining.substr(pos + 1);
+    }
+    // Add the last token
+    std::string_view trimmed_last_token = trim_http_whitespace(remaining);
+    if (!trimmed_last_token.empty()) {
+        result.emplace_back(trimmed_last_token);
+    }
+    return result;
+}
+
+/**
  * @brief Split a string by delimiters
  * @tparam String String type for result
  * @param str String to split
@@ -267,6 +314,43 @@ join(const std::vector<T> &strings, const std::string &delimiter) {
         result += strings[i];
     }
     return result;
+}
+
+// Basic HTML escaping
+inline std::string escape_html(std::string_view text) {
+    std::string result;
+    result.reserve(text.length());
+    for (char c : text) {
+        switch (c) {
+            case '&':  result.append("&amp;");       break;
+            case '\"': result.append("&quot;");      break;
+            case '\'': result.append("&#39;");       break; // &apos; is not universally supported
+            case '<':  result.append("&lt;");        break;
+            case '>':  result.append("&gt;");        break;
+            default:   result.push_back(c);         break;
+        }
+    }
+    return result;
+}
+
+// Basic URI component encoding
+inline std::string uri_encode_component(std::string_view component) {
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+
+    for (char c : component) {
+        // Keep alphanumeric and other unreserved characters
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+            continue;
+        }
+        // Any other characters are percent-encoded
+        escaped << std::uppercase;
+        escaped << '%' << std::setw(2) << static_cast<int>(static_cast<unsigned char>(c));
+        escaped << std::nouppercase;
+    }
+    return escaped.str();
 }
 
 } // namespace utility

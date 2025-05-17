@@ -1,6 +1,19 @@
-
+#include <qb/io/uri.h>
 #include "./body.h"
+
 namespace qb::http {
+
+// Placed explicit copy constructor and assignment operator definitions here
+Body::Body(Body const &rhs)
+    : _data(rhs._data) { // Explicitly use pipe's copy constructor
+}
+
+Body &Body::operator=(Body const &rhs) {
+    if (this != &rhs) {
+        _data = rhs._data; // Explicitly use pipe's copy assignment
+    }
+    return *this;
+}
 
 namespace internal {
 
@@ -85,7 +98,7 @@ private:
      */
     static void
     cbPartBegin(const char *, size_t, size_t, void *userData) {
-        auto *self  = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         self->headersProcessed = false;
         self->currentHeaders.headers().clear();
         self->currentHeaderName  = {};
@@ -99,7 +112,7 @@ private:
      */
     static void
     cbHeaderField(const char *buffer, size_t start, size_t end, void *userData) {
-        auto *self   = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         self->currentHeaderName = String(buffer + start, end - start);
     }
 
@@ -110,7 +123,7 @@ private:
      */
     static void
     cbHeaderValue(const char *buffer, size_t start, size_t end, void *userData) {
-        auto *self    = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         self->currentHeaderValue = String(buffer + start, end - start);
     }
 
@@ -122,7 +135,7 @@ private:
      */
     static void
     cbHeaderEnd(const char *, size_t, size_t, void *userData) {
-        auto *self = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         self->currentHeaders.headers()[self->currentHeaderName].push_back(
             self->currentHeaderValue);
         self->currentHeaderName  = {};
@@ -137,7 +150,7 @@ private:
      */
     static void
     cbHeadersEnd(const char *, size_t, size_t, void *userData) {
-        auto *self = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         if (self->onPartBegin != nullptr) {
             self->onPartBegin(self->currentHeaders, self->userData);
         }
@@ -154,7 +167,7 @@ private:
      */
     static void
     cbPartData(const char *buffer, size_t start, size_t end, void *userData) {
-        auto *self = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         if (self->onPartData != nullptr) {
             self->onPartData(buffer + start, end - start, self->userData);
         }
@@ -168,7 +181,7 @@ private:
      */
     static void
     cbPartEnd(const char *, size_t, size_t, void *userData) {
-        auto *self = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         if (self->onPartEnd != nullptr) {
             self->onPartEnd(self->userData);
         }
@@ -182,7 +195,7 @@ private:
      */
     static void
     cbEnd(const char *, size_t, size_t, void *userData) {
-        auto *self = (MultipartReader *) userData;
+        MultipartReader<String> *self = static_cast<MultipartReader<String>*>(userData);
         if (self->onEnd != nullptr) {
             self->onEnd(self->userData);
         }
@@ -319,15 +332,36 @@ public:
 std::unique_ptr<qb::compression::compress_provider>
 Body::get_compressor_from_header(const std::string &encoding) {
     auto tokens = utility::split_string<std::string>(encoding, ",; \t");
+    std::unique_ptr<qb::compression::compress_provider> actual_compressor;
 
     for (const auto &token : tokens) {
-        auto c = qb::compression::builtin::make_compressor(token);
-        if (c || utility::iequals(token, "identity") ||
-            utility::iequals(token, "chunked"))
-            return c;
+        if (utility::iequals(token, "chunked") || utility::iequals(token, "identity")) {
+            continue; // Skip these tokens for compressor selection
+        }
+        actual_compressor = qb::compression::builtin::make_compressor(token);
+        if (actual_compressor) {
+            return actual_compressor; // Found the first real compressor
+        }
+    }
+    // If loop finishes, no actual compressor was found.
+    // Check if "identity" was a relevant token, or if encoding implies no compression by being empty or only "chunked".
+    bool only_chunked_or_empty = true;
+    bool has_identity = false;
+    for (const auto &token : tokens) {
+        if (utility::iequals(token, "identity")) {
+            has_identity = true;
+        }
+        if (!token.empty() && !utility::iequals(token, "chunked") && !utility::iequals(token, "identity")) {
+            only_chunked_or_empty = false; // Found a token that is not chunked or identity
+        }
     }
 
-    throw std::runtime_error("Unsupported encoding type");
+    if (has_identity) return nullptr; // Explicit identity means no compression
+    if (only_chunked_or_empty && tokens.empty()) return nullptr; // Empty encoding means no compression
+    if (only_chunked_or_empty && !tokens.empty()) return nullptr; // Only chunked also means no actual compressor selected here
+
+    // If we are here, it means there was a token that was not chunked, not identity, and not a known compressor.
+    throw std::runtime_error("Unsupported encoding type: " + encoding);
 }
 
 /**
@@ -696,6 +730,163 @@ Body::as<MultipartView>() const {
                                  std::string(reader.getErrorMessage()));
 
     return mp;
+}
+
+/**
+ * @brief Assign a Form object to the body by copying
+ * @param form Form object to copy into the body
+ * @return Reference to this body
+ *
+ * Copy assignment operator for Form.
+ * Serializes the form content into the body as x-www-form-urlencoded.
+ */
+template <>
+Body &Body::operator=<Form>(Form const &form) {
+    _data.clear();
+    bool first_pair = true;
+    for (const auto &field_pair : form.fields()) {
+        for (const auto &value : field_pair.second) {
+            if (!first_pair) {
+                _data << '&';
+            }
+            _data << qb::io::uri::encode(field_pair.first);
+            _data << '=';
+            _data << qb::io::uri::encode(value);
+            first_pair = false;
+        }
+    }
+    return *this;
+}
+
+/**
+ * @brief Assign a Form object to the body by moving
+ * @param form Form object to move into the body
+ * @return Reference to this body
+ *
+ * Move assignment operator for Form.
+ * Serializes the form content into the body as x-www-form-urlencoded.
+ */
+template <>
+Body &Body::operator=<Form>(Form &&form) noexcept {
+    _data.clear();
+    bool first_pair = true;
+    for (const auto &field_pair : form.fields()) {
+        for (const auto &value : field_pair.second) {
+            if (!first_pair) {
+                _data << '&';
+            }
+            _data << qb::io::uri::encode(field_pair.first);
+            _data << '=';
+            _data << qb::io::uri::encode(value);
+            first_pair = false;
+        }
+    }
+    form.clear(); // Clear the source form after moving its content
+    return *this;
+}
+
+/**
+ * @brief Parse the body as x-www-form-urlencoded content
+ * @return Form object containing the parsed key-value pairs
+ *
+ * Parses the body content as x-www-form-urlencoded format and returns
+ * a Form object.
+ *
+ * @throws std::runtime_error If parsing fails (e.g., malformed data)
+ */
+template <>
+Form Body::as<Form>() const {
+    Form form_data;
+    auto body_view = _data.view();
+
+    if (body_view.empty()) {
+        return form_data;
+    }
+
+    size_t start = 0;
+    while (start < body_view.length()) {
+        size_t end_pair = body_view.find('&', start);
+        if (end_pair == std::string_view::npos) {
+            end_pair = body_view.length();
+        }
+
+        std::string_view pair_str = body_view.substr(start, end_pair - start);
+        size_t eq_pos = pair_str.find('=');
+
+        if (eq_pos != std::string_view::npos) {
+            std::string key = qb::io::uri::decode(pair_str.substr(0, eq_pos));
+            std::string value = qb::io::uri::decode(pair_str.substr(eq_pos + 1));
+            if (!key.empty()) { // Ensure key is not empty after decoding
+                 form_data.add(key, value);
+            }
+        } else {
+            // Handle cases where there is no '=' (e.g., 'key' or empty string if pair_str is empty)
+            std::string key = qb::io::uri::decode(pair_str);
+            if (!key.empty()) { // Ensure key is not empty after decoding
+                form_data.add(key, ""); // Add with empty value
+            }
+        }
+        start = end_pair + 1;
+    }
+
+    return form_data;
+}
+
+// Specialization for const std::string_view&
+template <>
+Body &Body::operator=<std::string_view>(std::string_view const &str) {
+    _data.clear();
+    _data << str;
+    return *this;
+}
+
+// Specialization for const char* const&
+template <>
+Body &Body::operator=<const char*>(char const * const &str) {
+    _data.clear();
+    if (str) { // Check for nullptr before attempting to stream
+        _data << str;
+    }
+    return *this;
+}
+
+/**
+ * @brief Assign a MultipartView object to the body by copying its structure.
+ * @param mpv MultipartView object to serialize into the body.
+ * @return Reference to this body.
+ *
+ * Note: This serializes the content referenced by MultipartView. The string_views
+ * in MultipartView must be valid when this operator is called.
+ */
+template <>
+Body &Body::operator=<MultipartView>(MultipartView const &mpv) {
+    _data.clear();
+    // The actual serialization logic uses qb::allocator::pipe<char>::put<MultipartView>
+    // which is already defined in multipart.cpp using a common put_impl.
+    // So, we can directly use the stream operator here.
+    _data << mpv;
+    return *this;
+}
+
+/**
+ * @brief Assign a MultipartView object to the body by moving its structure.
+ * @param mpv MultipartView object to serialize and then clear.
+ * @return Reference to this body.
+ *
+ * Note: This serializes the content referenced by MultipartView. The string_views
+ * in MultipartView must be valid. After serialization, the source mpv is cleared.
+ */
+template <>
+Body &Body::operator=<MultipartView>(MultipartView &&mpv) noexcept {
+    _data.clear();
+    _data << mpv; // Serialize the content
+    // Clearing a MultipartView typically means clearing its internal parts vector.
+    // The actual data pointed to by string_views is not owned by MultipartView.
+    mpv.parts().clear(); // Example: clear the parts. Actual clear might differ based on TMultiPart impl.
+    // If TMultiPart for string_view doesn't have a clear() or if clearing parts isn't enough,
+    // this might need adjustment based on MultipartView's specific clear semantics.
+    // For now, clearing parts is a reasonable assumption for "moved-from" state.
+    return *this;
 }
 
 } // namespace qb::http

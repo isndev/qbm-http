@@ -2,6 +2,8 @@
 #pragma once
 
 #include <llhttp.h>
+#include <functional>
+#include <string>
 
 namespace qb::http {
 
@@ -46,3 +48,27 @@ constexpr const char sep = ' ';
   XX(6, options, OPTIONS) \
   XX(7, trace, TRACE) \
   XX(28, patch, PATCH)
+
+namespace std {
+    template <>
+    struct hash<qb::http::method> {
+        size_t operator()(qb::http::method const &m) const noexcept {
+            return static_cast<size_t>(m);
+        }
+    };
+
+    template <>
+    struct hash<qb::http::status> {
+        size_t operator()(qb::http::status const &s) const noexcept {
+            return static_cast<size_t>(s);
+        }
+    };
+
+    inline std::string to_string(qb::http::method m) {
+        return http_method_name(m);
+    }
+
+    inline std::string to_string(qb::http::status s) {
+        return http_status_name(s); 
+    }
+} // namespace std

@@ -35,7 +35,7 @@
 
 #include "http.h"
 #include "multipart.h"
-#include "middleware/middleware.h"
+
 #if defined(_WIN32)
 #undef DELETE // Windows :/
 #endif
@@ -44,9 +44,6 @@
 #include <iostream>
 
 namespace qb::http {
-
-// Definition of the external middleware execution log
-std::vector<std::string> adv_test_mw_middleware_execution_log;
 
 /**
  * @brief Macro to register synchronous HTTP functions
@@ -119,8 +116,11 @@ pipe<char>::put<qb::http::Request>(const qb::http::Request &r) {
     // Body
     const auto length = r.body().size();
     if (length) {
-        *this << "content-length: " << length << qb::http::endl << qb::http::endl;
-        *this << r.body().raw();
+        if (!r.has_header("Content-Length")) {
+            *this << "content-length: " << length << qb::http::endl;
+        }
+        *this << qb::http::endl
+              << r.body().raw();
     } else
         *this << qb::http::endl;
     return *this;
@@ -161,8 +161,10 @@ pipe<char>::put<qb::http::Response>(const qb::http::Response &r) {
     // Body
     auto length = r.body().size();
     if (length) {
-        *this << "content-length: " << length << qb::http::endl
-              << qb::http::endl
+        if (!r.has_header("Content-Length")) {
+            *this << "content-length: " << length << qb::http::endl;
+        }
+        *this << qb::http::endl
               << r.body().raw();
     } else
         *this << qb::http::endl;

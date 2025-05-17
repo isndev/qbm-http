@@ -270,13 +270,16 @@ private:
     }
 
     /**
-     * @brief Check if a character is valid in a header field name
+     * @brief Check if a character is valid in a header field name (RFC 7230 tchar)
      * @param c Character to check
      * @return true if the character is valid for header field
      */
     bool
     isHeaderFieldCharacter(char c) const {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == HYPHEN;
+        return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+                c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
+                c == '^' || c == '_' || c == '`' || c == '|' || c == '~');
     }
 
     /**
@@ -628,10 +631,6 @@ public:
                     }
 
                     l_index++;
-                    if (c == HYPHEN) {
-                        break;
-                    }
-
                     if (c == COLON) {
                         if (l_index == 1) {
                             // empty header field
@@ -644,8 +643,7 @@ public:
                         break;
                     }
 
-                    cl = lower(c);
-                    if (cl < 'a' || cl > 'z') {
+                    if (!isHeaderFieldCharacter(c)) {
                         setError("Malformed header name.");
                         return i;
                     }

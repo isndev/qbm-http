@@ -5,52 +5,52 @@
 #include <string_view>
 #include <functional>
 #include <optional>
+#include <vector>
+#include <chrono>
+#include <algorithm> 
+#include <cctype>    
+
 #include <qb/json.h>
 #include <qb/io/crypto_jwt.h>
-#include <vector>
 
-#include "../http.h"
-#include "./middleware_interface.h"
-
-// Assuming these are declared globally in the test file and are accessible here
-// This is not ideal for library code but necessary for this specific debugging request.
-extern std::vector<std::string> adv_test_mw_middleware_execution_log;
+#include "../routing/middleware.h"
+#include "../request.h"
+#include "../response.h"
+#include "../types.h"
+#include "../cookie.h"
+#include "../utility.h"
 
 namespace qb::http {
 
-/**
- * @brief Token location in requests
- */
+/** @brief Specifies where to look for the JWT in an incoming request. */
 enum class JwtTokenLocation {
-    HEADER,  ///< In an HTTP header
-    COOKIE,  ///< In a cookie
-    QUERY    ///< In the URL query parameters
+    HEADER,  ///< Token is expected in an HTTP header (e.g., Authorization).
+    COOKIE,  ///< Token is expected in an HTTP cookie.
+    QUERY    ///< Token is expected in a URL query parameter.
 };
 
 /**
- * @brief Options for the JWT middleware
+ * @brief Configuration options for the JWTMiddleware.
  */
 struct JwtOptions {
-    std::string secret;            ///< Secret key for JWT validation
-    std::string algorithm = "HS256"; ///< Signature algorithm
-    bool verify_exp = true;        ///< Verify expiration
-    bool verify_nbf = true;        ///< Verify not-before
-    bool verify_iat = true;        ///< Verify issued-at
-    bool verify_iss = false;       ///< Verify issuer
-    bool verify_aud = false;       ///< Verify audience
-    bool verify_sub = false;       ///< Verify subject
-    std::string issuer;            ///< Expected issuer value
-    std::string audience;          ///< Expected audience value
-    std::string subject;           ///< Expected subject value
-    int leeway = 0;                ///< Clock skew tolerance in seconds
-    JwtTokenLocation token_location = JwtTokenLocation::HEADER; ///< Token location
-    std::string token_name = "Authorization"; ///< Name of header, cookie or parameter
-    std::string auth_scheme = "Bearer"; ///< Authentication scheme for header
+    std::string secret;            ///< The secret key (for HMAC) or public key (for RSA/ES).
+    std::string algorithm = "HS256"; ///< Expected JWT signature algorithm.
+    bool verify_exp = true;        ///< If true, verifies 'exp' (expiration time) claim.
+    bool verify_nbf = true;        ///< If true, verifies 'nbf' (not before) claim.
+    bool verify_iat = true;        ///< If true, verifies 'iat' (issued at) claim.
+    bool verify_iss = false;       ///< If true, verifies 'iss' (issuer) claim against `issuer`.
+    bool verify_aud = false;       ///< If true, verifies 'aud' (audience) claim against `audience`.
+    bool verify_sub = false;       ///< If true, verifies 'sub' (subject) claim against `subject`.
+    std::string issuer;            ///< Expected 'iss' claim value if `verify_iss` is true.
+    std::string audience;          ///< Expected 'aud' claim value if `verify_aud` is true.
+    std::string subject;           ///< Expected 'sub' claim value if `verify_sub` is true.
+    int leeway_seconds = 0;        ///< Clock skew tolerance for time-based claims (exp, nbf).
+    JwtTokenLocation token_location = JwtTokenLocation::HEADER; ///< Where to find the token.
+    std::string token_name = "Authorization"; ///< Name of the header, cookie, or query parameter.
+    std::string auth_scheme = "Bearer"; ///< Authentication scheme prefix (e.g., "Bearer") for header tokens.
 };
 
-/**
- * @brief JWT specific errors
- */
+/** @brief Enumerates specific JWT processing errors. */
 enum class JwtError {
     NONE,
     MISSING_TOKEN,
@@ -62,50 +62,59 @@ enum class JwtError {
     ALGORITHM_MISMATCH
 };
 
-/**
- * @brief JWT error information structure
- */
+/** @brief Structure to hold JWT error code and a descriptive message. */
 struct JwtErrorInfo {
-    JwtError code;
+    JwtError code = JwtError::NONE;
     std::string message;
 };
 
 /**
- * @brief JWT middleware implementing authentication and token validation
- * 
- * This middleware verifies and validates JWT tokens in HTTP requests,
- * with support for different token locations, claim validation,
- * and customization of error responses.
+ * @brief Middleware for JWT-based authentication.
+ * Extracts and verifies JWTs from requests.
+ * @tparam SessionType The type of the session object.
  */
-template <typename Session, typename String = std::string>
-class JwtMiddleware : public ISyncMiddleware<Session, String> {
+template <typename SessionType>
+class JwtMiddleware : public IMiddleware<SessionType> {
 public:
-    using Context = typename ISyncMiddleware<Session, String>::Context;
-    using Validator = std::function<bool(const qb::json&, JwtErrorInfo&)>;
-    using ErrorHandler = std::function<void(Context&, const JwtErrorInfo&)>;
-    using SuccessHandler = std::function<void(Context&, const qb::json&)>;
+    using ContextPtr = std::shared_ptr<Context<SessionType>>;
+    /** 
+     * @brief Custom payload validation function.
+     * @param payload Decoded JSON payload.
+     * @param error_info Reference to populate on failure.
+     * @return True if valid, false otherwise.
+     */
+    using Validator = std::function<bool(const qb::json& payload, JwtErrorInfo& error_info)>;
+    /** 
+     * @brief Custom error handler function.
+     * Called on JWT validation failure. Responsible for setting the HTTP response.
+     * @param ctx Request context.
+     * @param error_info Details of the JWT error.
+     */
+    using ErrorHandler = std::function<void(ContextPtr ctx, const JwtErrorInfo& error_info)>; 
+    /** 
+     * @brief Custom success handler function.
+     * Called after successful JWT validation.
+     * @param ctx Request context.
+     * @param payload Decoded JWT payload.
+     */
+    using SuccessHandler = std::function<void(ContextPtr ctx, const qb::json& payload)>;
     
     /**
-     * @brief Constructor with minimal options
-     * @param secret Secret key for JWT validation
-     * @param algorithm Signature algorithm
+     * @brief Constructor with secret and algorithm.
+     * @param secret Secret or public key.
+     * @param algorithm JWT signing algorithm (default "HS256").
      */
     explicit JwtMiddleware(const std::string& secret, const std::string& algorithm = "HS256")
         : _options({secret, algorithm}) {}
     
     /**
-     * @brief Constructor with complete options
-     * @param options JWT configuration options
+     * @brief Constructor with detailed options.
+     * @param options JwtOptions struct.
      */
     explicit JwtMiddleware(JwtOptions options)
         : _options(std::move(options)) {}
     
-    /**
-     * @brief Set token location as header
-     * @param header_name Header name
-     * @param scheme Authentication scheme
-     * @return Reference to this middleware for chaining
-     */
+    /** @brief Configure token extraction from an HTTP header. */
     JwtMiddleware& from_header(const std::string& header_name, const std::string& scheme = "Bearer") {
         _options.token_location = JwtTokenLocation::HEADER;
         _options.token_name = header_name;
@@ -113,359 +122,266 @@ public:
         return *this;
     }
     
-    /**
-     * @brief Set token location as cookie
-     * @param cookie_name Cookie name
-     * @return Reference to this middleware for chaining
-     */
+    /** @brief Configure token extraction from an HTTP cookie. */
     JwtMiddleware& from_cookie(const std::string& cookie_name) {
         _options.token_location = JwtTokenLocation::COOKIE;
         _options.token_name = cookie_name;
         return *this;
     }
     
-    /**
-     * @brief Set token location as query parameter
-     * @param param_name Parameter name
-     * @return Reference to this middleware for chaining
-     */
+    /** @brief Configure token extraction from a URL query parameter. */
     JwtMiddleware& from_query(const std::string& param_name) {
         _options.token_location = JwtTokenLocation::QUERY;
         _options.token_name = param_name;
         return *this;
     }
     
-    /**
-     * @brief Set required claims
-     * @param claims List of required claim names
-     * @return Reference to this middleware for chaining
-     */
+    /** @brief Specify claims that must be present in the JWT payload. */
     JwtMiddleware& require_claims(const std::vector<std::string>& claims) {
         _required_claims = claims;
         return *this;
     }
     
-    /**
-     * @brief Set a custom validator
-     * @param validator Validation function
-     * @return Reference to this middleware for chaining
-     */
-    JwtMiddleware& with_validator(Validator validator) {
-        _validator = std::move(validator);
+    /** @brief Set a custom validation function for the JWT payload. */
+    JwtMiddleware& with_validator(Validator validator_fn) {
+        _validator = std::move(validator_fn);
+        return *this;
+    }
+    
+    /** @brief Set a custom error handling function. */
+    JwtMiddleware& with_error_handler(ErrorHandler handler_fn) {
+        _error_handler = std::move(handler_fn);
+        return *this;
+    }
+    
+    /** @brief Set a custom success handling function. */
+    JwtMiddleware& with_success_handler(SuccessHandler handler_fn) {
+        _success_handler = std::move(handler_fn);
+        return *this;
+    }
+    
+    /** @brief Override current JWT options. */
+    JwtMiddleware& with_options(const JwtOptions& opts) {
+        _options = opts;
         return *this;
     }
     
     /**
-     * @brief Set a custom error handler
-     * @param handler Error handling function
-     * @return Reference to this middleware for chaining
+     * @brief Handles incoming request: extracts, verifies, and validates JWT.
+     * @param ctx The request context.
      */
-    JwtMiddleware& with_error_handler(ErrorHandler handler) {
-        _error_handler = std::move(handler);
-        return *this;
-    }
-    
-    /**
-     * @brief Set a custom success handler
-     * @param handler Success handling function
-     * @return Reference to this middleware for chaining
-     */
-    JwtMiddleware& with_success_handler(SuccessHandler handler) {
-        _success_handler = std::move(handler);
-        return *this;
-    }
-    
-    /**
-     * @brief Set configuration options
-     * @param options New options
-     * @return Reference to this middleware for chaining
-     */
-    JwtMiddleware& with_options(const JwtOptions& options) {
-        _options = options;
-        return *this;
-    }
-    
-    /**
-     * @brief Process a request
-     * @param ctx Request context
-     * @return Middleware result
-     */
-    MiddlewareResult process(Context& ctx) override {
-        if (adv_test_mw_middleware_execution_log.size() < 1000) { 
-            adv_test_mw_middleware_execution_log.push_back(name() + " process_start for " + std::string(ctx.request.uri().path()));
-        }
-
-        auto token = extract_token(ctx.request);
-        if (!token) {
-            if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                 adv_test_mw_middleware_execution_log.push_back(name() + " stopping: missing token for " + std::string(ctx.request.uri().path()));
-            }
-            handle_error(ctx, {JwtError::MISSING_TOKEN, "JWT token is missing"});
-            return MiddlewareResult::Stop();
+    void process(ContextPtr ctx) override {
+        std::optional<std::string> token_opt = extract_token(ctx->request());
+        if (!token_opt) {
+            handle_error(ctx, {JwtError::MISSING_TOKEN, "JWT token is missing."});
+            return; 
         }
         
-        JwtErrorInfo error;
-        auto payload = verify_token(*token, error);
-        if (!payload) {
-             if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                adv_test_mw_middleware_execution_log.push_back(name() + " stopping: verify_token failed ('" + error.message + "') for " + std::string(ctx.request.uri().path()));
-            }
-            handle_error(ctx, error);
-            return MiddlewareResult::Stop();
+        JwtErrorInfo error_info{JwtError::NONE, ""};
+        std::optional<qb::json> payload_opt = verify_token(*token_opt, error_info);
+        if (!payload_opt) {
+            handle_error(ctx, error_info);
+            return; 
         }
         
-        for (const auto& claim : _required_claims) {
-            if (!payload->contains(claim)) {
-                if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                    adv_test_mw_middleware_execution_log.push_back(name() + " stopping: missing required claim '" + claim + "' for " + std::string(ctx.request.uri().path()));
-                }
-                handle_error(ctx, {JwtError::INVALID_CLAIM, "Required claim '" + claim + "' is missing"});
-                return MiddlewareResult::Stop();
+        for (const auto& claim_name : _required_claims) {
+            if (!payload_opt->contains(claim_name)) {
+                handle_error(ctx, {JwtError::INVALID_CLAIM, "Required claim '" + claim_name + "' is missing."});
+                return; 
             }
         }
         
         if (_validator) {
-            if (!_validator(*payload, error)) {
-                if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                    adv_test_mw_middleware_execution_log.push_back(name() + " stopping: custom validator failed ('" + error.message + "') for " + std::string(ctx.request.uri().path()));
-                }
-                handle_error(ctx, error);
-                return MiddlewareResult::Stop();
+            JwtErrorInfo validator_error{JwtError::NONE, ""};
+            if (!_validator(*payload_opt, validator_error)) {
+                handle_error(ctx, validator_error.code != JwtError::NONE ? validator_error : JwtErrorInfo{JwtError::INVALID_CLAIM, "Custom JWT validation failed."});
+                return; 
             }
         }
         
-        ctx.template set<qb::json>("jwt_payload", *payload);
+        ctx->template set<qb::json>("jwt_payload", *payload_opt);
         
         if (_success_handler) {
-            _success_handler(ctx, *payload);
+            _success_handler(ctx, *payload_opt);
         }
         
-        if (adv_test_mw_middleware_execution_log.size() < 1000) {
-            adv_test_mw_middleware_execution_log.push_back(name() + " continuing: token valid for " + std::string(ctx.request.uri().path()));
-        }
-        return MiddlewareResult::Continue();
+        ctx->complete(AsyncTaskResult::CONTINUE);
     }
     
-    /**
-     * @brief Get the middleware name
-     */
     std::string name() const override {
-        return "JwtMiddleware";
+        return _name;
+    }
+
+    void cancel() override {
+        // No-op for this synchronous middleware.
     }
     
-    /**
-     * @brief Create a JWT middleware with a secret key
-     * @param secret Secret key
-     * @param algorithm Signature algorithm
-     * @return Shared JWT middleware
-     */
-    static std::shared_ptr<JwtMiddleware<Session, String>> create(const std::string& secret, const std::string& algorithm = "HS256") {
-        return std::make_shared<JwtMiddleware<Session, String>>(secret, algorithm);
+    static std::shared_ptr<JwtMiddleware<SessionType>> create(const std::string& secret, const std::string& algorithm = "HS256") {
+        return std::make_shared<JwtMiddleware<SessionType>>(JwtOptions{secret, algorithm});
     }
     
-    /**
-     * @brief Create a JWT middleware with complete options
-     * @param options Configuration options
-     * @return Shared JWT middleware
-     */
-    static std::shared_ptr<JwtMiddleware<Session, String>> create_with_options(const JwtOptions& options) {
-        return std::make_shared<JwtMiddleware<Session, String>>(options);
+    static std::shared_ptr<JwtMiddleware<SessionType>> create_with_options(const JwtOptions& options) {
+        return std::make_shared<JwtMiddleware<SessionType>>(options);
     }
     
 private:
     JwtOptions _options;
+    std::string _name = "JwtMiddleware"; 
     std::vector<std::string> _required_claims;
     Validator _validator;
     ErrorHandler _error_handler;
     SuccessHandler _success_handler;
     
-    /**
-     * @brief Extract token from request
-     * @param request HTTP request
-     * @return Optional JWT token
-     */
-    std::optional<std::string> extract_token(const TRequest<String>& request) const {
-        switch (_options.token_location) {
-            case JwtTokenLocation::HEADER: {
-                auto header = request.header(_options.token_name);
-                if (header.empty()) {
-                    return std::nullopt;
+    std::optional<std::string> extract_token(const Request& req) const {
+        if (_options.token_location == JwtTokenLocation::HEADER) {
+            std::string header_value = req.header(_options.token_name, 0, "");
+            if (header_value.empty()) {
+                return std::nullopt;
+            }
+
+            header_value.erase(0, header_value.find_first_not_of(" \t\n\r\f "));
+            header_value.erase(header_value.find_last_not_of(" \t\n\r\f ") + 1);
+
+            if (_options.auth_scheme.empty()) {
+                return header_value.empty() ? std::nullopt : std::make_optional(header_value);
+            }
+
+            if (header_value.length() > _options.auth_scheme.length() &&
+                std::equal(_options.auth_scheme.begin(), _options.auth_scheme.end(),
+                           header_value.begin(),
+                           [](char a, char b) {
+                               return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+                           })) {
+                if (header_value[_options.auth_scheme.length()] != ' ') {
+                    return std::nullopt; 
                 }
                 
-                if (_options.token_name == "Authorization") {
-                    // Handle Authorization header with scheme
-                    std::string auth_header = header;
-                    if (auth_header.rfind(_options.auth_scheme + " ", 0) != 0) {
-                        return std::nullopt;
-                    }
-                    return auth_header.substr(_options.auth_scheme.length() + 1);
-                }
+                std::string_view token_sv = std::string_view(header_value).substr(_options.auth_scheme.length());
                 
-                return header;
-            }
-            
-            case JwtTokenLocation::COOKIE: {
-                // Use the cookie_value method to retrieve the cookie's value
-                auto value = request.cookie_value(_options.token_name);
-                if (value.empty()) {
+                size_t first_char = token_sv.find_first_not_of(" \t\n\r\f ");
+                if (first_char == std::string_view::npos) { 
                     return std::nullopt;
                 }
-                return value;
-            }
-            
-            case JwtTokenLocation::QUERY: {
-                // Use the query method to access query parameters
-                auto value = request.query(_options.token_name);
-                if (value.empty()) {
+                token_sv.remove_prefix(first_char);
+                
+                if (token_sv.empty()) {
                     return std::nullopt;
                 }
-                return value;
+                return std::string(token_sv);
             }
+            return std::nullopt; 
+        } else if (_options.token_location == JwtTokenLocation::COOKIE) {
+            std::string cookie_val = req.cookie_value(_options.token_name);
+            return cookie_val.empty() ? std::nullopt : std::optional<std::string>(cookie_val);
+        } else if (_options.token_location == JwtTokenLocation::QUERY) {
+            std::string query_val = req.query(_options.token_name);
+            return query_val.empty() ? std::nullopt : std::optional<std::string>(query_val);
         }
-        
         return std::nullopt;
     }
     
-    /**
-     * @brief Verify and decode JWT token
-     * @param token JWT token
-     * @param error Reference to store errors
-     * @return Optional JSON payload
-     */
-    std::optional<qb::json> verify_token(const std::string& token, JwtErrorInfo& error) const {
-        try {
-            qb::jwt::VerifyOptions options;
-            
-            auto jwt_alg_opt = qb::jwt::algorithm_from_string(_options.algorithm);
-            if (!jwt_alg_opt) {
-                error = {JwtError::ALGORITHM_MISMATCH, "Unsupported algorithm in JwtOptions: " + _options.algorithm};
-                if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                     adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] error: " + error.message);
-                }
-                return std::nullopt;
-            }
-            options.algorithm = *jwt_alg_opt;
-            
-            if (options.algorithm == qb::jwt::Algorithm::HS256 ||
-                options.algorithm == qb::jwt::Algorithm::HS384 ||
-                options.algorithm == qb::jwt::Algorithm::HS512) {
-                options.key = _options.secret;
-            } else {
-            options.key = _options.secret;
-            }
-
-            options.verify_expiration = _options.verify_exp;
-            options.verify_not_before = _options.verify_nbf;
-            options.verify_issuer = _options.verify_iss;
-            options.verify_audience = _options.verify_aud;
-            options.verify_subject = _options.verify_sub;
-            options.clock_skew = std::chrono::seconds(_options.leeway);
-            if (_options.verify_iss && !_options.issuer.empty()) {
-                options.issuer = _options.issuer;
-            }
-            if (_options.verify_aud && !_options.audience.empty()) {
-                options.audience = _options.audience;
-            }
-            if (_options.verify_sub && !_options.subject.empty()) {
-                options.subject = _options.subject;
-            }
-            
-            auto result = qb::jwt::verify(token, options);
-            
-            if (!result.is_valid()) {
-                switch (result.error) {
-                    case qb::jwt::ValidationError::INVALID_FORMAT: error = {JwtError::INVALID_TOKEN, "Invalid token format"}; break;
-                    case qb::jwt::ValidationError::INVALID_SIGNATURE: error = {JwtError::INVALID_SIGNATURE, "Invalid signature"}; break;
-                    case qb::jwt::ValidationError::TOKEN_EXPIRED: error = {JwtError::TOKEN_EXPIRED, "Token has expired"}; break;
-                    case qb::jwt::ValidationError::TOKEN_NOT_ACTIVE: error = {JwtError::TOKEN_NOT_ACTIVE, "Token is not yet active"}; break;
-                    case qb::jwt::ValidationError::INVALID_ISSUER: error = {JwtError::INVALID_CLAIM, "Invalid issuer"}; break;
-                    case qb::jwt::ValidationError::INVALID_AUDIENCE: error = {JwtError::INVALID_CLAIM, "Invalid audience"}; break;
-                    case qb::jwt::ValidationError::INVALID_SUBJECT: error = {JwtError::INVALID_CLAIM, "Invalid subject"}; break;
-                    case qb::jwt::ValidationError::CLAIM_MISMATCH: error = {JwtError::INVALID_CLAIM, "Claim validation failed"}; break;
-                    default: error = {JwtError::INVALID_TOKEN, "Unknown validation error"};
-                }
-                return std::nullopt;
-            }
-            
-            qb::json payload_to_return; 
-            for (const auto& pair_kv : result.payload) {
-                const std::string& key = pair_kv.first;
-                const std::string& value_str = pair_kv.second;
-
-                if (key == "roles" || key == "aud") {
-                    if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                        adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] attempting to parse value_str for claim '" + key + "': " + value_str);
-                    }
-                    try {
-                        payload_to_return[key] = qb::json::parse(value_str); 
-                        if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                            adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] successfully parsed claim '" + key + "'. Resulting type: " + std::string(payload_to_return[key].type_name()));
-                        }
-                    } catch (const qb::json::exception& e) {
-                        if (adv_test_mw_middleware_execution_log.size() < 1000) {
-                            adv_test_mw_middleware_execution_log.push_back(name() + " [verify_token] FAILED to parse claim '" + key + "' into JSON object. Error: " + e.what() + ". Storing as string.");
-                        }
-                        payload_to_return[key] = value_str; 
-                    }
-                } else {
-                    payload_to_return[key] = value_str;
-            }
-            }
-            return payload_to_return;
+    std::optional<qb::json> verify_token(const std::string& token, JwtErrorInfo& error_info) const {
+        qb::jwt::VerifyOptions jwt_verify_options;
+        
+        auto alg_opt = qb::jwt::algorithm_from_string(_options.algorithm);
+        if (!alg_opt) {
+            error_info = {JwtError::ALGORITHM_MISMATCH, "JWT algorithm '" + _options.algorithm + "' is not supported or recognized by the library."};
+            return std::nullopt;
         }
-        catch (const std::exception& e) {
-            error = {JwtError::INVALID_TOKEN, std::string("Token validation error: ") + e.what()};
+        jwt_verify_options.algorithm = *alg_opt;
+        jwt_verify_options.key = _options.secret;
+        jwt_verify_options.verify_expiration = _options.verify_exp;
+        jwt_verify_options.verify_not_before = _options.verify_nbf;
+        jwt_verify_options.clock_skew = std::chrono::seconds(_options.leeway_seconds);
+
+        if (_options.verify_iss) {
+            jwt_verify_options.verify_issuer = true;
+            jwt_verify_options.issuer = _options.issuer;
+        }
+        if (_options.verify_aud) {
+            jwt_verify_options.verify_audience = true;
+            jwt_verify_options.audience = _options.audience;
+        }
+        if (_options.verify_sub) {
+            jwt_verify_options.verify_subject = true;
+            jwt_verify_options.subject = _options.subject;
+        }
+
+        qb::jwt::ValidationResult result = qb::jwt::verify(token, jwt_verify_options);
+
+        if (result.is_valid()) {
+            qb::json payload_json = qb::json::object();
+            for(const auto& pair : result.payload) {
+                if (pair.second == "true") {
+                    payload_json[pair.first] = true;
+                } else if (pair.second == "false") {
+                    payload_json[pair.first] = false;
+                } else {
+                    try {
+                        size_t pos = 0;
+                        long double val = std::stold(pair.second, &pos);
+                        if (pos == pair.second.length()) { 
+                           if (static_cast<long long>(val) == val) { 
+                               payload_json[pair.first] = static_cast<long long>(val);
+                           } else {
+                               payload_json[pair.first] = val;
+                           }
+                        } else {
+                           payload_json[pair.first] = pair.second; 
+                        }
+                    } catch (const std::invalid_argument&) {
+                        payload_json[pair.first] = pair.second; 
+                    } catch (const std::out_of_range&) {
+                        payload_json[pair.first] = pair.second; 
+                    }
+                }
+            }
+            return payload_json;
+        } else {
+            switch (result.error) {
+                case qb::jwt::ValidationError::INVALID_FORMAT:    error_info = {JwtError::INVALID_TOKEN, "Invalid token format."}; break;
+                case qb::jwt::ValidationError::INVALID_SIGNATURE: error_info = {JwtError::INVALID_SIGNATURE, "Invalid token signature."}; break;
+                case qb::jwt::ValidationError::TOKEN_EXPIRED:     error_info = {JwtError::TOKEN_EXPIRED, "Token has expired."}; break;
+                case qb::jwt::ValidationError::TOKEN_NOT_ACTIVE:  error_info = {JwtError::TOKEN_NOT_ACTIVE, "Token is not yet active."}; break;
+                case qb::jwt::ValidationError::INVALID_ISSUER:    error_info = {JwtError::INVALID_CLAIM, "Invalid issuer."}; break;
+                case qb::jwt::ValidationError::INVALID_AUDIENCE:  error_info = {JwtError::INVALID_CLAIM, "Invalid audience."}; break;
+                case qb::jwt::ValidationError::INVALID_SUBJECT:   error_info = {JwtError::INVALID_CLAIM, "Invalid subject."}; break;
+                case qb::jwt::ValidationError::CLAIM_MISMATCH:    
+                                                                  error_info = {JwtError::INVALID_CLAIM, "A specific claim value mismatch occurred."}; break;
+                default: error_info = {JwtError::INVALID_TOKEN, "Unknown JWT validation error."}; break;
+            }
             return std::nullopt;
         }
     }
     
-    /**
-     * @brief Handle JWT validation error
-     * @param ctx Request context
-     * @param error Error information
-     */
-    void handle_error(Context& ctx, const JwtErrorInfo& error) const {
+    void handle_error(ContextPtr ctx, const JwtErrorInfo& error) const {
         if (_error_handler) {
             _error_handler(ctx, error);
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+                 ctx->complete(AsyncTaskResult::COMPLETE); 
+            }
             return;
         }
         
-        // Default error handler
-        qb::json response = {
-            {"status", "error"},
-            {"message", error.message},
-            {"code", static_cast<int>(error.code)}
-        };
+        qb::json response_body = { {"error", error.message} };
         
-        ctx.response.status_code = HTTP_STATUS_UNAUTHORIZED;
-        ctx.response.add_header("Content-Type", "application/json");
-        ctx.response.body() = response.dump();
-        ctx.execute_error_callbacks(error.message);
-        ctx.mark_handled();
+        ctx->response().status_code = HTTP_STATUS_UNAUTHORIZED;
+        ctx->response().set_header("Content-Type", "application/json");
+        ctx->response().body() = response_body.dump();
+        ctx->complete(AsyncTaskResult::COMPLETE); 
     }
 };
 
-/**
- * @brief Create a JWT middleware as a typed middleware
- * @param secret Secret key
- * @param algorithm Signature algorithm
- * @return Adapted JWT middleware
- */
-template <typename Session, typename String = std::string>
-auto jwt_middleware(const std::string& secret, const std::string& algorithm = "HS256") {
-    auto middleware = std::make_shared<JwtMiddleware<Session, String>>(secret, algorithm);
-    return std::make_shared<SyncMiddlewareAdapter<Session, String>>(std::move(middleware));
+template <typename SessionType>
+std::shared_ptr<JwtMiddleware<SessionType>>
+jwt_middleware(const std::string& secret, const std::string& algorithm = "HS256") {
+    return JwtMiddleware<SessionType>::create(secret, algorithm);
 }
 
-/**
- * @brief Create a JWT middleware as a typed middleware with complete options
- * @param options Configuration options
- * @return Adapted JWT middleware
- */
-template <typename Session, typename String = std::string>
-auto jwt_middleware_with_options(const JwtOptions& options) {
-    auto middleware = std::make_shared<JwtMiddleware<Session, String>>(options);
-    return std::make_shared<SyncMiddlewareAdapter<Session, String>>(std::move(middleware));
+template <typename SessionType>
+std::shared_ptr<JwtMiddleware<SessionType>>
+jwt_middleware_with_options(const JwtOptions& options) {
+    return JwtMiddleware<SessionType>::create_with_options(options);
 }
 
 } // namespace qb::http 

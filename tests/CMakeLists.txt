@@ -23,36 +23,35 @@ find_package(OpenSSL REQUIRED)
 # Define test files and their corresponding test names
 set(HTTP_TESTS
         uri-only
-        router
-        router-radix
-        router-advanced
-        router-async-advanced
-        router-sync-middleware
-        router-async-middleware
-        router-complex-middleware
-        router-groups
-        router-auth
+        body
         cookie
-        middleware-cors
-        middleware-validator
-        middleware-rate-limit
-        middleware-logging
-        middleware-jwt
-        middleware-transform
+        validation
+        router
+        router-api
+        router-match
+        router-async
+        router-error-handling
+        router-middleware
+        router-controller
+        router-route-group
+        router-all
         middleware-conditional
+        middleware-transform
+        middleware-logging
         middleware-timing
-        middleware-error-handling
-        middleware-auth
+        middleware-rate_limit
+        middleware-security-headers
         middleware-compression
-#        middleware-recaptcha
-        openapi
-        openapi-complex
-#        session-http
+        middleware-cors
+        middleware-auth
+        middleware-error-handling
+        middleware-jwt
+        middleware-validator
+        middleware-static-files
+        session-http
         integration-basic
         integration-advanced
-        integration-controller
         integration-middleware
-        integration-middleware-advanced
 )
 
 # Register each standard test

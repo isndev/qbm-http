@@ -19,186 +19,169 @@
 
 #pragma once
 
-#include "./middleware_interface.h"
-#include "../http.h"
+#include <memory>
+#include <string>
+#include <string_view> // For TRequest/TResponse header views, though Request/Response types are concrete
+#include <functional>
+#include <optional>
+#include <vector>
+#include <chrono>      // For RecaptchaResult challenge_ts
+
+#include <qb/json.h>   // For qb::json
+
+#include "../routing/middleware.h" // IMiddleware, Context, AsyncTaskResult
+#include "../http.h"               // For qb::http::REQUEST, qb::http::Request, qb::http::Response, http_status
+#include "../io/uri.h"             // For qb::io::uri used in api_req construction
 
 namespace qb::http {
 
 /**
- * @brief Configuration options for the reCAPTCHA middleware
+ * @brief Configuration options for the RecaptchaMiddleware.
+ *
+ * Defines settings such as the reCAPTCHA secret key, minimum acceptable score (for v3),
+ * the API endpoint for verification, and how to extract the reCAPTCHA token from requests.
  */
 class RecaptchaOptions {
 public:
-    /**
-     * @brief Token location in the request
-     */
+    /** @brief Specifies where the reCAPTCHA token is expected in the incoming HTTP request. */
     enum class TokenLocation {
-        Header,  ///< In an HTTP header
-        Body,    ///< In the request body
-        Query    ///< In the URL query parameters
+        Header,  ///< Token is in an HTTP header.
+        Body,    ///< Token is in the request body (e.g., JSON or form field).
+        Query    ///< Token is in a URL query parameter.
     };
 
-    /**
-     * @brief Default constructor
-     */
+    /** @brief Default constructor. Requires `secret_key` to be set before use. */
     RecaptchaOptions() = default;
 
     /**
-     * @brief Constructor with secret key
-     * @param secret_key Google reCAPTCHA secret key
+     * @brief Constructs RecaptchaOptions with a secret key.
+     * @param secret_key_val The Google reCAPTCHA secret key for your site.
      */
-    explicit RecaptchaOptions(std::string secret_key)
-        : _secret_key(std::move(secret_key)) {}
+    explicit RecaptchaOptions(std::string secret_key_val)
+        : _secret_key(std::move(secret_key_val)) {}
 
-    /**
-     * @brief Set the secret key
-     * @param key Secret key for reCAPTCHA verification
-     * @return Reference to this options object
-     */
+    /** @brief Sets the Google reCAPTCHA secret key. This is mandatory. */
     RecaptchaOptions& secret_key(const std::string& key) {
         _secret_key = key;
         return *this;
     }
-
-    /**
-     * @brief Set the minimum score
-     * @param score Minimum acceptable score (0.0 to 1.0)
-     * @return Reference to this options object
-     */
-    RecaptchaOptions& min_score(float score) {
-        _min_score = score;
+    /** @brief Sets the minimum score (0.0 to 1.0) for reCAPTCHA v3 to be considered valid. */
+    RecaptchaOptions& min_score(float score_val) {
+        _min_score = score_val;
         return *this;
     }
-
-    /**
-     * @brief Set the API URL
-     * @param url API URL for reCAPTCHA verification
-     * @return Reference to this options object
-     */
+    /** @brief Sets the URL for the Google reCAPTCHA site verification API. */
     RecaptchaOptions& api_url(const std::string& url) {
         _api_url = url;
         return *this;
     }
-
-    /**
-     * @brief Configure token location in header
-     * @param header_name Header name
-     * @return Reference to this options object
-     */
+    /** @brief Configures token extraction from a specified HTTP header. */
     RecaptchaOptions& from_header(const std::string& header_name) {
         _token_location = TokenLocation::Header;
         _token_field_name = header_name;
         return *this;
     }
-
-    /**
-     * @brief Configure token location in body
-     * @param field_name Field name in request body
-     * @return Reference to this options object
+    /** @brief Configures token extraction from a field in the request body. 
+     *  The middleware currently attempts to parse the body as JSON if this location is used.
      */
     RecaptchaOptions& from_body(const std::string& field_name) {
         _token_location = TokenLocation::Body;
         _token_field_name = field_name;
         return *this;
     }
-
-    /**
-     * @brief Configure token location in query parameters
-     * @param param_name Query parameter name
-     * @return Reference to this options object
-     */
+    /** @brief Configures token extraction from a specified URL query parameter. */
     RecaptchaOptions& from_query(const std::string& param_name) {
         _token_location = TokenLocation::Query;
         _token_field_name = param_name;
         return *this;
     }
 
-    /**
-     * @brief Create a standard reCAPTCHA configuration for v3
-     * @param secret_key Google reCAPTCHA secret key
-     * @param min_score Minimum acceptable score (default: 0.5)
-     * @return RecaptchaOptions with standard settings
+    /** 
+     * @brief Creates a standard RecaptchaOptions configuration for reCAPTCHA v3.
+     * @param secret_key_val The Google reCAPTCHA secret key.
+     * @param min_score_val Minimum acceptable score (default: 0.5).
+     * @return RecaptchaOptions instance configured for v3, expecting token in body field "g-recaptcha-response".
      */
-    static RecaptchaOptions v3(const std::string& secret_key, float min_score = 0.5f) {
-        return RecaptchaOptions(secret_key)
-            .min_score(min_score)
-            .from_body("g-recaptcha-response");
+    static RecaptchaOptions v3(const std::string& secret_key_val, float min_score_val = 0.5f) {
+        return RecaptchaOptions(secret_key_val)
+            .min_score(min_score_val)
+            .from_body("g-recaptcha-response"); // Default field name for reCAPTCHA v3
     }
-
-    /**
-     * @brief Create a strict reCAPTCHA configuration for high security
-     * @param secret_key Google reCAPTCHA secret key
-     * @return RecaptchaOptions with strict settings
+    /** 
+     * @brief Creates a RecaptchaOptions configuration typically used with a custom header.
+     * Often implies a higher security posture or specific frontend integration.
+     * @param secret_key_val The Google reCAPTCHA secret key.
+     * @return RecaptchaOptions instance configured for header extraction and a higher min_score.
      */
-    static RecaptchaOptions strict(const std::string& secret_key) {
-        return RecaptchaOptions(secret_key)
-            .min_score(0.7f)
+    static RecaptchaOptions strict(const std::string& secret_key_val) {
+        return RecaptchaOptions(secret_key_val)
+            .min_score(0.7f) // Example of a stricter score
             .from_header("X-reCAPTCHA-Token");
     }
 
     // Getters
-    const std::string& secret_key() const { return _secret_key; }
-    float min_score() const { return _min_score; }
-    const std::string& api_url() const { return _api_url; }
-    TokenLocation token_location() const { return _token_location; }
-    const std::string& token_field_name() const { return _token_field_name; }
+    [[nodiscard]] const std::string& get_secret_key() const { return _secret_key; } // Renamed
+    [[nodiscard]] float get_min_score() const { return _min_score; }           // Renamed
+    [[nodiscard]] const std::string& get_api_url() const { return _api_url; }     // Renamed
+    [[nodiscard]] TokenLocation get_token_location() const { return _token_location; } //Renamed
+    [[nodiscard]] const std::string& get_token_field_name() const { return _token_field_name; } //Renamed
 
 private:
     std::string _secret_key;
-    float _min_score = 0.5f;
+    float _min_score = 0.5f; // Default for v3, can be overridden
     std::string _api_url = "https://www.google.com/recaptcha/api/siteverify";
     TokenLocation _token_location = TokenLocation::Body;
-    std::string _token_field_name = "g-recaptcha-response";
+    std::string _token_field_name = "g-recaptcha-response"; // Common default
+};
+
+/** @brief Holds the result of a reCAPTCHA verification attempt from Google's API. */
+struct RecaptchaResult { 
+    bool success = false;        ///< Whether Google considered the token valid.
+    float score = 0.0f;          ///< reCAPTCHA v3 score (0.0 to 1.0).
+    std::string action;          ///< The action name associated with the token (for v3).
+    std::string hostname;        ///< The hostname that served the reCAPTCHA.
+    std::string error_codes;     ///< Comma-separated list of error codes if success is false.
+    std::chrono::system_clock::time_point challenge_ts; ///< Timestamp of the challenge load.
 };
 
 /**
- * @brief Result of reCAPTCHA verification
- */
-struct RecaptchaResult {
-    bool success = false;
-    float score = 0.0f;
-    std::string action;
-    std::string hostname;
-    std::string error_codes;
-    std::chrono::system_clock::time_point challenge_ts;
-};
-
-/**
- * @brief Advanced middleware for Google reCAPTCHA validation
+ * @brief Middleware for verifying Google reCAPTCHA v2 or v3 tokens.
  *
- * This middleware validates reCAPTCHA tokens by:
- * - Extracting tokens from various locations (headers, body, query)
- * - Verifying tokens with Google's API
- * - Filtering requests based on reCAPTCHA scores
- * - Storing verification results for later use
+ * This middleware extracts a reCAPTCHA token from the request (header, body, or query)
+ * and sends it to Google's site verification API. Based on the response (success, score),
+ * it either allows the request to proceed or rejects it.
+ * The verification result is stored in the context variable "recaptcha_result".
+ * This is an asynchronous middleware due to the external HTTP call.
+ *
+ * @tparam SessionType The type of the session object managed by the router.
  */
-template <typename Session, typename String = std::string>
-class RecaptchaMiddleware : public IAsyncMiddleware<Session, String> {
+template <typename SessionType>
+class RecaptchaMiddleware : public IMiddleware<SessionType> {
 public:
-    using Context = typename IAsyncMiddleware<Session, String>::Context;
-    using CompletionCallback = typename IAsyncMiddleware<Session, String>::CompletionCallback;
+    using ContextPtr = std::shared_ptr<Context<SessionType>>;
     
     /**
-     * @brief Constructor with options
-     * @param options reCAPTCHA configuration options
-     * @param name Middleware name
+     * @brief Constructs RecaptchaMiddleware with specified options.
+     * @param options The reCAPTCHA configuration options.
+     * @param name An optional name for this middleware instance.
+     * @throws std::invalid_argument if the secret key in options is empty.
      */
     explicit RecaptchaMiddleware(
         const RecaptchaOptions& options,
         std::string name = "RecaptchaMiddleware"
     ) : _options(std::make_shared<RecaptchaOptions>(options)),
         _name(std::move(name)) {
-        
-        if (_options->secret_key().empty()) {
-            throw std::invalid_argument("reCAPTCHA secret key is required");
+        if (_options->get_secret_key().empty()) {
+            throw std::invalid_argument("RecaptchaMiddleware: Secret key in options cannot be empty.");
         }
     }
     
     /**
-     * @brief Constructor with secret key and minimum score
-     * @param secret_key Google reCAPTCHA secret key
-     * @param min_score Minimum acceptable score
-     * @param name Middleware name
+     * @brief Constructs RecaptchaMiddleware primarily for v3 with a secret key and minimum score.
+     * Token is expected in the body field "g-recaptcha-response" by default.
+     * @param secret_key The Google reCAPTCHA secret key.
+     * @param min_score Minimum acceptable score (0.0 to 1.0). Defaults to 0.5.
+     * @param name An optional name for this middleware instance.
      */
     RecaptchaMiddleware(
         const std::string& secret_key,
@@ -207,266 +190,246 @@ public:
     ) : _options(std::make_shared<RecaptchaOptions>(RecaptchaOptions::v3(secret_key, min_score))),
         _name(std::move(name)) {}
     
-    /**
-     * @brief Create a standard reCAPTCHA middleware for v3
-     * @param secret_key Google reCAPTCHA secret key
-     * @param min_score Minimum acceptable score
-     * @return RecaptchaMiddleware instance with standard settings
-     */
-    static RecaptchaMiddleware v3(
+    /** @brief Creates a RecaptchaMiddleware instance configured for v3. */
+    static std::shared_ptr<RecaptchaMiddleware<SessionType>> v3(
         const std::string& secret_key,
         float min_score = 0.5f,
         const std::string& name = "RecaptchaV3Middleware"
     ) {
-        return RecaptchaMiddleware(RecaptchaOptions::v3(secret_key, min_score), name);
+        return std::make_shared<RecaptchaMiddleware<SessionType>>(RecaptchaOptions::v3(secret_key, min_score), name);
     }
     
-    /**
-     * @brief Create a strict reCAPTCHA middleware for high security
-     * @param secret_key Google reCAPTCHA secret key
-     * @return RecaptchaMiddleware instance with strict settings
-     */
-    static RecaptchaMiddleware strict(
+    /** @brief Creates a RecaptchaMiddleware instance configured for stricter header-based token extraction. */
+    static std::shared_ptr<RecaptchaMiddleware<SessionType>> strict(
         const std::string& secret_key,
         const std::string& name = "StrictRecaptchaMiddleware"
     ) {
-        return RecaptchaMiddleware(RecaptchaOptions::strict(secret_key), name);
+        return std::make_shared<RecaptchaMiddleware<SessionType>>(RecaptchaOptions::strict(secret_key), name);
     }
     
     /**
-     * @brief Process a request asynchronously
-     * @param ctx Request context
-     * @param callback Completion callback
+     * @brief Handles the incoming request by extracting the reCAPTCHA token, verifying it with Google,
+     *        and then deciding whether to continue or complete the request based on the verification result.
+     * @param ctx The shared context for the current request.
      */
-    void process_async(Context& ctx, CompletionCallback callback) override {
-        // Extract the reCAPTCHA token
-        auto token = extract_token(ctx.request);
+    void process(ContextPtr ctx) override {
+        std::optional<std::string> token_opt = extract_token_from_request(ctx->request());
         
-        if (!token) {
-            // Token missing, reject the request
-            ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
-            ctx.response.body() = R"({"error":"reCAPTCHA token is missing"})";
-            ctx.mark_handled();
-            callback(MiddlewareResult::Stop());
+        if (!token_opt) {
+            set_error_response(ctx, HTTP_STATUS_BAD_REQUEST, "reCAPTCHA token is missing");
             return;
         }
         
-        // Create the request to Google API
-        Request req(_options->api_url());
-        req.method = HTTP_POST;
-        req.add_header("Content-Type", "application/x-www-form-urlencoded");
+        Request api_req(qb::io::uri(_options->get_api_url()));
+        api_req.method = qb::http::method::HTTP_POST;
+        api_req.set_header("Content-Type", "application/x-www-form-urlencoded");
         
-        // Build the request body
-        std::string body = "secret=" + _options->secret_key() + "&response=" + *token;
-        req.body() = body;
+        std::string request_body_str = "secret=" + _options->get_secret_key() + "&response=" + *token_opt;
+        // Optionally, include remoteip: &remoteip=USER_IP_ADDRESS
+        // auto client_ip = ctx->request().header("X-Forwarded-For"); // Or other IP source
+        // if (!client_ip.empty()) { request_body_str += "&remoteip=" + std::string(client_ip); }
+        api_req.body() = request_body_str;
         
-        // Send the request asynchronously
-        qb::http::POST(req, [ctx, callback, this](Response response) mutable {
-            auto result = parse_recaptcha_response(response);
+        auto shared_ctx = ctx; // Capture context by shared_ptr for async callback
+        qb::http::REQUEST(std::move(api_req), // Assuming qb::http::REQUEST is an alias for the async client call
+            [shared_ctx, this](qb::http::async::Reply&& api_reply) mutable { 
+            RecaptchaResult verification_result = parse_google_recaptcha_response(api_reply.response);
             
-            // Store the result in the context for later use
-            ctx.template set<RecaptchaResult>("recaptcha_result", result);
+            shared_ctx->set<RecaptchaResult>("recaptcha_result", verification_result);
             
-            if (!result.success || result.score < _options->min_score()) {
-                // Verification failed or score too low
-                ctx.response.status_code = HTTP_STATUS_FORBIDDEN;
-                ctx.response.body() = qb::json{
-                    {"error", "reCAPTCHA verification failed"},
-                    {"details", result.error_codes.empty() ? "Score too low" : result.error_codes}
-                }.dump();
-                ctx.mark_handled();
-                callback(MiddlewareResult::Stop());
-                return;
+            if (!verification_result.success || verification_result.score < _options->get_min_score()) {
+                set_error_response(shared_ctx, HTTP_STATUS_FORBIDDEN, 
+                                   "reCAPTCHA verification failed", 
+                                   verification_result.error_codes.empty() ? "Score too low or invalid token" : verification_result.error_codes);
+            } else {
+                shared_ctx->complete(AsyncTaskResult::CONTINUE);
             }
-            
-            // Verification successful, continue the middleware chain
-            callback(MiddlewareResult::Continue());
         });
     }
     
-    /**
-     * @brief Get the middleware name
-     */
+    /** @brief Gets the name of this middleware instance. */
     std::string name() const override {
         return _name;
     }
-    
-    /**
-     * @brief Get current reCAPTCHA options
-     * @return Reference to the reCAPTCHA options
+
+    /** 
+     * @brief Handles cancellation. 
+     * TODO: Implement cancellation of the in-flight HTTP request to Google if `qb::http::REQUEST` supports it.
      */
-    const RecaptchaOptions& options() const {
+    void cancel() override {
+        // If _http_request_handle is stored from qb::http::REQUEST, attempt to cancel it here.
+    }
+    
+    /** @brief Gets the current reCAPTCHA options used by this middleware. */
+    const RecaptchaOptions& get_options() const { // Renamed from options()
         return *_options;
     }
     
-    /**
-     * @brief Update reCAPTCHA options
-     * @param options New reCAPTCHA options
-     * @return Reference to this middleware
-     */
-    RecaptchaMiddleware& update_options(const RecaptchaOptions& options) {
-        _options = std::make_shared<RecaptchaOptions>(options);
+    /** @brief Updates the reCAPTCHA options for this middleware instance. */
+    RecaptchaMiddleware& update_options(const RecaptchaOptions& opts) {
+        if (opts.get_secret_key().empty()) {
+            throw std::invalid_argument("RecaptchaMiddleware update_options: Secret key cannot be empty.");
+        }
+        _options = std::make_shared<RecaptchaOptions>(opts);
         return *this;
     }
     
 private:
     std::shared_ptr<RecaptchaOptions> _options;
     std::string _name;
-    
-    /**
-     * @brief Extract the reCAPTCHA token from the request
-     * @param request HTTP request
-     * @return Token string or std::nullopt if not found
-     */
-    template <typename RequestType>
-    std::optional<std::string> extract_token(const RequestType& request) const {
-        switch (_options->token_location()) {
+    // std::shared_ptr<SomeCancellableHttpRequestHandle> _http_request_handle; // For cancel()
+
+    /** @brief Extracts the reCAPTCHA token from the HTTP request based on configured options. */
+    std::optional<std::string> extract_token_from_request(const qb::http::Request& request) const {
+        const std::string& field_name = _options->get_token_field_name();
+        switch (_options->get_token_location()) {
             case RecaptchaOptions::TokenLocation::Header:
-                if (request.has_header(_options->token_field_name())) {
-                    return request.header(_options->token_field_name());
+                {
+                    std::string header_val = std::string(request.header(field_name));
+                    return header_val.empty() ? std::nullopt : std::optional<std::string>(header_val);
                 }
-                break;
-                
             case RecaptchaOptions::TokenLocation::Body:
                 try {
                     if (!request.body().empty()) {
-                        auto body = qb::json::parse(request.body());
-                        if (body.contains(_options->token_field_name())) {
-                            return body[_options->token_field_name()].template get<std::string>();
+                        auto body_json = qb::json::parse(request.body().as<std::string>());
+                        if (body_json.contains(field_name) && body_json[field_name].is_string()) {
+                            return body_json[field_name].get<std::string>();
                         }
+                        // TODO: Add support for x-www-form-urlencoded body parsing here if needed.
                     }
-                } catch (...) {
-                    // Parsing error, return nullopt
-                }
+                } catch (const qb::json::exception& /*e*/) { /* Parsing failed */ }
                 break;
-                
             case RecaptchaOptions::TokenLocation::Query:
-                return request.query(_options->token_field_name());
+                {
+                    std::string query_val = request.query(field_name);
+                    return query_val.empty() ? std::nullopt : std::optional<std::string>(query_val);
+                }
         }
-        
         return std::nullopt;
     }
     
-    /**
-     * @brief Parse the response from Google's reCAPTCHA API
-     * @param response HTTP response from Google
-     * @return Parsed verification result
-     */
-    RecaptchaResult parse_recaptcha_response(const Response& response) const {
+    /** @brief Parses the JSON response from Google's reCAPTCHA site verification API. */
+    RecaptchaResult parse_google_recaptcha_response(const qb::http::Response& google_response) const {
         RecaptchaResult result;
-        
-        if (response.status_code != HTTP_STATUS_OK) {
-            result.error_codes = "HTTP error: " + std::to_string(response.status_code);
+        if (google_response.status_code != HTTP_STATUS_OK) {
+            result.success = false;
+            result.error_codes = "Google API HTTP error: " + std::to_string(static_cast<int>(google_response.status_code));
             return result;
         }
-        
         try {
-            auto json = qb::json::parse(response.body());
-            
-            // Extract basic fields
-            result.success = json.value("success", false);
-            
-            // If successful, extract additional information
+            auto json_body = qb::json::parse(google_response.body().as<std::string>());
+            result.success = json_body.value("success", false);
             if (result.success) {
-                result.score = json.value("score", 0.0f);
-                result.action = json.value("action", "");
-                result.hostname = json.value("hostname", "");
-                
-                // Parse the timestamp
-                if (json.contains("challenge_ts")) {
-                    // In a real implementation, properly parse the timestamp
-                    // For now, just use current time
-                    result.challenge_ts = std::chrono::system_clock::now();
+                result.score = json_body.value("score", 0.0f);
+                result.action = json_body.value("action", "");
+                result.hostname = json_body.value("hostname", "");
+                if (json_body.contains("challenge_ts") && json_body["challenge_ts"].is_string()) {
+                    // Basic ISO 8601 string to time_point conversion is non-trivial.
+                    // For robust parsing, a date/time library or more detailed parsing is needed.
+                    // As a placeholder, or if not critical for your use case:
+                    result.challenge_ts = std::chrono::system_clock::now(); 
                 }
             }
-            
-            // Extract error codes if any
-            if (json.contains("error-codes")) {
-                const auto& errors = json["error-codes"];
-                if (errors.is_array()) {
-                    std::string error_concat;
-                    for (const auto& err : errors) {
+            if (json_body.contains("error-codes") && json_body["error-codes"].is_array()) {
+                std::string error_concat;
+                for (const auto& err_item : json_body["error-codes"]) {
+                    if (err_item.is_string()) {
                         if (!error_concat.empty()) error_concat += ", ";
-                        error_concat += err.template get<std::string>();
+                        error_concat += err_item.get<std::string>();
                     }
-                    result.error_codes = error_concat;
                 }
+                result.error_codes = error_concat;
             }
-            
-        } catch (const std::exception& e) {
+        } catch (const qb::json::exception& e) {
             result.success = false;
-            result.error_codes = std::string("JSON parsing error: ") + e.what();
+            result.error_codes = std::string("Google API JSON parsing error: ") + e.what();
         }
-        
         return result;
+    }
+
+    /** @brief Sets a standard error response on the context and completes it. */
+    void set_error_response(ContextPtr ctx, http_status status, const std::string& error_message, const std::string& details = "") const {
+        ctx->response().status_code = status;
+        ctx->response().set_header("Content-Type", "application/json");
+        qb::json err_body;
+        err_body["error"] = error_message;
+        if(!details.empty()) {
+            err_body["details"] = details;
+        }
+        ctx->response().body() = err_body.dump();
+        ctx->complete(AsyncTaskResult::COMPLETE);
     }
 };
 
+// Factory Functions
+
 /**
- * @brief Create a reCAPTCHA middleware with custom options
- * @param options reCAPTCHA options to use
- * @param name Middleware name
- * @return reCAPTCHA middleware adapter with the specified options
+ * @brief Creates a RecaptchaMiddleware instance with specified options.
+ * @tparam SessionType The session type.
+ * @param options The reCAPTCHA configuration options.
+ * @param name Optional name for the middleware.
+ * @return A shared pointer to the created RecaptchaMiddleware.
  */
-template <typename Session, typename String = std::string>
-auto recaptcha_middleware(
+template <typename SessionType>
+std::shared_ptr<RecaptchaMiddleware<SessionType>>
+recaptcha_middleware(
     const RecaptchaOptions& options,
     const std::string& name = "RecaptchaMiddleware"
 ) {
-    auto middleware = std::make_shared<RecaptchaMiddleware<Session, String>>(options, name);
-    return std::make_shared<AsyncMiddlewareAdapter<Session, String>>(std::move(middleware));
+    return std::make_shared<RecaptchaMiddleware<SessionType>>(options, name);
 }
 
 /**
- * @brief Create a reCAPTCHA middleware with secret key and minimum score
- * @param secret_key Google reCAPTCHA secret key
- * @param min_score Minimum acceptable score
- * @param name Middleware name
- * @return reCAPTCHA middleware adapter
+ * @brief Creates a RecaptchaMiddleware instance, typically for v3, with a secret key and minimum score.
+ * @tparam SessionType The session type.
+ * @param secret_key The Google reCAPTCHA secret key.
+ * @param min_score Minimum acceptable score (0.0 to 1.0). Defaults to 0.5.
+ * @param name Optional name for the middleware.
+ * @return A shared pointer to the created RecaptchaMiddleware.
  */
-template <typename Session, typename String = std::string>
-auto recaptcha_middleware(
+template <typename SessionType>
+std::shared_ptr<RecaptchaMiddleware<SessionType>>
+recaptcha_middleware(
     const std::string& secret_key,
     float min_score = 0.5f,
     const std::string& name = "RecaptchaMiddleware"
 ) {
-    auto middleware = std::make_shared<RecaptchaMiddleware<Session, String>>(
-        secret_key, min_score, name);
-    return std::make_shared<AsyncMiddlewareAdapter<Session, String>>(std::move(middleware));
+    // This overload implies v3-like behavior by default due to min_score.
+    return std::make_shared<RecaptchaMiddleware<SessionType>>(RecaptchaOptions::v3(secret_key, min_score), name);
 }
 
 /**
- * @brief Create a standard reCAPTCHA v3 middleware
- * @param secret_key Google reCAPTCHA secret key
- * @param min_score Minimum acceptable score
- * @param name Middleware name
- * @return reCAPTCHA middleware adapter with standard settings
+ * @brief Creates a RecaptchaMiddleware instance configured for reCAPTCHA v3.
+ * @tparam SessionType The session type.
+ * @param secret_key The Google reCAPTCHA secret key.
+ * @param min_score Minimum acceptable score (default: 0.5).
+ * @param name Optional name for the middleware.
+ * @return A shared pointer to the created RecaptchaMiddleware.
  */
-template <typename Session, typename String = std::string>
-auto recaptcha_v3_middleware(
+template <typename SessionType>
+std::shared_ptr<RecaptchaMiddleware<SessionType>>
+recaptcha_v3_middleware(
     const std::string& secret_key,
     float min_score = 0.5f,
     const std::string& name = "RecaptchaV3Middleware"
 ) {
-    auto middleware = std::make_shared<RecaptchaMiddleware<Session, String>>(
-        RecaptchaOptions::v3(secret_key, min_score), name);
-    return std::make_shared<AsyncMiddlewareAdapter<Session, String>>(std::move(middleware));
+    return RecaptchaMiddleware<SessionType>::v3(secret_key, min_score, name);
 }
 
 /**
- * @brief Create a strict reCAPTCHA middleware for high security
- * @param secret_key Google reCAPTCHA secret key
- * @param name Middleware name
- * @return reCAPTCHA middleware adapter with strict settings
+ * @brief Creates a RecaptchaMiddleware instance with stricter defaults (e.g., header token, higher score).
+ * @tparam SessionType The session type.
+ * @param secret_key The Google reCAPTCHA secret key.
+ * @param name Optional name for the middleware.
+ * @return A shared pointer to the created RecaptchaMiddleware.
  */
-template <typename Session, typename String = std::string>
-auto recaptcha_strict_middleware(
+template <typename SessionType>
+std::shared_ptr<RecaptchaMiddleware<SessionType>>
+recaptcha_strict_middleware(
     const std::string& secret_key,
     const std::string& name = "StrictRecaptchaMiddleware"
 ) {
-    auto middleware = std::make_shared<RecaptchaMiddleware<Session, String>>(
-        RecaptchaOptions::strict(secret_key), name);
-    return std::make_shared<AsyncMiddlewareAdapter<Session, String>>(std::move(middleware));
+    return RecaptchaMiddleware<SessionType>::strict(secret_key, name);
 }
 
 } // namespace qb::http 

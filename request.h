@@ -5,7 +5,7 @@
 
 namespace qb::http {
 
-template <typename String, typename Session>
+template <typename Session>
 class Router;
 
 template <typename String>
@@ -242,7 +242,7 @@ public:
      * It also supports asynchronous request handling through an event-driven approach.
      */
     template <typename Session>
-    using Router = Router<Session, String>;
+    using Router = Router<Session>;
 };
 
 using Request      = TRequest<std::string>;

@@ -1,490 +1,579 @@
 #include <gtest/gtest.h>
 #include "../http.h"
-#include "../middleware/error_handling.h"
-#include "../middleware/middleware_interface.h"
+#include "../middleware/error_handling.h" // The adapted ErrorHandlingMiddleware
+#include "../routing/middleware.h" // For MiddlewareTask and IMiddleware
 
-// Mock Session class for testing
-class MockSession {
+#include <memory>
+#include <string>
+#include <vector>
+#include <functional>
+#include <sstream>
+
+// --- Mock Session for ErrorHandlingMiddleware Tests ---
+struct MockErrorHandlingSession {
+    qb::http::Response _response;
+    std::string _session_id_str = "error_handling_test_session";
+    std::ostringstream _trace;
+    bool _final_handler_called_flag = false; // Renamed to avoid conflict with fixture member
+    std::string _last_error_message_handled_by_generic;
+
+    qb::http::Response& get_response_ref() { return _response; }
+
+    MockErrorHandlingSession& operator<<(const qb::http::Response& resp) {
+        _response = resp;
+        return *this;
+    }
+
+    void reset() {
+        _response = qb::http::Response();
+        _trace.str("");
+        _trace.clear();
+        _final_handler_called_flag = false;
+        _last_error_message_handled_by_generic.clear();
+    }
+    void trace(const std::string& point) {
+        if (!_trace.str().empty()) _trace << ";";
+        _trace << point;
+    }
+    std::string get_trace() const { return _trace.str(); }
+};
+
+// --- Helper Task that can signal an error ---
+class ErrorSignalerTask : public qb::http::IMiddleware<MockErrorHandlingSession> {
 public:
-    void operator<<(const qb::http::Response& resp) {
-        // Use move semantics since Response is not copyable
-        last_response = std::move(const_cast<qb::http::Response&>(resp));
+    ErrorSignalerTask(std::string id, qb::http::status status_to_set_before_error, std::string msg = "") 
+        : _id(std::move(id)), _status_to_set(status_to_set_before_error), _error_message(std::move(msg)) {}
+
+    void process(std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx) override {
+        if (ctx->session()) ctx->session()->trace(_id + "_triggered");
+        ctx->response().status_code = _status_to_set;
+        if (!_error_message.empty()) {
+            ctx->response().body() = "ErrorTrigger: " + _error_message;
+            ctx->set("__error_message", _error_message); // For generic handler test
+        }
+        ctx->complete(qb::http::AsyncTaskResult::ERROR);
     }
-    
-    qb::http::Response last_response;
+    std::string name() const override { return _id; }
+    void cancel() override {}
+private:
+    std::string _id;
+    qb::http::status _status_to_set;
+    std::string _error_message;
 };
 
-// Test fixture
-class ErrorHandlingTest : public ::testing::Test {
+// --- Test Fixture for ErrorHandlingMiddleware --- 
+class ErrorHandlingMiddlewareTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        // Create a mock session
-        session = std::make_shared<MockSession>();
-        
-        // Create a request
-        request.method = HTTP_GET;
-        request._uri = "/api/test";
-        
-        // Reset error handling logs
-        error_logs.clear();
-        custom_responses.clear();
+    std::shared_ptr<MockErrorHandlingSession> _session;
+    std::unique_ptr<qb::http::Router<MockErrorHandlingSession>> _router;
+    std::shared_ptr<qb::http::ErrorHandlingMiddleware<MockErrorHandlingSession>> _error_mw;
 
-        // Reset done callbacks executed flag
-        done_callbacks_executed = false;
+    void SetUp() override {
+        _session = std::make_shared<MockErrorHandlingSession>();
+        _router = std::make_unique<qb::http::Router<MockErrorHandlingSession>>();
+        _error_mw = qb::http::error_handling_middleware<MockErrorHandlingSession>("TestErrorMW");
+    }
+
+    qb::http::Request create_request(const std::string& target_path = "/error_trigger") {
+        qb::http::Request req;
+        req.method = qb::http::method::HTTP_GET;
+        try {
+            req.uri() = qb::io::uri(target_path);
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "URI parse failure: " << target_path << " (" << e.what() << ")";
+            req.uri() = qb::io::uri("/_ERROR_URI_");
+        }
+        return req;
+    }
+
+    // Dummy handler that should not be called if error occurs before it
+    qb::http::RouteHandlerFn<MockErrorHandlingSession> normal_route_handler() {
+        return [this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx) {
+            if (_session) _session->trace("NormalRouteHandlerCalled");
+            _session->_final_handler_called_flag = true;
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().body() = "Normal handler reached successfully";
+            ctx->complete();
+        };
+    }
+
+    void configure_router_and_make_request(std::shared_ptr<qb::http::IMiddleware<MockErrorHandlingSession>> error_trigger_task, const std::string& path = "/error_trigger") {
+        _router->use(error_trigger_task); // This task will signal ERROR
+        _router->get(path, normal_route_handler()); // This handler should be bypassed
         
-        // Reset tracking variables
-        execution_order.clear();
-    }
-    
-    void TearDown() override {
-        // Clean up if needed
-    }
-    
-    std::shared_ptr<MockSession> session;
-    qb::http::Request request;
-    std::vector<std::string> error_logs;
-    std::vector<std::string> custom_responses;
-    bool done_callbacks_executed = false;
-    std::vector<std::string> execution_order;
-    
-    // Helper to create a context with a fresh copy of the request
-    qb::http::RouterContext<MockSession> create_context() {
-        // Create a deep copy of the request to prevent move issues
-        qb::http::Request req_copy = request;
-        return qb::http::RouterContext<MockSession>(session, std::move(req_copy));
-    }
-    
-    // Helper to execute done callbacks (since execute_after_callbacks might not be available)
-    void execute_done_callbacks(qb::http::RouterContext<MockSession>& ctx) {
-        ctx.execute_after_callbacks();
-        done_callbacks_executed = true;
-    }
-    
-    // Helper to create an error logger
-    std::function<void(qb::http::RouterContext<MockSession>&, const std::string&)> create_error_logger() {
-        return [this](qb::http::RouterContext<MockSession>& ctx, const std::string& error_message) {
-            std::string log = "Error " + std::to_string(ctx.response.status_code) + ": " + error_message;
-            error_logs.push_back(log);
-        };
-    }
-    
-    // Helper to create a custom error response handler for a specific status
-    std::function<void(qb::http::RouterContext<MockSession>&)> create_response_customizer(const std::string& body_prefix) {
-        return [this, body_prefix](qb::http::RouterContext<MockSession>& ctx) {
-            std::string custom_message = body_prefix + " - Status: " + std::to_string(ctx.response.status_code);
-            ctx.response.body() = custom_message;
-            ctx.response.add_header("X-Error-Handled", "true");
-            custom_responses.push_back(custom_message);
-        };
-    }
-    
-    // Helper to get body contents as string for comparison
-    std::string body_str(const qb::http::Body& body) {
-        return std::string(body.begin(), body.end());
+        // Set the error handling middleware as the error chain for the router
+        std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession>>> error_chain;
+        error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession>>(_error_mw, _error_mw->name()));
+        _router->set_error_task_chain(error_chain);
+        
+        _router->compile();
+        _session->reset();
+        _router->route(_session, create_request(path));
     }
 };
 
-// Test handling of specific status codes
-TEST_F(ErrorHandlingTest, SpecificStatusCode) {
-    // Create the error handling middleware
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    // Register a handler for HTTP 404
-    middleware->on_status(HTTP_STATUS_NOT_FOUND, create_response_customizer("Not Found"));
-    
-    // Process a request
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_NOT_FOUND;
-    
-    auto result = middleware->process(ctx);
-    
-    // Verify that processing continues
-    EXPECT_TRUE(result.should_continue());
-    
-    // Execute the after_handling callbacks (this should trigger the error handler)
-    execute_done_callbacks(ctx);
-    
-    // Verify that the response was customized
-    EXPECT_EQ(1, custom_responses.size());
-    EXPECT_EQ("Not Found - Status: 404", body_str(ctx.response.body()));
-    EXPECT_EQ("true", ctx.response.header("X-Error-Handled"));
+// --- Test Cases --- 
+
+TEST_F(ErrorHandlingMiddlewareTest, SpecificStatusCodeHandler) {
+    bool custom_handler_called = false;
+    _error_mw->on_status(qb::http::status::HTTP_STATUS_BAD_GATEWAY, 
+        [&custom_handler_called, this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx) {
+            custom_handler_called = true;
+            if(_session) _session->trace("CustomBadGatewayHandler");
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_BAD_GATEWAY; // Keep or change
+            ctx->response().body() = "Handled specifically by BadGateway handler.";
+            // No ctx->complete() here; ErrorHandlingMiddleware::handle does it.
+        });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger502", qb::http::status::HTTP_STATUS_BAD_GATEWAY);
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(custom_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_GATEWAY);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled specifically by BadGateway handler.");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger502_triggered;CustomBadGatewayHandler");
+    EXPECT_FALSE(_session->_final_handler_called_flag); // Normal handler should not be called
 }
 
-// Test handling of status code ranges
-TEST_F(ErrorHandlingTest, StatusCodeRange) {
-    // Create the error handling middleware
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    // Register handlers for 4xx and 5xx ranges
-    middleware->on_status_range(HTTP_STATUS_BAD_REQUEST, HTTP_STATUS_UNAVAILABLE_FOR_LEGAL_REASONS, create_response_customizer("Client Error"));
-    middleware->on_status_range(HTTP_STATUS_INTERNAL_SERVER_ERROR, HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED, create_response_customizer("Server Error"));
-    
-    // Test with a 400 Bad Request
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
-        
-        middleware->process(ctx);
-        execute_done_callbacks(ctx);
-        
-        EXPECT_EQ("Client Error - Status: 400", body_str(ctx.response.body()));
-    }
-    
-    // Test with a 500 Internal Server Error
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
-        
-        middleware->process(ctx);
-        execute_done_callbacks(ctx);
-        
-        EXPECT_EQ("Server Error - Status: 500", body_str(ctx.response.body()));
-    }
-    
-    // Verify we handled two errors
-    EXPECT_EQ(2, custom_responses.size());
+TEST_F(ErrorHandlingMiddlewareTest, StatusCodeRangeHandler) {
+    bool custom_4xx_handler_called = false;
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_BAD_REQUEST, qb::http::status::HTTP_STATUS_PAYMENT_REQUIRED, 
+        [&custom_4xx_handler_called, this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx) {
+            custom_4xx_handler_called = true;
+            if(_session) _session->trace("Custom4xxRangeHandler");
+            ctx->response().body() = "Handled by 4xx range: Original status " + std::to_string(static_cast<int>(ctx->response().status_code));
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_FORBIDDEN; // Change it
+        });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger401", qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(custom_4xx_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by 4xx range: Original status 401");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger401_triggered;Custom4xxRangeHandler");
 }
 
-// Test the error callback directly
-TEST_F(ErrorHandlingTest, ExplicitErrorCallback) {
-    // Create the error handling middleware with a generic error handler
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    middleware->on_any_error(create_error_logger());
-    middleware->on_status(HTTP_STATUS_BAD_REQUEST, create_response_customizer("Bad Request"));
-    
-    // Process a request
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
-    
-    middleware->process(ctx);
-    
-    // Explicitly trigger the error callback
-    ctx.execute_error_callbacks("Invalid input parameter");
-    
-    // Verify that the error was logged
-    EXPECT_EQ(1, error_logs.size());
-    EXPECT_EQ("Error 400: Invalid input parameter", error_logs[0]);
-    
-    // Verify that the response was customized
-    EXPECT_EQ("Bad Request - Status: 400", body_str(ctx.response.body()));
+TEST_F(ErrorHandlingMiddlewareTest, GenericErrorHandler) {
+    bool generic_handler_called = false;
+    std::string received_message;
+    _error_mw->on_any_error(
+        [&generic_handler_called, &received_message, this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx, const std::string& error_message) {
+            generic_handler_called = true;
+            received_message = error_message;
+            if(_session) _session->trace("GenericErrorHandler");
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED;
+            ctx->response().body() = "Generic handler caught: " + error_message;
+        });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger500", qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR, "Specific details for generic handler");
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(generic_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Generic handler caught: Specific details for generic handler");
+    EXPECT_EQ(received_message, "Specific details for generic handler");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger500_triggered;GenericErrorHandler");
 }
 
-// Test integration with the complete method
-TEST_F(ErrorHandlingTest, IntegrationWithComplete) {
-    // Create the error handling middleware
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    middleware->on_status_range(HTTP_STATUS_BAD_REQUEST, HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED, create_response_customizer("Error"));
-    
-    // Process a request
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_FORBIDDEN;
-    
-    middleware->process(ctx);
-    
-    // Call complete method which should execute after_handling callbacks
-    ctx.complete();
-    
-    // Verify that the error handler was called
-    EXPECT_EQ(1, custom_responses.size());
-    
-    // Verify that the session received the customized response
-    EXPECT_EQ("Error - Status: 403", body_str(session->last_response.body()));
-    EXPECT_EQ("true", session->last_response.header("X-Error-Handled"));
+TEST_F(ErrorHandlingMiddlewareTest, NoMatchingErrorHandlerUsesDefaultBehavior) {
+    // No specific handlers configured on _error_mw for HTTP_STATUS_NOT_ACCEPTABLE
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger406", qb::http::status::HTTP_STATUS_NOT_ACCEPTABLE, "No handler for this");
+    configure_router_and_make_request(trigger_task);
+
+    // ErrorHandlingMiddleware still calls complete(COMPLETE). The response state would be what ErrorSignalerTask set.
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NOT_ACCEPTABLE);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "ErrorTrigger: No handler for this");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger406_triggered"); // Only the trigger traces
 }
 
-// Test with multiple error handlers
-TEST_F(ErrorHandlingTest, MultipleHandlers) {
-    // Create error handling middleware with multiple specialized handlers
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
+TEST_F(ErrorHandlingMiddlewareTest, HandlerPrioritySpecificOverGeneric) {
+    bool specific_handler_called = false;
+    bool generic_handler_called = false;
     
-    // Track which handlers were called
-    bool not_found_handler_called = false;
-    bool server_error_handler_called = false;
-    bool generic_error_handler_called = false;
-    
-    // Specific error handlers
-    middleware->on_status(HTTP_STATUS_NOT_FOUND, [&](qb::http::RouterContext<MockSession>& ctx) {
-        not_found_handler_called = true;
-        ctx.response.body() = "Custom 404 page";
+    _error_mw->on_status(qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE,
+        [&specific_handler_called, this](auto ctx) {
+        specific_handler_called = true;
+            if(_session) _session->trace("Specific503Handler");
+            ctx->response().body() = "Handled by specific 503.";
+        });
+    _error_mw->on_any_error([&generic_handler_called](auto /*ctx*/, const auto& /*msg*/) {
+        generic_handler_called = true; 
     });
-    
-    middleware->on_status_range(HTTP_STATUS_INTERNAL_SERVER_ERROR, HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED, [&](qb::http::RouterContext<MockSession>& ctx) {
-        server_error_handler_called = true;
-        ctx.response.body() = "Server error occurred";
-    });
-    
-    middleware->on_any_error([&](qb::http::RouterContext<MockSession>& ctx, const std::string& message) {
-        generic_error_handler_called = true;
-        ctx.response.add_header("X-Error-Message", message);
-    });
-    
-    // Test with a 404 Not Found
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_NOT_FOUND;
-        
-        middleware->process(ctx);
-        ctx.execute_error_callbacks("Resource not found");
-        
-        EXPECT_TRUE(not_found_handler_called);
-        EXPECT_FALSE(server_error_handler_called);
-        EXPECT_TRUE(generic_error_handler_called);
-        EXPECT_EQ("Custom 404 page", body_str(ctx.response.body()));
-        EXPECT_EQ("Resource not found", ctx.response.header("X-Error-Message"));
-    }
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger503", qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE);
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(specific_handler_called);
+    EXPECT_FALSE(generic_handler_called);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by specific 503.");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger503_triggered;Specific503Handler");
 }
 
-// Test factory function
-TEST_F(ErrorHandlingTest, FactoryFunction) {
-    // Create middleware with the factory function
-    auto error_middleware = qb::http::error_handling_middleware<MockSession>("CustomErrorHandler");
-    
-    // Process a request just to verify it works
-    auto ctx = create_context();
-    auto result = error_middleware->process(ctx);
-    
-    // Verify middleware name and that processing continues
-    EXPECT_EQ("CustomErrorHandler", error_middleware->name());
-    EXPECT_TRUE(result.should_continue());
+TEST_F(ErrorHandlingMiddlewareTest, RangeHandlerPriorityOverGeneric) {
+    bool range_handler_called = false;
+    bool generic_handler_called = false;
+
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR, qb::http::status::HTTP_STATUS_BAD_GATEWAY, // 500-502
+        [&range_handler_called, this](auto ctx) {
+            range_handler_called = true;
+            if(_session) _session->trace("Range500-502Handler");
+            ctx->response().body() = "Handled by 500-502 range.";
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        });
+
+    _error_mw->on_any_error(
+        [&generic_handler_called, this](auto /*ctx*/, const auto& /*msg*/) {
+            generic_handler_called = true;
+            if(_session) _session->trace("GenericHandler");
+        });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger501", qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED); // 501 is in range
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(range_handler_called);
+    EXPECT_FALSE(generic_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by 500-502 range.");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger501_triggered;Range500-502Handler");
 }
 
-// Test handler priority (range handlers vs specific handlers)
-TEST_F(ErrorHandlingTest, HandlerPriority) {
-    // Create the error handling middleware
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
+TEST_F(ErrorHandlingMiddlewareTest, MultipleErrorHandlersInChain) {
+    auto error_mw1 = qb::http::error_handling_middleware<MockErrorHandlingSession>("ErrorMW1");
+    auto error_mw2 = qb::http::error_handling_middleware<MockErrorHandlingSession>("ErrorMW2");
+    bool handler1_called = false;
+    bool handler2_called = false;
+
+    error_mw1->on_status(qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR, 
+        [&handler1_called, this](auto ctx) {
+            handler1_called = true;
+            if(_session) _session->trace("HandlerFromMW1");
+            ctx->response().body() = "Handled by MW1";
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK; // Change status
+        });
+
+    error_mw2->on_status(qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR, 
+        [&handler2_called, this](auto ctx) {
+            handler2_called = true;
+            if(_session) _session->trace("HandlerFromMW2");
+            ctx->response().body() = "Handled by MW2";
+        });
+    error_mw2->on_any_error( // Add a generic too to mw2 to see if it's hit
+        [&handler2_called, this](auto ctx, const auto& /*msg*/) { // Named ctx
+            handler2_called = true; // If this is called, something is wrong with mw1 completion
+            if(_session) _session->trace("GenericHandlerFromMW2");
+            ctx->response().body() = "Generic in MW2";
+        });
+
+
+    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession>>> error_chain;
+    error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession>>(error_mw1, error_mw1->name()));
+    error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession>>(error_mw2, error_mw2->name()));
     
-    // Register both specific and range handlers for 404
+    _router = std::make_unique<qb::http::Router<MockErrorHandlingSession>>(); // New router for this test
+    _router->set_error_task_chain(error_chain);
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger500", qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    _router->use(trigger_task);
+    _router->get("/error_trigger", normal_route_handler());
+    _router->compile();
+
+    _session->reset();
+    _router->route(_session, create_request("/error_trigger"));
+
+    EXPECT_TRUE(handler1_called);
+    EXPECT_FALSE(handler2_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by MW1");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger500_triggered;HandlerFromMW1");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, FactoryFunctionCreatesInstance) {
+    auto factory_mw = qb::http::error_handling_middleware<MockErrorHandlingSession>("FactoryTestErrorMW");
+    ASSERT_NE(factory_mw, nullptr);
+    EXPECT_EQ(factory_mw->name(), "FactoryTestErrorMW");
+
+    // Verify it works by configuring a handler and routing an error to it
+    bool factory_handler_called = false;
+    factory_mw->on_status(qb::http::status::HTTP_STATUS_NOT_FOUND, 
+        [&factory_handler_called, this](auto ctx) {
+            factory_handler_called = true;
+            if(_session) _session->trace("FactoryMWHandler404");
+            ctx->response().body() = "Handled by factory MW (404)";
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        });
+
+    auto local_router = std::make_unique<qb::http::Router<MockErrorHandlingSession>>();
+    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession>>> error_chain;
+    error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession>>(factory_mw, factory_mw->name()));
+    local_router->set_error_task_chain(error_chain);
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger404", qb::http::status::HTTP_STATUS_NOT_FOUND);
+    local_router->use(trigger_task);
+    local_router->get("/error_trigger_404", normal_route_handler()); // Should not be called
+    local_router->compile();
+
+    _session->reset(); // Use the fixture's session
+    local_router->route(_session, create_request("/error_trigger_404"));
+
+    EXPECT_TRUE(factory_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by factory MW (404)");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger404_triggered;FactoryMWHandler404");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, SpecificHandlerPriorityOverRange) {
     bool specific_handler_called = false;
     bool range_handler_called = false;
-    
-    middleware->on_status(HTTP_STATUS_NOT_FOUND, [&](qb::http::RouterContext<MockSession>& ctx) {
-        specific_handler_called = true;
-        ctx.response.body() = "Specific handler";
-    });
-    
-    middleware->on_status_range(HTTP_STATUS_BAD_REQUEST, HTTP_STATUS_UNAVAILABLE_FOR_LEGAL_REASONS, 
-        [&](qb::http::RouterContext<MockSession>& ctx) {
+
+    _error_mw->on_status(qb::http::status::HTTP_STATUS_BAD_GATEWAY, // 502
+        [&specific_handler_called, this](auto ctx) {
+            specific_handler_called = true;
+            if(_session) _session->trace("Specific502Handler");
+            ctx->response().body() = "Handled by specific 502 handler.";
+        });
+
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR, qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE, // 500-503
+        [&range_handler_called, this](auto ctx) {
             range_handler_called = true;
-            ctx.response.body() = "Range handler";
+            if(_session) _session->trace("Range500-503Handler");
+            ctx->response().body() = "Handled by 500-503 range.";
+        });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger502", qb::http::status::HTTP_STATUS_BAD_GATEWAY);
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(specific_handler_called);
+    EXPECT_FALSE(range_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_GATEWAY); // Original status is preserved by default
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by specific 502 handler.");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger502_triggered;Specific502Handler");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, FirstMatchingRangeHandlerWins) {
+    bool handler_A_called = false;
+    bool handler_B_called = false;
+
+    // Handler A: Range 500-501
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR, qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED, 
+        [&handler_A_called, this](auto ctx) {
+            handler_A_called = true;
+            if(_session) _session->trace("HandlerA_500-501");
+            ctx->response().body() = "Handled by A (500-501).";
+        });
+
+    // Handler B: Range 501-502 (overlaps with A on 501)
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED, qb::http::status::HTTP_STATUS_BAD_GATEWAY, 
+        [&handler_B_called, this](auto ctx) {
+            handler_B_called = true;
+            if(_session) _session->trace("HandlerB_501-502");
+            ctx->response().body() = "Handled by B (501-502).";
+        });
+
+    // Trigger an error for status 501 (HTTP_STATUS_NOT_IMPLEMENTED)
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger501", qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED);
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(handler_A_called); // Handler A was defined first and matches
+    EXPECT_FALSE(handler_B_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by A (500-501).");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger501_triggered;HandlerA_500-501");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, ErrorHandlerCanModifyResponse) {
+    bool handler_called = false;
+    _error_mw->on_status(qb::http::status::HTTP_STATUS_NOT_FOUND, // 404
+        [&handler_called, this](auto ctx) {
+            handler_called = true;
+            if(_session) _session->trace("HandlerModifiesResponse404");
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_EXPECTATION_FAILED; // Change to 417
+            ctx->response().body() = "This was a 404, now it is a 417 with custom message.";
+            ctx->response().set_header("X-Error-Handled", "True");
+        });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger404", qb::http::status::HTTP_STATUS_NOT_FOUND, "Original 404 body");
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_EXPECTATION_FAILED);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "This was a 404, now it is a 417 with custom message.");
+    EXPECT_EQ(std::string(_session->_response.header("X-Error-Handled")), "True");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger404_triggered;HandlerModifiesResponse404");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, GenericHandlerReceivesDefaultMessageWhenContextUnset) {
+    bool generic_handler_called = false;
+    std::string received_message_in_handler;
+
+    _error_mw->on_any_error(
+        [&generic_handler_called, &received_message_in_handler, this](auto ctx, const std::string& error_message) {
+            generic_handler_called = true;
+            received_message_in_handler = error_message;
+            if(_session) _session->trace("GenericHandlerDefaultMsg");
+            ctx->response().body() = "Generic caught: " + error_message;
+            // Keep original status or set a new one
+            ctx->response().status_code = qb::http::status::HTTP_STATUS_IM_A_TEAPOT;
+        });
+
+    // ErrorSignalerTask here does NOT set "__error_message" in context, or sets it empty.
+    // We are testing the default message generation.
+    auto trigger_task = std::make_shared<ErrorSignalerTask>(
+        "ErrorTrigger403NoCtxMsg", 
+        qb::http::status::HTTP_STATUS_FORBIDDEN, 
+        "" // Empty message from signaler, so __error_message won't be set meaningfully if signaler sets it based on this.
+    );
+    // To be sure __error_message is not set from signaler, let's ensure ErrorSignalerTask only uses its msg for body.
+    // The generic handler in ErrorHandlingMiddleware should then generate its default.
+
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(generic_handler_called);
+    std::string expected_default_message = "Error encountered: status " + std::to_string(static_cast<int>(qb::http::status::HTTP_STATUS_FORBIDDEN));
+    EXPECT_EQ(received_message_in_handler, expected_default_message);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_IM_A_TEAPOT);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Generic caught: " + expected_default_message);
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger403NoCtxMsg_triggered;GenericHandlerDefaultMsg");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, OnStatusReRegistration) {
+    bool handler1_called = false;
+    bool handler2_called = false;
+
+    _error_mw->on_status(qb::http::status::HTTP_STATUS_FORBIDDEN, 
+        [&handler1_called, this](auto ctx) {
+            handler1_called = true;
+            if(_session) _session->trace("Handler1_Forbidden");
+            ctx->response().body() = "Handled by Handler1 (Forbidden)";
+        });
+
+    _error_mw->on_status(qb::http::status::HTTP_STATUS_FORBIDDEN,  // Re-register for the same status
+        [&handler2_called, this](auto ctx) {
+            handler2_called = true;
+            if(_session) _session->trace("Handler2_Forbidden");
+            ctx->response().body() = "Handled by Handler2 (Forbidden)";
+        });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger403", qb::http::status::HTTP_STATUS_FORBIDDEN);
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_FALSE(handler1_called); // First handler should not be called
+    EXPECT_TRUE(handler2_called);  // Second (last registered) handler should be called
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by Handler2 (Forbidden)");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger403_triggered;Handler2_Forbidden");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, NullHandlersAreIgnored) {
+    // Attempt to register null handlers
+    _error_mw->on_status(qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED, nullptr);
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_GATEWAY_TIMEOUT, qb::http::status::HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED, nullptr);
+    _error_mw->on_any_error(nullptr);
+
+    // To verify they were ignored, set up a known (non-null) generic handler.
+    // If the null handlers were somehow registered and caused issues, or if they 
+    // replaced the generic handler slot, this test would fail differently.
+    bool generic_handler_called = false;
+    _error_mw->on_any_error([&generic_handler_called, this](auto ctx, const auto& msg) {
+        generic_handler_called = true;
+        if(_session) _session->trace("NonNullGenericHandler");
+        ctx->response().body() = "Handled by non-null generic: " + msg;
+        ctx->response().status_code = qb::http::status::HTTP_STATUS_VARIANT_ALSO_NEGOTIATES;
+    });
+
+    // Trigger an error that would have been caught by the null on_status if it was active
+    auto trigger_task_specific = std::make_shared<ErrorSignalerTask>("ErrorTrigger501ForNullTest", qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED, "Test specific null");
+    configure_router_and_make_request(trigger_task_specific);
+    
+    EXPECT_TRUE(generic_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_VARIANT_ALSO_NEGOTIATES);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by non-null generic: Test specific null");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger501ForNullTest_triggered;NonNullGenericHandler");
+
+    // Reset and test for range
+    _router = std::make_unique<qb::http::Router<MockErrorHandlingSession>>(); // Re-initialize router
+    generic_handler_called = false;
+    _session->reset();
+    auto trigger_task_range = std::make_shared<ErrorSignalerTask>("ErrorTrigger504ForNullTest", qb::http::status::HTTP_STATUS_GATEWAY_TIMEOUT, "Test range null");
+    configure_router_and_make_request(trigger_task_range);
+
+    EXPECT_TRUE(generic_handler_called);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_VARIANT_ALSO_NEGOTIATES);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled by non-null generic: Test range null");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger504ForNullTest_triggered;NonNullGenericHandler");
+}
+
+TEST_F(ErrorHandlingMiddlewareTest, OnStatusRangeWithInvalidCodes) {
+    bool valid_code_handler_called = false;
+    bool out_of_range_handler_called = false; // Should not be possible to be called via valid HTTP status
+
+    // This handler should only be registered for HTTP_STATUS_OK (200)
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_OK, static_cast<qb::http::status>(700), 
+        [&valid_code_handler_called, &out_of_range_handler_called, this](auto ctx) {
+            if (ctx->response().status_code == qb::http::status::HTTP_STATUS_OK) {
+                valid_code_handler_called = true;
+                if(_session) _session->trace("HandlerForValidCodeInRange");
+                ctx->response().body() = "Handled 200 from mixed range";
+            } else {
+                out_of_range_handler_called = true; // Should not happen
+                if(_session) _session->trace("HandlerForOutOfHttpRangeCode");
+                ctx->response().body() = "Handled out-of-HTTP-range code";
+            }
         });
     
-    // Process a request with 404
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_NOT_FOUND;
-    
-    middleware->process(ctx);
-    execute_done_callbacks(ctx);
-    
-    // Based on the actual implementation, range handlers have priority over specific handlers
-    EXPECT_FALSE(specific_handler_called);
-    EXPECT_TRUE(range_handler_called);
-    EXPECT_EQ("Range handler", body_str(ctx.response.body()));
-}
-
-// Test method chaining
-TEST_F(ErrorHandlingTest, MethodChaining) {
-    // Create the error handling middleware with method chaining
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    // Use method chaining to register handlers
-    middleware->on_status(HTTP_STATUS_BAD_REQUEST, create_response_customizer("Bad Request"))
-              .on_status(HTTP_STATUS_NOT_FOUND, create_response_customizer("Not Found"))
-              .on_status_range(HTTP_STATUS_INTERNAL_SERVER_ERROR, HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED, 
-                            create_response_customizer("Server Error"));
-    
-    // Test with a 400 Bad Request
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
-        
-        middleware->process(ctx);
-        execute_done_callbacks(ctx);
-        
-        EXPECT_EQ("Bad Request - Status: 400", body_str(ctx.response.body()));
-    }
-    
-    // Test with a 404 Not Found
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_NOT_FOUND;
-        
-        middleware->process(ctx);
-        execute_done_callbacks(ctx);
-        
-        EXPECT_EQ("Not Found - Status: 404", body_str(ctx.response.body()));
-    }
-    
-    // Test with a 500 Internal Server Error
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
-        
-        middleware->process(ctx);
-        execute_done_callbacks(ctx);
-        
-        EXPECT_EQ("Server Error - Status: 500", body_str(ctx.response.body()));
-    }
-    
-    // Verify we handled three errors
-    EXPECT_EQ(3, custom_responses.size());
-}
-
-// Test behavior when no handler is registered for a specific status
-TEST_F(ErrorHandlingTest, NoHandlerForStatus) {
-    // Create middleware with only 500 handler
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    middleware->on_status(HTTP_STATUS_INTERNAL_SERVER_ERROR, create_response_customizer("Server Error"));
-    
-    // Process a 404 request with no handler
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_NOT_FOUND;
-    ctx.response.body() = "Original response";
-    
-    middleware->process(ctx);
-    execute_done_callbacks(ctx);
-    
-    // Verify the response wasn't modified
-    EXPECT_EQ("Original response", body_str(ctx.response.body()));
-    EXPECT_FALSE(ctx.response.has_header("X-Error-Handled"));
-    EXPECT_EQ(0, custom_responses.size());
-}
-
-// Test callback execution order
-TEST_F(ErrorHandlingTest, CallbackExecutionOrder) {
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    // Register handlers that track execution order
-    middleware->on_any_error([this](qb::http::RouterContext<MockSession>& ctx, const std::string& message) {
-        execution_order.push_back("generic");
+    // Sanity check with a generic handler to see what happens if we try to trigger an "invalid" code.
+    // Realistically, the system won't set status codes outside 100-599 for errors.
+    bool generic_handler_called_for_valid = false;
+    _error_mw->on_any_error([&generic_handler_called_for_valid, this](auto ctx, const auto& /*msg*/){
+        generic_handler_called_for_valid = true;
+        if(_session) _session->trace("GenericFallback");
+        ctx->response().body() = "Generic fallback called";
+        ctx->response().status_code = qb::http::status::HTTP_STATUS_BAD_REQUEST;
     });
-    
-    middleware->on_status(HTTP_STATUS_BAD_REQUEST, [this](qb::http::RouterContext<MockSession>& ctx) {
-        execution_order.push_back("specific");
-    });
-    
-    // Process a 400 request
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
-    
-    middleware->process(ctx);
-    ctx.execute_error_callbacks("Test error");
-    
-    // Verify execution order: generic handler is called first, then specific
-    ASSERT_EQ(2, execution_order.size());
-    EXPECT_EQ("generic", execution_order[0]);
-    EXPECT_EQ("specific", execution_order[1]);
-}
 
-// Test handler replacement
-TEST_F(ErrorHandlingTest, HandlerReplacement) {
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    // Register first handler
-    middleware->on_status(HTTP_STATUS_BAD_REQUEST, [](qb::http::RouterContext<MockSession>& ctx) {
-        ctx.response.body() = "First handler";
-    });
-    
-    // Replace with second handler
-    middleware->on_status(HTTP_STATUS_BAD_REQUEST, [](qb::http::RouterContext<MockSession>& ctx) {
-        ctx.response.body() = "Second handler";
-    });
-    
-    // Process a 400 request
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
-    
-    middleware->process(ctx);
-    execute_done_callbacks(ctx);
-    
-    // Verify second handler was used
-    EXPECT_EQ("Second handler", body_str(ctx.response.body()));
-}
+    // Test 1: Trigger HTTP_STATUS_OK (200), which is in the valid part of the range
+    auto trigger_task_200 = std::make_shared<ErrorSignalerTask>("ErrorTrigger200", qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_make_request(trigger_task_200);
 
-// Test fallback to generic status code handlers (400/500)
-TEST_F(ErrorHandlingTest, FallbackToGenericHandlers) {
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    // Register handlers for general 4xx/5xx but not specific codes
-    middleware->on_status(HTTP_STATUS_BAD_REQUEST, [](qb::http::RouterContext<MockSession>& ctx) {
-        ctx.response.body() = "Generic 4xx handler";
-    });
-    
-    middleware->on_status(HTTP_STATUS_INTERNAL_SERVER_ERROR, [](qb::http::RouterContext<MockSession>& ctx) {
-        ctx.response.body() = "Generic 5xx handler";
-    });
-    
-    // Test with 403 Forbidden (should use 400 handler)
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_FORBIDDEN;
-        
-        middleware->process(ctx);
-        execute_done_callbacks(ctx);
-        
-        EXPECT_EQ("Generic 4xx handler", body_str(ctx.response.body()));
-    }
-    
-    // Test with 503 Service Unavailable (should use 500 handler)
-    {
-        auto ctx = create_context();
-        ctx.response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE;
-        
-        middleware->process(ctx);
-        execute_done_callbacks(ctx);
-        
-        EXPECT_EQ("Generic 5xx handler", body_str(ctx.response.body()));
-    }
-}
+    EXPECT_TRUE(valid_code_handler_called);
+    EXPECT_FALSE(out_of_range_handler_called);
+    EXPECT_FALSE(generic_handler_called_for_valid);
+    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Handled 200 from mixed range");
+    EXPECT_EQ(_session->get_trace(), "ErrorTrigger200_triggered;HandlerForValidCodeInRange");
 
-// Test handling of custom HTTP status codes
-TEST_F(ErrorHandlingTest, CustomStatusCodes) {
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    // Register handler for a custom status code
-    const http_status CUSTOM_STATUS = static_cast<http_status>(499); // Example custom code
-    
-    middleware->on_status(CUSTOM_STATUS, [](qb::http::RouterContext<MockSession>& ctx) {
-        ctx.response.body() = "Custom status handler";
-    });
-    
-    // Process request with custom status
-    auto ctx = create_context();
-    ctx.response.status_code = CUSTOM_STATUS;
-    
-    middleware->process(ctx);
-    execute_done_callbacks(ctx);
-    
-    // Verify handler was called
-    EXPECT_EQ("Custom status handler", body_str(ctx.response.body()));
-}
+    // Test 2: Trigger an error that the range was supposed to cover (e.g. 500)
+    _router = std::make_unique<qb::http::Router<MockErrorHandlingSession>>(); // Re-initialize router
+    _session->reset();
+    valid_code_handler_called = false; // reset flags
+    out_of_range_handler_called = false;
+    generic_handler_called_for_valid = false;
 
-// Test handling of non-error status codes (shouldn't trigger handlers)
-TEST_F(ErrorHandlingTest, IgnoreSuccessStatus) {
-    auto middleware = std::make_shared<qb::http::ErrorHandlingMiddleware<MockSession>>();
-    
-    bool handler_called = false;
-    
-    middleware->on_status_range(HTTP_STATUS_BAD_REQUEST, HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED,
-                              [&handler_called](qb::http::RouterContext<MockSession>& ctx) {
-        handler_called = true;
-        ctx.response.body() = "Error handler called";
+    // Clear existing handlers on _error_mw to make this test cleaner for the 500 case
+    _error_mw = qb::http::error_handling_middleware<MockErrorHandlingSession>("TestErrorMW_ForInvalidRange");
+    _error_mw->on_status_range(qb::http::status::HTTP_STATUS_OK, static_cast<qb::http::status>(700), 
+        [&valid_code_handler_called, &out_of_range_handler_called, this](auto ctx) { // Same handler as above
+            if (ctx->response().status_code == qb::http::status::HTTP_STATUS_OK) valid_code_handler_called = true;
+            else out_of_range_handler_called = true;
+        });
+    // Add a generic handler AFTER the range one
+     _error_mw->on_any_error([&generic_handler_called_for_valid, this](auto ctx, const auto& /*msg*/){
+        generic_handler_called_for_valid = true;
+        ctx->response().body() = "Generic fallback called for 500";
     });
-    
-    // Process a 200 OK response
-    auto ctx = create_context();
-    ctx.response.status_code = HTTP_STATUS_OK;
-    ctx.response.body() = "Success response";
-    
-    middleware->process(ctx);
-    execute_done_callbacks(ctx);
-    
-    // Verify handler was not called for success status
-    EXPECT_FALSE(handler_called);
-    EXPECT_EQ("Success response", body_str(ctx.response.body()));
-}
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-} 
+
+    auto trigger_task_500 = std::make_shared<ErrorSignalerTask>("ErrorTrigger500", qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    // We need to use the new _error_mw
+    _router->use(trigger_task_500); // Add trigger
+    _router->get("/error_trigger", normal_route_handler()); // Add route
+    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession>>> error_chain;
+    error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession>>(_error_mw, _error_mw->name()));
+    _router->set_error_task_chain(error_chain); // Set the new error MW
+    _router->compile();
+    _router->route(_session, create_request("/error_trigger"));
+
+    EXPECT_FALSE(valid_code_handler_called); // Not a 200 error
+    EXPECT_TRUE(out_of_range_handler_called); 
+    EXPECT_FALSE(generic_handler_called_for_valid); // Generic should not be called as range handler took precedence
+}
