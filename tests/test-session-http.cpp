@@ -1,13 +1,12 @@
-
 #include <gtest/gtest.h>
 #include "../http.h"
 
 using namespace qb::io;
 
-constexpr const std::size_t NB_ITERATION          = 4096;
-constexpr const char        STRING_MESSAGE[]      = "Here is my content test";
-std::atomic<std::size_t>    msg_count_server_side = 0;
-std::atomic<std::size_t>    msg_count_client_side = 0;
+constexpr const std::size_t NB_ITERATION = 4096;
+constexpr const char STRING_MESSAGE[] = "Here is my content test";
+std::atomic<std::size_t> msg_count_server_side = 0;
+std::atomic<std::size_t> msg_count_client_side = 0;
 
 bool
 all_done() {
@@ -73,35 +72,38 @@ TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
 TEST(Session, HTTP_PARSE_MULTIPART) {
     qb::http::Multipart mp;
 
-    auto &part1                            = mp.create_part();
+    auto &part1 = mp.create_part();
     part1.headers()["Content-Disposition"] = {R"(form-data; name="company")"};
-    part1.headers()["Content-Type"]        = {"text"};
-    part1.body                             = "isndev";
-    auto &part2                            = mp.create_part();
+    part1.headers()["Content-Type"] = {"text"};
+    part1.body = "isndev";
+    auto &part2 = mp.create_part();
     part2.headers()["Content-Disposition"] = {
-        R"(file; name="file"; filename="file1.txt")"};
+        R"(file; name="file"; filename="file1.txt")"
+    };
     part2.headers()["Content-Type"] = {"application/json"};
-    part2.body                      = R"({"hello": "true"})";
+    part2.body = R"({"hello": "true"})";
 
     qb::icase_unordered_map<std::string> op{{"Content-Type", {"multipart/form-data"}}};
-    qb::http::Request                    req{HTTP_POST,
-                                             {"https://isndev.com"},
-                                             {{"Content-Type", {"multipart/form-data"}}},
-                          mp};
+    qb::http::Request req{
+        HTTP_POST,
+        {"https://isndev.com"},
+        {{"Content-Type", {"multipart/form-data"}}},
+        mp
+    };
     req.body() = mp;
 
     auto mp2 = req.body().as<qb::http::Multipart>();
     EXPECT_EQ(mp2.parts()[0].header("Content-Type"), "text");
     EXPECT_EQ(mp2.parts()[0].body, "isndev");
     auto attrs =
-        qb::http::parse_header_attributes(mp2.parts()[0].header("Content-Disposition"));
+            qb::http::parse_header_attributes(mp2.parts()[0].header("Content-Disposition"));
     EXPECT_TRUE(attrs.has("Form-Data"));
     EXPECT_EQ(attrs.at("name"), "company");
 
     EXPECT_EQ(mp2.parts()[1].header("Content-Type"), "application/json");
     EXPECT_EQ(mp2.parts()[1].body, R"({"hello": "true"})");
     attrs =
-        qb::http::parse_header_attributes(mp2.parts()[1].header("Content-Disposition"));
+            qb::http::parse_header_attributes(mp2.parts()[1].header("Content-Disposition"));
     EXPECT_TRUE(attrs.has("File"));
     EXPECT_EQ(attrs.at("Name"), "file");
     EXPECT_EQ(attrs.at("Filename"), "file1.txt");
@@ -118,9 +120,11 @@ public:
     using Protocol = qb::http::protocol<TestServerClient>;
 
     explicit TestServerClient(TestServer &server)
-        : client(server) {}
+        : client(server) {
+    }
 
-    ~TestServerClient() {}
+    ~TestServerClient() {
+    }
 
     void
     on(Protocol::request &&event) {
@@ -132,7 +136,7 @@ public:
 
         qb::http::Response r;
         r.status() = qb::http::status::OK;
-        r.body()      = std::move(event.http.body());
+        r.body() = std::move(event.http.body());
         *this << r;
 
         ++msg_count_server_side;
@@ -189,16 +193,20 @@ TEST(Session, HTTP_OVER_TCP) {
         }
         client.start();
 
-        qb::http::Request r{HTTP_GET,
-                            {"http://www.isndev.test:9999/?happy=true"},
-                            {{"Host", {"www.isndev.test:9999"}},
-                             {"Connection", {"keep-alive"}},
-                             {"Transfer-Encoding", {"chunked"}}}};
+        qb::http::Request r{
+            HTTP_GET,
+            {"http://www.isndev.test:9999/?happy=true"},
+            {
+                {"Host", {"www.isndev.test:9999"}},
+                {"Connection", {"keep-alive"}},
+                {"Transfer-Encoding", {"chunked"}}
+            }
+        };
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
             client << r;
             client << qb::http::Chunk(STRING_MESSAGE, sizeof(STRING_MESSAGE) - 1)
-                   << qb::http::Chunk();
+                    << qb::http::Chunk();
         }
 
         for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
@@ -222,11 +230,15 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
     std::thread t([]() {
         async::init();
 
-        qb::http::Request r{{"http://localhost:9999/?happy=true"},
-                            {{"Host", {"www.isndev.test:9999"}},
-                             {"Connection", {"keep-alive"}},
-                             {"Authorization", {"None"}}},
-                            {STRING_MESSAGE}};
+        qb::http::Request r{
+            {"http://localhost:9999/?happy=true"},
+            {
+                {"Host", {"www.isndev.test:9999"}},
+                {"Connection", {"keep-alive"}},
+                {"Authorization", {"None"}}
+            },
+            {STRING_MESSAGE}
+        };
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
             auto res = qb::http::GET(r);
@@ -247,12 +259,13 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
 class TestSecureServer;
 
 class TestSecureServerClient
-    : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
+        : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
 public:
     using Protocol = qb::http::protocol_view<TestSecureServerClient>;
 
     explicit TestSecureServerClient(IOServer &server)
-        : client(server) {}
+        : client(server) {
+    }
 
     ~TestSecureServerClient() {
         EXPECT_EQ(msg_count_server_side, NB_ITERATION);
@@ -268,7 +281,7 @@ public:
 
         qb::http::Response r;
         r.status() = qb::http::status::OK;
-        r.body()      = std::move(event.http.body());
+        r.body() = std::move(event.http.body());
         *this << r;
 
         ++msg_count_server_side;
@@ -276,7 +289,7 @@ public:
 };
 
 class TestSecureServer
-    : public use<TestSecureServer>::tcp::ssl::server<TestSecureServerClient> {
+        : public use<TestSecureServer>::tcp::ssl::server<TestSecureServerClient> {
     std::size_t connection_count = 0u;
 
 public:
@@ -329,7 +342,8 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
             HTTP_GET,
             {"http://www.isndev.test:9999/?happy=true"},
             {{"Host", {"www.isndev.test:9999"}}, {"Connection", {"keep-alive"}}},
-            {STRING_MESSAGE}};
+            {STRING_MESSAGE}
+        };
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
             client << r;
