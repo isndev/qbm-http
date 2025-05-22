@@ -38,9 +38,11 @@ namespace qb::http {
      *                The `status` member (reason phrase) will also use this String type.
      */
     template<typename String>
-    struct TResponse : public internal::MessageBase<String> {
+    class TResponse : public internal::MessageBase<String> {
+    public:
         /** @brief Indicates that this message type is an HTTP response, used by parsers. */
         constexpr static http_type type = HTTP_RESPONSE;
+    private:
         /** @brief The HTTP status code of the response (e.g., 200, 404). */
         Status _status;
         /** @brief A collection of cookies to be sent with this response via `Set-Cookie` headers. */
