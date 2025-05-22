@@ -1,237 +1,269 @@
 # QB HTTP Module (`qbm-http`)
 
-This module provides a comprehensive, high-performance, and flexible HTTP/1.1 client and server implementation, deeply integrated with the asynchronous capabilities of the QB C++ Actor Framework (`qb-io` and `qb-core`). It's designed for building robust, scalable web applications and services in C++17.
+Welcome to `qb-http`, a modern C++17 library for building high-performance, asynchronous HTTP/1.1 clients and servers. Part of the QB Actor Framework, `qb-http` is designed for developers seeking efficiency, type safety, and a clean, expressive API for their web services and applications.
+
+Whether you're crafting a REST API, serving static content, or making outbound HTTP requests, `qb-http` provides the tools you need with a focus on asynchronous operations and ease of use.
 
 ## Core Philosophy
 
 *   **Asynchronous & Non-Blocking:** Built entirely on the non-blocking I/O foundation of `qb-io` to maximize performance and concurrency.
-*   **Flexibility & Extensibility:** Offers a powerful middleware system and clear interfaces for customization.
-*   **Performance:** Utilizes efficient parsing (llhttp), optimized routing (Radix Tree option), and modern C++ techniques.
-*   **Ease of Use:** Provides both high-level APIs for common tasks (client requests, simple routing) and detailed control for complex scenarios.
+*   **Modern C++17:** Leverages modern C++ features for clarity, safety, and performance.
+*   **Flexibility & Extensibility:** Offers a powerful routing and middleware system for customization.
+*   **Simplicity & Power:** Provides high-level APIs for common tasks while allowing deep control when needed.
 
-## Key Features
+## Key Features at a Glance
 
-*   **HTTP/1.1 Compliance:** Full support for the HTTP/1.1 protocol.
-*   **Client & Server:** Includes implementations for both asynchronous HTTP clients and servers.
-*   **Robust Routing (`qb::http::Router`):**
+*   **HTTP/1.1 Client & Server:** Robust implementations for both roles.
+*   **Expressive Routing Engine (`qb::http::Router`):**
     *   Method-based routing (GET, POST, PUT, DELETE, etc.).
-    *   Path parameter extraction (e.g., `/users/:id`).
-    *   Route grouping (`router.group("/api")`).
-    *   Hierarchical controllers (`qb::http::Controller`).
-    *   Optional high-performance Radix Tree matching.
-    *   Route priorities.
-*   **Powerful Middleware System (`qb::http::IMiddleware`):**
-    *   Intercept and modify requests/responses.
-    *   Supports both synchronous and asynchronous middleware.
-    *   Chainable execution order.
-    *   Built-in middleware for common tasks (Logging, Timing, CORS, Error Handling, Validation, Authentication, Rate Limiting, JWT, reCAPTCHA).
+    *   Path parameters (`/users/:id`) and wildcards (`/files/*filepath`).
+    *   Route grouping and class-based Controllers for organization.
+    *   Efficient Radix Tree-based matching.
+*   **Flexible Middleware System (`qb::http::IMiddleware`):**
+    *   Easily intercept and modify requests/responses.
+    *   Support for synchronous and asynchronous middleware.
+    *   Chainable execution with clear flow control.
+    *   Comprehensive set of [standard middleware](./readme/08-standard-middleware.md) (Logging, CORS, Auth, Validation, etc.).
 *   **Asynchronous Request Handling:**
-    *   Route handlers can perform long-running operations without blocking the server thread using `Context::make_async()` and `AsyncCompletionHandler`.
-    *   Built-in timeout management for async requests.
-*   **Request/Response Abstraction (`qb::http::Request`, `qb::http::Response`):**
-    *   Easy access to method, URI, headers, body, query parameters.
-    *   Type-safe header management (case-insensitive).
-    *   Flexible body handling (`Body::as<T>()`, `Body::raw()`).
-    *   Cookie parsing and management (`qb::http::Cookie`, `CookieJar`).
-    *   Multipart/form-data support (`qb::http::Multipart`).
-*   **Authentication & Authorization (`qbm/http/auth`, `middleware/auth.h`, `middleware/jwt.h`):**
-    *   JWT generation and verification (`qb::jwt`).
-    *   Flexible `AuthManager` for token handling.
-    *   `AuthMiddleware` for request authentication and role-based authorization.
-*   **Validation (`qbm/http/validation`, `middleware/validator.h`):**
-    *   Request validation using JSON Schema.
-    *   Query parameter validation with type checking, ranges, patterns, enums.
-    *   Input sanitization.
-*   **Content Handling:**
-    *   Automatic Content-Length calculation.
-    *   Chunked Transfer Encoding support.
-    *   Optional Content Compression (Gzip, Deflate via `qb-io` if built with Zlib).
-*   **Transport:** Built on `qb::io::tcp::socket` and `qb::io::tcp::ssl::socket`.
+    *   Route handlers and middleware can perform non-blocking I/O seamlessly.
+    *   Built around the `qb::http::Context` for managing request lifecycle.
+*   **Rich Request/Response API (`qb::http::Request`, `qb::http::Response`):
+    *   Intuitive access to methods, URI, headers, body, cookies.
+    *   Flexible body handling with `Body::as<T>()` and `Body::raw()`.
+    *   Automatic `Content-Length`, cookie parsing, and multipart support.
+*   **Built-in Authentication & Validation:**
+    *   JWT generation & verification via `qb::http::auth` and `qb::jwt`.
+    *   Request validation (body, params, headers) using JSON Schema-like definitions.
+*   **Content Negotiation:** Automatic compression/decompression (Gzip/Deflate if Zlib enabled).
 
-## Quick Start
+## Quick Start: A Simple HTTP Server
 
-### Simple HTTP Server
+Let's create a server that says hello!
 
 ```cpp
-#include <http/http.h>
-#include <qb/main.h>
-#include <qb/actor.h>
-#include <iostream>
+#include <http/http.h> // Main include for this module
 
-// Define the Session Type based on the Server
-class MyHttpServer;
-class MyHttpSession : public qb::http::use<MyHttpSession>::session<MyHttpServer> {
+// Forward declare your server to define a session type
+class MySimpleServer;
+
+// Define a session type associated with your server
+class MySimpleSession : public qb::http::use<MySimpleSession>::session<MySimpleServer> {
 public:
-    explicit MyHttpSession(MyHttpServer& server) : session(server) {}
+    // Constructor boilerplate, passes server reference to base
+    explicit MySimpleSession(MySimpleServer& server_ref)
+        : qb::http::use<MySimpleSession>::session<MySimpleServer>(server_ref) {}
+    
+    // Optional: Add custom session-specific logic or state here if needed
 };
 
-// Define the Server Actor
-class MyHttpServer : public qb::Actor, public qb::http::use<MyHttpServer>::server<MyHttpSession> {
+// Define your server by inheriting from qb::http::use<...>::server<...>
+class MySimpleServer : public qb::http::use<MySimpleServer>::server<MySimpleSession> {
 public:
-    bool onInit() override {
-        // Configure Router
-        router()
-            .get("/", [](Context& ctx) {
-                ctx.response.add_header("Content-Type", "text/html");
-                ctx.response.body() = "<h1>Hello from QB HTTP!</h1>";
-                ctx.complete(); // Send the response
-            })
-            .get("/hello/:name", [](Context& ctx) {
-                std::string name = ctx.param("name", "World");
-                ctx.response.body() = "Hello, " + name + "!";
-                ctx.complete();
-            });
+    MySimpleServer() {
+        std::cout << "Configuring server routes..." << std::endl;
 
-        // Add middleware (optional)
-        router().use([](Context& ctx) {
-            std::cout << "Middleware: Processing " << ctx.request.method_name() << " " << ctx.request.uri().path() << std::endl;
-            ctx.response.add_header("X-Served-By", "QB-HTTP");
-            return true; // Continue processing
+        // Define a GET route for the root path "/"
+        router().get("/", [](auto ctx) { // ctx is std::shared_ptr<qb::http::Context<MySimpleSession>>
+            std::cout << "Request to / received" << std::endl;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Type", "text/html; charset=utf-8");
+            ctx->response().body() = "<h1>Hello from QB HTTP!</h1><p>Welcome to your first qb-http server.</p>";
+            ctx->complete(); // Signal that request processing is finished
         });
 
-        // Listen on port 8080
-        if (transport().listen({ "tcp://0.0.0.0:8080" })) {
-             std::cerr << "Failed to listen on port 8080" << std::endl;
-             return false;
-        }
-        std::cout << "Server listening on http://0.0.0.0:8080" << std::endl;
-        start(); // Start accepting connections
-        registerEvent<qb::KillEvent>(*this);
-        return true;
+        // Define a GET route with a path parameter
+        router().get("/hello/:name", [](auto ctx) {
+            auto name = ctx->path_param("name", "World"); // Get path param "name", default to "World"
+            std::cout << "Request to /hello/" << name << " received" << std::endl;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+            ctx->response().body() = "Hello, " + std::string(name) + "!";
+            ctx->complete();
+        });
+
+        // Define an asynchronous route simulation
+        router().get("/async-data", [](auto ctx) {
+            std::cout << "Request to /async-data received, simulating async work..." << std::endl;
+            auto shared_ctx = ctx; // Capture context for the async callback
+            
+            // Simulate an asynchronous operation using qb::io::async::callback
+            qb::io::async::callback([shared_ctx]() {
+                std::cout << "Async work for /async-data completed." << std::endl;
+                if (shared_ctx->is_cancelled()) {
+                    std::cout << "Async work for /async-data was cancelled before completion." << std::endl;
+                    // Context is already completing with CANCELLED, just return
+                    return;
+                }
+                shared_ctx->response().status() = qb::http::status::OK;
+                shared_ctx->response().set_header("Content-Type", "application/json");
+                shared_ctx->response().body() = R"({"data": "This is asynchronously fetched data!", "delay_simulated": "100ms"})";
+                shared_ctx->complete();
+            }, std::chrono::milliseconds(100)); // Simulate a 100ms delay
+        });
+
+        // Add a simple logging middleware for all routes
+        router().use([](auto ctx, auto next){
+            std::cout << "[Middleware] Request: " << std::to_string(ctx->request().method()) 
+                      << " " << ctx->request().uri().path() << std::endl;
+            ctx->response().set_header("X-Served-By", "QB-HTTP-Server");
+            next(); // Call next to proceed to the next middleware or handler
+            // This line will execute after the handler (or subsequent middleware) calls next() or complete()
+            // Note: For async handlers/middleware, this post-processing part might execute *before* the async operation completes.
+            // To reliably log after the full response, use a HookPoint::REQUEST_COMPLETE or similar.
+            std::cout << "[Middleware] Response Status (after handler chain attempt): " << ctx->response().status().code() << std::endl;
+        }, "SimpleLogger");
+
+        // Important: Compile routes after defining them
+        router().compile();
+        std::cout << "Routes compiled." << std::endl;
     }
 
-    void on(const qb::KillEvent&) {
-        transport().close(); // Close listener socket
-        kill();
+    // Optional: Callback for when a new client connection is accepted by the server transport
+    void on(qb::http::use<MySimpleServer>::server<MySimpleSession>::IOSession& new_session_io) {
+        std::cout << "New client connection established." << std::endl;
+        // Note: The MySimpleSession object itself is created later by the framework 
+        // when this IOSession is associated with a protocol.
     }
 };
 
-int main() {
-    qb::Main engine;
-    engine.addActor<MyHttpServer>(0);
-    engine.start(false); // Run synchronously
+int main(int argc, char* argv[]) {
+    // Initialize the qb-io asynchronous system for the main thread
+    qb::io::async::init();
+
+    MySimpleServer server_instance;
+
+    // Listen on port 8080 on all IPv4 interfaces
+    if (!server_instance.transport().listen_v4(8080)) {
+        std::cerr << "Error: Failed to listen on port 8080." << std::endl;
+        return 1;
+    }
+    std::cout << "Server listening on http://0.0.0.0:8080" << std::endl;
+
+    server_instance.start(); // Start accepting connections and processing events
+
+    // Run the main event loop (blocks until stopped or no more events)
+    qb::io::async::run(); 
+
+    std::cout << "Server shutting down." << std::endl;
     return 0;
 }
 ```
 
-### Simple HTTP Client
+## Quick Start: An HTTP Client (Asynchronous and Synchronous)
+
+Making HTTP requests is just as straightforward, with both asynchronous and synchronous options.
 
 ```cpp
-#include <http/http.h>
-#include <qb/io.h> // For qb::io::cout()
-#include <iostream>
+#include <qb/http/http.h>
 
 int main() {
-    qb::http::Request req("http://httpbin.org/get");
-    req.add_header("Accept", "application/json");
+    qb::io::async::init(); // Initialize the async system
 
-    // Asynchronous Request
-    std::atomic<bool> done = false;
-    qb::http::GET(req, [&done](qb::http::async::Reply&& reply) {
-        qb::io::cout() << "--- Async Response ---" << std::endl;
-        qb::io::cout() << "Status: " << reply.response.status() << std::endl;
-        qb::io::cout() << "Body: " << reply.response.body().as<std::string>() << std::endl;
-        done = true;
-    });
+    // --- Asynchronous Request Example --- 
+    std::cout << "--- Asynchronous GET Request Example ---" << std::endl;
+    qb::http::Request async_req(qb::io::uri("http://worldtimeapi.org/api/ip"));
+    async_req.add_header("Accept", "application/json");
+    async_req.set_header("User-Agent", "QB-HTTP-Client-Async-Example/1.0");
 
-    // Need an event loop to process the async reply
-    while(!done) {
-        qb::io::async::run(EVRUN_ONCE);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::atomic<bool> async_request_done{false};
+
+    qb::http::GET(std::move(async_req), 
+        [&async_request_done](qb::http::async::Reply&& reply) { 
+            std::cout << "Async Response Received for: " << reply.request.uri().to_string() << std::endl;
+            std::cout << "Status: " << reply.response.status().code() 
+                      << " " << std::string(reply.response.status()) << std::endl;
+            if (reply.response.status() == qb::http::status::OK) {
+                std::cout << "Body:\n" << reply.response.body().as<std::string>() << std::endl;
+            } else {
+                std::cerr << "Async Request failed. Body: " << reply.response.body().as<std::string>() << std::endl;
+            }
+            async_request_done = true;
+        },
+        5.0 // 5-second timeout
+    );
+
+    std::cout << "Async request sent, waiting for response (event loop processing required)..." << std::endl;
+    while(!async_request_done.load()) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); 
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); 
     }
 
-    // Synchronous Request
-    qb::io::cout() << "\n--- Sync Response ---" << std::endl;
+    // --- Synchronous Request Example --- 
+    std::cout << "\n--- Synchronous GET Request Example ---" << std::endl;
+    qb::http::Request sync_req(qb::io::uri("http://httpbin.org/get"));
+    sync_req.add_header("X-Sync-Test", "true");
+    sync_req.set_header("User-Agent", "QB-HTTP-Client-Sync-Example/1.0");
     try {
-        qb::http::Response res = qb::http::GET(req, 5.0); // 5 second timeout
-        qb::io::cout() << "Status: " << res.status() << std::endl;
-        qb::io::cout() << "Body: " << res.body().as<std::string>() << std::endl;
+        std::cout << "Sending synchronous GET request to httpbin.org..." << std::endl;
+        // The synchronous call blocks until completion or timeout
+        auto sync_res = qb::http::GET(std::move(sync_req), 3.0); // 3-second timeout
+        std::cout << "Sync Status: " << sync_res.status().code() << std::endl;
+        // httpbin.org/get echoes headers, so let's check our custom one
+        auto echoed_json_body = sync_res.body().as<qb::json>();
+        if (echoed_json_body.contains("headers") && echoed_json_body["headers"].contains("X-Sync-Test")) {
+             std::cout << "Echoed X-Sync-Test header: " << echoed_json_body["headers"]["X-Sync-Test"].get<std::string>() << std::endl;
+        }
+        std::cout << "Sync Body (first 100 chars): " << sync_res.body().as<std::string_view>().substr(0, 100) << "..." << std::endl;
     } catch (const std::exception& e) {
-        qb::io::cout() << "Sync request failed: " << e.what() << std::endl;
+        std::cerr << "Synchronous request failed: " << e.what() << std::endl;
     }
 
+    std::cout << "\nClient examples finished." << std::endl;
     return 0;
 }
 ```
 
-## Documentation
+## Dive Deeper
 
-**Start here for detailed documentation:** **[`./readme/README.md`](./readme/README.md)**
+This `README.md` provides a high-level overview. For detailed information, please refer to our comprehensive documentation set located in the [`./readme/`](./readme/README.md) directory. It covers:
 
-Detailed documentation for specific features can also be found directly in the `readme/` directory:
+*   Core Concepts (Request, Response, Body, Headers, URI)
+*   The Routing System (Router, path matching, groups, controllers)
+*   Middleware (overview, standard middleware, custom middleware)
+*   Request Lifecycle and the `Context` object
+*   Authentication and Authorization systems
+*   Data Validation and Sanitization
+*   Error Handling strategies
+*   Advanced topics and best practices
 
-*   **Core Concepts:**
-    *   [`Core Concepts`](./readme/core_concepts.md): Fundamental ideas (Request/Response, Routing, Middleware, Async).
-    *   [`Request & Response`](./readme/request_response.md): Details on `Request`, `Response`, `Headers`, `Body` classes.
-    *   [`Routing System`](./readme/routing.md): In-depth look at the router, path parameters, groups, controllers, and Radix Tree matching.
-    *   [`Middleware`](./readme/middleware.md): Explains the middleware concept, chain execution, synchronous vs. asynchronous middleware, and how to create custom middleware.
-    *   [`Asynchronous Handling`](./readme/async_handling.md): Covers handling long-running tasks in route handlers using `make_async` and `AsyncCompletionHandler`, including timeouts and cancellation.
-    *   [`Cookie Management`](./readme/cookies.md): Details on parsing, creating, and managing HTTP cookies using `Cookie` and `CookieJar`.
-    *   [`Multipart/form-data Handling`](./readme/multipart.md): Parsing and creating multipart messages.
-*   **Built-in Components:**
-    *   [`Built-in Middleware`](./readme/builtin_middleware.md): Documentation for provided middleware like CORS, Logging, Rate Limiting, etc.
-    *   [`Authentication & Authorization`](./readme/authentication.md): Details on the `AuthManager`, JWT integration, and the `AuthMiddleware`.
-    *   [`Validation`](./readme/validation.md): How to use the `Validator` system, JSON Schema, query parameter validation, and sanitizers.
-*   **Client & Server:**
-    *   [`HTTP Client`](./readme/client.md): Using the global functions (`qb::http::GET`, `POST`, etc.) for making requests.
-    *   [`HTTP Server`](./readme/server.md): Building servers using the `use<...>::server` and `use<...>::session` templates.
-*   **Utilities & Reference:**
-    *   [`Utilities`](./readme/utils.md): Covers `qb::http::date`, `qb::http::utility`, and other helpers.
-    *   [`OpenAPI/Swagger Integration`](./readme/openapi.md): Generating API documentation.
-    *   [`Dependencies`](./readme/dependencies.md): Lists the required and optional dependencies for the module.
+**Start with the [Full Documentation Index](./readme/README.md).**
 
-## Building
+## Building `qbm-http`
 
-Ensure `qb-core` is built or installed. Then, include this module in your CMake project:
+To use `qbm-http` in your CMake project:
 
-```cmake
-# Find the installed qbm-http package
-# find_package(qbm-http REQUIRED)
+1.  Ensure `qb-core` (which includes `qb-io`) is available (built or installed).
+2.  Add `qbm-http` to your project. If it's a subdirectory:
+    ```cmake
+    # Assuming qbm-http is in a subdirectory like 'libs/qb/qbm/http'
+    add_subdirectory(libs/qb/qbm/http)
+    ```
+    Or, if `qbm-http` is installed system-wide or via `find_package`:
+    ```cmake
+    find_package(qbm-http REQUIRED)
+    ```
+3.  Link against the target:
+    ```cmake
+    target_link_libraries(your_application_target PRIVATE qbm::http)
+    ```
 
-# Or, if building alongside source:
-# add_subdirectory(path/to/qbm/http)
+### Dependencies
 
-# Link your target against the http module
-# target_link_libraries(your_target PRIVATE qbm::http)
-```
+*   **Required**: `qb-core` (and its dependency `qb-io`), C++17 compiler, CMake.
+*   **Bundled**: `llhttp` (for HTTP parsing).
+*   **Optional**:
+    *   OpenSSL: For HTTPS client/server functionality and JWT asymmetric algorithms. Enable with `QB_IO_WITH_SSL=ON` when building `qb-io`.
+    *   Zlib: For Gzip/Deflate content compression/decompression. Enable with `QB_IO_WITH_ZLIB=ON` when building `qb-io`.
 
-## Dependencies
+## Acknowledgements
 
-*   `qb-core` (which includes `qb-io`)
-*   `llhttp` (Bundled)
-*   OpenSSL (Optional, required for HTTPS client/server and JWT asymmetric algorithms)
-*   Zlib (Optional, required for content compression)
+This module stands on the shoulders of giants. We extend our sincere thanks to:
 
-## API Documentation
+*   The **Node.js team and contributors** for `llhttp`, providing a fast and robust HTTP parser.
+*   **Niels Lohmann** for the `nlohmann/json` library, used for JSON handling within the validation system and potentially by users for request/response bodies.
 
-- [Core Concepts](./readme/core_concepts.md)
-- [Routing](./readme/routing.md)
-- [Request/Response](./readme/request_response.md)
-- [Middleware](./readme/middleware.md)
-- [Authentication](./readme/authentication.md)
-- [Built-in Middleware](./readme/builtin_middleware.md)
-- [Validation](./readme/validation.md)
-- [Async Handling](./readme/async_handling.md)
-- [Cookies](./readme/cookies.md)
-- [Multipart](./readme/multipart.md)
-- [OpenAPI/Swagger Integration](./readme/openapi.md)
-- [HTTP Client](./readme/client.md)
-- [Server](./readme/server.md)
-- [Utilities](./readme/utils.md)
-- [Dependencies](./readme/dependencies.md)
+Their excellent work significantly contributes to the capabilities of `qb-http`.
 
-```
-Copyright (c) 2011-2025 qb - isndev (cpp.actor). All rights reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-      http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
+---
+*Copyright (c) 2011-2025 qb - isndev (cpp.actor). All rights reserved.*
+*Licensed under the Apache License, Version 2.0.*
