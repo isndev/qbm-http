@@ -63,6 +63,13 @@ namespace qb::http {
             this->internal::MessageBase<String>::reset(); // Reset headers and Content-Type in base
         }
 
+        TResponse(Status s,
+                  qb::icase_unordered_map<std::vector<String> > h = {},
+                  Body b = {}) noexcept
+            : internal::MessageBase<String>(std::move(h), std::move(b))
+            , _status(s)
+        {}
+
         // Defaulted copy/move constructors and assignment operators
         TResponse(const TResponse &) = default;
 

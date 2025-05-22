@@ -142,6 +142,25 @@ namespace qb::http {
             return *this;
         }
 
+        /**
+         * @brief Add a chunk to the body
+         * @param c Chunk to add
+         * @return Reference to this body
+         */
+        Body &add_chunk(Chunk const &c) {
+            _data << c;
+            return *this;
+        }
+
+        /**
+         * @brief Add a final chunk to the body
+         * @return Reference to this body
+         */
+        Body &add_final_chunk() {
+            _data << Chunk{};
+            return *this;
+        }
+
 #ifdef QB_IO_WITH_ZLIB
         /**
          * @brief Get a compressor for the given encoding

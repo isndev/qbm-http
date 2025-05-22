@@ -26,7 +26,7 @@
 #include "./validation/sanitizer.h"           // For Sanitizer class and sanitization functions.
 #include "./validation/request_validator.h"   // For RequestValidator.
 
-// Note: The actual validation middleware (e.g., qb/http/middleware/validation.h)
+// Note: The actual validation middleware (e.g., middleware/validation.h)
 // would typically use these components to perform validation as part of the request lifecycle.
 
 /**
@@ -43,4 +43,4 @@ namespace qb::http {
      */
     // For convenience, users might want to use a namespace alias in their own code:
     // namespace validation = qb::http::validation; 
-} // namespace qb::http 
+} // namespace qb::http

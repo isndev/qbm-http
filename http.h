@@ -923,7 +923,8 @@ namespace qb::http {
          * request transmission, and response handling.
          */
         template<typename Func, typename Transport>
-        class session : public io::async::tcp::client<session<Func, Transport>, Transport> {
+        class session : public io::async::tcp::client<session<Func, Transport>, Transport>
+                      , public io::use<session<Func, Transport>>::timeout {
             Func _func;
             Request _request;
 
@@ -944,6 +945,7 @@ namespace qb::http {
                       return req;
                   }(request))) {
                 this->template switch_protocol<http_protocol>(*this);
+                this->setTimeout(0);
             }
 
             ~session() = default;
@@ -957,7 +959,7 @@ namespace qb::http {
             connect(qb::io::uri const &remote, double timeout = 0) {
                 qb::io::async::tcp::connect<typename Transport::transport_io_type>(
                     remote,
-                    [this](auto &&transport) {
+                    [this, timeout](auto &&transport) {
                         if (!transport.is_open()) {
                             Response response;
                             response.status() = qb::http::status::SERVICE_UNAVAILABLE;
@@ -977,6 +979,7 @@ namespace qb::http {
                     }
 #endif
                             *this << _request;
+                            this->setTimeout(timeout);
                         }
                     },
                     timeout);
@@ -1004,15 +1007,23 @@ namespace qb::http {
             }
 
             /**
+             * @brief Handle timeout event
+             * @param event Timeout event
+             */
+            void
+            on(qb::io::async::event::timeout const &) {
+                _func(Reply{std::move(_request), Response{qb::http::status::GATEWAY_TIMEOUT}});
+                this->disconnect(2);
+            }
+
+            /**
              * @brief Handle disconnection event
              * @param event Disconnection event
              */
             void
             on(qb::io::async::event::disconnected const &event) {
                 if (!event.reason) {
-                    Response response;
-                    response.status() = qb::http::status::GONE;
-                    _func(Reply{std::move(_request), std::move(response)});
+                    _func(Reply{std::move(_request), Response{qb::http::status::BAD_GATEWAY}});
                 }
             }
 
@@ -1151,23 +1162,6 @@ namespace qb::allocator {
      */
     template<>
     pipe<char> &pipe<char>::put<qb::http::Response>(const qb::http::Response &r);
-
-    /**
-     * @brief HTTP Chunk serialization specialization
-     *
-     * Specialization of the pipe<char>::put template for HTTP chunks.
-     * This function formats an HTTP chunk according to the chunked transfer encoding
-     * specification in HTTP/1.1.
-     *
-     * This is used for implementing chunked transfer encoding in HTTP/1.1, allowing
-     * the server to send data in chunks without knowing the total size in advance.
-     * A zero-size chunk (0\r\n\r\n) indicates the end of the chunked data.
-     *
-     * @param c HTTP chunk to serialize
-     * @return Reference to the pipe for method chaining
-     */
-    template<>
-    pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
 } // namespace qb::allocator
 
 namespace qb::http {

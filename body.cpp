@@ -14,6 +14,50 @@
 #include <qb/io/uri.h>
 #include "./body.h"
 
+namespace qb::allocator {
+    /**
+     * @brief Serialize an HTTP Chunk into a byte stream
+     * @param c HTTP Chunk to serialize
+     * @return Reference to this pipe
+     *
+     * Formats an HTTP chunk according to the chunked transfer encoding
+     * specification (RFC 7230).
+     *
+     * The format is:
+     * - Chunk size in hexadecimal
+     * - CRLF
+     * - Chunk data
+     * - CRLF
+     *
+     * A zero-length chunk (with size "0") represents the end of the
+     * chunked data stream.
+     */
+    template<>
+    pipe<char> &
+    pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
+        constexpr static const std::size_t hex_len = sizeof(std::size_t) << 1u;
+        static const char digits[] = "0123456789ABCDEF";
+        if (c.size()) {
+            std::string rc(hex_len, '0');
+            auto f_pos = 0u;
+            for (size_t i = 0u, j = (hex_len - 1u) * 4u; i < hex_len; ++i, j -= 4u) {
+                const auto offset = (c.size() >> j) & 0x0fu;
+                rc[i] = digits[offset];
+                if (!offset)
+                    ++f_pos;
+            }
+            std::string_view hex_view(rc.c_str() + f_pos, rc.size() - f_pos);
+            *this << hex_view << qb::http::endl;
+            put(c.data(), c.size());
+        } else {
+            *this << '0' << qb::http::endl;
+        }
+
+        *this << qb::http::endl;
+        return *this;
+    }
+}
+
 namespace qb::http {
     // Placed explicit copy constructor and assignment operator definitions here
     Body::Body(Body const &rhs)
