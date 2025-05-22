@@ -149,7 +149,7 @@ namespace qb::http {
             if constexpr (MessageType::type == HTTP_REQUEST) {
                 auto &msg = static_cast<Parser *>(parser->data)->msg;
                 msg.method() = static_cast<http_method>(parser->method);
-                msg._uri = std::string{at, length};
+                msg.uri() = std::string{at, length};
             } else {
                 (void) at;
                 (void) length;

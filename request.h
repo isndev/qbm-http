@@ -42,9 +42,11 @@ namespace qb::http {
      * @tparam String The string type used for headers (e.g., `std::string`, `std::string_view`).
      */
     template<typename String>
-    struct TRequest : public internal::MessageBase<String> {
+    class TRequest : public internal::MessageBase<String> {
+    public:
         /** @brief Indicates that this message type is an HTTP request, used by parsers. */
         constexpr static http_type type = HTTP_REQUEST;
+    private:
         /** @brief The HTTP method of the request (e.g., GET, POST). */
         Method _method;
         /** @brief The URI associated with the request. */

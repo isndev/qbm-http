@@ -289,10 +289,10 @@ protected:
         qb::http::Request req;
         req.method() = method_val; // method_val is already qb::http::method, which is correct
         try {
-            req._uri = qb::io::uri(path_str);
+            req.uri() = qb::io::uri(path_str);
         } catch (const std::exception &e) {
             ADD_FAILURE() << "Failed to parse URI for request: " << path_str << " - " << e.what();
-            req._uri = qb::io::uri("/__test_uri_parse_failure__");
+            req.uri() = qb::io::uri("/__test_uri_parse_failure__");
         }
         _router->route(_session_ptr, std::move(req));
         _task_executor.processAllTasks();
