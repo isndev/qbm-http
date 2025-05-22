@@ -166,7 +166,7 @@ public:
     NormalCompletingTask(std::string name, 
                          std::shared_ptr<MockErrorHandlingSession> session, 
                          TaskExecutor& executor, 
-                         qb::http::status status_code = HTTP_STATUS_OK, // Corrected type and constant
+                         qb::http::status status_code = qb::http::status::OK, // Corrected type and constant
                          std::string body = "OK",
                          bool is_error_path_handler = false) 
         : BaseTestTask<MockErrorHandlingSession>(std::move(name), session, executor), 
@@ -178,7 +178,7 @@ public:
     void process(std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx) override {
         record_execution(ctx);
         _executor_ref.addTask([ctx, name = _name, status_code_cap = _status_code, body_cap = _body, is_err_handler = _is_error_path_handler, session_h = _session_ref]() {
-            ctx->response().status_code = status_code_cap;
+            ctx->response().status() = status_code_cap;
             ctx->response().body() = body_cap;
             if (is_err_handler && session_h) {
                  session_h->_last_error_handler_name_executed = name;
@@ -266,7 +266,7 @@ protected:
 
     void make_request(qb::http::method method_val, const std::string& path_str) {
         qb::http::Request req;
-        req.method = method_val; // method_val is already qb::http::method, which is correct
+        req.method() = method_val; // method_val is already qb::http::method, which is correct
         try {
             req._uri = qb::io::uri(path_str);
         } catch (const std::exception& e) {
@@ -319,7 +319,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInHandlerTriggersErrorChain) {
     EXPECT_TRUE(_session_ptr->_finalized_cb_called);
     EXPECT_TRUE(was_task_executed("ErroringRouteLambda"));
     EXPECT_TRUE(was_task_executed("ErrorHandlerInChain"));
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     EXPECT_EQ(_session_ptr->_response_received.body().as<std::string>(), "Handled by error chain");
     EXPECT_EQ(_session_ptr->_last_error_handler_name_executed, "ErrorHandlerInChain");
 }
@@ -349,7 +349,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInHandlerTriggersErrorChain) {
     EXPECT_TRUE(_session_ptr->_finalized_cb_called);
     EXPECT_TRUE(was_task_executed("RouteExceptionThrower")); 
     EXPECT_TRUE(was_task_executed("ExceptionHandlerInChain"));
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_session_ptr->_response_received.body().as<std::string>(), "Handled by error chain (exception)");
     EXPECT_EQ(_session_ptr->_last_error_handler_name_executed, "ExceptionHandlerInChain");
 }
@@ -401,7 +401,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInMiddlewareTriggersErrorChain) {
     EXPECT_EQ(count_task_executions("ErrorSignalingMiddlewareItself"), 2);
     EXPECT_FALSE(was_task_executed("NormalHandlerAfterMiddleware")); 
     EXPECT_FALSE(was_task_executed("MiddlewareErrorChainHandler"));
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty());
 }
 
@@ -455,7 +455,7 @@ TEST_F(RouterErrorHandlingTest, GlobalMiddlewarePrependedToErrorChain) {
     EXPECT_EQ(count_task_executions("GlobalErrorTestMiddleware"), 2); 
     EXPECT_TRUE(was_task_executed("CustomErrorChainHandler"));
     
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_CONFLICT);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_CONFLICT);
     EXPECT_EQ(_session_ptr->_response_received.body().as<std::string>(), "Custom error handled after global MW");
     EXPECT_EQ(_session_ptr->_last_error_handler_name_executed, "CustomErrorChainHandler");
     EXPECT_EQ(_session_ptr->_response_received.header("X-Global-ErrorTest-MW"), "Processed")
@@ -477,7 +477,7 @@ TEST_F(RouterErrorHandlingTest, ErrorChainNotSetDefaultsToFinalization) {
 
     EXPECT_TRUE(_session_ptr->_finalized_cb_called);
     EXPECT_TRUE(was_task_executed("ErrorNoChainHandlerLambda"));
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR); 
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty()) << "No error handler should have been marked as run.";
 }
 
@@ -498,7 +498,7 @@ TEST_F(RouterErrorHandlingTest, EmptyErrorChainDefaultsToFinalization) {
 
     EXPECT_TRUE(_session_ptr->_finalized_cb_called);
     EXPECT_TRUE(was_task_executed("ErrorEmptyChainHandlerLambda"));
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty());
 }
 
@@ -525,7 +525,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInErrorChainHandlerItselfFinalizes) {
     EXPECT_TRUE(was_task_executed("InitialErrorTrigger"));
     EXPECT_TRUE(was_task_executed("ErrorChainErrorSignaler")); 
     
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty());
 }
 
@@ -575,7 +575,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInMiddlewareTriggersErrorChain) {
     EXPECT_EQ(count_task_executions("ThrowingMiddlewareLambda"), 2); 
     EXPECT_FALSE(was_task_executed("NormalHandlerAfterThrowingMiddleware")); 
     EXPECT_FALSE(was_task_executed("MiddlewareExceptionChainHandler"));
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR); 
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty());
 }
 
@@ -603,7 +603,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInErrorChainHandlerFinalizes) {
     EXPECT_TRUE(was_task_executed("ErrorChainExceptionThrower"));
 
     // Expect a default 500 error because the error chain itself failed by throwing an exception.
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty()) 
         << "No error handler should have successfully completed and set its name.";
 }
@@ -646,7 +646,7 @@ TEST_F(RouterErrorHandlingTest, CancellationDuringNormalProcessingTriggersFinali
     EXPECT_FALSE(was_task_executed("HandlerAfterCancellingMiddleware")); // This handler should not run
     EXPECT_FALSE(was_task_executed("ErrorChainShouldNotRunOnCancel"));
     
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
 }
 
 TEST_F(RouterErrorHandlingTest, CancellationDuringErrorChainProcessingFinalizes) {
@@ -685,7 +685,7 @@ TEST_F(RouterErrorHandlingTest, CancellationDuringErrorChainProcessingFinalizes)
     EXPECT_FALSE(was_task_executed("ErrorChainSubsequentTaskAfterCancel"));
 
     // Context::cancel currently sets 503.
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty()) 
         << "No error handler should have fully completed if cancellation happened.";
 }
@@ -718,7 +718,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInNotFoundHandlerResultsInInternalServerErr
     EXPECT_TRUE(was_task_executed("ErroringNotFoundLambda"));
     EXPECT_FALSE(was_task_executed("MainErrorHandlerShouldNotRun"))
         << "The main error handler should not be executed when the 'not found' handler itself errors.";
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR)
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR)
         << "Expected 500 when 'not found' handler errors.";
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty())
         << "No specific error handler from the main chain should have completed when 'not found' handler errors.";
@@ -740,7 +740,7 @@ TEST_F(RouterErrorHandlingTest, GlobalMiddlewareErrorPreventsNotFoundHandlerExec
     qb::http::RouteHandlerFn<MockErrorHandlingSession> not_found_fn_should_not_run =
         [this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx) {
         _session_ptr->record_task_execution("NotFoundHandlerShouldNotRunLambda");
-        ctx->response().status_code = HTTP_STATUS_NOT_FOUND;
+        ctx->response().status() = qb::http::status::NOT_FOUND;
         ctx->response().body() = "Not found handler ran despite global MW error!";
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     };
@@ -774,7 +774,7 @@ TEST_F(RouterErrorHandlingTest, GlobalMiddlewareErrorPreventsNotFoundHandlerExec
         << "The 'not found' handler should not run if a global middleware errors first.";
     EXPECT_FALSE(was_task_executed("MainErrorHandlerForGlobalMwError"))
         << "MainErrorHandlerForGlobalMwError should not run if prepended ErroringGlobalMiddleware errors in the error chain.";
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR)
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR)
         << "Expected 500 when the error chain itself fails due to an erroring global middleware.";
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty())
         << "No specific error handler should have completed if the error chain itself failed.";
@@ -805,7 +805,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInNotFoundHandlerTriggersMainErrorChain
     EXPECT_TRUE(was_task_executed("ExceptionThrowingNotFoundLambda"));
     EXPECT_TRUE(was_task_executed("MainErrorHandlerForExceptionInNotFound"))
         << "The main error handler should execute when an exception occurs in the 'not found' handler.";
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_BAD_GATEWAY);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_BAD_GATEWAY);
     EXPECT_EQ(_session_ptr->_response_received.body().as<std::string>(), "Handled by main error chain (exception in not_found)");
     EXPECT_EQ(_session_ptr->_last_error_handler_name_executed, "MainErrorHandlerForExceptionInNotFound");
 }
@@ -839,7 +839,7 @@ TEST_F(RouterErrorHandlingTest, FatalErrorInMainErrorChainIsStillFatal) {
     EXPECT_TRUE(was_task_executed("FatalSignalingErrorChainTask"));
     EXPECT_FALSE(was_task_executed("SubsequentErrorHandlerShouldNotRun"));
     
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty())
         << "No error handler should have completed normally if a fatal error occurred in the chain.";
 }
@@ -874,7 +874,7 @@ TEST_F(RouterErrorHandlingTest, CancellationFromNotFoundHandlerFinalizes) {
     EXPECT_TRUE(was_task_executed("CancellingNotFoundLambda"));
     EXPECT_FALSE(was_task_executed("MainErrorChainShouldNotRunOnNotFoundCancel"));
     
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty());
 }
 
@@ -897,7 +897,7 @@ TEST_F(RouterErrorHandlingTest, CancellationByGlobalMiddlewareDuringNotFoundProc
     qb::http::RouteHandlerFn<MockErrorHandlingSession> not_found_fn_should_not_run =
         [this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession>> ctx) {
         _session_ptr->record_task_execution("NotFoundHandlerShouldNotRunAfterGlobalCancel");
-        ctx->response().status_code = HTTP_STATUS_NOT_FOUND;
+        ctx->response().status() = qb::http::status::NOT_FOUND;
         ctx->response().body() = "Not found handler ran despite global MW cancel!";
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     };
@@ -920,6 +920,6 @@ TEST_F(RouterErrorHandlingTest, CancellationByGlobalMiddlewareDuringNotFoundProc
     EXPECT_FALSE(was_task_executed("NotFoundHandlerShouldNotRunAfterGlobalCancel"));
     EXPECT_FALSE(was_task_executed("MainErrorChainShouldNotRunOnGlobalNotFoundCancel"));
 
-    EXPECT_EQ(_session_ptr->_response_received.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty());
 }

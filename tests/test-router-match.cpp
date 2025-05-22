@@ -47,7 +47,7 @@ protected:
 
     qb::http::Request create_request(qb::http::method method_val, const std::string& target_path) {
         qb::http::Request req;
-        req.method = method_val;
+        req.method() = method_val;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -69,7 +69,7 @@ protected:
                 ctx->session()->_handler_id = handler_id;
                 ctx->session()->_captured_params = ctx->path_parameters();
             }
-            ctx->response().status_code = HTTP_STATUS_OK; // Indicate a match and successful handling
+            ctx->response().status() = qb::http::status::OK; // Indicate a match and successful handling
             ctx->complete();
         };
     }
@@ -85,7 +85,7 @@ TEST_F(RouterMatchTest, StaticRouteSimpleMatch) {
 
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "hello_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
 }
 
 TEST_F(RouterMatchTest, StaticRouteNoMatch) {
@@ -96,7 +96,7 @@ TEST_F(RouterMatchTest, StaticRouteNoMatch) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed); // Handler for /world should not run
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND); // Default 404
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND); // Default 404
 }
 
 TEST_F(RouterMatchTest, StaticRouteRootPath) {
@@ -108,7 +108,7 @@ TEST_F(RouterMatchTest, StaticRouteRootPath) {
 
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "root_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
 }
 
 TEST_F(RouterMatchTest, StaticRouteTrailingSlashEquivalence) {
@@ -124,7 +124,7 @@ TEST_F(RouterMatchTest, StaticRouteTrailingSlashEquivalence) {
     router.route(mock_session, std::move(request_with_slash));
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "path_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
 
     // Test without trailing slash
     mock_session->reset();
@@ -132,7 +132,7 @@ TEST_F(RouterMatchTest, StaticRouteTrailingSlashEquivalence) {
     router.route(mock_session, std::move(request_without_slash));
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "path_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
 }
 
 TEST_F(RouterMatchTest, StaticRouteCaseSensitivity) {
@@ -145,14 +145,14 @@ TEST_F(RouterMatchTest, StaticRouteCaseSensitivity) {
     router.route(mock_session, std::move(request_correct));
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "correct_case_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     
     // Incorrect case
     mock_session->reset();
     auto request_incorrect = create_request(HTTP_GET, "/CasePath");
     router.route(mock_session, std::move(request_incorrect));
     ASSERT_FALSE(mock_session->_handler_executed); // Should not execute correct_case_handler
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 // --- Parameterized Route Matching ---
@@ -165,7 +165,7 @@ TEST_F(RouterMatchTest, ParameterSimpleMatch) {
 
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "user_id_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     auto param_val = mock_session->_captured_params.get("id");
     ASSERT_TRUE(param_val.has_value());
     ASSERT_EQ(param_val.value(), "123");
@@ -180,7 +180,7 @@ TEST_F(RouterMatchTest, ParameterMultipleParams) {
     
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "article_post_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     
     auto cat_val = mock_session->_captured_params.get("category");
     ASSERT_TRUE(cat_val.has_value());
@@ -227,7 +227,7 @@ TEST_F(RouterMatchTest, ParameterMissingFollowingStaticSegment) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 TEST_F(RouterMatchTest, ParameterValueEmptySegment) {
@@ -244,7 +244,7 @@ TEST_F(RouterMatchTest, ParameterValueEmptySegment) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 
@@ -422,7 +422,7 @@ TEST_F(RouterMatchTest, DifferentMethodsSamePath) {
     auto req_put = create_request(HTTP_PUT, "/resource");
     router.route(mock_session, std::move(req_put));
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 // --- More "Twisted" / Edge Cases for Matching ---
@@ -492,7 +492,7 @@ TEST_F(RouterMatchTest, NoRoutesDefined) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 TEST_F(RouterMatchTest, VeryLongParameterValue) {
@@ -511,7 +511,7 @@ TEST_F(RouterMatchTest, VeryLongParameterValue) {
 
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "long_param_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     auto param_val = mock_session->_captured_params.get("itemId");
     ASSERT_TRUE(param_val.has_value());
     ASSERT_EQ(std::string(param_val.value()), long_value);
@@ -532,7 +532,7 @@ TEST_F(RouterMatchTest, VeryLongWildcardCapture) {
 
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "long_wildcard_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     auto param_val = mock_session->_captured_params.get("filePath");
     ASSERT_TRUE(param_val.has_value());
     ASSERT_EQ(std::string(param_val.value()), long_path);
@@ -548,7 +548,7 @@ TEST_F(RouterMatchTest, PathIsPrefixOfDefinedStaticRoute) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 TEST_F(RouterMatchTest, PathIsPrefixOfDefinedParamRoute) {
@@ -559,7 +559,7 @@ TEST_F(RouterMatchTest, PathIsPrefixOfDefinedParamRoute) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 TEST_F(RouterMatchTest, PathIsExtensionOfDefinedStaticRoute) {
@@ -570,7 +570,7 @@ TEST_F(RouterMatchTest, PathIsExtensionOfDefinedStaticRoute) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 TEST_F(RouterMatchTest, PathIsExtensionOfDefinedParamRoute) {
@@ -581,7 +581,7 @@ TEST_F(RouterMatchTest, PathIsExtensionOfDefinedParamRoute) {
     router.route(mock_session, std::move(request));
 
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 TEST_F(RouterMatchTest, ComplexPriorityMix) {
@@ -697,7 +697,7 @@ TEST_F(RouterMatchTest, IdenticalStructureDifferentMethodsParameterized) {
     auto req_delete = create_request(HTTP_DELETE, "/resource/789");
     router.route(mock_session, std::move(req_delete));
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
 
 TEST_F(RouterMatchTest, IdenticalStructureDifferentMethodsWildcard) {
@@ -736,7 +736,7 @@ TEST_F(RouterMatchTest, ParameterNameWithHyphen) {
 
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "item_hyphen_id_handler");
-    ASSERT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     auto param_val = mock_session->_captured_params.get("item-id");
     ASSERT_TRUE(param_val.has_value());
     ASSERT_EQ(param_val.value(), "product-abc");

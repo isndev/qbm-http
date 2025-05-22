@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/validation/rule.cpp
+ * @brief Implementation of the Rule class.
+ *
+ * This file contains the implementation of the Rule class,
+ * which is used to validate HTTP requests according to the rules defined
+ * in the RequestValidator.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #include "./rule.h" 
 #include "./schema_validator.h" 
 #include <qb/system/container/unordered_set.h>
@@ -12,7 +25,7 @@ namespace qb::http::validation {
 // and refer to other types within qb::http::validation if necessary.
 
 // Example for TypeRule:
-std::string TypeRule::data_type_to_string(DataType dt) {
+std::string TypeRule::data_type_to_string(DataType dt) noexcept {
     switch (dt) {
         case DataType::STRING:  return "string";
         case DataType::INTEGER: return "integer";

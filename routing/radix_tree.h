@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/radix_tree.h
+ * @file qbm/http/routing/radix_tree.h
  * @brief Defines a Radix Tree for efficient HTTP route matching.
  *
  * This file contains the `RadixTree` class template, a specialized tree data structure
@@ -116,21 +116,6 @@ private:
         std::string_view param_name; 
         /** @brief Child node for a wildcard segment, if one exists at this level. */
         std::shared_ptr<Node> wildcard_child = nullptr;
-
-        // The members below seem related to a more advanced or alternative middleware/context design
-        // that might associate context or specific middleware definitions directly with tree nodes.
-        // Documenting based on apparent intent.
-        /** 
-         * @brief (Potentially advanced feature) Weak pointer to a `RouteGroup` context relevant to this route.
-         * This might be used if routes need to access group-specific context not passed via task chains.
-         */
-        // std::map<qb::http::method, std::weak_ptr<RouteGroup<SessionType>>> group_context_for_route; // Assuming RouteGroup is a class
-        
-        /**
-         * @brief (Potentially advanced feature) Definitions of middleware specific to this route, perhaps before compilation into a linear task list.
-         * This might be used for a more declarative middleware definition directly on routes.
-         */
-        // std::map<qb::http::method, std::vector<std::shared_ptr<IMiddleware<SessionType>>>> route_specific_middleware_definitions;
 
         /**
          * @brief Constructs a Node.

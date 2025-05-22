@@ -1,42 +1,14 @@
 /**
- * @file multipart.h
- * @brief Multipart form-data parser for the QB Actor Framework
+* @file qbm/http/multipart.h
+ * @brief Multipart form-data parser implementation
  *
- * This file implements a parser for multipart/form-data content according to RFC 7578.
- * Multipart form data is commonly used in HTTP for file uploads and complex form
- * submissions. The implementation provides a state machine based parser with callback
- * functionality for efficient processing of multipart content.
- *
- * Key features:
- * - Streaming parser that processes data incrementally
- * - Callback-based event system for efficient memory management
- * - Robust error handling with detailed error messages
- * - Boundary detection and validation
- * - Header parsing and normalization
- * - Support for both string and binary content
- *
- * The MultipartParser is primarily used internally by the HTTP module to process
- * multipart form data in incoming requests, but can also be used directly for
- * custom multipart content processing needs.
- *
- * @see qb::http::Multipart
- * @see qb::http::internal::MultipartReader
+ * This file implements the parser for multipart/form-data content according to RFC 7578.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2021 isndev (www.qbaf.io)
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *         http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
-
 #pragma once
 
 #include <cassert>

@@ -1,253 +1,362 @@
+/**
+ * @file qbm/http/request.h
+ * @brief Defines the HTTP Request message class.
+ *
+ * This file contains the `TRequest` template class, which represents an HTTP request.
+ * It inherits from `MessageBase` to include common HTTP message properties like
+ * version, headers, and body, and adds request-specific details such as the
+ * HTTP method, URI, and parsed cookies.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #pragma once
 
-#include "./message_base.h"
-#include "./cookie.h"
+#include <string>       // For std::string (used in TRequest members if String is std::string)
+#include <vector>       // For std::vector (used in TRequest members if String is std::string)
+#include <utility>      // For std::move, std::forward
+
+#include "./message_base.h" // For internal::MessageBase
+#include "./cookie.h"       // For CookieJar, parse_cookies
+#include <qb/io/uri.h>      // For qb::io::uri
+#include "./types.h"        // For qb::http::method, HTTP_REQUEST (via llhttp.h)
 
 namespace qb::http {
 
-template <typename Session>
-class Router;
+// Forward declaration for the Router class, if it were to be a friend or closely related.
+// However, the `using Router = Router<Session>` below is a using-declaration for a template.
+// If `qb::http::Router` is a distinct class template, this forward declaration is fine.
+// If `TRequest::Router` is meant to be a nested class, it would be defined inside TRequest.
+// Based on context of routing.h, Router is likely a standalone class template.
+template <typename Session> class Router;
 
+/**
+ * @brief Represents an HTTP request message.
+ *
+ * This class template models an HTTP request, providing access to its method, URI,
+ * headers, body, and cookies. It inherits common message properties from `MessageBase`.
+ * The `String` template parameter allows flexibility in the underlying string type used for headers.
+ *
+ * @tparam String The string type used for headers (e.g., `std::string`, `std::string_view`).
+ */
 template <typename String>
 struct TRequest : public internal::MessageBase<String> {
-    constexpr static const http_type_t type = HTTP_REQUEST;
-    http_method                        method;
-    qb::io::uri                        _uri;
-    CookieJar                          _cookies;
+    /** @brief Indicates that this message type is an HTTP request, used by parsers. */
+    constexpr static http_type type = HTTP_REQUEST;
+    /** @brief The HTTP method of the request (e.g., GET, POST). */
+    Method _method;
+    /** @brief The URI associated with the request. */
+    qb::io::uri _uri;
+    /** @brief A collection of cookies parsed from the `Cookie` header of the request. */
+    CookieJar   _cookies;
 
 public:
     /**
-     * @brief Default constructor
+     * @brief Default constructor.
      *
-     * Creates an empty HTTP request with GET method.
+     * Creates an empty HTTP request. The method defaults to `HTTP_GET`.
+     * The URI, headers, body, and cookies are default-initialized (empty).
+     * HTTP version defaults to 1.1 via `MessageBase`.
      */
     TRequest() noexcept
-        : method(HTTP_GET) {}
+        : internal::MessageBase<String>() // Ensure MessageBase default constructor is called
+        , _method(Method::UNINITIALIZED)
+        , _uri() // Default construct URI
+        , _cookies() // Default construct CookieJar
+    {
+        this->internal::MessageBase<String>::reset(); // Resets headers and content_type in MessageBase
+    }
 
     /**
-     * @brief Constructor with method, URI, headers, and body
-     * @param method HTTP method for the request
-     * @param url URI for the request
-     * @param headers Map of headers for the request
-     * @param body Body content for the request
-     *
-     * Creates an HTTP request with the specified method, URI, headers, and body.
-     * All parameters except method and URL are optional.
+     * @brief Constructs an HTTP request with specified method, URI, headers, and body.
+     * @param m The HTTP method for the request.
+     * @param u The URI for the request (moved).
+     * @param h A map of headers for the request (moved). Defaults to an empty map.
+     * @param b The body content for the request (moved). Defaults to an empty body.
      */
-    TRequest(http::method method, qb::io::uri url,
-             qb::icase_unordered_map<std::vector<String>> headers = {}, Body body = {})
-        : internal::MessageBase<String>(std::move(headers), std::move(body))
-        , method(method)
-        , _uri{std::move(url)} {}
+    TRequest(qb::http::method m, qb::io::uri u,
+             qb::icase_unordered_map<std::vector<String>> h = {},
+             Body b = {})
+        : internal::MessageBase<String>(std::move(h), std::move(b))
+        , _method(m)
+        , _uri(std::move(u)) {
+        // Cookies would be parsed separately if this constructor is used for incoming requests.
+    }
 
     /**
-     * @brief Constructor with URI, headers, and body
-     * @param url URI for the request
-     * @param headers Map of headers for the request
-     * @param body Body content for the request
-     *
-     * Creates an HTTP request with GET method and the specified URI, headers, and body.
-     * Headers and body are optional.
+     * @brief Constructs an HTTP GET request with specified URI, headers, and body.
+     * @param u The URI for the request (moved).
+     * @param h A map of headers for the request (moved). Defaults to an empty map.
+     * @param b The body content for the request (moved). Defaults to an empty body.
      */
-    TRequest(qb::io::uri url, qb::icase_unordered_map<std::vector<String>> headers = {},
-             Body body = {})
-        : internal::MessageBase<String>(std::move(headers), std::move(body))
-        , method(HTTP_GET)
-        , _uri{std::move(url)} {}
+    explicit TRequest(qb::io::uri u,
+                      qb::icase_unordered_map<std::vector<String>> h = {},
+                      Body b = {})
+        : internal::MessageBase<String>(std::move(h), std::move(b))
+        , _method(Method::GET)
+        , _uri(std::move(u)) {}
+
+    // Defaulted copy/move constructors and assignment operators
+    TRequest(const TRequest&) = default;
+    TRequest(TRequest&&) noexcept = default;
+    TRequest& operator=(const TRequest&) = default;
+    TRequest& operator=(TRequest&&) noexcept = default;
+
+    const Method &method() const noexcept { return _method; }
+    Method &method() noexcept { return _method; }
 
     /**
-     * @brief Copy constructor
-     * @param other The request to copy
+     * @brief Gets a constant reference to the request's URI.
+     * @return `const qb::io::uri&` representing the URI.
      */
-    TRequest(TRequest const &) = default;
-
-    /**
-     * @brief Move constructor
-     * @param other The request to move
-     */
-    TRequest(TRequest &&) noexcept = default;
-
-    /**
-     * @brief Copy assignment operator
-     * @param other The request to copy
-     * @return Reference to this request
-     */
-    TRequest &operator=(TRequest const &) = default;
-
-    /**
-     * @brief Move assignment operator
-     * @param other The request to move
-     * @return Reference to this request
-     */
-    TRequest &operator=(TRequest &&) noexcept = default;
-
-    /**
-     * @brief Get the URI of the request (const version)
-     * @return Const reference to the URI object
-     *
-     * This method provides read-only access to the request's URI,
-     * which contains the path, query parameters, and other URI components.
-     */
-    qb::io::uri const &
-    uri() const {
+    [[nodiscard]] const qb::io::uri&
+    uri() const noexcept {
         return _uri;
     }
 
     /**
-     * @brief Get the URI of the request
-     * @return Mutable reference to the URI object
-     *
-     * This method provides mutable access to the request's URI,
-     * allowing modification of the path, query parameters, and other URI components.
+     * @brief Gets a mutable reference to the request's URI.
+     * @return `qb::io::uri&` allowing modification of the URI.
      */
-    qb::io::uri &
-    uri() {
+    [[nodiscard]] qb::io::uri&
+    uri() noexcept {
         return _uri;
     }
 
     /**
-     * @brief Get a query parameter value
-     * @tparam T Query parameter name type
-     * @param name Query parameter name
-     * @param index Index for multiple values
-     * @param not_found Default value to return if parameter not found
-     * @return Query parameter value or default value if not found
+     * @brief Retrieves a specific query parameter value from the request's URI.
      *
-     * Retrieves the value of a query parameter from the request URI.
-     * For query strings like "?foo=bar&foo=baz", index 0 returns "bar" and index 1
-     * returns "baz". If the parameter is not found, the not_found value is returned.
+     * If the query parameter has multiple values, `index` specifies which one to retrieve.
+     * @tparam QueryNameType The type of the query parameter name (e.g., `const char*`, `std::string_view`).
+     * @param name The name of the query parameter.
+     * @param index The 0-based index for multi-value parameters. Defaults to 0.
+     * @param not_found_value The string to return if the parameter is not found or index is out of bounds.
+     * @return A constant reference to the query parameter's value if found; otherwise, `not_found_value`.
      */
-    template <typename T>
-    [[nodiscard]] std::string const &
-    query(T &&name, std::size_t const index = 0,
-          std::string const &not_found = "") const {
-        return _uri.query<T>(std::forward<T>(name), index, not_found);
+    template <typename QueryNameType>
+    [[nodiscard]] const std::string&
+    query(QueryNameType&& name, std::size_t index = 0,
+          const std::string& not_found_value = "") const noexcept {
+        // Assumes _uri.query() is noexcept or handles exceptions appropriately to fit this noexcept.
+        return _uri.query(std::forward<QueryNameType>(name), index, not_found_value);
     }
 
     /**
-     * @brief Get the query parameters map
-     * @return Mutable reference to the query parameters map
-     *
-     * Provides access to the map of query parameters, allowing
-     * modification of the parameters. Each parameter can have
-     * multiple values stored as a vector.
+     * @brief Gets a mutable reference to the map of all query parameters in the URI.
+     * @return A reference to the `qb::io::uri`'s internal query map.
+     *         The exact type is `qb::icase_unordered_map<std::vector<std::string>>&`.
      */
-    auto &
-    queries() {
+    [[nodiscard]] auto&
+    queries() noexcept {
         return _uri.queries();
     }
 
     /**
-     * @brief Get the query parameters map (const version)
-     * @return Const reference to the query parameters map
-     *
-     * Provides read-only access to the map of query parameters.
-     * Each parameter can have multiple values stored as a vector.
+     * @brief Gets a constant reference to the map of all query parameters in the URI.
+     * @return A constant reference to the `qb::io::uri`'s internal query map.
      */
-    [[nodiscard]] auto const &
-    queries() const {
+    [[nodiscard]] const auto&
+    queries() const noexcept {
         return _uri.queries();
     }
 
     /**
-     * @brief Parse cookies from the Cookie header
-     * 
-     * Extracts cookies from the Cookie header and makes them
-     * available through the cookie management functions.
-     * This is automatically called when a request is received.
+     * @brief Parses the `Cookie` header from the request and populates the internal `CookieJar`.
+     *
+     * This method should be called after headers are available (e.g., by a server
+     * processing an incoming request). It clears any existing cookies in the jar
+     * before parsing.
+     * If the `Cookie` header is not present or empty, the cookie jar remains empty.
+     * @throws std::runtime_error if `parse_cookies` encounters a parsing error.
      */
     void parse_cookie_header() {
         _cookies.clear();
-        const auto cookie_header = this->header("Cookie", 0, "");
-        if (!cookie_header.empty()) {
-            auto cookies_map = parse_cookies(cookie_header, false);
-            for (const auto& [name, value] : cookies_map) {
-                _cookies.add(name, value);
+        // Use this->header to access headers from MessageBase/THeaders
+        const String& cookie_header_value = this->header("Cookie", 0, String{});
+        
+        if (!cookie_header_value.empty()) {
+            // parse_cookies expects std::string_view or const char*, String might need conversion.
+            std::string_view cookie_header_sv;
+            if constexpr (std::is_convertible_v<const String&, std::string_view>) {
+                cookie_header_sv = cookie_header_value;
+            } else {
+                // If String is not convertible (e.g. custom string type), this path needs handling.
+                // Assuming String is std::string or std::string_view for now.
+                // This part might need adjustment if String is more complex.
+                static_assert(std::is_same_v<String, std::string> || std::is_same_v<String, std::string_view>,
+                              "TRequest::parse_cookie_header expects String to be std::string or std::string_view or convertible for parse_cookies.");
+                // If it's std::string, it's convertible. If it's string_view, it's direct.
+                cookie_header_sv = std::string_view(cookie_header_value.data(), cookie_header_value.length());
+            }
+
+            if (!cookie_header_sv.empty()) {
+                auto cookies_map = parse_cookies(cookie_header_sv, false); // false for parsing "Cookie" header
+                for (const auto& [name, value] : cookies_map) {
+                    _cookies.add(name, value); // CookieJar::add handles name case-insensitivity
+                }
             }
         }
     }
 
     /**
-     * @brief Get a cookie from the request
-     * @param name Cookie name
-     * @return Pointer to the cookie, or nullptr if not found
-     * 
-     * Retrieves a cookie from the request by name. Returns nullptr
-     * if the cookie doesn't exist.
+     * @brief Retrieves a cookie by its name from the parsed request cookies.
+     * @param name The name of the cookie (case-insensitive lookup).
+     * @return A `const Cookie*` pointing to the cookie if found, otherwise `nullptr`.
      */
-    [[nodiscard]] const Cookie* cookie(const std::string& name) const {
+    [[nodiscard]] const Cookie* cookie(const std::string& name) const noexcept {
         return _cookies.get(name);
     }
 
     /**
-     * @brief Get a cookie value
-     * @param name Cookie name
-     * @param default_value Value to return if cookie not found
-     * @return Cookie value or default value
-     * 
-     * Convenience method to get a cookie value directly. Returns
-     * the default_value if the cookie doesn't exist.
+     * @brief Retrieves the value of a cookie by its name.
+     * @param name The name of the cookie (case-insensitive lookup).
+     * @param default_value The value to return if the cookie is not found.
+     * @return The cookie's value if found, otherwise `default_value`.
      */
-    [[nodiscard]] std::string cookie_value(const std::string& name, 
-                                          const std::string& default_value = "") const {
-        const Cookie* cookie = _cookies.get(name);
-        return cookie ? cookie->value() : default_value;
+    [[nodiscard]] std::string cookie_value(const std::string& name,
+                                           const std::string& default_value = "") const noexcept {
+        const Cookie* c = _cookies.get(name);
+        return c ? c->value() : default_value;
     }
 
     /**
-     * @brief Check if a cookie exists
-     * @param name Cookie name
-     * @return true if the cookie exists
+     * @brief Checks if a cookie with the given name exists in the request.
+     * @param name The name of the cookie (case-insensitive lookup).
+     * @return `true` if the cookie exists, `false` otherwise.
      */
-    [[nodiscard]] bool has_cookie(const std::string& name) const {
+    [[nodiscard]] bool has_cookie(const std::string& name) const noexcept {
         return _cookies.has(name);
     }
 
     /**
-     * @brief Get all cookies
-     * @return Reference to the cookie jar
+     * @brief Gets a constant reference to the `CookieJar` containing all parsed request cookies.
+     * @return `const CookieJar&`.
      */
-    [[nodiscard]] const CookieJar& cookies() const {
+    [[nodiscard]] const CookieJar& cookies() const noexcept {
         return _cookies;
     }
 
     /**
-     * @brief Get the cookie jar
-     * @return Mutable reference to the cookie jar
+     * @brief Gets a mutable reference to the `CookieJar` associated with this request.
+     * Allows direct manipulation of the cookie collection.
+     * @return `CookieJar&`.
      */
-    CookieJar& cookies() {
+    [[nodiscard]] CookieJar& cookies() noexcept {
         return _cookies;
     }
 
     /**
-     * @brief Reset the request to its default state
+     * @brief Resets the request object to a default state.
      *
-     * Resets the HTTP method to GET, clears the URI,
-     * and resets all headers and the body to their defaults.
-     * This allows reusing the same request object for a new request.
+     * - Sets the HTTP method to `GET`.
+     * - Clears the URI (to an empty/default state).
+     * - Clears all parsed cookies from the internal `CookieJar`.
+     * - Calls the `reset()` method of the `MessageBase` base class, which
+     *   clears all headers and resets the Content-Type to its default.
+     * The body content is not cleared by `MessageBase::reset()` itself but would be
+     * by `Body::clear()` if called directly on the body.
+     * The HTTP version and upgrade flag in `MessageBase` are not modified by this reset.
      */
     void
-    reset() {
-        method = HTTP_GET;
-        _uri   = qb::io::uri{};
-        _cookies.clear();
-        static_cast<internal::MessageBase<String> &>(*this).reset();
+    reset() noexcept {
+        _method = Method::GET;
+        _uri   = qb::io::uri{}; // Reset URI to default
+        _cookies.clear();       // Clear all cookies
+        this->internal::MessageBase<String>::reset(); // Reset headers and Content-Type in base
     }
 
     /**
-     * @brief HTTP Router for handling requests
+     * @brief Sets the HTTP method for the request.
+     * @param m The HTTP method to set.
+     * @return A reference to the request object.
+     */
+    TRequest &with_method(Method m) noexcept {
+        _method = m;
+        return *this;
+    }
+
+    /**
+     * @brief Sets the URI for the request.
+     * @param u The URI to set.
+     * @return A reference to the request object.
+     */
+    TRequest &with_uri(qb::io::uri u) noexcept {
+        _uri = std::move(u);
+        return *this;
+    }
+
+    /**
+     * @brief Adds a header to the request.
+     * @param name The name of the header.
+     * @param value The value of the header.
+     * @return A reference to the request object.
+     */
+    TRequest &with_header(std::string name, std::string value) noexcept {
+        this->add_header(std::move(name), std::move(value));
+        return *this;
+    }
+
+    /**
+     * @brief Sets the headers for the request.
+     * @param h The headers to set.
+     * @return A reference to the request object.
+     */
+    TRequest &with_headers(qb::icase_unordered_map<std::vector<String>> h) noexcept {
+        this->headers() = std::move(h);
+        return *this;
+    }
+
+    /**
+     * @brief Adds a cookie to the request.
+     * @param c The cookie to add.
+     * @return A reference to the request object.
+     */
+    TRequest &with_cookie(const Cookie &c) noexcept {
+        _cookies.add(c);
+        return *this;
+    }
+
+    /**
+     * @brief Sets the cookies for the request.
+     * @param cookies The cookies to set.
+     * @return A reference to the request object.
+     */
+    TRequest &with_cookies(const CookieJar &cookies) noexcept {
+        _cookies = cookies;
+        return *this;
+    }
+
+    /**
+     * @brief Sets the body for the request.
+     * @param b The body to set.
+     * @return A reference to the request object.
+     */
+    template <typename BodyType>
+    TRequest &with_body(BodyType &&b) noexcept {
+        this->body()= std::forward<BodyType>(b);
+        return *this;
+    }
+
+    /**
+     * @brief Using-declaration for `qb::http::Router` template.
      *
-     * This router provides a flexible and efficient way to handle HTTP requests
-     * with support for path parameters, controllers, and custom route handlers.
-     * It also supports asynchronous request handling through an event-driven approach.
+     * This declaration makes the `qb::http::Router<Session>` template accessible
+     * as `TRequest::Router<Session>` within contexts where `TRequest` is known.
+     * It does not define a nested Router class but rather aliases the external one.
      */
     template <typename Session>
-    using Router = Router<Session>;
+    using Router = qb::http::Router<Session>;
 };
 
+/** @brief Convenience alias for `TRequest<std::string>`, representing a request with mutable string headers. */
 using Request      = TRequest<std::string>;
+/** @brief Shorthand alias for `Request`. */
 using request      = Request;
+/** @brief Convenience alias for `TRequest<std::string_view>`, representing a request with immutable string_view headers. */
 using RequestView  = TRequest<std::string_view>;
+/** @brief Shorthand alias for `RequestView`. */
 using request_view = RequestView;
 
 } // namespace qb::http

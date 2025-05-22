@@ -1,3 +1,17 @@
+/**
+ * @file qbm/http/cookie.h
+ * @brief Defines classes and functions for HTTP cookie management.
+ *
+ * This file provides the `Cookie` class to represent individual HTTP cookies with their
+ * attributes (name, value, domain, path, expires, etc.), the `CookieJar` class for
+ * managing collections of cookies, and utility functions for parsing `Cookie` and
+ * `Set-Cookie` headers according to RFC 6265.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #pragma once
 
 #include <qb/system/container/unordered_map.h>
@@ -59,12 +73,33 @@ private:
     std::optional<SameSite> _same_site;
 
 public:
-    Cookie() : _secure(false), _http_only(false), _same_site() {}
-    Cookie(std::string name, std::string value);
+    /**
+     * @brief Default constructor. Creates an empty Cookie object.
+     * Path defaults to "/", secure and http_only to false, SameSite is not set.
+     */
+    Cookie() noexcept : _path("/"), _secure(false), _http_only(false), _same_site(std::nullopt) {}
+
+    /**
+     * @brief Constructs a Cookie with a name and value.
+     * Other attributes default as per the default constructor (e.g., path="/", secure=false).
+     * @param name The name of the cookie. Copied.
+     * @param value The value of the cookie. Copied.
+     * @note Definition is in `cookie.cpp`.
+     */
+    Cookie(const std::string& name, const std::string& value);
+
+    /**
+     * @brief Constructs a Cookie with a name and value using move semantics.
+     * @param name The name of the cookie. Moved.
+     * @param value The value of the cookie. Moved.
+     */
+    Cookie(std::string&& name, std::string&& value) noexcept;
+
+    // Defaulted copy/move constructors and assignment operators
     Cookie(const Cookie&) = default;
-    Cookie(Cookie&&) = default;
+    Cookie(Cookie&&) noexcept = default;
     Cookie& operator=(const Cookie&) = default;
-    Cookie& operator=(Cookie&&) = default;
+    Cookie& operator=(Cookie&&) noexcept = default;
 
     /**
      * @brief Get the cookie name
@@ -351,18 +386,6 @@ public:
 parse_cookies(const char *ptr, size_t len, bool set_cookie_header);
 
 /**
- * @brief Parse cookies from a string header
- * @param header Header string
- * @param set_cookie_header true if parsing Set-Cookie header
- * @return Map of cookie names to values
- *
- * String overload of the parse_cookies function, converting the string
- * to a raw pointer and length for processing.
- */
-[[nodiscard]] qb::icase_unordered_map<std::string>
-parse_cookies(std::string const &header, bool set_cookie_header);
-
-/**
  * @brief Parse cookies from a string_view header
  * @param header Header string_view
  * @param set_cookie_header true if parsing Set-Cookie header
@@ -372,7 +395,7 @@ parse_cookies(std::string const &header, bool set_cookie_header);
  * efficient way to parse cookies without copying the header data.
  */
 [[nodiscard]] qb::icase_unordered_map<std::string>
-parse_cookies(std::string_view const &header, bool set_cookie_header);
+parse_cookies(std::string_view header, bool set_cookie_header);
 
 /**
  * @brief Parse a Set-Cookie header into a Cookie object

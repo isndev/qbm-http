@@ -50,7 +50,7 @@ public:
         
         // 1. Basic GET route
         router().get("/test", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "GET Success";
             ctx->response().add_header("X-Test-Header", "test-value");
             request_count_server++;
@@ -59,7 +59,7 @@ public:
         
         // 2. POST route
         router().post("/test", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_CREATED;
+            ctx->response().status() = qb::http::status::CREATED;
             ctx->response().body() = ctx->request().body();
             ctx->response().add_header("Content-Type", "application/json");
             request_count_server++;
@@ -75,7 +75,7 @@ public:
         // 3. PUT route with single path parameter
         router().put("/test/:id", [](std::shared_ptr<SessionContext> ctx) {
             std::string id = ctx->path_param("id");
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "PUT Success for ID: " + id;
             request_count_server++;
             
@@ -88,7 +88,7 @@ public:
         // 4. DELETE handler
         router().del("/test/:id", [](std::shared_ptr<SessionContext> ctx) {
             std::string id = ctx->path_param("id");
-            ctx->response().status_code = HTTP_STATUS_NO_CONTENT;
+            ctx->response().status() = qb::http::status::NO_CONTENT;
             request_count_server++;
             
             if (id == "456") {
@@ -103,7 +103,7 @@ public:
             std::string age = ctx->request().query("age");
             std::string sort = ctx->request().query("sort", 0, "default"); // Query with default
             
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Query params - name: " + name + ", age: " + age + ", sort: " + sort;
             ctx->response().add_header("X-Query-Count", std::to_string(ctx->request().queries().size()));
             request_count_server++;
@@ -116,7 +116,7 @@ public:
         
         // 6. Synchronous route (must call complete)
         router().get("/sync-no-complete", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Sync response without explicit complete call"; // Body content same
             ctx->response().add_header("X-Complete-Type", "implicit"); // Header same
             request_count_server++;
@@ -125,7 +125,7 @@ public:
         
         // 7. Error handler
         router().get("/error", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->response().body() = "Intentional error";
             request_count_server++;
             ctx->complete();
@@ -137,7 +137,7 @@ public:
             // The handler itself is responsible for calling ctx->complete()
             // For async operations, capture ctx and call complete in the callback.
             qb::io::async::callback([ctx_capture = ctx]() {
-                ctx_capture->response().status_code = HTTP_STATUS_OK;
+                ctx_capture->response().status() = qb::http::status::OK;
                 ctx_capture->response().body() = "Async response";
                 ctx_capture->response().add_header("X-Async", "true");
                 ctx_capture->complete();
@@ -147,7 +147,7 @@ public:
         // 9. Route Group Test
         auto api_group = router().group("/api/v1");
         api_group->get("/status", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "API Status: OK";
             ctx->response().add_header("X-Route-Type", "group");
             request_count_server++;
@@ -156,7 +156,7 @@ public:
         
         // 10. Cookie setting test
         router().get("/cookie-set", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Cookie has been set";
             
             ctx->response().add_cookie("test_cookie", "cookie_value");
@@ -172,7 +172,7 @@ public:
         
         // 11. Cookie reading test
         router().get("/cookie-read", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             std::string cookie_value = ctx->request().cookie_value("test_cookie");
             ctx->response().body() = "Cookie value: " + cookie_value;
             request_count_server++;
@@ -185,7 +185,7 @@ public:
         
         // 12. JSON content type test
         router().get("/json", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().add_header("Content-Type", "application/json");
             
             qb::json json_obj = {
@@ -202,7 +202,7 @@ public:
         
         // 13. Request headers echo
         router().get("/echo-headers", [](std::shared_ptr<SessionContext> ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().add_header("Content-Type", "application/json");
             
             qb::json headers_json = qb::json::object();
@@ -355,8 +355,8 @@ TEST_F(HttpBasicIntegrationTest, GetRequest) {
         qb::http::Request request{{"http://localhost:9876/test"}};
         request.add_header("User-Agent", "Integration-Test/1.0");
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received GET response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received GET response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("GET Success", response.body().template as<std::string>());
         EXPECT_EQ("test-value", response.header("X-Test-Header"));
     });
@@ -366,12 +366,12 @@ TEST_F(HttpBasicIntegrationTest, PostRequest) {
     expected_server_assertions = 1; // For body content check
     MakeClientRequest([] {
         std::cout << "Client: Sending POST request to /test" << std::endl;
-        qb::http::Request request{qb::http::method::HTTP_POST, {"http://localhost:9876/test"}};
+        qb::http::Request request{qb::http::method::POST, {"http://localhost:9876/test"}};
         request.add_header("Content-Type", "application/json");
         request.body() = "{\"test\": \"data\"}";
         auto response = qb::http::POST(request);
-        std::cout << "Client: Received POST response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_CREATED, response.status_code);
+        std::cout << "Client: Received POST response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_CREATED, response.status());
         EXPECT_EQ("{\"test\": \"data\"}", response.body().template as<std::string>());
         EXPECT_EQ("application/json", response.header("Content-Type"));
     }, 1, 1);
@@ -381,10 +381,10 @@ TEST_F(HttpBasicIntegrationTest, PutRequestWithParam) {
     expected_server_assertions = 1; // For ID check
     MakeClientRequest([] {
         std::cout << "Client: Sending PUT request to /test/123" << std::endl;
-        qb::http::Request request{qb::http::method::HTTP_PUT, {"http://localhost:9876/test/123"}};
+        qb::http::Request request{qb::http::method::PUT, {"http://localhost:9876/test/123"}};
         auto response = qb::http::PUT(request);
-        std::cout << "Client: Received PUT response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received PUT response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("PUT Success for ID: 123", response.body().template as<std::string>());
     }, 1, 1);
 }
@@ -393,10 +393,10 @@ TEST_F(HttpBasicIntegrationTest, DeleteRequestWithParam) {
     expected_server_assertions = 1; // For ID check
     MakeClientRequest([] {
         std::cout << "Client: Sending DELETE request to /test/456" << std::endl;
-        qb::http::Request request{qb::http::method::HTTP_DELETE, {"http://localhost:9876/test/456"}};
+        qb::http::Request request{qb::http::method::DEL, {"http://localhost:9876/test/456"}};
         auto response = qb::http::DELETE(request);
-        std::cout << "Client: Received DELETE response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status_code);
+        std::cout << "Client: Received DELETE response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
         EXPECT_TRUE(response.body().empty());
     }, 1, 1);
 }
@@ -407,8 +407,8 @@ TEST_F(HttpBasicIntegrationTest, GetWithQueryParameters) {
         std::cout << "Client: Sending GET request with query parameters" << std::endl;
         qb::http::Request request{{"http://localhost:9876/query?name=test&age=25&sort=asc"}};
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received query params response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received query params response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("Query params - name: test, age: 25, sort: asc", response.body().template as<std::string>());
         EXPECT_EQ("3", response.header("X-Query-Count"));
     }, 1, 1);
@@ -420,8 +420,8 @@ TEST_F(HttpBasicIntegrationTest, GetErrorRoute) {
         std::cout << "Client: Sending GET request to /error" << std::endl;
         qb::http::Request request{{"http://localhost:9876/error"}};
         auto response = qb::http::GET(request, 5.0);
-        std::cout << "Client: Received ERROR response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_INTERNAL_SERVER_ERROR, response.status_code);
+        std::cout << "Client: Received ERROR response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_INTERNAL_SERVER_ERROR, response.status());
         EXPECT_EQ("Intentional error", response.body().template as<std::string>());
     });
 }
@@ -432,8 +432,8 @@ TEST_F(HttpBasicIntegrationTest, GetSyncRouteWithComplete) {
         std::cout << "Client: Sending GET request to /sync-no-complete" << std::endl;
         qb::http::Request request{{"http://localhost:9876/sync-no-complete"}};
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received SYNC-NO-COMPLETE response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received SYNC-NO-COMPLETE response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("Sync response without explicit complete call", response.body().template as<std::string>());
         EXPECT_EQ("implicit", response.header("X-Complete-Type"));
     });
@@ -446,8 +446,8 @@ TEST_F(HttpBasicIntegrationTest, GetAsyncRoute) {
         qb::http::Request request{{"http://localhost:9876/async"}};
         // Increased timeout for async response
         auto response = qb::http::GET(request, 5.0); 
-        std::cout << "Client: Received ASYNC response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received ASYNC response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("Async response", response.body().template as<std::string>());
         EXPECT_EQ("true", response.header("X-Async"));
     });
@@ -459,8 +459,8 @@ TEST_F(HttpBasicIntegrationTest, GetRouteGroup) {
         std::cout << "Client: Testing route group - sending request to /api/v1/status" << std::endl;
         qb::http::Request request{{"http://localhost:9876/api/v1/status"}};
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received group route response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received group route response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("API Status: OK", response.body().template as<std::string>());
         EXPECT_EQ("group", response.header("X-Route-Type"));
     });
@@ -472,8 +472,8 @@ TEST_F(HttpBasicIntegrationTest, CookieSetting) {
         std::cout << "Client: Testing cookie setting" << std::endl;
         qb::http::Request request{{"http://localhost:9876/cookie-set"}};
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received cookie-set response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received cookie-set response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("Cookie has been set", response.body().template as<std::string>());
         EXPECT_TRUE(response.cookie("test_cookie") != nullptr);
         EXPECT_EQ("cookie_value", response.cookie("test_cookie")->value());
@@ -492,8 +492,8 @@ TEST_F(HttpBasicIntegrationTest, CookieReading) {
         qb::http::Request request{{"http://localhost:9876/cookie-read"}};
         request.add_header("Cookie", "test_cookie=cookie_value");
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received cookie-read response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received cookie-read response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("Cookie value: cookie_value", response.body().template as<std::string>());
     }, 1, 1);
 }
@@ -504,8 +504,8 @@ TEST_F(HttpBasicIntegrationTest, JsonContentType) {
         std::cout << "Client: Testing JSON response" << std::endl;
         qb::http::Request request{{"http://localhost:9876/json"}};
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received JSON response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received JSON response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("application/json", response.header("Content-Type"));
         auto json_body = response.body().template as<qb::json>();
         EXPECT_EQ("This is JSON", json_body["message"]);
@@ -522,8 +522,8 @@ TEST_F(HttpBasicIntegrationTest, RequestHeadersEcho) {
         request.add_header("X-Custom-Header", "test-value");
         request.add_header("User-Agent", "Echo-Headers-Test/1.0");
         auto response = qb::http::GET(request);
-        std::cout << "Client: Received headers echo response status: " << response.status_code << std::endl;
-        EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+        std::cout << "Client: Received headers echo response status: " << response.status() << std::endl;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("application/json", response.header("Content-Type"));
         auto headers_json_body = response.body().template as<qb::json>();
         EXPECT_TRUE(headers_json_body.contains("x-custom-header") ||

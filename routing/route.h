@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/route.h
+ * @file qbm/http/routing/route.h
  * @brief Defines the Route class and task adapters for specific HTTP endpoints.
  *
  * This file contains the `Route` class, which represents a terminal node in the routing
@@ -81,14 +81,14 @@ public:
         } catch (const std::exception& /*e*/) {
             // Log e.what() if logging is available
             if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
-                 ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                  ctx->response().body() = "Internal server error in route handler.";
                  ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
                  ctx->complete(AsyncTaskResult::ERROR);
             }
         } catch (...) {
              if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
-                 ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                  ctx->response().body() = "Unknown internal server error in route handler.";
                  ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
                  ctx->complete(AsyncTaskResult::ERROR);
@@ -145,14 +145,14 @@ public:
         } catch (const std::exception& /*e*/) {
             // Log e.what() if logging is available
             if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
-                ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body() = "Internal server error in custom route handler.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
                 ctx->complete(AsyncTaskResult::ERROR);
             }
         } catch (...) {
              if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
-                ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body() = "Unknown internal server error in custom route handler.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
                 ctx->complete(AsyncTaskResult::ERROR);

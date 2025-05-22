@@ -1,163 +1,202 @@
+/**
+ * @file qbm/http/middleware/logging.h
+ * @brief Defines middleware for logging HTTP requests and responses.
+ *
+ * This file provides the `LoggingMiddleware` class template, which allows for flexible
+ * logging of incoming HTTP requests and their corresponding outgoing responses.
+ * It uses a user-provided callback function to perform the actual logging, enabling
+ * integration with various logging frameworks or custom logging mechanisms.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Middleware
+ */
 #pragma once
 
-#include <memory>
-#include <functional>
-#include <string>
-#include <chrono> // For timing if needed, though not directly used by logging now
+#include <memory>      // For std::shared_ptr, std::make_shared
+#include <functional>  // For std::function
+#include <string>      // For std::string, std::to_string
+#include <stdexcept>   // For std::invalid_argument
+#include <utility>     // For std::move
 
-// New Includes for qb::http routing system
-#include "../routing/middleware.h" // Includes IMiddleware, Context, AsyncTaskResult
+#include "../routing/middleware.h" // For IMiddleware, Context, AsyncTaskResult, HookPoint
 #include "../request.h"            // For qb::http::Request
 #include "../response.h"           // For qb::http::Response
-#include "../types.h"              // For http_method_to_string, http_status enum and potentially http_status_name
-                                   // Assuming http_method_name and http_status_name are available or replaced by qb::http::http_method_to_string etc.
-
-// Removed old middleware_interface.h
+#include "../types.h"              // For qb::http::status, http_method_to_string, std::to_string(qb::http::status)
 
 namespace qb::http {
+    /** @brief Defines the severity levels for logging messages used by `LoggingMiddleware`. */
+    enum class LogLevel {
+        Debug, ///< Detailed diagnostic information, useful for developers.
+        Info, ///< General information about system operation (e.g., request received).
+        Warning, ///< Indicates a potential issue or an unusual event that is not critical.
+        Error ///< Signifies an error that prevented normal operation of a specific task.
+    };
 
-/** @brief Defines the severity levels for logging messages. */
-enum class LogLevel {
-    Debug,  ///< Detailed information, typically of interest only when diagnosing problems.
-    Info,   ///< Confirmation that things are working as expected.
-    Warning,///< An indication that something unexpected happened, or indicative of some problem in the near future (e.g. 'disk space low'). The software is still working as expected.
-    Error   ///< Due to a more serious problem, the software has not been able to perform some function.
-};
-
-// Helper to convert http_status to string. 
-// Consider moving to a common utility if not already present in routing/types.h or types.h
-namespace internal {
-    inline std::string http_status_to_string_for_logging(qb::http::status s) {
-        // This can be expanded or use a proper mapping from http_status enum if available
-        // For now, just converting the integer value.
-        return std::to_string(static_cast<int>(s));
-    }
-} // namespace internal
-
-/**
- * @brief Middleware for logging HTTP requests and their corresponding responses.
- *
- * This middleware logs basic information about incoming requests (method, path)
- * and outgoing responses (status code). Logging occurs via a user-provided log function.
- * Request logging happens when the middleware handles the request.
- * Response logging is deferred using a lifecycle hook and occurs after the request is complete.
- *
- * @tparam SessionType The type of the session object managed by the router.
- */
-template <typename SessionType>
-class LoggingMiddleware : public IMiddleware<SessionType> {
-public:
-    using ContextPtr = std::shared_ptr<Context<SessionType>>;
-    /** 
-     * @brief Function signature for the user-provided logging callback.
-     * @param level The severity level of the log message.
-     * @param message The log message string.
-     */
-    using LogFunction = std::function<void(LogLevel level, const std::string& message)>;
-    
     /**
-     * @brief Constructs a LoggingMiddleware instance.
+     * @brief Middleware for logging HTTP requests and their corresponding responses.
      *
-     * @param log_function The function to be called for logging messages. Must not be null.
-     * @param request_level The log level for request messages. Defaults to LogLevel::Info.
-     * @param response_level The log level for response messages. Defaults to LogLevel::Debug.
-     * @param name An optional name for this middleware instance (for logging/debugging).
-     * @throws std::invalid_argument if log_function is null.
+     * This middleware captures basic information about an incoming request (e.g., method, URI path)
+     * when it processes the request. It then registers a lifecycle hook with the `Context`
+     * to log information about the outgoing response (e.g., status code) once the request
+     * processing is complete (at `HookPoint::REQUEST_COMPLETE`).
+     *
+     * Logging is performed via a user-provided `LogFunction` callback, allowing customization
+     * of the logging destination and format. Different log levels can be specified for
+     * request and response messages.
+     *
+     * @tparam SessionType The type of the session object managed by the router, used by `Context`.
      */
-    LoggingMiddleware(
-        LogFunction log_function,
+    template<typename SessionType>
+    class LoggingMiddleware : public IMiddleware<SessionType> {
+    public:
+        /** @brief Convenience alias for a shared pointer to the request `Context`. */
+        using ContextPtr = std::shared_ptr<Context<SessionType> >;
+        /**
+         * @brief Defines the signature for the user-provided logging callback function.
+         * @param level The `LogLevel` indicating the severity of the log message.
+         * @param message The formatted log message string.
+         */
+        using LogFunction = std::function<void(LogLevel level, const std::string &message)>;
+
+        /**
+         * @brief Constructs a `LoggingMiddleware` instance.
+         *
+         * @param log_fn The function to be called for logging messages. This function must not be null.
+         * @param req_level The `LogLevel` to use for request log messages. Defaults to `LogLevel::Info`.
+         * @param res_level The `LogLevel` to use for response log messages. Defaults to `LogLevel::Debug`.
+         * @param instance_name An optional name for this middleware instance, useful for identification in logs
+         *                      or when multiple logging middlewares are used. Defaults to "LoggingMiddleware".
+         * @throws std::invalid_argument if `log_fn` is null.
+         */
+        LoggingMiddleware(
+            LogFunction log_fn,
+            LogLevel req_level = LogLevel::Info,
+            LogLevel res_level = LogLevel::Debug,
+            std::string instance_name = "LoggingMiddleware"
+        ) noexcept(false) // std::function move constructor is noexcept, std::string move is noexcept.
+        // std::invalid_argument can be thrown.
+            : _log_function(std::move(log_fn))
+              , _request_level(req_level)
+              , _response_level(res_level)
+              , _name(std::move(instance_name)) {
+            if (!_log_function) {
+                throw std::invalid_argument("LoggingMiddleware: log_function cannot be null.");
+            }
+        }
+
+        /**
+         * @brief Processes the incoming request by logging its details and registering a hook
+         *        for logging the response when the request processing completes.
+         * Calls `ctx->complete(AsyncTaskResult::CONTINUE)` to pass control to the next task.
+         * @param ctx The shared `Context` for the current request.
+         */
+        void process(ContextPtr ctx) override {
+            // User log_fn can throw, add_lifecycle_hook might allocate
+            log_request(ctx->request());
+
+            // Add a lifecycle hook to log the response details when the request is fully processed.
+            ctx->add_lifecycle_hook([this](Context<SessionType> &ctx_ref, HookPoint point) {
+                if (point == HookPoint::REQUEST_COMPLETE) {
+                    log_response(ctx_ref.response());
+                }
+            });
+
+            ctx->complete(AsyncTaskResult::CONTINUE);
+        }
+
+        /** @brief Gets the configured name of this middleware instance. */
+        [[nodiscard]] std::string name() const noexcept override {
+            return _name;
+        }
+
+        /**
+         * @brief Handles a cancellation notification.
+         * For this logging middleware, cancellation is a no-op as it doesn't manage long-running async tasks.
+         */
+        void cancel() noexcept override {
+            // No specific cancellation logic needed for logging.
+        }
+
+    private:
+        /**
+         * @brief Logs information about the incoming HTTP request using the configured `_log_function`.
+         * @param request The `Request` object to log.
+         */
+        void log_request(const Request &request) {
+            if (!_log_function) return; // Should not happen due to constructor check
+            std::string message = "Request: " + format_request_info(request);
+            try {
+                _log_function(_request_level, message);
+            } catch (...) {
+                /* Suppress exceptions from user log function */
+            }
+        }
+
+        /**
+         * @brief Logs information about the outgoing HTTP response using the configured `_log_function`.
+         * @param response The `Response` object to log.
+         */
+        void log_response(const Response &response) {
+            if (!_log_function) return;
+            std::string message = "Response: " + format_response_info(response);
+            try {
+                _log_function(_response_level, message);
+            } catch (...) {
+                /* Suppress exceptions from user log function */
+            }
+        }
+
+        /**
+         * @brief Formats basic request information (method and URI path) into a string for logging.
+         * @param request The `Request` object.
+         * @return A formatted string (e.g., "GET /index.html").
+         */
+        [[nodiscard]] std::string format_request_info(const Request &request) const {
+            // Assumes request.uri().path() returns a type convertible to std::string or string_view
+            // and http_method_to_string is available and returns std::string.
+            return std::to_string(request.method()) + " " + std::string(request.uri().path());
+        }
+
+        /**
+         * @brief Formats basic response information (status code and reason phrase) into a string for logging.
+         * @param response The `Response` object.
+         * @return A formatted string (e.g., "200 OK").
+         */
+        [[nodiscard]] std::string format_response_info(const Response &response) const {
+            return std::to_string(static_cast<int>(response.status())) + " " + std::to_string(response.status());
+        }
+
+        LogFunction _log_function; ///< User-provided function for actual logging.
+        LogLevel _request_level; ///< Log level for request messages.
+        LogLevel _response_level; ///< Log level for response messages.
+        std::string _name; ///< Name of this middleware instance.
+    };
+
+    /**
+     * @brief Factory function to create a `std::shared_ptr` to a `LoggingMiddleware` instance.
+     * @tparam SessionType The session type used by the HTTP context.
+     * @param log_fn The function to be called for logging messages. Must not be null.
+     * @param request_level Log level for request messages. Defaults to `LogLevel::Info`.
+     * @param response_level Log level for response messages. Defaults to `LogLevel::Debug`.
+     * @param name Optional name for the middleware instance. Defaults to "LoggingMiddleware".
+     * @return A `std::shared_ptr<LoggingMiddleware<SessionType>>`.
+     * @throws std::invalid_argument if `log_fn` is null.
+     */
+    template<typename SessionType>
+    [[nodiscard]] std::shared_ptr<LoggingMiddleware<SessionType> >
+    logging_middleware(
+        typename LoggingMiddleware<SessionType>::LogFunction log_fn,
         LogLevel request_level = LogLevel::Info,
         LogLevel response_level = LogLevel::Debug,
-        std::string name = "LoggingMiddleware"
-    ) : _log_function(std::move(log_function)),
-        _request_level(request_level),
-        _response_level(response_level),
-        _name(std::move(name)) {
-        if (!_log_function) {
-            throw std::invalid_argument("LoggingMiddleware: log_function cannot be null.");
-        }
+        const std::string &name = "LoggingMiddleware"
+    ) {
+        return std::make_shared<LoggingMiddleware<SessionType> >(
+            std::move(log_fn),
+            request_level,
+            response_level,
+            name
+        );
     }
-    
-    /**
-     * @brief Handles the incoming request by logging it and setting up a hook for response logging.
-     * @param ctx The shared context for the current request.
-     */
-    void process(ContextPtr ctx) override {
-        log_request(ctx->request());
-        
-        ctx->add_lifecycle_hook([this](Context<SessionType>& ctx_ref, HookPoint point) {
-            if (point == HookPoint::REQUEST_COMPLETE) {
-                log_response(ctx_ref.response());
-            }
-        });
-        
-        ctx->complete(AsyncTaskResult::CONTINUE);
-    }
-    
-    /** @brief Gets the name of this middleware instance. */
-    std::string name() const override {
-        return _name;
-    }
-
-    /** @brief Handles cancellation; a no-op for this middleware. */
-    void cancel() override {
-        // No specific cancellation logic needed.
-    }
-    
-private:
-    /** @brief Logs information about the incoming request. */
-    void log_request(const Request& request) {
-        // _log_function already checked for null in constructor
-        std::string message = "Request: " + format_request_info(request);
-        _log_function(_request_level, message);
-    }
-    
-    /** @brief Logs information about the outgoing response. */
-    void log_response(const Response& response) {
-        // _log_function already checked for null in constructor
-        std::string message = "Response: " + format_response_info(response);
-        _log_function(_response_level, message);
-    }
-    
-    /** @brief Formats basic request information (method and path) for logging. */
-    std::string format_request_info(const Request& request) const {
-        return qb::http::http_method_to_string(request.method) + " " + std::string(request.uri().path());
-    }
-    
-    /** @brief Formats basic response information (status code) for logging. */
-    std::string format_response_info(const Response& response) const {
-        return internal::http_status_to_string_for_logging(response.status_code);
-    }
-    
-    LogFunction _log_function;
-    LogLevel _request_level;
-    LogLevel _response_level;
-    std::string _name;
-};
-
-/**
- * @brief Factory function to create a LoggingMiddleware instance.
- * @tparam SessionType The session type.
- * @param log_function The function to be called for logging messages.
- * @param request_level Log level for request messages (default: Info).
- * @param response_level Log level for response messages (default: Debug).
- * @param name Optional name for the middleware.
- * @return A shared pointer to the created LoggingMiddleware.
- */
-template <typename SessionType>
-std::shared_ptr<LoggingMiddleware<SessionType>>
-logging_middleware(
-    typename LoggingMiddleware<SessionType>::LogFunction log_function,
-    LogLevel request_level = LogLevel::Info,
-    LogLevel response_level = LogLevel::Debug,
-    const std::string& name = "LoggingMiddleware"
-) {
-    return std::make_shared<LoggingMiddleware<SessionType>>(
-        std::move(log_function),
-        request_level,
-        response_level,
-        name
-    );
-}
-
-} // namespace qb::http 
+} // namespace qb::http

@@ -1,3 +1,17 @@
+/**
+ * @file qbm/http/date.h
+ * @brief HTTP-compliant date and time formatting and parsing utilities.
+ *
+ * This file provides functions within the `qb::http::date` namespace for converting
+ * between various time representations (like `qb::Timestamp`, `std::chrono::system_clock::time_point`)
+ * and HTTP-formatted date strings (RFC 7231, RFC 6265). It supports parsing multiple
+ * standard date formats found in HTTP headers.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include "./date.h"
 #include <array>
 #include <ctime>

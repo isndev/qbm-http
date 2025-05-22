@@ -40,9 +40,9 @@ protected:
         _request_validator = std::make_shared<qb::http::validation::RequestValidator>(); 
     }
 
-    qb::http::Request create_request(const std::string& path, qb::http::method method = qb::http::method::HTTP_POST, const std::string& body = "") {
+    qb::http::Request create_request(const std::string& path, qb::http::method method = qb::http::method::POST, const std::string& body = "") {
         qb::http::Request req;
-        req.method = method;
+        req.method() = method;
         req.uri() = qb::io::uri(path);
         if (!body.empty()) {
             req.body() = body;
@@ -60,7 +60,7 @@ protected:
                 _session->_handler_id_executed = id;
                 _session->_final_handler_reached = true;
             }
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Handler reached: " + id;
             ctx->complete();
         };
@@ -96,10 +96,10 @@ TEST_F(ValidationMiddlewareTest, ValidRequestBodyPasses) {
     _request_validator->for_body(body_schema);
 
     qb::json valid_body_data = {{"name", "Test User"}};
-    configure_and_run(create_request("/test_validation", qb::http::method::HTTP_POST, valid_body_data.dump()));
+    configure_and_run(create_request("/test_validation", qb::http::method::POST, valid_body_data.dump()));
 
     EXPECT_TRUE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(ValidationMiddlewareTest, InvalidRequestBodyFails) {
@@ -113,12 +113,12 @@ TEST_F(ValidationMiddlewareTest, InvalidRequestBodyFails) {
     _request_validator->for_body(body_schema);
 
     qb::json invalid_body_data = {{"email", "not-an-email"}};
-    configure_and_run(create_request("/test_validation", qb::http::method::HTTP_POST, invalid_body_data.dump()));
+    configure_and_run(create_request("/test_validation", qb::http::method::POST, invalid_body_data.dump()));
 
     EXPECT_FALSE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
     ASSERT_TRUE(_session->_response.has_header("Content-Type"));
-    EXPECT_EQ(_session->_response.header("Content-Type"), "application/json");
+    EXPECT_EQ(_session->_response.header("Content-Type"), "application/json; charset=utf-8");
     
     qb::json error_response = qb::json::parse(_session->_response.body().as<std::string_view>());
     EXPECT_EQ(error_response["message"], "Validation failed.");
@@ -140,10 +140,10 @@ TEST_F(ValidationMiddlewareTest, InvalidRequestBodyFails) {
 
 TEST_F(ValidationMiddlewareTest, ValidQueryParameterPasses) {
     _request_validator->for_query_param("id", ParameterRuleSet("id").set_type(DataType::INTEGER).set_required());
-    configure_and_run(create_request("/test_validation_get?id=123", qb::http::method::HTTP_GET));
+    configure_and_run(create_request("/test_validation_get?id=123", qb::http::method::GET));
     
     EXPECT_TRUE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(ValidationMiddlewareTest, InvalidQueryParameterFails) {
@@ -152,10 +152,10 @@ TEST_F(ValidationMiddlewareTest, InvalidQueryParameterFails) {
             .set_type(DataType::INTEGER)
             .add_rule(std::make_shared<MinimumRule>(10))
     );
-    configure_and_run(create_request("/test_validation_get?count=5", qb::http::method::HTTP_GET));
+    configure_and_run(create_request("/test_validation_get?count=5", qb::http::method::GET));
 
     EXPECT_FALSE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
     qb::json error_response = qb::json::parse(_session->_response.body().as<std::string_view>());
     ASSERT_FALSE(error_response["errors"].empty());
     EXPECT_EQ(error_response["errors"][0]["field"], "query.count");
@@ -164,12 +164,12 @@ TEST_F(ValidationMiddlewareTest, InvalidQueryParameterFails) {
 
 TEST_F(ValidationMiddlewareTest, ValidHeaderPasses) {
     _request_validator->for_header("X-API-Key", ParameterRuleSet("X-API-Key").set_required());
-    qb::http::Request req = create_request("/test_validation_get", qb::http::method::HTTP_GET);
+    qb::http::Request req = create_request("/test_validation_get", qb::http::method::GET);
     req.set_header("X-API-Key", "secrettoken");
     configure_and_run(std::move(req));
     
     EXPECT_TRUE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(ValidationMiddlewareTest, InvalidHeaderFails) {
@@ -178,12 +178,12 @@ TEST_F(ValidationMiddlewareTest, InvalidHeaderFails) {
             .set_type(DataType::INTEGER)
             .add_rule(std::make_shared<MinimumRule>(100))
     );
-    qb::http::Request req = create_request("/test_validation_get", qb::http::method::HTTP_GET);
+    qb::http::Request req = create_request("/test_validation_get", qb::http::method::GET);
     req.set_header("Content-Length", "50"); // Invalid according to rule
     configure_and_run(std::move(req));
 
     EXPECT_FALSE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
     qb::json error_response = qb::json::parse(_session->_response.body().as<std::string_view>());
     ASSERT_FALSE(error_response["errors"].empty());
     EXPECT_EQ(error_response["errors"][0]["field"], "header.content-length");
@@ -208,29 +208,29 @@ TEST_F(ValidationMiddlewareTest, BodySanitizationByMiddleware) {
             qb::json received_body = qb::json::parse(ctx->request().body().template as<std::string_view>());
             EXPECT_EQ(received_body["description"].get<std::string>(), "Clean Description");
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
 
     qb::json body_to_send = {{"description", "  Clean Description  "}};
     _session->reset();
-    _router->route(_session, create_request("/test_sanitization", qb::http::method::HTTP_POST, body_to_send.dump()));
+    _router->route(_session, create_request("/test_sanitization", qb::http::method::POST, body_to_send.dump()));
 
     EXPECT_TRUE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(ValidationMiddlewareTest, MultipleValidationFailures) {
     _request_validator->for_query_param("page", ParameterRuleSet("page").set_type(DataType::INTEGER).set_required());
     _request_validator->for_header("X-Client-Version", ParameterRuleSet("X-Client-Version").add_rule(std::make_shared<MinLengthRule>(3)));
 
-    qb::http::Request req = create_request("/test_validation_get?page=one", qb::http::method::HTTP_GET);
+    qb::http::Request req = create_request("/test_validation_get?page=one", qb::http::method::GET);
     req.set_header("X-Client-Version", "1"); // Too short
     configure_and_run(std::move(req));
 
     EXPECT_FALSE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
     qb::json error_response = qb::json::parse(_session->_response.body().as<std::string_view>());
     ASSERT_TRUE(error_response["errors"].is_array());
     EXPECT_EQ(error_response["errors"].size(), 2);
@@ -257,12 +257,12 @@ TEST_F(ValidationMiddlewareTest, ValidPathParamPasses) {
     _router->get("/users/:userId/info", [this](auto ctx){
         // This handler will be called if validation passes
         if(_session) _session->_final_handler_reached = true;
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
     
-    qb::http::Request req = create_request("/users/123/info", qb::http::method::HTTP_GET);
+    qb::http::Request req = create_request("/users/123/info", qb::http::method::GET);
     // In a real scenario, RouterCore would populate PathParameters in Context.
     // ValidationMiddleware then gets it from Context.
     // For this test, we need to simulate this. The middleware needs access to ctx->path_parameters().
@@ -272,7 +272,7 @@ TEST_F(ValidationMiddlewareTest, ValidPathParamPasses) {
     _router->route(_session, std::move(req));
 
     EXPECT_TRUE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(ValidationMiddlewareTest, InvalidPathParamFails) {
@@ -284,12 +284,12 @@ TEST_F(ValidationMiddlewareTest, InvalidPathParamFails) {
     _router->get("/orders/:orderId", success_route_handler()); // Path variable name matches for_path_param
     _router->compile();
 
-    qb::http::Request req = create_request("/orders/50", qb::http::method::HTTP_GET);
+    qb::http::Request req = create_request("/orders/50", qb::http::method::GET);
     _session->reset();
     _router->route(_session, std::move(req));
 
     EXPECT_FALSE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
     qb::json error_response = qb::json::parse(_session->_response.body().as<std::string_view>());
     ASSERT_FALSE(error_response["errors"].empty());
     EXPECT_EQ(error_response["errors"][0]["field"], "path.orderId");
@@ -303,10 +303,10 @@ TEST_F(ValidationMiddlewareTest, MultiValueQueryParamValidation) {
             .add_rule(std::make_shared<MinimumRule>(0)) // Each ID must be >= 0
     );
     // RequestValidator will iterate and validate each value of "ids"
-    configure_and_run(create_request("/test_validation_get?ids=10&ids=20&ids=-5&ids=30", qb::http::method::HTTP_GET));
+    configure_and_run(create_request("/test_validation_get?ids=10&ids=20&ids=-5&ids=30", qb::http::method::GET));
 
     EXPECT_FALSE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
     qb::json error_response = qb::json::parse(_session->_response.body().as<std::string_view>());
     ASSERT_EQ(error_response["errors"].size(), 1);
     EXPECT_EQ(error_response["errors"][0]["field"], "query.ids");
@@ -332,14 +332,14 @@ TEST_F(ValidationMiddlewareTest, QueryParamSanitizationByMiddleware) {
             // Assuming sanitizers modify the request in-place before rules are checked by the same validator instance.
             EXPECT_EQ(ctx->request().uri().query("name"), "TEST NAME");
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
 
     _session->reset();
-    _router->route(_session, create_request("/test_query_sanitize?name=  TeSt NaMe  ", qb::http::method::HTTP_GET));
+    _router->route(_session, create_request("/test_query_sanitize?name=  TeSt NaMe  ", qb::http::method::GET));
 
     EXPECT_TRUE(_session->_final_handler_reached);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 } 

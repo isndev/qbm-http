@@ -129,7 +129,7 @@ int main() {
     std::atomic<bool> done = false;
     qb::http::GET(req, [&done](qb::http::async::Reply&& reply) {
         qb::io::cout() << "--- Async Response ---" << std::endl;
-        qb::io::cout() << "Status: " << reply.response.status_code << std::endl;
+        qb::io::cout() << "Status: " << reply.response.status() << std::endl;
         qb::io::cout() << "Body: " << reply.response.body().as<std::string>() << std::endl;
         done = true;
     });
@@ -144,7 +144,7 @@ int main() {
     qb::io::cout() << "\n--- Sync Response ---" << std::endl;
     try {
         qb::http::Response res = qb::http::GET(req, 5.0); // 5 second timeout
-        qb::io::cout() << "Status: " << res.status_code << std::endl;
+        qb::io::cout() << "Status: " << res.status() << std::endl;
         qb::io::cout() << "Body: " << res.body().as<std::string>() << std::endl;
     } catch (const std::exception& e) {
         qb::io::cout() << "Sync request failed: " << e.what() << std::endl;

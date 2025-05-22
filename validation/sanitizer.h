@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/validation/sanitizer.h
+ * @brief Defines the Sanitizer class and predefined sanitization functions.
+ *
+ * This file contains the definition of the Sanitizer class, which is responsible
+ * for applying registered sanitization rules to `qb::json` data. It also contains
+ * the definitions for common sanitization routines provided in the `PredefinedSanitizers` namespace.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #pragma once
 
 #include <string>
@@ -58,21 +71,21 @@ private:
  */
 namespace PredefinedSanitizers {
     /** @brief Trims leading and trailing whitespace. */
-    SanitizerFunction trim();
+    SanitizerFunction trim() noexcept;
     /** @brief Converts string to lower case. */
-    SanitizerFunction to_lower_case();
+    SanitizerFunction to_lower_case() noexcept;
     /** @brief Converts string to upper case. */
-    SanitizerFunction to_upper_case();
+    SanitizerFunction to_upper_case() noexcept;
     /** @brief Escapes HTML special characters (&, <, >, ", '). */
-    SanitizerFunction escape_html();
+    SanitizerFunction escape_html() noexcept;
     /** @brief Strips HTML tags from a string. (Basic, not for security use against XSS). */
-    SanitizerFunction strip_html_tags();
+    SanitizerFunction strip_html_tags() noexcept;
     /** @brief Removes all non-alphanumeric characters. */
-    SanitizerFunction alphanumeric_only();
+    SanitizerFunction alphanumeric_only() noexcept;
     /** @brief Normalizes whitespace: trims ends, collapses multiple internal spaces to one. */
-    SanitizerFunction normalize_whitespace();
+    SanitizerFunction normalize_whitespace() noexcept;
     /** @brief Escapes SQL LIKE wildcards (%, _) and single quotes ('). (NOT for general SQL injection prevention). */
-    SanitizerFunction escape_sql_like(); 
+    SanitizerFunction escape_sql_like() noexcept;
 } 
 
 } // namespace qb::http::validation 

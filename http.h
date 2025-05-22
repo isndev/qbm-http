@@ -1,54 +1,22 @@
 /**
- * @file http.h
- * @brief HTTP client and server implementation for the QB Actor Framework
+ * @file qbm/http/http.h
+ * @brief Main include file for the QB HTTP client and server module.
  *
- * This file implements a comprehensive HTTP client and server stack integrated with the
- * QB Actor Framework. It provides a non-blocking, asynchronous interface for HTTP
- * operations including:
+ * This header aggregates all core components of the qb-http module, providing a comprehensive
+ * suite for HTTP/1.1 communication. It defines foundational classes for requests (`qb::http::Request`),
+ * responses (`qb::http::Response`), message parsing (`qb::http::Parser`), asynchronous client
+ * operations (`qb::http::async`), protocol handlers (`qb::protocol::http_server`, `qb::protocol::http_client`),
+ * and server-side routing (`qb::http::Router`).
  *
- * - HTTP 1.1 client and server implementations
- * - Request and response handling with full header support
- * - Content negotiation and compression support
- * - Form data and multipart content handling
- * - Cookie management and parsing
- * - RESTful routing with parameter extraction
- * - High-performance message parsing using llhttp
- * - Support for both string and string_view based operations
- * - WebSocket upgrade support
- *
- * The implementation is designed to work with the actor model, allowing
- * network I/O operations to be performed without blocking actor threads.
- * The module fully implements the HTTP/1.1 protocol for efficient communication.
- *
- * Key features:
- * - Asynchronous I/O using the QB Actor Framework
- * - Support for both plain TCP and SSL/TLS connections
- * - Content compression (when built with zlib support)
- * - Flexible routing system for server implementations
- * - RESTful API support with path parameter extraction
- * - Streaming support through chunked transfer encoding
- * - Detailed error reporting and handling
- * - Performance optimized header and body processing
- *
- * @see qb::http::Request
- * @see qb::http::Response
- * @see qb::http::async
+ * The module is designed for high performance and integration with the qb-io asynchronous
+ * I/O layer, leveraging libev for event handling. It supports features like content
+ * compression, cookie management, multipart forms, and customizable routing.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 isndev (www.qbaf.io)
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *         http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
-
 #ifndef QB_MODULE_HTTP_H_
 #define QB_MODULE_HTTP_H_
 #include <qb/io/async.h>
@@ -181,7 +149,7 @@ struct Parser : public http_t {
     on_url(http_t *parser, const char *at, size_t length) {
         if constexpr (MessageType::type == HTTP_REQUEST) {
             auto &msg  = static_cast<Parser *>(parser->data)->msg;
-            msg.method = static_cast<http_method>(parser->method);
+            msg.method() = static_cast<http_method>(parser->method);
             msg._uri   = std::string{at, length};
         } else {
             (void) at;
@@ -206,8 +174,8 @@ struct Parser : public http_t {
     on_status(http_t *parser, const char *at, size_t length) {
         if constexpr (MessageType::type == HTTP_RESPONSE) {
             auto &msg       = static_cast<Parser *>(parser->data)->msg;
-            msg.status_code = static_cast<http_status>(parser->status_code);
-            msg.status      = String(at, length);
+            msg.status() = static_cast<http_status>(parser->status_code);
+            // msg.status      = String(at, length);
         }
         return 0;
     }
@@ -985,7 +953,7 @@ public:
             [this](auto &&transport) {
                 if (!transport.is_open()) {
                     Response response;
-                    response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE;
+                    response.status() = qb::http::status::SERVICE_UNAVAILABLE;
 
                     _func(Reply{std::move(_request), std::move(response)});
                     delete this;
@@ -1021,7 +989,7 @@ public:
             }
         } catch (std::exception &e) {
             LOG_WARN("[http] failed to decompress: " << e.what());
-            response.status_code = HTTP_STATUS_BAD_REQUEST;
+            response.status() = qb::http::status::BAD_REQUEST;
         }
 #endif
         _func(Reply{std::move(_request), std::move(event.http)});
@@ -1036,7 +1004,7 @@ public:
     on(qb::io::async::event::disconnected const &event) {
         if (!event.reason) {
             Response response;
-            response.status_code = HTTP_STATUS_GONE;
+            response.status() = qb::http::status::GONE;
             _func(Reply{std::move(_request), std::move(response)});
         }
     }
@@ -1101,7 +1069,7 @@ using HTTPS = session<Func, qb::io::transport::stcp>;
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void> name( \
         Request request, _Func &&func, double timeout = 0.) {                 \
         if constexpr ((num) >= 0)                                             \
-            request.method = static_cast<http_method>(num);                   \
+            request.method() = static_cast<http_method>(num);                   \
                                                                               \
         request.headers()["host"].emplace_back(request.uri().host());         \
         EXEC_REQUEST()                                                        \

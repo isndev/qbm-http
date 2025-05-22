@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/validation/rule.h
+ * @brief Defines the Rule class for validating HTTP requests.
+ *
+ * This file contains the definition of the Rule class,
+ * which is used to validate HTTP requests according to the rules defined
+ * in the RequestValidator.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #pragma once
 
 #include <string>
@@ -64,7 +77,7 @@ public:
     TypeRule(DataType expected_type);
     bool validate(const qb::json& value, const std::string& field_path, Result& result) const override;
     std::string rule_name() const override { return "type"; }
-    static std::string data_type_to_string(DataType dt);
+    static std::string data_type_to_string(DataType dt) noexcept;
 };
 
 /** @brief Placeholder rule for "required" keyword, logic is handled by validators. */

@@ -102,7 +102,7 @@ router.post("/register", [](Context& ctx) {
     // Process validated data
     // ...
 
-    ctx.response.status_code = HTTP_STATUS_CREATED;
+    ctx.response.status() = HTTP_STATUS_CREATED;
     ctx.response.body() = "User registered";
     ctx.complete();
 });

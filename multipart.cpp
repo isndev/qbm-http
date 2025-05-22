@@ -1,4 +1,14 @@
-
+/**
+ * @file qbm/http/multipart.cpp
+ * @brief Multipart form-data parser implementation
+ *
+ * This file implements the parser for multipart/form-data content according to RFC 7578.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include "./multipart.h"
 
 namespace qb::http {

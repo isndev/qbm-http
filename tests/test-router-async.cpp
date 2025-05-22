@@ -90,7 +90,7 @@ public:
              if (ctx->session()) {
                 ctx->session()->_handler_id_executed = _handler_id + "_NO_EXECUTOR";
              }
-            ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->complete(qb::http::AsyncTaskResult::ERROR);
             return;
         }
@@ -185,14 +185,14 @@ public:
             }
             
             if (signal_err) {
-                shared_ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR; // Or any other error code
+                shared_ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR; // Or any other error code
                 shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
             } else {
                 // Default behavior: an async task, once its async operation is done,
                 // usually signals completion of this part of the chain.
                 // If it were part of a longer chain needing more async steps, it might be CONTINUE.
                 // For a final handler, COMPLETE is typical.
-                shared_ctx->response().status_code = HTTP_STATUS_OK;
+                shared_ctx->response().status() = qb::http::status::OK;
                 shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
             }
         });
@@ -274,7 +274,7 @@ public:
                         shared_ctx->session()->_handler_id_executed += ";" + hid + "_ERROR_SIGNALLED";
                     }
                 }
-                shared_ctx->response().status_code = HTTP_STATUS_SERVICE_UNAVAILABLE; 
+                shared_ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
                 shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
                 return;
             }
@@ -323,7 +323,7 @@ protected:
 
     qb::http::Request create_request(qb::http::method method_val, const std::string& target_path) {
         qb::http::Request req;
-        req.method = method_val;
+        req.method() = method_val;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -360,7 +360,7 @@ TEST_F(RouterAsyncTest, SimpleAsyncGetRouteDeferred) {
 
     // Verify task completion and effects
     ASSERT_TRUE(mock_session->_async_handler_logic_done) << "Async handler logic did not complete.";
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_hello_handler");
 }
 
@@ -386,7 +386,7 @@ TEST_F(RouterAsyncTest, AsyncRouteWithPathParametersDeferred) {
     _task_executor.processAllTasks();
 
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_params_handler") 
         << "The async task did not run or did not update _handler_id_executed to the final value.";
     EXPECT_EQ(mock_session->_captured_params.get("id").value_or(""), "123");
@@ -426,7 +426,7 @@ TEST_F(RouterAsyncTest, AsyncRouteWithSyncMiddlewareDeferred) {
     EXPECT_EQ(mock_session->_response.header("X-Sync-Middleware"), "Applied") 
         << "Header from sync middleware not found after task completion.";
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "sync_mw;async_after_sync_mw");
 }
 
@@ -445,7 +445,7 @@ TEST_F(RouterAsyncTest, MultipleAsyncRoutesDeferred) {
     ASSERT_EQ(_task_executor.getPendingTaskCount(), 1);
     _task_executor.processAllTasks();
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_route1");
 
     // Reset for next request
@@ -459,7 +459,7 @@ TEST_F(RouterAsyncTest, MultipleAsyncRoutesDeferred) {
     ASSERT_EQ(_task_executor.getPendingTaskCount(), 1);
     _task_executor.processAllTasks();
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_route2");
 }
 
@@ -494,7 +494,7 @@ TEST_F(RouterAsyncTest, AsyncMiddlewareAndAsyncHandler) {
     EXPECT_EQ(mock_session->_response.header("X-Async-Middleware"), "Applied") 
         << "Header from async middleware not found after its task completion.";
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_mw;async_handler_after_async_mw");
 }
 
@@ -511,7 +511,7 @@ TEST_F(RouterAsyncTest, AsyncHandlerSignalsError) {
     _task_executor.processAllTasks();
 
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_error_handler");
 }
 
@@ -576,7 +576,7 @@ TEST_F(RouterAsyncTest, MixedTaskChain_SyncMw_AsyncMw_AsyncHandler) {
     EXPECT_EQ(mock_session->_response.header("X-Sync-Test"), "SyncApplied") << "X-Sync-Test header missing after all tasks."; 
     EXPECT_EQ(mock_session->_response.header("X-Async-Test"), "AsyncApplied") << "X-Async-Test header missing or incorrect after all tasks."; // Corrected expected value
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "sync_functional_mw;async_test_mw;async_final_handler");
 }
 
@@ -603,7 +603,7 @@ TEST_F(RouterAsyncTest, AsyncHandlerCancellation) {
     
     // At this point, context is cancelled. Its internal response should be 500.
     // The _on_finalized_callback (which copies to session) has run because cancel() calls complete(CANCELLED).
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE) 
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE)
         << "Session response status should be 503 immediately after context cancellation and its finalization.";
 
     // Now, process the task that TestAsyncHandler had queued.
@@ -615,7 +615,7 @@ TEST_F(RouterAsyncTest, AsyncHandlerCancellation) {
     EXPECT_TRUE(ctx_to_cancel->is_cancelled());
     EXPECT_TRUE(ctx_to_cancel->is_completed());
     // Check session again, it should still be 500. The handler task should not change it.
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
     // Ensure the handler's async logic was marked as "cancelled pre logic"
     EXPECT_EQ(mock_session->_handler_id_executed, "async_cancel_handler_CANCELLED_PRE_LOGIC");
@@ -647,7 +647,7 @@ TEST_F(RouterAsyncTest, CancelBeforeAnyTasksProcessed) {
     // Now, try to process tasks. The handler's task should see it's cancelled.
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     ASSERT_TRUE(mock_session->_async_handler_logic_done); // Marked done by TestAsyncHandler when it sees cancellation
     EXPECT_EQ(mock_session->_handler_id_executed, "async_cancel_immediate_CANCELLED_PRE_LOGIC");
     EXPECT_TRUE(ctx_to_cancel->is_cancelled());
@@ -686,7 +686,7 @@ TEST_F(RouterAsyncTest, CancelDuringAsyncMiddlewareBeforeHandlerTask) {
     // cancel() calls complete(CANCELLED), which finalizes and updates session.
     // NOW the header from middleware should be in the session.
     EXPECT_EQ(mock_session->_response.header("X-Async-Middleware"), "Applied");
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
 
     _task_executor.processAllTasks(); // Process handler's task, it should see cancellation.
 
@@ -699,7 +699,7 @@ TEST_F(RouterAsyncTest, CancelDuringAsyncMiddlewareBeforeHandlerTask) {
 TEST_F(RouterAsyncTest, CancelContextAlreadyOnErrorStatus) {
     // Create a dummy request and response prototype for context construction
     qb::http::Request req;
-    req.method = HTTP_GET;
+    req.method() = HTTP_GET;
     req.uri() = qb::io::uri("/test");
     qb::http::Response resp_proto;
 
@@ -725,8 +725,8 @@ TEST_F(RouterAsyncTest, CancelContextAlreadyOnErrorStatus) {
     );
 
     // Set an initial error status
-    ctx->response().status_code = HTTP_STATUS_NOT_FOUND; // e.g., 404
-    temp_session->get_response_ref().status_code = HTTP_STATUS_NOT_FOUND; // Simulate it being in session too
+    ctx->response().status() = qb::http::status::NOT_FOUND; // e.g., 404
+    temp_session->get_response_ref().status() = qb::http::status::NOT_FOUND; // Simulate it being in session too
 
     // Cancel the context
     ctx->cancel("Testing cancellation on 404");
@@ -734,9 +734,9 @@ TEST_F(RouterAsyncTest, CancelContextAlreadyOnErrorStatus) {
     // The finalize_processing (called by complete(CANCELLED) inside cancel()) should run the callback.
     
     // Status code in the context should be overridden to 503 by cancel logic
-    EXPECT_EQ(ctx->response().status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(ctx->response().status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     // And this should be reflected in the session after finalization
-    EXPECT_EQ(temp_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(temp_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
 
     EXPECT_TRUE(ctx->is_cancelled());
     EXPECT_TRUE(ctx->is_completed()); // cancel() calls complete(), which calls finalize_processing()
@@ -763,7 +763,7 @@ TEST_F(RouterAsyncTest, AsyncPostRouteDeferred) {
     _task_executor.processAllTasks();
 
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_post_handler");
 }
 
@@ -782,7 +782,7 @@ TEST_F(RouterAsyncTest, AsyncPutRouteDeferred) {
     _task_executor.processAllTasks();
 
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "async_put_handler");
 }
 
@@ -810,7 +810,7 @@ TEST_F(RouterAsyncTest, AsyncMiddlewareTaskSignalsError) {
 
     // Verify middleware signalled error and context finalized with error
     EXPECT_EQ(mock_session->_handler_id_executed, "error_mw_ERROR_SIGNALLED");
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR) 
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR)
         << "Context should have error status from middleware.";
     
     // The next handler (asyncHandler) should not have been processed or its task queued.
@@ -852,7 +852,7 @@ TEST_F(RouterAsyncTest, RouteGroupWithAsyncMiddlewareAndHandler) {
 
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
     EXPECT_EQ(mock_session->_response.header("X-Group-Async-MW"), "Applied");
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "group_async_mw;group_route_async_handler");
 }
 
@@ -884,7 +884,7 @@ TEST_F(RouterAsyncTest, AsyncMiddlewareTaskCancellation) {
     ctx_to_cancel->cancel("Test initiated cancellation of middleware task");
     // cancel() calls complete(CANCELLED), which finalizes and updates session.
     // The middleware's specific header ("X-Cancel-Check-MW") should NOT be set by its task later.
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
 
     _task_executor.processAllTasks(); // Process the cancellable middleware's task.
                                       // Its task lambda should see is_cancelled() and exit early.
@@ -931,7 +931,7 @@ TEST_F(RouterAsyncTest, NotFoundWithGlobalAsyncMiddleware) {
     EXPECT_EQ(mock_session->_response.header("X-Global-Async-MW"), "AppliedGlobal");
     
     // Final status should be 404 Not Found.
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
     
     // The other handler should not have been involved.
     ASSERT_FALSE(mock_session->_async_handler_logic_done);
@@ -957,7 +957,7 @@ TEST_F(RouterAsyncTest, AsyncLambdaHandlerDeferred) {
                 ctx->session()->_async_handler_logic_done = true;
             }
             if (ctx) { // Always check ctx before using
-                ctx->response().status_code = HTTP_STATUS_OK;
+                ctx->response().status() = qb::http::status::OK;
                 ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
             }
         });
@@ -976,6 +976,6 @@ TEST_F(RouterAsyncTest, AsyncLambdaHandlerDeferred) {
     _task_executor.processAllTasks(); // Process the lambda's deferred task.
 
     ASSERT_TRUE(mock_session->_async_handler_logic_done);
-    EXPECT_EQ(mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(mock_session->_handler_id_executed, "lambda_executed");
 } 

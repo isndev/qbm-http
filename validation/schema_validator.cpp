@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/validation/schema_validator.cpp
+ * @brief Implementation of the SchemaValidator class.
+ *
+ * This file contains the implementation of the SchemaValidator class,
+ * which is used to validate HTTP requests according to the schema defined
+ * in the RequestValidator.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #include "./schema_validator.h"
 #include "./rule.h" // For access to concrete rule classes like TypeRule, MinLengthRule, etc.
 #include <algorithm> 

@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/custom_route.h
+ * @file qbm/http/routing/custom_route.h
  * @brief Defines the ICustomRoute interface for advanced, class-based HTTP route handlers.
  *
  * This file contains the `ICustomRoute` abstract base class. Implementations of this interface

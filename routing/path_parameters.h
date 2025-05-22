@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/path_parameters.h
+ * @file qbm/http/routing/path_parameters.h
  * @brief Defines the PathParameters class for storing extracted URL path parameters.
  *
  * This file contains the `PathParameters` class, which is used by the HTTP routing

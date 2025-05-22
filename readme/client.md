@@ -46,7 +46,7 @@ get_req.add_header("User-Agent", "My QB Client/1.0");
 
 // Create request for POST with JSON body
 qb::http::Request post_req("https://api.example.com/users");
-post_req.method = HTTP_POST; // Set method (optional for POST func, mandatory for REQUEST)
+post_req.method() = HTTP_POST; // Set method (optional for POST func, mandatory for REQUEST)
 post_req.add_header("Content-Type", "application/json");
 
 qb::json post_body;
@@ -70,14 +70,14 @@ try {
 
     qb::http::Response res = qb::http::GET(req, 5.0); // 5 second timeout
 
-    if (res.status_code == HTTP_STATUS_OK) {
-        qb::io::cout() << "Sync Response Status: " << res.status_code << std::endl;
+    if (res.status() == HTTP_STATUS_OK) {
+        qb::io::cout() << "Sync Response Status: " << res.status() << std::endl;
         // Access headers (case-insensitive)
         qb::io::cout() << "Sync Content-Type: " << res.header("content-type") << std::endl;
         // Access body as string
         qb::io::cout() << "Sync Body: " << res.body().as<std::string>() << std::endl;
     } else {
-        qb::io::cout() << "Sync Request failed with status: " << res.status_code << std::endl;
+        qb::io::cout() << "Sync Request failed with status: " << res.status() << std::endl;
     }
 
 } catch (const std::exception& e) {
@@ -98,14 +98,14 @@ Does not block. Requires an event loop (like `qb::io::async::run()` or the one i
 std::atomic<bool> async_done = false;
 
 qb::http::Request req("http://httpbin.org/post");
-req.method = HTTP_POST;
+req.method() = HTTP_POST;
 req.add_header("Content-Type", "application/x-www-form-urlencoded");
 req.body() = "key=value&another=param";
 
 qb::http::POST(req, [](qb::http::async::Reply&& reply) {
     // This lambda executes when the response arrives
     qb::io::cout() << "--- Async POST Response ---" << std::endl;
-    qb::io::cout() << "Status: " << reply.response.status_code << std::endl;
+    qb::io::cout() << "Status: " << reply.response.status() << std::endl;
     qb::io::cout() << "Body: " << reply.response.body().as<std::string>() << std::endl;
 
     // Signal completion

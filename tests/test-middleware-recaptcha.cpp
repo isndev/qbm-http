@@ -60,7 +60,7 @@ protected:
                                      qb::http::RecaptchaOptions::TokenLocation location = qb::http::RecaptchaOptions::TokenLocation::Body,
                                      const std::string& field_name = "g-recaptcha-response") {
         qb::http::Request req;
-        req.method = qb::http::method::HTTP_POST; // Often used with forms needing reCAPTCHA
+        req.method() = qb::http::method::POST; // Often used with forms needing reCAPTCHA
         req.uri() = qb::io::uri("/submit_form");
 
         if (!token_value.empty()) {
@@ -94,7 +94,7 @@ protected:
                     _session->_recaptcha_result_in_context = ctx->template get<qb::http::RecaptchaResult>("recaptcha_result");
                 }
             }
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Form Submitted Successfully";
             ctx->complete();
         };
@@ -120,7 +120,7 @@ protected:
         // If qb::http::REQUEST is truly async and uses a different thread/event loop, this test will be flaky.
         int max_wait_cycles = 100; // Approx 1 second if 10ms sleep
         while(!_session->_response.has_header("Content-Type") && --max_wait_cycles > 0) { // Wait for response to be populated
-             if (_session->_response.status_code != 0 && _session->_response.status_code != qb::http::HTTP_STATUS_CONTINUE) break; // Early exit if status set
+             if (_session->_response.status() != 0 && _session->_response.status() != qb::http::HTTP_STATUS_CONTINUE) break; // Early exit if status set
             // std::this_thread::sleep_for(std::chrono::milliseconds(10)); 
             // Due to potential issues with sleep in single-threaded test runners or GTest, 
             // this active wait is problematic. Test will rely on qb::http::REQUEST being synchronous for now for simplicity.
@@ -142,7 +142,7 @@ TEST_F(RecaptchaMiddlewareTest, MissingToken) {
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
     configure_router_and_run(recap_mw, create_request("")); // Empty token
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
     EXPECT_NE(_session->_response.body().as<std::string>().find("reCAPTCHA token is missing"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -166,7 +166,7 @@ TEST_F(RecaptchaMiddlewareTest, ValidTokenPasses_Conceptual) {
     
     configure_router_and_run(recap_mw, create_request("valid_mocked_token"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
     EXPECT_TRUE(_session->_recaptcha_result_in_context->success);
@@ -185,7 +185,7 @@ TEST_F(RecaptchaMiddlewareTest, TokenScoreTooLow_Conceptual) {
 
     configure_router_and_run(recap_mw, create_request("mocked_token_low_score"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_NE(_session->_response.body().as<std::string>().find("reCAPTCHA verification failed"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
@@ -204,7 +204,7 @@ TEST_F(RecaptchaMiddlewareTest, GoogleApiError_Conceptual) {
 
     configure_router_and_run(recap_mw, create_request("mocked_token_google_error"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_NE(_session->_response.body().as<std::string>().find("invalid-input-secret"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
@@ -228,10 +228,10 @@ TEST_F(RecaptchaMiddlewareTest, TokenExtractionFromHeader) {
 
     // Expect a Forbidden or other error because "dummy_header_token" is invalid with Google / "test_secret"
     // but NOT a Bad Request due to "missing token".
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_BAD_REQUEST) 
+    EXPECT_NE(_session->_response.status(), qb::http::status::BAD_REQUEST)
         << "Should not be Bad Request (missing token) if token was provided in header.";
     // More specific check for what happens on invalid token with Google:
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN); 
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_FALSE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
     EXPECT_FALSE(_session->_recaptcha_result_in_context->success);

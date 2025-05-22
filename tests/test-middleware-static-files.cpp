@@ -118,12 +118,12 @@ protected:
     }
 
     qb::http::Request create_request(
-        qb::http::method method = qb::http::method::HTTP_GET,
+        qb::http::method method = qb::http::method::GET,
         const std::string& target_path = "/",
         const std::map<std::string, std::string>& headers_map = {}
     ) {
         qb::http::Request req;
-        req.method = method;
+        req.method() = method;
         try {
             req.uri() = qb::io::uri("http://localhost" + target_path);
         } catch (const std::exception& e) {
@@ -141,7 +141,7 @@ protected:
         return [this](std::shared_ptr<qb::http::Context<MockStaticFilesSession>> ctx) {
             if (_session) _session->_final_handler_called = true;
             // This handler should ideally not be called if StaticFilesMiddleware serves a file.
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_NOT_IMPLEMENTED; // Should not happen
+            ctx->response().status() = qb::http::status::NOT_IMPLEMENTED; // Should not happen
             ctx->response().body() = "Dummy final handler reached - indicates middleware did not complete.";
             ctx->complete();
         };
@@ -151,7 +151,7 @@ protected:
     qb::http::RouteHandlerFn<MockStaticFilesSession> passthrough_expectant_handler() {
          return [this](std::shared_ptr<qb::http::Context<MockStaticFilesSession>> ctx) {
             if (_session) _session->_final_handler_called = true;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Passthrough handler reached.";
             ctx->complete();
         };
@@ -190,9 +190,9 @@ TEST_F(StaticFilesMiddlewareTest, ServeTextFile) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/plain; charset=utf-8");
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), std::to_string(std::string("Contents of file1.txt").length()));
@@ -203,9 +203,9 @@ TEST_F(StaticFilesMiddlewareTest, ServeImageFile) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/image.jpg"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/image.jpg"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "image/jpeg");
     EXPECT_EQ(_session->_response.body().as<std::string>(), "JPG_BINARY_DATA");
     EXPECT_FALSE(_session->_final_handler_called);
@@ -215,8 +215,8 @@ TEST_F(StaticFilesMiddlewareTest, ServeRootIndexHtml) {
     qb::http::StaticFilesOptions options(_test_root_dir); // serve_index_file is true by default
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Root Index HTML");
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/html; charset=utf-8");
     EXPECT_FALSE(_session->_final_handler_called);
@@ -226,8 +226,8 @@ TEST_F(StaticFilesMiddlewareTest, ServeSubdirIndexHtml) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/subdir/"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/subdir/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Subdir Index HTML");
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/html; charset=utf-8");
     EXPECT_FALSE(_session->_final_handler_called);
@@ -238,8 +238,8 @@ TEST_F(StaticFilesMiddlewareTest, PathPrefixStripping) {
     options.with_path_prefix_to_strip("/static_assets");
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/static_assets/file1.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/static_assets/file1.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -250,9 +250,9 @@ TEST_F(StaticFilesMiddlewareTest, PathPrefixNotMatchingContinue) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
     // Request path does not match the strip prefix
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/other_path/file1.txt"), false);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/other_path/file1.txt"), false);
     
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK); // Handled by passthrough_expectant_handler
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK); // Handled by passthrough_expectant_handler
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Passthrough handler reached.");
     EXPECT_TRUE(_session->_final_handler_called); 
 }
@@ -262,8 +262,8 @@ TEST_F(StaticFilesMiddlewareTest, FileNotFound) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/nonexistent.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/nonexistent.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_FOUND);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "File not found");
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -272,8 +272,8 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryTraversalAttempt) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/../some_other_file.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN); // Or 404 depending on sanitize logic
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/../some_other_file.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN); // Or 404 depending on sanitize logic
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Forbidden");
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -282,8 +282,8 @@ TEST_F(StaticFilesMiddlewareTest, HeadRequest) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_HEAD, "/file1.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::HEAD, "/file1.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/plain; charset=utf-8");
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), std::to_string(std::string("Contents of file1.txt").length()));
@@ -296,14 +296,14 @@ TEST_F(StaticFilesMiddlewareTest, ETagAndIfNoneMatch) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
     // First request to get ETag
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     std::string etag = std::string(_session->_response.header("ETag"));
     EXPECT_FALSE(etag.empty());
 
     // Second request with If-None-Match
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "If-None-Match", etag }}));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NOT_MODIFIED);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "If-None-Match", etag }}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -314,14 +314,14 @@ TEST_F(StaticFilesMiddlewareTest, LastModifiedAndIfModifiedSince) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
     // First request to get Last-Modified
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     std::string last_modified = std::string(_session->_response.header("Last-Modified"));
     EXPECT_FALSE(last_modified.empty());
 
     // Second request with If-Modified-Since (using the exact Last-Modified value)
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "If-Modified-Since", last_modified }}));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NOT_MODIFIED);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "If-Modified-Since", last_modified }}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -332,9 +332,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestPartialContent) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt"; // Expected content
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=9-14" }}));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=9-14" }}));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_PARTIAL_CONTENT);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PARTIAL_CONTENT);
     EXPECT_EQ(_session->_response.body().as<std::string>(), file_content.substr(9, 6));
     EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes 9-14/" + std::to_string(file_content.length()));
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), "6");
@@ -348,9 +348,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestSuffix) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt"; 
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=-4" }}));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=-4" }}));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_PARTIAL_CONTENT);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PARTIAL_CONTENT);
     EXPECT_EQ(_session->_response.body().as<std::string>(), file_content.substr(file_content.length() - 4, 4));
     EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes " + std::to_string(file_content.length() - 4) + "-" + std::to_string(file_content.length() - 1) + "/" + std::to_string(file_content.length()));
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), "4");
@@ -364,9 +364,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestInvalid) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt";
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=1000-2000" }}));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=1000-2000" }}));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::RANGE_NOT_SATISFIABLE);
     EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes */" + std::to_string(file_content.length()));
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_FALSE(_session->_final_handler_called);
@@ -378,8 +378,8 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryListingEnabled) {
     options.with_serve_index_file(false); // Disable index serving to force listing
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/html; charset=utf-8");
     std::string body = _session->_response.body().as<std::string>();
     // Links in directory listing for root (request_uri_path = "/") should be absolute from root
@@ -400,8 +400,8 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryListingSubdir) {
     // it should list. This is a bit tricky. The current logic is: if serve_index_file is true, it serves it.
     // If false, OR if true but index not found, THEN it considers listing.
     // So serve_index_file=false is key here.
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/subdir/"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/subdir/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/html; charset=utf-8");
     std::string body = _session->_response.body().as<std::string>();
     
@@ -422,8 +422,8 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryListingDisabledServeIndexFalse) {
     options.with_serve_index_file(false); 
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Directory listing not allowed.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -433,9 +433,9 @@ TEST_F(StaticFilesMiddlewareTest, ServeEmptyFile) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/empty.txt"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/empty.txt"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "");
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/plain; charset=utf-8");
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), "0");
@@ -447,9 +447,9 @@ TEST_F(StaticFilesMiddlewareTest, DefaultMimeTypeForUnknownExtension) {
     options.with_default_mime_type("application/x-custom-unknown");
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/no_extension_file"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/no_extension_file"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "application/x-custom-unknown");
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -463,10 +463,10 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestMalformed_EmptyValue) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt";
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=" }})); // Malformed
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=" }})); // Malformed
 
     // Expect 416 as parse_byte_range will return nullopt, and we now treat all such failures as 416.
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::RANGE_NOT_SATISFIABLE);
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes */" + std::to_string(file_content.length()));
     EXPECT_FALSE(_session->_final_handler_called);
@@ -478,9 +478,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestMalformed_InvalidChars) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt";
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=abc-def" }}));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=abc-def" }}));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::RANGE_NOT_SATISFIABLE);
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes */" + std::to_string(file_content.length()));
     EXPECT_FALSE(_session->_final_handler_called);
@@ -492,9 +492,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestMalformed_StartGreaterThanEnd) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt";
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=10-5" }}));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=10-5" }}));
     
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::RANGE_NOT_SATISFIABLE);
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes */" + std::to_string(file_content.length()));
     EXPECT_FALSE(_session->_final_handler_called);
@@ -506,10 +506,10 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestMultipleRanges_NotSupported) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt";
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=0-5, 10-15" }})); // Multiple ranges
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=0-5, 10-15" }})); // Multiple ranges
 
     // parse_byte_range currently fails to parse this as a single valid range, leading to 416.
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_RANGE_NOT_SATISFIABLE);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::RANGE_NOT_SATISFIABLE);
     EXPECT_TRUE(_session->_response.body().empty());
     EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes */" + std::to_string(file_content.length()));
     EXPECT_FALSE(_session->_final_handler_called);
@@ -521,7 +521,7 @@ TEST_F(StaticFilesMiddlewareTest, CacheControlCustomValue) {
     options.with_cache_control(true, "public, max-age=86400");
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
     EXPECT_EQ(std::string(_session->_response.header("Cache-Control")), "public, max-age=86400");
 }
 
@@ -530,7 +530,7 @@ TEST_F(StaticFilesMiddlewareTest, CacheControlDisabled) {
     options.with_cache_control(false);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
     EXPECT_TRUE(_session->_response.header("Cache-Control").empty());
 }
 
@@ -540,8 +540,8 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryListingWithSpecialCharsInFilenames) {
     options.with_directory_listing(true).with_serve_index_file(false);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     std::string body = _session->_response.body().as<std::string>();
 
     // Check for URI encoded and HTML escaped filenames
@@ -565,14 +565,14 @@ TEST_F(StaticFilesMiddlewareTest, PathPrefixToEmptyServesRootIndex) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
     // Requesting exactly the prefix
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/static/"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/static/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Root Index HTML");
 
     _session->reset();
     // Requesting prefix without trailing slash (should also work if path normalization handles it)
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/static"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/static"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Root Index HTML");
 }
 
@@ -584,17 +584,17 @@ TEST_F(StaticFilesMiddlewareTest, CaseInsensitiveFileSystemResolution) {
     // This test's success depends on the underlying filesystem being case-insensitive (common on Win/macOS)
     // On case-sensitive filesystems (common on Linux), this would be a 404.
     // The middleware uses weakly_canonical, which should resolve if possible.
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/FILE1.TXT"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/FILE1.TXT"));
     
     std::error_code ec;
     bool file_exists_case_sensitive = std::filesystem::exists(_test_root_dir / "FILE1.TXT", ec);
     bool file_exists_original_case = std::filesystem::exists(_test_root_dir / "file1.txt", ec);
 
     if (!file_exists_case_sensitive && file_exists_original_case) { // Likely case-sensitive FS where FILE1.TXT doesn't exist as such
-        EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NOT_FOUND);
+        EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_FOUND);
         std::cout << "[ INFO     ] CaseInsensitiveFileSystemResolution: FS is case-sensitive, 404 for /FILE1.TXT is expected." << std::endl;
     } else { // Case-insensitive FS or FILE1.TXT actually exists with that casing
-        EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+        EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
         EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
         std::cout << "[ INFO     ] CaseInsensitiveFileSystemResolution: FS is case-insensitive or file exists as /FILE1.TXT, 200 OK is expected." << std::endl;
     }
@@ -606,7 +606,7 @@ TEST_F(StaticFilesMiddlewareTest, MimeTypeOverride) {
     options.add_mime_type(".txt", "text/custom-text-type");
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt"));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
     EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/custom-text-type");
 }
 
@@ -615,8 +615,8 @@ TEST_F(StaticFilesMiddlewareTest, PathNormalizationLeadingSlashes) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "//file1.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "//file1.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
 }
 
@@ -624,8 +624,8 @@ TEST_F(StaticFilesMiddlewareTest, PathNormalizationInternalSlashes) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/subdir//file2.css"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/subdir//file2.css"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "/* CSS content for file2 */");
 }
 
@@ -633,8 +633,8 @@ TEST_F(StaticFilesMiddlewareTest, PathNormalizationDotSegment) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/./file1.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/./file1.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
 }
 
@@ -645,9 +645,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestDisabledServesFullContent) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
     std::string file_content = "Contents of file1.txt";
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt", {{ "Range", "bytes=9-14" }}));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{ "Range", "bytes=9-14" }}));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), file_content);
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), std::to_string(file_content.length()));
     EXPECT_TRUE(_session->_response.header("Content-Range").empty());
@@ -661,11 +661,11 @@ TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalSimple) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/../outside_root.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
-    if (_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN) {
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/../outside_root.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
+    if (_session->_response.status() == qb::http::status::FORBIDDEN) {
          EXPECT_EQ(_session->_response.body().as<std::string>(), "Forbidden");
     }
     EXPECT_FALSE(_session->_final_handler_called);
@@ -677,10 +677,10 @@ TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalWithPathPrefix) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
     // Request path will be "/../outside_root.txt" after prefix stripping
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/static/../outside_root.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/static/../outside_root.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -688,10 +688,10 @@ TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalDeep) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/subdir/../../../outside_root.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/subdir/../../../outside_root.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -700,10 +700,10 @@ TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalEncodedDotDotSlash) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
     // %2F is / after URI decoding. Path becomes /../outside_root.txt
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/..%2Foutside_root.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/..%2Foutside_root.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -712,10 +712,10 @@ TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalEncodedDotDotBackslash) {
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
 
     // %5C is \ after URI decoding. Path becomes /..\outside_root.txt which std::filesystem::path normalizes.
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/..%5Coutside_root.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/..%5Coutside_root.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -725,10 +725,10 @@ TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalDoubleEncodedSlash) {
 
     // %252F becomes %2F after first URI decode, then / after second (if any) or by path normalization.
     // qb::io::uri will decode %25 to %. So path is /..%2Foutside_root.txt -> /../outside_root.txt
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/..%252Foutside_root.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/..%252Foutside_root.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -740,12 +740,12 @@ TEST_F(StaticFilesMiddlewareTest, SecurityPathNullByteInjection) {
     // (i.e., not truncate early).
     // The URI parser might reject %00 or treat it as part of the name.
     // If path becomes "/file1.txt\0other.txt", filesystem will likely fail to find it.
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/file1.txt%00other.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt%00other.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
      // Expect 404 because "file1.txt\0other.txt" won't be found, or 400 if URI parser rejects %00.
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_BAD_REQUEST ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::NOT_FOUND ||
+                _session->_response.status() == qb::http::status::BAD_REQUEST ||
+                _session->_response.status() == qb::http::status::FORBIDDEN);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -760,11 +760,11 @@ TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToOutsideRootIsForbidden) {
         GTEST_SKIP() << "Skipping symlink test: symlink_to_outside.txt does not exist or failed to create.";
     }
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/symlink_to_outside.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND)
-        << "Status code was: " << _session->_response.status_code;
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/symlink_to_outside.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND)
+        << "Status code was: " << _session->_response.status();
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -777,8 +777,8 @@ TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToInsideRootIsOk) {
         GTEST_SKIP() << "Skipping symlink test: symlink_to_inside.txt does not exist or failed to create.";
     }
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/symlink_to_inside.txt"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/symlink_to_inside.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Body: " << _session->_response.body().as<std::string>();
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
     EXPECT_FALSE(_session->_final_handler_called);
@@ -796,20 +796,20 @@ TEST_F(StaticFilesMiddlewareTest, SecurityAbsolutePathLikeAttempt) {
     // Attempt with a path that looks like a Windows drive letter path
     // sanitize_and_resolve_path will effectively try to serve _test_root_dir / "C:/Windows/System32/calc.exe"
     // which will then be canonicalized and checked.
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "/C:/Windows/System32/calc.exe"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/C:/Windows/System32/calc.exe"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
 
     _session->reset();
     // Attempt with a path that looks like a UNC path (after http://localhost part)
     // Request will be http://localhost//attacker_server/share/data.txt
     // uri().path() will be "//attacker_server/share/data.txt"
     // sanitize_and_resolve_path will process this to "attacker_server/share/data.txt" relative to root.
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, "//attacker_server/share/data.txt"));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "//attacker_server/share/data.txt"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND);
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecurityMaxPathLength) {
@@ -832,18 +832,18 @@ TEST_F(StaticFilesMiddlewareTest, SecurityMaxPathLength) {
     // then potentially a 500 if not caught, but ideally still a 404 or 400/414 from URI parsing.
     // std::filesystem operations on very long paths that don't exist usually fail gracefully.
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::HTTP_GET, long_path));
-    EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, long_path));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
     // Likely 404, but could be 400 (Bad Request) if URI parsing has issues, or 414 (URI Too Long) from a server layer.
     // For this middleware specifically, 404 or 403 (if somehow resolved outside root) are primary concerns.
-    EXPECT_TRUE(_session->_response.status_code == qb::http::status::HTTP_STATUS_NOT_FOUND ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_BAD_REQUEST ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_URI_TOO_LONG ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_FORBIDDEN ||
-                _session->_response.status_code == qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR); // Last resort for unexpected fs errors
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::NOT_FOUND ||
+                _session->_response.status() == qb::http::status::BAD_REQUEST ||
+                _session->_response.status() == qb::http::status::URI_TOO_LONG ||
+                _session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::INTERNAL_SERVER_ERROR); // Last resort for unexpected fs errors
 
     // We primarily want to ensure it didn't somehow succeed.
-    EXPECT_FALSE(_session->_final_handler_called  && _session->_response.status_code == qb::http::status::HTTP_STATUS_OK);
+    EXPECT_FALSE(_session->_final_handler_called  && _session->_response.status() == qb::http::status::OK);
 }
 
 // --- End of New Test Cases ---

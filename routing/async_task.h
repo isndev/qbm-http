@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/async_task.h
+ * @file qbm/http/routing/async_task.h
  * @brief Defines the IAsyncTask interface for executable units in the HTTP request processing chain.
  *
  * This file contains the `IAsyncTask` abstract base class. Any component that can be part of

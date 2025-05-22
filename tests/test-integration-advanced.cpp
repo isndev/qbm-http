@@ -76,7 +76,7 @@ public:
     void cancel() override {}
 
     void process(std::shared_ptr<AdvCtx> ctx) override {
-        std::cout << "[GlobalLoggingMiddleware] Request: " << std::to_string(ctx->request().method) << " " << ctx->request().uri().path() << std::endl;
+        std::cout << "[GlobalLoggingMiddleware] Request: " << std::to_string(ctx->request().method()) << " " << ctx->request().uri().path() << std::endl;
         adv_server_side_assertions++; // Count middleware execution
         ctx->response().set_header("X-Global-Middleware", "Applied");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE); 
@@ -94,7 +94,7 @@ public:
             ctx->response().set_header("X-ApiV1-Auth", "TokenValid");
             ctx->complete(qb::http::AsyncTaskResult::CONTINUE); 
         } else {
-            ctx->response().status_code = HTTP_STATUS_UNAUTHORIZED;
+            ctx->response().status() = qb::http::status::UNAUTHORIZED;
             ctx->response().body() = "APIv1: Unauthorized";
             ctx->response().set_header("X-ApiV1-Auth", "TokenInvalidOrMissing");
             ctx->complete();
@@ -131,7 +131,7 @@ public:
     void process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
         ctx->response().set_header("X-MW-Order", ctx->response().header("X-MW-Order") + "MW3SC;");
-        ctx->response().status_code = HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Short-circuited by Middleware3!";
         ctx->complete(); 
     }
@@ -188,7 +188,7 @@ public:
         } else {
             std::cout << "[ConditionalContinueMiddleware] Condition NOT met or header missing. Completing early." << std::endl;
             ctx->response().set_header("X-Conditional-Result", "completed_by_mw");
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_MISCELLANEOUS_PERSISTENT_WARNING; // Custom status for testing
+            ctx->response().status() = qb::http::status::MISCELLANEOUS_PERSISTENT_WARNING; // Custom status for testing
             ctx->response().body() = "Request processing completed by ConditionalContinueMiddleware.";
             ctx->complete();
         }
@@ -227,7 +227,7 @@ public:
         adv_server_side_assertions++;
         std::string current_order = ctx->response().header("X-Nested-Order");
         ctx->response().set_header("X-Nested-Order", current_order + "NestedSC;");
-        ctx->response().status_code = HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Short-circuited by NestedShortCircuitMW";
         ctx->complete();
     }
@@ -287,7 +287,7 @@ public:
     void process(std::shared_ptr<AdvCtx> ctx) override {
         adv_request_count_server++;
         adv_server_side_assertions++;
-        ctx->response().status_code = HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Response from MyCustomRoute for path: " + std::string(ctx->request().uri().path());
         ctx->response().set_header("X-Custom-Route-Type", "MyCustomRoute");
         ctx->complete();
@@ -305,7 +305,7 @@ public:
         this->get("/:id", [this](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++;
             std::string item_id = ctx->path_param("id");
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = _prefix + " Data for item: " + item_id;
             if (item_id == "item123") {
                 adv_server_side_assertions++;
@@ -317,7 +317,7 @@ public:
         this->post("/", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++;
             adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_CREATED;
+            ctx->response().status() = qb::http::status::CREATED;
             ctx->response().body() = "Data created: " + ctx->request().body().template as<std::string>();
             if (ctx->request().body().template as<std::string>() == "{\"name\":\"test_data\"}") { 
                 adv_server_side_assertions++;
@@ -329,7 +329,7 @@ public:
             adv_request_count_server++;
             adv_server_side_assertions++; // Unconditional assertion
             std::string item_id = ctx->path_param("id");
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = _prefix + " Data updated for item: " + item_id;
             if (item_id == "item789" || ctx->request().body().template as<std::string>() == "{\"value\":\"updated_data\"}") { // example specific check
                 adv_server_side_assertions++;
@@ -341,7 +341,7 @@ public:
             adv_request_count_server++;
             adv_server_side_assertions++; // Unconditional assertion
             std::string item_id = ctx->path_param("id");
-            ctx->response().status_code = HTTP_STATUS_NO_CONTENT;
+            ctx->response().status() = qb::http::status::NO_CONTENT;
             // No body for NO_CONTENT
             if (item_id == "item789") { // example specific check
                 adv_server_side_assertions++;
@@ -380,7 +380,7 @@ public:
             auto captured_ctx = ctx; 
             qb::io::async::callback([captured_ctx]() { 
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                captured_ctx->response().status_code = HTTP_STATUS_OK;
+                captured_ctx->response().status() = qb::http::status::OK;
                 captured_ctx->response().body() = "Async operation completed in LegacyController";
                 captured_ctx->response().set_header("X-Legacy-Async", "Done");
                 captured_ctx->complete();
@@ -390,7 +390,7 @@ public:
         this->get("/error_test", [](std::shared_ptr<AdvCtx> ctx){ 
             adv_request_count_server++;
             adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_BAD_GATEWAY; 
+            ctx->response().status() = qb::http::status::BAD_GATEWAY;
             ctx->response().body() = "LegacyController intentional error";
             ctx->complete(qb::http::AsyncTaskResult::ERROR); 
         });
@@ -406,7 +406,7 @@ public:
         this->get("/status_at_root", [](std::shared_ptr<AdvCtx> ctx){
             adv_request_count_server++;
             adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Root controller says hello!";
             ctx->complete();
         });
@@ -430,7 +430,7 @@ public:
         // POST /items (Create new)
         this->post("/items", [](std::shared_ptr<AdvCtx> ctx){
             adv_request_count_server++; adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_CREATED;
+            ctx->response().status() = qb::http::status::CREATED;
             ctx->response().body() = "Created item with body: " + ctx->request().body().template as<std::string>();
             ctx->complete();
         });
@@ -459,7 +459,7 @@ public:
         // DELETE /items/:id (Delete specific)
         this->del("/items/:id", [](std::shared_ptr<AdvCtx> ctx){
             adv_request_count_server++; adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_NO_CONTENT;
+            ctx->response().status() = qb::http::status::NO_CONTENT;
             ctx->complete();
         });
 
@@ -475,7 +475,7 @@ public:
         this->options("/items", [](std::shared_ptr<AdvCtx> ctx){
             adv_request_count_server++; adv_server_side_assertions++;
             ctx->response().set_header("Allow", "GET, POST, HEAD, OPTIONS");
-            ctx->response().status_code = HTTP_STATUS_NO_CONTENT;
+            ctx->response().status() = qb::http::status::NO_CONTENT;
             ctx->complete();
         });
 
@@ -483,7 +483,7 @@ public:
         this->options("/items/:id", [](std::shared_ptr<AdvCtx> ctx){
             adv_request_count_server++; adv_server_side_assertions++;
             ctx->response().set_header("Allow", "GET, PUT, PATCH, DELETE, OPTIONS");
-            ctx->response().status_code = HTTP_STATUS_NO_CONTENT;
+            ctx->response().status() = qb::http::status::NO_CONTENT;
             ctx->complete();
         });
     }
@@ -502,7 +502,7 @@ public:
             [](std::shared_ptr<AdvCtx> ctx) {
                 adv_server_side_assertions++; // For the 404 handler itself
                 std::cout << "[CustomNotFoundHandler] Path not found: " << ctx->request().uri().path() << std::endl;
-                ctx->response().status_code = HTTP_STATUS_NOT_FOUND;
+                ctx->response().status() = qb::http::status::NOT_FOUND;
                 ctx->response().body() = "Oops! The page you\'re looking for doesn\'t exist here (Custom 404).";
                 ctx->response().set_header("X-Custom-404", "Applied");
                 ctx->complete();
@@ -514,7 +514,7 @@ public:
             [](std::shared_ptr<AdvCtx> ctx) {
                 adv_server_side_assertions++; // For the global error handler itself
                 std::cout << "[CustomGlobalServerErrorHandler] An error was caught. Path: " << ctx->request().uri().path() << std::endl;
-                ctx->response().status_code = HTTP_STATUS_SERVICE_UNAVAILABLE; // e.g., 503
+                ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE; // e.g., 503
                 ctx->response().body() = "A global server error occurred and was handled by our custom global handler.";
                 ctx->response().set_header("X-Global-Error-Handler", "Applied");
                 ctx->complete(); 
@@ -540,7 +540,7 @@ public:
         this->router().get("/ping", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++;
             adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "pong";
             ctx->complete();
         });
@@ -548,7 +548,7 @@ public:
         this->router().head("/ping", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++; // Count handler invocation
             adv_server_side_assertions++; // Count for this handler logic
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             // No body for HEAD requests
             ctx->complete();
         });
@@ -562,7 +562,7 @@ public:
         api_v1_group->get("/status", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++;
             adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "APIv1 Status: Healthy";
             ctx->complete();
         });
@@ -577,7 +577,7 @@ public:
             adv_request_count_server++;
             adv_server_side_assertions++;
             std::string filepath = ctx->path_param("filepath");
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "File path: " + filepath;
             if (filepath == "some/long/path/to/file.txt") {
                  adv_server_side_assertions++;
@@ -595,7 +595,7 @@ public:
                     ctx->response().set_header("X-Admin-Check", "Passed");
                     ctx->complete(qb::http::AsyncTaskResult::CONTINUE); 
                 } else {
-                    ctx->response().status_code = HTTP_STATUS_FORBIDDEN;
+                    ctx->response().status() = qb::http::status::FORBIDDEN;
                     ctx->response().body() = "Access denied: Admin role required.";
                     ctx->response().set_header("X-Admin-Check", "Failed");
                     ctx->complete(); 
@@ -608,7 +608,7 @@ public:
             short_circuit_group->get("/resource", [](std::shared_ptr<AdvCtx> ctx){
                 adv_request_count_server++; 
                 adv_server_side_assertions++;
-                ctx->response().status_code = HTTP_STATUS_OK;
+                ctx->response().status() = qb::http::status::OK;
                 ctx->response().body() = "Admin resource accessed.";
                 ctx->complete();
             });
@@ -622,7 +622,7 @@ public:
         });
         this->router().post("/multi_method_resource", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++; adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_CREATED;
+            ctx->response().status() = qb::http::status::CREATED;
             ctx->response().body() = "POST multi_method: " + ctx->request().body().template as<std::string>();
             ctx->complete();
         });
@@ -633,7 +633,7 @@ public:
         });
         this->router().del("/multi_method_resource", [](std::shared_ptr<AdvCtx> ctx) { 
             adv_request_count_server++; adv_server_side_assertions++;
-            ctx->response().status_code = HTTP_STATUS_NO_CONTENT;
+            ctx->response().status() = qb::http::status::NO_CONTENT;
             ctx->complete();
         });
 
@@ -660,7 +660,7 @@ public:
             adv_request_count_server++; 
             adv_server_side_assertions++;
             ctx->response().set_header("Allow", "GET, POST, PUT, DELETE, OPTIONS");
-            ctx->response().status_code = HTTP_STATUS_NO_CONTENT; // Or HTTP_STATUS_OK
+            ctx->response().status() = qb::http::status::NO_CONTENT; // Or HTTP_STATUS_OK
             ctx->complete();
         });
 
@@ -752,7 +752,7 @@ public:
             async_mw_group->get("/resource", [](std::shared_ptr<AdvCtx> ctx){
                 adv_request_count_server++;
                 adv_server_side_assertions++; // Handler assertion
-                ctx->response().status_code = HTTP_STATUS_OK;
+                ctx->response().status() = qb::http::status::OK;
                 ctx->response().body() = "Async MW test successful!";
                 ctx->complete();
             });
@@ -772,7 +772,7 @@ public:
                     adv_server_side_assertions++; // Handler assertion
                     std::string current_order = ctx->response().header("X-Nested-Order");
                     ctx->response().set_header("X-Nested-Order", current_order + "Handler;");
-                    ctx->response().status_code = HTTP_STATUS_OK;
+                    ctx->response().status() = qb::http::status::OK;
                     ctx->response().body() = "Nested middleware passthrough successful!";
                     ctx->complete();
                 });
@@ -793,7 +793,7 @@ public:
                 nested_sc_outer_group->get("/inner/resource", [](std::shared_ptr<AdvCtx> ctx){
                     adv_request_count_server++; // Should NOT be reached
                     adv_server_side_assertions++; 
-                    ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body() = "SHOULD NOT SEE THIS - Nested SC failed";
                     ctx->complete();
                 });
@@ -811,7 +811,7 @@ public:
             conditional_mw_group->get("/action", [](std::shared_ptr<AdvCtx> ctx){
                 adv_request_count_server++;
                 adv_server_side_assertions++; // Handler assertion
-                ctx->response().status_code = HTTP_STATUS_OK;
+                ctx->response().status() = qb::http::status::OK;
                 ctx->response().body() = "Handler reached successfully after conditional MW.";
                 ctx->complete();
             });
@@ -1040,7 +1040,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /ping" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/ping"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("pong", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1050,7 +1050,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /api/v1/status (unauthorized)" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/api/v1/status"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status());
                 EXPECT_EQ("APIv1: Unauthorized", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1062,7 +1062,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                 qb::http::Request request{{"http://localhost:9877/api/v1/status"}};
                 request.add_header("Authorization", "Bearer valid_token_v1");
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("APIv1 Status: Healthy", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1084,19 +1084,19 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerOperations) {
                 qb::http::Request request{{"http://localhost:9877/api/v1/data/item123"}};
                 request.add_header("Authorization", "Bearer valid_token_v1");
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("ControllerPrefix_ Data for item: item123", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
             }
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending POST /api/v1/data" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_POST, {"http://localhost:9877/api/v1/data"}};
+                qb::http::Request request{qb::http::method::POST, {"http://localhost:9877/api/v1/data"}};
                 request.add_header("Authorization", "Bearer valid_token_v1"); // <<< THIS LINE
                 request.add_header("Content-Type", "application/json");
                 request.body() = "{\"name\":\"test_data\"}"; 
                 auto response = qb::http::POST(request);
-                EXPECT_EQ(HTTP_STATUS_CREATED, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_CREATED, response.status());
                 EXPECT_EQ("Data created: {\"name\":\"test_data\"}", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1115,7 +1115,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /legacy/custom" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/legacy/custom"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Response from MyCustomRoute for path: /legacy/custom", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1127,7 +1127,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /legacy/async_op" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/legacy/async_op"}};
                 auto response = qb::http::GET(request, 7.0); 
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Async operation completed in LegacyController", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1139,7 +1139,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /legacy/error_test" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/legacy/error_test"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_SERVICE_UNAVAILABLE, response.status_code); 
+                EXPECT_EQ(HTTP_STATUS_SERVICE_UNAVAILABLE, response.status());
                 EXPECT_EQ("A global server error occurred and was handled by our custom global handler.", response.body().as<std::string>()); 
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1161,7 +1161,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /files/some/long/path/to/file.txt" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/files/some/long/path/to/file.txt"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("File path: some/long/path/to/file.txt", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1171,7 +1171,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /short_circuit_test/admin_only/resource (forbidden)" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/short_circuit_test/admin_only/resource"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_FORBIDDEN, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_FORBIDDEN, response.status());
                 EXPECT_EQ("Access denied: Admin role required.", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1183,7 +1183,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                 qb::http::Request request{{"http://localhost:9877/short_circuit_test/admin_only/resource"}};
                 request.add_header("X-User-Role", "admin");
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Admin resource accessed.", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1205,7 +1205,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /multi_method_resource" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/multi_method_resource"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("GET multi_method", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1213,10 +1213,10 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
             }
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending POST /multi_method_resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_POST, {"http://localhost:9877/multi_method_resource"}};
+                qb::http::Request request{qb::http::method::POST, {"http://localhost:9877/multi_method_resource"}};
                 request.body() = "payload_for_post";
                 auto response = qb::http::POST(request);
-                EXPECT_EQ(HTTP_STATUS_CREATED, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_CREATED, response.status());
                 EXPECT_EQ("POST multi_method: payload_for_post", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1224,10 +1224,10 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
             }
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending PUT /multi_method_resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_PUT, {"http://localhost:9877/multi_method_resource"}};
+                qb::http::Request request{qb::http::method::PUT, {"http://localhost:9877/multi_method_resource"}};
                 request.body() = "payload_for_put";
                 auto response = qb::http::PUT(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("PUT multi_method: payload_for_put", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1235,18 +1235,18 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
             }
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending DELETE /multi_method_resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_DELETE, {"http://localhost:9877/multi_method_resource"}};
+                qb::http::Request request{qb::http::method::DEL, {"http://localhost:9877/multi_method_resource"}};
                 auto response = qb::http::DELETE(request);
-                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
             }
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending PATCH /multi_method_resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_PATCH, {"http://localhost:9877/multi_method_resource"}};
+                qb::http::Request request{qb::http::method::PATCH, {"http://localhost:9877/multi_method_resource"}};
                 auto response = qb::http::PATCH(request);
-                EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status_code); 
+                EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware")); 
                 EXPECT_EQ("L0;", response.header("X-MW-Trace")); // L0 still runs before 404 chain
                 adv_request_count_client++;
@@ -1279,7 +1279,7 @@ TEST_F(AdvancedHttpIntegrationTest, PathParamEncoding) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /param_test/" << encoded_param << " (decoded: " << tc.first << ")" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/param_test/" + encoded_param}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ(tc.second, response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1301,7 +1301,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /query_test?name=value" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/query_test?name=value"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("name=value;name1=not_found;name2=not_found;encoded_name=not_found", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1310,7 +1310,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /query_test?name1=value1&name2=value2" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/query_test?name1=value1&name2=value2"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("name=not_found;name1=value1;name2=value2;encoded_name=not_found", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1320,7 +1320,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /query_test?encoded_name=" << encoded_query_val << std::endl;
                 qb::http::Request request{{"http://localhost:9877/query_test?encoded_name=" + encoded_query_val}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("name=not_found;name1=not_found;name2=not_found;encoded_name=encoded value", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1341,7 +1341,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /specific/resource (exact)" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/specific/resource"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Exact: /specific/resource", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1350,7 +1350,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /specific/myid123 (param)" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/specific/myid123"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Param: /specific/myid123", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1359,7 +1359,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /specific/a/b/c (wildcard)" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/specific/a/b/c"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Wildcard: /specific/a/b/c", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1381,7 +1381,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /status_at_root" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/status_at_root"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Root controller says hello!", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1391,7 +1391,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /mw_chain_test/passthrough" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/mw_chain_test/passthrough"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Middleware chain passthrough complete", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware")); 
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1402,7 +1402,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /mw_short_circuit_test/resource" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/mw_short_circuit_test/resource"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code); 
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Short-circuited by Middleware3!", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1428,7 +1428,7 @@ TEST_F(AdvancedHttpIntegrationTest, NotFoundAndHeadRequests) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /this/path/does/not/exist" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/this/path/does/not/exist"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("Applied", response.header("X-Custom-404"));
@@ -1437,9 +1437,9 @@ TEST_F(AdvancedHttpIntegrationTest, NotFoundAndHeadRequests) {
             }
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending HEAD /ping" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_HEAD, {"http://localhost:9877/ping"}};
+                qb::http::Request request{qb::http::method::HEAD, {"http://localhost:9877/ping"}};
                 auto response = qb::http::HEAD(request); 
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_TRUE(response.body().as<std::string>().empty()); 
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1463,11 +1463,11 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
             // PUT Successful
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending PUT /api/v1/data/item789 (authorized)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_PUT, {"http://localhost:9877/api/v1/data/item789"}};
+                qb::http::Request request{qb::http::method::PUT, {"http://localhost:9877/api/v1/data/item789"}};
                 request.add_header("Authorization", "Bearer valid_token_v1");
                 request.body() = "{\"value\":\"updated_data\"}";
                 auto response = qb::http::PUT(request); 
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("ControllerPrefix_ Data updated for item: item789", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1477,10 +1477,10 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
             // DELETE Successful
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending DELETE /api/v1/data/item789 (authorized)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_DELETE, {"http://localhost:9877/api/v1/data/item789"}};
+                qb::http::Request request{qb::http::method::DEL, {"http://localhost:9877/api/v1/data/item789"}};
                 request.add_header("Authorization", "Bearer valid_token_v1");
                 auto response = qb::http::DELETE(request); 
-                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                 EXPECT_TRUE(response.body().as<std::string>().empty());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1490,10 +1490,10 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
             // PUT Unauthorized
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending PUT /api/v1/data/item789 (unauthorized)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_PUT, {"http://localhost:9877/api/v1/data/item789"}};
+                qb::http::Request request{qb::http::method::PUT, {"http://localhost:9877/api/v1/data/item789"}};
                 request.body() = "{\"value\":\"updated_data_unauth\"}";
                 auto response = qb::http::PUT(request);
-                EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status());
                 EXPECT_EQ("APIv1: Unauthorized", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1503,9 +1503,9 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
             // DELETE Unauthorized
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending DELETE /api/v1/data/item789 (unauthorized)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_DELETE, {"http://localhost:9877/api/v1/data/item789"}};
+                qb::http::Request request{qb::http::method::DEL, {"http://localhost:9877/api/v1/data/item789"}};
                 auto response = qb::http::DELETE(request);
-                EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status());
                 EXPECT_EQ("APIv1: Unauthorized", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1525,9 +1525,9 @@ TEST_F(AdvancedHttpIntegrationTest, OptionsRequestTest) {
         [&]() {
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending OPTIONS /multi_method_resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_OPTIONS, {"http://localhost:9877/multi_method_resource"}};
+                qb::http::Request request{qb::http::method::OPTIONS, {"http://localhost:9877/multi_method_resource"}};
                 auto response = qb::http::OPTIONS(request); 
-                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status_code); 
+                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("GET, POST, PUT, DELETE, OPTIONS", response.header("Allow"));
@@ -1547,10 +1547,10 @@ TEST_F(AdvancedHttpIntegrationTest, MiddlewareInducedErrorTest) {
         [&]() {
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /mw_error_test_sg/route" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_GET, {"http://localhost:9877/mw_error_test_sg/route"}};
+                qb::http::Request request{qb::http::method::GET, {"http://localhost:9877/mw_error_test_sg/route"}};
                 auto response = qb::http::GET(request);
 
-                EXPECT_NE(HTTP_STATUS_OK, response.status_code); 
+                EXPECT_NE(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("Applied", response.header("X-Error-Inducer"));
@@ -1572,10 +1572,10 @@ TEST_F(AdvancedHttpIntegrationTest, GlobalErrorHandlerForMiddlewareErrorTest) {
         [&]() {
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /mw_error_test_sg/route (expecting global error handler)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_GET, {"http://localhost:9877/mw_error_test_sg/route"}};
+                qb::http::Request request{qb::http::method::GET, {"http://localhost:9877/mw_error_test_sg/route"}};
                 auto response = qb::http::GET(request);
 
-                EXPECT_EQ(HTTP_STATUS_SERVICE_UNAVAILABLE, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_SERVICE_UNAVAILABLE, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("Applied", response.header("X-Error-Inducer"));
@@ -1598,9 +1598,9 @@ TEST_F(AdvancedHttpIntegrationTest, MethodNotAllowedTest) {
         [&]() {
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending PATCH /ping (method not allowed)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_PATCH, {"http://localhost:9877/ping"}};
+                qb::http::Request request{qb::http::method::PATCH, {"http://localhost:9877/ping"}};
                 auto response = qb::http::PATCH(request);
-                EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("Applied", response.header("X-Custom-404"));
@@ -1622,10 +1622,10 @@ TEST_F(AdvancedHttpIntegrationTest, ConditionalMiddlewareFlowTest) {
             // Case 1: Middleware completes the request (condition not met)
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /conditional_mw_route/action (MW completes)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_GET, {"http://localhost:9877/conditional_mw_route/action"}};
+                qb::http::Request request{qb::http::method::GET, {"http://localhost:9877/conditional_mw_route/action"}};
                 auto response = qb::http::GET(request);
 
-                EXPECT_EQ(299, response.status_code); 
+                EXPECT_EQ(299, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("completed_by_mw", response.header("X-Conditional-Result"));
@@ -1636,11 +1636,11 @@ TEST_F(AdvancedHttpIntegrationTest, ConditionalMiddlewareFlowTest) {
             // Case 2: Middleware continues to handler (condition met)
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /conditional_mw_route/action (MW continues)" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_GET, {"http://localhost:9877/conditional_mw_route/action"}};
+                qb::http::Request request{qb::http::method::GET, {"http://localhost:9877/conditional_mw_route/action"}};
                 request.add_header("X-Test-Condition", "pass");
                 auto response = qb::http::GET(request);
 
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("continued", response.header("X-Conditional-Result"));
@@ -1660,10 +1660,10 @@ TEST_F(AdvancedHttpIntegrationTest, AsyncMiddlewareTest) {
         [&]() {
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /async_mw_test/resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_GET, {"http://localhost:9877/async_mw_test/resource"}};
+                qb::http::Request request{qb::http::method::GET, {"http://localhost:9877/async_mw_test/resource"}};
                 auto response = qb::http::GET(request, 5.0); 
 
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("Completed", response.header("X-Async-MW-Status"));
@@ -1685,10 +1685,10 @@ TEST_F(AdvancedHttpIntegrationTest, NestedMiddlewareOrderAndShortCircuitTest) {
             // Test passthrough
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /nested_mw/outer/inner/resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_GET, {"http://localhost:9877/nested_mw/outer/inner/resource"}};
+                qb::http::Request request{qb::http::method::GET, {"http://localhost:9877/nested_mw/outer/inner/resource"}};
                 auto response = qb::http::GET(request);
 
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("NestedMW1;NestedMW2;Handler;", response.header("X-Nested-Order"));
@@ -1698,10 +1698,10 @@ TEST_F(AdvancedHttpIntegrationTest, NestedMiddlewareOrderAndShortCircuitTest) {
             // Test short-circuit in nested group
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /nested_sc/outer/inner/resource" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_GET, {"http://localhost:9877/nested_sc/outer/inner/resource"}};
+                qb::http::Request request{qb::http::method::GET, {"http://localhost:9877/nested_sc/outer/inner/resource"}};
                 auto response = qb::http::GET(request);
 
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 EXPECT_EQ("NestedMW1;NestedSC;", response.header("X-Nested-Order")); 
@@ -1726,7 +1726,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /specific_first/static_val" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/specific_first/static_val"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Static: /specific_first/static_val", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1737,7 +1737,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /specific_first/param_val" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/specific_first/param_val"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Param: /specific_first/param_val", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1748,7 +1748,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /specific_second/static_val" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/specific_second/static_val"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Static: /specific_second/static_val", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1759,7 +1759,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /overlap_test/foo/bar" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/overlap_test/foo/bar"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Static: /overlap_test/foo/bar", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1770,7 +1770,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /overlap_test/some/other/path" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/overlap_test/some/other/path"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Wildcard: /overlap_test/some/other/path", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1781,7 +1781,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /precedence_group/route1" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/precedence_group/route1"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("ParentGroup: /precedence_group/route1", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1792,7 +1792,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /precedence_group/nested/route1" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/precedence_group/nested/route1"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("NestedGroup: /precedence_group/nested/route1", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1817,7 +1817,7 @@ TEST_F(AdvancedHttpIntegrationTest, NestedStructureMiddlewareTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /level1_group/level2_nested_group/level3_controller/endpoint" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/level1_group/level2_nested_group/level3_controller/endpoint"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Deeply nested endpoint reached!", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 // Verify the trace header shows correct order of middleware execution
@@ -1843,7 +1843,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /wildcard_multi/static_prefix/foo/bar/baz" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/wildcard_multi/static_prefix/foo/bar/baz"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Static: /wildcard_multi/static_prefix/foo/bar/baz", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1854,7 +1854,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /wildcard_multi/static_prefix/segment1/segment2" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/wildcard_multi/static_prefix/segment1/segment2"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Wildcard after static: segment1/segment2", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1865,7 +1865,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /wildcard_multi/another_static/other_segments/file.txt" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/wildcard_multi/another_static/other_segments/file.txt"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Higher wildcard: another_static/other_segments/file.txt", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1880,7 +1880,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET /wildcard_multi/static_prefix/onlyone" << std::endl;
                 qb::http::Request request{{"http://localhost:9877/wildcard_multi/static_prefix/onlyone"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Wildcard after static: onlyone", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1906,7 +1906,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET " << base_url << std::endl;
                 qb::http::Request request{{base_url}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("List of all items", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1915,10 +1915,10 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
             // 2. POST /items (Create)
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending POST " << base_url << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_POST, {base_url}};
+                qb::http::Request request{qb::http::method::POST, {base_url}};
                 request.body() = "new_item_data";
                 auto response = qb::http::POST(request);
-                EXPECT_EQ(HTTP_STATUS_CREATED, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_CREATED, response.status());
                 EXPECT_EQ("Created item with body: new_item_data", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1928,7 +1928,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending GET " << base_url << "/item123" << std::endl;
                 qb::http::Request request{{base_url + "/item123"}};
                 auto response = qb::http::GET(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Item details for: item123", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1936,10 +1936,10 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
             // 4. PUT /items/item123 (Update)
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending PUT " << base_url << "/item123" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_PUT, {base_url + "/item123"}};
+                qb::http::Request request{qb::http::method::PUT, {base_url + "/item123"}};
                 request.body() = "updated_item_data";
                 auto response = qb::http::PUT(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Updated item item123 with: updated_item_data", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1947,10 +1947,10 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
             // 5. PATCH /items/item123 (Partial Update)
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending PATCH " << base_url << "/item123" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_PATCH, {base_url + "/item123"}};
+                qb::http::Request request{qb::http::method::PATCH, {base_url + "/item123"}};
                 request.body() = "partial_update_data";
                 auto response = qb::http::PATCH(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_EQ("Patched item item123 with: partial_update_data", response.body().as<std::string>());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1958,9 +1958,9 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
             // 6. DELETE /items/item123 (Delete)
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending DELETE " << base_url << "/item123" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_DELETE, {base_url + "/item123"}};
+                qb::http::Request request{qb::http::method::DEL, {base_url + "/item123"}};
                 auto response = qb::http::DELETE(request);
-                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                 EXPECT_TRUE(response.body().as<std::string>().empty());
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1968,9 +1968,9 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
             // 7. HEAD /items
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending HEAD " << base_url << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_HEAD, {base_url}};
+                qb::http::Request request{qb::http::method::HEAD, {base_url}};
                 auto response = qb::http::HEAD(request);
-                EXPECT_EQ(HTTP_STATUS_OK, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_OK, response.status());
                 EXPECT_TRUE(response.body().as<std::string>().empty());
                 EXPECT_EQ("Head request for items list", response.header("X-Head-Info"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1979,9 +1979,9 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
             // 8. OPTIONS /items
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending OPTIONS " << base_url << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_OPTIONS, {base_url}};
+                qb::http::Request request{qb::http::method::OPTIONS, {base_url}};
                 auto response = qb::http::OPTIONS(request);
-                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                 EXPECT_EQ("GET, POST, HEAD, OPTIONS", response.header("Allow"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;
@@ -1989,9 +1989,9 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
             // 9. OPTIONS /items/item123
             {
                 std::cout << "Client (" << GetCurrentTestName() << "): Sending OPTIONS " << base_url << "/item123" << std::endl;
-                qb::http::Request request{qb::http::method::HTTP_OPTIONS, {base_url + "/item123"}};
+                qb::http::Request request{qb::http::method::OPTIONS, {base_url + "/item123"}};
                 auto response = qb::http::OPTIONS(request);
-                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status_code);
+                EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                 EXPECT_EQ("GET, PUT, PATCH, DELETE, OPTIONS", response.header("Allow"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                 adv_request_count_client++;

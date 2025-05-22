@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/handler_node.h
+ * @file qbm/http/routing/handler_node.h
  * @brief Defines the IHandlerNode interface, a base for elements in the HTTP routing tree.
  *
  * This file contains the `IHandlerNode` abstract base class, which serves as a common

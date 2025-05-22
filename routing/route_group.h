@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/route_group.h
+ * @file qbm/http/routing/route_group.h
  * @brief Defines the RouteGroup class for organizing HTTP routes hierarchically.
  *
  * This file contains the `RouteGroup` class template, which allows for the grouping
@@ -88,37 +88,37 @@ public:
 
     /** @brief Adds a GET route. @see add_route */
     RouteGroup<Session>& get(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HTTP_GET, std::move(handler_fn));
+        return add_route(std::move(path), qb::http::method::GET, std::move(handler_fn));
     }
 
     /** @brief Adds a POST route. @see add_route */
     RouteGroup<Session>& post(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HTTP_POST, std::move(handler_fn));
+        return add_route(std::move(path), qb::http::method::POST, std::move(handler_fn));
     }
 
     /** @brief Adds a PUT route. @see add_route */
     RouteGroup<Session>& put(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HTTP_PUT, std::move(handler_fn));
+        return add_route(std::move(path), qb::http::method::PUT, std::move(handler_fn));
     }
 
     /** @brief Adds a DELETE route. @see add_route */
     RouteGroup<Session>& del(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HTTP_DELETE, std::move(handler_fn));
+        return add_route(std::move(path), qb::http::method::DEL, std::move(handler_fn));
     }
 
     /** @brief Adds a PATCH route. @see add_route */
     RouteGroup<Session>& patch(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HTTP_PATCH, std::move(handler_fn));
+        return add_route(std::move(path), qb::http::method::PATCH, std::move(handler_fn));
     }
 
     /** @brief Adds an OPTIONS route. @see add_route */
     RouteGroup<Session>& options(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HTTP_OPTIONS, std::move(handler_fn));
+        return add_route(std::move(path), qb::http::method::OPTIONS, std::move(handler_fn));
     }
 
     /** @brief Adds a HEAD route. @see add_route */
     RouteGroup<Session>& head(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HTTP_HEAD, std::move(handler_fn));
+        return add_route(std::move(path), qb::http::method::HEAD, std::move(handler_fn));
     }
 
     /**
@@ -136,37 +136,37 @@ public:
 
     /** @brief Adds a GET route with an `ICustomRoute` handler. @see add_route */
     RouteGroup<Session>& get(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route) {
-        return add_route(std::move(path), qb::http::method::HTTP_GET, std::move(custom_route));
+        return add_route(std::move(path), qb::http::method::GET, std::move(custom_route));
     }
 
     /** @brief Adds a POST route with an `ICustomRoute` handler. @see add_route */
     RouteGroup<Session>& post(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route) {
-        return add_route(std::move(path), qb::http::method::HTTP_POST, std::move(custom_route));
+        return add_route(std::move(path), qb::http::method::POST, std::move(custom_route));
     }
 
     /** @brief Adds a PUT route with an `ICustomRoute` handler. @see add_route */
     RouteGroup<Session>& put(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route) {
-        return add_route(std::move(path), qb::http::method::HTTP_PUT, std::move(custom_route));
+        return add_route(std::move(path), qb::http::method::PUT, std::move(custom_route));
     }
 
     /** @brief Adds a DELETE route with an `ICustomRoute` handler. @see add_route */
     RouteGroup<Session>& del(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route) {
-        return add_route(std::move(path), qb::http::method::HTTP_DELETE, std::move(custom_route));
+        return add_route(std::move(path), qb::http::method::DEL, std::move(custom_route));
     }
 
     /** @brief Adds a PATCH route with an `ICustomRoute` handler. @see add_route */
     RouteGroup<Session>& patch(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route) {
-        return add_route(std::move(path), qb::http::method::HTTP_PATCH, std::move(custom_route));
+        return add_route(std::move(path), qb::http::method::PATCH, std::move(custom_route));
     }
 
     /** @brief Adds an OPTIONS route with an `ICustomRoute` handler. @see add_route */
     RouteGroup<Session>& options(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route) {
-        return add_route(std::move(path), qb::http::method::HTTP_OPTIONS, std::move(custom_route));
+        return add_route(std::move(path), qb::http::method::OPTIONS, std::move(custom_route));
     }
 
     /** @brief Adds a HEAD route with an `ICustomRoute` handler. @see add_route */
     RouteGroup<Session>& head(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route) {
-        return add_route(std::move(path), qb::http::method::HTTP_HEAD, std::move(custom_route));
+        return add_route(std::move(path), qb::http::method::HEAD, std::move(custom_route));
     }
 
     /**
@@ -318,37 +318,37 @@ public:
 
     /** @brief Adds a GET route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args> RouteGroup<Session>& get(std::string path, Args&&... ctor_args) {
-        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_GET, std::forward<Args>(ctor_args)...);
+        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::GET, std::forward<Args>(ctor_args)...);
     }
 
     /** @brief Adds a POST route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args> RouteGroup<Session>& post(std::string path, Args&&... ctor_args) {
-        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_POST, std::forward<Args>(ctor_args)...);
+        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::POST, std::forward<Args>(ctor_args)...);
     }
 
     /** @brief Adds a PUT route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args> RouteGroup<Session>& put(std::string path, Args&&... ctor_args) {
-        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_PUT, std::forward<Args>(ctor_args)...);
+        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::PUT, std::forward<Args>(ctor_args)...);
     }
 
     /** @brief Adds a DELETE route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args> RouteGroup<Session>& del(std::string path, Args&&... ctor_args) {
-        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_DELETE, std::forward<Args>(ctor_args)...);
+        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::DEL, std::forward<Args>(ctor_args)...);
     }
 
     /** @brief Adds a PATCH route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args> RouteGroup<Session>& patch(std::string path, Args&&... ctor_args) {
-        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_PATCH, std::forward<Args>(ctor_args)...);
+        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::PATCH, std::forward<Args>(ctor_args)...);
     }
 
     /** @brief Adds an OPTIONS route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args> RouteGroup<Session>& options(std::string path, Args&&... ctor_args) {
-        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_OPTIONS, std::forward<Args>(ctor_args)...);
+        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::OPTIONS, std::forward<Args>(ctor_args)...);
     }
 
     /** @brief Adds a HEAD route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args> RouteGroup<Session>& head(std::string path, Args&&... ctor_args) {
-        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_HEAD, std::forward<Args>(ctor_args)...);
+        return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HEAD, std::forward<Args>(ctor_args)...);
     }
 
 }; // class RouteGroup

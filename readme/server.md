@@ -57,7 +57,7 @@ public:
         // We need to pass the session shared_ptr to route_context
         if (!this->server().router().route_context(this->shared_from_this(), req.http)) {
             // If no route matched, send a default 404
-            response().status_code = HTTP_STATUS_NOT_FOUND;
+            response().status() = HTTP_STATUS_NOT_FOUND;
             response().body() = "Not Found";
             *this << response(); // Send the 404 response
         }

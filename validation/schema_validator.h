@@ -1,11 +1,22 @@
+/**
+ * @file qbm/http/validation/schema_validator.h
+ * @brief Defines the SchemaValidator class for validating HTTP requests.
+ *
+ * This file contains the definition of the SchemaValidator class,
+ * which is used to validate HTTP requests according to the schema defined
+ * in the RequestValidator.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #pragma once
 
 #include <string>
 #include <vector>
 #include <memory>
-// <map> is not directly used by this header, <qb/system/container/unordered_set.h> is used for some rules.
 #include <qb/json.h>
-// #include <qb/system/container/unordered_set.h> // Included by rule.h if needed by specific rules
 #include "./rule.h"       
 #include "./error.h"      
 

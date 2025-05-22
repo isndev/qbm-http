@@ -1,36 +1,21 @@
 /**
- * @file http.cpp
- * @brief Implementation of the HTTP client and server for the QB Actor Framework
+ * @file qbm/http/http.cpp
+ * @brief Main include file for the QB HTTP client and server module.
  *
- * This file contains the implementation of the HTTP protocol features defined in http.h,
- * providing concrete implementations for:
+ * This header aggregates all core components of the qb-http module, providing a comprehensive
+ * suite for HTTP/1.1 communication. It defines foundational classes for requests (`qb::http::Request`),
+ * responses (`qb::http::Response`), message parsing (`qb::http::Parser`), asynchronous client
+ * operations (`qb::http::async`), protocol handlers (`qb::protocol::http_server`, `qb::protocol::http_client`),
+ * and server-side routing (`qb::http::Router`).
  *
- * - HTTP request and response serialization and deserialization
- * - HTTP header parsing and cookie handling
- * - Content compression and decompression
- * - Multipart form data parsing and generation
- * - HTTP message body management
- * - Utility functions for HTTP protocol operations
- *
- * The implementation follows HTTP/1.1 standards (RFCs 7230-7235) and provides
- * efficient, high-performance processing of HTTP messages in both client and server
- * contexts.
- *
- * @see http.h for interface definitions and API documentation
+ * The module is designed for high performance and integration with the qb-io asynchronous
+ * I/O layer, leveraging libev for event handling. It supports features like content
+ * compression, cookie management, multipart forms, and customizable routing.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2021 isndev (www.qbaf.io)
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *         http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
 
 #include "http.h"
@@ -100,7 +85,7 @@ template <>
 pipe<char> &
 pipe<char>::put<qb::http::Request>(const qb::http::Request &r) {
     // HTTP Status Line
-    *this << ::http_method_name(r.method) << qb::http::sep
+    *this << ::http_method_name(r.method()) << qb::http::sep
           << r.uri().path();
     if (r.uri().encoded_queries().size())
         *this << "?" << r.uri().encoded_queries();
@@ -148,10 +133,8 @@ pipe<char> &
 pipe<char>::put<qb::http::Response>(const qb::http::Response &r) {
     // HTTP Status Line
     *this << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep
-          << r.status_code << qb::http::sep
-          << (r.status.empty()
-                  ? ::http_status_name(r.status_code)
-                  : r.status.c_str())
+          << r.status() << qb::http::sep
+          << std::to_string(r.status())
           << qb::http::endl;
     // HTTP Headers
     for (const auto &it : r.headers()) {

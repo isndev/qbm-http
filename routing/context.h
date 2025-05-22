@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/context.h
+ * @file qbm/http/routing/context.h
  * @brief Defines the Context class, which encapsulates the state of an HTTP request's processing lifecycle.
  *
  * The `Context` object is a central piece of the qb-http routing system. It holds the
@@ -345,7 +345,7 @@ public:
                     break;
 
                 case AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR:
-                    _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                    _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     _is_completed_internally = true;
                     finalize_processing_internal();
                     break;
@@ -356,7 +356,7 @@ public:
                         return;
                     }
                     if (_current_processing_phase == ProcessingPhase::ERROR_CHAIN) { 
-                        _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                        _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
                         _is_completed_internally = true;
                         finalize_processing_internal();
                     } else { 
@@ -370,12 +370,12 @@ public:
                                 _current_task_index = 0;
                                 proceed_to_next_task_internal();
                             } else {
-                                _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                                _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
                                 _is_completed_internally = true;
                                 finalize_processing_internal();
                             }
                         } else {
-                            _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                            _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
                             _is_completed_internally = true;
                             finalize_processing_internal();
                         }
@@ -383,7 +383,7 @@ public:
                     break;
             }
         } catch (...) {
-            _response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
             _is_completed_internally = true;
             finalize_processing_internal();
         }
@@ -407,7 +407,7 @@ public:
             }
         }
         // Always set to Service Unavailable on cancellation, regardless of previous state.
-        _response.status_code = HTTP_STATUS_SERVICE_UNAVAILABLE; 
+        _response.status() = qb::http::status::SERVICE_UNAVAILABLE;
 
         AsyncTaskResult cancel_result = AsyncTaskResult::CANCELLED;
         this->complete(cancel_result);

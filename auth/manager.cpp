@@ -1,11 +1,29 @@
-#include "manager.h"
-#include <ctime>
-#include <iomanip>
-#include <qb/io/crypto_jwt.h>
-#include <qb/json.h>
-#include <sstream>
-#include <algorithm> // Required for std::transform and std::isspace
-#include <cctype>    // Required for ::tolower and ::isspace
+/**
+ * @file qbm/http/auth/manager.cpp
+ * @brief Implements the qb::http::auth::Manager class for authentication.
+ *
+ * This file provides the definitions for the methods of the `Manager` class,
+ * including token payload generation, token creation using `qb::jwt`,
+ * extraction of tokens from HTTP headers, and token verification with user extraction.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Auth
+ */
+
+#include "./manager.h"
+#include "../utility.h" // For qb::http::utility::iequals (used in extract_token_from_header)
+
+#include <qb/json.h>          // For qb::json manipulation
+#include <qb/io/crypto_jwt.h> // For qb::jwt::create, qb::jwt::verify, and related options/structs
+
+#include <chrono>      // For std::chrono::system_clock, std::time (used via current_timestamp)
+#include <ctime>       // For std::time_t, std::time, std::gmtime (if timestamp_to_iso8601 were used)
+#include <iomanip>     // For std::put_time, std::get_time (if ISO8601 helpers were used)
+#include <sstream>     // For std::ostringstream, std::istringstream (if ISO8601 helpers were used)
+#include <algorithm>   // For std::transform, std::isspace, std::find_if_not
+#include <cctype>      // For std::tolower, std::isspace
 
 namespace qb {
 namespace http {
@@ -31,8 +49,13 @@ using json = qb::json;
 // }
 
 // Get current timestamp
-static uint64_t current_timestamp() {
-    return static_cast<uint64_t>(std::time(nullptr));
+static uint64_t current_timestamp() noexcept {
+    // Using std::chrono for a more C++ idiomatic way to get current time.
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count()
+    );
 }
 
 // Implementation of generate_token_payload

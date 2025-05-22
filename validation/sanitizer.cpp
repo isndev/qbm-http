@@ -1,3 +1,17 @@
+/**
+ * @file qbm/http/validation/sanitizer.cpp
+ * @brief Implementation of the Sanitizer class and predefined sanitization functions.
+ *
+ * This file provides the method definitions for the `Sanitizer` class, which is responsible
+ * for applying registered sanitization rules to `qb::json` data. It also contains the
+ * implementations for common sanitization routines provided in the `PredefinedSanitizers` namespace,
+ * such as trimming whitespace, escaping HTML, case conversion, and basic tag stripping.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #include "./sanitizer.h"
 #include <algorithm> 
 #include <cctype>    
@@ -85,7 +99,7 @@ void Sanitizer::sanitize(qb::json& data) const {
 
 namespace PredefinedSanitizers {
 
-SanitizerFunction trim() {
+SanitizerFunction trim() noexcept {
     return [](const std::string& input) -> std::string {
         // Find the first non-whitespace character
         auto first_char = std::find_if_not(input.begin(), input.end(), [](unsigned char c){ return std::isspace(c); });
@@ -99,7 +113,7 @@ SanitizerFunction trim() {
     };
 }
 
-SanitizerFunction to_lower_case() {
+SanitizerFunction to_lower_case() noexcept {
     return [](const std::string& input) -> std::string {
         std::string output = input;
         std::transform(output.begin(), output.end(), output.begin(), [](unsigned char c){ return std::tolower(c); });
@@ -107,7 +121,7 @@ SanitizerFunction to_lower_case() {
     };
 }
 
-SanitizerFunction to_upper_case() {
+SanitizerFunction to_upper_case() noexcept {
     return [](const std::string& input) -> std::string {
         std::string output = input;
         std::transform(output.begin(), output.end(), output.begin(), [](unsigned char c){ return std::toupper(c); });
@@ -115,7 +129,7 @@ SanitizerFunction to_upper_case() {
     };
 }
 
-SanitizerFunction escape_html() {
+SanitizerFunction escape_html() noexcept {
     return [](const std::string& input) -> std::string {
         std::string buffer;
         buffer.reserve(input.size()); // Avoid multiple reallocations
@@ -133,7 +147,7 @@ SanitizerFunction escape_html() {
     };
 }
 
-SanitizerFunction strip_html_tags() {
+SanitizerFunction strip_html_tags() noexcept {
     return [](const std::string& input) -> std::string {
         // Basic regex to remove anything that looks like a tag. 
         // For robust HTML sanitization, a proper HTML parser would be better, but this is common for simple stripping.
@@ -142,7 +156,7 @@ SanitizerFunction strip_html_tags() {
     };
 }
 
-SanitizerFunction alphanumeric_only() {
+SanitizerFunction alphanumeric_only() noexcept {
     return [](const std::string& input) -> std::string {
         std::string output;
         output.reserve(input.length());
@@ -155,7 +169,7 @@ SanitizerFunction alphanumeric_only() {
     };
 }
 
-SanitizerFunction normalize_whitespace() {
+SanitizerFunction normalize_whitespace() noexcept {
     return [](const std::string& input) -> std::string {
         std::string trimmed = trim()(input); // First, trim leading/trailing whitespace
         if (trimmed.empty()) return "";
@@ -180,7 +194,7 @@ SanitizerFunction normalize_whitespace() {
     };
 }
 
-SanitizerFunction escape_sql_like() {
+SanitizerFunction escape_sql_like() noexcept {
     // Basic escaping for SQL LIKE wildcards and single quotes.
     // IMPORTANT: This is NOT a comprehensive SQL injection prevention method.
     // Always use parameterized queries or a proper SQL escaping library for database interactions.

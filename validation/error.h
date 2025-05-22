@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/validation/error.h
+ * @brief Defines classes and functions for HTTP validation error management.
+ *
+ * This file provides the `Error` class to represent individual validation errors,
+ * the `Result` class for managing collections of validation errors, and utility
+ * functions for parsing `Error` and `Result` headers according to RFC 6265.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #pragma once
 
 #include <string>

@@ -55,7 +55,7 @@ protected:
 
     qb::http::Request create_request(const std::string& target_path = "/timed_route") {
         qb::http::Request req;
-        req.method = qb::http::method::HTTP_GET;
+        req.method() = qb::http::method::GET;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -71,7 +71,7 @@ protected:
                 std::this_thread::sleep_for(delay);
             }
             if (_session) _session->_final_handler_called = true;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Handler Executed";
             ctx->complete();
         };
@@ -255,7 +255,7 @@ TEST_F(TimingMiddlewareTest, TimingWhenHandlerThrowsException) {
         // This handler will complete the context with an error, but also throw.
         // Or, it could just throw and rely on a higher-level error handler to call ctx->complete(ERROR).
         // For TimingMiddleware, what matters is if REQUEST_COMPLETE hook is run by Context/RouterCore.
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
         ctx->response().body() = "Handler threw intentionally";
         // No explicit ctx->complete() here, to simulate a raw throw or an error handler doing it.
         // If RouterCore ensures finalize_processing (and thus REQUEST_COMPLETE hooks) on exceptions, timing should work.
@@ -272,8 +272,8 @@ TEST_F(TimingMiddlewareTest, TimingWhenHandlerThrowsException) {
             // Assuming status_code_type defaults to 0 or an equivalent state if not explicitly set.
             // If there's a specific "unset" enum member, that should be used.
             // For now, checking against a default-constructed qb::http::status (often 0 for enums).
-            if (ctx->response().status_code == qb::http::status{}) { 
-                ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            if (ctx->response().status() == qb::http::status{}) {
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             }
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Ensure completion
         }
@@ -358,7 +358,7 @@ TEST_F(TimingMiddlewareTest, TimingFor404NotFound) {
     // The final handler (if any is configured for 404s) might or might not set _final_handler_called.
     // For this test, we primarily care that timing happened.
     // The default router behavior should result in a 404 status code.
-    EXPECT_EQ(_session->get_response_ref().status_code, qb::http::status::HTTP_STATUS_NOT_FOUND);
+    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::NOT_FOUND);
 }
 
 TEST_F(TimingMiddlewareTest, CallbackThrowsException) {
@@ -395,7 +395,7 @@ TEST_F(TimingMiddlewareTest, CallbackThrowsException) {
     // If a hook throwing prevents subsequent processing or sets an error status, this might change.
     // For now, let's assume the simple_handler still completes.
     EXPECT_TRUE(_session->_final_handler_called); 
-    EXPECT_EQ(_session->get_response_ref().status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::OK);
     // _last_duration_logged will not be set by the throwing_cb. If we had another non-throwing 
     // timing callback, we could check that.
 }
@@ -438,5 +438,5 @@ TEST_F(TimingMiddlewareTest, ContextKeyCollisionWrongType) {
     
     // The request should still complete normally via simple_handler.
     EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->get_response_ref().status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::OK);
 }

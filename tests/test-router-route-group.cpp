@@ -81,7 +81,7 @@ protected:
 
     qb::http::Request create_request(qb::http::method method_val, const std::string& target_path) {
         qb::http::Request req;
-        req.method = method_val;
+        req.method() = method_val;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -95,13 +95,13 @@ protected:
     }
 
     // Helper to make a simple synchronous handler for testing
-    qb::http::RouteHandlerFn<MockRouteGroupSession> make_simple_handler(const std::string& id, qb::http::status status = qb::http::status::HTTP_STATUS_OK, const std::string& body_prefix = "Handler response: ") {
+    qb::http::RouteHandlerFn<MockRouteGroupSession> make_simple_handler(const std::string& id, qb::http::status status = qb::http::status::OK, const std::string& body_prefix = "Handler response: ") {
         return [id, status, body_prefix](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
             if (ctx->session()) {
                 ctx->session()->trace(id);
                 ctx->session()->_handler_executed_flag = true;
             }
-            ctx->response().status_code = status;
+            ctx->response().status() = status;
             ctx->response().body() = body_prefix + id;
             ctx->complete();
         };
@@ -172,7 +172,7 @@ public:
 
     void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
         if (ctx->session()) ctx->session()->trace(_id);
-        ctx->response().status_code = _status_code;
+        ctx->response().status() = _status_code;
         ctx->response().body() = _body;
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Short-circuit
     }
@@ -186,12 +186,12 @@ private:
 
 class TestRouteGroupErrorMiddleware : public qb::http::IMiddleware<MockRouteGroupSession> {
 public:
-    TestRouteGroupErrorMiddleware(std::string id, qb::http::status status_to_set_before_error = qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE, std::string body_prefix = "Error from mw: ")
+    TestRouteGroupErrorMiddleware(std::string id, qb::http::status status_to_set_before_error = qb::http::status::SERVICE_UNAVAILABLE, std::string body_prefix = "Error from mw: ")
         : _id(std::move(id)), _status_to_set_before_error(status_to_set_before_error), _body_prefix(std::move(body_prefix)) {}
 
     void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
         if (ctx->session()) ctx->session()->trace(_id);
-        ctx->response().status_code = _status_to_set_before_error;
+        ctx->response().status() = _status_to_set_before_error;
         ctx->response().body() = _body_prefix + _id;
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     }
@@ -216,20 +216,20 @@ public:
         // This middleware will be prepended to controller's own task chain for its routes
         this->use(std::make_shared<TestRouteGroupSyncMiddleware>("ctrl_sync_mw"));
 
-        this->add_controller_route("/hello", qb::http::method::HTTP_GET, [this](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+        this->add_controller_route("/hello", qb::http::method::GET, [this](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
             if (ctx->session()) {
                 ctx->session()->trace("ctrl_hello_handler");
             }
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Hello from controller in group";
             ctx->complete();
         });
 
-        this->add_controller_route("/world", qb::http::method::HTTP_GET, [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+        this->add_controller_route("/world", qb::http::method::GET, [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
             if (ctx->session()) {
                 ctx->session()->trace("ctrl_world_handler");
             }
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "World from controller in group";
             ctx->complete();
         });
@@ -241,7 +241,7 @@ public:
 // --- Helper Custom Route for RouteGroup Tests ---
 class TestCustomRoute : public qb::http::ICustomRoute<MockRouteGroupSession> {
 public:
-    TestCustomRoute(std::string id, bool signal_error = false, qb::http::status status_code = qb::http::status::HTTP_STATUS_OK, std::string body_content = "Custom Route Body")
+    TestCustomRoute(std::string id, bool signal_error = false, qb::http::status status_code = qb::http::status::OK, std::string body_content = "Custom Route Body")
         : _id(std::move(id)), _signal_error(signal_error), _status_code(status_code), _body_content(std::move(body_content)) {}
 
     void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
@@ -249,11 +249,11 @@ public:
             ctx->session()->trace(_id);
         }
         if (_signal_error) {
-            ctx->response().status_code = HTTP_STATUS_EXPECTATION_FAILED; // Some status before error
+            ctx->response().status() = qb::http::status::EXPECTATION_FAILED; // Some status before error
             ctx->response().body() = "Custom route " + _id + " signaling error";
             ctx->complete(qb::http::AsyncTaskResult::ERROR);
         } else {
-            ctx->response().status_code = _status_code;
+            ctx->response().status() = _status_code;
             ctx->response().body() = _body_content;
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
         }
@@ -281,7 +281,7 @@ TEST_F(RouterRouteGroupTest, MountRouteGroupAndCallRoute) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: api_users_handler");
     EXPECT_EQ(_mock_session->get_trace(), "api_users_handler");
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
@@ -298,7 +298,7 @@ TEST_F(RouterRouteGroupTest, NestedRouteGroup) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: api_v1_status_handler");
     EXPECT_EQ(_mock_session->get_trace(), "api_v1_status_handler");
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
@@ -315,7 +315,7 @@ TEST_F(RouterRouteGroupTest, RouteGroupWithPathParameters) {
             }
             // Explicitly construct std::string from std::string_view
             std::string item_id_str(ctx->path_parameters().get("item_id").value_or("NOT_FOUND"));
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Item: " + item_id_str;
             ctx->complete();
         }
@@ -327,7 +327,7 @@ TEST_F(RouterRouteGroupTest, RouteGroupWithPathParameters) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Item: abc789");
     EXPECT_EQ(_mock_session->get_trace(), "item_details_handler");
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
@@ -348,7 +348,7 @@ TEST_F(RouterRouteGroupTest, RouteGroupWithSyncMiddleware) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: api_data_handler");
     EXPECT_EQ(_mock_session->get_trace(), "group_sync_mw;api_data_handler");
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
@@ -371,7 +371,7 @@ TEST_F(RouterRouteGroupTest, RouteGroupWithAsyncMiddleware) {
 
     _task_executor.processAllTasks(); // Process middleware task
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: api_data_handler");
     EXPECT_EQ(_mock_session->get_trace(), "group_async_mw_HANDLE_CALLED;group_async_mw_TASK_EXECUTED;api_data_handler");
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
@@ -392,7 +392,7 @@ TEST_F(RouterRouteGroupTest, MiddlewareInParentAndNestedGroup) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: status_handler");
     EXPECT_EQ(_mock_session->get_trace(), "api_mw;v1_mw;status_handler");
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
@@ -411,7 +411,7 @@ TEST_F(RouterRouteGroupTest, GlobalAndGroupMiddlewareInteraction) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: data_handler");
     EXPECT_EQ(_mock_session->get_trace(), "global_mw;api_mw;data_handler");
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
@@ -429,7 +429,7 @@ TEST_F(RouterRouteGroupTest, GroupMiddlewareShortCircuit) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_ACCEPTED);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_ACCEPTED);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Short-circuited!");
     EXPECT_EQ(_mock_session->get_trace(), "short_circuit_mw");
     ASSERT_FALSE(_mock_session->_handler_executed_flag); // Handler should not have run
@@ -448,7 +448,7 @@ TEST_F(RouterRouteGroupTest, GroupMiddlewareSignalsError) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     // Body might be the one set by TestRouteGroupErrorMiddleware or a generic one from RouterCore
     // For now, just check trace and that handler didn't run.
     EXPECT_EQ(_mock_session->get_trace(), "error_signal_mw");
@@ -475,7 +475,7 @@ TEST_F(RouterRouteGroupTest, ErrorInRouteHandlerWithinGroup) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->get_trace(), "group_mw_before_error_route;error_route_handler");
 }
 
@@ -495,7 +495,7 @@ TEST_F(RouterRouteGroupTest, MultipleGroupsAtSameLevel) {
     auto request_api = create_request(HTTP_GET, "/api/users");
     _router.route(_mock_session, std::move(request_api));
     _task_executor.processAllTasks();
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: api_users_handler");
     EXPECT_EQ(_mock_session->get_trace(), "api_users_handler");
 
@@ -504,7 +504,7 @@ TEST_F(RouterRouteGroupTest, MultipleGroupsAtSameLevel) {
     auto request_admin = create_request(HTTP_GET, "/admin/settings");
     _router.route(_mock_session, std::move(request_admin));
     _task_executor.processAllTasks();
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: admin_settings_handler");
     EXPECT_EQ(_mock_session->get_trace(), "admin_settings_handler");
 }
@@ -521,7 +521,7 @@ TEST_F(RouterRouteGroupTest, MiddlewareOrderInGroup) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->get_trace(), "mw1;mw2;resource_handler");
 }
 
@@ -536,7 +536,7 @@ TEST_F(RouterRouteGroupTest, EmptyRouteGroupNotFound) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
     // Default 404 handler in RouterCore does not trace. Check body instead.
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "404 Not Found (Default)");
     EXPECT_EQ(_mock_session->get_trace(), ""); // Trace should be empty if no other middleware ran and traced
@@ -557,7 +557,7 @@ TEST_F(RouterRouteGroupTest, ControllerMountedInRouteGroup) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Hello from controller in group");
     EXPECT_EQ(_mock_session->get_trace(), "global_mw;api_group_mw;ctrl_sync_mw;ctrl_hello_handler");
 }
@@ -578,7 +578,7 @@ TEST_F(RouterRouteGroupTest, ControllerMountedInRouteGroupWithEmptyControllerPre
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "World from controller in group");
     EXPECT_EQ(_mock_session->get_trace(), "global_mw;api_group_mw;ctrl_sync_mw;ctrl_world_handler");
 }
@@ -597,7 +597,7 @@ TEST_F(RouterRouteGroupTest, PathParameterPropagationFromGroupToRoute) {
             }
             std::string tenant_id = std::string(ctx->path_parameters().get("tenant_id").value_or("N/A"));
             std::string user_id = std::string(ctx->path_parameters().get("user_id").value_or("N/A"));
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Tenant: " + tenant_id + ", User: " + user_id;
             ctx->complete();
         }
@@ -609,7 +609,7 @@ TEST_F(RouterRouteGroupTest, PathParameterPropagationFromGroupToRoute) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Tenant: acme_corp, User: usr_123");
     EXPECT_EQ(_mock_session->get_trace(), "tenant_mw;profile_handler");
     ASSERT_TRUE(_mock_session->_captured_params.get("tenant_id").has_value());
@@ -625,7 +625,7 @@ TEST_F(RouterRouteGroupTest, NotFoundWithinGroupUsesRouterNotFoundHandler) {
             if (ctx->session()) { // Check session existence
                 ctx->session()->trace("CUSTOM_404_HANDLER");
             }
-            ctx->response().status_code = HTTP_STATUS_NOT_FOUND;
+            ctx->response().status() = qb::http::status::NOT_FOUND;
             ctx->response().body() = "Custom Page Not Found From Router";
             ctx->complete();
         }
@@ -645,7 +645,7 @@ TEST_F(RouterRouteGroupTest, NotFoundWithinGroupUsesRouterNotFoundHandler) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Custom Page Not Found From Router");
     // Expected: global_router_mw_for_404_test (router global) -> CUSTOM_404_HANDLER (router's 404)
     // Group middleware api_group_mw_for_404 does not run if the 404 happens after matching the group's prefix.
@@ -675,7 +675,7 @@ TEST_F(RouterRouteGroupTest, ErrorInGroupMiddlewareUsesRouterErrorHandler) {
                 if (ctx->session()) { // Check session existence
                     ctx->session()->trace("CUSTOM_500_HANDLER");
                 }
-                ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body() = "Custom Internal Error From Router";
                 ctx->complete();
             }
@@ -695,7 +695,7 @@ TEST_F(RouterRouteGroupTest, ErrorInGroupMiddlewareUsesRouterErrorHandler) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Custom Internal Error From Router");
     // Expected trace: global_mw_for_error_test (router global) -> api_group_mw_before_error (group) -> group_error_trigger_mw (group, signals error)
     // Then error chain: global_mw_for_error_test (router global, re-applied for error chain) -> custom_error_mw -> CUSTOM_500_HANDLER
@@ -724,7 +724,7 @@ TEST_F(RouterRouteGroupTest, DeeplyNestedGroupMiddleware) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->get_trace(), "global_mw;l1_mw;l2_mw;l3_mw;final_handler");
 }
 
@@ -751,7 +751,7 @@ TEST_F(RouterRouteGroupTest, CustomRouteInGroupWithGroupMiddleware) {
     _router.route(_mock_session, std::move(request1));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Custom Route Body");
     EXPECT_EQ(_mock_session->get_trace(), "group_mw_for_custom_route;custom_route_hdlr1");
 
@@ -761,7 +761,7 @@ TEST_F(RouterRouteGroupTest, CustomRouteInGroupWithGroupMiddleware) {
     _router.route(_mock_session, std::move(request2));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Custom Route Body"); // Default body from TestCustomRoute constructor
     EXPECT_EQ(_mock_session->get_trace(), "group_mw_for_custom_route;custom_route_hdlr2_constructed");
 }
@@ -777,7 +777,7 @@ TEST_F(RouterRouteGroupTest, GroupAsEndpoint) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: base_as_endpoint");
     EXPECT_EQ(_mock_session->get_trace(), "base_group_mw;base_as_endpoint");
 }
@@ -794,7 +794,7 @@ TEST_F(RouterRouteGroupTest, GroupAsEndpointWithSlash) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: base_slash_as_endpoint");
     EXPECT_EQ(_mock_session->get_trace(), "base_slash_group_mw;base_slash_as_endpoint");
 }
@@ -820,7 +820,7 @@ TEST_F(RouterRouteGroupTest, ErrorInCustomRouteInGroup) {
         std::make_shared<qb::http::RouteLambdaTask<MockRouteGroupSession>>(
             [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
                 if (ctx->session()) ctx->session()->trace("ROUTER_CUSTOM_500_HANDLER");
-                ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body() = "Router Custom 500 from ErrorInCustomRouteInGroup";
                 ctx->complete();
             }, "RouterCustom500Lambda")
@@ -837,7 +837,7 @@ TEST_F(RouterRouteGroupTest, ErrorInCustomRouteInGroup) {
     _router.route(_mock_session, std::move(request));
     _task_executor.processAllTasks();
     
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Router Custom 500 from ErrorInCustomRouteInGroup");
     // Trace: global -> group_mw -> custom_route (signals error) -> global (for error chain) -> router_error_chain_mw -> ROUTER_CUSTOM_500_HANDLER
     EXPECT_EQ(_mock_session->get_trace(), "global_mw_for_custom_error;error_group_mw;custom_error_trigger;global_mw_for_custom_error;router_error_chain_mw;ROUTER_CUSTOM_500_HANDLER");

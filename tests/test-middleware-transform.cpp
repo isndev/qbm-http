@@ -42,7 +42,7 @@ struct MockTransformSession {
         _xbody_cleared_header_present = false;
         _xbody_cleared_header_value.clear();
         _content_type_header_at_handler.clear();
-        _method_at_handler = qb::http::method::HTTP_UNINITIALIZED; // Reset to a default
+        _method_at_handler = qb::http::method::UNINITIALIZED; // Reset to a default
         _response_body_before_transform_hook.clear();
         _final_handler_called = false;
     }
@@ -62,10 +62,10 @@ protected:
     qb::http::Request create_request(
         const std::string& target_path = "/transform_route", 
         const std::string& body = "",
-        qb::http::method http_method = qb::http::method::HTTP_POST // Default to POST
+        qb::http::method http_method = qb::http::method::POST // Default to POST
     ) {
         qb::http::Request req;
-        req.method = http_method; 
+        req.method() = http_method;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -84,7 +84,7 @@ protected:
             if (_session) {
                 _session->_final_handler_called = true;
                 _session->_request_body_at_handler = ctx->request().body().as<std::string>();
-                _session->_method_at_handler = ctx->request().method; // Capture the method
+                _session->_method_at_handler = ctx->request().method(); // Capture the method
                 // _session->_request_headers_at_handler = ctx->request().headers(); // Removed
 
                 // Capture specific headers using the public API of THeaders (via Request)
@@ -102,7 +102,7 @@ protected:
                 // Capture response body *before* any PRE_RESPONSE_SEND hook from TransformMiddleware runs
                 _session->_response_body_before_transform_hook = "Initial Handler Response Body"; 
             }
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Initial Handler Response Body";
             ctx->complete();
         };
@@ -154,10 +154,10 @@ TEST_F(TransformMiddlewareTest, RequestTransformation) {
 
 TEST_F(TransformMiddlewareTest, NullTransformersDoNothing) {
     auto transform_mw = qb::http::transform_middleware<MockTransformSession>(nullptr, "NullTransformerTest");
-    configure_router_and_run(transform_mw, create_request("/transform_route_get", "", qb::http::method::HTTP_GET));
+    configure_router_and_run(transform_mw, create_request("/transform_route_get", "", qb::http::method::GET));
 
     EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Initial Handler Response Body"); // Should be unchanged by MW
     EXPECT_TRUE(_session->_response.header("X-Request-Transformed").empty());
     EXPECT_TRUE(_session->_response.header("X-Response-Transformed").empty());
@@ -198,7 +198,7 @@ TEST_F(TransformMiddlewareTest, RequestTransformerThrows) {
     // Expecting a server error status code, assuming the router sets one when a middleware exec_task fails like this.
     // This might depend on the router's specific behavior for unhandled exceptions from middleware process() methods.
     // For now, let's check for 500. If default is different, this needs adjustment.
-    EXPECT_EQ(_session->get_response_ref().status_code, qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::INTERNAL_SERVER_ERROR);
 }
 
 TEST_F(TransformMiddlewareTest, RequestContentTypeTransform) {
@@ -241,7 +241,7 @@ TEST_F(TransformMiddlewareTest, RequestBodyClearedByTransformer) {
 TEST_F(TransformMiddlewareTest, RequestMethodChangedByTransformer_LeadsToMiss) {
     qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer = 
         [](qb::http::Request& req) {
-            req.method = qb::http::method::HTTP_PUT; // Change method from POST to PUT
+            req.method() = qb::http::method::PUT; // Change method from POST to PUT
             req.set_header("X-Method-Changed", "true");
         };
     
@@ -255,16 +255,16 @@ TEST_F(TransformMiddlewareTest, RequestMethodChangedByTransformer_LeadsToMiss) {
         
     _session->reset();
     // Create a POST request, which the transformer will change to PUT
-    _router->route(_session, create_request("/transform_route", "SomeBody", qb::http::method::HTTP_POST));
+    _router->route(_session, create_request("/transform_route", "SomeBody", qb::http::method::POST));
 
     // The handler for POST /transform_route SHOULD be called because route matching happens before this middleware type runs.
     // However, the handler should see the method as PUT.
     EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_method_at_handler, qb::http::method::HTTP_PUT);
+    EXPECT_EQ(_session->_method_at_handler, qb::http::method::PUT);
     // We can also check that the response is a 404 Not Found or 405 Method Not Allowed
     // depending on router's behavior for unhandled routes/methods. 
     // For now, not calling the handler is the primary check.
-    // EXPECT_NE(_session->get_response_ref().status_code, qb::http::status::HTTP_STATUS_OK);
+    // EXPECT_NE(_session->get_response_ref().status(), qb::http::status::OK);
 }
 
 // ConditionalTransformation would require a ConditionalMiddleware that works with MockTransformSession
