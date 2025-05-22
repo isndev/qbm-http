@@ -1,3 +1,19 @@
+/**
+ * @file qb/http/routing/middleware.h
+ * @brief Defines the IMiddleware interface and related classes for HTTP middleware processing.
+ *
+ * Middleware is a mechanism for processing HTTP requests and responses. It is used to add
+ * functionality to the request/response lifecycle without modifying the core routing logic.
+ *
+ * Middleware is implemented as a chain of tasks, each of which is responsible for processing
+ * a part of the request/response lifecycle. The chain is executed in order, and the output
+ * of each task is passed as input to the next task.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Routing
+ */
 #pragma once
 
 #include "./async_task.h"
