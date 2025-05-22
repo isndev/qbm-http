@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/middleware.h
+ * @file qbm/http/routing/middleware.h
  * @brief Defines the IMiddleware interface and related classes for HTTP middleware processing.
  *
  * Middleware is a mechanism for processing HTTP requests and responses. It is used to add
@@ -83,7 +83,7 @@ public:
         } catch (const std::exception& e) {
             std::cerr << "MiddlewareTask [" << name() << "]: Exception during process(): " << e.what() << std::endl;
             // If middleware throws, it means it didn't call complete. We should signal error.
-            ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR; // NO NAMESPACE
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR; // NO NAMESPACE
             const qb::http::AsyncTaskResult error_result = qb::http::AsyncTaskResult::ERROR; // Explicitly typed
             ctx->complete(error_result); // Scoped
         }

@@ -1,3 +1,15 @@
+/**
+ * @file qbm/http/middleware/static_files.h
+ * @brief Defines the StaticFilesMiddleware class for serving static files.
+ *
+ * This file contains the definition of the StaticFilesMiddleware class,
+ * which is used to serve static files from a given directory.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Middleware
+ */
 #pragma once
 
 #include <iostream> // Added for logging
@@ -15,7 +27,7 @@
 #include "../routing/middleware.h"
 #include "../request.h"
 #include "../response.h"
-#include "../types.h" // For http_status
+#include "../types.h" // For qb::http::status
 #include "../utility.h" // For string utilities if needed
 
 namespace qb::http {
@@ -373,7 +385,7 @@ public:
         std::filesystem::path target_file_abs;
 
         // Optimization: Handle HEAD requests early if possible, or ensure body is not sent.
-        bool is_head_request = ctx->request().method == qb::http::method::HTTP_HEAD;
+        bool is_head_request = ctx->request().method() == qb::http::method::HEAD;
 
         std::string_view effective_request_path_sv = request_path_sv;
 
@@ -392,7 +404,7 @@ public:
         );
         
         if (target_file_abs.empty()) { // Path traversal or invalid path detected by sanitize_and_resolve_path
-            send_error_response(ctx, HTTP_STATUS_FORBIDDEN, "Forbidden");
+            send_error_response(ctx, qb::http::status::FORBIDDEN, "Forbidden");
             return;
         }
 
@@ -402,18 +414,18 @@ public:
         bool path_exists = std::filesystem::exists(target_file_abs, ec_exists);
 
         if (ec_exists) { // Error during exists check
-            send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Error accessing file system.");
+            send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error accessing file system.");
             return;
         }
         if (!path_exists) { // File or directory does not exist
-            send_error_response(ctx, HTTP_STATUS_NOT_FOUND, "File not found");
+            send_error_response(ctx, qb::http::status::NOT_FOUND, "File not found");
             return;
         }
 
         bool is_dir = std::filesystem::is_directory(target_file_abs, ec_is_dir);
 
         if (ec_is_dir) { // Error during is_directory check
-            send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Error accessing file system attributes.");
+            send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error accessing file system attributes.");
             return;
         }
 
@@ -421,7 +433,7 @@ public:
         if (!is_dir) { // Only check is_regular_file if not a directory
              is_regular = std::filesystem::is_regular_file(target_file_abs, ec_is_reg);
              if (ec_is_reg) {
-                send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Error accessing file system attributes.");
+                send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error accessing file system attributes.");
                 return;
              }
         }
@@ -447,7 +459,7 @@ public:
             if (is_dir) { // Still a directory (index not found/served or not enabled)
                 if (_options.enable_directory_listing) {
                     std::string listing_html = internal::generate_directory_listing_html(target_file_abs, request_path_sv, _options);
-                    ctx->response().status_code = HTTP_STATUS_OK;
+                    ctx->response().status() = qb::http::status::OK;
                     ctx->response().set_header("Content-Type", "text/html; charset=utf-8");
                     ctx->response().set_header("Content-Length", std::to_string(listing_html.length()));
                     if (_options.set_cache_control_header) { // Apply cache control for directory listing too
@@ -461,7 +473,7 @@ public:
                     ctx->complete(AsyncTaskResult::COMPLETE);
                     return;
                 } else if (is_dir) { // serve_index_file was false or index not found, AND directory listing disabled
-                     send_error_response(ctx, HTTP_STATUS_FORBIDDEN, "Directory listing not allowed.");
+                     send_error_response(ctx, qb::http::status::FORBIDDEN, "Directory listing not allowed.");
                      return;
                 }
             }
@@ -470,7 +482,7 @@ public:
         // At this point, target_file_abs refers to a regular file (either originally, or an index file)
         // and is_dir is false.
         if (!is_regular) { // Should not happen if logic above is correct and it's not a dir
-            send_error_response(ctx, HTTP_STATUS_NOT_FOUND, "Requested resource is not a regular file.");
+            send_error_response(ctx, qb::http::status::NOT_FOUND, "Requested resource is not a regular file.");
             return;
         }
 
@@ -482,12 +494,12 @@ public:
             std::error_code file_stat_ec;
             auto file_size_for_cond = std::filesystem::file_size(target_file_abs, file_stat_ec);
             if (file_stat_ec) {
-                send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Error getting file metadata for cache headers");
+                send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error getting file metadata for cache headers");
                 return;
             }
             last_modified_time = std::filesystem::last_write_time(target_file_abs, file_stat_ec);
             if (file_stat_ec) {
-                send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Error getting file last write time for cache headers");
+                send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error getting file last write time for cache headers");
                 return;
             }
 
@@ -543,7 +555,7 @@ public:
 
         std::ifstream file_stream(target_file_abs, std::ios::binary | std::ios::ate);
         if (!file_stream.is_open()) {
-            send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Could not open file");
+            send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Could not open file");
             return;
         }
 
@@ -566,7 +578,7 @@ public:
                     offset = parsed_range_opt->first;
                     length_to_read = parsed_range_opt->second;
                     is_range_request = true;
-                    ctx->response().status_code = HTTP_STATUS_PARTIAL_CONTENT;
+                    ctx->response().status() = qb::http::status::PARTIAL_CONTENT;
                     std::string content_range_val = "bytes " + std::to_string(offset) + "-" + 
                                                     std::to_string(offset + length_to_read - 1) + "/" + 
                                                     std::to_string(full_file_size);
@@ -594,13 +606,13 @@ public:
         if (!is_range_request) {
             offset = 0;
             length_to_read = full_file_size;
-            ctx->response().status_code = HTTP_STATUS_OK; 
+            ctx->response().status() = qb::http::status::OK;
         }
 
         std::string mime_type = internal::get_mime_type_for_file(target_file_abs, _options);
 
         if (!is_range_request) { // For full requests or if range processing was skipped/failed to become a range request
-            ctx->response().status_code = HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
         }
         // Content-Type is always needed, for 200 or 206
         ctx->response().set_header("Content-Type", mime_type);
@@ -625,7 +637,7 @@ public:
         if (is_range_request) {
             file_stream.seekg(offset, std::ios::beg);
             if (file_stream.fail()) {
-                send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Error seeking in file for range request");
+                send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error seeking in file for range request");
                 return;
             }
         }
@@ -640,7 +652,7 @@ public:
             if (!file_stream.read(response_body_pipe.begin(), length_to_read)) {
                 // Error reading file or read less than expected (should not happen if size checks were correct)
                 response_body_pipe.clear();
-                send_error_response(ctx, HTTP_STATUS_INTERNAL_SERVER_ERROR, "Error reading file content for range/full");
+                send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error reading file content for range/full");
                 return;
             }
         }
@@ -660,8 +672,8 @@ private:
     StaticFilesOptions _options;
     std::string _name;
 
-    void send_error_response(ContextPtr ctx, http_status status, const std::string& message) {
-        ctx->response().status_code = status;
+    void send_error_response(ContextPtr ctx, qb::http::status status, const std::string& message) {
+        ctx->response().status() = status;
         ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
         // For HEAD requests with errors, body should still be set for consistency,
         // but it won't be sent by the underlying transport.
@@ -672,7 +684,7 @@ private:
     }
 
     void send_not_modified_response(ContextPtr ctx) {
-        ctx->response().status_code = HTTP_STATUS_NOT_MODIFIED;
+        ctx->response().status() = qb::http::status::NOT_MODIFIED;
         // Key headers for 304: Date, ETag (if used), Cache-Control, Expires, Vary.
         // Content-* headers should be omitted.
         // The ETag and Last-Modified headers would have already been set by the calling logic.
@@ -690,7 +702,7 @@ private:
     }
 
     void send_range_not_satisfiable_response(ContextPtr ctx, long long total_file_size) {
-        ctx->response().status_code = HTTP_STATUS_RANGE_NOT_SATISFIABLE;
+        ctx->response().status() = qb::http::status::RANGE_NOT_SATISFIABLE;
         ctx->response().set_header("Content-Range", "bytes */" + std::to_string(total_file_size));
         // According to RFC 7231, a 416 response SHOULD NOT include other representation metadata.
         // Content-Type is often omitted or kept minimal.

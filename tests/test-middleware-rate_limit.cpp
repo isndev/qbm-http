@@ -47,7 +47,7 @@ protected:
 
     qb::http::Request create_request(const std::string& target_path = "/limited_route", const std::string& client_ip_header = "") {
         qb::http::Request req;
-        req.method = qb::http::method::HTTP_GET;
+        req.method() = qb::http::method::GET;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -63,7 +63,7 @@ protected:
     qb::http::RouteHandlerFn<MockRateLimitSession> success_handler() {
         return [this](std::shared_ptr<qb::http::Context<MockRateLimitSession>> ctx) {
             if (_session) _session->_final_handler_called = true;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Access Granted by Handler";
             ctx->complete();
         };
@@ -92,21 +92,21 @@ TEST_F(RateLimitMiddlewareTest, BasicRateLimiting) {
     // Request 1 (Allowed)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", "client_A"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "1");
 
     // Request 2 (Allowed)
     _session->reset(); // Reset session to clear previous response/state for this distinct request
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", "client_A"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 
     // Request 3 (Rate Limited)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", "client_A"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
     EXPECT_FALSE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 
@@ -116,7 +116,7 @@ TEST_F(RateLimitMiddlewareTest, BasicRateLimiting) {
     // Request 4 (Allowed again after window)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", "client_A"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "1"); 
 }
@@ -135,32 +135,32 @@ TEST_F(RateLimitMiddlewareTest, CustomClientIdExtractor) {
     auto req1 = create_request();
     req1.set_header("X-Client-ID", "custom_client_1");
     configure_router_and_run(rate_limit_mw, std::move(req1));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 
     // Request 2 for custom_client_1 (Rate Limited)
     _session->reset();
     auto req2 = create_request();
     req2.set_header("X-Client-ID", "custom_client_1");
     configure_router_and_run(rate_limit_mw, std::move(req2));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 
     // Request 3 for custom_client_2 (Allowed, different client)
     _session->reset();
     auto req3 = create_request();
     req3.set_header("X-Client-ID", "custom_client_2");
     configure_router_and_run(rate_limit_mw, std::move(req3));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(RateLimitMiddlewareTest, CustomErrorMessageAndStatusCode) {
     qb::http::RateLimitOptions options;
     options.max_requests(0) // Rate limit immediately
-           .status_code(qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE) 
+           .status_code(qb::http::status::SERVICE_UNAVAILABLE)
            .message("Custom rate limit message.");
     auto rate_limit_mw = qb::http::rate_limit_middleware<MockRateLimitSession>(options);
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", "client_B"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Custom rate limit message.");
 }
 
@@ -174,12 +174,12 @@ TEST_F(RateLimitMiddlewareTest, ResetClientFunctionality) {
     // Request 1 (Allowed)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id_to_test));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 
     // Request 2 (Rate Limited)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id_to_test));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 
     // Reset the client
     rate_limit_mw->reset_client(client_id_to_test);
@@ -187,7 +187,7 @@ TEST_F(RateLimitMiddlewareTest, ResetClientFunctionality) {
     // Request 3 (Allowed again after reset)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id_to_test));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(RateLimitMiddlewareTest, FactoryMethodsCreateInstances) {
@@ -214,13 +214,13 @@ TEST_F(RateLimitMiddlewareTest, TestPermissiveConfiguration) {
     const auto& opts = permissive_mw->get_options();
     EXPECT_EQ(opts.get_max_requests(), 1000);
     EXPECT_EQ(opts.get_window(), std::chrono::minutes(1));
-    EXPECT_EQ(opts.get_status_code(), qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS); // Default status
+    EXPECT_EQ(opts.get_status_code(), qb::http::status::TOO_MANY_REQUESTS); // Default status
     EXPECT_EQ(opts.get_message(), "You have reached the rate limit. Please try again later."); // Permissive message
 
     // Perform one request to check basic functionality and headers
     _session->reset();
     configure_router_and_run(permissive_mw, create_request("/limited_route", "client_perm_test"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Limit")), "1000");
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "999");
@@ -233,13 +233,13 @@ TEST_F(RateLimitMiddlewareTest, TestSecureConfiguration) {
     const auto& opts = secure_mw->get_options();
     EXPECT_EQ(opts.get_max_requests(), 60);
     EXPECT_EQ(opts.get_window(), std::chrono::minutes(1));
-    EXPECT_EQ(opts.get_status_code(), qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS); // Default status
+    EXPECT_EQ(opts.get_status_code(), qb::http::status::TOO_MANY_REQUESTS); // Default status
     EXPECT_EQ(opts.get_message(), "Rate limit exceeded. Please try again later."); // Default message for secure
 
     // Perform one request
     _session->reset();
     configure_router_and_run(secure_mw, create_request("/limited_route", "client_sec_test"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Limit")), "60");
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "59");
@@ -248,12 +248,12 @@ TEST_F(RateLimitMiddlewareTest, TestSecureConfiguration) {
     for (size_t i = 0; i < 59; ++i) { // 59 more requests
         _session->reset(); // Reset session for next distinct request
         configure_router_and_run(secure_mw, create_request("/limited_route", "client_sec_test"));
-        EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+        EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     }
 
     _session->reset();
     configure_router_and_run(secure_mw, create_request("/limited_route", "client_sec_test"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
     EXPECT_FALSE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 }
@@ -267,7 +267,7 @@ TEST_F(RateLimitMiddlewareTest, RateLimitHeadersAreAccurate) {
     // Request 1
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Limit")), "3");
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "2");
     long long reset_val1 = std::stoll(std::string(_session->_response.header("X-RateLimit-Reset")));
@@ -279,7 +279,7 @@ TEST_F(RateLimitMiddlewareTest, RateLimitHeadersAreAccurate) {
     // Request 2
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Limit")), "3");
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "1");
     long long reset_val2 = std::stoll(std::string(_session->_response.header("X-RateLimit-Reset")));
@@ -290,13 +290,13 @@ TEST_F(RateLimitMiddlewareTest, RateLimitHeadersAreAccurate) {
     // Request 3
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 
     // Request 4 (Rate Limited)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Limit")), "3");
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
     long long reset_val4 = std::stoll(std::string(_session->_response.header("X-RateLimit-Reset")));
@@ -309,7 +309,7 @@ TEST_F(RateLimitMiddlewareTest, RateLimitHeadersAreAccurate) {
     // Request 5 (Allowed again)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Limit")), "3");
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "2"); // Max - 1
     long long reset_val5 = std::stoll(std::string(_session->_response.header("X-RateLimit-Reset")));
@@ -328,22 +328,22 @@ TEST_F(RateLimitMiddlewareTest, ResetAllClientsFunctionality) {
     // Client A - Request 1 (Allowed)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_A_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 
     // Client A - Request 2 (Rate Limited)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_A_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 
     // Client B - Request 1 (Allowed)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_B_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 
     // Client B - Request 2 (Rate Limited)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_B_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 
     // Reset all clients
     rate_limit_mw->reset_all_clients();
@@ -351,13 +351,13 @@ TEST_F(RateLimitMiddlewareTest, ResetAllClientsFunctionality) {
     // Client A - Request 3 (Allowed again after reset_all_clients)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_A_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 
     // Client B - Request 3 (Allowed again after reset_all_clients)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_B_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 }
 
@@ -372,24 +372,24 @@ TEST_F(RateLimitMiddlewareTest, NoRateLimitForDifferentClients) {
     // Client 1 - Request 1 (Allowed)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client1_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 
     // Client 2 - Request 1 (Allowed, should not be affected by Client 1)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client2_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 
     // Client 1 - Request 2 (Rate Limited)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client1_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 
     // Client 2 - Request 2 (Rate Limited)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client2_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 }
 
 TEST_F(RateLimitMiddlewareTest, ZeroMaxRequestsBlocksAll) {
@@ -400,7 +400,7 @@ TEST_F(RateLimitMiddlewareTest, ZeroMaxRequestsBlocksAll) {
 
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
     EXPECT_FALSE(_session->_final_handler_called);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Limit")), "0");
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
@@ -418,13 +418,13 @@ TEST_F(RateLimitMiddlewareTest, RateLimitWhenExtractorReturnsEmptyString) {
     // Request 1 (Allowed, client ID is "")
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request()); // No X-Forwarded-For needed as custom extractor is used
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
 
     // Request 2 (Rate Limited, client ID is also "")
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request());
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0"); 
 }
 
@@ -437,7 +437,7 @@ TEST_F(RateLimitMiddlewareTest, RequestsStraddlingWindowBoundary) {
     // Request 1 (Allowed)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "1");
 
     // Wait for a bit, but not for the full window to pass (e.g., 1.5 seconds into a 2s window)
@@ -446,7 +446,7 @@ TEST_F(RateLimitMiddlewareTest, RequestsStraddlingWindowBoundary) {
     // Request 2 (Allowed, still in the first window)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "0");
     long long reset_val_req2 = std::stoll(std::string(_session->_response.header("X-RateLimit-Reset")));
     EXPECT_EQ(reset_val_req2, 0);
@@ -454,7 +454,7 @@ TEST_F(RateLimitMiddlewareTest, RequestsStraddlingWindowBoundary) {
     // Request 3 (Rate Limited, still in the first window)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 
     // Wait for the remainder of the first window plus a bit more (e.g., another 1 second, total ~2.5s from start)
     // This ensures we are definitely in the next window.
@@ -463,7 +463,7 @@ TEST_F(RateLimitMiddlewareTest, RequestsStraddlingWindowBoundary) {
     // Request 4 (Allowed, new window)
     _session->reset();
     configure_router_and_run(rate_limit_mw, create_request("/limited_route", client_id));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "1");
     long long reset_val_req4 = std::stoll(std::string(_session->_response.header("X-RateLimit-Reset")));
     EXPECT_GT(reset_val_req4, 0); // Should be positive

@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/validation/request_validator.cpp
+ * @brief Implementation of the RequestValidator class.
+ *
+ * This file contains the implementation of the RequestValidator class,
+ * which is used to validate HTTP requests according to the rules defined
+ * in the RequestValidator.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #include "./request_validator.h"
 // #include "../utility.h" // Not directly used now
 

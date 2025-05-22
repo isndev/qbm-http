@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/types.h
+ * @file qbm/http/routing/types.h
  * @brief Core enumerations and type aliases for the HTTP routing system.
  *
  * This file defines fundamental types used throughout the qb-http routing module,
@@ -95,59 +95,5 @@ using RouteHandlerFn = std::function<void(std::shared_ptr<Context<SessionType>> 
  */
 template <typename SessionType>
 using MiddlewareHandlerFn = std::function<void(std::shared_ptr<Context<SessionType>> ctx, std::function<void()> next)>;
-
-/**
- * @brief Converts a `qb::http::method` enum value to its standard string representation (e.g., "GET", "POST").
- *
- * This utility is primarily for logging, debugging, or display purposes.
- * It covers all methods defined in the `llhttp_method` enum, which `qb::http::method` aliases.
- * If an unknown method value is provided (which should not happen if using the enum correctly),
- * it returns "UNKNOWN_METHOD".
- *
- * @param m The `qb::http::method` enum value.
- * @return A `std::string` representing the HTTP method.
- * @note This function is `noexcept` as it involves direct string returns from a switch.
- */
-[[nodiscard]] inline std::string http_method_to_string(qb::http::method m) noexcept {
-    // This uses the llhttp_method enum directly, which qb::http::method aliases.
-    // The list of cases should be exhaustive based on llhttp.h HTTP_METHOD_MAP.
-    switch (m) {
-        case HTTP_DELETE:     return "DELETE";
-        case HTTP_GET:        return "GET";
-        case HTTP_HEAD:       return "HEAD";
-        case HTTP_POST:       return "POST";
-        case HTTP_PUT:        return "PUT";
-        case HTTP_CONNECT:    return "CONNECT";
-        case HTTP_OPTIONS:    return "OPTIONS";
-        case HTTP_TRACE:      return "TRACE";
-        case HTTP_COPY:       return "COPY";
-        case HTTP_LOCK:       return "LOCK";
-        case HTTP_MKCOL:      return "MKCOL";
-        case HTTP_MOVE:       return "MOVE";
-        case HTTP_PROPFIND:   return "PROPFIND";
-        case HTTP_PROPPATCH:  return "PROPPATCH";
-        case HTTP_SEARCH:     return "SEARCH";
-        case HTTP_UNLOCK:     return "UNLOCK";
-        case HTTP_BIND:       return "BIND";
-        case HTTP_REBIND:     return "REBIND";
-        case HTTP_UNBIND:     return "UNBIND";
-        case HTTP_ACL:        return "ACL";
-        case HTTP_REPORT:     return "REPORT";
-        case HTTP_MKACTIVITY: return "MKACTIVITY";
-        case HTTP_CHECKOUT:   return "CHECKOUT";
-        case HTTP_MERGE:      return "MERGE";
-        case HTTP_MSEARCH:    return "M-SEARCH"; // Note: Hyphenated methods are standard.
-        case HTTP_NOTIFY:     return "NOTIFY";
-        case HTTP_SUBSCRIBE:  return "SUBSCRIBE";
-        case HTTP_UNSUBSCRIBE:return "UNSUBSCRIBE";
-        case HTTP_PATCH:      return "PATCH";
-        case HTTP_PURGE:      return "PURGE";
-        case HTTP_MKCALENDAR: return "MKCALENDAR";
-        // llhttp also includes LINK, UNLINK, SOURCE, PRI, DESCRIBE, ANNOUNCE, SETUP, PLAY, PAUSE, TEARDOWN, GET_PARAMETER, SET_PARAMETER, REDIRECT, RECORD.
-        // These are less common for general web servers but might be relevant if llhttp is used broadly.
-        // For now, sticking to the user's provided list.
-        default: return "UNKNOWN_METHOD"; // Fallback for any unlisted or invalid method codes.
-    }
-}
 
 } // namespace qb::http 

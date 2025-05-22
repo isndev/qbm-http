@@ -87,7 +87,7 @@ public:
         
         this->router().set_not_found_handler([](std::shared_ptr<MidCtx> ctx) {
             mid_server_side_assertions++;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_NOT_FOUND;
+            ctx->response().status() = qb::http::status::NOT_FOUND;
             ctx->response().body() = "Test default: Resource not found.";
             ctx->response().set_header("X-Test-404", "DefaultMiddlewareTest404");
             ctx->complete();
@@ -97,8 +97,8 @@ public:
             [](std::shared_ptr<MidCtx> ctx) {
                 mid_server_side_assertions++; 
                 std::cout << "[TestGlobalServerErrorHandler] Path: " << ctx->request().uri().path() << "\n";
-                if (ctx->response().status_code < qb::http::status::HTTP_STATUS_BAD_REQUEST) {
-                    ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                if (ctx->response().status() < qb::http::status::BAD_REQUEST) {
+                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 }
                 ctx->response().body() = "Test default: A global server error occurred.";
                 ctx->response().set_header("X-Test-Global-Error-Handler", "Applied");
@@ -114,7 +114,7 @@ public:
         this->router().get("/ping", [](std::shared_ptr<MidCtx> ctx){
             mid_request_count_server++;
             mid_server_side_assertions++;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "pong_middleware_test";
             ctx->complete();
         });
@@ -215,7 +215,7 @@ TEST_F(MiddlewareHttpIntegrationTest, InitialPing) {
     std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /ping\n";
     qb::http::Request request{{"http://localhost:9878/ping"}};
     auto response = qb::http::GET(request);
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_middleware_test", response.body().as<std::string>());
     mid_request_count_client++;
     
@@ -242,7 +242,7 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
     _server->router().get("/logged_route", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++; 
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Logged route content";
         ctx->complete();
     });
@@ -252,7 +252,7 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
     qb::http::Request request{{"http://localhost:9878/logged_route"}};
     auto response = qb::http::GET(request);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Logged route content", response.body().as<std::string>());
     mid_request_count_client++;
 
@@ -297,7 +297,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Introduce a small delay
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Timed route content";
         ctx->complete();
     });
@@ -307,7 +307,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
     qb::http::Request request{{"http://localhost:9878/timed_route"}};
     auto response = qb::http::GET(request);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Timed route content", response.body().as<std::string>());
     mid_request_count_client++;
 
@@ -363,7 +363,7 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
              mid_server_side_assertions++; // Count this server-side check
         }
 
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Secure route response";
         ctx->response().set_header("Content-Type", "text/html");
         ctx->complete();
@@ -374,7 +374,7 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
     qb::http::Request request{{"https://localhost:9878/secure_route"}}; 
     auto response = qb::http::GET(request);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Secure route response", response.body().as<std::string>());
     mid_request_count_client++;
 
@@ -426,7 +426,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     _server->router().get("/compressible_route", [original_compressible_body_content](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++;
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = original_compressible_body_content;
         ctx->response().set_header("Content-Type", "text/plain");
         ctx->complete();
@@ -435,7 +435,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     _server->router().post("/decompress_test_route", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++;
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         std::string received_body = ctx->request().body().template as<std::string>();
         ctx->response().body() = "Received body: " + received_body;
         
@@ -455,7 +455,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
         request.add_header("Accept-Encoding", "gzip, deflate");
         auto response = qb::http::GET(request);
 
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         mid_request_count_client++;
 
 #ifdef QB_IO_WITH_ZLIB
@@ -477,7 +477,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     // Test Request Decompression
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending POST /decompress_test_route with pseudo-compressed data\n";
-        qb::http::Request request{qb::http::method::HTTP_POST, {"http://localhost:9878/decompress_test_route"}};
+        qb::http::Request request{qb::http::method::POST, {"http://localhost:9878/decompress_test_route"}};
         std::string data_sent_in_post_request = "invalid gzipped data";
         request.body() = data_sent_in_post_request; 
         request.add_header("Content-Encoding", "gzip");
@@ -486,7 +486,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
         auto response = qb::http::POST(request);
         mid_request_count_client++;
 #ifdef QB_IO_WITH_ZLIB
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Received body: " + data_sent_in_post_request, response.body().as<std::string>());
 
 #else
@@ -496,7 +496,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
         request.add_header("Content-Type", "text/plain");
         auto response = qb::http::POST(request);
         mid_request_count_client++;
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Received body: " + original_body_for_decomp_test, response.body().as<std::string>());
 #endif
     }
@@ -535,7 +535,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     _server->router().get("/cors_test_route", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++;
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "CORS test route content";
         ctx->response().set_header("X-Response-Info", "Some info");
         ctx->complete();
@@ -547,7 +547,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     _server->router().options("/cors_test_route", [](std::shared_ptr<MidCtx> ctx){ 
         mid_request_count_server++; 
         mid_server_side_assertions++; // This would indicate CorsMiddleware didn't short-circuit preflight.
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
         ctx->response().body() = "OPTIONS handler should not be reached if CORS preflight is handled by middleware.";
         ctx->complete();
     });
@@ -556,7 +556,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     _server->router().get("/cors_test_route_credentials", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++;
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "CORS credentials route content";
         ctx->complete();
     });
@@ -570,7 +570,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
         request.add_header("Origin", "http://allowed.example.com");
         auto response = qb::http::GET(request);
 
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("CORS test route content", response.body().as<std::string>());
         EXPECT_EQ("http://allowed.example.com", response.header("Access-Control-Allow-Origin"));
         EXPECT_EQ("Some info", response.header("X-Response-Info")); // Check exposed header
@@ -586,7 +586,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
         request.add_header("Origin", "http://disallowed.example.com");
         auto response = qb::http::GET(request);
 
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code); 
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("CORS test route content", response.body().as<std::string>());
         EXPECT_TRUE(response.header("Access-Control-Allow-Origin").empty()); // No ACAO header for disallowed origin
         mid_request_count_client++;
@@ -595,13 +595,13 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     // 3. Preflight OPTIONS request from allowed origin
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending OPTIONS /cors_test_route (preflight)\n";
-        qb::http::Request request{qb::http::method::HTTP_OPTIONS, {"http://localhost:9878/cors_test_route"}};
+        qb::http::Request request{qb::http::method::OPTIONS, {"http://localhost:9878/cors_test_route"}};
         request.add_header("Origin", "http://allowed.example.com");
         request.add_header("Access-Control-Request-Method", "POST");
         request.add_header("Access-Control-Request-Headers", "X-Custom-Header, Content-Type");
         auto response = qb::http::OPTIONS(request);
 
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_NO_CONTENT, response.status_code);
+        EXPECT_EQ(qb::http::status::NO_CONTENT, response.status());
         EXPECT_EQ("http://allowed.example.com", response.header("Access-Control-Allow-Origin"));
         EXPECT_NE(response.header("Access-Control-Allow-Methods").find("POST"), std::string::npos);
         EXPECT_NE(response.header("Access-Control-Allow-Methods").find("GET"), std::string::npos);
@@ -621,7 +621,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
         request.add_header("Cookie", "sessionid=12345");
         auto response = qb::http::GET(request);
 
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("CORS credentials route content", response.body().as<std::string>());
         EXPECT_EQ("http://allowed.example.com", response.header("Access-Control-Allow-Origin"));
         EXPECT_EQ("true", response.header("Access-Control-Allow-Credentials"));
@@ -649,7 +649,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
     qb::http::RateLimitOptions rl_options;
     rl_options.max_requests(3)
               .window(std::chrono::seconds(2)) 
-              .status_code(qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS)
+              .status_code(qb::http::status::TOO_MANY_REQUESTS)
               .message("Custom: Too many requests!");
 
     _server->router().use<qb::http::RateLimitMiddleware<MiddlewareIntegrationSession>>(rl_options);
@@ -657,7 +657,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
     _server->router().get("/rate_limited_route", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++;
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Rate limit test content";
         ctx->complete();
     });
@@ -670,7 +670,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
     for (int i = 0; i < 3; ++i) {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt " << (i + 1) << ")\n";
         auto response = qb::http::GET(base_request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code) << "Request " << (i+1) << " should succeed.";
+        EXPECT_EQ(qb::http::status::OK, response.status()) << "Request " << (i+1) << " should succeed.";
         EXPECT_EQ("Rate limit test content", response.body().as<std::string>());
         EXPECT_EQ("3", response.header("X-RateLimit-Limit"));
         EXPECT_EQ(std::to_string(3 - (i + 1)), response.header("X-RateLimit-Remaining"));
@@ -682,7 +682,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt 4 - expecting rate limit)\n";
         auto response = qb::http::GET(base_request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_TOO_MANY_REQUESTS, response.status_code);
+        EXPECT_EQ(qb::http::status::TOO_MANY_REQUESTS, response.status());
         EXPECT_EQ("Custom: Too many requests!", response.body().as<std::string>());
         EXPECT_EQ("3", response.header("X-RateLimit-Limit"));
         EXPECT_EQ("0", response.header("X-RateLimit-Remaining"));
@@ -703,7 +703,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt 5 - after reset)" << std::endl;
         auto response = qb::http::GET(base_request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Rate limit test content", response.body().as<std::string>());
         EXPECT_EQ("3", response.header("X-RateLimit-Limit"));
         EXPECT_EQ("2", response.header("X-RateLimit-Remaining")); // 1 request made in new window
@@ -728,18 +728,18 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
 
     auto error_mw = qb::http::error_handling_middleware<MiddlewareIntegrationSession>();
 
-    error_mw->on_status(qb::http::status::HTTP_STATUS_FORBIDDEN, [](std::shared_ptr<MidCtx> ctx){
+    error_mw->on_status(qb::http::status::FORBIDDEN, [](std::shared_ptr<MidCtx> ctx){
         mid_server_side_assertions++; // For the specific 403 handler in ErrorHandlingMiddleware
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_FORBIDDEN;
+        ctx->response().status() = qb::http::status::FORBIDDEN;
         ctx->response().body() = "Custom Forbidden Error Page from ErrorHandlingMiddleware";
         ctx->response().set_header("X-Error-Handler", "Specific-403");
         // ErrorHandlingMiddleware itself calls ctx->complete(AsyncTaskResult::COMPLETE) after this handler.
     });
 
-    error_mw->on_status_range(qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR, qb::http::status::HTTP_STATUS_BAD_GATEWAY, 
+    error_mw->on_status_range(qb::http::status::INTERNAL_SERVER_ERROR, qb::http::status::BAD_GATEWAY,
     [](std::shared_ptr<MidCtx> ctx){
         mid_server_side_assertions++; // For the 500-502 range handler
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE; // Change it for test
+        ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE; // Change it for test
         ctx->response().body() = "Custom 50x Error Page (became 503) from ErrorHandlingMiddleware";
         ctx->response().set_header("X-Error-Handler", "Range-50x-to-503");
     });
@@ -748,8 +748,8 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
         mid_server_side_assertions++; // For the generic error handler in ErrorHandlingMiddleware
         // Default status if not set by erroring task might be 500 or something else.
         // Here, we ensure it becomes something specific if it falls to generic.
-        if (ctx->response().status_code < qb::http::status::HTTP_STATUS_BAD_REQUEST || ctx->response().status_code >= qb::http::status::HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED) {
-             ctx->response().status_code = qb::http::status::HTTP_STATUS_IM_A_TEAPOT; // Corrected Teapot
+        if (ctx->response().status() < qb::http::status::BAD_REQUEST || ctx->response().status() >= qb::http::status::NETWORK_AUTHENTICATION_REQUIRED) {
+             ctx->response().status() = qb::http::status::IM_A_TEAPOT; // Corrected Teapot
         }
         ctx->response().body() = "Generic Error from ErrorHandlingMiddleware: " + error_message;
         ctx->response().set_header("X-Error-Handler", "Generic");
@@ -771,7 +771,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
     _server->router().get("/route_triggering_specific_error", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++; // For the handler itself
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_FORBIDDEN;
+        ctx->response().status() = qb::http::status::FORBIDDEN;
         ctx->set("__error_message", std::string("Access specifically denied")); // Ensure std::string
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     });
@@ -779,7 +779,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
     _server->router().get("/route_triggering_500_for_range", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++; // For the handler itself
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
         ctx->set("__error_message", std::string("Triggering a 500 error for range test.")); // Ensure std::string
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     });
@@ -791,7 +791,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_generic_error" << std::endl;
         qb::http::Request request{{"http://localhost:9878/route_triggering_generic_error"}};
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_IM_A_TEAPOT, response.status_code); // Corrected Teapot
+        EXPECT_EQ(qb::http::status::IM_A_TEAPOT, response.status()); // Corrected Teapot
         EXPECT_EQ("Generic Error from ErrorHandlingMiddleware: Something bad happened generically", response.body().as<std::string>());
         EXPECT_EQ("Generic", response.header("X-Error-Handler"));
         mid_request_count_client++;
@@ -802,7 +802,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_specific_error" << std::endl;
         qb::http::Request request{{"http://localhost:9878/route_triggering_specific_error"}};
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_FORBIDDEN, response.status_code);
+        EXPECT_EQ(qb::http::status::FORBIDDEN, response.status());
         EXPECT_EQ("Custom Forbidden Error Page from ErrorHandlingMiddleware", response.body().as<std::string>());
         EXPECT_EQ("Specific-403", response.header("X-Error-Handler"));
         mid_request_count_client++;
@@ -813,7 +813,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_500_for_range" << std::endl;
         qb::http::Request request{{"http://localhost:9878/route_triggering_500_for_range"}};
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE, response.status_code); // Changed by range handler
+        EXPECT_EQ(qb::http::status::SERVICE_UNAVAILABLE, response.status()); // Changed by range handler
         EXPECT_EQ("Custom 50x Error Page (became 503) from ErrorHandlingMiddleware", response.body().as<std::string>());
         EXPECT_EQ("Range-50x-to-503", response.header("X-Error-Handler"));
         mid_request_count_client++;
@@ -906,7 +906,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
             }
             mid_server_side_assertions++; // For successful payload content check
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "JWT Simplified Auth OK";
         ctx->complete();
     });
@@ -916,7 +916,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
     {
         qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_UNAUTHORIZED, response.status_code);
+        EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         mid_request_count_client++;
     }
 
@@ -925,7 +925,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
         qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer garbage");
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_UNAUTHORIZED, response.status_code);
+        EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         mid_request_count_client++;
     }
 
@@ -935,7 +935,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
         qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + expired_token);
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_UNAUTHORIZED, response.status_code);
+        EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         mid_request_count_client++;
     }
     
@@ -945,7 +945,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
         qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + nbf_token);
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_UNAUTHORIZED, response.status_code);
+        EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         mid_request_count_client++;
     }
 
@@ -955,7 +955,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
         qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + token_no_req_claim);
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_UNAUTHORIZED, response.status_code);
+        EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         EXPECT_NE(response.body().as<std::string>().find("Required claim 'custom_claim' is missing"), std::string::npos);
         mid_request_count_client++;
     }
@@ -966,7 +966,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
         qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + valid_token);
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("JWT Simplified Auth OK", response.body().as<std::string>());
         mid_request_count_client++;
     }
@@ -1021,7 +1021,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
                 mid_server_side_assertions++; // For role check
             }
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Auth Route New OK - JWT Verified";
         ctx->complete();
     });
@@ -1031,7 +1031,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
     {
         qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_UNAUTHORIZED, response.status_code);
+        EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         EXPECT_NE(response.body().as<std::string>().find("Authentication required"), std::string::npos);
         mid_request_count_client++;
     }
@@ -1041,7 +1041,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
         qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
         request.add_header("Authorization", "Bearer aninvalidtokenstring");
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_UNAUTHORIZED, response.status_code);
+        EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         EXPECT_NE(response.body().as<std::string>().find("Invalid or expired token"), std::string::npos);
         mid_request_count_client++;
     }
@@ -1052,7 +1052,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
         qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
         request.add_header("Authorization", "Bearer " + token_wrong_role);
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_FORBIDDEN, response.status_code);
+        EXPECT_EQ(qb::http::status::FORBIDDEN, response.status());
         EXPECT_NE(response.body().as<std::string>().find("Insufficient permissions"), std::string::npos);
         mid_request_count_client++;
     }
@@ -1063,7 +1063,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
         qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
         request.add_header("Authorization", "Bearer " + token_correct_role);
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Auth Route New OK - JWT Verified", response.body().as<std::string>());
         mid_request_count_client++;
     }
@@ -1081,8 +1081,8 @@ public:
     void process(std::shared_ptr<MidCtx> ctx) override {
         ctx->response().set_header(_header_name, _header_value);
         if (_complete_request) {
-            if (ctx->response().status_code < qb::http::status::HTTP_STATUS_OK || ctx->response().status_code >= qb::http::status::HTTP_STATUS_MULTIPLE_CHOICES) { 
-                 ctx->response().status_code = qb::http::status::HTTP_STATUS_NO_CONTENT;
+            if (ctx->response().status() < qb::http::status::OK || ctx->response().status() >= qb::http::status::MULTIPLE_CHOICES) {
+                 ctx->response().status() = qb::http::status::NO_CONTENT;
             }
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
         } else {
@@ -1113,7 +1113,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S1_PredicateFalse_No
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().set_header("X-Main-S1-Ran", "true");
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "S1 Main Handler";
         ctx->complete();
     });
@@ -1122,7 +1122,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S1_PredicateFalse_No
     qb::http::Request request_s1{{"http://localhost:9878/cond_test_s1"}};
     auto response_s1 = qb::http::GET(request_s1);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response_s1.status_code);
+    EXPECT_EQ(qb::http::status::OK, response_s1.status());
     EXPECT_EQ("S1 Main Handler", response_s1.body().as<std::string>());
     EXPECT_EQ("true", response_s1.header("X-Main-S1-Ran"));
     EXPECT_TRUE(response_s1.header("X-If-S1-Ran").empty()); 
@@ -1143,7 +1143,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S2_PredicateTrue_IfR
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().set_header("X-Main-S2-Ran", "true");
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "S2 Main Handler";
         ctx->complete();
     });
@@ -1152,7 +1152,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S2_PredicateTrue_IfR
     qb::http::Request request_s2{{"http://localhost:9878/cond_test_s2?exec_if=1"}};
     auto response_s2 = qb::http::GET(request_s2);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response_s2.status_code);
+    EXPECT_EQ(qb::http::status::OK, response_s2.status());
     EXPECT_EQ("S2 Main Handler", response_s2.body().as<std::string>());
     EXPECT_EQ("true", response_s2.header("X-Main-S2-Ran"));
     EXPECT_EQ("true", response_s2.header("X-If-S2-Ran")); 
@@ -1216,7 +1216,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx){
             // This should not be hit if a file is served
             mid_server_side_assertions++; // Should remain 0 if files are served correctly
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->response().body() = "Fallback handler hit unexpectedly";
             ctx->complete();
         });
@@ -1225,7 +1225,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         qb::http::Request request{{"http://localhost:9878/file1.txt"}};
         auto response = qb::http::GET(request);
 
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Contents of file1.txt", response.body().as<std::string>());
         EXPECT_EQ("text/plain; charset=utf-8", response.header("Content-Type"));
         EXPECT_EQ(std::to_string(std::string("Contents of file1.txt").length()), response.header("Content-Length"));
@@ -1240,7 +1240,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         _server->router().use(sf_mw);
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx){
             mid_server_side_assertions++; 
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->response().body() = "Fallback handler hit unexpectedly for 404 test";
             ctx->complete();
         });
@@ -1248,7 +1248,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
 
         qb::http::Request request{{"http://localhost:9878/nonexistent.txt"}};
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_NOT_FOUND, response.status_code);
+        EXPECT_EQ(qb::http::status::NOT_FOUND, response.status());
         // The body for 404 is set by StaticFilesMiddleware itself
         EXPECT_EQ("File not found", response.body().as<std::string>()); 
         mid_request_count_client++;
@@ -1262,7 +1262,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         _server->router().use(sf_mw);
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx){
             mid_server_side_assertions++;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->response().body() = "Fallback handler hit unexpectedly for root index";
             ctx->complete();
         });
@@ -1270,7 +1270,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
 
         qb::http::Request request{{"http://localhost:9878/"}};
         auto response = qb::http::GET(request);
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+        EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Root Index HTML", response.body().as<std::string>());
         EXPECT_EQ("text/html; charset=utf-8", response.header("Content-Type"));
         mid_request_count_client++;
@@ -1285,7 +1285,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         _server->router().use(sf_mw);
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx){
             mid_server_side_assertions++; 
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->response().body() = "Fallback handler hit unexpectedly for range test";
             ctx->complete();
         });
@@ -1296,7 +1296,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         request.add_header("Range", "bytes=9-14");
         auto response = qb::http::GET(request);
 
-        EXPECT_EQ(qb::http::status::HTTP_STATUS_PARTIAL_CONTENT, response.status_code);
+        EXPECT_EQ(qb::http::status::PARTIAL_CONTENT, response.status());
         EXPECT_EQ(file_content.substr(9, 6), response.body().as<std::string>());
         EXPECT_EQ("bytes 9-14/" + std::to_string(file_content.length()), response.header("Content-Range"));
         EXPECT_EQ("6", response.header("Content-Length"));
@@ -1337,7 +1337,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S1_RequestBodyAndHeade
         mid_server_side_assertions++; 
         EXPECT_EQ("true", ctx->request().header("X-Request-Transformed-New"));
         EXPECT_EQ("TransformedBody:OriginalData", ctx->request().body().as<std::string>());
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Transformed Route Final Content Handled";
         ctx->response().set_header("X-Handler-Saw-Header", ctx->request().header("X-Request-Transformed-New"));
         ctx->response().set_header("X-Handler-Saw-Body-Prefix", ctx->request().body().as<std::string>().substr(0,15));
@@ -1345,11 +1345,11 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S1_RequestBodyAndHeade
     });
     _server->router().compile();
 
-    qb::http::Request http_req{qb::http::method::HTTP_POST, {"http://localhost:9878/transformed_route_final"}};
+    qb::http::Request http_req{qb::http::method::POST, {"http://localhost:9878/transformed_route_final"}};
     http_req.body() = "OriginalData";
     auto response = qb::http::POST(http_req);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Transformed Route Final Content Handled", response.body().as<std::string>());
     EXPECT_EQ("true", response.header("X-Handler-Saw-Header"));
     EXPECT_EQ("TransformedBody", response.header("X-Handler-Saw-Body-Prefix"));
@@ -1361,7 +1361,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S2_RequestMethodChange
 
     qb::http::TransformMiddleware<MiddlewareIntegrationSession>::RequestTransformer method_changer = 
         [](qb::http::Request& req) {
-            req.method = qb::http::method::HTTP_PUT; 
+            req.method() = qb::http::method::PUT;
             req.set_header("X-Method-Altered", "true");
         };
     auto transform_mw_method_change = qb::http::transform_middleware<MiddlewareIntegrationSession>(method_changer, "MethodChangerMW");
@@ -1370,22 +1370,22 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S2_RequestMethodChange
     _server->router().post("/method_change_test", [this](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++; 
-        EXPECT_EQ(ctx->request().method, qb::http::method::HTTP_PUT); 
+        EXPECT_EQ(ctx->request().method(), qb::http::method::PUT);
         EXPECT_EQ(ctx->request().header("X-Method-Altered"), "true");
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Method change test handled";
-        ctx->response().set_header("X-Handler-Actual-Method", qb::http::http_method_to_string(ctx->request().method));
+        ctx->response().set_header("X-Handler-Actual-Method", std::to_string(ctx->request().method()));
         ctx->complete();
     });
     _server->router().compile();
 
-    qb::http::Request http_req_post{qb::http::method::HTTP_POST, {"http://localhost:9878/method_change_test"}};
+    qb::http::Request http_req_post{qb::http::method::POST, {"http://localhost:9878/method_change_test"}};
     http_req_post.body()="data";
     auto response = qb::http::POST(http_req_post);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Method change test handled", response.body().as<std::string>());
-    EXPECT_EQ(qb::http::http_method_to_string(qb::http::method::HTTP_PUT), response.header("X-Handler-Actual-Method"));
+    EXPECT_EQ(std::to_string(qb::http::method::PUT), response.header("X-Handler-Actual-Method"));
 }
 
 
@@ -1409,19 +1409,19 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S1_ValidBody) {
     _server->router().post("/val_test_body", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++;
         mid_server_side_assertions++;
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Valid body processed";
         ctx->complete();
     });
     _server->router().compile();
 
-    qb::http::Request req{qb::http::method::HTTP_POST, {"http://localhost:9878/val_test_body"}};
+    qb::http::Request req{qb::http::method::POST, {"http://localhost:9878/val_test_body"}};
     qb::json valid_body_data = {{"name", "Test User"}};
     req.body() = valid_body_data.dump();
     req.set_header("Content-Type", "application/json");
     auto response = qb::http::POST(req);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_OK, response.status_code);
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Valid body processed", response.body().as<std::string>());
 }
 
@@ -1444,20 +1444,20 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S2_InvalidBody) {
     _server->router().post("/val_test_body_invalid", [](std::shared_ptr<MidCtx> ctx){
         mid_request_count_server++; 
         mid_server_side_assertions++; 
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Handler reached unexpectedly";
         ctx->complete();
     });
     _server->router().compile();
 
-    qb::http::Request req{qb::http::method::HTTP_POST, {"http://localhost:9878/val_test_body_invalid"}};
+    qb::http::Request req{qb::http::method::POST, {"http://localhost:9878/val_test_body_invalid"}};
     qb::json invalid_body_data = {{"email", "not-an-email"}};
     req.body() = invalid_body_data.dump();
     req.set_header("Content-Type", "application/json");
     auto response = qb::http::POST(req);
 
-    EXPECT_EQ(qb::http::status::HTTP_STATUS_BAD_REQUEST, response.status_code);
-    EXPECT_EQ("application/json", response.header("Content-Type"));
+    EXPECT_EQ(qb::http::status::BAD_REQUEST, response.status());
+    EXPECT_EQ("application/json; charset=utf-8", response.header("Content-Type"));
     qb::json error_response = qb::json::parse(response.body().as<std::string_view>());
     EXPECT_EQ("Validation failed.", error_response["message"].get<std::string>());
     ASSERT_TRUE(error_response["errors"].is_array() && !error_response["errors"].empty());
@@ -1486,20 +1486,20 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S2_InvalidBody) {
 /*
     _server->router().clear(); 
     _server->router().set_not_found_handler([](std::shared_ptr<MidCtx> ctx) {
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_NOT_FOUND;
+        ctx->response().status() = qb::http::status::NOT_FOUND;
         ctx->response().body() = "Test default: Resource not found.";
         ctx->complete();
     });
     qb::http::RouteHandlerFn<MiddlewareIntegrationSession> default_error_handler_fn_v = 
         [](std::shared_ptr<MidCtx> ctx) {
-            if (ctx->response().status_code < qb::http::status::HTTP_STATUS_BAD_REQUEST || ctx->response().status_code >= 600) {
-                ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            if (ctx->response().status() < qb::http::status::BAD_REQUEST || ctx->response().status() >= 600) {
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             }
             ctx->response().body() = "Test default: A global server error occurred.";
             ctx->complete(); 
     };
     auto default_error_task_v = std::make_shared<qb::http::RouteLambdaTask<MiddlewareIntegrationSession>>(default_error_handler_fn_v, "DefaultGlobalServerErrorTaskV");
     _server->router().set_error_task_chain({default_error_task_v});
-     _server->router().get("/ping", [](std::shared_ptr<MidCtx> ctx){ mid_request_count_server++; mid_server_side_assertions++; ctx->response().status_code = qb::http::status::HTTP_STATUS_OK; ctx->response().body() = "pong_middleware_test"; ctx->complete(); });
+     _server->router().get("/ping", [](std::shared_ptr<MidCtx> ctx){ mid_request_count_server++; mid_server_side_assertions++; ctx->response().status() = qb::http::status::OK; ctx->response().body() = "pong_middleware_test"; ctx->complete(); });
     _server->router().compile();
 */

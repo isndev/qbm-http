@@ -74,7 +74,7 @@ protected:
 
     qb::http::Request create_request(const std::string& target_path = "/protected") {
         qb::http::Request req;
-        req.method = qb::http::method::HTTP_GET;
+        req.method() = qb::http::method::GET;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -92,7 +92,7 @@ protected:
                     _session->_jwt_payload_in_context = ctx->template get<qb::json>("jwt_payload");
                 }
             }
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Authenticated Access Granted";
             ctx->complete();
         };
@@ -200,7 +200,7 @@ TEST_F(JwtMiddlewareTest, ValidTokenAuthentication) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Response body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
@@ -210,7 +210,7 @@ TEST_F(JwtMiddlewareTest, ValidTokenAuthentication) {
 TEST_F(JwtMiddlewareTest, MissingToken) {
     configure_router_and_run(_jwt_mw, create_request());
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -220,7 +220,7 @@ TEST_F(JwtMiddlewareTest, InvalidTokenFormat) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " not.a.valid.jwt.token");
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid token format"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -233,7 +233,7 @@ TEST_F(JwtMiddlewareTest, ExpiredToken) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + expired_token);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Token has expired"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -249,7 +249,7 @@ TEST_F(JwtMiddlewareTest, TokenNotYetValid) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + nbf_token);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Token is not yet active"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -264,7 +264,7 @@ TEST_F(JwtMiddlewareTest, RequiredClaimMissing) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_claim);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Required claim 'scope' is missing"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -281,7 +281,7 @@ TEST_F(JwtMiddlewareTest, TokenFromCookie) {
     req.cookies().add(_jwt_options.token_name, token); 
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "cookie_user");
@@ -298,7 +298,7 @@ TEST_F(JwtMiddlewareTest, TokenFromQuery) {
     auto req = create_request("/protected?access_token=" + token);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "query_user");
@@ -312,7 +312,7 @@ TEST_F(JwtMiddlewareTest, WrongAlgorithm) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_key_implies_sig_fail);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for WrongAlgorithm: " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid token signature."), std::string::npos)
         << "Response body for WrongAlgorithm: " << _session->_response.body().as<std::string>();
@@ -340,7 +340,7 @@ TEST_F(JwtMiddlewareTest, CustomValidator) {
     req_valid.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_valid);
     configure_router_and_run(_jwt_mw, std::move(req_valid));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Test Case 2: Validator returns false (invalid value)
@@ -351,7 +351,7 @@ TEST_F(JwtMiddlewareTest, CustomValidator) {
     req_invalid.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_invalid);
     configure_router_and_run(_jwt_mw, std::move(req_invalid));
     
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED); 
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     std::string body_str_invalid = _session->_response.body().as<std::string>();
     EXPECT_TRUE(body_str_invalid.find("Custom claim 'custom_claim' has invalid value.") != std::string::npos ||
                 body_str_invalid.find("Custom JWT validation failed") != std::string::npos)
@@ -366,7 +366,7 @@ TEST_F(JwtMiddlewareTest, CustomValidator) {
     req_missing.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing);
     configure_router_and_run(_jwt_mw, std::move(req_missing));
     
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     std::string body_str_missing = _session->_response.body().as<std::string>();
     EXPECT_TRUE(body_str_missing.find("Custom claim 'custom_claim' is missing.") != std::string::npos ||
                 body_str_missing.find("Custom JWT validation failed") != std::string::npos) 
@@ -394,7 +394,7 @@ TEST_F(JwtMiddlewareTest, TokenTampering) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + tampered_token);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     std::string body_str = _session->_response.body().as<std::string>();
     bool correct_error = body_str.find("Token signature verification failed") != std::string::npos ||
                          body_str.find("Invalid token format") != std::string::npos;
@@ -413,7 +413,7 @@ TEST_F(JwtMiddlewareTest, IssuerVerification) {
     auto req_correct_iss = create_request();
     req_correct_iss.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_correct_iss);
     configure_router_and_run(_jwt_mw, std::move(req_correct_iss));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Case 2: Wrong issuer
@@ -423,7 +423,7 @@ TEST_F(JwtMiddlewareTest, IssuerVerification) {
     auto req_wrong_iss = create_request();
     req_wrong_iss.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_iss);
     configure_router_and_run(_jwt_mw, std::move(req_wrong_iss));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for IssuerVerification (Wrong Issuer): " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid issuer.\""), std::string::npos)
         << "Response body for IssuerVerification (Wrong Issuer): " << _session->_response.body().as<std::string>();
@@ -449,7 +449,7 @@ TEST_F(JwtMiddlewareTest, IssuerVerification) {
     auto req_missing_iss = create_request();
     req_missing_iss.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_iss);
     configure_router_and_run(_jwt_mw, std::move(req_missing_iss));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for IssuerVerification (Missing Issuer): " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid issuer.\""), std::string::npos)
         << "Response body for IssuerVerification (Missing Issuer): " << _session->_response.body().as<std::string>();
@@ -464,7 +464,7 @@ TEST_F(JwtMiddlewareTest, WrongSecret) {
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_secret);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for WrongSecret: " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid token signature."), std::string::npos)
         << "Response body for WrongSecret: " << _session->_response.body().as<std::string>();
@@ -482,7 +482,7 @@ TEST_F(JwtMiddlewareTest, AudienceValidation) {
     auto req_correct_aud = create_request();
     req_correct_aud.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_correct_aud);
     configure_router_and_run(_jwt_mw, std::move(req_correct_aud));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Case 2: Wrong audience
@@ -492,7 +492,7 @@ TEST_F(JwtMiddlewareTest, AudienceValidation) {
     auto req_wrong_aud = create_request();
     req_wrong_aud.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_aud);
     configure_router_and_run(_jwt_mw, std::move(req_wrong_aud));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for AudienceValidation (Wrong Audience): " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid audience.\""), std::string::npos)
         << "Response body for AudienceValidation (Wrong Audience): " << _session->_response.body().as<std::string>();
@@ -518,7 +518,7 @@ TEST_F(JwtMiddlewareTest, AudienceValidation) {
     auto req_missing_aud = create_request();
     req_missing_aud.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_aud);
     configure_router_and_run(_jwt_mw, std::move(req_missing_aud));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for AudienceValidation (Missing Audience): " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid audience.\""), std::string::npos)
         << "Response body for AudienceValidation (Missing Audience): " << _session->_response.body().as<std::string>();
@@ -536,7 +536,7 @@ TEST_F(JwtMiddlewareTest, SubjectVerification) {
     auto req_correct_sub = create_request();
     req_correct_sub.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_correct_sub);
     configure_router_and_run(_jwt_mw, std::move(req_correct_sub));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Case 2: Wrong subject
@@ -546,7 +546,7 @@ TEST_F(JwtMiddlewareTest, SubjectVerification) {
     auto req_wrong_sub = create_request();
     req_wrong_sub.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_sub);
     configure_router_and_run(_jwt_mw, std::move(req_wrong_sub));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for SubjectVerification (Wrong Subject): " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid subject"), std::string::npos)
         << "Response body for SubjectVerification (Wrong Subject): " << _session->_response.body().as<std::string>();
@@ -572,7 +572,7 @@ TEST_F(JwtMiddlewareTest, SubjectVerification) {
     auto req_missing_sub = create_request();
     req_missing_sub.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_sub_alt);
     configure_router_and_run(_jwt_mw, std::move(req_missing_sub));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Response body for SubjectVerification (Missing Subject): " << _session->_response.body().as<std::string>();
     EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid subject.\""), std::string::npos)
         << "Response body for SubjectVerification (Missing Subject): " << _session->_response.body().as<std::string>();
@@ -591,7 +591,7 @@ TEST_F(JwtMiddlewareTest, ClockSkewTolerance) {
     auto req_exp_leeway = create_request();
     req_exp_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_exp_within_leeway);
     configure_router_and_run(_jwt_mw, std::move(req_exp_leeway));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Expired within leeway failed. Body: " << _session->_response.body().as<std::string>();
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Expired within leeway failed. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Test 2: Token expired by 90s (outside leeway)
@@ -600,7 +600,7 @@ TEST_F(JwtMiddlewareTest, ClockSkewTolerance) {
     auto req_exp_no_leeway = create_request();
     req_exp_no_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_exp_outside_leeway);
     configure_router_and_run(_jwt_mw, std::move(req_exp_no_leeway));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Token has expired"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 
@@ -610,7 +610,7 @@ TEST_F(JwtMiddlewareTest, ClockSkewTolerance) {
     auto req_nbf_leeway = create_request();
     req_nbf_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_nbf_within_leeway);
     configure_router_and_run(_jwt_mw, std::move(req_nbf_leeway));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "NBF within leeway failed. Body: " << _session->_response.body().as<std::string>();
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "NBF within leeway failed. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Test 4: Token NBF is 90s in future (outside leeway)
@@ -619,7 +619,7 @@ TEST_F(JwtMiddlewareTest, ClockSkewTolerance) {
     auto req_nbf_no_leeway = create_request();
     req_nbf_no_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_nbf_outside_leeway);
     configure_router_and_run(_jwt_mw, std::move(req_nbf_no_leeway));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Token is not yet active"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -630,7 +630,7 @@ TEST_F(JwtMiddlewareTest, CustomErrorHandler) {
         [&custom_handler_called](std::shared_ptr<qb::http::Context<MockJwtSession>> ctx, 
                                  const qb::http::JwtErrorInfo& error_info) {
             custom_handler_called = true;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_IM_A_TEAPOT;
+            ctx->response().status() = qb::http::status::IM_A_TEAPOT;
             ctx->response().body() = "Custom JWT Error: " + error_info.message;
             ctx->complete();
         });
@@ -638,7 +638,7 @@ TEST_F(JwtMiddlewareTest, CustomErrorHandler) {
     configure_router_and_run(_jwt_mw, create_request()); 
 
     EXPECT_TRUE(custom_handler_called);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_IM_A_TEAPOT);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::IM_A_TEAPOT);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Custom JWT Error: JWT token is missing"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -655,7 +655,7 @@ TEST_F(JwtMiddlewareTest, SuccessHandlerCanAccessPayload) {
                 _session->_jwt_payload_in_context = ctx->template get<qb::json>("jwt_payload");
             }
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Authenticated Access Granted, payload checked";
         ctx->complete();
     };
@@ -673,7 +673,7 @@ TEST_F(JwtMiddlewareTest, SuccessHandlerCanAccessPayload) {
     _session->reset();
     _router->route(_session, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "payload_access_user");
@@ -692,7 +692,7 @@ TEST_F(JwtMiddlewareTest, FactoryFunctionsWorkAsExpected) {
     req1.set_header("Authorization", "Bearer " + token1);
     configure_router_and_run(factory_mw1, std::move(req1));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Factory MW1 Failed. Body: " << _session->_response.body().as<std::string>();
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Factory MW1 Failed. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "factory_user1");
@@ -700,7 +700,7 @@ TEST_F(JwtMiddlewareTest, FactoryFunctionsWorkAsExpected) {
     // Test 1.1: Missing token with factory_mw1
     _session->reset();
     configure_router_and_run(factory_mw1, create_request());
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
 
     // Test 2: jwt_middleware_with_options(options)
@@ -721,7 +721,7 @@ TEST_F(JwtMiddlewareTest, FactoryFunctionsWorkAsExpected) {
     req2.cookies().add(custom_options.token_name, token2);
     configure_router_and_run(factory_mw2, std::move(req2));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Factory MW2 Failed. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
@@ -736,7 +736,7 @@ TEST_F(JwtMiddlewareTest, TokenWithNoSchemeWhenSchemeExpected) {
     req.set_header(_jwt_options.token_name, token);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"JWT token is missing.\""), std::string::npos)
         << "Response body: " << _session->_response.body().as<std::string>();
     EXPECT_FALSE(_session->_final_handler_called);
@@ -750,7 +750,7 @@ TEST_F(JwtMiddlewareTest, TokenWithWrongSchemeWhenSchemeExpected) {
     req.set_header(_jwt_options.token_name, "Basic " + token);
     configure_router_and_run(_jwt_mw, std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"JWT token is missing.\""), std::string::npos)
         << "Response body: " << _session->_response.body().as<std::string>();
     EXPECT_FALSE(_session->_final_handler_called);
@@ -764,7 +764,7 @@ TEST_F(JwtMiddlewareTest, CaseInsensitiveAuthSchemeInHeader) {
     _session->reset();
     req.set_header(_jwt_options.token_name, "bearer " + token);
     configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Lowercase scheme failed. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
 
@@ -772,7 +772,7 @@ TEST_F(JwtMiddlewareTest, CaseInsensitiveAuthSchemeInHeader) {
     req = create_request();
     req.set_header(_jwt_options.token_name, "BeArEr " + token); 
     configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Mixed case scheme failed. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
 }
@@ -785,7 +785,7 @@ TEST_F(JwtMiddlewareTest, WhitespaceToleranceInAuthHeader) {
     _session->reset();
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + "   " + token);
     configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Extra spaces after scheme. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
 
@@ -793,7 +793,7 @@ TEST_F(JwtMiddlewareTest, WhitespaceToleranceInAuthHeader) {
     req = create_request();
     req.set_header(_jwt_options.token_name, "  " + _jwt_options.auth_scheme + " " + token);
     configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Leading spaces before scheme. Body: " << _session->_response.body().as<std::string>();
     EXPECT_TRUE(_session->_final_handler_called);
     
@@ -802,7 +802,7 @@ TEST_F(JwtMiddlewareTest, WhitespaceToleranceInAuthHeader) {
         req = create_request();
         req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + token);
         configure_router_and_run(_jwt_mw, std::move(req));
-        EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+        EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
             << "No space between scheme and token. Body: " << _session->_response.body().as<std::string>();
         EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"JWT token is missing.\""), std::string::npos)
              << "Response body: " << _session->_response.body().as<std::string>();

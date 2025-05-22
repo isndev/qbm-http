@@ -1,50 +1,60 @@
-#include <algorithm>
-#include <sstream>
+/**
+ * @file qbm/http/cookie.cpp
+ * @brief Implements HTTP cookie parsing and serialization utilities.
+ *
+ * This file provides the definitions for functions and methods declared in
+ * `cookie.h`, including parsing `Cookie` and `Set-Cookie` headers, and
+ * serializing `Cookie` objects to header strings.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 
 #include "./cookie.h"
-#include "./date.h"
-#include "./utility.h"
+#include "./date.h"      // For qb::http::date::parse_http_date, format_http_date
+#include "./utility.h"   // For qb::http::utility::iequals, is_control
 
-#include <qb/system/timestamp.h>
-#include <chrono>
-#include <string>
-#include <vector>
+#include <algorithm>   // For std::find_if_not, std::transform
+#include <sstream>     // For std::ostringstream
+#include <stdexcept>   // For std::runtime_error, std::stoi related exceptions
+// #include <qb/system/timestamp.h> // Not directly used here, date.h handles conversions
+// <chrono>, <string>, <vector> are included via cookie.h or other headers above
 
 namespace qb::http {
 
 /**
- * @brief Check if a name is a cookie attribute
- * @param name Name to check
- * @param set_cookie_header Whether parsing a Set-Cookie header (true) or Cookie header
- * (false)
- * @return true if name is a cookie attribute, false otherwise
+ * @brief (Internal) Checks if a given name string corresponds to a known cookie attribute name.
  *
- * Determines if a name-value pair in a cookie string is an attribute rather than a
- * cookie. Cookie attributes include $-prefixed attributes and standard attributes like
- * Path, Domain, etc.
+ * This helper function is used during cookie parsing to differentiate between
+ * actual cookie name-value pairs and reserved attribute names like "Path", "Domain",
+ * "Expires", etc., as defined in RFC 6265. It also considers legacy "$" prefixed
+ * attributes from older RFCs (like RFC 2109), though these are obsolete.
  *
- * According to RFC 6265, everything after the first semicolon in a Set-Cookie header
- * is considered an attribute, but this function provides more precise detection by
- * checking against a list of known attributes.
+ * @param name The attribute name to check (case-insensitive comparison is used for known attributes).
+ * @param set_cookie_header `true` if parsing a `Set-Cookie` header (where attributes are common),
+ *                          `false` if parsing a `Cookie` header (where attributes are not expected).
+ * @return `true` if `name` is a recognized cookie attribute, `false` otherwise.
  */
 inline bool
-is_cookie_attribute(const std::string &name, bool set_cookie_header) {
-    return (
-        name.empty() || name[0] == '$' ||
-        (set_cookie_header &&
-         (
-             // This is needed because of a very lenient determination in
-             // parse_cookie_header() of what qualifies as a cookie-pair in a Set-Cookie
-             // header. According to RFC 6265, everything after the first semicolon is a
-             // cookie attribute, but RFC 2109, which is obsolete, allowed multiple comma
-             // separated cookies. parse_cookie_header() is very conservatively assuming
-             // that any <n>=<value> pair in a Set-Cookie header is a cookie-pair unless
-             // <n> is a known cookie attribute.
-             utility::iequals(name, "Comment") || utility::iequals(name, "Domain") ||
-             utility::iequals(name, "Max-Age") || utility::iequals(name, "Path") ||
-             utility::iequals(name, "Secure") || utility::iequals(name, "Version") ||
-             utility::iequals(name, "Expires") || utility::iequals(name, "HttpOnly") ||
-             utility::iequals(name, "SameSite"))));
+is_cookie_attribute(std::string_view name, bool set_cookie_header) noexcept {
+    if (name.empty() || name[0] == '$') { // Legacy RFC 2109 attributes or empty string
+        return true;
+    }
+    if (set_cookie_header) {
+        // RFC 6265 attributes. Comparison should be case-insensitive.
+        static const char* known_attributes[] = {
+            "Comment", "Domain", "Max-Age", "Path", "Secure",
+            "Version", "Expires", "HttpOnly", "SameSite"
+        };
+        for (const char* attr : known_attributes) {
+            if (utility::iequals(name, attr)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 /**
@@ -68,139 +78,110 @@ is_cookie_attribute(const std::string &name, bool set_cookie_header) {
  * @throws std::runtime_error If parsing fails due to malformed data
  */
 qb::icase_unordered_map<std::string>
-parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
+parse_cookies(const char* ptr, const size_t len, bool set_cookie_header) {
     qb::icase_unordered_map<std::string> dict;
-    // BASED ON RFC 2109
-    // http://www.ietf.org/rfc/rfc2109.txt
-    //
-    // The current implementation ignores cookie attributes which begin with '$'
-    // (i.e. $Path=/, $Domain=, etc.)
+    if (!ptr || len == 0) {
+        return dict;
+    }
 
-    // used to track what we are parsing
-    enum CookieParseState {
+    enum class CookieParseState {
         COOKIE_PARSE_NAME,
         COOKIE_PARSE_VALUE,
-        COOKIE_PARSE_IGNORE
-    } parse_state = COOKIE_PARSE_NAME;
+        COOKIE_PARSE_IGNORE // After a quoted value, ignore until next separator
+    } parse_state = CookieParseState::COOKIE_PARSE_NAME;
 
-    // misc other variables used for parsing
-    const char *const end = ptr + len;
-    std::string       cookie_name;
-    std::string       cookie_value;
-    char              value_quote_character = '\0';
+    const char* const end = ptr + len;
+    std::string cookie_name;
+    std::string cookie_value;
+    char value_quote_character = '\0'; // '\'' or '"' if parsing a quoted value, else '\0'
 
-    // iterate through each character
     while (ptr < end) {
+        const char current_char = *ptr;
         switch (parse_state) {
-            case COOKIE_PARSE_NAME:
-                // parsing cookie name
-                if (*ptr == '=') {
-                    // end of name found (OK if empty)
-                    value_quote_character = '\0';
-                    parse_state           = COOKIE_PARSE_VALUE;
-                } else if (*ptr == ';' || *ptr == ',') {
-                    // ignore empty cookie names since this may occur naturally
-                    // when quoted values are encountered
-                    if (!cookie_name.empty()) {
-                        // value is empty (OK)
-                        if (!is_cookie_attribute(cookie_name, set_cookie_header))
-                            dict.emplace(cookie_name, cookie_value);
-                        cookie_name.erase();
-                    }
-                } else if (*ptr != ' ') { // ignore whitespace
-                    // check if control character detected, or max sized exceeded
-                    if (qb::http::utility::is_control(*ptr) ||
-                        cookie_name.size() >= COOKIE_NAME_MAX)
-                        throw std::runtime_error(
-                            "ctrl in name found or max cookie name length");
-                    // character is part of the name
-                    cookie_name.push_back(*ptr);
-                }
-                break;
-
-            case COOKIE_PARSE_VALUE:
-                // parsing cookie value
-                if (value_quote_character == '\0') {
-                    // value is not (yet) quoted
-                    if (*ptr == ';' || *ptr == ',') {
-                        // end of value found (OK if empty)
-                        if (!is_cookie_attribute(cookie_name, set_cookie_header))
-                            dict.emplace(cookie_name, cookie_value);
-                        cookie_name.erase();
-                        cookie_value.erase();
-                        parse_state = COOKIE_PARSE_NAME;
-                    } else if (*ptr == '\'' || *ptr == '"') {
-                        if (cookie_value.empty()) {
-                            // begin quoted value
-                            value_quote_character = *ptr;
-                        } else if (cookie_value.size() >= COOKIE_VALUE_MAX) {
-                            // max size exceeded
-                            throw std::runtime_error("cookie ");
-                        } else {
-                            // assume character is part of the (unquoted) value
-                            cookie_value.push_back(*ptr);
+            case CookieParseState::COOKIE_PARSE_NAME:
+                if (current_char == '=') {
+                    // End of name found. Value might be empty.
+                    // Name itself can be empty if previous was like ";=", handled by is_cookie_attribute.
+                    value_quote_character = '\0'; // Reset for new value
+                    cookie_value.clear();
+                    parse_state = CookieParseState::COOKIE_PARSE_VALUE;
+                } else if (current_char == ';' || current_char == ',') {
+                    // Separator found before '=', means empty value for previous name (if any).
+                    if (!cookie_name.empty()) { // If a name was parsed
+                        if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
+                            dict.emplace(cookie_name, ""); // Empty value
                         }
-                    } else if (*ptr != ' ' ||
-                               !cookie_value
-                                    .empty()) { // ignore leading unquoted whitespace
-                        // check if control character detected, or max sized exceeded
-                        if (qb::http::utility::is_control(*ptr) ||
-                            cookie_value.size() >= COOKIE_VALUE_MAX)
-                            throw std::runtime_error(
-                                "ctrl in value found or max cookie value length");
-                        // character is part of the (unquoted) value
-                        cookie_value.push_back(*ptr);
+                        cookie_name.clear();
+                        // cookie_value is already empty or irrelevant here
                     }
-                } else {
-                    // value is quoted
-                    if (*ptr == value_quote_character) {
-                        // end of value found (OK if empty)
-                        if (!is_cookie_attribute(cookie_name, set_cookie_header))
+                    // Stay in COOKIE_PARSE_NAME for the next potential cookie
+                } else if (!utility::is_http_whitespace(current_char)) { // Ignore whitespace
+                    if (utility::is_control(current_char) || cookie_name.length() >= COOKIE_NAME_MAX) {
+                        throw std::runtime_error("Invalid character or max length exceeded for cookie name.");
+                    }
+                    cookie_name.push_back(current_char);
+                }
+                break;
+
+            case CookieParseState::COOKIE_PARSE_VALUE:
+                if (value_quote_character == '\0') { // Value is not (yet) quoted
+                    if (current_char == ';' || current_char == ',') {
+                        // End of value (unquoted)
+                        if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
+                            dict.emplace(cookie_name, cookie_value); // Value might be empty
+                        }
+                        cookie_name.clear();
+                        cookie_value.clear();
+                        parse_state = CookieParseState::COOKIE_PARSE_NAME;
+                    } else if ((current_char == '\'' || current_char == '"') && cookie_value.empty()) {
+                        // Start of a quoted value, only if value is currently empty
+                        value_quote_character = current_char;
+                    } else if (!utility::is_http_whitespace(current_char) || !cookie_value.empty()) {
+                        // Non-whitespace, or non-leading whitespace for unquoted value
+                        if (utility::is_control(current_char) || cookie_value.length() >= COOKIE_VALUE_MAX) {
+                            throw std::runtime_error("Invalid character or max length exceeded for cookie value.");
+                        }
+                        cookie_value.push_back(current_char);
+                    }
+                } else { // Value is quoted
+                    if (current_char == value_quote_character) {
+                        // End of quoted value
+                        if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
                             dict.emplace(cookie_name, cookie_value);
-                        cookie_name.erase();
-                        cookie_value.erase();
-                        parse_state = COOKIE_PARSE_IGNORE;
-                    } else if (cookie_value.size() >= COOKIE_VALUE_MAX) {
-                        // max size exceeded
-                        throw std::runtime_error("max cookie value length");
+                        }
+                        cookie_name.clear();
+                        cookie_value.clear();
+                        value_quote_character = '\0'; // Reset quote char
+                        parse_state = CookieParseState::COOKIE_PARSE_IGNORE; // Ignore until next separator
                     } else {
-                        // character is part of the (quoted) value
-                        cookie_value.push_back(*ptr);
+                        if (cookie_value.length() >= COOKIE_VALUE_MAX) { // Max length check within quoted value
+                            throw std::runtime_error("Max length exceeded for quoted cookie value.");
+                        }
+                        // Allow CTLs within quoted strings as per RFC 6265 (though some older RFCs restricted)
+                        // For simplicity and modern behavior, not checking is_control here.
+                        cookie_value.push_back(current_char);
                     }
                 }
                 break;
 
-            case COOKIE_PARSE_IGNORE:
-                // ignore everything until we reach a comma "," or semicolon ";"
-                if (*ptr == ';' || *ptr == ',')
-                    parse_state = COOKIE_PARSE_NAME;
+            case CookieParseState::COOKIE_PARSE_IGNORE:
+                // Ignore everything until a separator is found, then switch to parsing next name.
+                if (current_char == ';' || current_char == ',') {
+                    parse_state = CookieParseState::COOKIE_PARSE_NAME;
+                }
                 break;
         }
-
         ++ptr;
     }
 
-    // handle last cookie in string
-    if (!is_cookie_attribute(cookie_name, set_cookie_header))
-        dict.emplace(cookie_name, cookie_value);
+    // Handle the last cookie in the string (if any name was parsed)
+    if (!cookie_name.empty()) {
+        if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
+            dict.emplace(std::move(cookie_name), std::move(cookie_value));
+        }
+    }
 
     return dict;
-}
-
-/**
- * @brief Parse HTTP cookies from a string
- * @param header Cookie header string
- * @param set_cookie_header Whether parsing a Set-Cookie header (true) or Cookie header
- * (false)
- * @return Map of cookie names to values
- *
- * String overload that converts to raw pointer and length for processing.
- *
- * @see parse_cookies(const char*, size_t, bool)
- */
-qb::icase_unordered_map<std::string>
-parse_cookies(std::string const &header, bool set_cookie_header) {
-    return parse_cookies(header.c_str(), header.size(), set_cookie_header);
 }
 
 /**
@@ -216,7 +197,7 @@ parse_cookies(std::string const &header, bool set_cookie_header) {
  * @see parse_cookies(const char*, size_t, bool)
  */
 qb::icase_unordered_map<std::string>
-parse_cookies(std::string_view const &header, bool set_cookie_header) {
+parse_cookies(std::string_view header, bool set_cookie_header) {
     return parse_cookies(header.data(), header.size(), set_cookie_header);
 }
 
@@ -226,119 +207,102 @@ parse_cookies(std::string_view const &header, bool set_cookie_header) {
  * @return Cookie object with parsed attributes
  */
 std::optional<Cookie> parse_set_cookie(std::string_view header) {
-    // First, parse the basic cookie data to get name/value
-    auto cookies = parse_cookies(header.data(), header.size(), true);
-    if (cookies.empty()) {
+    if (header.empty()) {
         return std::nullopt;
     }
-    
-    // Use the first entry for the cookie name/value
-    auto it = cookies.begin();
-    Cookie cookie(it->first, it->second);
-    
-    // Now parse all the attributes
-    std::string_view remaining = header;
-    
-    // Find the position after the first name=value pair
-    size_t pos = remaining.find(';');
-    if (pos != std::string_view::npos) {
-        remaining = remaining.substr(pos + 1);
-        
-        // Parse each attribute
-        while (!remaining.empty()) {
-            // Remove leading whitespace
-            while (!remaining.empty() && (remaining.front() == ' ' || remaining.front() == '\t')) {
-                remaining = remaining.substr(1);
-            }
-            
-            if (remaining.empty()) {
-                break;
-            }
-            
-            // Find attribute name
-            pos = remaining.find('=');
-            size_t end = remaining.find(';');
-            if (end == std::string_view::npos) {
-                end = remaining.size();
-            }
-            
-            if (pos != std::string_view::npos && pos < end) {
-                // Name=Value attribute
-                std::string_view name = remaining.substr(0, pos);
-                std::string_view value = remaining.substr(pos + 1, end - pos - 1);
-                
-                // Trim whitespace
-                while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
-                    name = name.substr(0, name.size() - 1);
-                }
-                
-                while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-                    value = value.substr(1);
-                }
-                
-                // Remove quotes from value if present
-                if (!value.empty() && (value.front() == '"' || value.front() == '\'')) {
-                    if (value.size() > 1 && value.back() == value.front()) {
-                        value = value.substr(1, value.size() - 2);
-                    }
-                }
-                
-                // Process attribute
-                if (qb::http::utility::iequals(std::string(name), "Path")) {
-                    cookie.path(std::string(value));
-                } else if (qb::http::utility::iequals(std::string(name), "Domain")) {
-                    cookie.domain(std::string(value));
-                } else if (qb::http::utility::iequals(std::string(name), "Expires")) {
-                    try {
-                        auto tp = qb::http::date::parse_http_date(std::string(value));
-                        if (tp) {
-                            cookie.expires(tp.value());
-                        }
-                    } catch (...) {
-                        // Invalid date, ignore
-                    }
-                } else if (qb::http::utility::iequals(std::string(name), "Max-Age")) {
-                    try {
-                        int seconds = std::stoi(std::string(value));
-                        cookie.max_age(seconds);
-                    } catch (...) {
-                        // Invalid integer, ignore
-                    }
-                } else if (qb::http::utility::iequals(std::string(name), "SameSite")) {
-                    if (qb::http::utility::iequals(std::string(value), "Strict")) {
-                        cookie.same_site(SameSite::Strict);
-                    } else if (qb::http::utility::iequals(std::string(value), "Lax")) {
-                        cookie.same_site(SameSite::Lax);
-                    } else if (qb::http::utility::iequals(std::string(value), "None")) {
-                        cookie.same_site(SameSite::None);
-                    }
-                }
-            } else {
-                // Flag attribute (no value)
-                std::string_view flag = remaining.substr(0, end);
-                
-                // Trim whitespace
-                while (!flag.empty() && (flag.back() == ' ' || flag.back() == '\t')) {
-                    flag = flag.substr(0, flag.size() - 1);
-                }
-                
-                if (qb::http::utility::iequals(std::string(flag), "Secure")) {
-                    cookie.secure(true);
-                } else if (qb::http::utility::iequals(std::string(flag), "HttpOnly")) {
-                    cookie.http_only(true);
-                }
-            }
-            
-            // Move to next attribute
-            if (end < remaining.size()) {
-                remaining = remaining.substr(end + 1);
-            } else {
-                break;
-            }
-        }
+
+    std::string_view original_header = header;
+    std::string_view cookie_pair_sv;
+    std::string_view attributes_sv;
+
+    size_t first_semi = header.find(';');
+    if (first_semi == std::string_view::npos) {
+        cookie_pair_sv = header;
+        // attributes_sv remains empty
+    } else {
+        cookie_pair_sv = header.substr(0, first_semi);
+        attributes_sv = header.substr(first_semi + 1);
     }
-    
-    return cookie;
+
+    cookie_pair_sv = utility::trim_http_whitespace(cookie_pair_sv);
+    size_t eq_pos = cookie_pair_sv.find('=');
+
+    if (eq_pos == std::string_view::npos || eq_pos == 0) { // No '=' or starts with '=' (empty name)
+        return std::nullopt; // Invalid cookie-pair
+    }
+
+    std::string cookie_name(cookie_pair_sv.substr(0, eq_pos));
+    std::string cookie_value(cookie_pair_sv.substr(eq_pos + 1));
+
+    // Basic unquoting of value if present (simple quotes, not full RFC spec)
+    if (cookie_value.length() >= 2 && cookie_value.front() == '"' && cookie_value.back() == '"' ) {
+        cookie_value = cookie_value.substr(1, cookie_value.length() - 2);
+    }
+
+    Cookie result_cookie(std::move(cookie_name), std::move(cookie_value));
+
+    // Parse attributes
+    std::string_view remaining_attrs = attributes_sv;
+    while (!remaining_attrs.empty()) {
+        size_t next_attr_semi = remaining_attrs.find(';');
+        std::string_view current_attr_pair = utility::trim_http_whitespace(
+            remaining_attrs.substr(0, next_attr_semi)
+        );
+
+        if (!current_attr_pair.empty()) {
+            std::string_view attr_name_sv;
+            std::string_view attr_value_sv;
+            size_t attr_eq_pos = current_attr_pair.find('=');
+
+            if (attr_eq_pos == std::string_view::npos) { // Flag attribute (e.g., Secure, HttpOnly)
+                attr_name_sv = current_attr_pair;
+            } else {
+                attr_name_sv = utility::trim_http_whitespace(current_attr_pair.substr(0, attr_eq_pos));
+                attr_value_sv = utility::trim_http_whitespace(current_attr_pair.substr(attr_eq_pos + 1));
+                // Simple unquoting for attribute values
+                if (attr_value_sv.length() >= 2 && attr_value_sv.front() == '\"' && attr_value_sv.back() == '\"') {
+                    attr_value_sv = attr_value_sv.substr(1, attr_value_sv.length() - 2);
+                }
+            }
+
+            if (utility::iequals(attr_name_sv, "Expires")) {
+                if (auto tp = date::parse_http_date(std::string(attr_value_sv))) {
+                    result_cookie.expires(*tp);
+                }
+            } else if (utility::iequals(attr_name_sv, "Max-Age")) {
+                try {
+                    // Ensure attr_value_sv is null-terminated for std::stoi, or use std::from_chars
+                    std::string temp_max_age(attr_value_sv);
+                    if (!temp_max_age.empty()){
+                        result_cookie.max_age(std::stoi(temp_max_age));
+                    }
+                } catch (const std::invalid_argument&) { /* ignore */ }
+                  catch (const std::out_of_range&)   { /* ignore */ }
+            } else if (utility::iequals(attr_name_sv, "Domain")) {
+                result_cookie.domain(std::string(attr_value_sv));
+            } else if (utility::iequals(attr_name_sv, "Path")) {
+                result_cookie.path(std::string(attr_value_sv));
+            } else if (utility::iequals(attr_name_sv, "Secure")) {
+                result_cookie.secure(true);
+            } else if (utility::iequals(attr_name_sv, "HttpOnly")) {
+                result_cookie.http_only(true);
+            } else if (utility::iequals(attr_name_sv, "SameSite")) {
+                if (utility::iequals(attr_value_sv, "Strict")) {
+                    result_cookie.same_site(SameSite::Strict);
+                } else if (utility::iequals(attr_value_sv, "Lax")) {
+                    result_cookie.same_site(SameSite::Lax);
+                } else if (utility::iequals(attr_value_sv, "None")) {
+                    result_cookie.same_site(SameSite::None);
+                }
+            } // Other attributes like Comment, Version are ignored as per RFC 6265 focus
+        }
+
+        if (next_attr_semi == std::string_view::npos) {
+            break;
+        }
+        remaining_attrs = remaining_attrs.substr(next_attr_semi + 1);
+    }
+    return result_cookie;
 }
 
 /**
@@ -347,66 +311,69 @@ std::optional<Cookie> parse_set_cookie(std::string_view header) {
  */
 std::string Cookie::to_header() const {
     std::ostringstream ss;
-    
-    // Cookie name and value (required)
-    ss << _name << "=" << _value;
-    
-    // Expires attribute (optional)
+    ss << _name << "=" << _value; // Name and value are assumed to not need special encoding here
+                                  // as per Set-Cookie syntax (they are tokens or quoted-strings).
+                                  // If they could contain delimiters, they must be quoted by the caller or setter.
+
     if (_expires) {
-        ss << "; Expires=" << qb::http::date::format_http_date(*_expires);
+        ss << "; Expires=" << date::format_http_date(*_expires);
     }
-    
-    // Max-Age attribute (optional)
     if (_max_age) {
         ss << "; Max-Age=" << *_max_age;
     }
-    
-    // Domain attribute (optional)
     if (!_domain.empty()) {
         ss << "; Domain=" << _domain;
     }
-    
-    // Path attribute (optional, but defaults to "/" so it's always present)
-    ss << "; Path=" << _path;
-    
-    // Secure flag (optional)
+    // Path defaults to "/" in constructor, so it's usually present.
+    // RFC 6265 says if Path is not specified, it defaults to the path of the request URI.
+    // However, when sending Set-Cookie, servers often explicitly set Path=/ for wide applicability.
+    if (!_path.empty()) { // Ensure path is not empty before adding, though default is "/"
+        ss << "; Path=" << _path;
+    }
     if (_secure) {
         ss << "; Secure";
     }
-    
-    // HttpOnly flag (optional)
     if (_http_only) {
         ss << "; HttpOnly";
     }
-    
-    // SameSite attribute (optional)
     if (_same_site) {
         ss << "; SameSite=";
         switch (*_same_site) {
-            case qb::http::SameSite::Strict:
-                ss << "Strict";
-                break;
-            case qb::http::SameSite::Lax:
-                ss << "Lax";
-                break;
-            case qb::http::SameSite::None:
-                ss << "None";
-                break;
-            case qb::http::SameSite::NOT_SET:
-                // This case should never be reached since we're using empty optionals now
-                break;
+            case SameSite::Strict: ss << "Strict"; break;
+            case SameSite::Lax:    ss << "Lax";    break;
+            case SameSite::None:   ss << "None";   break;
+            case SameSite::NOT_SET: break; // Should not happen if _same_site is std::optional and NOT_SET clears it
         }
     }
-    
     return ss.str();
 }
 
 std::string Cookie::serialize() const {
+    // Simply name=value, for Cookie header. No attributes.
+    // Assumes name and value are already suitable for Cookie header (e.g., no restricted chars unless quoted by original source).
     return _name + "=" + _value;
 }
 
-Cookie::Cookie(std::string name, std::string value)
-    : _name(std::move(name)), _value(std::move(value)), _path("/"),
-      _secure(false), _http_only(false), _same_site() {}
+// Constructor definition
+Cookie::Cookie(const std::string& name, const std::string& value)
+    : _name(name) // Copy from const lvalue ref
+    , _value(value) // Copy from const lvalue ref
+    , _path("/") // Default path
+    , _secure(false)
+    , _http_only(false)
+    , _same_site(std::nullopt) // Default: SameSite attribute not set
+{
+    // _expires and _max_age default to std::nullopt by their type.
+    // _domain defaults to empty string.
+}
+
+Cookie::Cookie(std::string&& name, std::string&& value) noexcept
+    : _name(std::move(name))
+    , _value(std::move(value))
+    , _path("/")
+    , _secure(false)
+    , _http_only(false)
+    , _same_site(std::nullopt)
+{}
 
 } // namespace qb::http

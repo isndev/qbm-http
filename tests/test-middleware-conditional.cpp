@@ -76,7 +76,7 @@ protected:
 
     qb::http::Request create_request(const std::string& target_path = "/test") {
         qb::http::Request req;
-        req.method = qb::http::method::HTTP_GET;
+        req.method() = qb::http::method::GET;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -100,7 +100,7 @@ protected:
                     }
                 }
             }
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->complete();
         };
     }
@@ -178,7 +178,7 @@ TEST_F(ConditionalMiddlewareTest, ContextManipulationInPredicateAndChild) {
         ASSERT_TRUE(decision_opt.has_value());
         EXPECT_EQ(*decision_opt, "took_if_branch");
         EXPECT_EQ(std::string(ctx->request().header("X-If-Action")), "Performed");
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
@@ -187,7 +187,7 @@ TEST_F(ConditionalMiddlewareTest, ContextManipulationInPredicateAndChild) {
 
     EXPECT_EQ(_session->get_trace(), "IfMiddlewareSetsHeader;FinalHandlerChecksContext");
     EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
 
 TEST_F(ConditionalMiddlewareTest, NestedConditionalMiddleware) {
@@ -230,7 +230,7 @@ public:
     CompletingTracerMiddleware(std::string id) : _id(std::move(id)) {}
     void process(std::shared_ptr<qb::http::Context<MockConditionalSession>> ctx) override {
         if (ctx->session()) ctx->session()->trace(_id);
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_NO_CONTENT; // Indicate it did something
+        ctx->response().status() = qb::http::status::NO_CONTENT; // Indicate it did something
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Key part: completes the chain
     }
     std::string name() const override { return _id; }
@@ -248,7 +248,7 @@ TEST_F(ConditionalMiddlewareTest, ConditionTrueIfCompletes) {
 
     EXPECT_EQ(_session->get_trace(), "IfMiddlewareCompletes");
     EXPECT_FALSE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NO_CONTENT);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NO_CONTENT);
 }
 
 TEST_F(ConditionalMiddlewareTest, ConditionFalseElseCompletes) {
@@ -261,7 +261,7 @@ TEST_F(ConditionalMiddlewareTest, ConditionFalseElseCompletes) {
 
     EXPECT_EQ(_session->get_trace(), "ElseMiddlewareCompletes");
     EXPECT_FALSE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_NO_CONTENT);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NO_CONTENT);
 }
 
 TEST_F(ConditionalMiddlewareTest, ChainedConditionalsExecuteSequentially) {
@@ -346,9 +346,9 @@ TEST_F(ConditionalMiddlewareTest, PredicateThrowsException) {
     }
 
     if (exception_caught_by_router) {
-        EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+        EXPECT_NE(_session->_response.status(), qb::http::status::OK);
         // Potentially check for 500 or other specific error code if qb::http::Router defines behavior.
-        // For example: EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        // For example: EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
     }
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -383,7 +383,7 @@ TEST_F(ConditionalMiddlewareTest, IfMiddlewareThrowsException) {
     }
 
     if (exception_caught_by_router) {
-        EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+        EXPECT_NE(_session->_response.status(), qb::http::status::OK);
     }
     EXPECT_EQ(_session->get_trace(), "IfMiddlewareThrows"); // It should at least trace before throwing
     EXPECT_FALSE(_session->_final_handler_called);
@@ -406,7 +406,7 @@ TEST_F(ConditionalMiddlewareTest, ElseMiddlewareThrowsException) {
     }
 
     if (exception_caught_by_router) {
-        EXPECT_NE(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+        EXPECT_NE(_session->_response.status(), qb::http::status::OK);
     }
     EXPECT_EQ(_session->get_trace(), "ElseMiddlewareThrows");
     EXPECT_FALSE(_session->_final_handler_called);
@@ -418,7 +418,7 @@ TEST_F(ConditionalMiddlewareTest, ThrowsOnNullIfMiddleware) {
     std::shared_ptr<qb::http::IMiddleware<MockConditionalSession>> dummy_else_mw = std::make_shared<TracerMiddleware>("DummyElse");
 
     EXPECT_THROW(
-        qb::http::conditional_middleware<MockConditionalSession>(predicate, null_if_mw, dummy_else_mw),
+        (void)qb::http::conditional_middleware<MockConditionalSession>(predicate, null_if_mw, dummy_else_mw),
         std::invalid_argument
     );
 
@@ -432,7 +432,7 @@ TEST_F(ConditionalMiddlewareTest, ThrowsOnNullIfMiddleware) {
     std::shared_ptr<qb::http::IMiddleware<MockConditionalSession>> valid_if_mw = std::make_shared<TracerMiddleware>("ValidIf");
     qb::http::ConditionalMiddleware<MockConditionalSession>::Predicate null_predicate = nullptr;
     EXPECT_THROW(
-        qb::http::conditional_middleware<MockConditionalSession>(null_predicate, valid_if_mw, dummy_else_mw),
+        (void)qb::http::conditional_middleware<MockConditionalSession>(null_predicate, valid_if_mw, dummy_else_mw),
         std::invalid_argument
     );
 }

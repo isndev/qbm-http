@@ -17,57 +17,57 @@ all_done() {
 
 TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
     // std::string
-    auto res = qb::http::Request::ContentType("application/json;charset=utf16");
+    auto res = qb::http::Request::ContentType("application/json;charset=utf-16");
     EXPECT_EQ(res.type(), "application/json");
-    EXPECT_EQ(res.charset(), "utf16");
+    EXPECT_EQ(res.charset(), "utf-16");
     res = qb::http::Request::ContentType(
-        "   application/json   ;   charset    =   utf16   ");
+        "   application/json   ;   charset    =   utf-16   ");
     EXPECT_EQ(res.type(), "application/json");
-    EXPECT_EQ(res.charset(), "utf16");
-    res = qb::http::Request::ContentType("application/json;charset=\"utf16\"");
+    EXPECT_EQ(res.charset(), "utf-16");
+    res = qb::http::Request::ContentType("application/json;charset=\"utf-16\"");
     EXPECT_EQ(res.type(), "application/json");
-    EXPECT_EQ(res.charset(), "utf16");
-    res = qb::http::Request::ContentType("application/json;charset=utf16;");
+    EXPECT_EQ(res.charset(), "utf-16");
+    res = qb::http::Request::ContentType("application/json;charset=utf-16;");
     EXPECT_EQ(res.type(), "application/json");
-    EXPECT_EQ(res.charset(), "utf16");
+    EXPECT_EQ(res.charset(), "utf-16");
     res = qb::http::Request::ContentType("application/json;charset=");
     EXPECT_EQ(res.type(), "application/json");
-    EXPECT_EQ(res.charset(), "utf8");
-    res = qb::http::Request::ContentType("application/json;charlot=utf16");
+    EXPECT_EQ(res.charset(), "utf-8");
+    res = qb::http::Request::ContentType("application/json;charlot=utf-16");
     EXPECT_EQ(res.type(), "application/json");
-    EXPECT_EQ(res.charset(), "utf8");
+    EXPECT_EQ(res.charset(), "utf-8");
     res = qb::http::Request::ContentType("application/json;");
     EXPECT_EQ(res.type(), "application/json");
-    EXPECT_EQ(res.charset(), "utf8");
+    EXPECT_EQ(res.charset(), "utf-8");
     res = qb::http::Request::ContentType("");
     EXPECT_EQ(res.type(), "application/octet-stream");
-    EXPECT_EQ(res.charset(), "utf8");
+    EXPECT_EQ(res.charset(), "utf-8");
     // std::string_view
-    auto res2 = qb::http::RequestView::ContentType("application/json;charset=utf16");
+    auto res2 = qb::http::RequestView::ContentType("application/json;charset=utf-16");
     EXPECT_EQ(res2.type(), "application/json");
-    EXPECT_EQ(res2.charset(), "utf16");
+    EXPECT_EQ(res2.charset(), "utf-16");
     res2 = qb::http::RequestView::ContentType(
-        "   application/json   ;   charset    =   utf16   ");
+        "   application/json   ;   charset    =   utf-16   ");
     EXPECT_EQ(res2.type(), "application/json");
-    EXPECT_EQ(res2.charset(), "utf16");
-    res2 = qb::http::RequestView::ContentType("application/json;charset=\"utf16\"");
+    EXPECT_EQ(res2.charset(), "utf-16");
+    res2 = qb::http::RequestView::ContentType("application/json;charset=\"utf-16\"");
     EXPECT_EQ(res2.type(), "application/json");
-    EXPECT_EQ(res2.charset(), "utf16");
-    res2 = qb::http::RequestView::ContentType("application/json;charset=utf16;");
+    EXPECT_EQ(res2.charset(), "utf-16");
+    res2 = qb::http::RequestView::ContentType("application/json;charset=utf-16;");
     EXPECT_EQ(res2.type(), "application/json");
-    EXPECT_EQ(res2.charset(), "utf16");
+    EXPECT_EQ(res2.charset(), "utf-16");
     res2 = qb::http::RequestView::ContentType("application/json;charset=");
     EXPECT_EQ(res2.type(), "application/json");
-    EXPECT_EQ(res2.charset(), "utf8");
-    res2 = qb::http::RequestView::ContentType("application/json;charlot=utf16");
+    EXPECT_EQ(res2.charset(), "utf-8");
+    res2 = qb::http::RequestView::ContentType("application/json;charlot=utf-16");
     EXPECT_EQ(res2.type(), "application/json");
-    EXPECT_EQ(res2.charset(), "utf8");
+    EXPECT_EQ(res2.charset(), "utf-8");
     res2 = qb::http::RequestView::ContentType("application/json;");
     EXPECT_EQ(res2.type(), "application/json");
-    EXPECT_EQ(res2.charset(), "utf8");
+    EXPECT_EQ(res2.charset(), "utf-8");
     res2 = qb::http::RequestView::ContentType("");
     EXPECT_EQ(res2.type(), "application/octet-stream");
-    EXPECT_EQ(res2.charset(), "utf8");
+    EXPECT_EQ(res2.charset(), "utf-8");
 }
 
 TEST(Session, HTTP_PARSE_MULTIPART) {
@@ -124,14 +124,14 @@ public:
 
     void
     on(Protocol::request &&event) {
-        EXPECT_EQ(event.http.method, HTTP_GET);
+        EXPECT_EQ(event.http.method(), HTTP_GET);
         EXPECT_NE(event.http.headers().size(), 0u);
         EXPECT_EQ(event.http.header("connection"), "keep-alive");
         EXPECT_EQ(event.http.query("happy"), "true");
         EXPECT_EQ(event.http.body().size(), sizeof(STRING_MESSAGE) - 1);
 
         qb::http::Response r;
-        r.status_code = HTTP_STATUS_OK;
+        r.status() = qb::http::status::OK;
         r.body()      = std::move(event.http.body());
         *this << r;
 
@@ -164,7 +164,7 @@ public:
 
     void
     on(Protocol::response &&event) {
-        EXPECT_EQ(event.http.status_code, HTTP_STATUS_OK);
+        EXPECT_EQ(event.http.status(), HTTP_STATUS_OK);
         ++msg_count_client_side;
     }
 };
@@ -230,7 +230,7 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
             auto res = qb::http::GET(r);
-            EXPECT_EQ(res.status_code, HTTP_STATUS_OK);
+            EXPECT_EQ(res.status(), HTTP_STATUS_OK);
             ++msg_count_client_side;
         }
     });
@@ -260,14 +260,14 @@ public:
 
     void
     on(Protocol::request &&event) {
-        EXPECT_EQ(event.http.method, HTTP_GET);
+        EXPECT_EQ(event.http.method(), HTTP_GET);
         EXPECT_EQ(event.http.headers().size(), 3u);
         EXPECT_EQ(event.http.header("connection"), "keep-alive");
         EXPECT_EQ(event.http.query("happy"), "true");
         EXPECT_EQ(event.http.body().size(), sizeof(STRING_MESSAGE) - 1);
 
         qb::http::Response r;
-        r.status_code = HTTP_STATUS_OK;
+        r.status() = qb::http::status::OK;
         r.body()      = std::move(event.http.body());
         *this << r;
 
@@ -300,7 +300,7 @@ public:
 
     void
     on(Protocol::response &&event) {
-        EXPECT_EQ(event.http.status_code, HTTP_STATUS_OK);
+        EXPECT_EQ(event.http.status(), HTTP_STATUS_OK);
         ++msg_count_client_side;
     }
 };
@@ -346,35 +346,35 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
 
 #endif
 
-#include <gtest/gtest.h>
-#include "../http.h"
-
-class HttpServer;
-class HttpSession : public qb::http::use<HttpSession>::session<HttpServer>
-{
-public:
-    HttpSession(HttpServer &server)
-        : session(server) {}
-};
-
-class HttpServer : public qb::http::use<HttpServer>::server<HttpSession> {
-public:
-
-    HttpServer() {
-        router().get("/", [](auto ctx) {
-            ctx->response().status_code = HTTP_STATUS_OK;
-            ctx->response().body()      = "Hello, World!";
-            ctx->complete();
-        });
-    }
-};
-
-TEST(Session, HTTP_SIMPLE_SERVER) {
-    HttpServer server;
-    server.transport().listen_v4(9999);
-    server.start();
-
-    while (true) {
-        async::run(EVRUN_ONCE);
-    }
-}
+// #include <gtest/gtest.h>
+// #include "../http.h"
+//
+// class HttpServer;
+// class HttpSession : public qb::http::use<HttpSession>::session<HttpServer>
+// {
+// public:
+//     HttpSession(HttpServer &server)
+//         : session(server) {}
+// };
+//
+// class HttpServer : public qb::http::use<HttpServer>::server<HttpSession> {
+// public:
+//
+//     HttpServer() {
+//         router().get("/", [](auto ctx) {
+//             ctx->response().status() = qb::http::status::OK;
+//             ctx->response().body()      = "Hello, World!";
+//             ctx->complete();
+//         });
+//     }
+// };
+//
+// TEST(Session, HTTP_SIMPLE_SERVER) {
+//     HttpServer server;
+//     server.transport().listen_v4(9999);
+//     server.start();
+//
+//     while (true) {
+//         async::run(EVRUN_ONCE);
+//     }
+// }

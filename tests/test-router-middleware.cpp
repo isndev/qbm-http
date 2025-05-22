@@ -142,16 +142,16 @@ public:
 // Synchronous middleware that short-circuits
 class SyncShortCircuitMiddleware : public BaseTestMiddleware {
 private:
-    int _status_code_int;
+    qb::http::status _status_code;
 public:
-    SyncShortCircuitMiddleware(std::string id, int status_code = HTTP_STATUS_OK) 
-        : BaseTestMiddleware(std::move(id)), _status_code_int(status_code) {}
+    SyncShortCircuitMiddleware(std::string id, qb::http::status status_code = qb::http::status::OK)
+        : BaseTestMiddleware(std::move(id)), _status_code(status_code) {}
 
     void process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
         if (ctx && ctx->session()) {
             ctx->session()->trace(_id);
         }
-        ctx->response().status_code = static_cast<qb::http::status>(_status_code_int);
+        ctx->response().status() = _status_code;
         ctx->response().body() = _id + " short-circuited";
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     }
@@ -166,7 +166,7 @@ public:
         if (ctx && ctx->session()) {
             ctx->session()->trace(_id);
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
         ctx->response().body() = _id + " signaled error";
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     }
@@ -176,10 +176,10 @@ public:
 class AsyncShortCircuitMiddleware : public BaseTestMiddleware {
 private:
     TaskExecutor* _executor;
-    int _status_code_int;
+    qb::http::status _status_code;
 public:
-    AsyncShortCircuitMiddleware(std::string id, TaskExecutor* executor, int status_code = HTTP_STATUS_OK)
-        : BaseTestMiddleware(std::move(id)), _executor(executor), _status_code_int(status_code) {}
+    AsyncShortCircuitMiddleware(std::string id, TaskExecutor* executor, qb::http::status status_code = qb::http::status::OK)
+        : BaseTestMiddleware(std::move(id)), _executor(executor), _status_code(status_code) {}
 
     void process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
         if (!_executor) {
@@ -191,11 +191,11 @@ public:
             ctx->session()->trace(_id + "_handle");
         }
         auto shared_ctx = ctx;
-        _executor->addTask([shared_ctx, id = _id, status = _status_code_int]() {
+        _executor->addTask([shared_ctx, id = _id, status = _status_code]() {
             if (shared_ctx && shared_ctx->session()) {
                 shared_ctx->session()->trace(id + "_task");
             }
-            shared_ctx->response().status_code = static_cast<qb::http::status>(status);
+            shared_ctx->response().status() = status;
             shared_ctx->response().body() = id + " short-circuited asynchronously";
             shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
         });
@@ -224,7 +224,7 @@ public:
             if (shared_ctx && shared_ctx->session()) {
                 shared_ctx->session()->trace(id + "_task");
             }
-            shared_ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            shared_ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             shared_ctx->response().body() = id + " signaled error asynchronously";
             shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
         });
@@ -305,7 +305,7 @@ protected:
 
     qb::http::Request create_request(qb::http::method method_val, const std::string& target_path_str) {
         qb::http::Request req;
-        req.method = method_val;
+        req.method() = method_val;
         req.uri() = qb::io::uri(target_path_str); // Correctly set URI via assignment to reference
         req.major_version = 1; // Set HTTP version directly
         req.minor_version = 1;
@@ -319,7 +319,7 @@ protected:
                 ctx->session()->trace(handler_id);
                 ctx->session()->_final_handler_called = true;
             }
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = handler_id + " executed";
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
         };
@@ -333,11 +333,11 @@ TEST_F(RouterMiddlewareTest, SingleSyncMiddleware) {
     _router.get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     
     EXPECT_EQ(_mock_session->get_trace(), "mw1;final_handler");
     EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
 }
 
 TEST_F(RouterMiddlewareTest, MultipleSyncMiddlewareOrder) {
@@ -347,7 +347,7 @@ TEST_F(RouterMiddlewareTest, MultipleSyncMiddlewareOrder) {
     _router.get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     
     EXPECT_EQ(_mock_session->get_trace(), "mw1;mw2;mw3;final_handler");
     EXPECT_TRUE(_mock_session->_final_handler_called);
@@ -360,11 +360,11 @@ TEST_F(RouterMiddlewareTest, SyncMiddlewareShortCircuit) {
     _router.get("/test", final_handler("handler_never_reached"));
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     
     EXPECT_EQ(_mock_session->get_trace(), "mw1;mw_sc");
     EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_ACCEPTED);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_ACCEPTED);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "mw_sc short-circuited");
 }
 
@@ -379,8 +379,8 @@ TEST_F(RouterMiddlewareTest, SyncMiddlewareError) {
             std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>([](auto ctx, auto /*next*/){ // Assuming next is not used based on lambda body
                 ctx->session()->trace("error_handler_task");
                 // Don't change status if already an error status from mw_err
-                if(ctx->response().status_code != qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR) {
-                     ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                if(ctx->response().status() != qb::http::status::INTERNAL_SERVER_ERROR) {
+                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 }
                 ctx->response().body() = "Processed by error_handler_task";
                 ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
@@ -389,11 +389,11 @@ TEST_F(RouterMiddlewareTest, SyncMiddlewareError) {
     });
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     
     EXPECT_EQ(_mock_session->get_trace(), "mw1;mw_err;error_handler_task");
     EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Processed by error_handler_task");
 }
 
@@ -404,14 +404,14 @@ TEST_F(RouterMiddlewareTest, SingleAsyncMiddleware) {
     _router.get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle"); // Only handle part runs synchronously
     EXPECT_FALSE(_mock_session->_final_handler_called);
     
     _task_executor.processAllTasks(); // Process the async part
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;final_handler");
     EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
 }
 
 TEST_F(RouterMiddlewareTest, MultipleAsyncMiddlewareOrder) {
@@ -420,7 +420,7 @@ TEST_F(RouterMiddlewareTest, MultipleAsyncMiddlewareOrder) {
     _router.get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle");
     
     _task_executor.processAllTasks(); // Process async_mw1's task
@@ -438,7 +438,7 @@ TEST_F(RouterMiddlewareTest, MixedSyncAndAsyncMiddlewareOrder) {
     _router.get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     // sync1 runs, then async1_handle runs and posts a task
     EXPECT_EQ(_mock_session->get_trace(), "sync1;async1_handle"); 
     
@@ -456,7 +456,7 @@ TEST_F(RouterMiddlewareTest, GroupSingleSyncMiddleware) {
     group->get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/group/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
     EXPECT_EQ(_mock_session->get_trace(), "group_mw1;final_handler");
     EXPECT_TRUE(_mock_session->_final_handler_called);
 }
@@ -468,7 +468,7 @@ TEST_F(RouterMiddlewareTest, RouterAndGroupSyncMiddleware) {
     group->get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/group/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
     // Router middleware runs first, then group middleware
     EXPECT_EQ(_mock_session->get_trace(), "router_mw1;group_mw1;final_handler");
 }
@@ -480,7 +480,7 @@ TEST_F(RouterMiddlewareTest, RouterAsyncAndGroupSyncMiddleware) {
     group->get("/test", final_handler());
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/group/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
     EXPECT_EQ(_mock_session->get_trace(), "router_async_mw1_handle");
     
     _task_executor.processAllTasks();
@@ -497,13 +497,13 @@ TEST_F(RouterMiddlewareTest, GroupMiddlewareNotAppliedToOtherRoutes) {
     _router.compile();
 
     // Test group route
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/group/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
     EXPECT_EQ(_mock_session->get_trace(), "router_mw1;group_mw1;group_handler");
     
     _mock_session->reset(); // Reset session for next route call
 
     // Test other route
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/other"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/other"));
     EXPECT_EQ(_mock_session->get_trace(), "router_mw1;other_handler"); // group_mw1 should not be here
 }
 
@@ -517,7 +517,7 @@ TEST_F(RouterMiddlewareTest, AsyncMiddlewareShortCircuit) {
     _router.get("/test", final_handler("handler_never_reached"));
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle");
     
     _task_executor.processAllTasks(); // Process async_mw1's task, then async_sc_handle
@@ -526,7 +526,7 @@ TEST_F(RouterMiddlewareTest, AsyncMiddlewareShortCircuit) {
     _task_executor.processAllTasks(); // Process async_sc's task which short-circuits
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_sc_handle;async_sc_task");
     EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_CREATED);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_CREATED);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "async_sc short-circuited asynchronously");
 }
 
@@ -540,8 +540,8 @@ TEST_F(RouterMiddlewareTest, AsyncMiddlewareError) {
         std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession>>(
             std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>([](auto ctx, auto /*next*/){ // Assuming next is not used
                 ctx->session()->trace("async_error_handler_task");
-                if(ctx->response().status_code != qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR) {
-                     ctx->response().status_code = qb::http::status::HTTP_STATUS_SERVICE_UNAVAILABLE; // Original was SERVICE_UNAVAILABLE, keeping it.
+                if(ctx->response().status() != qb::http::status::INTERNAL_SERVER_ERROR) {
+                     ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE; // Original was SERVICE_UNAVAILABLE, keeping it.
                 }
                 ctx->response().body() = "Processed by async_error_handler_task";
                 ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
@@ -550,7 +550,7 @@ TEST_F(RouterMiddlewareTest, AsyncMiddlewareError) {
     });
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle");
     
     _task_executor.processAllTasks(); // Process async_mw1's task, then async_err_mw_handle
@@ -560,7 +560,7 @@ TEST_F(RouterMiddlewareTest, AsyncMiddlewareError) {
                                       // This should trigger the error handler chain.
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_err_mw_handle;async_err_mw_task;async_error_handler_task");
     EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Processed by async_error_handler_task");
 }
 
@@ -575,7 +575,7 @@ TEST_F(RouterMiddlewareTest, NestedGroupMiddleware) {
 
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/group1/group2/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/group1/group2/test"));
     EXPECT_EQ(_mock_session->get_trace(), "router_mw;g1_mw;g2_mw;g2_handler");
     EXPECT_TRUE(_mock_session->_final_handler_called);
 }
@@ -591,7 +591,7 @@ TEST_F(RouterMiddlewareTest, NestedGroupAsyncMiddleware) {
 
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/g1/g2/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/g1/g2/test"));
     EXPECT_EQ(_mock_session->get_trace(), "router_sync;g1_async_handle");
     
     _task_executor.processAllTasks(); // Process g1_async's task
@@ -605,27 +605,27 @@ TEST_F(RouterMiddlewareTest, DefaultNotFoundHandler) {
     _router.get("/exists", final_handler("handler_exists"));
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/does_not_exist"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/does_not_exist"));
     _task_executor.processAllTasks(); // Process any async tasks if they were part of a (non-existent) 404 chain
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "404 Not Found (Default)");
 }
 
 TEST_F(RouterMiddlewareTest, CustomNotFoundHandler) {
     _router.set_not_found_handler([](auto ctx){
         ctx->session()->trace("custom_404_handler");
-        ctx->response().status_code = HTTP_STATUS_NOT_FOUND;
+        ctx->response().status() = qb::http::status::NOT_FOUND;
         ctx->response().body() = "Custom 404 Page";
         ctx->complete();
     });
     _router.get("/exists", final_handler("handler_exists"));
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/does_not_exist"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/does_not_exist"));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Custom 404 Page");
     EXPECT_EQ(_mock_session->get_trace(), "custom_404_handler"); // The custom handler itself is wrapped in DefaultOrCustomNotFoundHandler
 }
@@ -634,16 +634,16 @@ TEST_F(RouterMiddlewareTest, GlobalMiddlewareBeforeCustomNotFoundHandler) {
     _router.use(std::make_shared<SyncAppendingMiddleware>("global_mw1"));
     _router.set_not_found_handler([](auto ctx){
         ctx->session()->trace("custom_404_handler");
-        ctx->response().status_code = HTTP_STATUS_NOT_FOUND;
+        ctx->response().status() = qb::http::status::NOT_FOUND;
         ctx->response().body() = "Custom 404 With Global MW";
         ctx->complete();
     });
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/will_be_404"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/will_be_404"));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_NOT_FOUND);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
     EXPECT_EQ(_mock_session->get_trace(), "global_mw1;custom_404_handler");
 }
 
@@ -655,10 +655,10 @@ TEST_F(RouterMiddlewareTest, ErrorInCustomNotFoundHandlerIsFatal) {
     });
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/any_path_for_404"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/any_path_for_404"));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->get_trace(), "custom_404_causes_error");
     // Body might be empty or default for 500, depending on how finalize_processing handles it
 }
@@ -673,7 +673,7 @@ TEST_F(RouterMiddlewareTest, ErrorInGlobalMiddlewareDuringNotFoundProcessing) {
         std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession>>(
             std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>([](auto ctx, auto /*next*/){
                 ctx->session()->trace("main_error_handler_after_404_global_mw_error");
-                ctx->response().status_code = qb::http::status::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body() = "Error in global_mw during 404 processing, caught by main error handler";
                 ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
             }, "main_error_handler_after_404_global_mw_error")
@@ -681,11 +681,11 @@ TEST_F(RouterMiddlewareTest, ErrorInGlobalMiddlewareDuringNotFoundProcessing) {
     });
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/triggers_404_then_error"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/triggers_404_then_error"));
     _task_executor.processAllTasks();
 
     EXPECT_EQ(_mock_session->get_trace(), "global_error_mw;main_error_handler_after_404_global_mw_error");
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Error in global_mw during 404 processing, caught by main error handler");
 }
 
@@ -704,11 +704,11 @@ TEST_F(RouterMiddlewareTest, ErrorInUserErrorHandlerIsFatal) {
     });
     _router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     _task_executor.processAllTasks();
 
     EXPECT_EQ(_mock_session->get_trace(), "trigger_initial_error;faulty_error_handler");
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     // Body will likely be what `faulty_error_handler` set before erroring, or empty if status set late.
     // The key is that it doesn't loop and results in a 500.
 }
@@ -730,7 +730,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringSyncGlobalMiddleware) {
     _router.compile();
 
     // Route the request. The cancellation will happen inside mw1's handle method.
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     // ctx_ptr might be null if routing itself failed catastrophically before even starting the chain, 
     // but given the setup, it should be valid if mw1->handle was reached.
     // The assertions below will cover the outcome.
@@ -740,7 +740,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringSyncGlobalMiddleware) {
     EXPECT_TRUE(mw1->cancel_called); 
     EXPECT_EQ(_mock_session->get_trace(), "mw1_cancellable"); // mw1 runs and traces, then cancelled
     EXPECT_FALSE(_mock_session->_final_handler_called); // Should not be reached
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
 }
 
 TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGlobalMiddleware_BeforeAsyncTaskFinishes) {
@@ -750,7 +750,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGlobalMiddleware_BeforeAsync
     _router.get("/test", final_handler("handler_never_reached"));
     _router.compile();
 
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test"));
+    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
     ASSERT_NE(ctx_ptr, nullptr) << "Context pointer should not be null.";
 
     // At this point, async_mw1->process() has run and posted its task to _task_executor.
@@ -769,7 +769,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGlobalMiddleware_BeforeAsync
     // The trace should remain as it was after the _handle part, as the _task part should not execute its trace or proceed.
     EXPECT_EQ(_mock_session->get_trace(), "async_mw1_cancellable_handle"); 
     EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 0); // All tasks from executor should be processed or discarded
 }
 
@@ -788,7 +788,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringSyncGroupMiddleware) {
     group->get("/test", final_handler("handler_never_reached"));
     _router.compile();
 
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/group/test"));
+    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
     // Similar to the global sync test, ctx_ptr validity is mostly an intermediate check.
     // The actual outcome is verified by assertions.
 
@@ -797,7 +797,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringSyncGroupMiddleware) {
     EXPECT_TRUE(group_mw->cancel_called);
     EXPECT_EQ(_mock_session->get_trace(), "group_mw_cancellable");
     EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
 }
 
 TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGroupMiddleware_BeforeAsyncTaskFinishes) {
@@ -808,7 +808,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGroupMiddleware_BeforeAsyncT
     group->get("/test", final_handler("handler_never_reached"));
     _router.compile();
 
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/group/test"));
+    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
     ASSERT_NE(ctx_ptr, nullptr) << "Context pointer should not be null.";
 
     EXPECT_EQ(_mock_session->get_trace(), "async_group_mw_cancellable_handle");
@@ -821,7 +821,7 @@ TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGroupMiddleware_BeforeAsyncT
     EXPECT_TRUE(async_group_mw->cancel_called);
     EXPECT_EQ(_mock_session->get_trace(), "async_group_mw_cancellable_handle");
     EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);
 }
 
@@ -856,7 +856,7 @@ TEST_F(RouterMiddlewareTest, FunctionalMiddlewareAroundBehavior) {
             ctx->session()->trace("final_around_handler");
             ctx->session()->_final_handler_called = true;
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "final_around_handler executed";
         // Check that X-Post-Process-On-Ctx is NOT YET on the response when handler is running
         EXPECT_TRUE(ctx->response().header("X-Post-Process-On-Ctx").empty());
@@ -864,11 +864,11 @@ TEST_F(RouterMiddlewareTest, FunctionalMiddlewareAroundBehavior) {
     });
 
     _router.compile();
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test_around"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test_around"));
     _task_executor.processAllTasks(); // Process any async tasks
 
     EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     
     // Verify the execution trace to show the pre and post processing code ran in the middleware lambda
     EXPECT_EQ(_mock_session->get_trace(), "around_mw_pre_next_fn;inner_mw;final_around_handler;around_mw_post_next_fn"); 
@@ -888,7 +888,7 @@ TEST_F(RouterMiddlewareTest, FunctionalMiddlewareConditionalEarlyExit) {
         std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
             [](auto ctx, auto next_fn) {
                 if (ctx->request().has_header("X-Stop-Early")) {
-                    ctx->response().status_code = qb::http::status::HTTP_STATUS_IM_A_TEAPOT;
+                    ctx->response().status() = qb::http::status::IM_A_TEAPOT;
                     ctx->response().body() = "Stopped early by Functional MW";
                     ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Short-circuit
                 } else {
@@ -905,24 +905,24 @@ TEST_F(RouterMiddlewareTest, FunctionalMiddlewareConditionalEarlyExit) {
 
     // --- Case 1: Middleware stops early ---    
     _mock_session->reset();
-    qb::http::Request req_stop = create_request(qb::http::method::HTTP_GET, "/test_conditional_exit");
+    qb::http::Request req_stop = create_request(qb::http::method::GET, "/test_conditional_exit");
     req_stop.set_header("X-Stop-Early", "true");
     _router.route(_mock_session, std::move(req_stop));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_IM_A_TEAPOT);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_IM_A_TEAPOT);
     EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Stopped early by Functional MW");
     EXPECT_FALSE(_mock_session->_final_handler_called); // Handler and subsequent MW should not run
     EXPECT_TRUE(_mock_session->get_trace().empty()); // ConditionalFunctionalMiddleware does not trace, nor does mw_after_conditional or handler
 
     // --- Case 2: Middleware continues ---    
     _mock_session->reset();
-    qb::http::Request req_continue = create_request(qb::http::method::HTTP_GET, "/test_conditional_exit");
+    qb::http::Request req_continue = create_request(qb::http::method::GET, "/test_conditional_exit");
     // No X-Stop-Early header
     _router.route(_mock_session, std::move(req_continue));
     _task_executor.processAllTasks();
 
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_TRUE(_mock_session->_final_handler_called);
     EXPECT_EQ(_mock_session->get_trace(), "mw_after_conditional;handler_for_conditional");
 }
@@ -960,17 +960,17 @@ TEST_F(RouterMiddlewareTest, MiddlewareStateSharingViaRequestHeaders) {
             ctx->session()->trace("final_sharing_handler");
             ctx->session()->_final_handler_called = true;
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "final_sharing_handler executed";
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     });
 
     _router.compile();
-    _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/test_mw_sharing"));
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/test_mw_sharing"));
     _task_executor.processAllTasks();
 
     EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->get_trace(), "MW_B_processed_A_data;final_sharing_handler");
 }
 
@@ -1003,7 +1003,7 @@ public:
         }
 
         if (!ctx->is_cancelled()) {
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_EXPECTATION_FAILED; // Some distinct status
+            ctx->response().status() = qb::http::status::EXPECTATION_FAILED; // Some distinct status
             ctx->response().body() = _id + " processed error before any cancellation.";
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE); 
         } else {
@@ -1037,11 +1037,11 @@ TEST_F(RouterMiddlewareTest, CancellationDuringErrorHandlingMiddleware) {
 
     _router.compile();
     
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/trigger_error_then_cancel"));
+    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/trigger_error_then_cancel"));
     _task_executor.processAllTasks();
 
     EXPECT_TRUE(cancellable_error_handler_mw->cancel_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
     // The trace should show the error trigger, then the start of the error handler, but not its completion
     EXPECT_EQ(_mock_session->get_trace(), "error_trigger;cancellable_error_mw_handling_error"); 
 }
@@ -1063,11 +1063,11 @@ TEST_F(RouterMiddlewareTest, CancellationDuringGlobalMiddlewareInNotFoundChain) 
 
     _router.compile(); // Ensures global_mw_cancellable is part of the compiled not_found_tasks prefix
 
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::HTTP_GET, "/path_to_trigger_404"));
+    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/path_to_trigger_404"));
     _task_executor.processAllTasks();
 
     EXPECT_TRUE(global_mw_cancellable->cancel_called);
-    EXPECT_EQ(_mock_session->_response.status_code, HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
     
     // The global middleware should trace its ID before being cancelled.
     // The default 404 handler (or any custom one) should not be reached.

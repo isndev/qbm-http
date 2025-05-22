@@ -34,7 +34,7 @@ router.get("/", [](TestRouter::Context& ctx) {
 // POST request to /users
 router.post("/users", [](TestRouter::Context& ctx) {
     // Logic to create a user, potentially parsing ctx.request.body()
-    ctx.response.status_code = HTTP_STATUS_CREATED;
+    ctx.response.status() = HTTP_STATUS_CREATED;
     ctx.response.body() = "User Created";
     ctx.complete();
 });

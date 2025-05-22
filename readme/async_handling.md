@@ -35,7 +35,7 @@ router.get("/async-task", [](Context& ctx) {
     auto completion_handler_ptr = ctx.make_async();
     if (!completion_handler_ptr) {
         // Handle error: router might not be available, or other issue
-        ctx.response.status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+        ctx.response.status() = HTTP_STATUS_INTERNAL_SERVER_ERROR;
         ctx.response.body() = "Failed to initialize async operation";
         ctx.complete();
         return;
@@ -107,7 +107,7 @@ router.use(qb::http::make_middleware<MySession>(
                     ctx.set<bool>("check_passed", true);
                     next(MiddlewareResult::Continue()); // Continue chain
                 } else {
-                    ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
+                    ctx.response.status() = HTTP_STATUS_BAD_REQUEST;
                     ctx.response.body() = "Async check failed";
                     ctx.mark_handled();
                     next(MiddlewareResult::Stop()); // Stop chain

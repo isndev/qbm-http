@@ -101,7 +101,7 @@ Authorization is typically performed *after* successful authentication.
         if (userCanAccessDocument(user, docId)) {
             // Serve document
         } else {
-            ctx.response.status_code = HTTP_STATUS_FORBIDDEN;
+            ctx.response.status() = HTTP_STATUS_FORBIDDEN;
             ctx.response.body() = "Access Denied";
             ctx.complete();
         }

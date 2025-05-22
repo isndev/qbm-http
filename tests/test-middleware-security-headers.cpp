@@ -42,11 +42,11 @@ protected:
         _router = std::make_unique<qb::http::Router<MockSecuritySession>>();
     }
 
-    qb::http::Request create_request(qb::http::method method_val = qb::http::method::HTTP_GET, 
+    qb::http::Request create_request(qb::http::method method_val = qb::http::method::GET,
                                      const std::string& target_path = "/test",
                                      const std::string& scheme = "http") {
         qb::http::Request req;
-        req.method = method_val;
+        req.method() = method_val;
         try {
             req.uri() = qb::io::uri(scheme + "://localhost" + target_path);
         } catch (const std::exception& e) {
@@ -59,7 +59,7 @@ protected:
     qb::http::RouteHandlerFn<MockSecuritySession> basic_success_handler() {
         return [this](std::shared_ptr<qb::http::Context<MockSecuritySession>> ctx) {
             _session->_final_handler_called = true;
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Test body";
             ctx->complete();
         };
@@ -105,9 +105,9 @@ TEST_F(SecurityHeadersMiddlewareTest, AppliesSecureDefaultHeadersForHTTP) {
     _router->get("/test_http_defaults", basic_success_handler());
     _router->compile();
 
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_http_defaults", "http"));
+    make_request(create_request(qb::http::method::GET, "/test_http_defaults", "http"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
 
     const auto& default_opts = qb::http::SecurityHeadersOptions::secure_defaults();
@@ -133,9 +133,9 @@ TEST_F(SecurityHeadersMiddlewareTest, AppliesSecureDefaultHeadersForHTTPSInclude
     _router->get("/test_https_defaults", basic_success_handler());
     _router->compile();
 
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_https_defaults", "https"));
+    make_request(create_request(qb::http::method::GET, "/test_https_defaults", "https"));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
 
     const auto& default_opts = qb::http::SecurityHeadersOptions::secure_defaults();
@@ -154,7 +154,7 @@ TEST_F(SecurityHeadersMiddlewareTest, AppliesCustomHSTS) {
     opts.with_hsts("max-age=600; includeSubDomains");
     auto sh_mw = qb::http::security_headers_middleware<MockSecuritySession>(opts);
     configure_router_with_mw(sh_mw);
-    make_request(create_request(qb::http::method::HTTP_GET, "/test", "https"));
+    make_request(create_request(qb::http::method::GET, "/test", "https"));
     expect_header_value("Strict-Transport-Security", "max-age=600; includeSubDomains");
 }
 
@@ -361,15 +361,15 @@ TEST_F(SecurityHeadersMiddlewareTest, ConditionalHSTSOnlyOnHTTPS) {
     _router->compile();
 
     // HTTP request
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_http", "http"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    make_request(create_request(qb::http::method::GET, "/test_http", "http"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     expect_header_absent("Strict-Transport-Security");
 
     _session->reset(); // Reset session before next request
 
     // HTTPS request
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_https", "https"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    make_request(create_request(qb::http::method::GET, "/test_https", "https"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     expect_header_value("Strict-Transport-Security", "max-age=31536000");
 }
 
@@ -389,14 +389,14 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceGeneratedAndInContext) {
             captured_nonce = *nonce_opt;
             EXPECT_FALSE(captured_nonce.empty()) << "CSP Nonce in context is empty";
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
 
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_nonce", "http"));
+    make_request(create_request(qb::http::method::GET, "/test_nonce", "http"));
     EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     
     ASSERT_FALSE(captured_nonce.empty());
     std::string expected_csp = 
@@ -423,14 +423,14 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceWithUserProvidedCSP) {
         if (nonce_opt) {
             captured_nonce_in_handler = *nonce_opt;
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
 
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_nonce_custom_csp", "http"));
+    make_request(create_request(qb::http::method::GET, "/test_nonce_custom_csp", "http"));
     EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_FALSE(captured_nonce_in_handler.empty());
 
     // Middleware should use the user-provided CSP, not the default nonce-based one
@@ -448,12 +448,12 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceDisabledNoNonceInContextOrDefaultC
         _session->_final_handler_called = true;
         auto nonce_opt = ctx->template get<std::string>("csp_nonce");
         EXPECT_FALSE(nonce_opt.has_value()) << "CSP Nonce should not be in context if disabled";
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
 
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_no_nonce", "http"));
+    make_request(create_request(qb::http::method::GET, "/test_no_nonce", "http"));
     EXPECT_TRUE(_session->_final_handler_called);
     expect_header_absent("Content-Security-Policy"); // No CSP should be set if nonce disabled and no default
 }
@@ -467,12 +467,12 @@ TEST_F(SecurityHeadersMiddlewareTest, MiddlewareOverwritesHandlerSetHeader) {
     _router->get("/test_overwrite", [this](auto ctx){
         _session->_final_handler_called = true;
         ctx->response().set_header("X-Frame-Options", "DENY");
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });
     _router->compile();
 
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_overwrite"));
+    make_request(create_request(qb::http::method::GET, "/test_overwrite"));
     EXPECT_TRUE(_session->_final_handler_called);
     expect_header_value("X-Frame-Options", "SAMEORIGIN"); // Middleware's value should win
 }
@@ -485,8 +485,8 @@ TEST_F(SecurityHeadersMiddlewareTest, OptionWithEmptyStringValue) {
     _router->get("/test_empty_option_val", basic_success_handler());
     _router->compile();
 
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_empty_option_val"));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    make_request(create_request(qb::http::method::GET, "/test_empty_option_val"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     expect_header_value("X-Frame-Options", "");
 }
@@ -499,7 +499,7 @@ TEST_F(SecurityHeadersMiddlewareTest, OptionsCanBeUpdated) {
     _router->compile();
 
     // First request with default options
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_default_opts", "https"));
+    make_request(create_request(qb::http::method::GET, "/test_default_opts", "https"));
     expect_header_value("X-Frame-Options", *qb::http::SecurityHeadersOptions::secure_defaults().get_x_frame_options_value());
     expect_header_absent("Permissions-Policy");
 
@@ -514,7 +514,7 @@ TEST_F(SecurityHeadersMiddlewareTest, OptionsCanBeUpdated) {
     concrete_mw->update_options(new_opts);
 
     // Second request, should use new options
-    make_request(create_request(qb::http::method::HTTP_GET, "/test_updated_opts"));
+    make_request(create_request(qb::http::method::GET, "/test_updated_opts"));
 
     expect_header_value("X-Frame-Options", "DENY");
     expect_header_value("Permissions-Policy", "fullscreen=()");

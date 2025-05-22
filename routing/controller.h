@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/controller.h
+ * @file qbm/http/routing/controller.h
  * @brief Defines the Controller base class for organizing HTTP routes within a class structure.
  *
  * This file contains the `Controller` template class, which serves as a base for user-defined
@@ -167,72 +167,72 @@ public:
     // --- Lambda-based routes ---
     /** @brief Defines a GET route with a lambda handler. @see add_controller_route */
     Controller<Session>& get(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_GET, std::move(handler_fn));
+        return add_controller_route(std::move(path), qb::http::method::GET, std::move(handler_fn));
     }
     /** @brief Defines a POST route with a lambda handler. @see add_controller_route */
     Controller<Session>& post(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_POST, std::move(handler_fn));
+        return add_controller_route(std::move(path), qb::http::method::POST, std::move(handler_fn));
     }
     /** @brief Defines a PUT route with a lambda handler. @see add_controller_route */
     Controller<Session>& put(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_PUT, std::move(handler_fn));
+        return add_controller_route(std::move(path), qb::http::method::PUT, std::move(handler_fn));
     }
     /** @brief Defines a DELETE route with a lambda handler. @see add_controller_route */
     Controller<Session>& del(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_DELETE, std::move(handler_fn));
+        return add_controller_route(std::move(path), qb::http::method::DEL, std::move(handler_fn));
     }
     /** @brief Defines a PATCH route with a lambda handler. @see add_controller_route */
     Controller<Session>& patch(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_PATCH, std::move(handler_fn));
+        return add_controller_route(std::move(path), qb::http::method::PATCH, std::move(handler_fn));
     }
     /** @brief Defines an OPTIONS route with a lambda handler. @see add_controller_route */
     Controller<Session>& options(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_OPTIONS, std::move(handler_fn));
+        return add_controller_route(std::move(path), qb::http::method::OPTIONS, std::move(handler_fn));
     }
     /** @brief Defines a HEAD route with a lambda handler. @see add_controller_route */
     Controller<Session>& head(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_HEAD, std::move(handler_fn));
+        return add_controller_route(std::move(path), qb::http::method::HEAD, std::move(handler_fn));
     }
 
     // --- Typed ICustomRoute routes (constructs CustomRouteType in-place) ---
     /** @brief Defines a GET route with a typed `ICustomRoute` handler. @see add_controller_custom_route */
     template <typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
     Controller<Session>& get(std::string path, Args&&... ctor_args) {
-        return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_GET, std::forward<Args>(ctor_args)...);
+        return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::GET, std::forward<Args>(ctor_args)...);
     }
     /** @brief Defines a POST route with a typed `ICustomRoute` handler. @see add_controller_custom_route */
     template <typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
     Controller<Session>& post(std::string path, Args&&... ctor_args) {
-        return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_POST, std::forward<Args>(ctor_args)...);
+        return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::POST, std::forward<Args>(ctor_args)...);
     }
     // ... (similar overloads for PUT, DELETE, PATCH, OPTIONS, HEAD with CustomRouteType) ...
     template <typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
-    Controller<Session>& put(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_PUT, std::forward<Args>(ctor_args)...); }
+    Controller<Session>& put(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::PUT, std::forward<Args>(ctor_args)...); }
     template <typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
-    Controller<Session>& del(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_DELETE, std::forward<Args>(ctor_args)...); }
+    Controller<Session>& del(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::DEL, std::forward<Args>(ctor_args)...); }
     template <typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
-    Controller<Session>& patch(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_PATCH, std::forward<Args>(ctor_args)...); }
+    Controller<Session>& patch(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::PATCH, std::forward<Args>(ctor_args)...); }
     template <typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
-    Controller<Session>& options(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_OPTIONS, std::forward<Args>(ctor_args)...); }
+    Controller<Session>& options(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::OPTIONS, std::forward<Args>(ctor_args)...); }
     template <typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
-    Controller<Session>& head(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HTTP_HEAD, std::forward<Args>(ctor_args)...); }
+    Controller<Session>& head(std::string path, Args&&... ctor_args) { return add_controller_custom_route<CustomRouteType>(std::move(path), qb::http::method::HEAD, std::forward<Args>(ctor_args)...); }
 
 
     // --- std::shared_ptr<ICustomRoute<Session>> routes ---
     /** @brief Defines a GET route with a pre-created `ICustomRoute` handler. @see add_controller_route */
     Controller<Session>& get(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_GET, std::move(custom_route_ptr));
+        return add_controller_route(std::move(path), qb::http::method::GET, std::move(custom_route_ptr));
     }
     /** @brief Defines a POST route with a pre-created `ICustomRoute` handler. @see add_controller_route */
     Controller<Session>& post(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) {
-        return add_controller_route(std::move(path), qb::http::method::HTTP_POST, std::move(custom_route_ptr));
+        return add_controller_route(std::move(path), qb::http::method::POST, std::move(custom_route_ptr));
     }
     // ... (similar overloads for PUT, DELETE, PATCH, OPTIONS, HEAD with shared_ptr<ICustomRoute>) ...
-    Controller<Session>& put(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::HTTP_PUT, std::move(custom_route_ptr)); }
-    Controller<Session>& del(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::HTTP_DELETE, std::move(custom_route_ptr)); }
-    Controller<Session>& patch(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::HTTP_PATCH, std::move(custom_route_ptr)); }
-    Controller<Session>& options(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::HTTP_OPTIONS, std::move(custom_route_ptr)); }
-    Controller<Session>& head(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::HTTP_HEAD, std::move(custom_route_ptr)); }
+    Controller<Session>& put(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::PUT, std::move(custom_route_ptr)); }
+    Controller<Session>& del(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::DEL, std::move(custom_route_ptr)); }
+    Controller<Session>& patch(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::PATCH, std::move(custom_route_ptr)); }
+    Controller<Session>& options(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::OPTIONS, std::move(custom_route_ptr)); }
+    Controller<Session>& head(std::string path, std::shared_ptr<ICustomRoute<Session>> custom_route_ptr) { return add_controller_route(std::move(path), qb::http::method::HEAD, std::move(custom_route_ptr)); }
 
 
     /**

@@ -28,7 +28,7 @@ router.post("/upload", [](Context& ctx) {
     // Check Content-Type
     std::string content_type_header = ctx.request.header("Content-Type");
     if (content_type_header.find("multipart/form-data") == std::string::npos) {
-        ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
+        ctx.response.status() = HTTP_STATUS_BAD_REQUEST;
         ctx.response.body() = "Expected multipart/form-data";
         ctx.complete();
         return;
@@ -69,13 +69,13 @@ router.post("/upload", [](Context& ctx) {
             }
         }
 
-        ctx.response.status_code = HTTP_STATUS_OK;
+        ctx.response.status() = HTTP_STATUS_OK;
         ctx.response.body() = "Upload processed. User: " + user_field + ", Filename: " + uploaded_filename;
         ctx.complete();
 
     } catch (const std::exception& e) {
         // Handle parsing errors (e.g., invalid boundary, malformed data)
-        ctx.response.status_code = HTTP_STATUS_BAD_REQUEST;
+        ctx.response.status() = HTTP_STATUS_BAD_REQUEST;
         ctx.response.body() = std::string("Failed to parse multipart data: ") + e.what();
         ctx.complete();
     }
@@ -101,7 +101,7 @@ While less common for responses, you might create multipart content on the clien
 
 // ... client code ...
 qb::http::Request req("http://example.com/upload");
-req.method = HTTP_POST;
+req.method() = HTTP_POST;
 
 // Create multipart object
 qb::http::Multipart multipart_data;

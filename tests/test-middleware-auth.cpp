@@ -71,9 +71,9 @@ protected:
         _auth_mw = qb::http::create_auth_middleware<MockAuthSession>(_auth_options);
     }
 
-    qb::http::Request create_request(qb::http::method method_val = qb::http::method::HTTP_GET, const std::string& target_path = "/test") {
+    qb::http::Request create_request(qb::http::method method_val = qb::http::method::GET, const std::string& target_path = "/test") {
         qb::http::Request req;
-        req.method = method_val;
+        req.method() = method_val;
         try {
             req.uri() = qb::io::uri(target_path);
         } catch (const std::exception& e) {
@@ -91,7 +91,7 @@ protected:
             if (ctx->has("user")) {
                 _session->_user_in_context = ctx->template get<qb::http::auth::User>("user");
             }
-            ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+            ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Access Granted";
             ctx->complete();
         };
@@ -127,7 +127,7 @@ TEST_F(AuthMiddlewareTest, ValidTokenAuthentication) {
     req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().template as<std::string>(), "Access Granted");
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
@@ -140,7 +140,7 @@ TEST_F(AuthMiddlewareTest, MissingToken) {
 
     make_request(create_request()); // No token header
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Authentication required"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -153,7 +153,7 @@ TEST_F(AuthMiddlewareTest, InvalidToken) {
     req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " an_invalid_token_string");
     make_request(std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     // The exact message depends on qb::jwt::verify or AuthManager's verify_token
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid or expired token"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
@@ -170,7 +170,7 @@ TEST_F(AuthMiddlewareTest, ValidRoleAuthorization) {
     req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
     EXPECT_EQ(_session->_user_in_context->username, "adminuser");
@@ -187,7 +187,7 @@ TEST_F(AuthMiddlewareTest, InvalidRoleAuthorization) {
     req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Insufficient permissions"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -199,7 +199,7 @@ TEST_F(AuthMiddlewareTest, OptionalAuthentication) {
 
     // Scenario 1: No token provided, should still allow access
     make_request(create_request());
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().template as<std::string>(), "Access Granted");
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_FALSE(_session->_user_in_context.has_value()); // No user in context
@@ -213,7 +213,7 @@ TEST_F(AuthMiddlewareTest, OptionalAuthentication) {
     req_with_token.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req_with_token));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
     EXPECT_EQ(_session->_user_in_context->id, "user789");
@@ -238,7 +238,7 @@ TEST_F(AuthMiddlewareTest, ExpiredTokenMiddleware) {
                    expiring_options.get_auth_scheme() + " " + expired_token);
     make_request(std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid or expired token"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -304,7 +304,7 @@ TEST_F(AuthMiddlewareTest, NotYetValidTokenMiddleware) {
                    current_auth_opts.get_auth_scheme() + " " + token_not_yet_valid);
     make_request(std::move(req));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     // This message is generic, qb::jwt might throw specific exception that AuthMiddleware standardizes
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid or expired token"), std::string::npos); 
     EXPECT_FALSE(_session->_final_handler_called);
@@ -390,11 +390,11 @@ TEST_F(AuthMiddlewareTest, RSAAlgorithmTokenVerification) {
     make_request(std::move(req));
 
     // 4. Assert success
-    if (_session->_response.status_code != qb::http::status::HTTP_STATUS_OK) {
-        FAIL() << "RSA Token verification failed. Status: " << _session->_response.status_code
+    if (_session->_response.status() != qb::http::status::OK) {
+        FAIL() << "RSA Token verification failed. Status: " << _session->_response.status()
                << ", Body: " << _session->_response.body().template as<std::string>();
     }
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
     EXPECT_EQ(_session->_user_in_context->id, "user_rsa");
@@ -410,7 +410,7 @@ TEST_F(AuthMiddlewareTest, RSAAlgorithmTokenVerification) {
     req_hmac_verify.set_header(hmac_options_for_rsa_token.get_auth_header_name(), 
                                hmac_options_for_rsa_token.get_auth_scheme() + " " + rsa_token);
     make_request(std::move(req_hmac_verify));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "RSA token should not validate with HMAC configuration.";
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -441,7 +441,7 @@ TEST_F(AuthMiddlewareTest, CustomUserContextKey) {
         if (ctx->has("user")) { // Check for default key "user"
             user_found_at_default_key = true;
         }
-        ctx->response().status_code = qb::http::status::HTTP_STATUS_OK;
+        ctx->response().status() = qb::http::status::OK;
         ctx->response().body() = "Custom Key Handler Executed";
         ctx->complete();
     };
@@ -452,7 +452,7 @@ TEST_F(AuthMiddlewareTest, CustomUserContextKey) {
     qb::http::auth::User test_user{original_user_id, "customkeyuser", {"user"}};
     std::string token = generate_test_token(test_user); // Uses _auth_options from fixture
 
-    auto req = create_request(qb::http::method::HTTP_GET, "/test_custom_key");
+    auto req = create_request(qb::http::method::GET, "/test_custom_key");
     req.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     
     _session->reset(); // Reset session before making the call via router
@@ -488,7 +488,7 @@ TEST_F(AuthMiddlewareTest, CustomAuthScheme) {
                                custom_scheme + " " + token);
     make_request(std::move(req_custom_scheme));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
     EXPECT_EQ(_session->_user_in_context->id, "user_scheme");
@@ -502,7 +502,7 @@ TEST_F(AuthMiddlewareTest, CustomAuthScheme) {
                                   _auth_options.get_auth_scheme() + " " + token); // Using default "Bearer"
     make_request(std::move(req_default_scheme));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Invalid authentication format"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
     EXPECT_FALSE(_session->_user_in_context.has_value());
@@ -525,7 +525,7 @@ TEST_F(AuthMiddlewareTest, RequireAllRoles) {
     req1.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req1));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
     EXPECT_EQ(_session->_user_in_context->id, "user_all_roles");
@@ -541,7 +541,7 @@ TEST_F(AuthMiddlewareTest, RequireAllRoles) {
     req2.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req2));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Insufficient permissions"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 
@@ -554,7 +554,7 @@ TEST_F(AuthMiddlewareTest, RequireAllRoles) {
     req3.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req3));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_FORBIDDEN);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_FALSE(_session->_final_handler_called);
 
     // Scenario 4: Required roles list is empty, require_all = true (should pass)
@@ -566,7 +566,7 @@ TEST_F(AuthMiddlewareTest, RequireAllRoles) {
     req4.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " " + token);
     make_request(std::move(req4));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Access should be granted if require_all_roles is true and required list is empty.";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
@@ -623,7 +623,7 @@ TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
                     current_auth_opts_for_creation.get_auth_scheme() + " " + token_exp_within_tolerance);
     make_request(std::move(req1));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Token expired 10s ago, but should be OK due to 20s tolerance.";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
@@ -648,7 +648,7 @@ TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
                     current_auth_opts_for_creation.get_auth_scheme() + " " + token_exp_beyond_tolerance);
     make_request(std::move(req2));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Token expired 30s ago, should be UNAUTHORIZED with 20s tolerance.";
     EXPECT_FALSE(_session->_final_handler_called);
 
@@ -671,7 +671,7 @@ TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
                     current_auth_opts_for_creation.get_auth_scheme() + " " + token_nbf_within_tolerance);
     make_request(std::move(req3));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Token NBF in 10s, but should be OK due to 20s tolerance.";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
@@ -696,7 +696,7 @@ TEST_F(AuthMiddlewareTest, ClockSkewTolerance) {
                     current_auth_opts_for_creation.get_auth_scheme() + " " + token_nbf_beyond_tolerance);
     make_request(std::move(req4));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED)
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "Token NBF in 30s, should be UNAUTHORIZED with 20s tolerance.";
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -770,7 +770,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req1_1 = create_request();
     req1_1.set_header(issuer_verify_opts.get_auth_header_name(), issuer_verify_opts.get_auth_scheme() + " " + token_correct_iss);
     make_request(std::move(req1_1));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S1.1 Correct Issuer";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "S1.1 Correct Issuer";
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Scenario 1.2: Incorrect Issuer
@@ -781,7 +781,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req1_2 = create_request();
     req1_2.set_header(issuer_verify_opts.get_auth_header_name(), issuer_verify_opts.get_auth_scheme() + " " + token_incorrect_iss);
     make_request(std::move(req1_2));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S1.2 Incorrect Issuer";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "S1.2 Incorrect Issuer";
     EXPECT_FALSE(_session->_final_handler_called);
 
     // Scenario 1.3: Missing Issuer in Token, Verification On
@@ -792,7 +792,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req1_3 = create_request();
     req1_3.set_header(issuer_verify_opts.get_auth_header_name(), issuer_verify_opts.get_auth_scheme() + " " + token_no_iss);
     make_request(std::move(req1_3));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S1.3 Missing Issuer";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "S1.3 Missing Issuer";
     EXPECT_FALSE(_session->_final_handler_called);
 
     // Scenario 1.4: Issuer in Token, Verification Off
@@ -807,7 +807,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req1_4 = create_request();
     req1_4.set_header(issuer_no_verify_opts.get_auth_header_name(), issuer_no_verify_opts.get_auth_scheme() + " " + token_with_iss_verify_off);
     make_request(std::move(req1_4));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S1.4 Issuer Present, Verification Off";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "S1.4 Issuer Present, Verification Off";
     EXPECT_TRUE(_session->_final_handler_called);
 
     // --- Part 2: Audience Tests ---
@@ -824,7 +824,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req2_1 = create_request();
     req2_1.set_header(audience_verify_opts.get_auth_header_name(), audience_verify_opts.get_auth_scheme() + " " + token_correct_aud);
     make_request(std::move(req2_1));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S2.1 Correct Audience";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "S2.1 Correct Audience";
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Scenario 2.2: Incorrect Audience
@@ -835,7 +835,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req2_2 = create_request();
     req2_2.set_header(audience_verify_opts.get_auth_header_name(), audience_verify_opts.get_auth_scheme() + " " + token_incorrect_aud);
     make_request(std::move(req2_2));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S2.2 Incorrect Audience";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "S2.2 Incorrect Audience";
     EXPECT_FALSE(_session->_final_handler_called);
 
     // Scenario 2.3: Missing Audience in Token, Verification On
@@ -846,7 +846,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req2_3 = create_request();
     req2_3.set_header(audience_verify_opts.get_auth_header_name(), audience_verify_opts.get_auth_scheme() + " " + token_no_aud);
     make_request(std::move(req2_3));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "S2.3 Missing Audience";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "S2.3 Missing Audience";
     EXPECT_FALSE(_session->_final_handler_called);
 
     // Scenario 2.4: Audience in Token, Verification Off
@@ -861,7 +861,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
     auto req2_4 = create_request();
     req2_4.set_header(audience_no_verify_opts.get_auth_header_name(), audience_no_verify_opts.get_auth_scheme() + " " + token_with_aud_verify_off);
     make_request(std::move(req2_4));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "S2.4 Audience Present, Verification Off";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "S2.4 Audience Present, Verification Off";
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
@@ -884,7 +884,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthHeaderName) {
     auto req_exact = create_request();
     req_exact.set_header(custom_header_name_config, token_header_value);
     make_request(std::move(req_exact));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Exact case";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Exact case";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
 
@@ -895,7 +895,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthHeaderName) {
     std::transform(lower_case_header.begin(), lower_case_header.end(), lower_case_header.begin(), ::tolower);
     req_lower.set_header(lower_case_header, token_header_value);
     make_request(std::move(req_lower));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Lowercase header";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Lowercase header";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
 
@@ -906,7 +906,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthHeaderName) {
     std::transform(upper_case_header.begin(), upper_case_header.end(), upper_case_header.begin(), ::toupper);
     req_upper.set_header(upper_case_header, token_header_value);
     make_request(std::move(req_upper));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Uppercase header";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Uppercase header";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
 
@@ -915,7 +915,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthHeaderName) {
     auto req_wrong_name = create_request();
     req_wrong_name.set_header("Authorization", token_header_value); // Default, but should fail
     make_request(std::move(req_wrong_name));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "Wrong header name";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "Wrong header name";
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -935,7 +935,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
     auto req_lower_bearer = create_request();
     req_lower_bearer.set_header(header_name_bearer, "bearer " + token_bearer);
     make_request(std::move(req_lower_bearer));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Lowercase Bearer";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Lowercase Bearer";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
     EXPECT_EQ(_session->_user_in_context->id, test_user_bearer.id);
@@ -945,7 +945,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
     auto req_upper_bearer = create_request();
     req_upper_bearer.set_header(header_name_bearer, "BEARER " + token_bearer);
     make_request(std::move(req_upper_bearer));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Uppercase Bearer";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Uppercase Bearer";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
 
@@ -954,7 +954,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
     auto req_mixed_bearer = create_request();
     req_mixed_bearer.set_header(header_name_bearer, "BeArEr " + token_bearer);
     make_request(std::move(req_mixed_bearer));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Mixed case Bearer";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Mixed case Bearer";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
 
@@ -979,7 +979,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
     std::transform(lower_custom_scheme.begin(), lower_custom_scheme.end(), lower_custom_scheme.begin(), ::tolower);
     req_lower_custom.set_header(header_name_custom, lower_custom_scheme + " " + token_custom);
     make_request(std::move(req_lower_custom));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Lowercase Custom Scheme";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Lowercase Custom Scheme";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
     EXPECT_EQ(_session->_user_in_context->id, test_user_custom.id);
@@ -991,7 +991,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
     std::transform(upper_custom_scheme.begin(), upper_custom_scheme.end(), upper_custom_scheme.begin(), ::toupper);
     req_upper_custom.set_header(header_name_custom, upper_custom_scheme + " " + token_custom);
     make_request(std::move(req_upper_custom));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Uppercase Custom Scheme";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Uppercase Custom Scheme";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
 
@@ -1000,7 +1000,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
     auto req_wrong_scheme = create_request();
     req_wrong_scheme.set_header(header_name_custom, "Bearer " + token_custom); // Using default Bearer
     make_request(std::move(req_wrong_scheme));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) << "Wrong scheme for custom token";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "Wrong scheme for custom token";
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -1016,7 +1016,7 @@ TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
     req_malformed.set_header(_auth_options.get_auth_header_name(), _auth_options.get_auth_scheme() + " this_is_not_a_valid_jwt");
     make_request(std::move(req_malformed));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Malformed token with optional auth";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Malformed token with optional auth";
     EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with malformed token and optional auth";
     EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with malformed token";
 
@@ -1038,7 +1038,7 @@ TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
                            _auth_options.get_auth_scheme() + " " + expired_token);
     make_request(std::move(req_expired));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Expired token with optional auth";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Expired token with optional auth";
     EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with expired token and optional auth";
     EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with expired token";
 
@@ -1055,7 +1055,7 @@ TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
                              _auth_options.get_auth_scheme() + " " + token_wrong_sig);
     make_request(std::move(req_wrong_sig));
 
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) << "Wrong signature token with optional auth";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Wrong signature token with optional auth";
     EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with wrong signature and optional auth";
     EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with wrong signature token";
 }
@@ -1075,7 +1075,7 @@ TEST_F(AuthMiddlewareTest, TokenAndSchemeWhitespaceTolerance) {
     auto req_extra_space_after = create_request();
     req_extra_space_after.set_header(header_name, scheme + "   " + token); // 3 spaces
     make_request(std::move(req_extra_space_after));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) 
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Extra spaces between scheme and token should be accepted.";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
@@ -1088,7 +1088,7 @@ TEST_F(AuthMiddlewareTest, TokenAndSchemeWhitespaceTolerance) {
     auto req_leading_space = create_request();
     req_leading_space.set_header(header_name, "  " + scheme + " " + token); // 2 leading spaces
     make_request(std::move(req_leading_space));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) 
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Leading spaces before scheme should ideally be accepted or trimmed by HTTP parser.";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
@@ -1099,7 +1099,7 @@ TEST_F(AuthMiddlewareTest, TokenAndSchemeWhitespaceTolerance) {
     auto req_trailing_space = create_request();
     req_trailing_space.set_header(header_name, scheme + " " + token + "  "); // 2 trailing spaces
     make_request(std::move(req_trailing_space));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_OK) 
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
         << "Trailing spaces after token should ideally be accepted or trimmed.";
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_user_in_context.has_value());
@@ -1109,7 +1109,7 @@ TEST_F(AuthMiddlewareTest, TokenAndSchemeWhitespaceTolerance) {
     auto req_no_space = create_request();
     req_no_space.set_header(header_name, scheme + token); // No space
     make_request(std::move(req_no_space));
-    EXPECT_EQ(_session->_response.status_code, qb::http::status::HTTP_STATUS_UNAUTHORIZED) 
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
         << "No space between scheme and token should be rejected.";
     EXPECT_FALSE(_session->_final_handler_called);
 }

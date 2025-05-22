@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/router_core.h
+ * @file qbm/http/routing/router_core.h
  * @brief Defines the core engine for HTTP route registration, compilation, and execution.
  *
  * This file contains the `RouterCore` class template, which is the internal powerhouse
@@ -87,7 +87,7 @@ private:
         if (!_default_not_found_handler || !_custom_not_found_handler_set) { 
             // Set a very basic default 404 handler if none was provided by the user.
             _default_not_found_handler = [](std::shared_ptr<Context<SessionType>> ctx) { 
-                ctx->response().status_code = HTTP_STATUS_NOT_FOUND; 
+                ctx->response().status() = qb::http::status::NOT_FOUND;
                 ctx->response().set_content_type("text/plain; charset=utf-8");
                 ctx->response().body() = "404 Not Found (Default)";
                 ctx->complete(AsyncTaskResult::COMPLETE); // Signal completion of this handler
@@ -263,7 +263,7 @@ public:
         ctx->execute_hook(qb::http::HookPoint::PRE_ROUTING); 
 
         std::string request_path_str = std::string(ctx->request().uri().path());
-        auto matched_info_opt = _radix_tree.match(request_path_str, ctx->request().method);
+        auto matched_info_opt = _radix_tree.match(request_path_str, ctx->request().method());
         
         std::vector<std::shared_ptr<IAsyncTask<SessionType>>> tasks_to_execute_vec;
 
@@ -293,7 +293,7 @@ public:
         if (tasks_to_execute_vec.empty()) {
             // This is a critical state: no tasks for a matched route or even for 404.
             // Should ideally not happen if compile_default_not_found_handler ensures a task.
-            ctx->response().status_code = HTTP_STATUS_INTERNAL_SERVER_ERROR;
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->response().body() = "Router critical error: No task chain available.";
             ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
             ctx->complete(AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR); // Use FATAL to bypass normal error chain.

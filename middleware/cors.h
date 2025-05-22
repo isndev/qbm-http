@@ -1,3 +1,15 @@
+/**
+ * @file qbm/http/middleware/cors.h
+ * @brief Defines the CorsMiddleware class for handling Cross-Origin Resource Sharing (CORS).
+ *
+ * This file contains the definition of the CorsMiddleware class,
+ * which is used to handle CORS requests.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Middleware
+ */
 #pragma once
 
 #include <memory>
@@ -337,7 +349,7 @@ public:
         }
 
         // Handle Preflight (OPTIONS) request
-        if (ctx->request().method == qb::http::method::HTTP_OPTIONS) {
+        if (ctx->request().method() == qb::http::method::OPTIONS) {
             const std::string request_method_header = std::string(ctx->request().header("Access-Control-Request-Method"));
             if (!request_method_header.empty()) { // This signifies a preflight request
                 const auto& allowed_methods_list = _options->get_allowed_methods();
@@ -389,7 +401,7 @@ public:
 
                 ctx->response().set_header("Access-Control-Max-Age", std::to_string(_options->get_max_age()));
                 
-                ctx->response().status_code = HTTP_STATUS_NO_CONTENT; 
+                ctx->response().status() = qb::http::status::NO_CONTENT;
                 ctx->response().body().clear(); 
                 ctx->complete(AsyncTaskResult::COMPLETE); // Crucial: Complete the task here for preflight
                 return; // Preflight handled, stop further processing for this request.

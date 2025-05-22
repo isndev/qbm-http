@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/validation/parameter_validator.cpp
+ * @brief Implementation of the ParameterValidator class.
+ *
+ * This file contains the implementation of the ParameterValidator class,
+ * which is used to validate HTTP parameters according to the rules defined
+ * in the ParameterRuleSet.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Validaton
+ */
 #include "./parameter_validator.h"
 #include "./rule.h" // For TypeRule::data_type_to_string
 #include <charconv> 

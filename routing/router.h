@@ -1,5 +1,5 @@
 /**
- * @file qb/http/routing/router.h
+ * @file qbm/http/routing/router.h
  * @brief Defines the main public HTTP Router class for defining and dispatching routes.
  *
  * This file contains the `Router` class template, which serves as the primary user interface

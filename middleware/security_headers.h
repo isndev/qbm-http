@@ -1,3 +1,15 @@
+/**
+ * @file qbm/http/middleware/security_headers.h
+ * @brief Defines the SecurityHeadersMiddleware class for adding security headers to responses.
+ *
+ * This file contains the definition of the SecurityHeadersMiddleware class,
+ * which is used to add security headers to responses.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Middleware
+ */
 #pragma once
 
 #include <memory>
