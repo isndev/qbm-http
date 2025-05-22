@@ -14,15 +14,15 @@ struct MatchTestSession {
     qb::http::PathParameters _captured_params;
     qb::uuid _session_id = qb::generate_random_uuid(); // Assuming qb::generate_random_uuid available via http.h
 
-    qb::http::Response& get_response_ref() { return _response; }
+    qb::http::Response &get_response_ref() { return _response; }
 
-    MatchTestSession& operator<<(const qb::http::Response& resp) {
+    MatchTestSession &operator<<(const qb::http::Response &resp) {
         _response = resp;
         // In match tests, we don't focus on multiple writes like in full router tests.
         return *this;
     }
-    
-    [[nodiscard]] const qb::uuid& id() const { return _session_id; }
+
+    [[nodiscard]] const qb::uuid &id() const { return _session_id; }
 
     void reset() {
         _response = qb::http::Response();
@@ -45,12 +45,12 @@ protected:
 
     ~RouterMatchTest() noexcept override = default; // Explicitly noexcept(true)
 
-    qb::http::Request create_request(qb::http::method method_val, const std::string& target_path) {
+    qb::http::Request create_request(qb::http::method method_val, const std::string &target_path) {
         qb::http::Request req;
         req.method() = method_val;
         try {
             req.uri() = qb::io::uri(target_path);
-        } catch (const std::exception& e) {
+        } catch (const std::exception &e) {
             ADD_FAILURE() << "Failed to parse URI: " << target_path << " - " << e.what();
             // Return a request that's unlikely to match anything to prevent further issues
             req.uri() = qb::io::uri("/__invalid_uri_due_to_parse_failure__");
@@ -62,7 +62,7 @@ protected:
 
     // Helper to define a simple handler that marks execution and captures params
     auto
-    make_verifying_handler(const std::string& handler_id) {
+    make_verifying_handler(const std::string &handler_id) {
         return [this, handler_id](auto ctx) {
             if (ctx->session()) {
                 ctx->session()->_handler_executed = true;
@@ -146,7 +146,7 @@ TEST_F(RouterMatchTest, StaticRouteCaseSensitivity) {
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "correct_case_handler");
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
-    
+
     // Incorrect case
     mock_session->reset();
     auto request_incorrect = create_request(HTTP_GET, "/CasePath");
@@ -177,11 +177,11 @@ TEST_F(RouterMatchTest, ParameterMultipleParams) {
 
     auto request = create_request(HTTP_GET, "/articles/tech/posts/456");
     router.route(mock_session, std::move(request));
-    
+
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "article_post_handler");
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
-    
+
     auto cat_val = mock_session->_captured_params.get("category");
     ASSERT_TRUE(cat_val.has_value());
     ASSERT_EQ(cat_val.value(), "tech");
@@ -472,7 +472,7 @@ TEST_F(RouterMatchTest, ComplexRouteMix) {
 
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "complex_mix");
-    
+
     auto user_p = mock_session->_captured_params.get("user");
     ASSERT_TRUE(user_p.has_value());
     ASSERT_EQ(user_p.value(), "user123");
@@ -522,7 +522,8 @@ TEST_F(RouterMatchTest, VeryLongWildcardCapture) {
     router.compile();
 
     std::string long_path = "a";
-    for (int i = 0; i < 50; ++i) { // Create a path like a/b/c/...
+    for (int i = 0; i < 50; ++i) {
+        // Create a path like a/b/c/...
         long_path += "/" + std::string(1, static_cast<char>('b' + (i % 24))); // Cycle through b-z
     }
     long_path += "/final_file_with_long_name_and_extension.testdata";
@@ -587,8 +588,8 @@ TEST_F(RouterMatchTest, PathIsExtensionOfDefinedParamRoute) {
 TEST_F(RouterMatchTest, ComplexPriorityMix) {
     router.get("/mix/static_segment/specific_end", make_verifying_handler("H_SS")); // Static-Static
     router.get("/mix/:param_segment/specific_end", make_verifying_handler("H_PS")); // Param-Static
-    router.get("/mix/static_segment/:param_end", make_verifying_handler("H_SP"));   // Static-Param
-    router.get("/mix/*wildcard_capture", make_verifying_handler("H_WC"));          // Wildcard (changed from H_SW for clarity)
+    router.get("/mix/static_segment/:param_end", make_verifying_handler("H_SP")); // Static-Param
+    router.get("/mix/*wildcard_capture", make_verifying_handler("H_WC")); // Wildcard (changed from H_SW for clarity)
     router.compile();
 
     // Test 1: Match Static-Static
@@ -652,7 +653,7 @@ TEST_F(RouterMatchTest, ComplexPriorityMix) {
     auto param_wc_prefix_ps = mock_session->_captured_params.get("wildcard_capture");
     ASSERT_TRUE(param_wc_prefix_ps.has_value());
     ASSERT_EQ(param_wc_prefix_ps.value(), "valueA");
-    
+
     // Test 7: Wildcard should also match if path is just /mix/
     // (assuming /mix/*wildcard where wildcard can be empty)
     mock_session->reset();

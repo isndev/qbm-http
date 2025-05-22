@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "../http.h" // Should provide qb::http::Router, Request, Response, Context, PathParameters
-                     // qb::http::method, qb::http::status (e.g. HTTP_STATUS_OK), NextMiddlewareFunc
-                     // Also qb::uuid, qb::generate_random_uuid, qb::io::uri
+// qb::http::method, qb::http::status (e.g. HTTP_STATUS_OK), NextMiddlewareFunc
+// Also qb::uuid, qb::generate_random_uuid, qb::io::uri
 
 #include <string> // For std::string
 #include <memory> // For std::shared_ptr
@@ -15,22 +15,22 @@ struct MockSession {
     qb::uuid _session_id = qb::generate_random_uuid(); // Assuming qb::generate_random_uuid() is available
     unsigned int _response_write_count = 0;
 
-    qb::http::Response& get_response_ref() {
+    qb::http::Response &get_response_ref() {
         return _response;
     }
 
-    MockSession& operator<<(const qb::http::Response& response) {
+    MockSession &operator<<(const qb::http::Response &response) {
         _response = response;
         _response_write_count++;
         if (_response_write_count > 1) {
-            throw std::runtime_error("MockSession::operator<< called " + 
-                                     std::to_string(_response_write_count) + 
+            throw std::runtime_error("MockSession::operator<< called " +
+                                     std::to_string(_response_write_count) +
                                      " times. Expected no more than 1 call between resets.");
         }
         return *this;
     }
-    
-    [[nodiscard]] const qb::uuid& id() const {
+
+    [[nodiscard]] const qb::uuid &id() const {
         return _session_id;
     }
 
@@ -43,7 +43,7 @@ struct MockSession {
     // Useful to ensure a response was written (count = 1) or not written (count = 0).
     void verify_response_write_count(unsigned int expected_count = 1) const {
         ASSERT_EQ(_response_write_count, expected_count)
-            << "MockSession final response_write_count mismatch. Expected: " << expected_count 
+            << "MockSession final response_write_count mismatch. Expected: " << expected_count
             << ", Actual: " << _response_write_count;
     }
 };
@@ -60,9 +60,10 @@ protected:
     }
 
     // Default destructor for gtest compatibility with non-trivial members
-    ~RouterTest() override {}
+    ~RouterTest() override {
+    }
 
-    qb::http::Request create_request(qb::http::method method_val, const std::string& target_path) {
+    qb::http::Request create_request(qb::http::method method_val, const std::string &target_path) {
         qb::http::Request req; // Default constructor
         req.method() = method_val;
         req.uri() = qb::io::uri(target_path); // Construct URI from path
@@ -104,7 +105,7 @@ TEST_F(RouterTest, RouteNotFound) {
 
     auto request = create_request(HTTP_GET, "/nonexistent");
     router.route(mock_session, std::move(request));
-    
+
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
     mock_session->verify_response_write_count();
 }
@@ -417,7 +418,8 @@ TEST_F(RouterTest, AddAndMatchSimplePutRoute) {
 }
 
 TEST_F(RouterTest, AddAndMatchSimpleDeleteRoute) {
-    router.del("/resource/456", [](auto ctx) { // Assuming .del() or .delete_()
+    router.del("/resource/456", [](auto ctx) {
+        // Assuming .del() or .delete_()
         ctx->response().status() = qb::http::status::NO_CONTENT; // 204 No Content is common
         ctx->complete();
     });
@@ -732,7 +734,7 @@ TEST_F(RouterTest, AddRouteWithDuplicateParameterNameInSameSegment) {
 
     ASSERT_THROW(
         router.compile(), // Exception expected during compilation of routes
-        std::invalid_argument 
+        std::invalid_argument
     );
 
     // Reset router state for the next part of the test, as compile() might have partially modified it or cleared it.
@@ -754,7 +756,7 @@ TEST_F(RouterTest, AddRouteWithDuplicateParameterNameInSameSegment) {
     );
 
     // Re-initialize router again before testing a valid route.
-    router = qb::http::Router<MockSession>(); 
+    router = qb::http::Router<MockSession>();
 
     // Ensure a valid route can still be added and matched after attempted invalid ones,
     // meaning the router's internal state wasn't corrupted or was reset.
@@ -772,4 +774,4 @@ TEST_F(RouterTest, AddRouteWithDuplicateParameterNameInSameSegment) {
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     ASSERT_EQ(mock_session->_response.body().as<std::string>(), "Good route ok");
     mock_session->verify_response_write_count();
-} 
+}

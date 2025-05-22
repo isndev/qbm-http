@@ -23,19 +23,17 @@
 #include "./auth/manager.h"  // For qb::http::auth::Manager
 
 namespace qb {
-namespace http {
-/**
- * @namespace qb::http::auth
- * @brief Provides classes and utilities for HTTP authentication and authorization.
- *
- * This namespace includes components for managing user authentication, token generation
- * (typically JWT), token verification, and defining authentication options and policies.
- */
-namespace auth {
-
-// This header serves as a single include point for all core components
-// of the qb::http::auth module, simplifying their inclusion in projects.
-
-} // namespace auth
-} // namespace http
+    namespace http {
+        /**
+         * @namespace qb::http::auth
+         * @brief Provides classes and utilities for HTTP authentication and authorization.
+         *
+         * This namespace includes components for managing user authentication, token generation
+         * (typically JWT), token verification, and defining authentication options and policies.
+         */
+        namespace auth {
+            // This header serves as a single include point for all core components
+            // of the qb::http::auth module, simplifying their inclusion in projects.
+        } // namespace auth
+    } // namespace http
 } // namespace qb

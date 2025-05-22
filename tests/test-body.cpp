@@ -12,11 +12,11 @@ using namespace qb::http;
 // Helper function to create a simple multipart body
 Multipart create_simple_multipart() {
     Multipart mp;
-    auto& part1 = mp.create_part();
+    auto &part1 = mp.create_part();
     part1.set_header("Content-Disposition", "form-data; name=\"text_field\"");
     part1.body = "Simple text";
 
-    auto& part2 = mp.create_part();
+    auto &part2 = mp.create_part();
     part2.set_header("Content-Disposition", "form-data; name=\"file_field\"; filename=\"test.txt\"");
     part2.set_header("Content-Type", "text/plain");
     part2.body = "Content of the file.";
@@ -82,7 +82,7 @@ TEST_F(BodyTest, AssignStringView) {
 }
 
 TEST_F(BodyTest, AssignCString) {
-    const char* c_str = "Test C-String";
+    const char *c_str = "Test C-String";
     body = c_str;
     EXPECT_EQ(c_str, body.as<std::string>());
 }
@@ -113,7 +113,7 @@ TEST_F(BodyTest, AsStringView) {
 TEST_F(BodyTest, RawAccess) {
     body << "Raw Data";
     EXPECT_EQ("Raw Data", std::string(body.raw().begin(), body.raw().end()));
-    const Body& const_body = body;
+    const Body &const_body = body;
     EXPECT_EQ("Raw Data", std::string(const_body.raw().begin(), const_body.raw().end()));
 }
 
@@ -121,14 +121,14 @@ TEST_F(BodyTest, Iterators) {
     std::string data = "Iterator Test";
     body = data;
     std::string iterated_data;
-    for (char c : body) {
+    for (char c: body) {
         iterated_data += c;
     }
     EXPECT_EQ(data, iterated_data);
 
     const Body const_body = data;
     std::string const_iterated_data;
-    for (char c : const_body) {
+    for (char c: const_body) {
         const_iterated_data += c;
     }
     EXPECT_EQ(data, const_iterated_data);
@@ -208,7 +208,7 @@ TEST_F(BodyTest, CompressionAndDecompression) {
     // Test GZIP
     std::size_t compressed_size_gzip = body.compress("gzip");
     EXPECT_GT(original_data.size(), compressed_size_gzip); // Expect compression
-    EXPECT_NE(original_data, body.as<std::string>());   // Body is now compressed
+    EXPECT_NE(original_data, body.as<std::string>()); // Body is now compressed
 
     std::size_t decompressed_size_gzip = body.uncompress("gzip");
     EXPECT_EQ(original_data.size(), decompressed_size_gzip);
@@ -239,7 +239,7 @@ TEST_F(BodyTest, CompressionAndDecompression) {
     // Test unsupported encoding for compress (get_compressor_from_header throws)
     body = original_data;
     EXPECT_THROW(body.compress("unsupported_encoding"), std::runtime_error);
-    
+
     // Test unsupported encoding for decompress (get_decompressor_from_header throws)
     // First, we need to "fake" a compressed body with an unknown encoding
     // This is tricky as the decompressor is chosen based on encoding string.
@@ -268,7 +268,7 @@ TEST_F(BodyTest, MultipleCompressionsDecompressions) {
     // or just attempt to re-compress already compressed data.
     // The current API does not prevent this.
     // Let's assume we always decompress before another compress or operation.
-    
+
     body.uncompress("gzip");
     EXPECT_EQ(original_data, body.as<std::string>());
 
@@ -324,7 +324,7 @@ TEST_F(BodyTest, FormParsingEdgeCases) {
 
     // Only key-value pairs without ampersand
     body = "key1=value1key2=value2"; // This is not standard, behavior might depend on parser strictness
-                                   // Current parser would treat "value1key2=value2" as value for key1
+    // Current parser would treat "value1key2=value2" as value for key1
     Form form8 = body.as<Form>();
     EXPECT_EQ(1, form8.fields().size());
     EXPECT_EQ("value1key2=value2", form8.get_first("key1").value_or(""));
@@ -352,11 +352,11 @@ TEST_F(BodyTest, MultipartDetailedComparisonAndBoundaryInBody) {
     ASSERT_EQ(original_mp.parts().size(), parsed_mp.parts().size());
 
     for (size_t i = 0; i < original_mp.parts().size(); ++i) {
-        const auto& original_part = original_mp.parts()[i];
-        const auto& parsed_part = parsed_mp.parts()[i];
+        const auto &original_part = original_mp.parts()[i];
+        const auto &parsed_part = parsed_mp.parts()[i];
         EXPECT_EQ(original_part.body, parsed_part.body);
         ASSERT_EQ(original_part.headers().size(), parsed_part.headers().size());
-        for (const auto& header_pair : original_part.headers()) {
+        for (const auto &header_pair: original_part.headers()) {
             EXPECT_TRUE(parsed_part.has_header(header_pair.first));
             EXPECT_EQ(original_part.header(header_pair.first), parsed_part.header(header_pair.first));
         }
@@ -380,17 +380,17 @@ TEST_F(BodyTest, SelfAssignment) {
     EXPECT_EQ("initial data", body.as<std::string>());
 
     Body body2 = "other data";
-    Body& body_ref = body2;
+    Body &body_ref = body2;
     body2 = body_ref; // Test self-assignment (copy) via reference
     EXPECT_EQ("other data", body2.as<std::string>());
 
     // Test self-move assignment
     // body = std::move(body); // This is problematic and usually indicates a bug in user code.
-                            // The standard library containers have specific behavior for self-move.
-                            // For qb::allocator::pipe, the behavior might depend on its specific
-                            // move assignment operator implementation.
-                            // A common outcome is that the object is left in a valid but unspecified state.
-                            // It's generally not a useful test unless specific guarantees are made.
+    // The standard library containers have specific behavior for self-move.
+    // For qb::allocator::pipe, the behavior might depend on its specific
+    // move assignment operator implementation.
+    // A common outcome is that the object is left in a valid but unspecified state.
+    // It's generally not a useful test unless specific guarantees are made.
 
     // No specific test for self-move for now as default implementation should handle it, 
     // and direct self-move is often undefined behavior or leads to an unspecified state.
@@ -409,7 +409,7 @@ TEST_F(BodyTest, ExplicitBodyConstructorsAndAssignments) {
     Body b3 = std::move(b1);
     EXPECT_EQ("initial data for b1", b3.as<std::string>());
     // b1 is now in a valid but unspecified state (likely empty for pipe allocator)
-    EXPECT_TRUE(b1.empty() || b1.raw().begin() == nullptr); 
+    EXPECT_TRUE(b1.empty() || b1.raw().begin() == nullptr);
 
     // Copy assignment
     Body b4 = "initial data for b4";
@@ -447,7 +447,7 @@ TEST_F(BodyTest, BodyWithEmbeddedNulls) {
     EXPECT_EQ(data_with_nulls, sv_out);
 
     // Check direct raw access
-    qb::allocator::pipe<char> const& raw_pipe = body.raw();
+    qb::allocator::pipe<char> const &raw_pipe = body.raw();
     EXPECT_EQ(11, raw_pipe.size());
     EXPECT_EQ(0, memcmp(raw_pipe.begin(), data_with_nulls.data(), 11));
 }
@@ -470,7 +470,8 @@ TEST_F(BodyTest, FormEncodingDecodingComplexValues) {
     EXPECT_NE(encoded_body.find("percent%25key=percent%25value"), std::string::npos);
     EXPECT_NE(encoded_body.find("ampersand%26key=ampersand%26value"), std::string::npos);
     EXPECT_NE(encoded_body.find("equals%3Dkey=equals%3Dvalue"), std::string::npos);
-    EXPECT_NE(encoded_body.find("unicode%E2%9C%93key=unicode%E2%9C%93value"), std::string::npos); // ✓ is E2 9C 93 in UTF-8
+    EXPECT_NE(encoded_body.find("unicode%E2%9C%93key=unicode%E2%9C%93value"), std::string::npos);
+    // ✓ is E2 9C 93 in UTF-8
 
     Form parsed_form = body.as<Form>();
     EXPECT_EQ("spaced value", parsed_form.get_first("spaced key").value_or(""));
@@ -487,11 +488,11 @@ MultipartView create_simple_multipart_view() {
     // that have a lifetime managed outside, or point to parts of a larger string_view.
     // For simplicity in this test, we use string literals which are safe.
     MultipartView mpv;
-    auto& part1 = mpv.create_part();
+    auto &part1 = mpv.create_part();
     part1.set_header("Content-Disposition", "form-data; name=\"text_field_sv\"");
     part1.body = "Simple text from StringView";
 
-    auto& part2 = mpv.create_part();
+    auto &part2 = mpv.create_part();
     part2.set_header("Content-Disposition", "form-data; name=\"file_field_sv\"; filename=\"test_sv.txt\"");
     part2.set_header("Content-Type", "text/plain");
     part2.body = "Content of the file from StringView.";
@@ -500,7 +501,7 @@ MultipartView create_simple_multipart_view() {
 
 TEST_F(BodyTest, MultipartViewAssignmentAndConversion) {
     MultipartView original_mpv = create_simple_multipart_view();
-    
+
     // Test const& assignment
     body = original_mpv;
     std::string body_str_const_ref = body.as<std::string>();
@@ -524,7 +525,7 @@ TEST_F(BodyTest, MultipartViewAssignmentAndConversion) {
 
     body = std::move(mpv_to_move);
     // Check if mpv_to_move is cleared (its parts vector should be empty)
-    EXPECT_TRUE(mpv_to_move.parts().empty()); 
+    EXPECT_TRUE(mpv_to_move.parts().empty());
 
     std::string body_str_move_ref = body.as<std::string>();
     EXPECT_NE(body_str_move_ref.find(moved_boundary), std::string::npos);
@@ -534,7 +535,7 @@ TEST_F(BodyTest, MultipartViewAssignmentAndConversion) {
     EXPECT_EQ(moved_boundary, parsed_mpv_move_ref.boundary());
     ASSERT_EQ(moved_parts_count, parsed_mpv_move_ref.parts().size());
     bool found_extra_part = false;
-    for (const auto& part : parsed_mpv_move_ref.parts()) {
+    for (const auto &part: parsed_mpv_move_ref.parts()) {
         if (part.body == "extra part for move test") {
             found_extra_part = true;
             break;
@@ -545,10 +546,10 @@ TEST_F(BodyTest, MultipartViewAssignmentAndConversion) {
     // Test as<MultipartView>() with manually constructed body (original part of the test)
     std::string manual_boundary_str = "manual_boundary_for_mpv";
     MultipartView manual_mpv_setup(manual_boundary_str);
-    auto& p1 = manual_mpv_setup.create_part();
+    auto &p1 = manual_mpv_setup.create_part();
     p1.set_header("H1", "V1");
     p1.body = "ViewPart1";
-    auto& p2 = manual_mpv_setup.create_part();
+    auto &p2 = manual_mpv_setup.create_part();
     p2.set_header("H2", "V2");
     p2.body = "ViewPart2";
 
@@ -600,13 +601,13 @@ TEST_F(BodyTest, CompressionWithChunkedEncoding) {
     body = original_data;
     body.compress("gzip"); // Compress it first
     // Valid: chunked is last (and effectively ignored by get_decompressor for choosing algorithm)
-    EXPECT_NO_THROW(body.uncompress("gzip, chunked")); 
+    EXPECT_NO_THROW(body.uncompress("gzip, chunked"));
     EXPECT_EQ(original_data, body.as<std::string>());
 
     body = original_data;
     body.compress("gzip");
     // Invalid: chunked is not last
-    EXPECT_THROW(body.uncompress("chunked, gzip"), std::runtime_error); 
+    EXPECT_THROW(body.uncompress("chunked, gzip"), std::runtime_error);
     // Body remains compressed as uncompress threw before modification
     body.uncompress("gzip"); // cleanup
     EXPECT_EQ(original_data, body.as<std::string>());

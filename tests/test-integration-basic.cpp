@@ -13,7 +13,7 @@ std::atomic<int> request_count_client{0};
 std::atomic<bool> server_ready{false};
 
 // Test assertion counters for server-side validation
-std::atomic<int> server_side_assertions{0}; 
+std::atomic<int> server_side_assertions{0};
 std::atomic<int> expected_server_assertions{0};
 
 // Helper to give a bit of time for server to process, if needed.
@@ -26,11 +26,11 @@ class BasicIntegrationServer;
 
 // HTTP session class that handles client connections
 // It now needs to process requests using the router from BasicIntegrationServer
-class BasicIntegrationSession : public qb::http::use<BasicIntegrationSession>::session<BasicIntegrationServer>
-{
+class BasicIntegrationSession : public qb::http::use<BasicIntegrationSession>::session<BasicIntegrationServer> {
 public:
     BasicIntegrationSession(BasicIntegrationServer &server_ref)
-        : session(server_ref) {}
+        : session(server_ref) {
+    }
 };
 
 // HTTP server that listens for connections and configures routes using the new Router API
@@ -39,15 +39,14 @@ public:
     // SessionType alias for convenience in lambdas
     using SessionContext = qb::http::Context<BasicIntegrationSession>;
 
-    BasicIntegrationServer() 
-      : qb::http::use<BasicIntegrationServer>::server<BasicIntegrationSession>()
-    {
+    BasicIntegrationServer()
+        : qb::http::use<BasicIntegrationServer>::server<BasicIntegrationSession>() {
         // Configure routes for testing different methods and status codes
         // Logging is now typically handled by middleware or within handlers if needed.
         // The old router().enable_logging(true) is not directly applicable.
-        
+
         std::cout << "Setting up routes in the server using new routing API..." << std::endl;
-        
+
         // 1. Basic GET route
         router().get("/test", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::OK;
@@ -56,14 +55,14 @@ public:
             request_count_server++;
             ctx->complete();
         });
-        
+
         // 2. POST route
         router().post("/test", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::CREATED;
             ctx->response().body() = ctx->request().body();
             ctx->response().add_header("Content-Type", "application/json");
             request_count_server++;
-            
+
             if (!ctx->request().body().empty()) {
                 if (ctx->request().body().template as<std::string>() == "{\"test\": \"data\"}") {
                     server_side_assertions++;
@@ -71,49 +70,49 @@ public:
             }
             ctx->complete();
         });
-        
+
         // 3. PUT route with single path parameter
         router().put("/test/:id", [](std::shared_ptr<SessionContext> ctx) {
             std::string id = ctx->path_param("id");
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "PUT Success for ID: " + id;
             request_count_server++;
-            
+
             if (id == "123") {
                 server_side_assertions++;
             }
             ctx->complete();
         });
-        
+
         // 4. DELETE handler
         router().del("/test/:id", [](std::shared_ptr<SessionContext> ctx) {
             std::string id = ctx->path_param("id");
             ctx->response().status() = qb::http::status::NO_CONTENT;
             request_count_server++;
-            
+
             if (id == "456") {
                 server_side_assertions++;
             }
             ctx->complete();
         });
-        
+
         // 5. Route with query parameters
         router().get("/query", [](std::shared_ptr<SessionContext> ctx) {
             std::string name = ctx->request().query("name");
             std::string age = ctx->request().query("age");
             std::string sort = ctx->request().query("sort", 0, "default"); // Query with default
-            
+
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Query params - name: " + name + ", age: " + age + ", sort: " + sort;
             ctx->response().add_header("X-Query-Count", std::to_string(ctx->request().queries().size()));
             request_count_server++;
-            
+
             if (name == "test" && age == "25" && sort == "asc") {
                 server_side_assertions++;
             }
             ctx->complete();
         });
-        
+
         // 6. Synchronous route (must call complete)
         router().get("/sync-no-complete", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::OK;
@@ -122,7 +121,7 @@ public:
             request_count_server++;
             ctx->complete(); // MUST call complete now
         });
-        
+
         // 7. Error handler
         router().get("/error", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -130,7 +129,7 @@ public:
             request_count_server++;
             ctx->complete();
         });
-        
+
         // 8. Async route
         router().get("/async", [](std::shared_ptr<SessionContext> ctx) {
             request_count_server++;
@@ -143,7 +142,7 @@ public:
                 ctx_capture->complete();
             }, 0.1); // 100ms delay
         });
-        
+
         // 9. Route Group Test
         auto api_group = router().group("/api/v1");
         api_group->get("/status", [](std::shared_ptr<SessionContext> ctx) {
@@ -153,85 +152,85 @@ public:
             request_count_server++;
             ctx->complete();
         });
-        
+
         // 10. Cookie setting test
         router().get("/cookie-set", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body() = "Cookie has been set";
-            
+
             ctx->response().add_cookie("test_cookie", "cookie_value");
             ctx->response().add_cookie(qb::http::Cookie{"test_cookie_with_attrs", "value_with_attrs"}
-                     .path("/")
-                     .http_only(true)
-                     .max_age(3600));
-            
+                .path("/")
+                .http_only(true)
+                .max_age(3600));
+
             request_count_server++;
             server_side_assertions++;
             ctx->complete();
         });
-        
+
         // 11. Cookie reading test
         router().get("/cookie-read", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::OK;
             std::string cookie_value = ctx->request().cookie_value("test_cookie");
             ctx->response().body() = "Cookie value: " + cookie_value;
             request_count_server++;
-            
+
             if (cookie_value == "cookie_value") {
                 server_side_assertions++;
             }
             ctx->complete();
         });
-        
+
         // 12. JSON content type test
         router().get("/json", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::OK;
             ctx->response().add_header("Content-Type", "application/json");
-            
+
             qb::json json_obj = {
                 {"message", "This is JSON"},
                 {"success", true},
                 {"code", 200}
             };
-            
+
             ctx->response().body() = json_obj;
             request_count_server++;
             server_side_assertions++;
             ctx->complete();
         });
-        
+
         // 13. Request headers echo
         router().get("/echo-headers", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::OK;
             ctx->response().add_header("Content-Type", "application/json");
-            
+
             qb::json headers_json = qb::json::object();
-            for (const auto& header_pair : ctx->request().headers()) {
-                const auto& name = header_pair.first;
-                const auto& values = header_pair.second;
-                
+            for (const auto &header_pair: ctx->request().headers()) {
+                const auto &name = header_pair.first;
+                const auto &values = header_pair.second;
+
                 if (values.size() == 1) {
                     headers_json[name] = values[0];
                 } else {
                     headers_json[name] = qb::json::array();
-                    for (const auto& value : values) {
+                    for (const auto &value: values) {
                         headers_json[name].push_back(value);
                     }
                 }
             }
-            
+
             ctx->response().body() = headers_json;
             request_count_server++;
-            
+
             if (ctx->request().header("X-Custom-Header") == "test-value" ||
                 ctx->request().header("x-custom-header") == "test-value") {
                 server_side_assertions++;
             }
             ctx->complete();
         });
-        
-        expected_server_assertions = 8; 
-        
+
+        expected_server_assertions = 8;
+
         std::cout << "All routes configured successfully with new API" << std::endl;
 
         // Compile all routes
@@ -265,15 +264,15 @@ protected:
             BasicIntegrationServer server_instance; // Use a local instance for the thread
             server_instance.transport().listen_v4(SERVER_PORT);
             server_instance.start();
-            
+
             server_ready = true;
             std::cout << "Server is ready and listening at port " << SERVER_PORT << std::endl;
-            
+
             // Keep server running as long as server_ready is true.
             // The main test thread will set server_ready to false in TearDown.
             while (server_ready.load(std::memory_order_acquire)) {
                 if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                     // If no events, sleep a bit to avoid busy spinning
+                    // If no events, sleep a bit to avoid busy spinning
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
@@ -285,7 +284,7 @@ protected:
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         // Give a little extra time for the server to fully initialize routes, etc.
-        std::this_thread::sleep_for(std::chrono::milliseconds(100)); 
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         std::cout << "HttpBasicIntegrationTest::SetUp complete." << std::endl;
     }
 
@@ -299,25 +298,27 @@ protected:
         _server.reset(); // Clean up server object
 
         // Final check of assertions for the completed test
-        if (expected_server_assertions > 0) { // Only check if assertions were expected
-             EXPECT_EQ(expected_server_assertions.load(), server_side_assertions.load())
+        if (expected_server_assertions > 0) {
+            // Only check if assertions were expected
+            EXPECT_EQ(expected_server_assertions.load(), server_side_assertions.load())
                 << "Mismatch in server-side assertions for the test. Expected: "
                 << expected_server_assertions.load() << ", Got: " << server_side_assertions.load();
         }
-         std::cout << "Test finished. Client requests: " << request_count_client.load()
-                  << ", Server requests: " << request_count_server.load()
-                  << ", Server assertions: " << server_side_assertions.load()
-                  << " (expected: " << expected_server_assertions.load() << ")" << std::endl;
+        std::cout << "Test finished. Client requests: " << request_count_client.load()
+                << ", Server requests: " << request_count_server.load()
+                << ", Server assertions: " << server_side_assertions.load()
+                << " (expected: " << expected_server_assertions.load() << ")" << std::endl;
     }
 
     // Helper to make client requests - ensures server is ready
     template<typename Func>
-    void MakeClientRequest(Func&& client_logic, int expected_server_req_increment = 1, int expected_server_assert_increment = 0) {
+    void MakeClientRequest(Func &&client_logic, int expected_server_req_increment = 1,
+                           int expected_server_assert_increment = 0) {
         if (!server_ready) {
             FAIL() << "Server not ready before making client request.";
             return;
         }
-        
+
         int current_client_req = request_count_client.load();
         int current_server_req = request_count_server.load();
         int current_server_asserts = server_side_assertions.load();
@@ -325,12 +326,12 @@ protected:
         client_logic(); // Execute the client request logic
 
         request_count_client++;
-        
+
         // Allow some time for server to process
         // This is a bit of a heuristic. A more robust solution might involve direct signals
         // or checking server counters with a timeout.
         std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Increased delay
-                                                                    // especially for async tests
+        // especially for async tests
 
         // Check if server processed the request(s)
         // This check might be flaky for async handlers if the delay is too short.
@@ -338,7 +339,7 @@ protected:
             << "Server did not process the expected number of requests.";
 
         if (expected_server_assert_increment > 0) {
-             EXPECT_EQ(current_server_asserts + expected_server_assert_increment, server_side_assertions.load())
+            EXPECT_EQ(current_server_asserts + expected_server_assert_increment, server_side_assertions.load())
                 << "Server-side assertions did not increment as expected.";
         }
     }
@@ -445,7 +446,7 @@ TEST_F(HttpBasicIntegrationTest, GetAsyncRoute) {
         std::cout << "Client: Sending GET request to /async" << std::endl;
         qb::http::Request request{{"http://localhost:9876/async"}};
         // Increased timeout for async response
-        auto response = qb::http::GET(request, 5.0); 
+        auto response = qb::http::GET(request, 5.0);
         std::cout << "Client: Received ASYNC response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("Async response", response.body().template as<std::string>());
@@ -527,13 +528,13 @@ TEST_F(HttpBasicIntegrationTest, RequestHeadersEcho) {
         EXPECT_EQ("application/json", response.header("Content-Type"));
         auto headers_json_body = response.body().template as<qb::json>();
         EXPECT_TRUE(headers_json_body.contains("x-custom-header") ||
-                   headers_json_body.contains("X-Custom-Header"));
+            headers_json_body.contains("X-Custom-Header"));
         EXPECT_TRUE(headers_json_body.contains("user-agent") ||
-                   headers_json_body.contains("User-Agent"));
+            headers_json_body.contains("User-Agent"));
     }, 1, 1);
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
-} 
+}
