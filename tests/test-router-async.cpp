@@ -721,7 +721,7 @@ TEST_F(RouterAsyncTest, CancelContextAlreadyOnErrorStatus) {
         std::move(resp_proto), 
         temp_session, 
         on_finalized_for_test,
-        router.get_core_weak_ptr()
+        router.get_router_core_weak_ptr()
     );
 
     // Set an initial error status
