@@ -33,6 +33,10 @@ This documentation is broken down into several sections to help you understand a
     *   [HTTP Message Parsing](./15-http-parsing.md) (Overview of internal parser)
 9.  **Advanced Topics:**
     *   [Advanced Usage & Performance](./16-advanced-topics.md) (Best practices, `string_view`, body handling)
+10. **HTTP/2 Protocol:**
+    *   [HTTP/2 Specifics](./17-http2-protocol.md) (Client, Server, HPACK, Streams)
+11. **HTTPS (SSL/TLS):**
+    *   [Enabling HTTPS](./18-https-ssl-tls.md) (Client & Server, Certificates, ALPN)
 
 ## 🚀 Minimal Usage Example
 

@@ -52,6 +52,9 @@ set(HTTP_TESTS
         integration-basic
         integration-advanced
         integration-middleware
+        http2-hpack
+        integration-make-server
+        integration-http2-client
 )
 
 # Register each standard test

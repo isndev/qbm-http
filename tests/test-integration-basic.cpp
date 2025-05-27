@@ -395,7 +395,7 @@ TEST_F(HttpBasicIntegrationTest, DeleteRequestWithParam) {
     MakeClientRequest([] {
         std::cout << "Client: Sending DELETE request to /test/456" << std::endl;
         qb::http::Request request{qb::http::method::DEL, {"http://localhost:9876/test/456"}};
-        auto response = qb::http::DELETE(request);
+        auto response = qb::http::DEL(request);
         std::cout << "Client: Received DELETE response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
         EXPECT_TRUE(response.body().empty());

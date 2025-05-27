@@ -4,7 +4,7 @@ This section provides an overview of the fundamental classes used to represent a
 
 ## HTTP Messages: Request and Response
 
-The `qb::http` module defines two primary classes for representing HTTP messages: `qb::http::Request` and `qb::http::Response`. These classes serve as containers for all information related to an HTTP exchange.
+The `qb::http` module defines two primary classes for representing HTTP messages: `qb::http::Request` and `qb::http::Response`. These classes serve as containers for all information related to an HTTP exchange, supporting both HTTP/1.1 and HTTP/2 semantics where appropriate (e.g., HTTP/2 pseudo-headers are handled correctly during parsing and serialization for HTTP/2 contexts).
 
 Both `Request` and `Response` inherit from a common base (`internal::MessageBase`) which provides shared functionalities like HTTP version management, header storage, and body handling.
 
@@ -14,13 +14,17 @@ Represents an incoming or outgoing HTTP request. Key properties include:
 
 -   **HTTP Method**: (`qb::http::Method`) The HTTP method of the request (e.g., `GET`, `POST`, `PUT`). Accessed via `request.method()`.
 -   **URI**: (`qb::io::uri`) The Uniform Resource Identifier specifying the target resource. Accessed via `request.uri()`. This object provides detailed access to all parts of the URI (scheme, host, path, query parameters, fragment).
--   **HTTP Version**: (`major_version`, `minor_version`) Typically 1.1.
--   **Headers**: (`qb::http::Headers`) A collection of HTTP headers. See [Headers](#http-headers) section below.
+    -   For HTTP/2, the `:scheme`, `:authority` (or `Host` header), and `:path` pseudo-headers are used to construct this URI internally when parsing a request.
+-   **HTTP Version**: (`major_version`, `minor_version`) Can be 1.1 for HTTP/1.1 or 2.0 for HTTP/2.
+-   **Headers**: (`qb::http::Headers`) A collection of HTTP headers. For HTTP/2, this includes regular headers and is populated from HPACK decoded data. Pseudo-headers like `:method`, `:scheme`, `:path`, `:authority` are typically not stored here directly but are used to populate the respective `Request` members (method, URI components).
 -   **Body**: (`qb::http::Body`) The message body content. See [Message Body](#http-message-body) section below.
 -   **Cookies**: (`qb::http::CookieJar`) Parsed cookies from the `Cookie` header. Accessed via `request.cookies()` or `request.cookie("name")`. The `request.parse_cookie_header()` method must be called to populate this jar from the request headers.
 
 ```cpp
 // Example: Creating and inspecting a Request object
+#include <http/http.h>
+#include <iostream>
+
 qb::http::Request req(qb::http::method::POST, qb::io::uri("/submit_data?type=test"));
 req.set_header("User-Agent", "QB-Client/1.0");
 req.set_header("Content-Type", "application/json");
@@ -42,13 +46,17 @@ if (auto* cookie = req.cookie("session_id")) {
 Represents an outgoing HTTP response. Key properties include:
 
 -   **Status Code**: (`qb::http::Status`) The HTTP status code (e.g., `200 OK`, `404 Not Found`). Accessed via `response.status()`.
--   **HTTP Version**: (`major_version`, `minor_version`) Typically 1.1.
--   **Headers**: (`qb::http::Headers`) A collection of HTTP headers. See [Headers](#http-headers) section below.
+    -   For HTTP/2, this corresponds to the `:status` pseudo-header.
+-   **HTTP Version**: (`major_version`, `minor_version`) Can be 1.1 or 2.0.
+-   **Headers**: (`qb::http::Headers`) A collection of HTTP headers. For HTTP/2, this includes regular headers to be HPACK encoded. The `:status` pseudo-header is handled via `response.status()`.
 -   **Body**: (`qb::http::Body`) The message body content. See [Message Body](#http-message-body) section below.
 -   **Cookies**: (`qb::http::CookieJar`) Cookies to be sent to the client via `Set-Cookie` headers. Use `response.add_cookie()` to add cookies, which also automatically prepares the corresponding `Set-Cookie` header.
 
 ```cpp
 // Example: Creating and populating a Response object
+#include <http/http.h>
+#include <iostream>
+
 qb::http::Response res;
 res.status() = qb::http::status::OK; // 200 OK
 res.set_content_type("application/json; charset=utf-8");
@@ -75,6 +83,9 @@ The `qb::http::Body` class represents the payload of an HTTP message. It is desi
 -   **Compression**: If compiled with Zlib support (`QB_IO_WITH_ZLIB`), the body can be compressed (`body.compress("gzip")`) or decompressed (`body.uncompress("gzip")`).
 
 ```cpp
+#include <http/http.h>
+#include <iostream>
+
 qb::http::Body body;
 
 // Assigning content
@@ -102,7 +113,7 @@ raw_pipe.put("Direct data\0", 12); // Example of putting raw data
 -   **Form URL Encoded**: Assign from `qb::http::Form`. Serializes the form into `application/x-www-form-urlencoded` format. Convert using `as<qb::http::Form>()`. Parses the URL-encoded string into a `Form` object.
 -   **Multipart**: Assign from `qb::http::Multipart`. Serializes the multipart data. Convert using `as<qb::http::Multipart>()`. Parses the multipart body string.
 
-Refer to `body.h` and `body.cpp` for detailed template specializations for assignment and conversion.
+Refer to `body.h` and `body.cpp` for detailed template specializations for assignment and conversion. Further details on complex body types like Form and Multipart are in their respective documentation sections.
 
 ## HTTP Headers (`qb::http::THeaders`, `qb::http::Headers`)
 
@@ -122,6 +133,9 @@ Key features:
 -   **Content-Type Helper**: `THeaders` includes a nested `ContentType` class and a `content_type()` method for convenient parsing and access to the MIME type and charset of the `Content-Type` header. `set_content_type(value)` updates both the raw header and the parsed `ContentType` object.
 
 ```cpp
+#include <http/http.h>
+#include <iostream>
+
 qb::http::Request req;
 
 // Setting headers
@@ -149,12 +163,17 @@ Uniform Resource Identifiers (URIs) are managed by the `qb::io::uri` class. This
 Key capabilities:
 
 -   **Parsing**: Parses a URI string into its constituent components: scheme, user info, host (hostname, IPv4, or IPv6), port, path, query string, and fragment.
+    -   In HTTP/2 server contexts, the URI for a request is typically reconstructed from the `:scheme`, `:authority` (or `Host` header), and `:path` pseudo-headers.
 -   **Component Access**: Provides methods to access each part (e.g., `uri.scheme()`, `uri.host()`, `uri.path()`, `uri.query("param_name")`, `uri.fragment()`).
 -   **Query Parameter Handling**: The `uri.queries()` method returns a map-like structure (`qb::icase_unordered_map<std::vector<std::string>>`) of decoded query parameters. `uri.query(name, index, default_value)` provides easy access to specific query values, supporting multi-value parameters.
 -   **Normalization**: Path normalization utilities (e.g., resolving `.` and `..`).
 -   **Encoding/Decoding**: Static methods `qb::io::uri::encode()` and `qb::io::uri::decode()` for percent-encoding and decoding URI components.
 
 ```cpp
+#include <qb/io/uri.h>
+#include <http/http.h>
+#include <iostream>
+
 qb::io::uri my_uri("https://john.doe:secret@example.com:8080/api/resource?search=term&page=2#section1");
 
 std::cout << "Scheme: " << my_uri.scheme() << std::endl;       // "https"
@@ -172,7 +191,7 @@ std::string encoded_path = qb::io::uri::encode(original_path);
 
 ## HTTP Types (`qb::http::types.h`)
 
-This header defines core enumerations and type aliases for HTTP methods and status codes, building upon the `llhttp` library's definitions.
+This header defines core enumerations and type aliases for HTTP methods and status codes, building upon the `llhttp` library's definitions. It is included via `<http/http.h>`.
 
 -   **`qb::http::Method`**: A class wrapper around `enum class Method::Value` (which mirrors `::HTTP_DELETE`, `::HTTP_GET`, etc., from `llhttp.h`). It provides type safety, implicit conversions to string representations (e.g., `"GET"`), and comparison operators. Examples: `qb::http::method::GET`, `qb::http::method::POST`.
 

@@ -14,6 +14,9 @@ The `Body` class overloads `operator=` to allow easy assignment of various data 
 -   **`Body& operator=(std::string&& str) noexcept`**: Moves the string's content. The source string (`str`) is then cleared (`str.clear()`). This is the most efficient method for temporary `std::string`s or those no longer needed.
 
 ```cpp
+#include <http/http.h> // Main include for Body, string, etc.
+#include <iostream>    // For std::cout
+
 qb::http::Body http_body;
 std::string my_data = "Hello from std::string";
 
@@ -36,6 +39,9 @@ std::cout << "Original string after move: '" << data_to_move << "'" << std::endl
 -   **`Body& operator=(std::string_view&& str) noexcept`**: Moves (copies) the content of the rvalue `std::string_view`. Since `std::string_view` does not own the data, this effectively results in a copy.
 
 ```cpp
+#include <http/http.h> // Main include
+#include <iostream>    // For std::cout
+
 qb::http::Body http_body;
 std::string_view sv_data = "Data from string_view";
 
@@ -54,6 +60,9 @@ std::cout << "Body from rvalue sv: " << http_body.as<std::string>() << std::endl
 -   **`Body& operator=(const char (&str)[N]) noexcept`**: Optimized for string literals, copies the content.
 
 ```cpp
+#include <http/http.h> // Main include
+#include <iostream>    // For std::cout
+
 qb::http::Body http_body;
 
 const char* c_string = "Data from C-string";
@@ -73,6 +82,10 @@ http_body = nullptr; // Body will be empty
 -   **`Body& operator=(std::vector<char>&& vec) noexcept`**: Moves the vector's content. The source vector (`vec`) is then cleared (`vec.clear()`).
 
 ```cpp
+#include <http/http.h> // Main include
+#include <iostream>    // For std::cout
+#include <vector>      // For std::vector
+
 qb::http::Body http_body;
 std::vector<char> char_vec = {'b', 'i', 'n', 'a', 'r', 'y'};
 
@@ -91,6 +104,9 @@ std::cout << "Body from vector move: " << http_body.as<std::string>() << std::en
 -   **`Body& operator=(qb::json&& json_val) noexcept`**: Serializes the JSON object (semantically moved) into a string and assigns it.
 
 ```cpp
+#include <http/http.h> // Main include for Body and qb::json
+#include <iostream>    // For std::cout
+
 qb::http::Body http_body;
 qb::json my_json = {{"message", "Hello"}, {"value", 42}};
 
@@ -105,6 +121,9 @@ std::cout << "Body from JSON: " << http_body.as<std::string>() << std::endl;
 -   **`Body& operator=(Form&& form) noexcept`**: Moves and serializes. The source `Form` is cleared (`form.clear()`).
 
 ```cpp
+#include <http/http.h> // Main include for Body and Form
+#include <iostream>    // For std::cout
+
 qb::http::Body http_body;
 qb::http::Form my_form;
 my_form.add("user", "test_user");
@@ -120,6 +139,9 @@ std::cout << "Body from Form: " << http_body.as<std::string>() << std::endl;
 -   **`Body& operator=(Multipart const& mp)`**: Serializes the multipart content (parts, headers, boundaries) and assigns it.
 
 ```cpp
+#include <http/http.h> // Main include for Body and Multipart
+#include <iostream>    // For std::cout
+
 qb::http::Body http_body;
 qb::http::Multipart multipart_data;
 auto& part1 = multipart_data.create_part();
@@ -145,7 +167,10 @@ The `as<T>()` method allows converting and/or interpreting the raw body content 
 -   **`as<Multipart>() const`**: Attempts to parse the body content as a `multipart/form-data` message. The first line of the body is expected to be the boundary (e.g., `"--boundary_string\r\n"`). Throws `std::runtime_error` on parsing failure or if the boundary is not found.
 
 ```cpp
-qb::http::Body body_json_str = R"({"name": "QB", "version": 1.0})";
+#include <http/http.h> // Main include for Body, qb::json, Form
+#include <iostream>    // For std::cerr, std::cout
+
+qb::http::Body body_json_str = R"({\"name\": \"QB\", \"version\": 1.0})";
 try {
     qb::json parsed_obj = body_json_str.as<qb::json>();
     std::cout << "Parsed JSON version: " << parsed_obj["version"].get<double>() << std::endl;
@@ -165,13 +190,16 @@ For low-level control or streaming operations, you can directly access the inter
 -   **`qb::allocator::pipe<char> const& raw() const noexcept`**: Constant access.
 -   **`qb::allocator::pipe<char>& raw() noexcept`**: Modifiable access.
 
-This is useful if you need to read or write data in chunks or integrate with other I/O systems that operate on raw buffers.
+This is useful if you need to read or write data in chunks or integrate with other I/O systems that operate on raw buffers. Remember that direct manipulation of the pipe might bypass some of `Body`'s managed features (like automatic size updates if you are not careful, though pipe itself manages its size).
 
 ## Streaming Operators (`operator<<`)
 
 Just like with assignment, you can use `operator<<` to fluently append content to the body:
 
 ```cpp
+#include <http/http.h> // For qb::http::Body
+#include <iostream>    // For std::cout
+
 qb::http::Body stream_body;
 stream_body << "Chunk 1, " << 42 << ", more data.";
 std::cout << "Streamed body: " << stream_body.as<std::string>() << std::endl;
@@ -188,6 +216,10 @@ If the library is compiled with Zlib support (`QB_IO_WITH_ZLIB` defined), the `B
 These methods throw `std::runtime_error` if the encoding is unsupported or if an error occurs during (de)compression.
 
 ```cpp
+#include <http/http.h> // For qb::http::Body
+#include <iostream>    // For std::cout
+// QB_IO_WITH_ZLIB should be handled by the build system for conditional compilation of Body::compress/uncompress
+
 #ifdef QB_IO_WITH_ZLIB
 qb::http::Body data_body = "A long text that will benefit from compression. A long text that will benefit from compression.";
 size_t original_size = data_body.size();

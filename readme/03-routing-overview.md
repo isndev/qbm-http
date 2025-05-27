@@ -2,6 +2,8 @@
 
 Effective HTTP routing is crucial for any web service or API. The `qb::http` module provides a powerful and flexible routing system built around the `qb::http::Router` class. This system allows you to define how incoming HTTP requests are directed to specific handler logic based on their URI path and HTTP method.
 
+At its core, the routing mechanism relies on `qb::http::RouterCore`, which manages a specialized data structure called a `qb::http::RadixTree`. This tree is optimized for extremely fast path matching by breaking down URL paths into segments and storing routes in a prefix-based manner. When you define routes using the `Router` API, you are constructing a hierarchy of `IHandlerNode` objects (routes, groups, controllers). During the `router.compile()` step, `RouterCore` traverses this hierarchy, resolves middleware chains, and populates the `RadixTree` with the final, executable task chains for each endpoint.
+
 ## The `qb::http::Router`
 
 The `qb::http::Router<SessionType>` is the central component for defining your application's routes. It internally uses a `qb::http::RadixTree` for efficient path matching.
@@ -10,8 +12,8 @@ Key responsibilities of the Router include:
 
 1.  **Route Definition**: Provides a fluent API (e.g., `router.get("/path", handler)`) to associate HTTP methods and path patterns with specific handler logic.
 2.  **Middleware Management**: Allows application of middleware at global, group, or controller levels.
-3.  **Compilation**: Before processing requests, the router compiles all defined routes, groups, and controllers into an optimized internal structure (the Radix Tree). This step resolves middleware chains and prepares handlers for execution.
-4.  **Request Dispatching**: For each incoming request, the router attempts to match its path and method against the compiled routes. If a match is found, it creates a `qb::http::Context` for the request and dispatches it to the appropriate handler chain.
+3.  **Compilation**: Before processing requests, the router compiles all defined routes, groups, and controllers into an optimized internal structure (the `RadixTree` managed by `RouterCore`). This step resolves middleware chains and prepares handlers for execution.
+4.  **Request Dispatching**: For each incoming request, `RouterCore` attempts to match its path and method against the compiled `RadixTree`. If a match is found, it creates a `qb::http::Context` for the request and dispatches it to the appropriate handler chain.
 5.  **Error Handling**: Manages default and custom handlers for "404 Not Found" and general processing errors.
 
 ## Path Matching
@@ -44,16 +46,30 @@ When multiple route patterns could potentially match a request path, the router 
 
 ## Path Parameters
 
-When a route with parameterized or wildcard segments is matched, the values extracted from the request URI path are stored in a `qb::http::PathParameters` object. This object is then made available within the `qb::http::Context` passed to your handlers and middleware.
+When a route with parameterized segments (e.g., `/:id`) or wildcard segments (e.g., `/*filepath`) is matched by the `RadixTree`, the values extracted from the request URI path are automatically URL-decoded and stored in a `qb::http::PathParameters` object. This object is then made available within the `qb::http::Context` passed to your handlers and middleware.
+
+-   **Access via `Context`**: You can retrieve a specific path parameter by its name using `ctx->path_param("name", "default_value_if_not_found")` or access the entire `PathParameters` object via `ctx->path_parameters()`.
+-   **Parameter Names**: The names are derived from your route definition (e.g., `id` from `/:id`, `filepath` from `/*filepath`).
 
 ```cpp
 // Example: Accessing path parameters in a handler
 router.get("/books/:genre/page/:pageNumber", [](auto ctx) {
-    std::string genre = ctx->path_param("genre");
-    std::string page_str = ctx->path_param("pageNumber");
-    // Potentially convert page_str to an integer
+    // Using ctx->path_param() for convenient access with a default
+    std::string genre = ctx->path_param("genre", "unknown");
+    std::string page_str = ctx->path_param("pageNumber", "1");
+    
+    // Alternatively, access the PathParameters object directly:
+    // const qb::http::PathParameters& params = ctx->path_parameters();
+    // std::optional<std::string_view> genre_sv_opt = params.get("genre");
+    // std::optional<std::string_view> page_sv_opt = params.get("pageNumber");
 
-    ctx->response().body() = "Genre: " + genre + ", Page: " + page_str;
+    // Potentially convert page_str to an integer
+    int page_num = 1;
+    try {
+        if (!page_str.empty()) page_num = std::stoi(page_str);
+    } catch (const std::exception& e) { /* handle conversion error */ }
+
+    ctx->response().body() = "Genre: " + genre + ", Page: " + std::to_string(page_num);
     ctx->complete();
 });
 
@@ -62,9 +78,7 @@ router.get("/books/:genre/page/:pageNumber", [](auto ctx) {
 // page_str will be "2"
 ```
 
-Path parameter names are defined in the route pattern (e.g., `:genre`, `*filepath`). The `PathParameters` object within the `Context` provides a `get(name)` method which returns an `std::optional<std::string_view>` (or similar, depending on `PathParameters` internal storage/API, which uses `std::string` for values). The `Context::path_param(name, default_value)` provides a convenient way to get the string value directly or a default if not found.
-
-Path parameters are automatically URL-decoded before being stored in `PathParameters` if they were URL-encoded in the request path (e.g., a segment like `books%20and%20authors` matching `/:category` would result in `category` being `"books and authors"`).
+Path parameters are automatically URL-decoded. For instance, if a request path is `/notes/My%20Document` and the route is `/notes/:title`, `ctx->path_param("title")` will yield `"My Document"`.
 
 ## ASCII Diagram: Route Matching Logic (Conceptual Radix Tree)
 

@@ -53,6 +53,30 @@ namespace qb::http {
         /** @brief Child nodes of this group, which can be `Route`, `RouteGroup`, or `Controller` instances. */
         std::vector<std::shared_ptr<IHandlerNode<Session> > > _children;
 
+        // --- Task Compilation ---
+        /**
+         * @brief Compiles tasks for this group and its children.
+         * This method combines middleware inherited from its parent with its own middleware,
+         * then recursively calls `compile_tasks_and_register` on all its child nodes,
+         * passing down the augmented path and task list.
+         * @param router_core Reference to the `RouterCore`.
+         * @param current_built_path The full path accumulated up to this group's parent.
+         * @param inherited_tasks Middleware tasks passed down from the parent.
+         */
+        void compile_tasks_and_register(
+            RouterCore<Session> &router_core,
+            const std::string &current_built_path,
+            const std::list<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) override {
+            std::string group_full_path = this->build_full_path(current_built_path);
+            std::list<std::shared_ptr<IAsyncTask<Session> > > tasks_for_children = this->combine_tasks(inherited_tasks);
+
+            for (const auto &child: _children) {
+                if (child) {
+                    child->compile_tasks_and_register(router_core, group_full_path, tasks_for_children);
+                }
+            }
+        }
+
     public:
         /**
          * @brief Constructs a `RouteGroup` with a specified path prefix.
@@ -269,38 +293,6 @@ namespace qb::http {
                 _children.push_back(std::move(child_node));
             }
         }
-
-        // --- Task Compilation ---
-        /**
-         * @brief Compiles tasks for this group and its children.
-         * This method combines middleware inherited from its parent with its own middleware,
-         * then recursively calls `compile_tasks_and_register` on all its child nodes,
-         * passing down the augmented path and task list.
-         * @param router_core Reference to the `RouterCore`.
-         * @param current_built_path The full path accumulated up to this group's parent.
-         * @param inherited_tasks Middleware tasks passed down from the parent.
-         */
-        void compile_tasks_and_register(
-            RouterCore<Session> &router_core,
-            const std::string &current_built_path,
-            const std::list<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) override {
-            std::string group_full_path = this->build_full_path(current_built_path);
-            std::list<std::shared_ptr<IAsyncTask<Session> > > tasks_for_children = this->combine_tasks(inherited_tasks);
-
-            for (const auto &child: _children) {
-                if (child) {
-                    child->compile_tasks_and_register(router_core, group_full_path, tasks_for_children);
-                }
-            }
-        }
-
-        // This override is technically not needed if IHandlerNode::combine_tasks is not virtual or if this is identical.
-        // However, keeping it can be useful if RouteGroup had special combining logic in future.
-        // For now, it just calls the base implementation.
-        // std::list<std::shared_ptr<IAsyncTask<SessionType>>> combine_tasks(
-        //     const std::list<std::shared_ptr<IAsyncTask<SessionType>>>& inherited_tasks) const override {
-        //     return IHandlerNode<SessionType>::combine_tasks(inherited_tasks);
-        // }
 
         // --- Typed Route Support (Convenience for adding ICustomRoute derived types directly) ---
         /**

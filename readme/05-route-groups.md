@@ -9,7 +9,11 @@ A `RouteGroup` is created from an existing `Router` instance or another `RouteGr
 -   `path_prefix`: A `std::string` that defines the common base path for all routes and subgroups defined within this group. This prefix is prepended to the paths of its children.
 
 ```cpp
+#include <http/http.h> // Main include for Router, RouteGroup, etc.
+
 // Assuming 'router' is a qb::http::Router<MySession> instance
+// and handlers like users_list_handler are defined.
+// qb::http::Router<MySession> router;
 
 // Create a group for API version 1, prefixed with "/api/v1"
 auto v1_api_group = router.group("/api/v1");
@@ -32,15 +36,16 @@ The `RouteGroup` itself is an `IHandlerNode`. When routes are compiled, the rout
 
 **Example Path Resolution:**
 
-```
-router.get("/health", ...);                           // -> /health
+```cpp
+#include <http/http.h> // Main include
 
-auto user_group = router.group("/users");           // Group prefix: /users
-user_group->get("/:id", ...);                       // -> /users/:id
-user_group->post("/", ...);                         // -> /users/
-
-auto profile_group = user_group->group("/profiles"); // Nested group prefix: /users/profiles
-profile_group->get("/:userId/view", ...);           // -> /users/profiles/:userId/view
+// Assuming router is qb::http::Router<MySession> and handlers exist.
+// router.get("/health", ...);                           // -> /health
+// auto user_group = router.group("/users");           // Group prefix: /users
+// user_group->get("/:id", ...);                       // -> /users/:id
+// user_group->post("/", ...);                         // -> /users/
+// auto profile_group = user_group->group("/profiles"); // Nested group prefix: /users/profiles
+// profile_group->get("/:userId/view", ...);           // -> /users/profiles/:userId/view
 ```
 
 ## Group-Specific Middleware
@@ -48,11 +53,36 @@ profile_group->get("/:userId/view", ...);           // -> /users/profiles/:userI
 One of the primary benefits of `RouteGroup` is the ability to apply middleware that is specific to all routes and sub-nodes (other groups or controllers) within that group. Middleware applied to a group is executed *after* any middleware from its parent group or the main router, and *before* any middleware specific to a child node or the final route handler.
 
 ```cpp
-// Middleware to authenticate API requests
-class ApiAuthMiddleware : public qb::http::IMiddleware<MySession> { /* ... */ };
+#include <http/http.h> // Main include
+#include <http/middleware/all.h> // Or specific middleware headers
+#include <memory>      // For std::make_shared
 
-// Middleware for logging v1 API requests
-class V1LoggingMiddleware : public qb::http::IMiddleware<MySession> { /* ... */ };
+// Assume MySession and relevant handlers are defined.
+// Placeholder Middleware definitions:
+class ApiAuthMiddleware : public qb::http::IMiddleware<MySession> {
+public:
+    ApiAuthMiddleware(std::string name) : _name(name) {}
+    std::string name() const override { return _name; }
+    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override { 
+        // Minimal implementation for example
+        std::cout << "ApiAuthMiddleware: " << ctx->request().uri().path() << std::endl;
+        ctx->complete(qb::http::AsyncTaskResult::CONTINUE); 
+    }
+    void cancel() override {}
+private: std::string _name;
+};
+class V1LoggingMiddleware : public qb::http::IMiddleware<MySession> { 
+public:
+    V1LoggingMiddleware(std::string name) : _name(name) {}
+    std::string name() const override { return _name; }
+    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override { 
+        std::cout << "V1LoggingMiddleware: " << ctx->request().uri().path() << std::endl;
+        ctx->complete(qb::http::AsyncTaskResult::CONTINUE); 
+    }
+    void cancel() override {}
+private: std::string _name;
+ };
+// qb::http::Router<MySession> router;
 
 // ... in server setup ...
 auto api_group = router.group("/api");
@@ -89,14 +119,20 @@ Middleware is added to a `RouteGroup` using the same `use()` methods available o
 Controllers can also be mounted within `RouteGroup`s. The controller's routes will then be prefixed by the group's full path, and requests to those controller routes will pass through the group's middleware stack (in addition to any global middleware and the controller's own middleware).
 
 ```cpp
-// Assuming MyUserController is a qb::http::Controller<MySession> derivative
+#include <http/http.h> // Main include
+#include <memory>      // For std::make_shared
+
+// Assuming MyUserController and UserGroupSpecificMiddleware are defined
+// class MyUserController : public qb::http::Controller<MySession> { /* ... */ };
+// class UserGroupSpecificMiddleware : public qb::http::IMiddleware<MySession> { /* ... */ };
+// qb::http::Router<MySession> router;
 
 auto api_users_group = router.group("/api/users");
-api_users_group->use(std::make_shared<UserGroupSpecificMiddleware>());
+// api_users_group->use(std::make_shared<UserGroupSpecificMiddleware>());
 
 // Mount MyUserController at /api/users/manage
 // If MyUserController defines a route GET "/:id", its full path will be /api/users/manage/:id
-auto user_controller = api_users_group->controller<MyUserController>("/manage");
+// auto user_controller = api_users_group->controller<MyUserController>("/manage");
 ```
 
 ## Defining Routes Directly on Groups
@@ -104,11 +140,16 @@ auto user_controller = api_users_group->controller<MyUserController>("/manage");
 Just like the main `Router`, `RouteGroup` instances provide the same HTTP method functions (`get`, `post`, `put`, etc.) for defining routes directly within the group. These routes are relative to the group's prefix.
 
 ```cpp
-auto admin_panel = router.group("/admin-panel");
-admin_panel->use<AdminAuthMiddleware>();
+#include <http/http.h> // Main include
 
-admin_panel->get("/dashboard", admin_dashboard_handler); // Path: /admin-panel/dashboard
-admin_panel->post("/settings/update", update_settings_handler); // Path: /admin-panel/settings/update
+// Assuming AdminAuthMiddleware and handlers are defined
+// qb::http::Router<MySession> router;
+
+auto admin_panel = router.group("/admin-panel");
+// admin_panel->use<AdminAuthMiddleware>();
+
+// admin_panel->get("/dashboard", admin_dashboard_handler); // Path: /admin-panel/dashboard
+// admin_panel->post("/settings/update", update_settings_handler); // Path: /admin-panel/settings/update
 ```
 
 ## ASCII Diagram: Group and Middleware Chaining

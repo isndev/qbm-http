@@ -168,35 +168,27 @@ Internally, these synchronous functions use `qb::io::async::run_until(wait_flag)
 
 ## HTTPS Support
 
-If the `qb-io` library was compiled with SSL support (`QB_IO_WITH_SSL=ON`), the HTTP client can make HTTPS requests simply by specifying `https` as the scheme in the URI.
+If the `qb-io` library was compiled with SSL support (`QB_IO_WITH_SSL=ON`), the HTTP client can make HTTPS requests simply by specifying `https` as the scheme in the URI. This applies to both HTTP/1.1 and HTTP/2 requests made through their respective client interfaces (`qb::http::GET` etc. for HTTP/1.1, and `qb::http2::Client` for HTTP/2).
 
 ```cpp
-qb::http::Request secure_req(qb::io::uri("https://api.example.com/secure_data"));
+// For HTTP/1.1 client (qb::http::GET, etc.)
+qb::http::Request secure_req_http1(qb::io::uri("https://api.example.com/data_http1"));
 
-// Using async call
-qb::http::GET(std::move(secure_req), [](qb::http::async::Reply&& reply) {
-    // ... handle reply ...
+qb::http::GET(std::move(secure_req_http1), [](qb::http::async::Reply&& reply) {
+    // ... handle HTTPS/1.1 reply ...
 });
 
-// Or using sync call
-// qb::http::Response secure_response = qb::http::GET(std::move(secure_req));
+// For HTTP/2 client (qb::http2::Client)
+// (Client construction already shown in 17-http2-protocol.md for HTTPS base URI)
+// auto h2_client = qb::http2::make_client("https://my-http2-service.com");
+// qb::http::Request secure_req_http2(qb::io::uri("/api/resource")); // Path relative to client's base URI
+// h2_client->push_request(std::move(secure_req_http2), ...);
 ```
 
-The underlying `qb::io::transport::stcp` (Secure TCP) will handle the TLS handshake. Default system certificates are typically used for server certificate validation. For more advanced TLS configurations (e.g., client certificates, custom CA bundles), you would need to configure the `SSL_CTX` at a lower level if the high-level HTTP client API doesn't expose these options directly.
+The underlying `qb::io::transport::stcp` (Secure TCP) will handle the TLS handshake. Default system certificates are typically used for server certificate validation. For HTTP/2, ALPN (Application-Layer Protocol Negotiation) is used during the TLS handshake to negotiate the "h2" protocol.
 
-## Underlying Mechanism (`qb::http::async::session`)
+For more advanced TLS configurations (e.g., client certificates, custom CA bundles), you would need to configure the `SSL_CTX` at a lower level if the high-level HTTP client API doesn't expose these options directly. Refer to the [HTTPS/SSL/TLS documentation](./18-https-ssl-tls.md) for more server-side details and general SSL concepts.
 
-The high-level functions (`qb::http::GET`, `qb::http::POST`, etc.) are wrappers around a more fundamental client session mechanism: `qb::http::async::session<Func, Transport>`. This class template (`http/http.h`) manages the connection, request sending, and response parsing for a single HTTP transaction.
+## Underlying Mechanism (`qb::http::async::session` for HTTP/1.1)
 
--   `Func`: The type of the completion callback.
--   `Transport`: The transport layer, typically `qb::io::transport::tcp` for HTTP or `qb::io::transport::stcp` for HTTPS.
-
-While you usually don't interact with `async::session` directly when using the convenience functions, understanding its existence helps in comprehending how the asynchronous operations are managed.
-
-This asynchronous HTTP client provides a robust and efficient way to interact with other HTTP services from your `qb` applications.
-
-Previous: [Error Handling Strategies](./13-error-handling.md)
-Next: [HTTP Message Parsing](./15-http-parsing.md)
-
----
-Return to [Index](./README.md) 
+The high-level functions (`qb::http::GET`, `

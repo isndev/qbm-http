@@ -37,28 +37,12 @@ When using `RequestView` or `ResponseView`, or when `qb::http::Body::as<std::str
 
 ## HTTP Chunked Transfer Encoding
 
-The `qb::http::Chunk` class (`http/chunk.h`) represents a single chunk in an HTTP message using chunked transfer encoding. It's a lightweight, non-owning view of a data segment.
+The `qb::http::Chunk` class (`http/chunk.h`) represents a single chunk in an HTTP message using chunked transfer encoding.
 
-Serialization of chunks is supported via `qb::allocator::pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk& c)`.
+For HTTP/1.1, `Transfer-Encoding: chunked` is handled by the transport layer. The `qb::http::Parser` transparently assembles incoming chunked request bodies.
+For outgoing responses, if `Transfer-Encoding: chunked` is set and `Content-Length` is not, the HTTP/1.1 server session will typically send the body in chunks.
 
-```cpp
-// Conceptual example of sending a chunked response
-// Note: Actual chunked sending is typically managed by the server/session transport layer
-// when Transfer-Encoding: chunked is set, not directly by handlers filling the Body object.
-
-// If a handler were to manually produce chunks (less common with the current Body API):
-qb::http::Response response;
-response.set_header("Transfer-Encoding", "chunked");
-response.status() = qb::http::status::OK;
-// The body might be left empty, and chunks sent via a different mechanism on the session.
-
-// Or, if the Body itself were to support streaming chunks (hypothetical):
-// response.body().add_chunk(qb::http::Chunk(data1, len1));
-// response.body().add_chunk(qb::http::Chunk(data2, len2));
-// response.body().add_final_chunk();
-```
-
-The `qb::http::Parser` transparently handles incoming chunked request bodies, assembling them into the `qb::http::Body` object before `on_message_complete` is called.
+HTTP/2 does not use chunked transfer encoding in the same way as HTTP/1.1. Its own framing mechanism (DATA frames with END_STREAM flag) achieves similar streaming capabilities.
 
 ## Custom `ICustomRoute` vs. Lambdas
 
@@ -95,6 +79,13 @@ When a handler or middleware initiates an asynchronous operation (e.g., using `q
 2.  **Call `ctx->complete()`**: The callback of the asynchronous operation **must** call `shared_ctx->complete()` with the appropriate `AsyncTaskResult`. Failure to do so will leave the HTTP request hanging.
 
 3.  **Cancellation**: If the asynchronous operation is cancellable, the `cancel()` method of your `IMiddleware` or `ICustomRoute` should attempt to cancel it. The asynchronous callback should also check `shared_ctx->is_cancelled()` before proceeding with processing the result or calling `complete()`.
+
+## Advanced SSL/TLS and HTTP/2 Considerations
+
+-   **ALPN (Application-Layer Protocol Negotiation)**: When using HTTPS, ALPN is essential for HTTP/2. The `qb::http2::Server` and `qb::http2::Client` are designed to use ALPN to negotiate "h2". Ensure your SSL/TLS setup (certificates, server configuration) supports ALPN if HTTP/2 is desired. Refer to the [HTTPS/SSL/TLS documentation](./18-https-ssl-tls.md) for more details.
+-   **HTTP/2 Server Push**: While the HTTP/2 protocol supports server push, direct, high-level application control for initiating server pushes from within `qb::http2::Server` handlers might require specific patterns or may be a feature for future enhancement. The underlying `qb::protocol::http2::ServerHttp2Protocol` has methods like `send_push_promise` for protocol-level interaction.
+-   **HTTP/2 Flow Control**: HTTP/2 has its own flow control mechanisms (WINDOW_UPDATE frames) at both the connection and stream levels. The `qb::http2::Client` and the underlying `qb::protocol::http2::*` protocol handlers manage this automatically. Default window sizes are usually sufficient, but can be tuned via SETTINGS frames if needed.
+-   **HPACK Context Synchronization**: Header compression in HTTP/2 (HPACK) is stateful. Both client and server maintain dynamic tables. The `qb-http` HPACK implementation (`qb::protocol::hpack`) handles this. Issues with HPACK (e.g., compression errors, desynchronization) can lead to connection errors (`COMPRESSION_ERROR`).
 
 ## Thread Safety
 

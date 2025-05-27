@@ -46,6 +46,7 @@ namespace qb::http {
     public:
         /** @brief Indicates that this message type is an HTTP request, used by parsers. */
         constexpr static http_type type = HTTP_REQUEST;
+
     private:
         /** @brief The HTTP method of the request (e.g., GET, POST). */
         Method _method;
@@ -366,3 +367,24 @@ namespace qb::http {
     /** @brief Shorthand alias for `RequestView`. */
     using request_view = RequestView;
 } // namespace qb::http
+
+namespace qb::allocator {
+    /**
+     * @brief HTTP Request serialization specialization
+     *
+     * Formats the HTTP request according to the HTTP/1.1 specification,
+     * including method, URI, headers, and body. Used to serialize requests
+     * for transmission over the network.
+     *
+     * The implementation handles all aspects of HTTP request formatting:
+     * - Request line with method, URI, query parameters, and HTTP version
+     * - Header fields with proper formatting
+     * - Content-Length header for the body
+     * - Body content if present
+     *
+     * @param r HTTP request to serialize
+     * @return Reference to the pipe for method chaining
+     */
+    template<>
+    pipe<char> &pipe<char>::put<qb::http::Request>(const qb::http::Request &r);
+} // namespace qb::allocator
