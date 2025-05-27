@@ -137,7 +137,17 @@ This is a general-purpose authentication middleware (see `http/middleware/auth.h
 
 **Usage:**
 ```cpp
+#include <http/http.h>         // For Router, Context, etc.
+#include <http/auth.h>         // For auth::Options, auth::User
+#include <http/middleware/auth.h> // For create_auth_middleware
+#include <memory>              // For std::make_shared
+
+// Assume MySession and router are defined
+// struct MySession; // or using MySession = qb::http::DefaultSession;
+// qb::http::Router<MySession> router;
+
 // Create auth options for the manager used by AuthMiddleware
+/*
 qb::http::auth::Options manager_opts;
 manager_opts.secret_key("your-app-secret")
             .token_issuer("my-app")
@@ -157,6 +167,7 @@ router.get("/admin/dashboard", [](auto ctx) {
     // ... handler logic ...
     ctx->complete();
 });
+*/
 ```
 
 ### `qb::http::JwtMiddleware`
@@ -169,6 +180,16 @@ This middleware (see `http/middleware/jwt.h`) is specifically for JWT-based auth
 
 **Usage:**
 ```cpp
+#include <http/http.h>       // For Router, Context, etc.
+#include <http/middleware/jwt.h> // For jwt_middleware_with_options, JwtOptions
+#include <memory>            // For std::make_shared
+#include <qb/json.h>         // For qb::json if accessing payload directly
+
+// Assume MySession and router are defined
+// struct MySession; // or using MySession = qb::http::DefaultSession;
+// qb::http::Router<MySession> router;
+
+/*
 qb::http::JwtOptions jwt_opts;
 jwt_opts.secret = "your-jwt-secret";
 jwt_opts.algorithm = "HS256";
@@ -196,6 +217,7 @@ router.get("/data", [](auto ctx) {
     }
     ctx->complete();
 });
+*/
 ```
 
 **Choosing between `AuthMiddleware` and `JwtMiddleware`:

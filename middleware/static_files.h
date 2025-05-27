@@ -25,6 +25,7 @@
 
 #include <qb/system/container/unordered_map.h>
 #include "../routing/middleware.h"
+#include "../date.h"
 #include "../request.h"
 #include "../response.h"
 #include "../types.h" // For qb::http::status

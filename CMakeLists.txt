@@ -41,15 +41,20 @@ qb_register_module(
         cookie.cpp
         multipart.cpp
         auth/manager.cpp
-        http.cpp
         # Body
+        request.cpp
+        response.cpp
         body.cpp
+        1.1/http.cpp
         # Validation
         validation/parameter_validator.cpp
         validation/request_validator.cpp
         validation/rule.cpp
         validation/sanitizer.cpp
         validation/schema_validator.cpp
+        # HTTP/2
+        2/http2.cpp
+        2/client.cpp
 )
 
 if (QB_BUILD_TEST)

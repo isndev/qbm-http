@@ -1,268 +1,224 @@
 # QB HTTP Module (`qbm-http`)
 
-Welcome to `qb-http`, a modern C++17 library for building high-performance, asynchronous HTTP/1.1 clients and servers. Part of the QB Actor Framework, `qb-http` is designed for developers seeking efficiency, type safety, and a clean, expressive API for their web services and applications.
+Welcome to `qb-http`, your C++17 toolkit for crafting high-performance, asynchronous HTTP/1.1 and HTTP/2 applications. As a key component of the QB Actor Framework, `qb-http` empowers developers with efficiency, type safety, and an elegant API for modern web services and clients.
 
-Whether you're crafting a REST API, serving static content, or making outbound HTTP requests, `qb-http` provides the tools you need with a focus on asynchronous operations and ease of use.
+Build blazing-fast REST APIs, serve static content with ease, or perform concurrent outbound HTTP requests – `qb-http` is designed for the demands of today's network programming, focusing on asynchronous operations and developer productivity.
 
-## Core Philosophy
+## Why Choose `qb-http`? ✨
 
-*   **Asynchronous & Non-Blocking:** Built entirely on the non-blocking I/O foundation of `qb-io` to maximize performance and concurrency.
-*   **Modern C++17:** Leverages modern C++ features for clarity, safety, and performance.
-*   **Flexibility & Extensibility:** Offers a powerful routing and middleware system for customization.
-*   **Simplicity & Power:** Provides high-level APIs for common tasks while allowing deep control when needed.
+*   🚀 **Performance-First**: Built on the non-blocking, event-driven I/O of `qb-io`, ensuring high throughput and scalability.
+*   💎 **Modern C++17 Design**: Leverages the latest C++ features for clean, safe, and maintainable code.
+*   🔗 **Flexible & Extensible**: A powerful routing engine and a versatile middleware system allow deep customization.
+*   🛠️ **Simplicity Meets Power**: High-level APIs for common tasks, with pathways for fine-grained control when you need it.
+*   🔄 **HTTP/1.1 & HTTP/2 Support**: Comprehensive support for both major HTTP versions. HTTP/2 servers (via HTTPS/ALPN) can often serve HTTP/1.1 clients too.
+*   🛡️ **Security & Validation Built-in**:
+    *   Robust JWT generation and verification (`qb::http::auth`).
+    *   Schema-based request validation for body, parameters, and headers (`qb::http::validation`).
+    *   Standard middleware for CORS, security headers, and more.
+*   🗜️ **Content Negotiation**: Automatic Gzip/Deflate compression and decompression (with Zlib).
+*   🧩 **Modular Documentation**: Explore detailed guides for every aspect of the module.
 
-## Key Features at a Glance
+## 🚀 Feature Showcase: HTTP/2 Server Example
 
-*   **HTTP/1.1 Client & Server:** Robust implementations for both roles.
-*   **Expressive Routing Engine (`qb::http::Router`):**
-    *   Method-based routing (GET, POST, PUT, DELETE, etc.).
-    *   Path parameters (`/users/:id`) and wildcards (`/files/*filepath`).
-    *   Route grouping and class-based Controllers for organization.
-    *   Efficient Radix Tree-based matching.
-*   **Flexible Middleware System (`qb::http::IMiddleware`):**
-    *   Easily intercept and modify requests/responses.
-    *   Support for synchronous and asynchronous middleware.
-    *   Chainable execution with clear flow control.
-    *   Comprehensive set of [standard middleware](./readme/08-standard-middleware.md) (Logging, CORS, Auth, Validation, etc.).
-*   **Asynchronous Request Handling:**
-    *   Route handlers and middleware can perform non-blocking I/O seamlessly.
-    *   Built around the `qb::http::Context` for managing request lifecycle.
-*   **Rich Request/Response API (`qb::http::Request`, `qb::http::Response`):
-    *   Intuitive access to methods, URI, headers, body, cookies.
-    *   Flexible body handling with `Body::as<T>()` and `Body::raw()`.
-    *   Automatic `Content-Length`, cookie parsing, and multipart support.
-*   **Built-in Authentication & Validation:**
-    *   JWT generation & verification via `qb::http::auth` and `qb::jwt`.
-    *   Request validation (body, params, headers) using JSON Schema-like definitions.
-*   **Content Negotiation:** Automatic compression/decompression (Gzip/Deflate if Zlib enabled).
-
-## Quick Start: A Simple HTTP Server
-
-Let's create a server that says hello!
+This example demonstrates setting up an HTTP/2 server (which requires HTTPS) and showcases key features like routing, middleware, groups, controllers, path parameters, and query parameters. For HTTP/1.1 or HTTPS/1.1, the API is very similar!
 
 ```cpp
-#include <http/http.h> // Main include for this module
+#include <http/http.h>      // Core HTTP/1.1 components (Request, Response, Router etc.)
+#include <http/2/http2.h>  // For qb::http2::make_server and HTTP/2 specifics
+#include <qb/io/async.h>   // For the asynchronous event loop
+#include <filesystem>      // For std::filesystem::path
+#include <iostream>        // For std::cout, std::cerr
+#include <memory>          // For std::make_shared
 
-// Forward declare your server to define a session type
-class MySimpleServer;
+// --- Define a Session Type (can be shared across server types) ---
+// For HTTP/2, qb::http2::DefaultSession is often sufficient.
+// For HTTP/1.1, qb::http::DefaultSession or qb::http::ssl::DefaultSecureSession.
+// Let's use qb::http2::DefaultSession for the HTTP/2 example.
+using MySessionType = qb::http2::DefaultSession;
 
-// Define a session type associated with your server
-class MySimpleSession : public qb::http::use<MySimpleSession>::session<MySimpleServer> {
+// --- Simple Logging Middleware ---
+class SimpleLoggerMiddleware : public qb::http::IMiddleware<MySessionType> {
 public:
-    // Constructor boilerplate, passes server reference to base
-    explicit MySimpleSession(MySimpleServer& server_ref)
-        : qb::http::use<MySimpleSession>::session<MySimpleServer>(server_ref) {}
-    
-    // Optional: Add custom session-specific logic or state here if needed
+    std::string name() const override { return "SimpleLogger"; }
+    void cancel() override {}
+    void process(std::shared_ptr<qb::http::Context<MySessionType>> ctx) override {
+        std::cout << "[Log] Request: " << std::to_string(ctx->request().method())
+                  << " " << ctx->request().uri().path() << std::endl;
+        // Add a hook to log response status after handler completion
+        ctx->add_lifecycle_hook([](auto& context, qb::http::HookPoint point){
+            if (point == qb::http::HookPoint::REQUEST_COMPLETE) {
+                 std::cout << "[Log] Response: " << context.response().status().code() << std::endl;
+            }
+        });
+        ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+    }
 };
 
-// Define your server by inheriting from qb::http::use<...>::server<...>
-class MySimpleServer : public qb::http::use<MySimpleServer>::server<MySimpleSession> {
+// --- Example Controller ---
+class UserController : public qb::http::Controller<MySessionType> {
 public:
-    MySimpleServer() {
-        std::cout << "Configuring server routes..." << std::endl;
+    UserController(std::string greeting) : _greeting(std::move(greeting)) {}
 
-        // Define a GET route for the root path "/"
-        router().get("/", [](auto ctx) { // ctx is std::shared_ptr<qb::http::Context<MySimpleSession>>
-            std::cout << "Request to / received" << std::endl;
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().set_header("Content-Type", "text/html; charset=utf-8");
-            ctx->response().body() = "<h1>Hello from QB HTTP!</h1><p>Welcome to your first qb-http server.</p>";
-            ctx->complete(); // Signal that request processing is finished
-        });
-
-        // Define a GET route with a path parameter
-        router().get("/hello/:name", [](auto ctx) {
-            auto name = ctx->path_param("name", "World"); // Get path param "name", default to "World"
-            std::cout << "Request to /hello/" << name << " received" << std::endl;
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
-            ctx->response().body() = "Hello, " + std::string(name) + "!";
+    void initialize_routes() override {
+        // Path parameter: /api/users/{userId}
+        this->get("/:userId", [this](auto ctx) {
+            std::string user_id = ctx->path_param("userId");
+            ctx->response().body() = _greeting + ", User " + user_id + "! From Controller.";
             ctx->complete();
         });
-
-        // Define an asynchronous route simulation
-        router().get("/async-data", [](auto ctx) {
-            std::cout << "Request to /async-data received, simulating async work..." << std::endl;
-            auto shared_ctx = ctx; // Capture context for the async callback
-            
-            // Simulate an asynchronous operation using qb::io::async::callback
-            qb::io::async::callback([shared_ctx]() {
-                std::cout << "Async work for /async-data completed." << std::endl;
-                if (shared_ctx->is_cancelled()) {
-                    std::cout << "Async work for /async-data was cancelled before completion." << std::endl;
-                    // Context is already completing with CANCELLED, just return
-                    return;
-                }
-                shared_ctx->response().status() = qb::http::status::OK;
-                shared_ctx->response().set_header("Content-Type", "application/json");
-                shared_ctx->response().body() = R"({"data": "This is asynchronously fetched data!", "delay_simulated": "100ms"})";
-                shared_ctx->complete();
-            }, std::chrono::milliseconds(100)); // Simulate a 100ms delay
-        });
-
-        // Add a simple logging middleware for all routes
-        router().use([](auto ctx, auto next){
-            std::cout << "[Middleware] Request: " << std::to_string(ctx->request().method()) 
-                      << " " << ctx->request().uri().path() << std::endl;
-            ctx->response().set_header("X-Served-By", "QB-HTTP-Server");
-            next(); // Call next to proceed to the next middleware or handler
-            // This line will execute after the handler (or subsequent middleware) calls next() or complete()
-            // Note: For async handlers/middleware, this post-processing part might execute *before* the async operation completes.
-            // To reliably log after the full response, use a HookPoint::REQUEST_COMPLETE or similar.
-            std::cout << "[Middleware] Response Status (after handler chain attempt): " << ctx->response().status().code() << std::endl;
-        }, "SimpleLogger");
-
-        // Important: Compile routes after defining them
-        router().compile();
-        std::cout << "Routes compiled." << std::endl;
     }
-
-    // Optional: Callback for when a new client connection is accepted by the server transport
-    void on(qb::http::use<MySimpleServer>::server<MySimpleSession>::IOSession& new_session_io) {
-        std::cout << "New client connection established." << std::endl;
-        // Note: The MySimpleSession object itself is created later by the framework 
-        // when this IOSession is associated with a protocol.
-    }
+    std::string get_node_name() const override { return "UserController"; }
+private:
+    std::string _greeting;
 };
 
 int main(int argc, char* argv[]) {
-    // Initialize the qb-io asynchronous system for the main thread
-    qb::io::async::init();
+    qb::io::async::init(); // Initialize the asynchronous I/O system
 
-    MySimpleServer server_instance;
+    // --- HTTP/2 Server (Secure) ---
+    // For HTTP/2, HTTPS is typically required. Certificates are needed.
+    if (argc < 3) {
+        std::cerr << "Usage for HTTP/2: " << argv[0] << " <cert_file.pem> <key_file.pem>" << std::endl;
+        std::cerr << "Skipping HTTP/2 server example." << std::endl;
+    } else {
+        std::filesystem::path cert_path = argv[1];
+        std::filesystem::path key_path = argv[2];
 
-    // Listen on port 8080 on all IPv4 interfaces
-    if (!server_instance.transport().listen_v4(8080)) {
-        std::cerr << "Error: Failed to listen on port 8080." << std::endl;
-        return 1;
+        if (!std::filesystem::exists(cert_path) || !std::filesystem::exists(key_path)) {
+            std::cerr << "Certificate or key file not found. Skipping HTTP/2 server." << std::endl;
+        } else {
+            auto http2_server = qb::http2::make_server(); // Uses MySessionType via default
+
+            // 1. Apply Global Middleware
+            http2_server->router().use(std::make_shared<SimpleLoggerMiddleware>());
+
+            // 2. Define a Route Group
+            auto api_group = http2_server->router().group("/api");
+            api_group->get("/status", [](auto ctx) {
+                ctx->response().body() = "API Status: Healthy";
+                ctx->complete();
+            });
+
+            // 3. Mount a Controller within the group
+            // Full path will be /api/users/:userId
+            api_group->controller<UserController>("/users", "Greetings"); 
+
+            // 4. Route with Query Parameter
+            http2_server->router().get("/search", [](auto ctx) {
+                std::string query_term = ctx->request().query("q", 0, "default_term");
+                ctx->response().body() = "Search results for: " + query_term;
+                ctx->complete();
+            });
+
+            http2_server->router().compile();
+
+            // HTTP/2 listen (requires SSL certs and key)
+            // ALPN will negotiate "h2" for HTTP/2, can also offer "http/1.1" for fallback.
+            if (!http2_server->listen({"https://0.0.0.0:9443"}, cert_path, key_path)) {
+                std::cerr << "HTTP/2 Server: Failed to listen on port 9443." << std::endl;
+            } else {
+                std::cout << "HTTP/2 Server listening on https://0.0.0.0:9443" << std::endl;
+                http2_server->start();
+            }
+        }
     }
-    std::cout << "Server listening on http://0.0.0.0:8080" << std::endl;
 
-    server_instance.start(); // Start accepting connections and processing events
+    // --- Comments for Alternative Server Setups ---
+    // 
+    // // To create a plain HTTP/1.1 server:
+    // // auto http1_server = qb::http::make_server(); 
+    // // http1_server->router()... (configure as above)
+    // // http1_server->router().compile();
+    // // if (!http1_server->transport().listen_v4(8080)) { /* error */ }
+    // // http1_server->start();
+    // 
+    // // To create an HTTPS/1.1 server:
+    // // auto https1_server = qb::http::ssl::make_server();
+    // // https1_server->router()... (configure as above)
+    // // https1_server->router().compile();
+    // // // The listen method for qb::http::ssl::Server also takes certs/key
+    // // if (!https1_server->listen({"https://0.0.0.0:8443"}, cert_path, key_path)) { /* error */ }
+    // // https1_server->start();
 
-    // Run the main event loop (blocks until stopped or no more events)
-    qb::io::async::run(); 
+    std::cout << "Main event loop running... Press Ctrl+C to exit." << std::endl;
+    qb::io::async::run(); // Blocks until qb::io::async::break_loop() is called elsewhere
 
-    std::cout << "Server shutting down." << std::endl;
+    std::cout << "Server(s) shutting down." << std::endl;
     return 0;
 }
 ```
 
-## Quick Start: An HTTP Client (Asynchronous and Synchronous)
+**In this example, we've showcased:**
+*   **HTTP/2 Server**: The primary server instance is HTTP/2, requiring SSL certificates.
+*   **Middleware**: `SimpleLoggerMiddleware` is applied globally to log requests.
+*   **Route Groups**: Routes under `/api` are grouped, potentially sharing group-specific middleware (not shown in this concise example, but possible).
+*   **Controllers**: `UserController` organizes user-related routes like `/api/users/:userId`.
+*   **Path Parameters**: `:userId` is extracted from the URL.
+*   **Query Parameters**: `/search?q=term` demonstrates query parameter retrieval.
+*   **Simplicity**: The API for defining routes and structuring the application remains clean and intuitive.
 
-Making HTTP requests is just as straightforward, with both asynchronous and synchronous options.
+## Asynchronous HTTP Client
+Making outbound requests is just as powerful, supporting both fully asynchronous operations with callbacks and convenient synchronous-style calls for simpler use cases.
 
 ```cpp
-#include <qb/http/http.h>
+#include <http/http.h> // For HTTP/1.1 client
+#include <http/2/client.h> // For HTTP/2 client (if needed for specific H2 features)
 
-int main() {
-    qb::io::async::init(); // Initialize the async system
-
-    // --- Asynchronous Request Example --- 
-    std::cout << "--- Asynchronous GET Request Example ---" << std::endl;
-    qb::http::Request async_req(qb::io::uri("http://worldtimeapi.org/api/ip"));
-    async_req.add_header("Accept", "application/json");
-    async_req.set_header("User-Agent", "QB-HTTP-Client-Async-Example/1.0");
-
-    std::atomic<bool> async_request_done{false};
-
-    qb::http::GET(std::move(async_req), 
-        [&async_request_done](qb::http::async::Reply&& reply) { 
-            std::cout << "Async Response Received for: " << reply.request.uri().to_string() << std::endl;
-            std::cout << "Status: " << reply.response.status().code() 
-                      << " " << std::string(reply.response.status()) << std::endl;
-            if (reply.response.status() == qb::http::status::OK) {
-                std::cout << "Body:\n" << reply.response.body().as<std::string>() << std::endl;
-            } else {
-                std::cerr << "Async Request failed. Body: " << reply.response.body().as<std::string>() << std::endl;
-            }
-            async_request_done = true;
-        },
-        5.0 // 5-second timeout
-    );
-
-    std::cout << "Async request sent, waiting for response (event loop processing required)..." << std::endl;
-    while(!async_request_done.load()) {
-        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10)); 
+// HTTP/1.1 Asynchronous GET example
+qb::http::Request req_http1(qb::io::uri("http://worldtimeapi.org/api/ip"));
+qb::http::GET(std::move(req_http1), [](qb::http::async::Reply&& reply) {
+    if (reply.response.status() == qb::http::status::OK) {
+        std::cout << "HTTP/1.1 Async Response: " << reply.response.body().as<std::string_view>().substr(0, 60) << "..." << std::endl;
     }
+});
 
-    // --- Synchronous Request Example --- 
-    std::cout << "\n--- Synchronous GET Request Example ---" << std::endl;
-    qb::http::Request sync_req(qb::io::uri("http://httpbin.org/get"));
-    sync_req.add_header("X-Sync-Test", "true");
-    sync_req.set_header("User-Agent", "QB-HTTP-Client-Sync-Example/1.0");
-    try {
-        std::cout << "Sending synchronous GET request to httpbin.org..." << std::endl;
-        // The synchronous call blocks until completion or timeout
-        auto sync_res = qb::http::GET(std::move(sync_req), 3.0); // 3-second timeout
-        std::cout << "Sync Status: " << sync_res.status().code() << std::endl;
-        // httpbin.org/get echoes headers, so let's check our custom one
-        auto echoed_json_body = sync_res.body().as<qb::json>();
-        if (echoed_json_body.contains("headers") && echoed_json_body["headers"].contains("X-Sync-Test")) {
-             std::cout << "Echoed X-Sync-Test header: " << echoed_json_body["headers"]["X-Sync-Test"].get<std::string>() << std::endl;
-        }
-        std::cout << "Sync Body (first 100 chars): " << sync_res.body().as<std::string_view>().substr(0, 100) << "..." << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Synchronous request failed: " << e.what() << std::endl;
-    }
+// HTTP/1.1 Synchronous GET example
+qb::http::Request sync_req(qb::io::uri("http://httpbin.org/get"));
+sync_req.add_header("X-Sync-Test", "true");
+qb::http::Response sync_response = qb::http::GET(std::move(sync_req), 3.0 /*timeout_sec*/);
+std::cout << "HTTP/1.1 Sync Response Status: " << sync_response.status().code() << std::endl;
+// Process sync_response.body() ...
 
-    std::cout << "\nClient examples finished." << std::endl;
-    return 0;
-}
+// HTTP/2 Client Example (requires server from above example to be running)
+// auto h2_client = qb::http2::make_client("https://localhost:9443");
+// h2_client->connect([&](bool connected, const std::string& err_msg){
+//     if(connected) {
+//         qb::http::Request h2_req(qb::io::uri("/"));
+//         h2_client->push_request(std::move(h2_req), [](qb::http::Response res){
+//             std::cout << "HTTP/2 Client Response Status: " << res.status().code() << std::endl;
+//         });
+//     } else { std::cerr << "H2 client connect failed: " << err_msg << std::endl; }
+// });
+
+// Ensure qb::io::async::run() is active to process these.
 ```
 
-## Dive Deeper
+## 📚 Dive Deeper: Full Documentation
+This `README.md` is just a glimpse. For comprehensive details, explore our documentation set:
 
-This `README.md` provides a high-level overview. For detailed information, please refer to our comprehensive documentation set located in the [`./readme/`](./readme/README.md) directory. It covers:
-
-*   Core Concepts (Request, Response, Body, Headers, URI)
-*   The Routing System (Router, path matching, groups, controllers)
-*   Middleware (overview, standard middleware, custom middleware)
-*   Request Lifecycle and the `Context` object
-*   Authentication and Authorization systems
-*   Data Validation and Sanitization
-*   Error Handling strategies
-*   Advanced topics and best practices
-
-**Start with the [Full Documentation Index](./readme/README.md).**
+*   [**Full Documentation Index**](./readme/README.md)
+    *   Covers Core Concepts, Routing, Middleware (Standard & Custom), Context, Auth, Validation, HTTP/2 Specifics, HTTPS, and more.
 
 ## Building `qbm-http`
 
-To use `qbm-http` in your CMake project:
-
-1.  Ensure `qb-core` (which includes `qb-io`) is available (built or installed).
-2.  Add `qbm-http` to your project. If it's a subdirectory:
+1.  Ensure `qb-core` (which includes `qb-io`) is available.
+2.  Add `qbm-http` to your CMake project:
     ```cmake
-    # Assuming qbm-http is in a subdirectory like 'libs/qb/qbm/http'
-    add_subdirectory(libs/qb/qbm/http)
-    ```
-    Or, if `qbm-http` is installed system-wide or via `find_package`:
-    ```cmake
-    find_package(qbm-http REQUIRED)
-    ```
-3.  Link against the target:
-    ```cmake
+    # If qbm-http is a subdirectory
+    add_subdirectory(path/to/qbm-http) 
+    # Or if installed/found via find_package
+    # find_package(qbm-http REQUIRED)
     target_link_libraries(your_application_target PRIVATE qbm::http)
     ```
-
 ### Dependencies
-
-*   **Required**: `qb-core` (and its dependency `qb-io`), C++17 compiler, CMake.
-*   **Bundled**: `llhttp` (for HTTP parsing).
+*   **Required**: `qb-core`, C++17 compiler, CMake.
+*   **Bundled**: `llhttp` (for HTTP/1.1 parsing).
 *   **Optional**:
-    *   OpenSSL: For HTTPS client/server functionality and JWT asymmetric algorithms. Enable with `QB_IO_WITH_SSL=ON` when building `qb-io`.
-    *   Zlib: For Gzip/Deflate content compression/decompression. Enable with `QB_IO_WITH_ZLIB=ON` when building `qb-io`.
+    *   OpenSSL: For HTTPS & JWT. Enable `QB_IO_WITH_SSL=ON` when building `qb-io`.
+    *   Zlib: For content compression. Enable `QB_IO_WITH_ZLIB=ON` when building `qb-io`.
 
 ## Acknowledgements
-
-This module stands on the shoulders of giants. We extend our sincere thanks to:
-
-*   The **Node.js team and contributors** for `llhttp`, providing a fast and robust HTTP parser.
-*   **Niels Lohmann** for the `nlohmann/json` library, used for JSON handling within the validation system and potentially by users for request/response bodies.
-
-Their excellent work significantly contributes to the capabilities of `qb-http`.
+Special thanks to the Node.js team for `llhttp` and Niels Lohmann for `nlohmann/json`.
 
 ---
 *Copyright (c) 2011-2025 qb - isndev (cpp.actor). All rights reserved.*

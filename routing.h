@@ -2,10 +2,14 @@
  * @file qbm/http/routing.h
  * @brief Main convenience header for the QB HTTP Routing system.
  *
- * This header serves as a single include point for all essential public components
+ * This file serves as a single include point for all essential public components
  * of the qb-http routing module. By including this file, users gain access to
  * core routing elements such as `Router`, `RouteGroup`, `Controller`, `Context`,
- * `IMiddleware`, `IAsyncTask`, and various routing-specific types.
+ * `IMiddleware`, `IAsyncTask`, and various routing-specific types. This enables
+ * the definition of complex routing logic, including path matching (static, parameterized,
+ * wildcard), middleware chaining for cross-cutting concerns (e.g., logging, auth),
+ * class-based controllers for route organization, and sophisticated request lifecycle
+ * management via the `Context` object.
  *
  * Internal components like `RadixTree` or `RouterCore` are typically not included
  * directly through this header as they are not part of the primary public API for defining routes.

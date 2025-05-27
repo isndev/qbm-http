@@ -377,3 +377,25 @@ namespace qb::http {
     /** @brief Shorthand alias for `ResponseView`. */
     using response_view = ResponseView;
 } // namespace qb::http
+
+namespace qb::allocator {
+    /**
+     * @brief HTTP Response serialization specialization
+     *
+     * Formats the HTTP response according to the HTTP/1.1 specification,
+     * including status line, headers, and body. Used to serialize responses
+     * for transmission over the network.
+     *
+     * The implementation handles all aspects of HTTP response formatting:
+     * - Status line with HTTP version, status code, and reason phrase
+     * - Header fields with proper formatting
+     * - Content compression if requested in Content-Encoding header
+     * - Content-Length header for the body
+     * - Body content if present
+     *
+     * @param r HTTP response to serialize
+     * @return Reference to the pipe for method chaining
+     */
+    template<>
+    pipe<char> &pipe<char>::put<qb::http::Response>(const qb::http::Response &r);
+} // namespace qb::allocator

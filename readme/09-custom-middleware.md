@@ -156,43 +156,80 @@ If your custom middleware needs to perform non-blocking asynchronous operations 
     };
     ```
 
--   **Functional (Lambda)**: The same principle applies. The lambda initiates the async work. The `next` callback (or a direct `ctx->complete(...)` call) must be invoked from the async operation's completion handler.
+-   **Functional (Lambda)**: The same principle applies. The lambda initiates the async work. The `next` callback (or a direct `ctx->complete(...)` call if short-circuiting) must be invoked from the async operation's completion handler.
 
     ```cpp
     router.use([](auto ctx, auto next) {
         auto shared_ctx = ctx;
-        perform_some_async_lookup(shared_ctx->request().header("X-Lookup-Key"), 
-            [shared_ctx, next_fn = next](bool found) {
-                if (shared_ctx->is_cancelled()) return;
-                if (found) {
-                    shared_ctx->request().set_header("X-Lookup-Result", "FoundIt");
-                    next_fn(); // This will internally call ctx->complete(CONTINUE) for the part before this callback
-                               // and then after next_fn returns, the wrapper does its final complete.
-                } else {
-                    shared_ctx->response().status() = qb::http::status::NOT_FOUND;
-                    shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Short-circuit
-                }
+        std::string lookup_key = std::string(shared_ctx->request().header("X-Lookup-Key"));
+
+        // Example: using qb::io::async::callback for a delayed operation
+        qb::io::async::callback([shared_ctx, next_fn = next, key = lookup_key]() {
+            // Simulate an async operation that might take some time
+            std::cout << "[Async Functional MW] Async operation for key '" << key << "' completed." << std::endl;
+
+            if (shared_ctx->is_cancelled()) {
+                std::cout << "[Async Functional MW] Context was cancelled. Aborting." << std::endl;
+                // If context is cancelled, it might have already called complete(CANCELLED).
+                // If not, and we want to ensure it, we could call it here, but usually cancel() on context handles this.
+                return; 
             }
-        );
+
+            if (key == "valid_key_for_next") {
+                shared_ctx->request().set_header("X-Async-Lookup-Result", "DataFoundForNext");
+                next_fn(); // Proceed to the next middleware/handler
+            } else if (key == "valid_key_for_complete") {
+                shared_ctx->response().status() = qb::http::status::OK;
+                shared_ctx->response().body() = "Async operation completed and handled by middleware.";
+                shared_ctx->set<std::string>("async_op_data", "SpecificDataFromAsyncMW");
+                shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Short-circuit and finalize
+            } else {
+                shared_ctx->response().status() = qb::http::status::NOT_FOUND;
+                shared_ctx->response().body() = "Async lookup failed for key: " + key;
+                shared_ctx->complete(qb::http::AsyncTaskResult::ERROR); // Signal an error
+            }
+        }, std::chrono::milliseconds(20)); // Simulate a 20ms async delay
+
+        // The main lambda body returns immediately after scheduling the async task.
+        // The FunctionalMiddleware adapter has already called ctx->suspend() or similar internally
+        // to indicate that completion will happen later.
     }, "AsyncLookupFunctionalMW");
     ```
 
-    **Important for Functional Async Middleware**: When `next()` is called from an asynchronous callback, the `FunctionalMiddleware` adapter has already called `ctx->complete(CONTINUE)` once (when your main lambda body returned after initiating the async op). When `next()` is eventually called by your async callback, it triggers the downstream chain. After that downstream chain completes and control returns to the point *after* `next()` in your original lambda, the `FunctionalMiddleware` adapter will then call `ctx->complete(CONTINUE)` again (or another result if your lambda chose to call `ctx->complete` itself after `next`). This ensures the `Context` properly sequences through all stages.
+    **Important for Functional Async Middleware**:
+    - When your lambda returns after initiating an asynchronous operation (like scheduling a `qb::io::async::callback`), the `FunctionalMiddleware` wrapper that the router uses internally understands that the task is not yet complete. It effectively suspends the current middleware's processing in the chain.
+    - When your asynchronous callback eventually runs and calls `next_fn()`, this signals to the `FunctionalMiddleware` wrapper to resume the chain by calling `ctx->complete(AsyncTaskResult::CONTINUE)` (or similar mechanism to pass control onwards).
+    - If your asynchronous callback instead calls `ctx->complete(AsyncTaskResult::COMPLETE)` or `ctx->complete(AsyncTaskResult::ERROR)`, it directly finalizes or errors out the request processing for that context.
+    - Ensure that `ctx->complete()` or `next_fn()` is called *exactly once* for every execution path of your asynchronous logic to maintain correct control flow.
 
 ## Registering Custom Middleware
 
 Custom middleware, whether class-based (as `std::shared_ptr<IMiddleware<SessionType>>`) or functional, is added to the processing chain using the `use()` method on a `Router`, `RouteGroup`, or `Controller` instance.
 
 ```cpp
+#include <http/http.h> // For Router, RouteGroup, Controller, IMiddleware
+#include <memory>      // For std::make_shared
+
+// Assuming MySession, MyCustomHeaderMiddleware, my_functional_logging_mw, 
+// MyApiV1AuthMiddleware, MyControllerSpecificCacheMiddleware are defined.
+// And router, api_v1 are initialized qb::http::Router<MySession> or RouteGroup<MySession> instances.
+
+// struct MySession; // Or using MySession = qb::http::DefaultSession;
+// class MyCustomHeaderMiddleware : public qb::http::IMiddleware<MySession> { /* ... */ };
+// auto my_functional_logging_mw = [](auto ctx, auto next){ /* ... */ next(); };
+// class MyApiV1AuthMiddleware : public qb::http::IMiddleware<MySession> { /* ... */ };
+
+// qb::http::Router<MySession> router;
+
 // Router level (global)
-router.use(std::make_shared<MyCustomHeaderMiddleware>("X-Global", "true"));
-router.use(my_functional_logging_mw, "GlobalLogger");
+// router.use(std::make_shared<MyCustomHeaderMiddleware>("X-Global", "true"));
+// router.use(my_functional_logging_mw, "GlobalLogger");
 
 // Group level
-auto api_v1 = router.group("/api/v1");
-api_v1->use<MyApiV1AuthMiddleware>(); // Constructed in-place
+// auto api_v1 = router.group("/api/v1");
+// api_v1->use<MyApiV1AuthMiddleware>(); // Constructed in-place
 
-// Controller level (within initialize_routes)
+// Controller level (within initialize_routes of a Controller<MySession> derived class)
 // this->use(std::make_shared<MyControllerSpecificCacheMiddleware>());
 ```
 

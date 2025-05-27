@@ -13,14 +13,28 @@ A `Controller` is a class that you derive from `qb::http::Controller<YourSession
 
 ## Creating a Controller
 
-1.  **Inherit**: Create a class that inherits from `qb::http::Controller<SessionType>`.
+1.  **Inherit**: Create a class that inherits from `qb::http::Controller<YourSessionType>`.
 2.  **Implement `initialize_routes()`**: This pure virtual method is where you define your controller's routes using methods like `this->get()`, `this->post()`, `this->use()`.
 3.  **Implement Handler Methods**: Write member functions that will handle the requests for the routes you define. These methods typically take a `std::shared_ptr<qb::http::Context<SessionType>>` as an argument.
 
 ```cpp
-#include <http/http.h> // For Controller, Context, etc.
+#include <http/http.h> // Main include for Controller, Context, etc.
+#include <memory>      // For std::shared_ptr
+#include <string>      // For std::string
+#include <iostream>    // For std::cout (example only)
 
 // Assume MySession is your application's session type
+// For this example, let's define a placeholder session if not already globally defined.
+struct MySession; // Forward declaration or use qb::http::DefaultSession
+// using MySession = qb::http::DefaultSession; // Example if using DefaultSession
+
+// Assume MyDatabaseService is defined (placeholder for dependency injection)
+struct MyDatabaseService {
+    std::string fetchDataForUser(const std::string& userId) { return "Data for " + userId; }
+    void createNewUser(const std::string& data) { /* ... */ }
+    void updateExistingUser(const std::string& userId, const std::string& data) { /* ... */ }
+};
+
 class MyUserController : public qb::http::Controller<MySession> {
 public:
     // Constructor can take dependencies
@@ -93,11 +107,16 @@ Controllers are mounted onto a `Router` or a `RouteGroup` using the `controller<
 -   `constructor_args...`: Any arguments required by your controller's constructor.
 
 ```cpp
+#include <http/http.h> // Main include for Router, Controller
+#include <memory>      // For std::shared_ptr
+
 // In your server setup:
+// Assume MySession, router, and MyDatabaseService are defined.
+// extern qb::http::Router<MySession> router; // Assume router is declared elsewhere
 // auto my_db_service = std::make_shared<MyDatabaseService>();
 
 // Mount MyUserController under "/users"
-auto user_ctrl_ptr = router.controller<MyUserController>("/users", my_db_service);
+// auto user_ctrl_ptr = router.controller<MyUserController>("/users", my_db_service);
 
 // After router.compile(), requests like:
 // GET /users/123         -> MyUserController::getUserProfile (with userId="123")
@@ -119,13 +138,52 @@ and `MyUserController` defines `get("/:id", ...)`, the full path for that route 
 Middleware can be applied directly within a controller's `initialize_routes()` method using `this->use(...)`. This middleware will apply to **all routes defined within that controller**, after any middleware from parent groups or the router, but before the specific route handler.
 
 ```cpp
-void MySecureController::initialize_routes() {
-    // This authentication middleware applies to all routes in MySecureController
-    this->use<ControllerSpecificAuthMiddleware>(/* constructor args if any */);
+#include <http/http.h> // Main include for Controller, IMiddleware
+#include <memory>      // For std::make_shared
 
-    this->get("/data", MEMBER_HANDLER(&MySecureController::getSecureData));
-    this->post("/config", MEMBER_HANDLER(&MySecureController::updateSecureConfig));
-}
+// Assume MySession is defined.
+// using MySession = qb::http::DefaultSession;
+
+// Placeholder for a controller-specific middleware
+class ControllerSpecificAuthMiddleware : public qb::http::IMiddleware<MySession> {
+public:
+    ControllerSpecificAuthMiddleware() {}
+    std::string name() const override { return "ControllerSpecificAuthMiddleware"; }
+    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
+        // Example: Check for a specific header or condition
+        if (ctx->request().has_header("X-Controller-Auth")) {
+            ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+        } else {
+            ctx->response().status() = qb::http::status::UNAUTHORIZED;
+            ctx->response().body() = "Controller specific auth failed.";
+            ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+        }
+    }
+    void cancel() override {}
+};
+
+class MySecureController : public qb::http::Controller<MySession> {
+public:
+    MySecureController() {}
+    std::string get_node_name() const override { return "MySecureController";}
+
+    void initialize_routes() override {
+        // This authentication middleware applies to all routes in MySecureController
+        this->use<ControllerSpecificAuthMiddleware>();
+
+        this->get("/data", MEMBER_HANDLER(&MySecureController::getSecureData));
+        this->post("/config", MEMBER_HANDLER(&MySecureController::updateSecureConfig));
+    }
+
+    void getSecureData(std::shared_ptr<qb::http::Context<MySession>> ctx) {
+        ctx->response().body() = "Secure data accessed.";
+        ctx->complete();
+    }
+    void updateSecureConfig(std::shared_ptr<qb::http::Context<MySession>> ctx) {
+        ctx->response().body() = "Secure config updated.";
+        ctx->complete();
+    }
+};
 ```
 
 ## Benefits of Using Controllers

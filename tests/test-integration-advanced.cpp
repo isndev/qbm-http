@@ -1425,7 +1425,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                               qb::http::method::DEL,
                                                               {"http://localhost:9877/multi_method_resource"}
                                                           };
-                                                          auto response = qb::http::DELETE(request);
+                                                          auto response = qb::http::DEL(request);
                                                           EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                                                           EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
@@ -1746,7 +1746,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                               {"http://localhost:9877/api/v1/data/item789"}
                                                           };
                                                           request.add_header("Authorization", "Bearer valid_token_v1");
-                                                          auto response = qb::http::DELETE(request);
+                                                          auto response = qb::http::DEL(request);
                                                           EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                                                           EXPECT_TRUE(response.body().as<std::string>().empty());
                                                           EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
@@ -1783,7 +1783,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                               qb::http::method::DEL,
                                                               {"http://localhost:9877/api/v1/data/item789"}
                                                           };
-                                                          auto response = qb::http::DELETE(request);
+                                                          auto response = qb::http::DEL(request);
                                                           EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status());
                                                           EXPECT_EQ("APIv1: Unauthorized",
                                                                     response.body().as<std::string>());
@@ -2396,7 +2396,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                           qb::http::Request request{
                                                               qb::http::method::DEL, {base_url + "/item123"}
                                                           };
-                                                          auto response = qb::http::DELETE(request);
+                                                          auto response = qb::http::DEL(request);
                                                           EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
                                                           EXPECT_TRUE(response.body().as<std::string>().empty());
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));

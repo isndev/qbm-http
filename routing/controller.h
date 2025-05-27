@@ -371,7 +371,7 @@ namespace qb::http {
             return use(std::move(mw_instance), ""); // Delegate to shared_ptr overload for name derivation
         }
 
-    public:
+    private:
         // --- Task Compilation --- 
         /**
          * @brief Compiles tasks for all routes defined within this controller.

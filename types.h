@@ -18,6 +18,8 @@
 #include <string>        // For std::string, std::to_string
 #include <string_view>   // For std::string_view
 #include <ostream>       // For std::ostream
+#include <qb/system/container/unordered_map.h> // For qb::icase_unordered_map
+#include "./logger.h"
 
 namespace qb::http {
     /**
@@ -95,6 +97,15 @@ namespace qb::http {
 
         /// Construct from raw ::http_method (from llhttp).
         constexpr Method(::http_method m) : _value(static_cast<Value>(m)) {
+        }
+
+        /// Construct from std::string_view (case-insensitive).
+        Method(std::string_view sv) : _value(Value::UNINITIALIZED) {
+            const auto& map = get_string_to_method_map();
+            auto it = map.find(std::string(sv)); // Convert to string for icase_unordered_map lookup
+            if (it != map.end()) {
+                _value = it->second;
+            }
         }
 
         /// Assign from qb::http::Method::Value enum.
@@ -221,6 +232,60 @@ namespace qb::http {
 
     private:
         Value _value;
+
+        // Static map for string to Method::Value conversion
+        static const qb::icase_unordered_map<Value>& get_string_to_method_map() {
+            static qb::icase_unordered_map<Value> string_to_method_map = {
+                {"DELETE", Value::DEL},
+                {"GET", Value::GET},
+                {"HEAD", Value::HEAD},
+                {"POST", Value::POST},
+                {"PUT", Value::PUT},
+                {"CONNECT", Value::CONNECT},
+                {"OPTIONS", Value::OPTIONS},
+                {"TRACE", Value::TRACE},
+                {"COPY", Value::COPY},
+                {"LOCK", Value::LOCK},
+                {"MKCOL", Value::MKCOL},
+                {"MOVE", Value::MOVE},
+                {"PROPFIND", Value::PROPFIND},
+                {"PROPPATCH", Value::PROPPATCH},
+                {"SEARCH", Value::SEARCH},
+                {"UNLOCK", Value::UNLOCK},
+                {"BIND", Value::BIND},
+                {"REBIND", Value::REBIND},
+                {"UNBIND", Value::UNBIND},
+                {"ACL", Value::ACL},
+                {"REPORT", Value::REPORT},
+                {"MKACTIVITY", Value::MKACTIVITY},
+                {"CHECKOUT", Value::CHECKOUT},
+                {"MERGE", Value::MERGE},
+                {"M-SEARCH", Value::MSEARCH},
+                {"NOTIFY", Value::NOTIFY},
+                {"SUBSCRIBE", Value::SUBSCRIBE},
+                {"UNSUBSCRIBE", Value::UNSUBSCRIBE},
+                {"PATCH", Value::PATCH},
+                {"PURGE", Value::PURGE},
+                {"MKCALENDAR", Value::MKCALENDAR},
+                {"LINK", Value::LINK},
+                {"UNLINK", Value::UNLINK},
+                {"SOURCE", Value::SOURCE},
+                {"PRI", Value::PRI},
+                {"DESCRIBE", Value::DESCRIBE},
+                {"ANNOUNCE", Value::ANNOUNCE},
+                {"SETUP", Value::SETUP},
+                {"PLAY", Value::PLAY},
+                {"PAUSE", Value::PAUSE},
+                {"TEARDOWN", Value::TEARDOWN},
+                {"GET_PARAMETER", Value::GET_PARAMETER},
+                {"SET_PARAMETER", Value::SET_PARAMETER},
+                {"REDIRECT", Value::REDIRECT},
+                {"RECORD", Value::RECORD},
+                {"FLUSH", Value::FLUSH},
+                {"QUERY", Value::QUERY}
+            };
+            return string_to_method_map;
+        }
     };
 
     using method = Method;
@@ -604,6 +669,23 @@ namespace qb::http {
      * (e.g., "GET / HTTP/1.1").
      */
     constexpr char sep = ' ';
+
+    /**
+     * @brief HTTP disconnection reason codes
+     *
+     * Defines possible reasons for disconnection of HTTP sessions.
+     * These codes help with debugging and proper handling of session termination.
+     * Used to provide context when a disconnection event is triggered, allowing
+     * the application to react appropriately based on the reason.
+     */
+    enum DisconnectedReason : int {
+        ByUser = 0, ///< Disconnected by user request
+        ByTimeout, ///< Disconnected due to timeout
+        ResponseTransmitted, ///< Disconnected after response was transmitted
+        ServerError, ///< Disconnected due to server error
+        ByProtocolError, ///< Disconnected due to protocol error
+        Undefined ///< Undefined reason (should never happen)
+    };
 } // namespace qb::http
 
 /**

@@ -27,6 +27,7 @@ For straightforward route logic, lambda functions are often the most concise way
 
 ```cpp
 // Defined in http/routing/types.h (or similar)
+// Included via <http/http.h> or <http/routing.h>
 template<typename SessionType>
 using RouteHandlerFn = std::function<void(std::shared_ptr<qb::http::Context<SessionType>> ctx)>;
 ```
@@ -34,7 +35,14 @@ using RouteHandlerFn = std::function<void(std::shared_ptr<qb::http::Context<Sess
 The lambda receives a `std::shared_ptr<qb::http::Context<SessionType>>` which provides access to the request, response, path parameters, and other contextual information. **Crucially, the handler lambda is responsible for eventually calling `ctx->complete()`** to signal that its processing is finished and the router can proceed (e.g., send the response or move to an error state).
 
 ```cpp
+#include <http/http.h> // Main include for Router, Context, status, method, etc.
+#include <iostream>    // For std::cout in more complex examples (not strictly needed for this one)
+
+// Assuming MySession is defined elsewhere or is a type alias like qb::http::DefaultSession
+// using MySession = qb::http::DefaultSession; // Example alias
+
 // In your server setup code, assuming 'router' is an instance of qb::http::Router<MySession>
+// qb::http::Router<MySession> router;
 
 // GET /simple
 router.get("/simple", [](std::shared_ptr<qb::http::Context<MySession>> ctx) {
@@ -76,6 +84,14 @@ There are two ways to register an `ICustomRoute`:
 1.  **Passing a `std::shared_ptr<ICustomRoute<SessionType>>`:**
 
     ```cpp
+    #include <http/http.h> // For ICustomRoute, Context, etc.
+    #include <memory>      // For std::make_shared
+    #include <string>      // For std::string
+
+    // Assume MySession and some MyDatabaseService are defined
+    // using MySession = qb::http::DefaultSession;
+    // struct MyDatabaseService { /* ... */ };
+
     class UserProfileHandler : public qb::http::ICustomRoute<MySession> {
     public:
         std::string name() const override { return "UserProfileHandler"; }
@@ -98,6 +114,14 @@ There are two ways to register an `ICustomRoute`:
     The router provides templated versions of its method-specific functions (`get`, `post`, etc.) that can construct your `ICustomRoute` derived class in-place.
 
     ```cpp
+    #include <http/http.h> // For ICustomRoute, Context, etc.
+    #include <memory>      // For std::make_shared
+    #include <string>      // For std::string
+    #include <utility>     // For std::move
+
+    // Assume MySession is defined
+    // using MySession = qb::http::DefaultSession;
+
     class ProductDetailsHandler : public qb::http::ICustomRoute<MySession> {
     private:
         std::string _product_prefix;
@@ -124,12 +148,16 @@ Using `ICustomRoute` is beneficial for separating concerns, testing handler logi
 After all routes, groups, and controllers have been defined, you **must** call `router.compile()` before the router can start processing requests.
 
 ```cpp
-MyHttpServer() {
-    router.get("/status", status_handler_lambda);
-    // ... define all other routes, groups, controllers ...
+#include <http/http.h> // For Router, etc.
 
-    router.compile(); // Crucial step
-}
+// Assume MyHttpServer is your server class, MySession its session type
+// and status_handler_lambda is defined.
+// MyHttpServer() {
+//     router.get("/status", status_handler_lambda);
+// ... existing code ...
+
+router.compile(); // Crucial step
+// }
 ```
 
 Compilation analyzes the defined routing hierarchy, resolves middleware chains for each endpoint, and builds the internal `RadixTree` for efficient request matching. Attempting to route requests before compilation will result in undefined behavior or errors.
@@ -139,8 +167,13 @@ Compilation analyzes the defined routing hierarchy, resolves middleware chains f
 While the HTTP method-specific functions (`get`, `post`, etc.) are the most common way to define routes, the `Router` (and `RouteGroup`) also provides a more general `add_route` method:
 
 ```cpp
+#include <http/http.h> // For Router, method, etc.
+
+// Assume router, data_put_lambda_handler, MyDeleteResourceHandler, MyConfigHandler are defined.
+// qb::http::Router<MySession> router;
+
 // For lambda handlers
-router.add_route("/data", qb::http::method::PUT, data_put_lambda_handler);
+// ... existing code ...
 
 // For ICustomRoute shared_ptr
 auto custom_delete_handler = std::make_shared<MyDeleteResourceHandler>();

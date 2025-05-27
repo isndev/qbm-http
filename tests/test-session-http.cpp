@@ -127,16 +127,16 @@ public:
     }
 
     void
-    on(Protocol::request &&event) {
-        EXPECT_EQ(event.http.method(), HTTP_GET);
-        EXPECT_NE(event.http.headers().size(), 0u);
-        EXPECT_EQ(event.http.header("connection"), "keep-alive");
-        EXPECT_EQ(event.http.query("happy"), "true");
-        EXPECT_EQ(event.http.body().size(), sizeof(STRING_MESSAGE) - 1);
+    on(Protocol::request &&request) {
+        EXPECT_EQ(request.method(), HTTP_GET);
+        EXPECT_NE(request.headers().size(), 0u);
+        EXPECT_EQ(request.header("connection"), "keep-alive");
+        EXPECT_EQ(request.query("happy"), "true");
+        EXPECT_EQ(request.body().size(), sizeof(STRING_MESSAGE) - 1);
 
         qb::http::Response r;
         r.status() = qb::http::status::OK;
-        r.body() = std::move(event.http.body());
+        r.body() = std::move(request.body());
         *this << r;
 
         ++msg_count_server_side;
@@ -167,8 +167,8 @@ public:
     }
 
     void
-    on(Protocol::response &&event) {
-        EXPECT_EQ(event.http.status(), HTTP_STATUS_OK);
+    on(Protocol::response &&response) {
+        EXPECT_EQ(response.status(), HTTP_STATUS_OK);
         ++msg_count_client_side;
     }
 };
@@ -272,16 +272,16 @@ public:
     }
 
     void
-    on(Protocol::request &&event) {
-        EXPECT_EQ(event.http.method(), HTTP_GET);
-        EXPECT_EQ(event.http.headers().size(), 3u);
-        EXPECT_EQ(event.http.header("connection"), "keep-alive");
-        EXPECT_EQ(event.http.query("happy"), "true");
-        EXPECT_EQ(event.http.body().size(), sizeof(STRING_MESSAGE) - 1);
+    on(Protocol::request &&request) {
+        EXPECT_EQ(request.method(), HTTP_GET);
+        EXPECT_EQ(request.headers().size(), 3u);
+        EXPECT_EQ(request.header("connection"), "keep-alive");
+        EXPECT_EQ(request.query("happy"), "true");
+        EXPECT_EQ(request.body().size(), sizeof(STRING_MESSAGE) - 1);
 
         qb::http::Response r;
         r.status() = qb::http::status::OK;
-        r.body() = std::move(event.http.body());
+        r.body() = std::move(request.body());
         *this << r;
 
         ++msg_count_server_side;
@@ -312,8 +312,8 @@ public:
     }
 
     void
-    on(Protocol::response &&event) {
-        EXPECT_EQ(event.http.status(), HTTP_STATUS_OK);
+    on(Protocol::response &&response) {
+        EXPECT_EQ(response.status(), HTTP_STATUS_OK);
         ++msg_count_client_side;
     }
 };
@@ -360,35 +360,3 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
 
 #endif
 
-// #include <gtest/gtest.h>
-// #include "../http.h"
-//
-// class HttpServer;
-// class HttpSession : public qb::http::use<HttpSession>::session<HttpServer>
-// {
-// public:
-//     HttpSession(HttpServer &server)
-//         : session(server) {}
-// };
-//
-// class HttpServer : public qb::http::use<HttpServer>::server<HttpSession> {
-// public:
-//
-//     HttpServer() {
-//         router().get("/", [](auto ctx) {
-//             ctx->response().status() = qb::http::status::OK;
-//             ctx->response().body()      = "Hello, World!";
-//             ctx->complete();
-//         });
-//     }
-// };
-//
-// TEST(Session, HTTP_SIMPLE_SERVER) {
-//     HttpServer server;
-//     server.transport().listen_v4(9999);
-//     server.start();
-//
-//     while (true) {
-//         async::run(EVRUN_ONCE);
-//     }
-// }
