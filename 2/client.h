@@ -1,9 +1,36 @@
 /**
- * @file client.h
- * @brief Modern HTTP/2 client implementation with elegant async API
- * @copyright Copyright (c) 2024 isndev. All rights reserved.
- * @license This software is licensed under the terms specified in the LICENSE file
- *          located in the root directory of the project.
+ * @file qbm/http/2/client.h
+ * @brief HTTP/2 client interface for qb-io framework
+ *
+ * This file provides a high-level HTTP/2 client interface built on top of
+ * the qb-io asynchronous framework. It includes:
+ *
+ * - Modern C++ HTTP/2 client with callback-based API
+ * - Connection management with automatic reconnection support
+ * - Request multiplexing and stream management
+ * - Batch request processing for improved efficiency
+ * - Configurable timeouts for connections and requests
+ * - Response and error callback handling
+ * - Integration with HTTP/1.1 request/response objects
+ * - Factory functions for easy client creation
+ *
+ * @code
+ * // Example HTTP/2 client usage:
+ * auto client = qb::http2::make_client("https://api.example.com");
+ * client->connect([](bool success) {
+ *     if (success) {
+ *         qb::http::Request req("https://api.example.com/data");
+ *         client->push_request(std::move(req), [](qb::http::Response res) {
+ *             // Handle response
+ *         });
+ *     }
+ * });
+ * @endcode
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http2
  */
 
 #pragma once
@@ -64,7 +91,7 @@ struct BatchRequestContext {
     BatchResponseCallback callback;
     std::vector<qb::http::Response> responses;
     std::chrono::steady_clock::time_point created_at;
-    std::unordered_map<uint32_t, size_t> stream_to_index; // stream_id -> request index
+    qb::unordered_map<uint32_t, size_t> stream_to_index; // stream_id -> request index
     size_t completed_count = 0;
     bool all_completed = false;
 };
@@ -117,8 +144,8 @@ private:
     
     // Request management
     std::queue<std::unique_ptr<RequestContext>> _pending_requests;
-    std::unordered_map<uint32_t, std::unique_ptr<RequestContext>> _active_requests;
-    std::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> _active_batches;
+    qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>> _active_requests;
+    qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> _active_batches;
     uint64_t _next_batch_id = 1;
     
     // Configuration

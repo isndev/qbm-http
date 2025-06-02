@@ -103,7 +103,6 @@ public:
         // Controller Middleware
         this->use<SimpleApiMiddleware>("CtrlMwTyped", "arg2");
         this->use(std::make_shared<SimpleApiMiddleware>("CtrlMwShared"));
-        this->use([]() { return std::make_shared<SimpleApiMiddleware>("CtrlMwFactory"); }, "CtrlMwFactoryNamed");
     }
 
     std::string get_node_name() const override { return "ApiTestController"; }

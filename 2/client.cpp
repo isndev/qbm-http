@@ -1,9 +1,26 @@
 /**
- * @file client.cpp
- * @brief Modern HTTP/2 client implementation
- * @copyright Copyright (c) 2024 isndev. All rights reserved.
- * @license This software is licensed under the terms specified in the LICENSE file
- *          located in the root directory of the project.
+ * @file qbm/http/2/client.cpp
+ * @brief HTTP/2 client implementation for qb-io framework
+ *
+ * This file implements the HTTP/2 client functionality built on top of
+ * the qb-io asynchronous framework. It includes:
+ *
+ * - High-level HTTP/2 client interface implementation
+ * - Connection management with automatic reconnection
+ * - Request queuing and multiplexing support
+ * - Batch request processing capabilities
+ * - Response callback handling and error management
+ * - Timeout handling for connections and requests
+ * - Integration with the HTTP/2 protocol layer
+ * - Support for both single and batch request patterns
+ *
+ * The client provides an easy-to-use interface while leveraging the full
+ * power of HTTP/2 multiplexing and the asynchronous I/O framework.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http2
  */
 
 #include "client.h"

@@ -1,3 +1,26 @@
+/**
+ * @file qbm/http/1.1/protocol/base.h
+ * @brief HTTP/1.1 protocol base implementation for qb-io framework
+ *
+ * This file provides the foundational HTTP/1.1 protocol parsing and handling
+ * infrastructure built on top of the qb-io asynchronous framework. It includes:
+ *
+ * - Complete HTTP/1.1 message parsing using llhttp
+ * - Event-driven callback architecture for efficient processing
+ * - Support for chunked transfer encoding
+ * - Header field and value parsing with case-insensitive handling
+ * - Content-Length detection and body allocation optimization
+ * - Support for both request and response parsing
+ * - Proper HTTP version detection and upgrade protocol handling
+ *
+ * The parser implements the HTTP/1.1 specification (RFC 7230-7235) and provides
+ * a robust foundation for both client and server implementations.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #pragma once
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>

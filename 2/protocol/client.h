@@ -1,9 +1,26 @@
 /**
- * @file client.h
+ * @file qbm/http/2/protocol/client.h
  * @brief HTTP/2 client protocol implementation for qb-io framework
- * @copyright Copyright (c) 2024 isndev. All rights reserved.
- * @license This software is licensed under the terms specified in the LICENSE file
- *          located in the root directory of the project.
+ *
+ * This file provides HTTP/2 client-side protocol handling built on top of
+ * the qb-io asynchronous framework. It includes:
+ *
+ * - Complete HTTP/2 client protocol implementation
+ * - HPACK header compression and decompression
+ * - Stream multiplexing and flow control management
+ * - Server push support and handling
+ * - Request/response lifecycle management
+ * - Connection and stream error handling
+ * - Settings negotiation and window updates
+ * - Integration with HTTP/1.1 request/response objects
+ *
+ * The client supports both single-request mode and multiplexed streaming
+ * for optimal performance in different use cases.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http2
  */
 
 #pragma once

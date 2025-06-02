@@ -1,16 +1,34 @@
 /**
  * @file qbm/http/http.h
- * @brief Main include file for the QB HTTP client and server module.
+ * @brief Main HTTP module interface for qb-io framework
  *
- * This header aggregates all core components of the qb-http module, providing a comprehensive
- * suite for HTTP/1.1 communication. It defines foundational classes for requests (`qb::http::Request`),
- * responses (`qb::http::Response`), message parsing (`qb::http::Parser`), asynchronous client
- * operations (`qb::http::async`), protocol handlers (`qb::protocol::http_server`, `qb::protocol::http_client`),
- * and server-side routing (`qb::http::Router`).
+ * This file provides the main entry point for the comprehensive HTTP module
+ * built on top of the qb-io asynchronous framework. It includes:
  *
- * The module is designed for high performance and integration with the qb-io asynchronous
- * I/O layer, leveraging libev for event handling. It supports features like content
- * compression, cookie management, multipart forms, and customizable routing.
+ * - Complete HTTP/1.1 and HTTP/2 protocol support
+ * - Unified interface for both HTTP versions
+ * - Request and response handling classes
+ * - Asynchronous client and server implementations
+ * - High-performance message parsing and processing
+ * - Content compression and decompression support
+ * - Cookie management and multipart form handling
+ * - Customizable routing and middleware support
+ * - SSL/TLS support for secure connections
+ *
+ * The module is designed for high performance and seamless integration with
+ * the qb-io asynchronous I/O layer, supporting both HTTP/1.1 and HTTP/2
+ * protocols with a unified API.
+ *
+ * @code
+ * // Include both HTTP/1.1 and HTTP/2 support
+ * #include <qbm/http/http.h>
+ * 
+ * // Use HTTP/1.1 server
+ * auto http1_server = qb::http::make_server();
+ * 
+ * // Use HTTP/2 server  
+ * auto http2_server = qb::http2::make_server();
+ * @endcode
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)

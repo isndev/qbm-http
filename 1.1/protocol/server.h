@@ -1,3 +1,25 @@
+/**
+ * @file qbm/http/1.1/protocol/server.h
+ * @brief HTTP/1.1 server protocol implementation for qb-io framework
+ *
+ * This file provides HTTP/1.1 server-side protocol handling built on top of
+ * the qb-io asynchronous framework. It includes:
+ *
+ * - HTTP/1.1 request parsing and processing
+ * - Cookie parsing from Cookie headers
+ * - Support for both string and string_view semantics
+ * - Asynchronous request handling through callbacks
+ * - Integration with the base HTTP/1.1 protocol parser
+ * - Request routing and response generation
+ *
+ * The implementation supports both owning (string-based) and non-owning
+ * (string_view-based) request handling for optimal performance.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #pragma once
 #include "../../request.h"
 #include "./base.h"

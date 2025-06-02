@@ -1,3 +1,34 @@
+/**
+ * @file qbm/http/1.1/http.h
+ * @brief HTTP/1.1 server and client implementation for qb-io framework
+ *
+ * This file provides a comprehensive HTTP/1.1 server and client implementation
+ * built on top of the qb-io asynchronous framework. It includes:
+ *
+ * - Complete HTTP/1.1 protocol support with request/response handling
+ * - Asynchronous and synchronous client implementations
+ * - Full-featured HTTP server with routing capabilities
+ * - Session management with timeout handling
+ * - Content compression/decompression support (with zlib)
+ * - SSL/TLS support for secure HTTPS connections
+ * - Event-driven architecture for high performance
+ * - Template-based extensibility for custom session types
+ *
+ * @code
+ * // Example HTTP/1.1 server usage:
+ * auto server = qb::http::make_server();
+ * server->router().get("/api/data", [](auto ctx) {
+ *     ctx->response().json({"message": "Hello HTTP/1.1!"});
+ *     ctx->complete();
+ * });
+ * server->listen(qb::io::uri("http://localhost:8080"));
+ * @endcode
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #pragma once
 #ifdef QB_IO_WITH_ZLIB
 #include <qb/io/compression.h>
@@ -367,14 +398,17 @@ namespace qb::http {
              * @param key_file The path to the key file.
              * @return True if the server is listening, false otherwise.
              */
-            bool listen(qb::io::uri uri, std::filesystem::path cert_file, std::filesystem::path key_file) {
-                this->transport().init(qb::io::ssl::create_server_context(TLS_server_method(), cert_file, key_file));
-                if (!this->transport().ssl_handle()) {
-                    LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context.");
-                    return false;
+            bool listen(qb::io::uri uri, std::filesystem::path cert_file = {}, std::filesystem::path key_file = {}) {
+                using tpt = std::decay_t<decltype(this->transport())>;
+                if constexpr (tpt::is_secure()) {
+                    this->transport().init(qb::io::ssl::create_server_context(TLS_server_method(), cert_file, key_file));
+                    if (!this->transport().ssl_handle()) {
+                        LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context.");
+                        return false;
+                    }
+                    this->transport().set_supported_alpn_protocols({"http/1.1"});
                 }
-                this->transport().set_supported_alpn_protocols({"http/1.1"});
-                return this->transport().listen(std::move(uri));
+                return !this->transport().listen(std::move(uri));
             }
         };
 

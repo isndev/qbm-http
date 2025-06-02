@@ -87,7 +87,7 @@ namespace qb::http2 {
             friend Http2Protocol;
             friend qb::io::async::with_timeout<session<Derived, Handler>>;
 
-            std::unordered_map<uint32_t, std::shared_ptr<ContextType>> _contexts; ///< Stream contexts
+            qb::unordered_map<uint32_t, std::shared_ptr<ContextType>> _contexts; ///< Stream contexts
             
             Http1Protocol *_http1_protocol; ///< HTTP/1.1 protocol handler
             Http2Protocol *_http2_protocol; ///< HTTP/2 protocol handler
@@ -371,7 +371,7 @@ namespace qb::http2 {
                     return false;
                 }
                 this->transport().set_supported_alpn_protocols({"h2", "http/1.1"});
-                return this->transport().listen(std::move(uri));
+                return !this->transport().listen(std::move(uri));
             }
         };
 

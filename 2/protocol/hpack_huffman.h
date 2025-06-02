@@ -1,15 +1,25 @@
 /**
  * @file qbm/http/2/protocol/hpack_huffman.h
- * @brief HPACK Huffman encoding and decoding implementation
+ * @brief HPACK Huffman coding implementation for qb-io framework
  *
- * This file provides a complete implementation of HPACK Huffman encoding and decoding
- * as specified in RFC 7541 Appendix B. It includes the static Huffman table, encoding
- * and decoding algorithms, and utility functions for HTTP/2 header compression.
+ * This file provides a complete implementation of HPACK Huffman coding
+ * as specified in RFC 7541 Appendix B. It includes:
+ *
+ * - Complete Huffman code table for all 256 octets
+ * - Efficient encoding and decoding algorithms
+ * - Decode tree construction for fast symbol lookup
+ * - Compression ratio estimation and performance analysis
+ * - Statistics collection for encoding/decoding operations
+ * - Round-trip testing and validation utilities
+ * - Character frequency analysis for compression optimization
+ *
+ * The implementation provides both high-performance encoding/decoding
+ * and comprehensive analysis tools for HPACK optimization.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup HTTP2
+ * @ingroup Http2
  */
 
 #pragma once

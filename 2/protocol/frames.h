@@ -1,15 +1,25 @@
 /**
  * @file qbm/http/2/protocol/frames.h
- * @brief HTTP/2 frame definitions and structures
+ * @brief HTTP/2 frame definitions and structures for qb-io framework
  *
- * This file provides comprehensive definitions for HTTP/2 frames as specified in RFC 9113,
- * including frame types, flags, error codes, and concrete frame structures. It serves as
- * the foundation for HTTP/2 protocol implementation in the qb-io framework.
+ * This file provides comprehensive HTTP/2 frame type definitions and structures
+ * according to RFC 9113. It includes:
+ *
+ * - All HTTP/2 frame type enumerations and constants
+ * - Frame header structure with endian-safe access methods
+ * - Complete frame payload structures for all frame types
+ * - HTTP/2 error code definitions
+ * - Settings identifier enumerations
+ * - Priority data structures
+ * - Event structures for frame processing
+ *
+ * The frame structures provide type-safe access to HTTP/2 protocol elements
+ * with proper endianness handling for network byte order.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup HTTP2
+ * @ingroup Http2
  */
 
 #pragma once

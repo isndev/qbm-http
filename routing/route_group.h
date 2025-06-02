@@ -233,7 +233,7 @@ namespace qb::http {
          * @return Reference to this `RouteGroup` for chaining.
          */
         RouteGroup<Session> &use(MiddlewareHandlerFn<Session> mw_fn,
-                                 std::string name = "UnnamedFunctionalMiddleware_Use") {
+                                 std::string name = "UnnamedFunctionalMiddleware") {
             auto functional_middleware = std::make_shared<FunctionalMiddleware<Session> >(std::move(mw_fn), name);
             auto middleware_task = std::make_shared<MiddlewareTask<Session> >(
                 std::move(functional_middleware), std::move(name));
@@ -260,7 +260,7 @@ namespace qb::http {
             }
             if (task_name.empty()) {
                 // Ultimate fallback
-                task_name = "UnnamedSharedPtrMiddleware_Use";
+                task_name = "UnnamedSharedPtrMiddleware";
             }
             auto middleware_task = std::make_shared<MiddlewareTask<Session> >(std::move(mw_ptr), std::move(task_name));
             this->add_middleware(std::move(middleware_task)); // From IHandlerNode

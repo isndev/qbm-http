@@ -1,16 +1,26 @@
 /**
  * @file qbm/http/2/protocol/hpack.h
- * @brief HPACK header compression implementation for HTTP/2
+ * @brief HPACK header compression implementation for qb-io framework
  *
- * This file provides a complete implementation of HPACK header compression and
- * decompression as specified in RFC 7541. It includes static and dynamic table
- * management, integer and string literal encoding/decoding, and header field
- * representation handling for HTTP/2 protocol.
+ * This file provides a complete HPACK (HTTP/2 Header Compression) implementation
+ * according to RFC 7541. It includes:
+ *
+ * - Complete HPACK encoder and decoder implementations
+ * - Dynamic table management with eviction policies
+ * - Static table lookup for common headers
+ * - Huffman string encoding and decoding
+ * - Integer encoding/decoding with variable length
+ * - Header field indexing strategies
+ * - Statistics collection and performance monitoring
+ * - Memory-efficient dynamic table operations
+ *
+ * The implementation provides both high-level interfaces for easy integration
+ * and low-level control for performance optimization.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup HTTP2
+ * @ingroup Http2
  */
 
 #pragma once
