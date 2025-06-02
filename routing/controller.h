@@ -55,8 +55,6 @@ namespace qb::http {
         // Routes defined within this controller. They are relative to the controller's base path.
         std::vector<std::shared_ptr<IHandlerNode<Session> > > _controller_routes;
 
-        using ControllerMiddlewareFn = std::function<std::shared_ptr<IMiddleware<Session> >(void)>;
-
         // Helper methods for derived controllers to define routes
         // These can remain protected as they are implementation details for the public API below
 
@@ -307,34 +305,22 @@ namespace qb::http {
         // --- Middleware for this controller --- 
 
         /**
-         * @brief Adds middleware to this controller using a factory function (`ControllerMiddlewareFn`).
-         * The factory function is invoked to create an instance of the middleware.
-         * @param mw_fn A function that returns `std::shared_ptr<IMiddleware<SessionType>>`.
-         * @param name An optional name for this middleware task. If empty or default, tries to use middleware's own name.
+         * @brief Adds middleware to this controller using a `MiddlewareHandlerFn` (lambda/function pointer).
+         * The middleware will apply to all routes defined within this controller.
+         * @param mw_fn The middleware handler function.
+         * @param name An optional name for this middleware instance, useful for logging or debugging.
          * @return Reference to this `Controller` for chaining.
          */
-        Controller<Session> &use(ControllerMiddlewareFn mw_fn, std::string name = "ControllerMiddleware_Use") {
-            if (!mw_fn) return *this;
-            auto middleware_instance = mw_fn();
-            if (!middleware_instance) {
-                // Consider logging a warning if a logging facility is available.
-                return *this;
-            }
-            std::string task_name = name;
-            if (task_name == "ControllerMiddleware_Use" || task_name.empty()) {
-                task_name = middleware_instance->name();
-            }
-            if (task_name.empty()) {
-                task_name = "UnnamedControllerFactoryMiddleware_Use";
-            }
+        Controller<Session> &use(MiddlewareHandlerFn<Session> mw_fn, std::string name = "UnnamedFunctionalMiddleware") {
+            auto functional_middleware = std::make_shared<FunctionalMiddleware<Session> >(std::move(mw_fn), name);
             auto middleware_task = std::make_shared<MiddlewareTask<Session> >(
-                std::move(middleware_instance), std::move(task_name));
+                std::move(functional_middleware), std::move(name));
             this->add_middleware(std::move(middleware_task)); // From IHandlerNode
             return *this;
         }
 
         /**
-         * @brief Adds middleware to this controller using a pre-created `std::shared_ptr<IMiddleware<SessionType>>`.
+         * @brief Adds middleware to this controller using a pre-created `std::shared_ptr<IMiddleware<Session>>`.
          * @param mw_ptr Shared pointer to the middleware instance.
          * @param name_override Optional: A specific name for this middleware task. If empty, derives name from `mw_ptr`.
          * @return Reference to this `Controller` for chaining.
@@ -350,7 +336,7 @@ namespace qb::http {
                 name = base_name;
             }
             if (name.empty()) {
-                name = "UnnamedControllerInstanceMiddleware_Use";
+                name = "UnnamedSharedPtrMiddleware";
             }
             auto middleware_task = std::make_shared<MiddlewareTask<Session> >(std::move(mw_ptr), std::move(name));
             this->add_middleware(std::move(middleware_task)); // From IHandlerNode

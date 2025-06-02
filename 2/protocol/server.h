@@ -1,17 +1,26 @@
 /**
  * @file qbm/http/2/protocol/server.h
- * @brief HTTP/2 server protocol implementation
+ * @brief HTTP/2 server protocol implementation for qb-io framework
  *
- * This file provides a complete server-side implementation of the HTTP/2 protocol
- * as specified in RFC 7540/9113. It handles frame processing, stream management,
- * flow control, HPACK compression, connection settings, and error handling for
- * HTTP/2 server connections. The implementation supports all standard HTTP/2 frames
- * and provides integration with the qb I/O framework.
+ * This file provides HTTP/2 server-side protocol handling built on top of
+ * the qb-io asynchronous framework. It includes:
+ *
+ * - Complete HTTP/2 server protocol implementation
+ * - HPACK header compression and decompression
+ * - Stream multiplexing and flow control management
+ * - Request processing and response generation
+ * - Connection and stream lifecycle management
+ * - Settings negotiation and window updates
+ * - Error handling for protocol violations
+ * - Integration with HTTP/1.1 request/response objects
+ *
+ * The server efficiently handles multiple concurrent streams per connection
+ * with proper flow control and resource management.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup HTTP2
+ * @ingroup Http2
  */
 
 #pragma once
@@ -126,6 +135,7 @@ public:
           _hpack_decoder(std::make_unique<qb::protocol::hpack::HpackDecoderImpl>()),
           _hpack_encoder(std::make_unique<qb::protocol::hpack::HpackEncoderImpl>())
     {
+        LOG_HTTP_DEBUG("ServerHttp2Protocol: Constructing HTTP/2 server protocol handler");
         this->_our_max_frame_size = this->initialize_our_max_frame_size();
         _connection_send_window = this->get_initial_window_size_from_settings();
         
@@ -133,9 +143,11 @@ public:
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
         if (it_table_size != _our_settings.end() && _hpack_encoder) {
             _hpack_encoder->set_max_capacity(it_table_size->second);
+            LOG_HTTP_DEBUG("ServerHttp2Protocol: HPACK encoder max capacity set to " << it_table_size->second);
         }
         
         this->reset();
+        LOG_HTTP_INFO("ServerHttp2Protocol: HTTP/2 server protocol handler constructed successfully");
     }
 
     ~ServerHttp2Protocol() override = default;
@@ -150,6 +162,7 @@ public:
      * @brief Reset protocol state to initial conditions
      */
     void reset() noexcept override {
+        LOG_HTTP_DEBUG("ServerHttp2Protocol: Resetting protocol state to initial conditions");
         FramerBase::reset(); // Call base class reset first
 
         _server_streams.clear();
@@ -181,6 +194,7 @@ public:
                 _hpack_encoder->set_max_capacity(it_table_size->second);
             }
         }
+        LOG_HTTP_INFO("ServerHttp2Protocol: Protocol state reset completed");
     }
 
     /**
@@ -188,11 +202,13 @@ public:
      * @param event Preface complete event
      */
     void on(qb::protocol::http2::PrefaceCompleteEvent /*event*/) {
+        LOG_HTTP_DEBUG("ServerHttp2Protocol: Received preface complete event");
         if (!this->ok() || !_connection_active) {
+            LOG_HTTP_WARN("ServerHttp2Protocol: Cannot process preface complete - protocol not OK or connection inactive");
             return;
         }
         
-                if (!_initial_settings_sent) {
+        if (!_initial_settings_sent) {
             LOG_HTTP_DEBUG("Server: Sending initial SETTINGS frame");
             Http2FrameData<SettingsFrame> settings_frame_data;
             settings_frame_data.header.type = static_cast<uint8_t>(FrameType::SETTINGS);
@@ -860,24 +876,26 @@ public:
      * @return true if response sent successfully, false on error
      */
     bool send_response(uint32_t stream_id, qb::http::Response const &http_response) {
+        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Attempting to send response");
         auto it = _server_streams.find(stream_id);
         if (it == _server_streams.end()) {
-            // QB_LOG_WARN_S(this->logger()) << this->log_prefix(stream_id) << " Attempt to send response on non-existent stream.";
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on non-existent stream");
             return false; // Or send RST_STREAM(STREAM_CLOSED) if appropriate
         }
         Http2ServerStream& stream = it->second;
 
         if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
-             // QB_LOG_WARN_S(this->logger()) << this->log_prefix(stream_id) << " Attempt to send response on stream in IDLE or RESERVED_LOCAL state.";
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on stream in IDLE or RESERVED_LOCAL state");
             this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Sending response on stream in invalid state for response.");
             return false;
         }
         
         if (stream.state == Http2StreamConcreteState::CLOSED || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
-            // QB_LOG_INFO_S(this->logger()) << this->log_prefix(stream_id) << " Attempt to send response on already closed/half-closed(local) stream.";
+            LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on already closed/half-closed(local) stream");
             return false; // Stream is already closed or we've already sent END_STREAM
         }
 
+        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Building response headers with status " << http_response.status().code());
         std::vector<qb::protocol::hpack::HeaderField> hf_vector;
         hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
         for (const auto& header_item : http_response.headers()) { // Assuming http_response.headers() gives iterable key-value pairs
@@ -888,7 +906,7 @@ public:
 
         std::vector<uint8_t> encoded_headers;
         if (!_hpack_encoder || !_hpack_encoder->encode(hf_vector, encoded_headers)) {
-            // QB_LOG_ERROR_S(this->logger()) << this->log_prefix() << " HPACK encoding failed for stream " << stream_id;
+            LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: HPACK encoding failed for response headers");
             this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK encoder failed for response headers.");
             return false;
         }
@@ -896,8 +914,7 @@ public:
 
 
         if (_peer_max_header_list_size > 0 && encoded_headers.size() > _peer_max_header_list_size) {
-            // QB_LOG_WARN_S(this->logger()) << this->log_prefix(stream_id) << " Encoded headers size " << encoded_headers.size()
-            //                           << " exceeds peer's MAX_HEADER_LIST_SIZE " << _peer_max_header_list_size;
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Encoded headers size " << encoded_headers.size() << " exceeds peer's MAX_HEADER_LIST_SIZE " << _peer_max_header_list_size);
             send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR); 
             return false;
         }
@@ -912,7 +929,9 @@ public:
 
         if (!has_body) {
             headers_frame_data.header.flags |= FLAG_END_STREAM; // No body, HEADERS ends the stream
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Response has no body, setting END_STREAM flag");
         } else {
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Response has body of size " << body_pipe.size());
         }
         
         headers_frame_data.payload.header_block_fragment = std::move(encoded_headers);
@@ -927,10 +946,12 @@ public:
             } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
                 stream.state = Http2StreamConcreteState::CLOSED;
             }
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Response headers sent with END_STREAM");
         }
 
         if (has_body) {
             if (!send_response_body(stream, http_response)) {
+                LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Failed to send response body");
                 return false;
             }
             if (stream.state == Http2StreamConcreteState::CLOSED) {
@@ -942,6 +963,7 @@ public:
             }
         }
         
+        LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Response sent successfully");
         return this->ok();
     }
 
@@ -1372,7 +1394,7 @@ private:
         // If trailers are expected and all body data has been sent by this function. 
         // The actual sending of trailers is usually handled by try_send_pending_data_for_stream or a subsequent call.
         if (stream.send_buffer_offset == body_size && stream.is_trailers && !stream.end_stream_sent) {
-            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream.id << ": Body fully processed in send_response_body, trailers are pending.");
+            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Body fully processed in send_response_body, trailers are pending.");
             // At this point, try_send_pending_data_for_stream will pick up trailer sending.
             // Or if this function was meant to be comprehensive, it could call a send_trailers helper.
             // For now, let has_pending_data_to_send = false (for body) and is_trailers=true guide the next step.
@@ -1397,10 +1419,12 @@ private:
     void dispatch_complete_request(uint32_t stream_id, Http2ServerStream& stream) {
 
         if (stream.request_dispatched || stream.rst_stream_sent || stream.rst_stream_received) {
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Skipping request dispatch - already dispatched or stream reset");
             return;
         }
 
         if (this->ok() && this->_connection_active) {
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Dispatching complete request to application layer");
             // Assemble qb::http::Request from stream.assembled_request
             // The pseudo-headers should have already populated method and URI components.
             // Body should be in stream.assembled_request.body()
@@ -1411,19 +1435,33 @@ private:
 
             // Ensure mandatory fields are present if not checked earlier during header processing
             if (stream.assembled_request.method() == qb::http::Method::Value::UNINITIALIZED || stream.assembled_request.uri().path().empty()) {
+                 LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Attempt to dispatch incomplete request (missing method/path)");
                  this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Attempt to dispatch incomplete request (missing method/path)");
                  return;
             }
 
-
             stream.assembled_request.parse_cookie_header();
 
-            this->_io.on(std::move(stream.assembled_request), stream_id); // Pass stream_id as context/correlation
+            // CRITICAL: Mark as dispatched BEFORE calling _io.on() because it might trigger immediate response
+            // and close the stream, making the 'stream' reference invalid
             stream.request_dispatched = true;
-        }
 
-        if (stream.state == Http2StreamConcreteState::CLOSED) {
-            this->try_close_stream_context(stream_id);
+            this->_io.on(std::move(stream.assembled_request), stream_id); // Pass stream_id as context/correlation
+            
+            // After _io.on(), the stream might have been closed and erased. We need to check if it still exists.
+            auto it = _server_streams.find(stream_id);
+            if (it != _server_streams.end()) {
+                LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Request successfully dispatched to application");
+                // Check stream state only if stream still exists
+                if (it->second.state == Http2StreamConcreteState::CLOSED) {
+                    this->try_close_stream_context(stream_id);
+                }
+            } else {
+                // Stream was already closed and cleaned up during the dispatch
+                LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream was closed during request dispatch");
+            }
+        } else {
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cannot dispatch request - protocol not OK or connection inactive");
         }
     }
 
@@ -1443,28 +1481,34 @@ private:
             bool can_cleanup = (stream.state == Http2StreamConcreteState::CLOSED) || stream.rst_stream_sent || stream.rst_stream_received;
 
             if (can_cleanup) {
+                LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Cleaning up stream context");
                 // If an error occurred that wasn't dispatched because request/response cycle was aborted by RST
                 if ((!stream.request_dispatched || !stream.end_stream_sent) &&
                     (stream.rst_stream_sent || stream.rst_stream_received) && stream.error_code != ErrorCode::NO_ERROR) {
                     // Stream was reset before full lifecycle completion by app. Error already dispatched by RST handler.
                 }
                 _server_streams.erase(it);
+                LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Stream context cleaned up successfully");
 
                 if (_graceful_shutdown_initiated && this->_last_peer_initiated_stream_id_processed_in_goaway != 0) {
-                    // QB_LOG_INFO_PA(this->getName(), "Graceful shutdown: All streams up to "
-                    // << FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() << " are now closed.");
+                    LOG_HTTP_DEBUG("ServerHttp2Protocol: Checking if graceful shutdown can complete after stream " << stream_id << " cleanup");
                     if (this->are_all_relevant_streams_closed(FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway())) {
                         _connection_active = false;
+                        LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all relevant streams closed");
                         this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
                     }
                 } else if (_graceful_shutdown_initiated && _server_streams.empty() && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() == 0) {
                     // We initiated GOAWAY (so last_peer_id_processed might be 0 from our side if we didn't process any from peer before deciding to goaway)
                     // and all our streams are now gone.
                     _connection_active = false;
+                    LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all streams closed");
                     // this->not_ok() was already called by send_goaway_and_close.
                 }
             } else {
+                LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream not ready for cleanup yet");
             }
+        } else {
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream context not found for cleanup");
         }
     }
 
@@ -1480,10 +1524,10 @@ private:
     void send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string& context_msg = "") noexcept {
 
         if (!_connection_active && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
-            // QB_LOG_WARN_PA(this->getName(), "Tried to send RST_STREAM on stream " << stream_id << " but connection is not active.");
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Tried to send RST_STREAM but connection is not active");
             return;
         }
-        // QB_LOG_DEBUG_PA(this->getName(), "Server: Sending RST_STREAM on stream " << stream_id << " with error code " << static_cast<uint32_t>(error_code) << ". Context: " << context_msg);
+        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Sending RST_STREAM with error code " << static_cast<uint32_t>(error_code) << ". Context: " << context_msg);
 
         Http2FrameData<RstStreamFrame> rst_frame_data;
         rst_frame_data.payload.error_code = error_code;
@@ -1501,7 +1545,7 @@ private:
             it->second.state = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
             it->second.rst_stream_sent = true;
             it->second.error_code = error_code;
-            // QB_LOG_TRACE_PA(this->getName(), "Stream " << stream_id << " marked as CLOSED due to sent RST_STREAM.");
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream marked as CLOSED due to sent RST_STREAM");
             
             // Notify IO_Handler if request wasn't dispatched or response wasn't fully sent
             if ((!it->second.request_dispatched || !it->second.end_stream_sent) && error_code != ErrorCode::NO_ERROR) {
@@ -1512,6 +1556,7 @@ private:
             }
             this->try_close_stream_context(stream_id); // Attempt to clean up if conditions met
         }
+        LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: RST_STREAM sent successfully");
     }
 
     /**
@@ -1526,10 +1571,11 @@ private:
     void send_goaway_and_close(ErrorCode error_code, const std::string& debug_message) noexcept {
 
         if (!_connection_active) { // Removed .load(std::memory_order_relaxed)
+            LOG_HTTP_DEBUG("ServerHttp2Protocol: Avoiding GOAWAY send - connection already inactive");
             return; // Avoid sending if already inactive.
         }
         
-        LOG_HTTP_WARN_PA(0, "Server: Sending GOAWAY frame. Error: " << static_cast<int>(error_code) << ", Message: " << debug_message);
+        LOG_HTTP_WARN("ServerHttp2Protocol: Sending GOAWAY frame. Error: " << static_cast<int>(error_code) << ", Message: " << debug_message);
 
         Http2FrameData<GoAwayFrame> goaway_frame_data;
         goaway_frame_data.payload.last_stream_id = _last_client_initiated_stream_id; // Report last stream ID client successfully initiated with us
@@ -1555,7 +1601,7 @@ private:
             this->get_io_handler().on(goaway_event_to_dispatch);
         }
 
-        // QB_LOG_INFO_PA(this->getName(), "GOAWAY sent. Connection will be closed.");
+        LOG_HTTP_INFO("ServerHttp2Protocol: GOAWAY sent. Connection will be closed");
         this->FramerBase::not_ok(error_code); // Request underlying transport to close.
     }
 
@@ -1873,6 +1919,7 @@ private:
      * @param debug_message Error description
      */
     void on_stream_error(uint32_t stream_id, ErrorCode error_code, const std::string& debug_message) noexcept {
+        LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Stream error detected - " << debug_message << " (code: " << static_cast<int>(error_code) << ")");
         // Send RST_STREAM for the specific stream
         this->send_rst_stream(stream_id, error_code, debug_message);
     }
@@ -1886,6 +1933,7 @@ private:
      * @param debug_message Error description
      */
     void on_connection_error(ErrorCode error_code, const std::string& debug_message) noexcept {
+        LOG_HTTP_ERROR("ServerHttp2Protocol: Connection error detected - " << debug_message << " (code: " << static_cast<int>(error_code) << ")");
         // Send GOAWAY and close the connection
         this->send_goaway_and_close(error_code, debug_message);
     }

@@ -1,15 +1,17 @@
 /**
  * @file qbm/http/2/http2.cpp
- * @brief HTTP/2 frame serialization implementation
+ * @brief HTTP/2 implementation instantiations for qb-io framework
  *
- * This file implements the serialization of HTTP/2 frames into byte streams
- * for transmission over the network. Each frame type has a specialized
- * template implementation that handles the specific payload structure and
- * encoding requirements according to RFC 7540.
+ * This file provides template instantiations for the HTTP/2 implementation
+ * built on top of the qb-io asynchronous framework. It includes:
  *
- * The implementations are template specializations of the qb::allocator::pipe
- * put method for each HTTP/2 frame type, enabling efficient serialization
- * directly into the output buffer.
+ * - Template instantiation for HTTP/2 server with default session
+ * - Explicit instantiation to reduce compilation time
+ * - Integration with the HTTP/2 server infrastructure
+ * - Support for the default session management
+ *
+ * This file ensures that common HTTP/2 server configurations are
+ * pre-compiled for faster linking and reduced code duplication.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)

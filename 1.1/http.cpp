@@ -1,16 +1,18 @@
 /**
- * @file qbm/http/http.cpp
- * @brief Main include file for the QB HTTP client and server module.
+ * @file qbm/http/1.1/http.cpp
+ * @brief HTTP/1.1 client implementation for qb-io framework
  *
- * This header aggregates all core components of the qb-http module, providing a comprehensive
- * suite for HTTP/1.1 communication. It defines foundational classes for requests (`qb::http::Request`),
- * responses (`qb::http::Response`), message parsing (`qb::http::Parser`), asynchronous client
- * operations (`qb::http::async`), protocol handlers (`qb::protocol::http_server`, `qb::protocol::http_client`),
- * and server-side routing (`qb::http::Router`).
+ * This file implements synchronous HTTP/1.1 client functions built on top of
+ * the qb-io asynchronous framework. It includes:
  *
- * The module is designed for high performance and integration with the qb-io asynchronous
- * I/O layer, leveraging libev for event handling. It supports features like content
- * compression, cookie management, multipart forms, and customizable routing.
+ * - Synchronous wrappers for all HTTP methods (GET, POST, PUT, DELETE, etc.)
+ * - Automatic request/response handling with timeout support
+ * - Content compression and decompression support
+ * - Integration with the asynchronous HTTP client infrastructure
+ * - Template instantiation for the HTTP server with default session
+ *
+ * The implementation provides a simple synchronous API while leveraging
+ * the powerful asynchronous capabilities of the underlying framework.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)

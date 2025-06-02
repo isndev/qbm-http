@@ -1,15 +1,26 @@
 /**
  * @file qbm/http/2/protocol/stream.h
- * @brief HTTP/2 stream state management and event definitions
+ * @brief HTTP/2 stream state management for qb-io framework
  *
- * This file provides stream state management structures and event definitions
- * for HTTP/2 protocol implementation. It defines stream states, flow control
- * windows, and various stream-related events as per RFC 9113.
+ * This file provides HTTP/2 stream state management and lifecycle handling
+ * built for the qb-io asynchronous framework. It includes:
+ *
+ * - Complete HTTP/2 stream state machine implementation
+ * - Flow control window management for both directions
+ * - Stream lifecycle tracking with proper state transitions
+ * - Header processing state management
+ * - Trailer handling and expectation tracking
+ * - Priority information storage and management
+ * - Client and server stream specializations
+ * - Event structures for stream and connection errors
+ *
+ * The stream management follows RFC 9113 specifications for proper
+ * HTTP/2 stream state transitions and flow control.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup HTTP2
+ * @ingroup Http2
  */
 
 #pragma once

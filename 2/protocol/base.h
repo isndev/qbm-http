@@ -1,9 +1,26 @@
 /**
- * @file base.h
+ * @file qbm/http/2/protocol/base.h
  * @brief HTTP/2 protocol base implementation for qb-io framework
- * @copyright Copyright (c) 2024 isndev. All rights reserved.
- * @license This software is licensed under the terms specified in the LICENSE file
- *          located in the root directory of the project.
+ *
+ * This file provides the foundational HTTP/2 protocol parsing and framing
+ * infrastructure built on top of the qb-io asynchronous framework. It includes:
+ *
+ * - Complete HTTP/2 frame parsing according to RFC 9113
+ * - Connection preface validation and handling
+ * - State machine-based frame processing
+ * - Frame header parsing and payload extraction
+ * - Protocol error detection and handling
+ * - Support for all HTTP/2 frame types
+ * - Flow control and settings management
+ * - Template-based design for client/server specialization
+ *
+ * The parser implements a robust state machine with three main states:
+ * preface validation, frame header parsing, and frame payload processing.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http2
  */
 
 #pragma once
