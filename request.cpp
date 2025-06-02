@@ -2,8 +2,8 @@
 
 // templates instantiation
 // objects
-template struct qb::http::TRequest<std::string>;
-template struct qb::http::TRequest<std::string_view>;
+template class qb::http::TRequest<std::string>;
+template class qb::http::TRequest<std::string_view>;
 
 namespace qb::allocator {
     /**

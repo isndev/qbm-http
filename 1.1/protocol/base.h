@@ -141,7 +141,7 @@ namespace qb::http {
          * messages, this callback does nothing.
          */
         static int
-        on_status(http_t *parser, const char *at, size_t length) {
+        on_status(http_t *parser, const char *, size_t) {
             if constexpr (MessageType::type == HTTP_RESPONSE) {
                 auto &msg = static_cast<Parser *>(parser->data)->msg;
                 msg.status() = static_cast<http_status>(parser->status_code);

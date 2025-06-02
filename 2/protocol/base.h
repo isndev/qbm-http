@@ -149,7 +149,7 @@ public:
      * @param is_from_client Whether setting came from client (affects validation)
      * @return Validation result
      */
-    static ValidationResult validate_setting(Http2SettingIdentifier id, uint32_t value, bool is_from_client) {
+    static ValidationResult validate_setting(Http2SettingIdentifier id, uint32_t value, bool /*is_from_client*/) {
         switch (id) {
             case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
                 // No RFC-mandated limits, decoder will cap internally

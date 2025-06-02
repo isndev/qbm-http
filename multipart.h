@@ -554,7 +554,7 @@ namespace qb::http {
             size_t l_index = this->index;
             size_t boundaryEnd = boundarySize - 1;
             size_t i;
-            char c, cl;
+            char c;
 
             for (i = 0; i < len; i++) {
                 c = buffer[i];

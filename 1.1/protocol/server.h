@@ -67,7 +67,7 @@ namespace qb::protocol::http {
          * The response is automatically sent back to the client.
          */
         void
-        onMessage(std::size_t size) noexcept final {
+        onMessage(std::size_t) noexcept final {
             auto &request_obj = this->_http_obj.get_parsed_message();
             // Parse cookies from the Cookie header
             request_obj.parse_cookie_header();
@@ -115,7 +115,7 @@ namespace qb::protocol::http {
          * The response is automatically sent back to the client.
          */
         void
-        onMessage(std::size_t size) noexcept final {
+        onMessage(std::size_t) noexcept final {
             auto &request_obj = this->_http_obj.get_parsed_message();
             // Parse cookies from the Cookie header
             request_obj.parse_cookie_header();

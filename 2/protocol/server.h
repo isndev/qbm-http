@@ -619,7 +619,7 @@ public:
      * @brief Handle PUSH_PROMISE frame (error case for server)
      * @param pp_event PUSH_PROMISE frame event
      */
-    void on(Http2FrameData<PushPromiseFrame> pp_event) noexcept {
+    void on(Http2FrameData<PushPromiseFrame> /*pp_event*/) noexcept {
         // Server should not receive PUSH_PROMISE from client.
         this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Server received PUSH_PROMISE frame from client");
     }
@@ -783,7 +783,6 @@ public:
                 return;
             }
             
-            int64_t old_stream_peer_window = stream.peer_window_size;
             stream.peer_window_size += window_increment;
             // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " peer window updated from " << old_stream_peer_window << " to " << stream.peer_window_size);
 
@@ -1311,8 +1310,8 @@ private:
                 return true; // Successfully buffered/marked pending, not a protocol error
             }
 
-            uint32_t max_can_send_on_stream = static_cast<uint32_t>(std::min((long long)this->FramerBase::get_peer_max_frame_size(), stream.peer_window_size));
-            uint32_t max_can_send_on_conn = static_cast<uint32_t>(std::min((long long)this->FramerBase::get_peer_max_frame_size(), _connection_send_window));
+            uint32_t max_can_send_on_stream = static_cast<uint32_t>(std::min(this->FramerBase::get_peer_max_frame_size(), static_cast<uint32_t>(stream.peer_window_size)));
+            uint32_t max_can_send_on_conn = static_cast<uint32_t>(std::min(this->FramerBase::get_peer_max_frame_size(), static_cast<uint32_t>(_connection_send_window)));
             uint32_t chunk_size = std::min({
                 static_cast<uint32_t>(body_size - stream.send_buffer_offset), 
                 max_can_send_on_stream, 
@@ -1974,7 +1973,7 @@ private:
         if (it == _server_streams.end()) {
             // Create new stream context
             // For server, is_client_initiated is true if stream_id is odd.
-            bool client_init = (stream_id % 2 != 0);
+            // bool client_init = (stream_id % 2 != 0);
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
             // new_stream.is_client_initiated = client_init; // is_client_initiated is not a member of Http2ServerStream
             // The count of active client streams is handled elsewhere, e.g. on HEADERS receipt.

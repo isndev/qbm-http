@@ -2,8 +2,8 @@
 
 // templates instantiation
 // objects
-template struct qb::http::TResponse<std::string>;
-template struct qb::http::TResponse<std::string_view>;
+template class qb::http::TResponse<std::string>;
+template class qb::http::TResponse<std::string_view>;
 
 namespace qb::allocator {
         /**
