@@ -25,20 +25,7 @@
 
 #pragma once
 
-#include <memory>
-#include <optional>
-#include <algorithm>
-#include <string_view>
-
-#include <qb/io/async/protocol.h>
-#include <qb/system/container/unordered_map.h>
-
-#include "../../request.h"
-#include "../../response.h"
 #include "./base.h" // For qb::protocol::http2::Http2Protocol and frame types
-#include "./hpack.h" // For qb::protocol::hpack interfaces
-#include "./stream.h" // For Http2ServerStream
-#include "../../logger.h" // Added logger include
 
 
 namespace qb::http::well_known {
@@ -532,64 +519,68 @@ public:
             return;
         }
 
-        //SETTINGS frame from client (not an ACK)
+        // SETTINGS frame from client (not an ACK) - validate and process each setting
         for (const auto& setting_entry : settings_event.payload.entries) {
             Http2SettingIdentifier id = setting_entry.identifier;
             uint32_t value = setting_entry.value;
-            // QB_LOG_TRACE_PA(this->getName(), "Server: Received setting ID " << static_cast<uint16_t>(id) << " with value " << value);
+            
+            // Validate setting using centralized helper
+            auto validation_result = SettingsHelper::validate_setting(id, value, true); // true = from client
+            if (!validation_result.is_valid) {
+                this->send_goaway_and_close(validation_result.error_code, validation_result.error_message);
+                return;
+            }
 
-            // bool known_setting = false; // Not strictly needed
+            // Apply validated setting
             switch(id) {
                 case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
                     // Client informs us the max table size its decoder supports for headers we send.
                     // Our encoder must respect this.
                     if (_hpack_encoder) _hpack_encoder->set_peer_max_dynamic_table_size(value);
                     break;
+                    
                 case Http2SettingIdentifier::SETTINGS_ENABLE_PUSH:
                     // Client tells us if it allows server push.
-                    if (value > 1) { // MUST be 0 or 1
-                        this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Invalid SETTINGS_ENABLE_PUSH value from client: " + std::to_string(value));
-                        return;
-                    }
                     _peer_allows_push = (value == 1);
                     break;
+                    
                 case Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS:
                     // Client tells us max concurrent streams it will allow *us* to PUSH.
                     _peer_max_concurrent_streams = value; 
                     break;
+                    
                 case Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE:
-                    if (value > MAX_WINDOW_SIZE_LIMIT) { // Cannot exceed 2^31-1
-                        this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR, "SETTINGS_INITIAL_WINDOW_SIZE too large from client: " + std::to_string(value)); // Changed to FLOW_CONTROL_ERROR
-                        return;
-                    }
                     this->update_initial_peer_window_size(value);
                     break;
+                    
                 case Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE:
-                    if (value < MIN_MAX_FRAME_SIZE || value > MAX_FRAME_SIZE_LIMIT) { // Must be between 16,384 and 2^24-1
-                        this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Invalid SETTINGS_MAX_FRAME_SIZE value from client: " + std::to_string(value));
-                        return;
-                    }
                     FramerBase::set_peer_max_frame_size(value);
                     break;
+                    
                 case Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE:
                     _peer_max_header_list_size = value;
                     break;
-                // SETTINGS_ENABLE_CONNECT_PROTOCOL (0x8) - if client sends this, we might need to validate/store if we support extended CONNECT.
+                    
+                case Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL:
+                    // Implementation specific - store for extended CONNECT support
+                    // For now, just accept the value (already validated)
+                    break;
+                    
                 default:
                     // Unknown setting identifiers MUST be ignored by recipient.
-                    // QB_LOG_TRACE_PA(this->getName(), "Server: Ignoring unknown setting ID " << static_cast<uint16_t>(id) << " from client.");
+                    LOG_HTTP_TRACE_PA(0, "Server: Ignoring unknown setting ID " 
+                                     << static_cast<uint16_t>(id) << " from client.");
                     break;
             }
         }
 
-        // Send SETTINGS ACK
+        // Send SETTINGS ACK using centralized frame sending
         Http2FrameData<SettingsFrame> ack_frame;
         ack_frame.header.type = static_cast<uint8_t>(FrameType::SETTINGS);
         ack_frame.header.flags = FLAG_ACK;
         ack_frame.header.set_stream_id(0);
         this->_io << ack_frame;
         LOG_HTTP_DEBUG_PA(0, "Server: Processed SETTINGS frame from client. Sending ACK.");
-        // QB_LOG_TRACE_PA(this->getName(), "Server: Sent SETTINGS ACK to client.");
     }
 
     /**
@@ -1008,8 +999,10 @@ public:
         Http2ServerStream promised_stream(promised_stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
         promised_stream.state = Http2StreamConcreteState::RESERVED_LOCAL;
         promised_stream.parent_stream_id = associated_stream_id; 
-        auto [_, emplaced_successfully] = _server_streams.emplace(promised_stream_id, std::move(promised_stream));
-        if (!emplaced_successfully) {
+        
+        // Emplace the stream
+        auto emp_res = _server_streams.emplace(promised_stream_id, std::move(promised_stream));
+        if (!emp_res.second) {
             // QB_LOG_ERROR_PA(this->getName(), "Server: Failed to emplace promised stream " << promised_stream_id << " context.");
              return PushPromiseFailureReason::INTERNAL_ERROR; 
         }

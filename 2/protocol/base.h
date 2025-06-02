@@ -44,9 +44,7 @@
 
 #include "../../request.h" // For qb::http::Request
 #include "../../response.h" // For qb::http::Response
-#include "./frames.h" // For ErrorCode, Http2SettingIdentifier, Frame types, FrameHeader etc.
-#include "../../logger.h" // For HTTP/2 logging
-#include "../../logger.h" // For HTTP/2 logging
+#include "./stream.h"
 
 /**
  * @brief HTTP/2 connection preface bytes as specified in RFC 9113
@@ -59,6 +57,556 @@ constexpr char HTTP2_CONNECTION_PREFACE_BYTES[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\
 constexpr std::string_view HTTP2_CONNECTION_PREFACE(HTTP2_CONNECTION_PREFACE_BYTES, sizeof(HTTP2_CONNECTION_PREFACE_BYTES) - 1);
 
 namespace qb::protocol::http2 {
+
+// --- Binary Utilities ---
+
+/**
+ * @brief Extract a 16-bit integer from big-endian byte array
+ * @param data Pointer to byte data
+ * @return Extracted 16-bit value
+ */
+[[nodiscard]] inline uint16_t extract_uint16_be(const uint8_t* data) noexcept {
+    return (static_cast<uint16_t>(data[0]) << 8) | 
+           static_cast<uint16_t>(data[1]);
+}
+
+/**
+ * @brief Extract a 32-bit integer from big-endian byte array
+ * @param data Pointer to byte data
+ * @return Extracted 32-bit value
+ */
+[[nodiscard]] inline uint32_t extract_uint32_be(const uint8_t* data) noexcept {
+    return (static_cast<uint32_t>(data[0]) << 24) |
+           (static_cast<uint32_t>(data[1]) << 16) |
+           (static_cast<uint32_t>(data[2]) << 8)  |
+           static_cast<uint32_t>(data[3]);
+}
+
+/**
+ * @brief Extract a 32-bit integer from big-endian byte array with reserved bit masking
+ * @param data Pointer to byte data
+ * @return Extracted 31-bit value (R bit masked)
+ */
+[[nodiscard]] inline uint32_t extract_uint31_be(const uint8_t* data) noexcept {
+    return (static_cast<uint32_t>(data[0] & 0x7F) << 24) | // Mask R bit
+           (static_cast<uint32_t>(data[1]) << 16) |
+           (static_cast<uint32_t>(data[2]) << 8)  |
+           static_cast<uint32_t>(data[3]);
+}
+
+/**
+ * @brief Encode a 16-bit integer to big-endian byte array
+ * @param value Value to encode
+ * @param data Output byte array (must be at least 2 bytes)
+ */
+inline void encode_uint16_be(uint16_t value, uint8_t* data) noexcept {
+    data[0] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    data[1] = static_cast<uint8_t>(value & 0xFF);
+}
+
+/**
+ * @brief Encode a 32-bit integer to big-endian byte array
+ * @param value Value to encode
+ * @param data Output byte array (must be at least 4 bytes)
+ */
+inline void encode_uint32_be(uint32_t value, uint8_t* data) noexcept {
+    data[0] = static_cast<uint8_t>((value >> 24) & 0xFF);
+    data[1] = static_cast<uint8_t>((value >> 16) & 0xFF);
+    data[2] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    data[3] = static_cast<uint8_t>(value & 0xFF);
+}
+
+/**
+ * @brief Helper class for HTTP/2 SETTINGS processing
+ * 
+ * Provides common validation and processing logic for SETTINGS frames
+ * to avoid duplication between client and server implementations.
+ */
+class SettingsHelper {
+public:
+    /**
+     * @brief Validation result for a setting
+     */
+    struct ValidationResult {
+        bool is_valid = true;
+        ErrorCode error_code = ErrorCode::NO_ERROR;
+        std::string error_message;
+        
+        ValidationResult() = default;
+        ValidationResult(ErrorCode code, std::string msg) 
+            : is_valid(false), error_code(code), error_message(std::move(msg)) {}
+            
+        static ValidationResult valid() { return ValidationResult{}; }
+        static ValidationResult invalid(ErrorCode code, std::string msg) {
+            return ValidationResult{code, std::move(msg)};
+        }
+    };
+
+    /**
+     * @brief Validate a single setting entry
+     * @param id Setting identifier
+     * @param value Setting value
+     * @param is_from_client Whether setting came from client (affects validation)
+     * @return Validation result
+     */
+    static ValidationResult validate_setting(Http2SettingIdentifier id, uint32_t value, bool is_from_client) {
+        switch (id) {
+            case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
+                // No RFC-mandated limits, decoder will cap internally
+                return ValidationResult::valid();
+                
+            case Http2SettingIdentifier::SETTINGS_ENABLE_PUSH:
+                if (value > 1) {
+                    return ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "SETTINGS_ENABLE_PUSH must be 0 or 1, got: " + std::to_string(value));
+                }
+                return ValidationResult::valid();
+                
+            case Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS:
+                // No specific limits in RFC
+                return ValidationResult::valid();
+                
+            case Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE:
+                if (value > MAX_WINDOW_SIZE_LIMIT) {
+                    return ValidationResult::invalid(ErrorCode::FLOW_CONTROL_ERROR, 
+                        "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum: " + std::to_string(value));
+                }
+                return ValidationResult::valid();
+                
+            case Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE:
+                if (value < MIN_MAX_FRAME_SIZE || value > MAX_FRAME_SIZE_LIMIT) {
+                    return ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "SETTINGS_MAX_FRAME_SIZE out of range [" + std::to_string(MIN_MAX_FRAME_SIZE) + 
+                        ", " + std::to_string(MAX_FRAME_SIZE_LIMIT) + "]: " + std::to_string(value));
+                }
+                return ValidationResult::valid();
+                
+            case Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE:
+                // No specific limits in RFC
+                return ValidationResult::valid();
+                
+            case Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL:
+                // Implementation specific - for now just accept any value
+                return ValidationResult::valid();
+                
+            default:
+                // Unknown settings MUST be ignored per RFC 9113
+                return ValidationResult::valid();
+        }
+    }
+
+    /**
+     * @brief Get default settings map for a given role
+     * @param is_server Whether this is for server (affects ENABLE_PUSH default)
+     * @return Default settings map
+     */
+    static qb::unordered_map<Http2SettingIdentifier, uint32_t> get_default_settings(bool is_server) {
+        qb::unordered_map<Http2SettingIdentifier, uint32_t> settings;
+        settings[Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE] = DEFAULT_SETTINGS_HEADER_TABLE_SIZE;
+        settings[Http2SettingIdentifier::SETTINGS_ENABLE_PUSH] = 
+            is_server ? DEFAULT_SETTINGS_ENABLE_PUSH_SERVER : DEFAULT_SETTINGS_ENABLE_PUSH_CLIENT;
+        settings[Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE] = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
+        settings[Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE] = DEFAULT_SETTINGS_MAX_FRAME_SIZE;
+        return settings;
+    }
+
+    /**
+     * @brief Calculate safe max frame size from settings
+     * @param settings Settings map
+     * @return Safe max frame size value
+     */
+    static uint32_t calculate_safe_max_frame_size(const qb::unordered_map<Http2SettingIdentifier, uint32_t>& settings) {
+        auto it = settings.find(Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE);
+        if (it != settings.end()) {
+            uint32_t value = it->second;
+            if (value >= MIN_MAX_FRAME_SIZE && value <= MAX_FRAME_SIZE_LIMIT) {
+                return value;
+            }
+        }
+        return DEFAULT_SETTINGS_MAX_FRAME_SIZE;
+    }
+};
+
+/**
+ * @brief Helper class for HTTP/2 header validation
+ * 
+ * Provides validation logic for HTTP/2 headers according to RFC 9113
+ */
+class HeaderValidator {
+public:
+    /**
+     * @brief Check if header name is forbidden in HTTP/2
+     * @param name Header name (lowercase)
+     * @return true if header is forbidden
+     */
+    static bool is_forbidden_header(std::string_view name) {
+        static const std::array<std::string_view, 8> forbidden = {
+            "connection", "upgrade", "http2-settings", "te",
+            "transfer-encoding", "proxy-connection", "keep-alive", "host"
+        };
+        
+        // Exception: "te: trailers" is allowed
+        if (name == "te") return false; // Let caller check the value
+        
+        return std::find(forbidden.begin(), forbidden.end(), name) != forbidden.end();
+    }
+
+    /**
+     * @brief Check if header name is a pseudo-header
+     * @param name Header name
+     * @return true if it's a pseudo-header (starts with ':')
+     */
+    static bool is_pseudo_header(std::string_view name) {
+        return !name.empty() && name[0] == ':';
+    }
+
+    /**
+     * @brief Validate pseudo-header order (must come before regular headers)
+     * @param headers List of header fields
+     * @return true if order is valid
+     */
+    static bool validate_pseudo_header_order(const std::vector<qb::protocol::hpack::HeaderField>& headers) {
+        bool regular_header_seen = false;
+        
+        for (const auto& header : headers) {
+            if (is_pseudo_header(header.name)) {
+                if (regular_header_seen) {
+                    return false; // Pseudo-header after regular header
+                }
+            } else {
+                regular_header_seen = true;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @brief Validate request pseudo-headers
+     * @param headers List of header fields
+     * @return Validation result with details
+     */
+    static SettingsHelper::ValidationResult validate_request_pseudo_headers(
+            const std::vector<qb::protocol::hpack::HeaderField>& headers) {
+        bool has_method = false, has_path = false, has_scheme = false;
+        
+        for (const auto& header : headers) {
+            if (!is_pseudo_header(header.name)) continue;
+            
+            if (header.name == ":method") {
+                if (has_method) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Duplicate :method pseudo-header");
+                }
+                has_method = true;
+                if (header.value.empty()) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Empty :method value");
+                }
+            } else if (header.name == ":path") {
+                if (has_path) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Duplicate :path pseudo-header");
+                }
+                has_path = true;
+                if (header.value.empty()) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Empty :path value");
+                }
+            } else if (header.name == ":scheme") {
+                if (has_scheme) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Duplicate :scheme pseudo-header");
+                }
+                has_scheme = true;
+                if (header.value.empty()) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Empty :scheme value");
+                }
+            } else if (header.name == ":authority") {
+                // Optional, but if present must not be empty
+                if (header.value.empty()) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Empty :authority value");
+                }
+            } else {
+                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                    "Unknown pseudo-header: " + std::string(header.name));
+            }
+        }
+        
+        if (!has_method || !has_path || !has_scheme) {
+            return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                "Missing required pseudo-headers (:method, :path, :scheme)");
+        }
+        
+        return SettingsHelper::ValidationResult::valid();
+    }
+
+    /**
+     * @brief Validate response pseudo-headers
+     * @param headers List of header fields
+     * @return Validation result with details
+     */
+    static SettingsHelper::ValidationResult validate_response_pseudo_headers(
+            const std::vector<qb::protocol::hpack::HeaderField>& headers) {
+        bool has_status = false;
+        
+        for (const auto& header : headers) {
+            if (!is_pseudo_header(header.name)) continue;
+            
+            if (header.name == ":status") {
+                if (has_status) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Duplicate :status pseudo-header");
+                }
+                has_status = true;
+                if (header.value.empty() || header.value.length() != 3) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                        "Invalid :status value: " + std::string(header.value));
+                }
+                // Basic status code validation
+                for (char c : header.value) {
+                    if (c < '0' || c > '9') {
+                        return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                            "Non-numeric :status value: " + std::string(header.value));
+                    }
+                }
+            } else {
+                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                    "Invalid pseudo-header in response: " + std::string(header.name));
+            }
+        }
+        
+        if (!has_status) {
+            return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
+                "Missing required :status pseudo-header");
+        }
+        
+        return SettingsHelper::ValidationResult::valid();
+    }
+};
+
+/**
+ * @brief Helper class for HTTP/2 error handling and reporting
+ * 
+ * Centralizes error handling logic and provides consistent error reporting
+ */
+class Http2ErrorHandler {
+public:
+    /**
+     * @brief Check if error should escalate from stream to connection level
+     * @param error_code The error code
+     * @param stream_id Stream ID (0 for connection-level errors)
+     * @return true if error should close the connection
+     */
+    static bool should_escalate_to_connection(ErrorCode error_code, uint32_t stream_id) {
+        // Connection-level errors
+        if (stream_id == 0) return true;
+        
+        switch (error_code) {
+            case ErrorCode::PROTOCOL_ERROR:
+            case ErrorCode::COMPRESSION_ERROR:
+            case ErrorCode::CONNECT_ERROR:
+            case ErrorCode::ENHANCE_YOUR_CALM:
+            case ErrorCode::INADEQUATE_SECURITY:
+            case ErrorCode::HTTP_1_1_REQUIRED:
+                return true;
+                
+            case ErrorCode::INTERNAL_ERROR:
+            case ErrorCode::FLOW_CONTROL_ERROR:
+            case ErrorCode::SETTINGS_TIMEOUT:
+            case ErrorCode::FRAME_SIZE_ERROR:
+                return true;
+                
+            case ErrorCode::STREAM_CLOSED:
+            case ErrorCode::REFUSED_STREAM:
+            case ErrorCode::CANCEL:
+                return false; // Stream-specific errors
+                
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * @brief Format error message for logging
+     * @param error_code Error code
+     * @param context Context information
+     * @param stream_id Stream ID (0 for connection errors)
+     * @return Formatted error message
+     */
+    static std::string format_error_message(ErrorCode error_code, 
+                                          const std::string& context, 
+                                          uint32_t stream_id = 0) {
+        std::string message;
+        
+        if (stream_id == 0) {
+            message = "Connection error: ";
+        } else {
+            message = "Stream " + std::to_string(stream_id) + " error: ";
+        }
+        
+        message += "ErrorCode=" + std::to_string(static_cast<uint32_t>(error_code));
+        
+        if (!context.empty()) {
+            message += " (" + context + ")";
+        }
+        
+        return message;
+    }
+
+    /**
+     * @brief Get human-readable error code name
+     * @param error_code Error code
+     * @return Error code name
+     */
+    static std::string_view get_error_name(ErrorCode error_code) {
+        switch (error_code) {
+            case ErrorCode::NO_ERROR:           return "NO_ERROR";
+            case ErrorCode::PROTOCOL_ERROR:     return "PROTOCOL_ERROR";
+            case ErrorCode::INTERNAL_ERROR:     return "INTERNAL_ERROR";
+            case ErrorCode::FLOW_CONTROL_ERROR: return "FLOW_CONTROL_ERROR";
+            case ErrorCode::SETTINGS_TIMEOUT:   return "SETTINGS_TIMEOUT";
+            case ErrorCode::STREAM_CLOSED:      return "STREAM_CLOSED";
+            case ErrorCode::FRAME_SIZE_ERROR:   return "FRAME_SIZE_ERROR";
+            case ErrorCode::REFUSED_STREAM:     return "REFUSED_STREAM";
+            case ErrorCode::CANCEL:             return "CANCEL";
+            case ErrorCode::COMPRESSION_ERROR:  return "COMPRESSION_ERROR";
+            case ErrorCode::CONNECT_ERROR:      return "CONNECT_ERROR";
+            case ErrorCode::ENHANCE_YOUR_CALM:  return "ENHANCE_YOUR_CALM";
+            case ErrorCode::INADEQUATE_SECURITY: return "INADEQUATE_SECURITY";
+            case ErrorCode::HTTP_1_1_REQUIRED:  return "HTTP_1_1_REQUIRED";
+            default:                            return "UNKNOWN_ERROR";
+        }
+    }
+};
+
+/**
+ * @brief Helper class for HTTP/2 stream ID validation and management
+ * 
+ * Centralizes stream ID validation logic to reduce duplication
+ * between client and server implementations.
+ */
+class StreamIdValidator {
+public:
+    /**
+     * @brief Check if stream ID is valid for client-initiated streams
+     * @param stream_id Stream ID to validate
+     * @return true if valid for client use
+     */
+    static bool is_valid_client_stream_id(uint32_t stream_id) {
+        return stream_id != 0 && (stream_id % 2 == 1); // Odd numbers only
+    }
+
+    /**
+     * @brief Check if stream ID is valid for server-initiated streams  
+     * @param stream_id Stream ID to validate
+     * @return true if valid for server use
+     */
+    static bool is_valid_server_stream_id(uint32_t stream_id) {
+        return stream_id != 0 && (stream_id % 2 == 0); // Even numbers only
+    }
+
+    /**
+     * @brief Check if stream ID is valid for frames that must use stream 0
+     * @param stream_id Stream ID to validate
+     * @return true if stream ID is 0
+     */
+    static bool is_connection_stream_id(uint32_t stream_id) {
+        return stream_id == 0;
+    }
+
+    /**
+     * @brief Validate stream ID for a specific frame type
+     * @param frame_type Frame type
+     * @param stream_id Stream ID
+     * @param is_server Whether this is server-side validation
+     * @return Validation result with error details if invalid
+     */
+    static SettingsHelper::ValidationResult validate_stream_id_for_frame(
+        FrameType frame_type, 
+        uint32_t stream_id, 
+        bool is_server) {
+        
+        switch (frame_type) {
+            case FrameType::SETTINGS:
+            case FrameType::PING:
+            case FrameType::GOAWAY:
+                if (!is_connection_stream_id(stream_id)) {
+                    return SettingsHelper::ValidationResult::invalid(
+                        ErrorCode::PROTOCOL_ERROR,
+                        std::string(get_frame_type_name(frame_type)) + " frame must use stream ID 0"
+                    );
+                }
+                break;
+
+            case FrameType::DATA:
+            case FrameType::HEADERS:
+            case FrameType::PRIORITY:
+            case FrameType::RST_STREAM:
+            case FrameType::PUSH_PROMISE:
+            case FrameType::CONTINUATION:
+                if (is_connection_stream_id(stream_id)) {
+                    return SettingsHelper::ValidationResult::invalid(
+                        ErrorCode::PROTOCOL_ERROR,
+                        std::string(get_frame_type_name(frame_type)) + " frame cannot use stream ID 0"
+                    );
+                }
+                
+                // Additional validation for peer-initiated streams
+                if (frame_type == FrameType::HEADERS || frame_type == FrameType::PUSH_PROMISE) {
+                    if (is_server && !is_valid_client_stream_id(stream_id)) {
+                        return SettingsHelper::ValidationResult::invalid(
+                            ErrorCode::PROTOCOL_ERROR,
+                            "Server received " + std::string(get_frame_type_name(frame_type)) + 
+                            " on invalid client stream ID: " + std::to_string(stream_id)
+                        );
+                    }
+                    if (!is_server && frame_type == FrameType::PUSH_PROMISE && 
+                        !is_valid_server_stream_id(stream_id)) {
+                        return SettingsHelper::ValidationResult::invalid(
+                            ErrorCode::PROTOCOL_ERROR,
+                            "Client received PUSH_PROMISE with invalid server stream ID: " + 
+                            std::to_string(stream_id)
+                        );
+                    }
+                }
+                break;
+
+            case FrameType::WINDOW_UPDATE:
+                // WINDOW_UPDATE can use stream 0 (connection) or specific stream
+                break;
+
+            default:
+                // Unknown frame types are ignored per RFC 9113
+                break;
+        }
+        
+        return SettingsHelper::ValidationResult::valid();
+    }
+
+private:
+    /**
+     * @brief Get human-readable frame type name
+     * @param frame_type Frame type
+     * @return Frame type name
+     */
+    static std::string_view get_frame_type_name(FrameType frame_type) {
+        switch (frame_type) {
+            case FrameType::DATA:          return "DATA";
+            case FrameType::HEADERS:       return "HEADERS";
+            case FrameType::PRIORITY:      return "PRIORITY";
+            case FrameType::RST_STREAM:    return "RST_STREAM";
+            case FrameType::SETTINGS:      return "SETTINGS";
+            case FrameType::PUSH_PROMISE:  return "PUSH_PROMISE";
+            case FrameType::PING:          return "PING";
+            case FrameType::GOAWAY:        return "GOAWAY";
+            case FrameType::WINDOW_UPDATE: return "WINDOW_UPDATE";
+            case FrameType::CONTINUATION:  return "CONTINUATION";
+            default:                       return "UNKNOWN";
+        }
+    }
+};
 
 // --- HTTP/2 Frame Types ---
 // enum class FrameType : uint8_t { ... };
@@ -86,23 +634,7 @@ namespace qb::protocol::http2 {
 // struct WindowUpdateFrame { ... };
 // struct ContinuationFrame { ... };
 
-/**
- * @brief HTTP/2 Protocol parser and framer base class
- * @tparam IO_Handler The I/O handler type from qb-io framework
- * @tparam SideProtocol The derived protocol class (client or server)
- * 
- * This class implements the core HTTP/2 protocol parsing and framing logic
- * according to RFC 9113. It handles:
- * - Connection preface validation
- * - Frame header parsing
- * - Frame payload extraction
- * - Basic protocol error detection
- * 
- * The class follows a state machine pattern with three main states:
- * - EXPECTING_PREFACE: Initial state, waiting for HTTP/2 connection preface
- * - EXPECTING_FRAME_HEADER: Waiting for a 9-byte frame header
- * - EXPECTING_FRAME_PAYLOAD: Waiting for frame payload of known size
- */
+// --- HTTP/2 Protocol parser and framer base class
 template<typename IO_Handler, typename SideProtocol>
 class Http2Protocol : public qb::io::async::AProtocol<IO_Handler> {
 public:
@@ -363,6 +895,94 @@ protected:
     }
 
     /**
+     * @brief Helper to report framing error and set not_ok state
+     * @param error_code The error code
+     * @param message Error message
+     * @param stream_id Stream ID context
+     * @return Always returns false for convenience in error paths
+     */
+    [[nodiscard]] bool report_frame_error(ErrorCode error_code, 
+                                         const std::string& message, 
+                                         uint32_t stream_id = 0) noexcept {
+        this->not_ok(error_code);
+        static_cast<SideProtocol*>(this)->handle_framer_detected_error(error_code, message, stream_id);
+        return false;
+    }
+
+    /**
+     * @brief Helper to validate frame payload size
+     * @param expected_size Expected payload size
+     * @param actual_size Actual payload size
+     * @param frame_type_name Frame type name for error message
+     * @param stream_id Stream ID context
+     * @return false if validation fails, true otherwise
+     */
+    [[nodiscard]] bool validate_payload_size(std::size_t expected_size, 
+                                            std::size_t actual_size, 
+                                            const std::string& frame_type_name,
+                                            uint32_t stream_id) noexcept {
+        if (expected_size != actual_size) {
+            return report_frame_error(ErrorCode::FRAME_SIZE_ERROR, 
+                                    frame_type_name + " frame payload incorrect size.", 
+                                    stream_id);
+        }
+        return true;
+    }
+
+    /**
+     * @brief Helper to validate minimum payload size
+     * @param min_size Minimum expected payload size
+     * @param actual_size Actual payload size
+     * @param frame_type_name Frame type name for error message
+     * @param stream_id Stream ID context
+     * @return false if validation fails, true otherwise
+     */
+    [[nodiscard]] bool validate_min_payload_size(std::size_t min_size, 
+                                                std::size_t actual_size, 
+                                                const std::string& frame_type_name,
+                                                uint32_t stream_id) noexcept {
+        if (actual_size < min_size) {
+            return report_frame_error(ErrorCode::FRAME_SIZE_ERROR, 
+                                    frame_type_name + " frame payload too short.", 
+                                    stream_id);
+        }
+        return true;
+    }
+
+    /**
+     * @brief Helper to validate padded frame structure
+     * @param p_data Pointer to payload data
+     * @param p_len Payload length
+     * @param frame_type_name Frame type name for error message
+     * @param stream_id Stream ID context
+     * @return Pair<pad_length, success>
+     */
+    [[nodiscard]] std::pair<uint8_t, bool> validate_padded_frame(const uint8_t*& p_data, 
+                                                               std::size_t& p_len, 
+                                                               const std::string& frame_type_name,
+                                                               uint32_t stream_id) noexcept {
+        if (p_len == 0) {
+            (void)report_frame_error(ErrorCode::FRAME_SIZE_ERROR, 
+                             "Padded " + frame_type_name + " frame too short for Pad Length.", 
+                             stream_id);
+            return {0, false};
+        }
+        
+        uint8_t pad_length = p_data[0];
+        p_data++;
+        p_len--;
+        
+        if (pad_length > p_len) {
+            (void)report_frame_error(ErrorCode::PROTOCOL_ERROR, 
+                             "Pad Length in " + frame_type_name + " frame exceeds payload size.", 
+                             stream_id);
+            return {0, false};
+        }
+        
+        return {pad_length, true};
+    }
+
+    /**
      * @brief Send a frame to the peer
      * @tparam FramePayloadType The frame payload type
      * @param header Frame header
@@ -583,317 +1203,258 @@ private:
     [[nodiscard]] bool handle_payload_frame_dispatch(std::string_view payload_view) noexcept {
         if (!this->ok()) return false;
 
-        const uint8_t* payload_buffer_data = reinterpret_cast<const uint8_t*>(payload_view.data());
-        std::size_t payload_buffer_size = payload_view.size();
+        const uint8_t* payload_data = reinterpret_cast<const uint8_t*>(payload_view.data());
+        std::size_t payload_size = payload_view.size();
 
         switch (_current_frame_header.get_type()) {
-            case FrameType::DATA: {
-                Http2FrameData<DataFrame> data_f;
-                data_f.header = _current_frame_header;
-                const uint8_t* p_data = payload_buffer_data;
-                std::size_t p_len = payload_buffer_size;
-                uint8_t pad_length = 0;
-
-                if (_current_frame_header.flags & FLAG_PADDED) {
-                    if (p_len == 0) {
-                        this->not_ok(ErrorCode::FRAME_SIZE_ERROR);
-                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                            ErrorCode::FRAME_SIZE_ERROR, "Padded DATA frame too short for Pad Length.", 
-                            _current_frame_header.get_stream_id());
-                        return false;
-                    }
-                    pad_length = p_data[0];
-                    p_data++;
-                    p_len--;
-
-                    if (pad_length > p_len) {
-                        this->not_ok(ErrorCode::PROTOCOL_ERROR);
-                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                            ErrorCode::PROTOCOL_ERROR, "Pad Length in DATA frame exceeds payload size.", 
-                            _current_frame_header.get_stream_id());
-                        return false;
-                    }
-                    data_f.payload.data_payload.assign(p_data, p_data + (p_len - pad_length));
-                } else {
-                    data_f.payload.data_payload.assign(payload_buffer_data, 
-                                                     payload_buffer_data + payload_buffer_size);
-                }
-                static_cast<SideProtocol*>(this)->on(std::move(data_f));
-                break;
-            }
-            
-            case FrameType::HEADERS: {
-                Http2FrameData<HeadersFrame> headers_f;
-                headers_f.header = _current_frame_header;
-                const uint8_t* p_data = payload_buffer_data;
-                std::size_t p_len = payload_buffer_size;
-                uint8_t pad_length = 0;
-
-                if (_current_frame_header.flags & FLAG_PADDED) {
-                    if (p_len == 0) { 
-                        this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                            ErrorCode::FRAME_SIZE_ERROR, "Padded HEADERS frame too short for Pad Length.", 
-                            _current_frame_header.get_stream_id()); 
-                        return false; 
-                    }
-                    pad_length = p_data[0];
-                    p_data++; 
-                    p_len--;
-                    if (pad_length > p_len) { 
-                        this->not_ok(ErrorCode::PROTOCOL_ERROR); 
-                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                            ErrorCode::PROTOCOL_ERROR, "Pad Length in HEADERS frame exceeds payload size.", 
-                            _current_frame_header.get_stream_id()); 
-                        return false; 
-                    }
-                }
-
-                if (_current_frame_header.flags & FLAG_PRIORITY) {
-                    if (p_len < (5 + pad_length)) { 
-                        this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                            ErrorCode::FRAME_SIZE_ERROR, "HEADERS with PRIORITY flag too short for priority fields.", 
-                            _current_frame_header.get_stream_id()); 
-                        return false; 
-                    }
-                    Http2PriorityData pri_data;
-                    uint32_t stream_dep_raw = (static_cast<uint32_t>(p_data[0]) << 24) |
-                                            (static_cast<uint32_t>(p_data[1]) << 16) |
-                                            (static_cast<uint32_t>(p_data[2]) << 8)  |
-                                            (static_cast<uint32_t>(p_data[3]));
-                    pri_data.exclusive_dependency = (stream_dep_raw >> 31) & 0x1;
-                    pri_data.stream_dependency = stream_dep_raw & 0x7FFFFFFF;
-                    pri_data.weight = p_data[4];
-                    headers_f.payload.priority_info = pri_data;
-                    p_data += 5; 
-                    p_len -= 5;
-                }
-                
-                std::size_t header_block_size = p_len - pad_length;
-                headers_f.payload.header_block_fragment.assign(p_data, p_data + header_block_size);
-                static_cast<SideProtocol*>(this)->on(std::move(headers_f));
-                break;
-            }
-            
-            case FrameType::PRIORITY: {
-                if (payload_buffer_size != 5) { 
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "PRIORITY frame payload incorrect size.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false; 
-                }
-                Http2FrameData<PriorityFrame> priority_f;
-                priority_f.header = _current_frame_header;
-                uint32_t stream_dep_raw = (static_cast<uint32_t>(payload_buffer_data[0]) << 24) |
-                                        (static_cast<uint32_t>(payload_buffer_data[1]) << 16) |
-                                        (static_cast<uint32_t>(payload_buffer_data[2]) << 8)  |
-                                        (static_cast<uint32_t>(payload_buffer_data[3]));
-                priority_f.payload.priority_data.exclusive_dependency = (stream_dep_raw >> 31) & 0x1;
-                priority_f.payload.priority_data.stream_dependency = stream_dep_raw & 0x7FFFFFFF;
-                priority_f.payload.priority_data.weight = payload_buffer_data[4];
-                static_cast<SideProtocol*>(this)->on(std::move(priority_f));
-                break;
-            }
-            
-            case FrameType::RST_STREAM: {
-                if (payload_buffer_size != 4) { 
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "RST_STREAM frame payload incorrect size.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false; 
-                }
-                Http2FrameData<RstStreamFrame> rst_f;
-                rst_f.header = _current_frame_header;
-                rst_f.payload.error_code = static_cast<ErrorCode>(
-                    (static_cast<uint32_t>(payload_buffer_data[0]) << 24) |
-                    (static_cast<uint32_t>(payload_buffer_data[1]) << 16) |
-                    (static_cast<uint32_t>(payload_buffer_data[2]) << 8)  |
-                    (static_cast<uint32_t>(payload_buffer_data[3]))
-                );
-                static_cast<SideProtocol*>(this)->on(std::move(rst_f));
-                break;
-            }
-            
-            case FrameType::SETTINGS: {
-                if (_current_frame_header.flags & FLAG_ACK) {
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "SETTINGS ACK frame with payload.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false;
-                }
-                if (payload_buffer_size % 6 != 0) { 
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "SETTINGS frame payload size not a multiple of 6.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false; 
-                }
-                Http2FrameData<SettingsFrame> settings_f;
-                settings_f.header = _current_frame_header;
-                settings_f.payload.entries.reserve(payload_buffer_size / 6);
-                
-                for (size_t i = 0; i < payload_buffer_size; i += 6) {
-                    SettingsFrameEntry entry;
-                    entry.identifier = static_cast<Http2SettingIdentifier>(
-                        (static_cast<uint16_t>(payload_buffer_data[i]) << 8) | payload_buffer_data[i+1]
-                    );
-                    entry.value = (static_cast<uint32_t>(payload_buffer_data[i+2]) << 24) |
-                                (static_cast<uint32_t>(payload_buffer_data[i+3]) << 16) |
-                                (static_cast<uint32_t>(payload_buffer_data[i+4]) << 8)  |
-                                (static_cast<uint32_t>(payload_buffer_data[i+5]));
-                    settings_f.payload.entries.push_back(entry);
-                }
-                static_cast<SideProtocol*>(this)->on(std::move(settings_f));
-                break;
-            }
-            
-            case FrameType::PUSH_PROMISE: {
-                Http2FrameData<PushPromiseFrame> pp_f;
-                pp_f.header = _current_frame_header;
-                const uint8_t* p_data = payload_buffer_data;
-                std::size_t p_len = payload_buffer_size;
-                uint8_t pad_length = 0;
-
-                if (_current_frame_header.flags & FLAG_PADDED) {
-                    if (p_len == 0) { 
-                        this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                            ErrorCode::FRAME_SIZE_ERROR, "Padded PUSH_PROMISE frame too short for Pad Length.", 
-                            _current_frame_header.get_stream_id()); 
-                        return false; 
-                    }
-                    pad_length = p_data[0];
-                    p_data++; 
-                    p_len--;
-                    if (pad_length > p_len) { 
-                        this->not_ok(ErrorCode::PROTOCOL_ERROR); 
-                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                            ErrorCode::PROTOCOL_ERROR, "Pad Length in PUSH_PROMISE frame exceeds payload size.", 
-                            _current_frame_header.get_stream_id()); 
-                        return false; 
-                    }
-                }
-                if (p_len < (4 + pad_length)) { 
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "PUSH_PROMISE frame too short for Promised Stream ID.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false; 
-                }
-                
-                pp_f.payload.promised_stream_id = (static_cast<uint32_t>(p_data[0] & 0x7F) << 24) | // Mask R bit
-                                                (static_cast<uint32_t>(p_data[1]) << 16) |
-                                                (static_cast<uint32_t>(p_data[2]) << 8)  |
-                                                (static_cast<uint32_t>(p_data[3]));
-                p_data += 4; 
-                p_len -= 4;
-                pp_f.payload.header_block_fragment.assign(p_data, p_data + (p_len - pad_length));
-                static_cast<SideProtocol*>(this)->on(std::move(pp_f));
-                break;
-            }
-            
-            case FrameType::PING: {
-                if (payload_buffer_size != 8) { 
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "PING frame payload incorrect size.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false; 
-                }
-                Http2FrameData<PingFrame> ping_f;
-                ping_f.header = _current_frame_header;
-                std::copy(payload_buffer_data, payload_buffer_data + payload_buffer_size, 
-                         ping_f.payload.opaque_data.begin());
-                static_cast<SideProtocol*>(this)->on(std::move(ping_f));
-                break;
-            }
-            
-            case FrameType::GOAWAY: {
-                if (payload_buffer_size < 8) { 
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "GOAWAY frame payload too short.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false; 
-                }
-                
-                Http2FrameData<GoAwayFrame> goaway_f;
-                goaway_f.header = _current_frame_header;
-                goaway_f.payload.last_stream_id = (static_cast<uint32_t>(payload_buffer_data[0] & 0x7F) << 24) | // Mask R bit
-                                                 (static_cast<uint32_t>(payload_buffer_data[1]) << 16) |
-                                                 (static_cast<uint32_t>(payload_buffer_data[2]) << 8)  |
-                                                 (static_cast<uint32_t>(payload_buffer_data[3]));
-                goaway_f.payload.error_code = static_cast<ErrorCode>(
-                    (static_cast<uint32_t>(payload_buffer_data[4]) << 24) |
-                    (static_cast<uint32_t>(payload_buffer_data[5]) << 16) |
-                    (static_cast<uint32_t>(payload_buffer_data[6]) << 8)  |
-                    (static_cast<uint32_t>(payload_buffer_data[7]))
-                );
-                if (payload_buffer_size > 8) {
-                    goaway_f.payload.additional_debug_data.assign(payload_buffer_data + 8, 
-                                                                payload_buffer_data + payload_buffer_size);
-                }
-                
-                static_cast<SideProtocol*>(this)->on(std::move(goaway_f));
-                break;
-            }
-            
-            case FrameType::WINDOW_UPDATE: {
-                if (payload_buffer_size != 4) { 
-                    this->not_ok(ErrorCode::FRAME_SIZE_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FRAME_SIZE_ERROR, "WINDOW_UPDATE frame payload incorrect size.", 
-                        _current_frame_header.get_stream_id()); 
-                    return false; 
-                }
-                
-                Http2FrameData<WindowUpdateFrame> wu_f;
-                wu_f.header = _current_frame_header;
-                wu_f.payload.window_size_increment = (static_cast<uint32_t>(payload_buffer_data[0] & 0x7F) << 24) | // Mask R bit
-                                                    (static_cast<uint32_t>(payload_buffer_data[1]) << 16) |
-                                                    (static_cast<uint32_t>(payload_buffer_data[2]) << 8)  |
-                                                    (static_cast<uint32_t>(payload_buffer_data[3]));
-                
-                // Validate window size increment
-                if (wu_f.payload.window_size_increment == 0) {
-                    this->not_ok(ErrorCode::PROTOCOL_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with zero increment", 
-                        _current_frame_header.get_stream_id()); 
-                    return false;
-                }
-                
-                // Check for suspiciously large values
-                if (wu_f.payload.window_size_increment > 0x7FFFFFFF) {
-                    this->not_ok(ErrorCode::FLOW_CONTROL_ERROR); 
-                    static_cast<SideProtocol*>(this)->handle_framer_detected_error(
-                        ErrorCode::FLOW_CONTROL_ERROR, "WINDOW_UPDATE increment exceeds maximum", 
-                        _current_frame_header.get_stream_id()); 
-                    return false;
-                }
-                
-                static_cast<SideProtocol*>(this)->on(std::move(wu_f));
-                break;
-            }
-            
-            case FrameType::CONTINUATION: {
-                Http2FrameData<ContinuationFrame> cont_f;
-                cont_f.header = _current_frame_header;
-                cont_f.payload.header_block_fragment.assign(payload_buffer_data, 
-                                                           payload_buffer_data + payload_buffer_size);
-                static_cast<SideProtocol*>(this)->on(std::move(cont_f));
-                break;
-            }
-            
+            case FrameType::DATA:
+                return handle_data_frame_payload(payload_data, payload_size);
+            case FrameType::HEADERS:
+                return handle_headers_frame_payload(payload_data, payload_size);
+            case FrameType::PRIORITY:
+                return handle_priority_frame_payload(payload_data, payload_size);
+            case FrameType::RST_STREAM:
+                return handle_rst_stream_frame_payload(payload_data, payload_size);
+            case FrameType::SETTINGS:
+                return handle_settings_frame_payload(payload_data, payload_size);
+            case FrameType::PUSH_PROMISE:
+                return handle_push_promise_frame_payload(payload_data, payload_size);
+            case FrameType::PING:
+                return handle_ping_frame_payload(payload_data, payload_size);
+            case FrameType::GOAWAY:
+                return handle_goaway_frame_payload(payload_data, payload_size);
+            case FrameType::WINDOW_UPDATE:
+                return handle_window_update_frame_payload(payload_data, payload_size);
+            case FrameType::CONTINUATION:
+                return handle_continuation_frame_payload(payload_data, payload_size);
             default:
                 // Unknown frame type - ignore per RFC 9113
-                break;
+                return true;
         }
-        return this->ok();
+    }
+
+    /**
+     * @brief Handle DATA frame payload parsing
+     */
+    [[nodiscard]] bool handle_data_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        Http2FrameData<DataFrame> data_f;
+        data_f.header = _current_frame_header;
+        const uint8_t* p_data = payload_data;
+        std::size_t p_len = payload_size;
+
+        if (_current_frame_header.flags & FLAG_PADDED) {
+            auto [pad_length, success] = validate_padded_frame(p_data, p_len, "DATA", _current_frame_header.get_stream_id());
+            if (!success) return false;
+            
+            data_f.payload.data_payload.assign(p_data, p_data + (p_len - pad_length));
+        } else {
+            data_f.payload.data_payload.assign(payload_data, payload_data + payload_size);
+        }
+        
+        static_cast<SideProtocol*>(this)->on(std::move(data_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle HEADERS frame payload parsing
+     */
+    [[nodiscard]] bool handle_headers_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        Http2FrameData<HeadersFrame> headers_f;
+        headers_f.header = _current_frame_header;
+        const uint8_t* p_data = payload_data;
+        std::size_t p_len = payload_size;
+        uint8_t pad_length = 0;
+
+        if (_current_frame_header.flags & FLAG_PADDED) {
+            auto [pad_len, success] = validate_padded_frame(p_data, p_len, "HEADERS", _current_frame_header.get_stream_id());
+            if (!success) return false;
+            pad_length = pad_len;
+        }
+
+        if (_current_frame_header.flags & FLAG_PRIORITY) {
+            if (!validate_min_payload_size(5 + pad_length, payload_size, "HEADERS with PRIORITY flag", _current_frame_header.get_stream_id())) {
+                return false;
+            }
+            
+            Http2PriorityData pri_data;
+            uint32_t stream_dep_raw = extract_uint32_be(p_data);
+            pri_data.exclusive_dependency = (stream_dep_raw >> 31) & 0x1;
+            pri_data.stream_dependency = stream_dep_raw & 0x7FFFFFFF;
+            pri_data.weight = p_data[4];
+            headers_f.payload.priority_info = pri_data;
+            p_data += 5;
+            p_len -= 5;
+        }
+        
+        std::size_t header_block_size = p_len - pad_length;
+        headers_f.payload.header_block_fragment.assign(p_data, p_data + header_block_size);
+        static_cast<SideProtocol*>(this)->on(std::move(headers_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle PRIORITY frame payload parsing
+     */
+    [[nodiscard]] bool handle_priority_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        if (!validate_payload_size(5, payload_size, "PRIORITY", _current_frame_header.get_stream_id())) {
+            return false;
+        }
+        
+        Http2FrameData<PriorityFrame> priority_f;
+        priority_f.header = _current_frame_header;
+        uint32_t stream_dep_raw = extract_uint32_be(payload_data);
+        priority_f.payload.priority_data.exclusive_dependency = (stream_dep_raw >> 31) & 0x1;
+        priority_f.payload.priority_data.stream_dependency = stream_dep_raw & 0x7FFFFFFF;
+        priority_f.payload.priority_data.weight = payload_data[4];
+        
+        static_cast<SideProtocol*>(this)->on(std::move(priority_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle RST_STREAM frame payload parsing
+     */
+    [[nodiscard]] bool handle_rst_stream_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        if (!validate_payload_size(4, payload_size, "RST_STREAM", _current_frame_header.get_stream_id())) {
+            return false;
+        }
+        
+        Http2FrameData<RstStreamFrame> rst_f;
+        rst_f.header = _current_frame_header;
+        rst_f.payload.error_code = static_cast<ErrorCode>(extract_uint32_be(payload_data));
+        
+        static_cast<SideProtocol*>(this)->on(std::move(rst_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle SETTINGS frame payload parsing
+     */
+    [[nodiscard]] bool handle_settings_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        if (_current_frame_header.flags & FLAG_ACK) {
+            return report_frame_error(ErrorCode::FRAME_SIZE_ERROR, "SETTINGS ACK frame with payload.", _current_frame_header.get_stream_id());
+        }
+        
+        if (payload_size % 6 != 0) {
+            return report_frame_error(ErrorCode::FRAME_SIZE_ERROR, "SETTINGS frame payload size not a multiple of 6.", _current_frame_header.get_stream_id());
+        }
+        
+        Http2FrameData<SettingsFrame> settings_f;
+        settings_f.header = _current_frame_header;
+        settings_f.payload.entries.reserve(payload_size / 6);
+        
+        for (size_t i = 0; i < payload_size; i += 6) {
+            SettingsFrameEntry entry;
+            entry.identifier = static_cast<Http2SettingIdentifier>(extract_uint16_be(payload_data + i));
+            entry.value = extract_uint32_be(payload_data + i + 2);
+            settings_f.payload.entries.push_back(entry);
+        }
+        
+        static_cast<SideProtocol*>(this)->on(std::move(settings_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle PUSH_PROMISE frame payload parsing
+     */
+    [[nodiscard]] bool handle_push_promise_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        Http2FrameData<PushPromiseFrame> pp_f;
+        pp_f.header = _current_frame_header;
+        const uint8_t* p_data = payload_data;
+        std::size_t p_len = payload_size;
+        uint8_t pad_length = 0;
+
+        if (_current_frame_header.flags & FLAG_PADDED) {
+            auto [pad_len, success] = validate_padded_frame(p_data, p_len, "PUSH_PROMISE", _current_frame_header.get_stream_id());
+            if (!success) return false;
+            pad_length = pad_len;
+        }
+        
+        if (!validate_min_payload_size(4 + pad_length, payload_size, "PUSH_PROMISE", _current_frame_header.get_stream_id())) {
+            return false;
+        }
+        
+        pp_f.payload.promised_stream_id = extract_uint31_be(p_data); // Masks R bit automatically
+        p_data += 4;
+        p_len -= 4;
+        pp_f.payload.header_block_fragment.assign(p_data, p_data + (p_len - pad_length));
+        
+        static_cast<SideProtocol*>(this)->on(std::move(pp_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle PING frame payload parsing
+     */
+    [[nodiscard]] bool handle_ping_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        if (!validate_payload_size(8, payload_size, "PING", _current_frame_header.get_stream_id())) {
+            return false;
+        }
+        
+        Http2FrameData<PingFrame> ping_f;
+        ping_f.header = _current_frame_header;
+        std::copy(payload_data, payload_data + payload_size, ping_f.payload.opaque_data.begin());
+        
+        static_cast<SideProtocol*>(this)->on(std::move(ping_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle GOAWAY frame payload parsing
+     */
+    [[nodiscard]] bool handle_goaway_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        if (!validate_min_payload_size(8, payload_size, "GOAWAY", _current_frame_header.get_stream_id())) {
+            return false;
+        }
+        
+        Http2FrameData<GoAwayFrame> goaway_f;
+        goaway_f.header = _current_frame_header;
+        goaway_f.payload.last_stream_id = extract_uint31_be(payload_data); // Masks R bit automatically
+        goaway_f.payload.error_code = static_cast<ErrorCode>(extract_uint32_be(payload_data + 4));
+        
+        if (payload_size > 8) {
+            goaway_f.payload.additional_debug_data.assign(payload_data + 8, payload_data + payload_size);
+        }
+        
+        static_cast<SideProtocol*>(this)->on(std::move(goaway_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle WINDOW_UPDATE frame payload parsing
+     */
+    [[nodiscard]] bool handle_window_update_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        if (!validate_payload_size(4, payload_size, "WINDOW_UPDATE", _current_frame_header.get_stream_id())) {
+            return false;
+        }
+        
+        Http2FrameData<WindowUpdateFrame> wu_f;
+        wu_f.header = _current_frame_header;
+        wu_f.payload.window_size_increment = extract_uint31_be(payload_data); // Masks R bit automatically
+        
+        // Validate window size increment
+        if (wu_f.payload.window_size_increment == 0) {
+            return report_frame_error(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with zero increment", _current_frame_header.get_stream_id());
+        }
+        
+        if (wu_f.payload.window_size_increment > 0x7FFFFFFF) {
+            return report_frame_error(ErrorCode::FLOW_CONTROL_ERROR, "WINDOW_UPDATE increment exceeds maximum", _current_frame_header.get_stream_id());
+        }
+        
+        static_cast<SideProtocol*>(this)->on(std::move(wu_f));
+        return true;
+    }
+
+    /**
+     * @brief Handle CONTINUATION frame payload parsing
+     */
+    [[nodiscard]] bool handle_continuation_frame_payload(const uint8_t* payload_data, std::size_t payload_size) noexcept {
+        Http2FrameData<ContinuationFrame> cont_f;
+        cont_f.header = _current_frame_header;
+        cont_f.payload.header_block_fragment.assign(payload_data, payload_data + payload_size);
+        
+        static_cast<SideProtocol*>(this)->on(std::move(cont_f));
+        return true;
     }
 
 }; // class Http2Protocol

@@ -25,22 +25,7 @@
 
 #pragma once
 
-#include <memory>
-#include <optional>
-#include <algorithm>
-#include <string_view>
-#include <array>
-
-#include <qb/io/async/protocol.h>
-#include <qb/system/container/unordered_map.h>
-
-#include "../../request.h"
-#include "../../response.h"
 #include "./base.h"
-#include "./hpack.h"
-#include "./stream.h"
-#include "./frames.h"
-#include "../../logger.h" // Added logger include
 
 namespace qb::protocol::http2 {
 
@@ -531,56 +516,41 @@ public:
 
             LOG_HTTP_TRACE_PA(0, "Client: Received setting ID " << static_cast<uint16_t>(id) << " with value " << value);
 
-            // bool known_setting = false; // Not strictly needed if we only act on known ones
+            // Validate setting using helper
+            auto validation_result = SettingsHelper::validate_setting(id, value, false); // false = from server
+            if (!validation_result.is_valid) {
+                LOG_HTTP_ERROR_PA(0, "Client: Invalid setting from server: " << validation_result.error_message);
+                send_goaway_and_close(validation_result.error_code, validation_result.error_message);
+                return;
+            }
+
             switch(id) {
                 case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
-                    // No specific validation on value range in RFC for receiver, 
-                    // but decoder will cap it internally if it exceeds its own limits.
                     if (_hpack_encoder) {
                         _hpack_encoder->set_peer_max_dynamic_table_size(value);
                         LOG_HTTP_DEBUG_PA(0, "Client: Updated HPACK encoder peer table size to " << value);
                     }
                     break;
                 case Http2SettingIdentifier::SETTINGS_ENABLE_PUSH:
-                    if (value > 1) { // MUST be 0 or 1
-                        LOG_HTTP_ERROR_PA(0, "Client: Invalid SETTINGS_ENABLE_PUSH value: " << value);
-                        send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Invalid SETTINGS_ENABLE_PUSH value from server: " + std::to_string(value));
-                        return;
-                    }
                     _peer_allows_push = (value == 1); 
                     LOG_HTTP_DEBUG_PA(0, "Client: Server push " << (_peer_allows_push ? "enabled" : "disabled"));
                     break;
                 case Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS:
-                    // No specific upper bound mentioned for receiver to validate against, beyond practical limits.
                     _peer_max_concurrent_streams = value;
                     LOG_HTTP_DEBUG_PA(0, "Client: Server max concurrent streams: " << value);
                     break;
                 case Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE:
-                    if (value > MAX_WINDOW_SIZE_LIMIT) { // Cannot exceed 2^31-1
-                        LOG_HTTP_ERROR_PA(0, "Client: SETTINGS_INITIAL_WINDOW_SIZE too large: " << value);
-                        send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR, "SETTINGS_INITIAL_WINDOW_SIZE too large from server: " + std::to_string(value)); // Changed to FLOW_CONTROL_ERROR
-                        return;
-                    }
                     LOG_HTTP_DEBUG_PA(0, "Client: Updating initial window size from " << _initial_peer_window_size << " to " << value);
                     update_initial_peer_window_size(value);
                     break;
                 case Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE:
-                    if (value < MIN_MAX_FRAME_SIZE || value > MAX_FRAME_SIZE_LIMIT) { // Must be between 16,384 and 2^24-1
-                        LOG_HTTP_ERROR_PA(0, "Client: Invalid SETTINGS_MAX_FRAME_SIZE value: " << value);
-                        send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Invalid SETTINGS_MAX_FRAME_SIZE value from server: " + std::to_string(value));
-                        return;
-                    }
-                    // this->_peer_max_frame_size = value; // This is handled by FramerBase::set_peer_max_frame_size
                     LOG_HTTP_DEBUG_PA(0, "Client: Updating peer max frame size to " << value);
                     FramerBase::set_peer_max_frame_size(value);
                     break;
                 case Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE:
-                    // No specific upper bound mentioned for receiver to validate against.
                     _peer_max_header_list_size = value;
                     LOG_HTTP_DEBUG_PA(0, "Client: Server max header list size: " << value);
                     break;
-                // Case for SETTINGS_ENABLE_CONNECT_PROTOCOL (0x8) could be added if needed.
-                // RFC 9113: "An endpoint that receives a SETTINGS frame with any unknown or unsupported identifier MUST ignore that setting."
                 default:
                     // Unknown setting identifiers MUST be ignored by recipient.
                     LOG_HTTP_TRACE_PA(0, "Client: Ignoring unknown setting ID " << static_cast<uint16_t>(id) << " from server");
@@ -701,13 +671,23 @@ public:
         pushed_stream_obj.associated_stream_id = associated_stream_id;
         pushed_stream_obj.synthetic_request_headers = temp_decoded_hpack_fields; // Store for the app
 
-        auto [inserted_it, success] = _client_streams.emplace(promised_stream_id, std::move(pushed_stream_obj));
-        if (!success) {
+        // Create and emplace the pushed stream directly
+        auto [iter, emplaced] = _client_streams.emplace(promised_stream_id, 
+            Http2ClientStream(promised_stream_id, 
+                            this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE), 
+                            _initial_peer_window_size));
+        if (!emplaced) {
             // Should not happen if count check above was correct, but as a safeguard.
             send_goaway_and_close(ErrorCode::INTERNAL_ERROR, "Failed to emplace new pushed stream context");
             return;
         }
-                
+        
+        // Configure the stream after creation
+        Http2ClientStream& pushed_stream = iter->second;
+        pushed_stream.state = Http2StreamConcreteState::RESERVED_REMOTE; 
+        pushed_stream.associated_stream_id = associated_stream_id;
+        pushed_stream.synthetic_request_headers = temp_decoded_hpack_fields; // Store for the app
+
         // Convert hpack::HeaderField to qb::http::Headers for the event
         qb::http::headers event_pseudo_headers_for_app;
         for (const auto& hf : temp_decoded_hpack_fields) {
@@ -928,10 +908,16 @@ public:
         LOG_HTTP_DEBUG_PA(stream_id, "Client: Initiating new request. Method: " << http_request.method() 
                           << ", URI: " << http_request.uri().source());
 
-        // Create stream object first, but don't emplace it until after HEADERS are successfully sent.
-        Http2ClientStream stream_obj(stream_id, 
-                                   _initial_peer_window_size, 
-                                   get_initial_window_size_from_settings());
+        // Create and emplace stream directly in-place
+        auto [iter, emplaced] = _client_streams.emplace(stream_id, 
+            Http2ClientStream(stream_id, _initial_peer_window_size, get_initial_window_size_from_settings()));
+        
+        if (!emplaced) {
+            LOG_HTTP_CRIT_PA(stream_id, "Client: Failed to emplace stream context for new stream");
+            return false;
+        }
+        
+        Http2ClientStream& stream_obj = iter->second;
         stream_obj.application_request_id = app_request_id;
         stream_obj.state = Http2StreamConcreteState::IDLE;
 
@@ -945,6 +931,7 @@ public:
         std::vector<uint8_t> encoded_header_block;
         if (!_hpack_encoder || !_hpack_encoder->encode(hf_vector, encoded_header_block)) {
             LOG_HTTP_ERROR_PA(stream_id, "Client: HPACK encoding failed for new request headers");
+            _client_streams.erase(iter); // Remove the stream we just created
             send_goaway_and_close(ErrorCode::INTERNAL_ERROR, "HPACK encoding failed for new request headers");
             return false;
         }
@@ -971,12 +958,13 @@ public:
         this->_io << headers_frame_data;
         if (!this->ok()) { 
             LOG_HTTP_ERROR_PA(stream_id, "Client: Failed to send HEADERS frame - protocol not OK");
+            _client_streams.erase(iter); // Remove the stream we just created
             return false;
         }
         
         LOG_HTTP_DEBUG_PA(stream_id, "Client: HEADERS frame sent successfully");
         
-        // HEADERS sent successfully, now update stream state and emplace it.
+        // HEADERS sent successfully, now update stream state.
         stream_obj.request_sent = true; 
         stream_obj.state = Http2StreamConcreteState::OPEN;
         if (headers_frame_data.header.flags & FLAG_END_STREAM) {
@@ -999,30 +987,20 @@ public:
             LOG_HTTP_DEBUG_PA(stream_id, "Client: No body or trailers to send");
             // http_request goes out of scope if not moved, its body potentially cleaned up.
         }
-        
-        auto [iter, emplaced] = _client_streams.emplace(stream_id, std::move(stream_obj));
-        if (!emplaced) {
-            // This should ideally not happen if stream ID generation is correct
-            // QB_LOG_ERROR_PA(this->getName(), "Client: Failed to emplace stream context for new stream " << stream_id);
-            LOG_HTTP_CRIT_PA(stream_id, "Client: Failed to emplace stream context for new stream after sending HEADERS.");
-            send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Stream context emplacement failed after sending HEADERS");
-            return false;
-        }
-        Http2ClientStream& active_stream_ref = iter->second;
 
         // If there's a body to send, make the first attempt now.
-        if (active_stream_ref.has_pending_data_to_send) { 
-            if (!_send_request_body_data_internal(active_stream_ref)) {
+        if (stream_obj.has_pending_data_to_send) { 
+            if (!_send_request_body_data_internal(stream_obj)) {
                 // Error occurred during initial body send (e.g., connection broke). 
                 // _send_request_body_data_internal would have set has_pending_data_to_send if appropriate.
                 // No need to remove stream from _client_streams here, error handling in on(IO) or subsequent calls will handle it.
-                LOG_HTTP_ERROR_PA(active_stream_ref.id, "Client: _send_request_body_data_internal failed during initial send.");
+                LOG_HTTP_ERROR_PA(stream_obj.id, "Client: _send_request_body_data_internal failed during initial send.");
                 return false; 
             }
         }
         
-        if (active_stream_ref.state == Http2StreamConcreteState::CLOSED) {
-            try_close_stream_context_by_id(active_stream_ref.id, ErrorCode::NO_ERROR);
+        if (stream_obj.state == Http2StreamConcreteState::CLOSED) {
+            try_close_stream_context_by_id(stream_obj.id, ErrorCode::NO_ERROR);
         }
         return true;
     }

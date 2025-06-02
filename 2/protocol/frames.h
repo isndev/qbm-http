@@ -324,4 +324,13 @@ enum class PushPromiseFailureReason {
     // Add other specific reasons as needed
 };
 
+// --- Frame Size Constants ---
+constexpr std::size_t PRIORITY_FRAME_PAYLOAD_SIZE = 5;
+constexpr std::size_t RST_STREAM_FRAME_PAYLOAD_SIZE = 4;
+constexpr std::size_t SETTINGS_FRAME_ENTRY_SIZE = 6;
+constexpr std::size_t PING_FRAME_PAYLOAD_SIZE = 8;
+constexpr std::size_t WINDOW_UPDATE_FRAME_PAYLOAD_SIZE = 4;
+constexpr std::size_t GOAWAY_FRAME_MIN_PAYLOAD_SIZE = 8;
+constexpr std::size_t PUSH_PROMISE_MIN_PAYLOAD_SIZE = 4;
+
 } // namespace qb::protocol::http2 

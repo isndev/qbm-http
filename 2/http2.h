@@ -187,6 +187,7 @@ namespace qb::http2 {
                     // This session layer might not need to disconnect the whole connection unless routing failure is fatal.
                     // For now, we rely on router/context to signal errors that might lead to stream reset by ServerHttp2Protocol.
                 }
+                this->updateTimeout();
             }
 
             /**
