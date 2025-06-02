@@ -1212,6 +1212,9 @@ private:
     void try_close_stream_context(Http2ClientStream& stream_ref, 
                                 ErrorCode reason = ErrorCode::NO_ERROR, 
                                 const std::string& message = "") {
+	// Todo: use reason and message for ...
+	(void)reason;
+	(void)message;
         auto it = _client_streams.find(stream_ref.id);
         if (it != _client_streams.end() && 
             (it->second.state == Http2StreamConcreteState::CLOSED || 
@@ -2069,7 +2072,6 @@ private:
         std::string status_str;
 
         // Validation flags
-        bool pseudo_headers_ended = false;
         bool regular_headers_started = false;
         std::optional<std::string> method_from_connect_response;
 
@@ -2092,7 +2094,7 @@ private:
             
             // Check for invalid characters in header values
             for (char c_val : hf.value) {
-                if ((c_val >= 0 && c_val < 0x20 && c_val != '\t') || c_val == 0x7F) {
+                if ((c_val > 0 && c_val < 0x20 && c_val != '\t') || c_val == 0x7F) {
                     send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, 
                                   "Invalid char in header value: " + hf.name);
                     return false;
@@ -2136,7 +2138,6 @@ private:
                     response.add_header(std::string(hf.name), std::string(hf.value));
                 }
             } else { // Regular header
-                pseudo_headers_ended = true;
                 regular_headers_started = true;
 
                 // Check for forbidden headers
@@ -2203,7 +2204,7 @@ private:
     }
 
     // This method is called when a WINDOW_UPDATE is received or to resume sending.
-    void try_send_pending_data_for_stream(uint32_t stream_id_param, Http2ClientStream& active_stream) noexcept {
+    void try_send_pending_data_for_stream(uint32_t /*stream_id_param*/, Http2ClientStream& active_stream) noexcept {
         if (!this->ok() || !_connection_active) {
             // QB_LOG_WARN_PA(this->getName(), "Client Stream " << stream_id_param << ": try_send_pending_data called but connection not OK or inactive.");
             return;

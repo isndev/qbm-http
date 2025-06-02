@@ -216,7 +216,6 @@ namespace qb::http {
             return std::nullopt;
         }
 
-        std::string_view original_header = header;
         std::string_view cookie_pair_sv;
         std::string_view attributes_sv;
 

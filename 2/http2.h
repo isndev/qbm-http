@@ -341,6 +341,7 @@ namespace qb::http2 {
              * @param event Disconnection event
              */
             void on(qb::io::async::event::disconnected &&event) {
+		(void)event;
                 // Acceptor disconnected
                 // if constexpr(has_method_on<Derived, void, qb::http::event::disconnected>::value) {
                 //     this->on({event.reason});
@@ -411,7 +412,7 @@ class Server;
 class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>> {
 public:
     using Base = qb::http2::use<DefaultSession>::session<Server<DefaultSession>>;
-    using Server = qb::http2::Server<DefaultSession>;
+    using ServerType = qb::http2::Server<DefaultSession>;
 
     /**
      * @brief Constructs a DefaultSession.

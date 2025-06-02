@@ -520,7 +520,7 @@ namespace qb::http {
         /// Convert to int (e.g., 200, 404).
         constexpr int code() const { return static_cast<int>(_value); }
         /// Convert to std::string_view (e.g., "OK", "Not Found").
-        constexpr std::string_view str() const { return std::string_view(*this); }
+        std::string_view str() const { return std::string_view(*this); }
 
         /// Output stream operator (writes status code and name).
         friend std::ostream &operator<<(std::ostream &os, const Status &s) {

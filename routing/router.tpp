@@ -12,7 +12,7 @@
 namespace qb::http {
     template<typename SessionType>
     Router<SessionType>::Router()
-        : _router_core(std::make_shared<RouterCore<SessionType> >([this](Context<SessionType> &ctx) {
+        : _router_core(std::make_shared<RouterCore<SessionType> >([](Context<SessionType> &ctx) {
               // This callback is invoked by RouterCore when a Context is finalized.
               // It's responsible for sending the response via the session associated with the context.
               if (auto session_ptr = ctx.session()) {

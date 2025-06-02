@@ -112,7 +112,7 @@ namespace qb::http {
 
     public:
         using SessionType = Session;
-        using Context = Context<Session>;
+        using Context = qb::http::Context<Session>;
 
         /**
          * @brief Default constructor.

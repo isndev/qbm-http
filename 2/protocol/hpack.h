@@ -987,8 +987,6 @@ public:
                 return false;
             }
             
-            std::size_t pre_header_buffer_size = out_buffer.size(); // LOG: Size before this header
-
             // Try to find exact match in static table
             if (auto static_index = static_table::find_exact_match(name, value)) {
                 encode_integer(out_buffer, static_cast<uint8_t>(InstructionType::INDEXED_HEADER_FIELD), 7, *static_index);
@@ -1120,7 +1118,7 @@ inline std::unique_ptr<Encoder> Encoder::create() {
 namespace conversion {
     // Convert from qb::http::Headers to std::vector<HeaderField>
     template<typename HeadersType>
-    std::vector<HeaderField> from_qb_headers(const HeadersType& qb_headers) {
+    std::vector<HeaderField> from_qb_headers(const HeadersType& /*qb_headers*/) {
         std::vector<HeaderField> fields;
         // This would need to be implemented based on the actual qb::http::Headers interface
         // For now, this is a placeholder
@@ -1129,7 +1127,7 @@ namespace conversion {
     
     // Convert from std::vector<HeaderField> to qb::http::Headers
     template<typename HeadersType>
-    HeadersType to_qb_headers(const std::vector<HeaderField>& fields) {
+    HeadersType to_qb_headers(const std::vector<HeaderField>& /*fields*/) {
         HeadersType headers;
         // This would need to be implemented based on the actual qb::http::Headers interface
         // For now, this is a placeholder
