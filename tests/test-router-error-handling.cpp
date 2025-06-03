@@ -119,7 +119,7 @@ public:
     // Method from ICustomRoute
     void process(std::shared_ptr<qb::http::Context<MockErrorHandlingSession> > ctx) override {
         record_execution(ctx);
-        _executor_ref.addTask([ctx, this]() {
+        _executor_ref.addTask([ctx]() {
             ctx->complete(qb::http::AsyncTaskResult::ERROR);
         });
     }
@@ -247,7 +247,7 @@ public:
 
     void process(std::shared_ptr<qb::http::Context<MockErrorHandlingSession> > ctx) override {
         record_execution(ctx);
-        _executor_ref.addTask([ctx, this]() {
+        _executor_ref.addTask([ctx]() {
             ctx->complete(qb::http::AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR);
         });
     }

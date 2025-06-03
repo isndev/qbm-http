@@ -327,7 +327,7 @@ namespace qb::http {
         template<typename HeaderNameType>
         [[nodiscard]] bool
         has_header(HeaderNameType &&name) const noexcept {
-            return _headers.has(std::forward<HeaderNameType>(name)) > 0;
+            return _headers.has(std::forward<HeaderNameType>(name));
         }
 
         /**

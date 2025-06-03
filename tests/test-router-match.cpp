@@ -63,7 +63,7 @@ protected:
     // Helper to define a simple handler that marks execution and captures params
     auto
     make_verifying_handler(const std::string &handler_id) {
-        return [this, handler_id](auto ctx) {
+        return [handler_id](auto ctx) {
             if (ctx->session()) {
                 ctx->session()->_handler_executed = true;
                 ctx->session()->_handler_id = handler_id;

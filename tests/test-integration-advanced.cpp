@@ -388,7 +388,7 @@ public:
             ctx->complete();
         });
 
-        this->del("/:id", [this](std::shared_ptr<AdvCtx> ctx) {
+        this->del("/:id", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++;
             adv_server_side_assertions++; // Unconditional assertion
             std::string item_id = ctx->path_param("id");
@@ -432,7 +432,7 @@ public:
 
         this->get<MyCustomRoute>("/custom");
 
-        this->get("/async_op", [this](std::shared_ptr<AdvCtx> ctx) {
+        this->get("/async_op", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++;
             adv_server_side_assertions++;
             auto captured_ctx = ctx;
