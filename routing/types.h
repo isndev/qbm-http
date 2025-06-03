@@ -44,6 +44,7 @@ namespace qb::http {
      *        within the request processing chain, guiding the `Context` on how to proceed.
      */
     enum class AsyncTaskResult {
+    #undef ERROR
         CONTINUE, ///< The current task completed successfully; proceed to the next task in the chain.
         COMPLETE, ///< The current task has fully handled the request and generated a response; finalize processing.
         CANCELLED, ///< Request processing was cancelled (e.g., by client disconnect, timeout, or explicit call).
