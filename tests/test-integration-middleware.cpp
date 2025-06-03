@@ -1222,7 +1222,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
 
     std::filesystem::path temp_base_dir;
     std::filesystem::path test_root_dir;
-    MiddlewareHttpIntegrationTest *fixture_ptr_for_cleanup = this; // For potential cleanup in lambda
+    // MiddlewareHttpIntegrationTest *fixture_ptr_for_cleanup = this; // For potential cleanup in lambda
 
     // Setup for StaticFilesMiddlewareTest
     try {
@@ -1390,7 +1390,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S1_RequestBodyAndHeade
         req_transformer, "RequestTransformTestMW");
 
     _server->router().use(transform_mw);
-    _server->router().post("/transformed_route_final", [this](std::shared_ptr<MidCtx> ctx) {
+    _server->router().post("/transformed_route_final", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         EXPECT_EQ("true", ctx->request().header("X-Request-Transformed-New"));
@@ -1426,7 +1426,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S2_RequestMethodChange
         method_changer, "MethodChangerMW");
 
     _server->router().use(transform_mw_method_change);
-    _server->router().post("/method_change_test", [this](std::shared_ptr<MidCtx> ctx) {
+    _server->router().post("/method_change_test", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         EXPECT_EQ(ctx->request().method(), qb::http::method::PUT);

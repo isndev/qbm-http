@@ -28,7 +28,7 @@ namespace qb::allocator {
     pipe<char>::put<qb::http::Response>(const qb::http::Response &r) {
         // HTTP Status Line
         *this << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep
-                << r.status() << qb::http::sep
+                << r.status().code() << qb::http::sep
                 << std::to_string(r.status())
                 << qb::http::endl;
         // HTTP Headers

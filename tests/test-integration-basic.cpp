@@ -319,7 +319,6 @@ protected:
             return;
         }
 
-        int current_client_req = request_count_client.load();
         int current_server_req = request_count_server.load();
         int current_server_asserts = server_side_assertions.load();
 

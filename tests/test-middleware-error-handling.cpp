@@ -581,14 +581,14 @@ TEST_F(ErrorHandlingMiddlewareTest, OnStatusRangeWithInvalidCodes) {
     // Clear existing handlers on _error_mw to make this test cleaner for the 500 case
     _error_mw = qb::http::error_handling_middleware<MockErrorHandlingSession>("TestErrorMW_ForInvalidRange");
     _error_mw->on_status_range(qb::http::status::OK, static_cast<qb::http::status>(700),
-                               [&valid_code_handler_called, &out_of_range_handler_called, this](auto ctx) {
+                               [&valid_code_handler_called, &out_of_range_handler_called](auto ctx) {
                                    // Same handler as above
                                    if (ctx->response().status() == qb::http::status::OK)
                                        valid_code_handler_called = true;
                                    else out_of_range_handler_called = true;
                                });
     // Add a generic handler AFTER the range one
-    _error_mw->on_any_error([&generic_handler_called_for_valid, this](auto ctx, const auto & /*msg*/) {
+    _error_mw->on_any_error([&generic_handler_called_for_valid](auto ctx, const auto & /*msg*/) {
         generic_handler_called_for_valid = true;
         ctx->response().body() = "Generic fallback called for 500";
     });

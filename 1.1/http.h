@@ -127,6 +127,7 @@ namespace qb::http {
             friend qb::io::async::with_timeout<session>;
 
             std::shared_ptr<Context<Derived> > _context{};
+            bool _keep_alive{false}; ///< Keep-alive flag for persistent connections
 
             /**
              * @brief Handle incoming HTTP request
@@ -197,15 +198,12 @@ namespace qb::http {
             void
             on(qb::io::async::event::eos &&) {
                 LOG_HTTP_DEBUG_PA(this->id(), "End of stream (eos) event - response fully transmitted.");
-                
+
                 if (_context) {
                     _context->execute_hook(HookPoint::POST_RESPONSE_SEND);
                     _context.reset();
                 }
-
-                if constexpr (has_method_on<Derived, void, event::eos>::value) {
-                    static_cast<Derived &>(*this).on(event::eos{});
-                } else
+                if (!_keep_alive)
                     this->disconnect(DisconnectedReason::ResponseTransmitted);
             }
 
@@ -280,6 +278,10 @@ namespace qb::http {
              */
             std::shared_ptr<Context<Derived> > context() const {
                 return _context;
+            }
+
+            void keep_alive(bool value = true) {
+                _keep_alive = value;
             }
         };
 

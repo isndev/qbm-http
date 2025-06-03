@@ -983,7 +983,7 @@ TEST_F(RouterAsyncTest, AsyncLambdaHandlerDeferred) {
             // Store context for cancellation tests if needed, though not primary for this test
             ctx->session()->_last_context_seen = ctx;
         }
-        _task_executor.addTask([ctx, this]() {
+        _task_executor.addTask([ctx]() {
             // Capture this for _task_executor if it's a member, or pass explicitly
             if (ctx && ctx->session()) {
                 // Replace _HANDLE_CALLED with final ID

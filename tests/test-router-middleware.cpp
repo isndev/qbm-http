@@ -881,7 +881,7 @@ TEST_F(RouterMiddlewareTest, FunctionalMiddlewareAroundBehavior) {
 
     _router.use(std::make_shared<SyncAppendingMiddleware>("inner_mw")); // To check request header
 
-    _router.get("/test_around", [this](std::shared_ptr<qb::http::Context<MockMiddlewareSession> > ctx) {
+    _router.get("/test_around", [](std::shared_ptr<qb::http::Context<MockMiddlewareSession> > ctx) {
         // Check request header set by the "around" middleware before next_fn()
         EXPECT_EQ(ctx->request().header("X-Pre-Process"), "handled_by_around_mw");
 
@@ -986,7 +986,7 @@ TEST_F(RouterMiddlewareTest, MiddlewareStateSharingViaRequestHeaders) {
         )
     );
 
-    _router.get("/test_mw_sharing", [this](std::shared_ptr<qb::http::Context<MockMiddlewareSession> > ctx) {
+    _router.get("/test_mw_sharing", [](std::shared_ptr<qb::http::Context<MockMiddlewareSession> > ctx) {
         // Check if MW_B processed data from MW_A by looking for the header MW_B sets
         EXPECT_EQ(ctx->request().header("X-Data-From-MW-B"), "B_confirms_A");
 

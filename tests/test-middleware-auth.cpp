@@ -773,7 +773,7 @@ TEST_F(AuthMiddlewareTest, IssuerAudienceFlexibility) {
         // For now, assume it returns a string or we are interested in specific pre-checks.
         try {
             return qb::jwt::create(jwt_payload_map, jwt_create_opts);
-        } catch (const std::exception &e) {
+        } catch (const std::exception &) {
             // Log or handle if necessary, then return nullopt to signal failure to caller
             // For test purposes, usually letting it propagate or returning nullopt is fine.
             // std::cerr << "qb::jwt::create failed: " << e.what() << std::endl;

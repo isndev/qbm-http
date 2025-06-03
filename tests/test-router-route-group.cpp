@@ -247,7 +247,7 @@ public:
         this->use(std::make_shared<TestRouteGroupSyncMiddleware>("ctrl_sync_mw"));
 
         this->add_controller_route("/hello", qb::http::method::GET,
-                                   [this](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
+                                   [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
                                        if (ctx->session()) {
                                            ctx->session()->trace("ctrl_hello_handler");
                                        }
@@ -346,7 +346,7 @@ TEST_F(RouterRouteGroupTest, NestedRouteGroup) {
 TEST_F(RouterRouteGroupTest, RouteGroupWithPathParameters) {
     auto items_group = _router.group("/items");
     items_group->get("/:item_id/details",
-                     [this](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
+                     [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
                          if (ctx->session()) {
                              ctx->session()->trace("item_details_handler");
                              ctx->session()->_handler_executed_flag = true;
@@ -499,12 +499,12 @@ TEST_F(RouterRouteGroupTest, GroupMiddlewareSignalsError) {
 TEST_F(RouterRouteGroupTest, ErrorInRouteHandlerWithinGroup) {
     auto api_group = _router.group("/api");
     api_group->get("/error_route",
-                   [this](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
+                   [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
                        if (ctx->session()) {
-                           ctx->session()->trace("error_route_handler");
-                           // ctx->session()->_handler_executed_flag = true; // Not fully executed
+                           ctx->session()->trace("error_handler_in_group");
                        }
-                       ctx->response().body() = "About to signal error from route handler";
+                       ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                       ctx->response().body() = "Error in handler within group";
                        ctx->complete(qb::http::AsyncTaskResult::ERROR);
                    }
     );
@@ -517,7 +517,7 @@ TEST_F(RouterRouteGroupTest, ErrorInRouteHandlerWithinGroup) {
     _task_executor.processAllTasks();
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    EXPECT_EQ(_mock_session->get_trace(), "group_mw_before_error_route;error_route_handler");
+    EXPECT_EQ(_mock_session->get_trace(), "group_mw_before_error_route;error_handler_in_group");
 }
 
 // --- Advanced RouteGroup Tests ---
@@ -631,7 +631,7 @@ TEST_F(RouterRouteGroupTest, PathParameterPropagationFromGroupToRoute) {
     // Path parameters from both group and route should be available.
     // The final path pattern registered would be something like /tenant/:tenant_id/user/:user_id/profile
     tenant_group->get("/user/:user_id/profile",
-                      [this](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
+                      [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
                           if (ctx->session()) {
                               ctx->session()->trace("profile_handler");
                               ctx->session()->_captured_params = ctx->path_parameters();

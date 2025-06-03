@@ -770,6 +770,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorOneOf) {
     EXPECT_TRUE(outcome_longstring) << "'longstring' should match oneOf (minLength:2). Errors: " <<
  validation_errors_to_json_helper(result.errors()).dump(2);
     EXPECT_TRUE(success_after_longstring);
+    EXPECT_EQ(errors_after_longstring, 0) << "No errors expected for valid 'longstring'";
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorNot) {
@@ -945,7 +946,6 @@ TEST_F(ValidationLogicTest, ParameterValidatorDefaultValue) {
 
     result.clear();
     qb::json validated_json;
-    bool success_flag;
 
     result.clear();
     validated_json = pv.validate_single("limit", std::nullopt,

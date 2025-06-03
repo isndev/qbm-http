@@ -367,7 +367,8 @@ TEST_F(TimingMiddlewareTest, TimingFor404NotFound) {
 TEST_F(TimingMiddlewareTest, CallbackThrowsException) {
     bool main_callback_invoked = false;
     qb::http::TimingMiddleware<MockTimingSession>::TimingCallback throwing_cb =
-            [](const std::chrono::milliseconds & /*duration*/) {
+            [&main_callback_invoked](const std::chrono::milliseconds & /*duration*/) {
+        main_callback_invoked = true;
         throw std::runtime_error("Intentional exception from timing callback");
     };
 
@@ -399,6 +400,8 @@ TEST_F(TimingMiddlewareTest, CallbackThrowsException) {
     // For now, let's assume the simple_handler still completes.
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::OK);
+    // Verify that the callback was invoked before throwing
+    EXPECT_TRUE(main_callback_invoked) << "Timing callback should have been invoked even though it threw";
     // _last_duration_logged will not be set by the throwing_cb. If we had another non-throwing 
     // timing callback, we could check that.
 }

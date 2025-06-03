@@ -214,12 +214,12 @@ namespace qb::http {
                         if (!ctx_ref.response().body().empty()) {
                             try {
                                 compress_response_body(ctx_ref); // Pass Context by reference as per Hook signature
-                            } catch (const std::runtime_error &e) {
+                            } catch (const std::runtime_error &) {
                                 // Log error, but don't modify response further at this critical stage.
                                 // Or, strip Content-Encoding if partially set before error?
                                 // For now, just log (if logging is available).
                                 // std::cerr << "CompressionMiddleware: Error compressing response: " << e.what() << std::endl;
-                            } catch (const std::exception &e) {
+                            } catch (const std::exception &) {
                                 // std::cerr << "CompressionMiddleware: Generic error compressing response: " << e.what() << std::endl;
                             }
                         }
