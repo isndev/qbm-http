@@ -64,6 +64,7 @@ constexpr uint8_t FLAG_PRIORITY    = 0x20; ///< PRIORITY flag (HEADERS)
  * @brief HTTP/2 error codes as defined in RFC 9113 Section 7
  */
 enum class ErrorCode : uint32_t {
+#undef NO_ERROR
     NO_ERROR            = 0x0,  ///< Graceful shutdown
     PROTOCOL_ERROR      = 0x1,  ///< Protocol error detected
     INTERNAL_ERROR      = 0x2,  ///< Implementation fault

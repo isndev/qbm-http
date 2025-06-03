@@ -29,7 +29,6 @@
 DISABLE_WARNING_PUSH
 DISABLE_WARNING_IMPLICIT_FALLTHROUGH
 
-#undef ERROR
 namespace qb::http {
     /**
      * @brief Parser for multipart/form-data content
@@ -101,6 +100,7 @@ namespace qb::http {
          * of header and data processing.
          */
         enum State {
+        #undef ERROR
             ERROR, ///< Error occurred during parsing
             START, ///< Initial state before any data is processed
             START_BOUNDARY, ///< Processing the first boundary

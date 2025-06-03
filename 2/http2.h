@@ -367,7 +367,7 @@ namespace qb::http2 {
              * @return True if the server is listening, false otherwise.
              */
             bool listen(qb::io::uri uri, std::filesystem::path cert_file, std::filesystem::path key_file) {
-                this->transport().init(qb::io::ssl::create_server_context(TLS_server_method(), cert_file, key_file));
+                this->transport().init(qb::io::ssl::create_server_context(TLS_server_method(), std::move(cert_file), std::move(key_file)));
                 if (!this->transport().ssl_handle()) {
                     LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context.");
                     return false;
