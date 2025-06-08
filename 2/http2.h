@@ -223,6 +223,15 @@ namespace qb::http2 {
                 } // For HTTP/2, EOS is per-stream and handled by Http2Protocol stream lifecycle.
             }
 
+            void
+            on(qb::io::async::event::extracted &&) {
+                LOG_HTTP_DEBUG_PA(this->id(), "HTTP/2 session extracted.");
+                for (auto& [stream_id, context] : _contexts) {
+                    context->cancel("Session extracted");
+                }
+                _contexts.clear();
+            }
+
             /**
              * @brief Handle disconnection event
              * @param e Disconnection event
