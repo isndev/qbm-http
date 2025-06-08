@@ -120,8 +120,10 @@ namespace qb::http {
 
         private:
             friend qb::io::async::io<session>;
+            friend class qb::io::async::io_handler<Handler, Derived>;
             friend class has_method_on<session, void, qb::io::async::event::pending_write>;
             friend class has_method_on<session, void, qb::io::async::event::eos>;
+            friend class has_method_on<session, void, qb::io::async::event::extracted>;
             friend class has_method_on<session, void, qb::io::async::event::disconnected>;
             friend Protocol;
             friend qb::io::async::with_timeout<session>;
@@ -207,6 +209,15 @@ namespace qb::http {
                     this->disconnect(DisconnectedReason::ResponseTransmitted);
             }
 
+            void
+            on(qb::io::async::event::extracted &&) {
+                LOG_HTTP_DEBUG_PA(this->id(), "HTTP/1.1 session extracted.");
+                if (_context) {
+                    _context->cancel();
+                    _context.reset();
+                }
+            }
+
             /**
              * @brief Handle disconnection event
              * @param e Disconnection event
@@ -280,6 +291,13 @@ namespace qb::http {
                 return _context;
             }
 
+            /**
+             * @brief Set the keep-alive flag
+             * @param value Keep-alive flag value
+             *
+             * Sets the keep-alive flag for the session. If set to true,
+             * the session will not disconnect after sending the response.
+             */
             void keep_alive(bool value = true) {
                 _keep_alive = value;
             }

@@ -1431,7 +1431,8 @@ private:
                  this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Attempt to dispatch incomplete request (missing method/path)");
                  return;
             }
-
+            stream.assembled_request.major_version = 2;
+            stream.assembled_request.minor_version = 0;
             stream.assembled_request.parse_cookie_header();
 
             // CRITICAL: Mark as dispatched BEFORE calling _io.on() because it might trigger immediate response
