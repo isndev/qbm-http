@@ -308,7 +308,12 @@ namespace qb::http2 {
             Router _router; ///< HTTP router
 
         public:
-            io_handler() = default;
+            io_handler() {
+                this->router().use([](auto ctx, auto next) {
+                    ctx->response().add_header("x-stream-id", ctx->request().header("x-stream-id"));
+                    next();
+                });
+            }
 
             /**
              * @brief Get router reference
@@ -350,7 +355,7 @@ namespace qb::http2 {
              * @param event Disconnection event
              */
             void on(qb::io::async::event::disconnected &&event) {
-		(void)event;
+                (void)event;
                 // Acceptor disconnected
                 // if constexpr(has_method_on<Derived, void, qb::http::event::disconnected>::value) {
                 //     this->on({event.reason});
@@ -361,12 +366,7 @@ namespace qb::http2 {
             /**
              * @brief Construct HTTP/2 server
              */
-            server() : qb::io::async::tcp::acceptor<server<Derived, Session>, qb::io::transport::saccept>() {
-                this->router().use([](auto ctx, auto next) {
-                    ctx->response().add_header("x-stream-id", ctx->request().header("x-stream-id"));
-                    next();
-                });
-            }
+            server() = default;
 
             /**
              * @brief Listen for incoming connections on a given URI.
