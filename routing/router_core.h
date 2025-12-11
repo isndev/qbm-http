@@ -258,9 +258,13 @@ namespace qb::http {
          */
         [[nodiscard]] std::shared_ptr<Context<SessionType> >
         route_request(std::shared_ptr<SessionType> session_ptr, qb::http::Request request_obj) {
+            // Create response prototype and copy stream_id from request
+            Response response_prototype{};
+            response_prototype.stream_id = request_obj.stream_id;
+            
             auto ctx = std::make_shared<Context<SessionType> >(
                 std::move(request_obj),
-                Response{}, // Default response prototype
+                std::move(response_prototype),
                 std::move(session_ptr),
                 _on_request_finalized_callback,
                 this->weak_from_this() // Pass weak_ptr of RouterCore to Context

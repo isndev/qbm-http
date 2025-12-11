@@ -1062,6 +1062,114 @@ public:
         return std::nullopt; // Success
     }
 
+    /**
+     * @brief Cleanup idle streams to prevent DDoS attacks
+     * 
+     * Removes streams that have been idle for too long or incomplete for too long.
+     * This prevents resource exhaustion from malicious clients opening many streams.
+     * 
+     * @param max_idle_seconds Maximum idle time before cleanup (default: 30)
+     * @param max_incomplete_seconds Maximum time for incomplete streams (default: 10)
+     * @return Number of streams cleaned up
+     */
+    uint32_t cleanup_idle_streams(uint32_t max_idle_seconds = 30, uint32_t max_incomplete_seconds = 10) noexcept {
+        uint32_t cleaned_count = 0;
+        auto now = std::chrono::steady_clock::now();
+        
+        for (auto it = _server_streams.begin(); it != _server_streams.end();) {
+            auto& stream = it->second;
+            uint32_t stream_id = it->first;
+            
+            // Skip already closed streams
+            if (stream.state == Http2StreamConcreteState::CLOSED) {
+                ++it;
+                continue;
+            }
+            
+            auto idle_time_ms = stream.get_idle_time();
+            auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time_ms).count();
+            
+            // Check for incomplete streams (not dispatched yet)
+            bool is_incomplete = !stream.request_dispatched && 
+                                 (stream.state == Http2StreamConcreteState::IDLE || 
+                                  stream.state == Http2StreamConcreteState::OPEN);
+            
+            // Check for idle timeout
+            bool should_cleanup = false;
+            if (is_incomplete && idle_time_seconds > max_incomplete_seconds) {
+                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << idle_time_seconds << "s)");
+                should_cleanup = true;
+            } else if (idle_time_seconds > max_idle_seconds) {
+                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up idle stream (idle for " << idle_time_seconds << "s)");
+                should_cleanup = true;
+            }
+            
+            if (should_cleanup) {
+                this->send_rst_stream(stream_id, ErrorCode::CANCEL, 
+                    "Stream idle timeout (" + std::to_string(idle_time_seconds) + "s)");
+                it = _server_streams.erase(it);
+                cleaned_count++;
+            } else {
+                ++it;
+            }
+        }
+        
+        if (cleaned_count > 0) {
+            LOG_HTTP_INFO("ServerHttp2Protocol: Cleaned up " << cleaned_count << " idle/incomplete streams");
+        }
+        
+        return cleaned_count;
+    }
+
+    /**
+     * @brief Send RST_STREAM frame
+     * 
+     * Sends a stream reset frame and marks the stream as closed.
+     * This method is public to allow the session layer to send RST_STREAM
+     * when routing fails or other application-level errors occur.
+     * 
+     * @param stream_id Stream identifier
+     * @param error_code Error code for the reset
+     * @param context_msg Debug context message
+     */
+    void send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string& context_msg = "") noexcept {
+
+        if (!_connection_active && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Tried to send RST_STREAM but connection is not active");
+            return;
+        }
+        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Sending RST_STREAM with error code " << static_cast<uint32_t>(error_code) << ". Context: " << context_msg);
+
+        Http2FrameData<RstStreamFrame> rst_frame_data;
+        rst_frame_data.payload.error_code = error_code;
+
+        FrameHeader header;
+        header.type = static_cast<uint8_t>(FrameType::RST_STREAM);
+        header.flags = 0;
+        header.set_stream_id(stream_id);
+        
+        rst_frame_data.header = header;
+        this->_io << rst_frame_data;
+
+        auto it = _server_streams.find(stream_id);
+        if (it != _server_streams.end()) {
+            it->second.state = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
+            it->second.rst_stream_sent = true;
+            it->second.error_code = error_code;
+            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream marked as CLOSED due to sent RST_STREAM");
+            
+            // Notify IO_Handler if request wasn't dispatched or response wasn't fully sent
+            if ((!it->second.request_dispatched || !it->second.end_stream_sent) && error_code != ErrorCode::NO_ERROR) {
+                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by server: " + context_msg};
+                if constexpr (has_method_on<IO_Handler, void, Http2StreamErrorEvent>::value) {
+                    this->get_io_handler().on(stream_error_event);
+                }
+            }
+            this->try_close_stream_context(stream_id); // Attempt to clean up if conditions met
+        }
+        LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: RST_STREAM sent successfully");
+    }
+
 private:
     /**
      * @brief Initialize server's HTTP/2 settings to defaults
@@ -1070,7 +1178,8 @@ private:
         _our_settings.clear();
         _our_settings[Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE] = hpack::HPACK_DEFAULT_MAX_TABLE_SIZE;
         _our_settings[Http2SettingIdentifier::SETTINGS_ENABLE_PUSH] = 0; // Server disables push by default
-        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS] = 100; // Max streams we allow client to open
+        // Use lower default for DDoS protection (can be increased if needed)
+        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS] = 50; // Max streams we allow client to open (reduced from 100)
         _our_settings[Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE] = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
         _our_settings[Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE] = DEFAULT_SETTINGS_MAX_FRAME_SIZE;
         _our_settings[Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE] = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
@@ -1503,53 +1612,6 @@ private:
         } else {
             LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream context not found for cleanup");
         }
-    }
-
-    /**
-     * @brief Send RST_STREAM frame
-     * 
-     * Sends a stream reset frame and marks the stream as closed.
-     * 
-     * @param stream_id Stream identifier
-     * @param error_code Error code for the reset
-     * @param context_msg Debug context message
-     */
-    void send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string& context_msg = "") noexcept {
-
-        if (!_connection_active && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
-            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Tried to send RST_STREAM but connection is not active");
-            return;
-        }
-        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Sending RST_STREAM with error code " << static_cast<uint32_t>(error_code) << ". Context: " << context_msg);
-
-        Http2FrameData<RstStreamFrame> rst_frame_data;
-        rst_frame_data.payload.error_code = error_code;
-
-        FrameHeader header;
-        header.type = static_cast<uint8_t>(FrameType::RST_STREAM);
-        header.flags = 0;
-        header.set_stream_id(stream_id);
-        
-        rst_frame_data.header = header;
-        this->_io << rst_frame_data;
-
-        auto it = _server_streams.find(stream_id);
-        if (it != _server_streams.end()) {
-            it->second.state = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
-            it->second.rst_stream_sent = true;
-            it->second.error_code = error_code;
-            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream marked as CLOSED due to sent RST_STREAM");
-            
-            // Notify IO_Handler if request wasn't dispatched or response wasn't fully sent
-            if ((!it->second.request_dispatched || !it->second.end_stream_sent) && error_code != ErrorCode::NO_ERROR) {
-                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by server: " + context_msg};
-                if constexpr (has_method_on<IO_Handler, void, Http2StreamErrorEvent>::value) {
-                    this->get_io_handler().on(stream_error_event);
-                }
-            }
-            this->try_close_stream_context(stream_id); // Attempt to clean up if conditions met
-        }
-        LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: RST_STREAM sent successfully");
     }
 
     /**

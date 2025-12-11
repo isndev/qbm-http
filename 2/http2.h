@@ -46,6 +46,19 @@
 
 namespace qb::http2 {
 
+    // Constants for HTTP/2 session configuration
+    namespace constants {
+        constexpr uint32_t HTTP11_STREAM_ID = 0;        ///< Stream ID used for HTTP/1.1 requests (not a valid HTTP/2 stream ID)
+        constexpr uint32_t DEFAULT_SESSION_TIMEOUT = 60; ///< Default session timeout in seconds
+        constexpr uint32_t MIN_VALID_STREAM_ID = 1;     ///< Minimum valid HTTP/2 stream ID (0 is reserved for HTTP/1.1)
+        
+        // DDoS Protection constants
+        constexpr uint32_t DEFAULT_MAX_CONCURRENT_STREAMS = 50;  ///< Default max concurrent streams per connection (reduced from 100 for security)
+        constexpr uint32_t STREAM_IDLE_TIMEOUT_SECONDS = 30;      ///< Timeout for idle streams (seconds)
+        constexpr uint32_t STREAM_INCOMPLETE_TIMEOUT_SECONDS = 10; ///< Timeout for incomplete streams (seconds)
+        constexpr uint32_t CLEANUP_INTERVAL_SECONDS = 5;          ///< Interval for periodic stream cleanup (seconds)
+    }
+
     // Protocol type aliases for cleaner code
     template<typename IO_Handler> 
     using client_protocol = qb::protocol::http2::ClientHttp2Protocol<IO_Handler>;
@@ -91,6 +104,29 @@ namespace qb::http2 {
             
             Http1Protocol *_http1_protocol; ///< HTTP/1.1 protocol handler
             Http2Protocol *_http2_protocol; ///< HTTP/2 protocol handler
+            
+            std::chrono::steady_clock::time_point _last_stream_cleanup; ///< Last time we cleaned up idle streams
+
+            /**
+             * @brief Validate HTTP/2 stream ID
+             * @param stream_id Stream ID to validate
+             * @return true if stream_id is valid for HTTP/2 (not 0)
+             */
+            static constexpr bool is_valid_http2_stream_id(uint32_t stream_id) noexcept {
+                return stream_id != constants::HTTP11_STREAM_ID;
+            }
+
+            /**
+             * @brief Validate response before sending
+             * @param res Response to validate
+             * @return true if response is valid
+             */
+            bool validate_response(const qb::http::Response &res) const noexcept {
+                // Basic validation - can be extended
+                // Status is an enum class, convert to underlying type for comparison
+                const auto status_code = static_cast<int>(res.status());
+                return status_code >= 100 && status_code < 600; // Valid HTTP status code range
+            }
 
         public:
             using handler_type = Handler;
@@ -104,10 +140,11 @@ namespace qb::http2 {
             explicit session(Handler &server_handler)
                 : qb::io::async::tcp::client<session<Derived, Handler>, qb::io::transport::stcp, Handler>(server_handler),
                   _http1_protocol(nullptr),
-                  _http2_protocol(nullptr) {
+                  _http2_protocol(nullptr),
+                  _last_stream_cleanup(std::chrono::steady_clock::now()) {
                 LOG_HTTP_DEBUG_PA(this->id(), "HTTP/2 internal::session (server-side) created.");
                 this->template switch_protocol<qb::io::protocol::handshake<session<Derived, Handler>>>(*this);
-                this->setTimeout(60); // Default session timeout
+                this->setTimeout(constants::DEFAULT_SESSION_TIMEOUT);
             }
 
             ~session() {
@@ -123,16 +160,24 @@ namespace qb::http2 {
              */
             auto &operator<<(qb::http::Response &res) {
                 if (_http2_protocol) {
-                    const auto stream_id = std::stoi(res.header("x-stream-id"));
+                    const uint32_t stream_id = res.stream_id;
+                    if (!is_valid_http2_stream_id(stream_id)) {
+                        LOG_HTTP_ERROR_PA(this->id(), "HTTP/2 response with stream_id " << stream_id << " is invalid (stream_id 0 is reserved for HTTP/1.1)");
+                        return this->out();
+                    }
+                    if (!validate_response(res)) {
+                        LOG_HTTP_ERROR_PA(this->id(), "HTTP/2 response validation failed for stream " << stream_id << " (invalid status code: " << res.status() << ")");
+                        return this->out();
+                    }
                     if (!res.has_header("content-length") && !res.body().empty()) {
                        res.set_header("content-length", std::to_string(res.body().size()));
                     }
                     _http2_protocol->send_response(stream_id, res);
-                    auto context = _contexts[stream_id];
-                    if (context) {
-                        context->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
+                    auto it = _contexts.find(stream_id);
+                    if (it != _contexts.end() && it->second) {
+                        it->second->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
+                        _contexts.erase(it);
                     }
-                    _contexts.erase(stream_id);
                     this->ready_to_write();
                     this->updateTimeout();
                 } else {
@@ -163,7 +208,15 @@ namespace qb::http2 {
              */
             void on(qb::http::Request &&request) {
                 LOG_HTTP_INFO_PA(this->id(), "Received HTTP/1.1 request: " << request.method() << " " << request.uri().source());
-                auto context = _contexts[0] = router().route(this->shared_from_this(), std::move(request));
+                // HTTP/1.1 uses stream_id 0 (not a valid HTTP/2 stream ID)
+                request.stream_id = constants::HTTP11_STREAM_ID;
+                // Check if context[0] already exists and cleanup if needed
+                auto it = _contexts.find(constants::HTTP11_STREAM_ID);
+                if (it != _contexts.end() && it->second) {
+                    it->second->cancel("New HTTP/1.1 request replacing previous context");
+                    _contexts.erase(it);
+                }
+                auto context = _contexts[constants::HTTP11_STREAM_ID] = router().route(this->shared_from_this(), std::move(request));
                 if (!context) {
                     LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 request not routed, disconnecting.");
                     this->disconnect(qb::http::DisconnectedReason::Undefined); // Consider a more specific reason like NoRouteFound
@@ -177,15 +230,21 @@ namespace qb::http2 {
              */
             void on(qb::http::Request &&request, uint32_t stream_id) {
                 LOG_HTTP_INFO_PA(this->id(), "Received HTTP/2 request on stream " << stream_id << ": " << request.method() << " " << request.uri().source());
-                request.set_header("x-stream-id", std::to_string(stream_id));
+                // Store stream_id directly in request (no string conversion needed)
+                request.stream_id = stream_id;
                 request.set_header("server", "qb/http2");
                 
-                auto context = _contexts[stream_id] = router().route(this->shared_from_this(), std::move(request));
+                auto context = router().route(this->shared_from_this(), std::move(request));
                 if (!context) {
-                    LOG_HTTP_WARN_PA(this->id(), "HTTP/2 request on stream " << stream_id << " not routed. Protocol layer should RST stream.");
-                    // The HTTP/2 protocol layer (ServerHttp2Protocol) should handle sending RST_STREAM if a request cannot be processed.
-                    // This session layer might not need to disconnect the whole connection unless routing failure is fatal.
-                    // For now, we rely on router/context to signal errors that might lead to stream reset by ServerHttp2Protocol.
+                    LOG_HTTP_WARN_PA(this->id(), "HTTP/2 request on stream " << stream_id << " not routed. Sending RST_STREAM.");
+                    // Explicitly send RST_STREAM when routing fails
+                    if (_http2_protocol) {
+                        _http2_protocol->send_rst_stream(stream_id, qb::protocol::http2::ErrorCode::REFUSED_STREAM, "Request not routed - no matching route found");
+                    }
+                    // Don't store nullptr in _contexts - only store valid contexts
+                } else {
+                    // Only store valid contexts
+                    _contexts[stream_id] = context;
                 }
                 this->updateTimeout();
             }
@@ -206,6 +265,17 @@ namespace qb::http2 {
             void on(qb::io::async::event::pending_write &&) {
                 LOG_HTTP_TRACE_PA(this->id(), "Pending write event, updating timeout.");
                 this->updateTimeout();
+                // Periodic cleanup of idle streams for DDoS protection
+                if (_http2_protocol) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - _last_stream_cleanup).count();
+                    if (elapsed >= constants::CLEANUP_INTERVAL_SECONDS) {
+                        _http2_protocol->cleanup_idle_streams(
+                            constants::STREAM_IDLE_TIMEOUT_SECONDS,
+                            constants::STREAM_INCOMPLETE_TIMEOUT_SECONDS);
+                        _last_stream_cleanup = now;
+                    }
+                }
             }
 
             /**
@@ -215,8 +285,9 @@ namespace qb::http2 {
             void on(qb::io::async::event::eos &&) {
                 LOG_HTTP_DEBUG_PA(this->id(), "End of stream (eos) event.");
                 if (_http1_protocol) {
-                    if (_contexts[0]) {
-                        _contexts[0]->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
+                    auto it = _contexts.find(constants::HTTP11_STREAM_ID);
+                    if (it != _contexts.end() && it->second) {
+                        it->second->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
                         _contexts.clear();
                     }
                     this->disconnect(qb::http::DisconnectedReason::ResponseTransmitted);
@@ -309,10 +380,6 @@ namespace qb::http2 {
 
         public:
             io_handler() {
-                this->router().use([](auto ctx, auto next) {
-                    ctx->response().add_header("x-stream-id", ctx->request().header("x-stream-id"));
-                    next();
-                });
             }
 
             /**
