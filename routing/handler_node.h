@@ -19,16 +19,100 @@
 #include "./context.h"
 // #include "../types.h" // For qb::http::method - Not directly used here but by derived classes like Route
 
-#include <vector>   // For internal structures if any, or if children use it often
+#include <vector>   // For std::vector (middleware tasks)
 #include <string>   // For std::string
 #include <memory>   // For std::weak_ptr, std::shared_ptr, std::enable_shared_from_this
-#include <list>     // For std::list
 #include <sstream>  // For std::ostringstream in build_full_path
 
 namespace qb::http {
     // Forward declaration
     template<typename Session>
     class RouterCore;
+
+    // Internal utilities for path building
+    namespace detail {
+        /**
+         * @brief Normalizes a path segment by removing leading and trailing slashes.
+         * 
+         * This function ensures that path segments are clean before joining:
+         * - "/users" → "users"
+         * - "users/" → "users"
+         * - "/users/" → "users"
+         * - "/" → "" (empty string)
+         * - "" → "" (empty string)
+         * 
+         * @param segment The path segment to normalize.
+         * @return The normalized segment without leading/trailing slashes.
+         */
+        inline std::string normalize_path_segment(const std::string &segment) {
+            if (segment.empty()) {
+                return "";
+            }
+
+            std::string normalized = segment;
+            
+            // Remove leading slashes
+            while (!normalized.empty() && normalized.front() == '/') {
+                normalized.erase(0, 1);
+            }
+            
+            // Remove trailing slashes
+            while (!normalized.empty() && normalized.back() == '/') {
+                normalized.pop_back();
+            }
+            
+            return normalized;
+        }
+
+        /**
+         * @brief Joins two path segments with proper slash handling.
+         * 
+         * This function properly joins a parent path with a child segment:
+         * - parent="/api", segment="users" → "/api/users"
+         * - parent="/api", segment="/users" → "/api/users"
+         * - parent="/api/", segment="users" → "/api/users"
+         * - parent="", segment="users" → "/users"
+         * - parent="/", segment="users" → "/users"
+         * - parent="", segment="" → "/"
+         * 
+         * @param parent The parent path (may be empty, may have trailing slash).
+         * @param segment The child segment (may be empty, may have leading slash).
+         * @return The joined and normalized path (always starts with "/", except empty segments result in "/").
+         */
+        inline std::string join_paths(const std::string &parent, const std::string &segment) {
+            // Normalize both segments
+            std::string normalized_parent = normalize_path_segment(parent);
+            std::string normalized_segment = normalize_path_segment(segment);
+
+            // Special case: if both are empty, return root path
+            if (normalized_parent.empty() && normalized_segment.empty()) {
+                return "/";
+            }
+
+            // Build the result
+            std::string result;
+            
+            // Always start with "/" if we have any content
+            if (!normalized_parent.empty() || !normalized_segment.empty()) {
+                result += "/";
+            }
+            
+            // Add parent if not empty
+            if (!normalized_parent.empty()) {
+                result += normalized_parent;
+            }
+            
+            // Add segment if not empty, with a slash separator if parent exists
+            if (!normalized_segment.empty()) {
+                if (!normalized_parent.empty()) {
+                    result += "/";
+                }
+                result += normalized_segment;
+            }
+            
+            return result;
+        }
+    } // namespace detail
 
     /**
      * @brief Abstract base class for nodes in the HTTP routing hierarchy.
@@ -56,12 +140,12 @@ namespace qb::http {
         /** @brief The specific path segment this node represents (e.g., "/users", ":id", ""). */
         std::string _path_segment;
         /** 
-         * @brief List of middleware tasks specific to this node.
+         * @brief Vector of middleware tasks specific to this node.
          * These tasks are executed after middleware from parent nodes and before any handler
          * specific to this node (for `Route` nodes) or before tasks from child nodes.
-         * Middleware is executed in the order it is added to this list.
+         * Middleware is executed in the order it is added to this vector.
          */
-        std::list<std::shared_ptr<IAsyncTask<Session> > > _middleware_tasks;
+        std::vector<std::shared_ptr<IAsyncTask<Session> > > _middleware_tasks;
 
     public:
         /**
@@ -136,13 +220,13 @@ namespace qb::http {
          * @param router_core Reference to the `RouterCore` where final, compiled routes are registered.
          * @param current_built_path The fully resolved URL path accumulated from the root down to this node's parent.
          *                           This node will append its `_path_segment` to this to form its own base path.
-         * @param inherited_tasks A list of `IAsyncTask` shared pointers representing middleware tasks inherited from
+         * @param inherited_tasks A vector of `IAsyncTask` shared pointers representing middleware tasks inherited from
          *                        all parent nodes in the hierarchy, already in execution order.
          */
         virtual void compile_tasks_and_register(
             RouterCore<Session> &router_core,
             const std::string &current_built_path,
-            const std::list<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) = 0;
+            const std::vector<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) = 0;
 
         /**
          * @brief Gets a descriptive name for this handler node, primarily for debugging or logging purposes.
@@ -153,56 +237,38 @@ namespace qb::http {
     protected:
         /**
          * @brief (Protected) Helper method to construct the full URI path for this node.
+         * 
          * It prepends the `parent_full_path` to this node's `_path_segment`,
          * correctly handling leading/trailing slashes to form a normalized path string.
-         * For example, if `parent_full_path` is "/api" and `_path_segment` is "/users",
-         * the result is "/api/users". If `_path_segment` is "users", result is "/api/users".
-         * Ensures no trailing slash unless the path is just "/".
+         * 
+         * Examples:
+         * - parent="/api", segment="/users" → "/api/users"
+         * - parent="/api", segment="users" → "/api/users"
+         * - parent="/api/", segment="users" → "/api/users"
+         * - parent="", segment="users" → "/users"
+         * - parent="/", segment="users" → "/users"
+         * - parent="", segment="" → "/"
+         * 
+         * The path is always normalized: no trailing slashes (except root "/"),
+         * no double slashes, and always starts with "/" (except empty segments result in "/").
+         * 
          * @param parent_full_path The full path accumulated from the root to this node's parent.
          * @return The fully resolved path string for this node.
          */
         [[nodiscard]] std::string build_full_path(const std::string &parent_full_path) const {
-            std::string full_path = parent_full_path;
-
-            // Ensure a single slash between parent_full_path and _path_segment if both are non-empty and don't already have one.
-            if (!full_path.empty() && full_path.back() == '/' && !_path_segment.empty() && _path_segment.front() ==
-                '/') {
-                full_path.pop_back(); // Avoid double slashes like /api//users, use parent's slash
-            } else if (!full_path.empty() && full_path.back() != '/' && !_path_segment.empty() && _path_segment.front()
-                       != '/') {
-                full_path += "/"; // Add a slash if missing between segments
-            } else if (full_path == "/" && !_path_segment.empty() && _path_segment.front() == '/') {
-                // Parent is root "/", current segment starts with "/" (e.g. /users), avoid //users
-                // This case is tricky. If parent is "/" and child is "/foo", result should be "/foo".
-                // If child is "foo", result should be "/foo".
-                // The logic here might need to be path_segment = path_segment.substr(1) if it starts with / and full_path is /
-                // Current logic: if full_path = "/", path_segment = "/users" -> "//users" which then gets fixed.
-                // If full_path = "/", path_segment = "users" -> "/users". This is fine.
-            }
-
-            full_path += _path_segment;
-
-            // Normalize: Remove trailing slash unless it's the root path "/" itself.
-            if (full_path.length() > 1 && full_path.back() == '/') {
-                full_path.pop_back();
-            }
-            // Ensure root path is "/", not empty, if it results from joining empty segments.
-            if (full_path.empty() && parent_full_path.empty() && _path_segment.empty()) {
-                return "/";
-            }
-
-            return full_path;
+            return detail::join_paths(parent_full_path, _path_segment);
         }
 
         /**
          * @brief (Protected) Combines middleware tasks inherited from parent nodes with this node's own specific middleware.
-         * The resulting list maintains execution order: parent middleware first, then this node's middleware.
-         * @param inherited_tasks A list of middleware tasks passed down from the parent node.
-         * @return A new `std::list` containing all combined middleware tasks.
+         * The resulting vector maintains execution order: parent middleware first, then this node's middleware.
+         * @param inherited_tasks A vector of middleware tasks passed down from the parent node.
+         * @return A new `std::vector` containing all combined middleware tasks.
          */
-        [[nodiscard]] virtual std::list<std::shared_ptr<IAsyncTask<Session> > >
-        combine_tasks(const std::list<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) const {
-            std::list<std::shared_ptr<IAsyncTask<Session> > > combined = inherited_tasks;
+        [[nodiscard]] virtual std::vector<std::shared_ptr<IAsyncTask<Session> > >
+        combine_tasks(const std::vector<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) const {
+            std::vector<std::shared_ptr<IAsyncTask<Session> > > combined = inherited_tasks;
+            combined.reserve(combined.size() + _middleware_tasks.size());
             combined.insert(combined.end(), _middleware_tasks.begin(), _middleware_tasks.end());
             return combined;
         }

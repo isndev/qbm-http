@@ -17,13 +17,15 @@
 #include <string>         // For std::string
 #include <string_view>    // For std::string_view
 #include <vector>         // For std::vector
-#include <map>            // For std::map (node children)
+#include <map>            // For std::map (handlers)
+#include <unordered_map>  // For std::unordered_map (static_children - O(1) lookup)
 #include <memory>         // For std::shared_ptr, std::make_shared, std::unique_ptr (used by Node)
 #include <list>           // For std::list (task chains, _path_segment_storage)
 #include <optional>       // For std::optional (match result)
 #include <algorithm>      // For std::find_if, std::copy, std::back_inserter
 #include <stdexcept>      // For std::runtime_error, std::invalid_argument
 #include <utility>        // For std::move
+#include <cassert>        // For assert (debug mode checks)
 
 #include "../types.h"             // For qb::http::method enum
 #include "./async_task.h"       // For IAsyncTask
@@ -110,8 +112,11 @@ namespace qb::http {
              */
             std::map<qb::http::method, std::shared_ptr<const TaskList> > handlers;
 
-            /** @brief Children nodes representing static path segments. Keyed by the segment string. */
-            std::map<std::string_view, std::shared_ptr<Node> > static_children;
+            /** @brief Children nodes representing static path segments. Keyed by the segment string.
+             *  Uses std::unordered_map for O(1) average lookup time instead of O(log n) with std::map.
+             *  Order is not important as we only perform lookups, never iterate in order.
+             */
+            qb::unordered_map<std::string_view, std::shared_ptr<Node> > static_children;
             /** @brief Child node for a parameterized segment, if one exists at this level. */
             std::shared_ptr<Node> param_child = nullptr;
             /** @brief The name of the parameter for `param_child` (e.g., "id" for a `:id` segment). */
@@ -197,13 +202,12 @@ namespace qb::http {
          *
          * @param path_pattern_str The full, normalized path pattern string for the route (e.g., "/users/:id").
          * @param method The HTTP method this route responds to.
-         * @param task_chain_list A list of `IAsyncTask` shared pointers representing the compiled execution chain for this route.
+         * @param task_chain_list A vector of `IAsyncTask` shared pointers representing the compiled execution chain for this route.
          * @throws std::invalid_argument if the path pattern is malformed (e.g., empty segment, misplaced wildcard, conflicting parameters).
          */
         void add_route(const std::string &path_pattern_str, qb::http::method method,
-                       std::list<std::shared_ptr<IAsyncTask<SessionType> > > task_chain_list) {
-            TaskList task_chain_vec; // RadixTree::Node stores a vector internally for handlers.
-            std::copy(task_chain_list.begin(), task_chain_list.end(), std::back_inserter(task_chain_vec));
+                       std::vector<std::shared_ptr<IAsyncTask<SessionType> > > task_chain_list) {
+            TaskList task_chain_vec = std::move(task_chain_list); // RadixTree::Node stores a vector internally for handlers.
 
             std::shared_ptr<Node> current_node = _root;
             std::vector<std::string_view> segments = split_path_to_segments(path_pattern_str);
@@ -320,15 +324,9 @@ namespace qb::http {
             PathParameters params;
             std::vector<std::string_view> segments = split_path_to_segments(path_str);
 
-            // Store path segments as strings for wildcard matching, as wildcard value is a concatenation.
-            std::vector<std::string> path_segments_str_for_wildcard;
-            if (!segments.empty()) {
-                // Only needed if there are segments to potentially form a wildcard value
-                path_segments_str_for_wildcard.reserve(segments.size());
-                for (const auto &sv: segments) {
-                    path_segments_str_for_wildcard.emplace_back(sv);
-                }
-            }
+            // Lazy allocation: path_segments_str_for_wildcard is only created if a wildcard is actually matched.
+            // This avoids unnecessary allocations for the common case where no wildcard routes exist.
+            std::optional<std::vector<std::string> > path_segments_str_for_wildcard;
 
             // Recursive lambda for matching
             std::function<std::optional<MatchedRouteInfo<SessionType> >(std::shared_ptr<Node>, size_t, PathParameters)>
@@ -339,6 +337,19 @@ namespace qb::http {
                         if (!current_node_ptr) {
                             return std::nullopt;
                         }
+
+#ifndef NDEBUG
+                        // Debug assertions: Verify tree structure integrity
+                        // These checks help detect corruption during development
+                        if (current_node_ptr->param_child) {
+                            assert(current_node_ptr->param_child->type == NodeType::PARAMETER &&
+                                   "param_child must be of type PARAMETER");
+                        }
+                        if (current_node_ptr->wildcard_child) {
+                            assert(current_node_ptr->wildcard_child->type == NodeType::WILDCARD &&
+                                   "wildcard_child must be of type WILDCARD");
+                        }
+#endif
 
                         // Base case: All path segments have been consumed
                         if (segment_idx == segments.size()) {
@@ -381,10 +392,19 @@ namespace qb::http {
 
                         // 3. Try wildcard child match (lowest priority, and it consumes all remaining segments)
                         if (current_node_ptr->wildcard_child) {
+                            // Lazy creation: only create path_segments_str_for_wildcard if we actually need it
+                            if (!path_segments_str_for_wildcard.has_value()) {
+                                path_segments_str_for_wildcard.emplace();
+                                path_segments_str_for_wildcard->reserve(segments.size());
+                                for (const auto &sv: segments) {
+                                    path_segments_str_for_wildcard->emplace_back(sv);
+                                }
+                            }
+                            
                             std::string wildcard_captured_value;
                             for (size_t i = segment_idx; i < segments.size(); ++i) {
                                 if (i > segment_idx) wildcard_captured_value += "/";
-                                wildcard_captured_value += path_segments_str_for_wildcard[i];
+                                wildcard_captured_value += (*path_segments_str_for_wildcard)[i];
                                 // Use pre-converted strings for safety
                             }
                             PathParameters params_for_wildcard_branch = current_params;

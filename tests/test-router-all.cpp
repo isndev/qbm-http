@@ -402,7 +402,7 @@ TEST_F(RouterAllInOneTest, ComprehensiveScenario) {
         ctx->complete();
     });
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession> > > error_chain;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession> > > error_chain;
     error_chain.push_back(
         std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession> >(
             std::make_shared<AllInOneMiddleware>("ErrorChainMwSync", nullptr, _session.get(), false,
@@ -666,7 +666,7 @@ TEST_F(RouterAllInOneTest, ErrorInControllerMiddleware) {
     _router->template controller<ControllerWithErrorMw>("/ctrl_err_mw", _session.get(), &_task_executor);
 
     // Setup a main error handler for the router
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession> > > error_chain;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession> > > error_chain;
     error_chain.push_back(
         std::make_shared<qb::http::CustomRouteAdapterTask<MockAllInOneSession> >(
             std::make_shared<AllInOneCustomRoute>("MainRouterErrorHandlerForCtrlMwError", nullptr, _session.get(),
@@ -699,7 +699,7 @@ TEST_F(RouterAllInOneTest, ErrorInErrorChainIsFatal) {
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     });
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession> > > faulty_error_chain;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession> > > faulty_error_chain;
     faulty_error_chain.push_back(
         std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession> >(
             std::make_shared<AllInOneMiddleware>("FaultyErrorChainMw1", nullptr, _session.get(), false,

@@ -23,7 +23,6 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include <list>
 #include <functional>
 #include <iostream>
 #include <type_traits> // For std::enable_if_t, std::is_base_of_v
@@ -66,9 +65,9 @@ namespace qb::http {
         void compile_tasks_and_register(
             RouterCore<Session> &router_core,
             const std::string &current_built_path,
-            const std::list<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) override {
+            const std::vector<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) override {
             std::string group_full_path = this->build_full_path(current_built_path);
-            std::list<std::shared_ptr<IAsyncTask<Session> > > tasks_for_children = this->combine_tasks(inherited_tasks);
+            std::vector<std::shared_ptr<IAsyncTask<Session> > > tasks_for_children = this->combine_tasks(inherited_tasks);
 
             for (const auto &child: _children) {
                 if (child) {

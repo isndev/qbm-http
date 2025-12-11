@@ -282,7 +282,7 @@ namespace qb::http {
     }
 
     template<typename SessionType>
-    void Router<SessionType>::set_error_task_chain(std::list<std::shared_ptr<IAsyncTask<SessionType> > > error_chain) {
+    void Router<SessionType>::set_error_task_chain(std::vector<std::shared_ptr<IAsyncTask<SessionType> > > error_chain) {
         if (_router_core) {
             _router_core->set_error_task_chain(std::move(error_chain));
         }

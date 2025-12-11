@@ -111,7 +111,7 @@ protected:
         _router->get(path, normal_route_handler()); // This handler should be bypassed
 
         // Set the error handling middleware as the error chain for the router
-        std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
+        std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
         error_chain.push_back(
             std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession> >(_error_mw, _error_mw->name()));
         _router->set_error_task_chain(error_chain);
@@ -285,7 +285,7 @@ TEST_F(ErrorHandlingMiddlewareTest, MultipleErrorHandlersInChain) {
         });
 
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
     error_chain.push_back(
         std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession> >(error_mw1, error_mw1->name()));
     error_chain.push_back(
@@ -325,7 +325,7 @@ TEST_F(ErrorHandlingMiddlewareTest, FactoryFunctionCreatesInstance) {
                           });
 
     auto local_router = std::make_unique<qb::http::Router<MockErrorHandlingSession> >();
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
     error_chain.push_back(
         std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession> >(factory_mw, factory_mw->name()));
     local_router->set_error_task_chain(error_chain);
@@ -599,7 +599,7 @@ TEST_F(ErrorHandlingMiddlewareTest, OnStatusRangeWithInvalidCodes) {
     // We need to use the new _error_mw
     _router->use(trigger_task_500); // Add trigger
     _router->get("/error_trigger", normal_route_handler()); // Add route
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain;
     error_chain.push_back(
         std::make_shared<qb::http::MiddlewareTask<MockErrorHandlingSession> >(_error_mw, _error_mw->name()));
     _router->set_error_task_chain(error_chain); // Set the new error MW

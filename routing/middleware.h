@@ -19,12 +19,12 @@
 #include "./async_task.h"
 #include "./context.h"
 #include "./types.h"
+#include "../logger.h" // For LOG_HTTP_ERROR, LOG_HTTP_WARN
 
 #include <functional>
 #include <string>
 #include <memory>
 #include <variant>
-#include <iostream> // For std::cerr (TODO logging)
 
 namespace qb::http {
     /**
@@ -76,30 +76,36 @@ namespace qb::http {
         }
 
         void execute(std::shared_ptr<Context<SessionType> > ctx) override {
-            // std::cerr << "MiddlewareTask [" << name() << "]: Executing." << std::endl;
             try {
                 _middleware->process(ctx);
                 // The middleware's handle method is responsible for calling ctx->complete()
             } catch (const std::exception &e) {
-                std::cerr << "MiddlewareTask [" << name() << "]: Exception during process(): " << e.what() << std::endl;
+                // Log the exception with request context if available
+                if (ctx) {
+                    LOG_HTTP_ERROR("MiddlewareTask [" << name() << "]: Exception during process() - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path() << ", "
+                        << "Error: " << e.what());
+                } else {
+                    LOG_HTTP_ERROR("MiddlewareTask [" << name() << "]: Exception during process() - " << e.what());
+                }
                 // If middleware throws, it means it didn't call complete. We should signal error.
-                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR; // NO NAMESPACE
-                const qb::http::AsyncTaskResult error_result = qb::http::AsyncTaskResult::ERROR; // Explicitly typed
-                ctx->complete(error_result); // Scoped
+                if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                    const qb::http::AsyncTaskResult error_result = qb::http::AsyncTaskResult::ERROR;
+                    ctx->complete(error_result);
+                }
             }
         }
 
         void cancel() override {
-            // std::cerr << "MiddlewareTask [" << name() << "]: Cancel called." << std::endl;
             if (_middleware) {
                 try {
                     _middleware->cancel();
                 } catch (const std::exception &e) {
-                    std::cerr << "MiddlewareTask [" << name() << "]: Exception during _middleware->cancel(): " << e.
-                            what() << std::endl;
+                    LOG_HTTP_WARN("MiddlewareTask [" << name() << "]: Exception during cancel() - " << e.what());
                 } catch (...) {
-                    std::cerr << "MiddlewareTask [" << name() << "]: Unknown exception during _middleware->cancel()." <<
-                            std::endl;
+                    LOG_HTTP_WARN("MiddlewareTask [" << name() << "]: Unknown exception during cancel()");
                 }
             }
         }

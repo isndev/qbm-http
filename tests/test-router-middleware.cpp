@@ -396,7 +396,7 @@ TEST_F(RouterMiddlewareTest, SyncMiddlewareError) {
     _router.use(std::make_shared<SyncAppendingMiddleware>("mw3_never_reached"));
     _router.get("/test", final_handler("handler_never_reached"));
     // Define a simple error handler for the router to check if it's called
-    _router.set_error_task_chain(std::list<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
+    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
         std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession> >(
             std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession> >([](auto ctx, auto /*next*/) {
                 // Assuming next is not used based on lambda body
@@ -560,7 +560,7 @@ TEST_F(RouterMiddlewareTest, AsyncMiddlewareError) {
     _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw3_never_reached", &_task_executor));
     _router.get("/test", final_handler("handler_never_reached"));
 
-    _router.set_error_task_chain(std::list<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
+    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
         std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession> >(
             std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession> >([](auto ctx, auto /*next*/) {
                 // Assuming next is not used
@@ -698,7 +698,7 @@ TEST_F(RouterMiddlewareTest, ErrorInGlobalMiddlewareDuringNotFoundProcessing) {
         ctx->session()->trace("custom_404_not_reached");
         ctx->complete();
     });
-    _router.set_error_task_chain(std::list<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
+    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
         std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession> >(
             std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession> >([](auto ctx, auto /*next*/) {
                 ctx->session()->trace("main_error_handler_after_404_global_mw_error");
@@ -723,7 +723,7 @@ TEST_F(RouterMiddlewareTest, ErrorInGlobalMiddlewareDuringNotFoundProcessing) {
 
 TEST_F(RouterMiddlewareTest, ErrorInUserErrorHandlerIsFatal) {
     _router.use(std::make_shared<SyncErrorMiddleware>("trigger_initial_error")); // To trigger the error chain
-    _router.set_error_task_chain(std::list<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
+    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession> > >{
         std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession> >(
             std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession> >([](auto ctx, auto /*next*/) {
                 ctx->session()->trace("faulty_error_handler");
