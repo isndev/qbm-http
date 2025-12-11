@@ -90,7 +90,7 @@ namespace qb::http {
      * @brief Generates an `Accept-Encoding` header value string based on server capabilities for decompression.
      *
      * This string lists compression algorithms supported by the server for decompressing request bodies
-     * (if `QB_IO_WITH_ZLIB` is defined), usually with quality values (q-values) indicating preference.
+     * (if `QB_HAS_COMPRESSION` is defined), usually with quality values (q-values) indicating preference.
      * For example: `"gzip;q=1.0, deflate;q=0.9"`. The string "chunked" (a transfer encoding) is also typically appended.
      * This function is useful for a client to indicate to a server what encodings it can accept in a response.
      *
@@ -102,7 +102,7 @@ namespace qb::http {
      * @brief Selects a suitable `Content-Encoding` for a response based on the client's `Accept-Encoding` header.
      *
      * Compares the client's accepted encodings with the server's supported compression algorithms
-     * (if `QB_IO_WITH_ZLIB` is defined) and selects the best match. The selection logic typically respects
+     * (if `QB_HAS_COMPRESSION` is defined) and selects the best match. The selection logic typically respects
      * the client's preference order but does not currently parse q-values for complex weighting.
      *
      * @param accept_encoding_header The `Accept-Encoding` header value received from the client.

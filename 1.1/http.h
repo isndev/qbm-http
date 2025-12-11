@@ -30,14 +30,13 @@
  * @ingroup Http
  */
 #pragma once
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h>
 #endif
-#include "../date.h"
 #include "../routing.h"
-#include "../logger.h"
 #include "./protocol/server.h"
 #include "./protocol/client.h"
+#include "../logger.h"
 
 namespace qb::http {
     /**
@@ -141,7 +140,7 @@ namespace qb::http {
             void
             on(typename Protocol::request &&request) {
                 LOG_HTTP_INFO_PA(this->id(), "Received HTTP/1.1 request: " << request.method() << " " << request.uri().source());
-                
+
                 _context = this->server().router().route(this->shared_from_this(), std::move(request));
 
                 if (!_context) {
@@ -167,7 +166,7 @@ namespace qb::http {
             void
             on(qb::io::async::event::timeout const &) {
                 LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 session timed out.");
-                
+
                 // disconnect session on timeout
                 // add reason for timeout
                 if constexpr (has_method_on<Derived, void, event::timeout const &>::value) {
@@ -540,7 +539,7 @@ namespace qb::http {
             void
             connect(double timeout = 0) {
                 LOG_HTTP_INFO("HTTP/1.1 client connecting to " << _request.uri().source() << " with timeout " << timeout << "s");
-                
+
                 qb::io::async::tcp::connect<typename Transport::transport_io_type>(
                     _request.uri(),
                     [this, timeout, remote_uri = _request.uri().source()](auto &&transport) {
@@ -555,7 +554,7 @@ namespace qb::http {
                             LOG_HTTP_DEBUG("HTTP/1.1 client connection established to " << remote_uri);
                             this->transport() = std::forward<decltype(transport)>(transport);
                             this->start();
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
                             if (_request.has_header("Content-Encoding")) {
                                 LOG_HTTP_DEBUG("Compressing request body with " << _request.header("Content-Encoding"));
                                 _request.body().compress(_request.header("Content-Encoding"));
@@ -580,8 +579,8 @@ namespace qb::http {
             void
             on(typename http_protocol::response response) {
                 LOG_HTTP_INFO("HTTP/1.1 client received response. Status: " << response.status().code());
-                
-#ifdef QB_IO_WITH_ZLIB
+
+#ifdef QB_HAS_COMPRESSION
                 try {
                     if (response.has_header("Content-Encoding")) {
                         LOG_HTTP_DEBUG("Decompressing response body with " << response.header("Content-Encoding"));
@@ -638,10 +637,10 @@ namespace qb::http {
         template <typename Func>
         using HTTP = session<Func, qb::io::transport::tcp>;
 
-#if QB_IO_WITH_SSL
+#if QB_HAS_SSL
         template <typename Func>
         using HTTPS = session<Func, qb::io::transport::stcp>;
-#endif // QB_IO_WITH_SSL
+#endif // QB_HAS_SSL
 
     } // namespace async
 
@@ -650,7 +649,7 @@ namespace qb::http {
         void _execute_async_request_internal(Request request, _Func &&func, double timeout, const char* method_name_for_log) {
             request.headers()["host"].emplace_back(request.uri().host());
             LOG_HTTP_DEBUG("Executing HTTP/1.1 " << method_name_for_log << " request: " << request.method() << " " << request.uri().source());
-#if QB_IO_WITH_SSL
+#if QB_HAS_SSL
             if (request.uri().scheme() == "https") {
                 (new async::HTTPS<_Func>(std::forward<_Func>(func), request))
                     ->connect(timeout);
@@ -983,7 +982,7 @@ std::unique_ptr<Server<Session>> make_server() {
 template<typename Session = DefaultSession>
 using server = Server<Session>;
 
-#if QB_IO_WITH_SSL
+#if QB_HAS_SSL
 namespace ssl {
     template<typename SessionType>
     class Server;
@@ -1052,6 +1051,6 @@ template<typename Session = DefaultSecureSession>
 using server = Server<Session>;
 
 } // namespace ssl
-#endif // QB_IO_WITH_SSL
+#endif // QB_HAS_SSL
 
 } // namespace qb::http

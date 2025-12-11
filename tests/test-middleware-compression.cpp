@@ -124,7 +124,7 @@ protected:
     }
 };
 
-#ifdef QB_IO_WITH_ZLIB // Most compression tests will only run if ZLIB is enabled
+#ifdef QB_HAS_COMPRESSION // Most compression tests will only run if ZLIB is enabled
 
 TEST_F(CompressionMiddlewareTest, DecompressesGzipRequest) {
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>();
@@ -424,7 +424,7 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionNotAppliedIfNoCommonSupport
     EXPECT_EQ(_session->_response.body().as<std::string>(), original_response_body);
 }
 
-#endif // QB_IO_WITH_ZLIB
+#endif // QB_HAS_COMPRESSION
 
 TEST_F(CompressionMiddlewareTest, FactoryFunctions) {
     auto default_mw = qb::http::compression_middleware<MockCompressionSession>();

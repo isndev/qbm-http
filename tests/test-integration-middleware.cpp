@@ -406,15 +406,15 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
 TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     // Expected server assertions:
     // 1 for /compressible_route handler.
-    // If QB_IO_WITH_ZLIB is defined, the POST request with "invalid gzipped data" will be
+    // If QB_HAS_COMPRESSION is defined, the POST request with "invalid gzipped data" will be
     // auto-compressed by the client. The server will decompress it successfully.
     // So, the /decompress_test_route handler will also be hit, adding 1 assertion.
-    // Inside /decompress_test_route, if QB_IO_WITH_ZLIB, we expect Content-Encoding to be removed (1 assertion for the EXPECT_TRUE).
+    // Inside /decompress_test_route, if QB_HAS_COMPRESSION, we expect Content-Encoding to be removed (1 assertion for the EXPECT_TRUE).
     // Total with ZLIB: 1 (GET) + 1 (POST handler) + 1 (POST header check) = 3. But the header check is inside the handler, which already counts as 1 assertion for the handler hit.
     // Let's be precise: Handler for /compressible_route (1), Handler for /decompress_test_route (1). Total 2.
     // The EXPECT_TRUE for Content-Encoding inside the /decompress_test_route handler is a server-side check but doesn't increment mid_server_side_assertions itself.
     // So, if both handlers are hit, mid_server_side_assertions should be 2.
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
     mid_expected_server_assertions = 2; // Handler for GET + Handler for POST
 #else
     mid_expected_server_assertions = 2;
@@ -447,7 +447,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
         std::string received_body = ctx->request().body().template as<std::string>();
         ctx->response().body() = "Received body: " + received_body;
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
         EXPECT_TRUE(ctx->request().header("Content-Encoding").empty())
             << "Content-Encoding header should be removed by middleware after successful decompression attempt.";
 #endif
@@ -467,7 +467,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
         EXPECT_EQ(qb::http::status::OK, response.status());
         mid_request_count_client++;
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
         EXPECT_EQ("gzip", response.header("Content-Encoding"))
             << "Content-Encoding header should be gzip.";
         EXPECT_NE(std::to_string(original_compressible_body_content.length()), response.header("Content-Length"))
@@ -477,7 +477,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
         // For this test, header checks are the primary focus for middleware behavior.
 #else
         EXPECT_TRUE(response.header("Content-Encoding").empty())
-            << "Content-Encoding header should be empty if QB_IO_WITH_ZLIB is not defined.";
+            << "Content-Encoding header should be empty if QB_HAS_COMPRESSION is not defined.";
         EXPECT_EQ(original_compressible_body_content, response.body().as<std::string>());
         EXPECT_EQ(std::to_string(original_compressible_body_content.length()), response.header("Content-Length"));
 #endif
@@ -495,7 +495,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
 
         auto response = qb::http::POST(request);
         mid_request_count_client++;
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
         EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Received body: " + data_sent_in_post_request, response.body().as<std::string>());
 
@@ -512,7 +512,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     }
 
     EXPECT_EQ(2, mid_request_count_client.load());
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
     // EXPECT_EQ(1, mid_request_count_server.load()) << "Only GET handler should be reached if POST data is invalid gzip.";
     // If client auto-compresses and server successfully decompresses, both handlers are reached.
     EXPECT_EQ(2, mid_request_count_server.load()) << "Both GET and POST handlers should be reached.";

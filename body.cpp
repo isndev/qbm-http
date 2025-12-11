@@ -372,7 +372,7 @@ namespace qb::http {
         };
     } // namespace internal
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
     /**
      * @brief Get a compressor provider based on encoding header
      * @param encoding Content-Encoding or Accept-Encoding header value

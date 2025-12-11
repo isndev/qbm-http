@@ -6,7 +6,7 @@
  * `CompressionOptions`. This middleware automatically handles decompression of
  * incoming request bodies (e.g., gzip, deflate) and compression of outgoing
  * response bodies based on client capabilities (`Accept-Encoding`) and server configuration.
- * Actual compression/decompression operations require the `QB_IO_WITH_ZLIB` macro to be defined.
+ * Actual compression/decompression operations require the `QB_HAS_COMPRESSION` macro to be defined.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
@@ -143,7 +143,7 @@ namespace qb::http {
      *
      * This middleware inspects the `Content-Encoding` header for incoming requests and attempts
      * to decompress the body if a supported encoding (e.g., gzip, deflate) is specified and
-     * if `QB_IO_WITH_ZLIB` is defined.
+     * if `QB_HAS_COMPRESSION` is defined.
      *
      * For outgoing responses, it inspects the client's `Accept-Encoding` header and the response body.
      * If conditions are met (e.g., body size exceeds `min_size_to_compress`, content type is not
@@ -186,7 +186,7 @@ namespace qb::http {
          * @param ctx The shared `Context` for the current request.
          */
         void process(ContextPtr ctx) override {
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
             if (_options.should_decompress_requests() && can_decompress_request(ctx->request())) {
                 try {
                     decompress_request_body(ctx->request());
@@ -226,7 +226,7 @@ namespace qb::http {
                     }
                 });
             }
-#endif // QB_IO_WITH_ZLIB
+#endif // QB_HAS_COMPRESSION
             ctx->complete(AsyncTaskResult::CONTINUE); // Continue to next middleware/handler
         }
 
@@ -270,14 +270,14 @@ namespace qb::http {
         }
 
         /**
-         * @brief Decompresses the request body in-place if `QB_IO_WITH_ZLIB` is defined.
+         * @brief Decompresses the request body in-place if `QB_HAS_COMPRESSION` is defined.
          * Modifies the request object by replacing its body with the decompressed content
          * and removing/updating `Content-Encoding` and `Content-Length` headers.
          * @param request The HTTP request object (mutable).
          * @throws std::runtime_error if decompression fails (e.g., bad data, unsupported encoding within Body::uncompress).
          */
         void decompress_request_body(RequestType &request) {
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
             // header() returns `const String&`. Body::uncompress needs `const std::string&`.
             std::string encoding_str;
             const auto &enc_header_val = request.header("Content-Encoding");
@@ -306,14 +306,14 @@ namespace qb::http {
         }
 
         /**
-         * @brief Compresses the response body in-place if `QB_IO_WITH_ZLIB` is defined and conditions are met.
+         * @brief Compresses the response body in-place if `QB_HAS_COMPRESSION` is defined and conditions are met.
          * Modifies the response object by replacing its body with compressed content and setting
          * `Content-Encoding`, `Vary`, and `Content-Length` headers.
          * @param ctx_ref Reference to the `Context` object containing the response.
          * @throws std::runtime_error if compression fails (e.g., unsupported encoding within Body::compress).
          */
         void compress_response_body(Context<SessionType> &ctx_ref) {
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
             ResponseType &response = ctx_ref.response(); // Get mutable reference
 
             if (response.body().size() < _options.get_min_size_to_compress() ||

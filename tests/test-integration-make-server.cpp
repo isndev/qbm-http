@@ -5,7 +5,7 @@
 #include "../2/http2.h" // For HTTP/2 server components
 #include "../2/client.h" // For HTTP/2 client
 
-#if QB_IO_WITH_SSL
+#if QB_HAS_SSL
 #include <fstream>     // For checking certificate file existence
 #endif
 
@@ -100,7 +100,7 @@ TEST_F(HttpMakeServerTest, PingDefaultSessionHttpServer) {
     EXPECT_EQ(1, g_make_server_test_req_count_server.load());
 }
 
-#if QB_IO_WITH_SSL
+#if QB_HAS_SSL
 
 // --- Test Fixture for qb::http::ssl::make_server (default session) ---
 class HttpsMakeServerTest : public ::testing::Test {
@@ -195,9 +195,9 @@ TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
     EXPECT_EQ(1, g_make_server_test_req_count_server.load());
 }
 
-#endif // QB_IO_WITH_SSL
+#endif // QB_HAS_SSL
 
-#if QB_IO_WITH_SSL
+#if QB_HAS_SSL
 // --- Test Fixture for qb::http2::make_server --- 
 class Http2MakeServerTest : public ::testing::Test {
 protected:
@@ -344,4 +344,4 @@ TEST_F(Http2MakeServerTest, PingHttp2Server) {
     h2_client->disconnect();
 }
 
-#endif // QB_IO_WITH_SSL 
+#endif // QB_HAS_SSL

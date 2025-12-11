@@ -63,7 +63,7 @@ namespace qb::http::validation {
                 break;
         }
         if (!valid) {
-            result.add_error(field_path, rule_name(), "Invalid type. Expected " + _type_name_str + ".", value);
+            result.add_error(field_path, rule_name(), "Invalid type. Expected " + _type_name_str + ".", std::make_optional(value));
         }
         return valid;
     }
@@ -82,14 +82,14 @@ namespace qb::http::validation {
         if (value.is_string()) {
             if (value.get<std::string>().length() < _min_length) {
                 result.add_error(field_path, rule_name(),
-                                 "String too short. Minimum length is " + std::to_string(_min_length) + ".", value);
+                                 "String too short. Minimum length is " + std::to_string(_min_length) + ".", std::make_optional(value));
                 return false;
             }
         } else if (value.is_array()) {
             // Apply to arrays as well (minItems is preferred for arrays by JSON Schema spec)
             if (value.size() < _min_length) {
                 result.add_error(field_path, rule_name(),
-                                 "Array too short. Minimum items is " + std::to_string(_min_length) + ".", value);
+                                 "Array too short. Minimum items is " + std::to_string(_min_length) + ".", std::make_optional(value));
                 return false;
             }
         }
@@ -101,14 +101,14 @@ namespace qb::http::validation {
         if (value.is_string()) {
             if (value.get<std::string>().length() > _max_length) {
                 result.add_error(field_path, rule_name(),
-                                 "String too long. Maximum length is " + std::to_string(_max_length) + ".", value);
+                                 "String too long. Maximum length is " + std::to_string(_max_length) + ".", std::make_optional(value));
                 return false;
             }
         } else if (value.is_array()) {
             // Apply to arrays as well (maxItems is preferred for arrays by JSON Schema spec)
             if (value.size() > _max_length) {
                 result.add_error(field_path, rule_name(),
-                                 "Array too long. Maximum items is " + std::to_string(_max_length) + ".", value);
+                                 "Array too long. Maximum items is " + std::to_string(_max_length) + ".", std::make_optional(value));
                 return false;
             }
         }
@@ -131,7 +131,7 @@ namespace qb::http::validation {
         }
         const auto &str_val = value.get<std::string>();
         if (!std::regex_match(str_val, _regex)) {
-            result.add_error(field_path, rule_name(), "String does not match pattern: " + _pattern_str, value);
+            result.add_error(field_path, rule_name(), "String does not match pattern: " + _pattern_str, std::make_optional(value));
             return false;
         }
         return true;
@@ -143,13 +143,13 @@ namespace qb::http::validation {
         if (_exclusive) {
             if (num_val <= _minimum) {
                 result.add_error(field_path, rule_name(),
-                                 "Value must be greater than " + std::to_string(_minimum) + ".", value);
+                                 "Value must be greater than " + std::to_string(_minimum) + ".", std::make_optional(value));
                 return false;
             }
         } else {
             if (num_val < _minimum) {
                 result.add_error(field_path, rule_name(),
-                                 "Value must be greater than or equal to " + std::to_string(_minimum) + ".", value);
+                                 "Value must be greater than or equal to " + std::to_string(_minimum) + ".", std::make_optional(value));
                 return false;
             }
         }
@@ -162,13 +162,13 @@ namespace qb::http::validation {
         if (_exclusive) {
             if (num_val >= _maximum) {
                 result.add_error(field_path, rule_name(), "Value must be less than " + std::to_string(_maximum) + ".",
-                                 value);
+                                 std::make_optional(value));
                 return false;
             }
         } else {
             if (num_val > _maximum) {
                 result.add_error(field_path, rule_name(),
-                                 "Value must be less than or equal to " + std::to_string(_maximum) + ".", value);
+                                 "Value must be less than or equal to " + std::to_string(_maximum) + ".", std::make_optional(value));
                 return false;
             }
         }
@@ -191,7 +191,7 @@ namespace qb::http::validation {
             }
         }
         if (!found) {
-            result.add_error(field_path, rule_name(), "Value is not one of the allowed enumerated values.", value);
+            result.add_error(field_path, rule_name(), "Value is not one of the allowed enumerated values.", std::make_optional(value));
             return false;
         }
         return true;
@@ -204,7 +204,7 @@ namespace qb::http::validation {
         for (const auto &item: value) {
             if (!seen_items.insert(item).second) {
                 // .second is false if item was already present
-                result.add_error(field_path, rule_name(), "Array items must be unique.", value);
+                result.add_error(field_path, rule_name(), "Array items must be unique.", std::make_optional(value));
                 // Report error on the whole array value
                 return false;
             }
@@ -216,7 +216,7 @@ namespace qb::http::validation {
         if (!value.is_array()) return true; // Rule only applies to arrays.
         if (value.size() < _min_items) {
             result.add_error(field_path, rule_name(),
-                             "Array must contain at least " + std::to_string(_min_items) + " items.", value);
+                             "Array must contain at least " + std::to_string(_min_items) + " items.", std::make_optional(value));
             return false;
         }
         return true;
@@ -226,7 +226,7 @@ namespace qb::http::validation {
         if (!value.is_array()) return true; // Rule only applies to arrays.
         if (value.size() > _max_items) {
             result.add_error(field_path, rule_name(),
-                             "Array must contain at most " + std::to_string(_max_items) + " items.", value);
+                             "Array must contain at most " + std::to_string(_max_items) + " items.", std::make_optional(value));
             return false;
         }
         return true;
@@ -236,7 +236,7 @@ namespace qb::http::validation {
         if (!value.is_object()) return true; // Rule only applies to objects.
         if (value.size() < _min_properties) {
             result.add_error(field_path, rule_name(),
-                             "Object must have at least " + std::to_string(_min_properties) + " properties.", value);
+                             "Object must have at least " + std::to_string(_min_properties) + " properties.", std::make_optional(value));
             return false;
         }
         return true;
@@ -246,7 +246,7 @@ namespace qb::http::validation {
         if (!value.is_object()) return true; // Rule only applies to objects.
         if (value.size() > _max_properties) {
             result.add_error(field_path, rule_name(),
-                             "Object must have at most " + std::to_string(_max_properties) + " properties.", value);
+                             "Object must have at most " + std::to_string(_max_properties) + " properties.", std::make_optional(value));
             return false;
         }
         return true;
@@ -278,7 +278,7 @@ namespace qb::http::validation {
                                                                                 : ("." + err.field_path));
                     result.add_error(reported_path, err.rule_violated,
                                      "Property name '" + prop_name + "' failed validation: " + err.message,
-                                     prop_name_json);
+                                     std::make_optional(prop_name_json));
                 }
                 all_names_valid = false;
                 // It might be desirable to collect all property name errors, so no `break` here.

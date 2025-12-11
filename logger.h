@@ -1,12 +1,12 @@
 #ifndef QB_MODULE_HTTP_LOGGER_H_
 #define QB_MODULE_HTTP_LOGGER_H_
 
-#include <qb/io.h> // This should include nanolog.h if QB_LOGGER is defined
+#include <qb/io.h> // This should include nanolog.h if QB_WITH_LOGGING is defined
 
 // Define a common prefix for all qbm-http logs to easily identify them.
 #define QBM_HTTP_LOG_PREFIX "[qbm-http] "
 
-#ifdef QB_LOGGER
+#ifdef QB_WITH_LOGGING
 
 // HTTP-specific TRACE (maps to DEBUG for nanolog, could be made more distinct if nanolog supported more levels easily)
 #define LOG_HTTP_TRACE(X) \
@@ -62,9 +62,9 @@
     (void)(nanolog::is_logged(nanolog::LogLevel::CRIT) && \
            NANO_LOG(nanolog::LogLevel::CRIT) << QBM_HTTP_LOG_PREFIX << "S-" << STREAM_ID << " CRITICAL: " << X)
 
-#else // QB_LOGGER not defined, fallback to QB_STDOUT_LOG or no-op
+#else // QB_WITH_LOGGING not defined, fallback to QB_STDOUT_LOGGING or no-op
 
-#ifdef QB_STDOUT_LOG
+#ifdef QB_STDOUT_LOGGING
 #define LOG_HTTP_TRACE(X) qb::io::cout() << QBM_HTTP_LOG_PREFIX << "TRACE: " << X << std::endl
 #define LOG_HTTP_DEBUG(X) qb::io::cout() << QBM_HTTP_LOG_PREFIX << "DEBUG: " << X << std::endl
 #define LOG_HTTP_VERBOSE(X) qb::io::cout() << QBM_HTTP_LOG_PREFIX << "VERBOSE: " << X << std::endl
@@ -80,7 +80,7 @@
 #define LOG_HTTP_ERROR_PA(STREAM_ID, X) qb::io::cerr() << QBM_HTTP_LOG_PREFIX << "S-" << STREAM_ID << " ERROR: " << X << std::endl
 #define LOG_HTTP_CRIT_PA(STREAM_ID, X)  qb::io::cerr() << QBM_HTTP_LOG_PREFIX << "S-" << STREAM_ID << " CRITICAL: " << X << std::endl
 
-#else // QB_STDOUT_LOG not defined, logs are no-ops
+#else // QB_STDOUT_LOGGING not defined, logs are no-ops
 
 #define LOG_HTTP_TRACE(X) do {} while (false)
 #define LOG_HTTP_DEBUG(X) do {} while (false)
@@ -97,7 +97,7 @@
 #define LOG_HTTP_ERROR_PA(STREAM_ID, X) do {} while (false)
 #define LOG_HTTP_CRIT_PA(STREAM_ID, X) do {} while (false)
 
-#endif // QB_STDOUT_LOG
-#endif // QB_LOGGER
+#endif // QB_STDOUT_LOGGING
+#endif // QB_WITH_LOGGING
 
 #endif // QB_MODULE_HTTP_LOGGER_H_ 
