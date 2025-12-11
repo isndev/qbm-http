@@ -54,6 +54,15 @@ namespace qb::http {
             bool upgrade{};
 
             /**
+             * @brief HTTP/2 stream identifier.
+             * 
+             * For HTTP/2 requests/responses, this contains the stream ID (odd for client-initiated,
+             * even for server-initiated). For HTTP/1.1, this is 0.
+             * This avoids the need for string conversions and provides type safety.
+             */
+            uint32_t stream_id{0};
+
+            /**
              * @brief Default constructor.
              *
              * Initializes a message with HTTP version 1.1 (`major_version = 1`, `minor_version = 1`)
@@ -64,6 +73,7 @@ namespace qb::http {
                 : major_version(1)
                   , minor_version(1)
                   , upgrade(false) // Explicitly initialize upgrade flag
+                  , stream_id(0) // Default to 0 for HTTP/1.1
             {
                 // reset() is called to clear headers from THeaders, Body is default constructed.
                 // The THeaders part of MessageBase is default constructed before this body,
@@ -93,7 +103,9 @@ namespace qb::http {
                   , Body(std::move(initial_body)) // Initialize Body part
                   , major_version(1)
                   , minor_version(1)
-                  , upgrade(false) {
+                  , upgrade(false)
+                  , stream_id(0) // Default to 0 for HTTP/1.1
+            {
             }
 
             /**
@@ -134,6 +146,7 @@ namespace qb::http {
                 this->THeaders<String>::_content_type = typename THeaders<String>::ContentType{};
                 // Note: Body is not cleared here by design, typically managed separately or by derived reset().
                 // HTTP version and upgrade flag are also not reset here, typically set at construction or explicitly.
+                // stream_id is not reset here - it should be explicitly set by the protocol layer
             }
 
         public:
