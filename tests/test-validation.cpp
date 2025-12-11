@@ -28,7 +28,7 @@ TEST_F(ValidationLogicTest, ValidationResultBehavesCorrectly) {
     EXPECT_EQ(result.errors()[0].message, "Field is missing");
 
     Result other_result;
-    other_result.add_error("field2", "type", "Must be a string", qb::json(123));
+    other_result.add_error("field2", "type", "Must be a string", std::make_optional(qb::json(123)));
     result.merge(other_result);
     EXPECT_FALSE(result.success());
     ASSERT_EQ(result.errors().size(), 2);
@@ -310,7 +310,7 @@ TEST_F(ValidationLogicTest, CustomRuleValidation) {
         if (val.is_string() && val.get<std::string>() == "custom_valid") {
             return true;
         }
-        res.add_error(path, "custom_lambda_error_name", "Value did not meet custom criteria.", val);
+        res.add_error(path, "custom_lambda_error_name", "Value did not meet custom criteria.", std::make_optional(val));
         return false;
     };
     CustomRule rule(fn, "myCustomRuleNameRegisteredInValidator");

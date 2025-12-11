@@ -17,24 +17,27 @@
 
 project(qbm-http)
 
-if (NOT QB_FOUND)
-    message(STATUS "qb project not found, skipping HTTP module")
+# Check if qb framework is available
+if(NOT QB_FOUND)
+    qb_status_message("qb framework not found, skipping HTTP module")
     return()
-endif ()
+endif()
 
-if (NOT OPENSSL_FOUND OR NOT QB_IO_WITH_SSL)
-    message(INFO: qbm-http will not be loaded, missing openssl)
+# Check if SSL support is available
+if(NOT QB_HAS_SSL)
+    qb_status_message("HTTP module requires SSL support - skipping")
     return()
-endif ()
+endif()
 
+# Add the internal llhttp dependency
 add_subdirectory(not-qb/llhttp)
 
+# Register the HTTP module using the new framework functions
 qb_register_module(
-        NAME http
-        VERSION 1.0.0
-        DEPENDENCIES
-        llhttp
-        SOURCES
+    NAME http
+    VERSION 1.0.0
+    DEPENDS qb-core llhttp
+    SOURCES
         # Core files
         headers.cpp
         date.cpp
@@ -55,9 +58,11 @@ qb_register_module(
         # HTTP/2
         2/http2.cpp
         2/client.cpp
+    DEFINES
+        QBM_HTTP_VERSION=1.0.0
 )
 
-if (QB_BUILD_TEST)
-    enable_testing()
+# Add tests if enabled
+if(QB_BUILD_TESTS)
     add_subdirectory(tests)
-endif ()
+endif()

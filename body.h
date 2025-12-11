@@ -23,7 +23,7 @@
 #include <qb/json.h>
 #include <qb/system/allocator/pipe.h>
 #include <qb/utility/build_macros.h>
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h>
 #endif
 
@@ -161,7 +161,7 @@ namespace qb::http {
             return *this;
         }
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
         /**
          * @brief Get a compressor for the given encoding
          * @param encoding Compression encoding name (e.g., "gzip", "deflate")
@@ -172,7 +172,7 @@ namespace qb::http {
          * Returns nullptr for unsupported or unknown encodings.
          *
          * This method is only available when the library is compiled
-         * with zlib support (when QB_IO_WITH_ZLIB is defined).
+         * with zlib support (when QB_HAS_COMPRESSION is defined).
          */
         static std::unique_ptr<qb::compression::compress_provider>
         get_compressor_from_header(const std::string &encoding);

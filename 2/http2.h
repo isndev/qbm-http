@@ -217,7 +217,7 @@ namespace qb::http2 {
                 if (_http1_protocol) {
                     if (_contexts[0]) {
                         _contexts[0]->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
-                        _contexts[0].reset();
+                        _contexts.clear();
                     }
                     this->disconnect(qb::http::DisconnectedReason::ResponseTransmitted);
                 } // For HTTP/2, EOS is per-stream and handled by Http2Protocol stream lifecycle.

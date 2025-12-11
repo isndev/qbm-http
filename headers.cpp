@@ -20,7 +20,7 @@
 #include <stdexcept>    // For std::runtime_error (thrown by parse_header_attributes)
 #include <charconv>     // For std::to_chars (used in accept_encoding)
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h> // For qb::compression::builtin factories
 #endif
 
@@ -190,7 +190,7 @@ namespace qb::http {
     /**
      * @brief Generates an `Accept-Encoding` HTTP header value string based on server capabilities.
      *
-     * This string lists compression algorithms supported by the server (if `QB_IO_WITH_ZLIB` is defined),
+     * This string lists compression algorithms supported by the server (if `QB_HAS_COMPRESSION` is defined),
      * typically with quality values (q-values) indicating preference. For example: "gzip;q=1.0, deflate;q=0.9".
      * The string "chunked" is always appended; while `chunked` is a Transfer-Encoding, its presence in
      * `Accept-Encoding` has historical context or might be used by some clients.
@@ -200,7 +200,7 @@ namespace qb::http {
     [[nodiscard]] std::string
     accept_encoding() {
         std::string algorithms_str;
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
         algorithms_str.reserve(64); // Pre-allocate for common cases
         const auto &decompress_factories = qb::compression::builtin::get_decompress_factories();
         bool first_algorithm = true;
@@ -254,7 +254,7 @@ namespace qb::http {
      * @brief Selects a suitable `Content-Encoding` based on the client's `Accept-Encoding` header.
      *
      * This function parses the `accept_encoding_header` string (e.g., "gzip, deflate, br") from the client.
-     * It then iterates through the server's available compression algorithms (if `QB_IO_WITH_ZLIB` is defined)
+     * It then iterates through the server's available compression algorithms (if `QB_HAS_COMPRESSION` is defined)
      * and returns the name of the first algorithm found in the client's accepted list that is also supported
      * by the server. The order of encodings in the client's `Accept-Encoding` header is generally respected.
      * Quality values (q-values) are not used for weighting in this simple implementation; first match wins.
@@ -265,7 +265,7 @@ namespace qb::http {
      */
     [[nodiscard]] std::string
     content_encoding(std::string_view accept_encoding_header) {
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
         // Split client's Accept-Encoding header into individual tokens (encodings).
         // Delimiters include comma and semicolon (q-values are attached to tokens before this split).
         std::vector<std::string> client_accepted_tokens = utility::split_string<std::string>(

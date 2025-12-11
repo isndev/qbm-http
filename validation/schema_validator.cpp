@@ -117,7 +117,7 @@ namespace qb::http::validation {
             result.add_error(current_path.empty() ? "_schema" : current_path + "._schema",
                              "invalidSchemaType",
                              "Schema definition at this level must be an object.",
-                             current_schema);
+                             std::make_optional(current_schema));
             return false;
         }
 
@@ -223,7 +223,7 @@ namespace qb::http::validation {
             else if (type_str == "array") dt = DataType::ARRAY;
             else if (type_str == "null") dt = DataType::NUL;
             else {
-                result.add_error(path, "type", "Unknown type specified in schema: " + type_str, schema_type_def);
+                result.add_error(path, "type", "Unknown type specified in schema: " + type_str, std::make_optional(schema_type_def));
                 return false;
             }
             return TypeRule(dt).validate(value, path, result);
@@ -248,11 +248,11 @@ namespace qb::http::validation {
                 }
             }
             result.add_error(path, "type", "Value does not match any of the allowed types: " + schema_type_def.dump(),
-                             value);
+                             std::make_optional(value));
             return false;
         }
         result.add_error(path, "type", "Schema 'type' keyword must be a string or an array of strings.",
-                         schema_type_def);
+                         std::make_optional(schema_type_def));
         return false;
     }
 
@@ -261,7 +261,7 @@ namespace qb::http::validation {
                                                       const std::string &path, Result &result) const {
         if (!value.is_object()) return true;
         if (!properties_def.is_object()) {
-            result.add_error(path, "schemaError.properties", "'properties' keyword must be an object.", properties_def);
+            result.add_error(path, "schemaError.properties", "'properties' keyword must be an object.", std::make_optional(properties_def));
             return false;
         }
         bool all_local_properties_valid = true;
@@ -281,7 +281,7 @@ namespace qb::http::validation {
         if (!value.is_object()) return true;
         if (!required_def.is_array()) {
             result.add_error(path, "schemaError.required", "'required' keyword must be an array of strings.",
-                             required_def);
+                             std::make_optional(required_def));
             return false;
         }
 
@@ -289,7 +289,7 @@ namespace qb::http::validation {
         for (const auto &required_prop_json: required_def) {
             if (!required_prop_json.is_string()) {
                 result.add_error(path, "schemaError.required", "Elements in 'required' array must be strings.",
-                                 required_prop_json);
+                                 std::make_optional(required_prop_json));
                 all_required_present = false;
                 continue;
             }
@@ -333,7 +333,7 @@ namespace qb::http::validation {
                     if (schema_node.contains("additionalItems")) {
                         const qb::json &additional_items_def = schema_node["additionalItems"];
                         if (additional_items_def.is_boolean() && !additional_items_def.get<bool>()) {
-                            result.add_error(item_path, "additionalItems", "Additional items not allowed.", value[i]);
+                            result.add_error(item_path, "additionalItems", "Additional items not allowed.", std::make_optional(value[i]));
                             is_valid = false;
                             break;
                         } else if (additional_items_def.is_object()) {
@@ -346,7 +346,7 @@ namespace qb::http::validation {
             }
         } else {
             result.add_error(path.empty() ? "_schema.items" : path + "._schema.items", "schemaError.items",
-                             "'items' keyword must be an object (schema) or an array of schemas.", items_def);
+                             "'items' keyword must be an object (schema) or an array of schemas.", std::make_optional(items_def));
             return false; // Schema error itself
         }
         return is_valid;
@@ -380,7 +380,7 @@ namespace qb::http::validation {
             if (additional_props_def.is_boolean()) {
                 if (!additional_props_def.get<bool>()) {
                     result.add_error(prop_path, "additionalProperties",
-                                     "Additional property '" + key + "' not allowed.", val);
+                                     "Additional property '" + key + "' not allowed.", std::make_optional(val));
                     is_valid = false;
                 }
             } else if (additional_props_def.is_object()) {
@@ -406,7 +406,7 @@ namespace qb::http::validation {
                 }
             } else {
                 result.add_error(path, "schemaError.additionalProperties",
-                                 "'additionalProperties' must be a boolean or a schema object.", additional_props_def);
+                                 "'additionalProperties' must be a boolean or a schema object.", std::make_optional(additional_props_def));
                 return false;
             }
         }
@@ -417,7 +417,7 @@ namespace qb::http::validation {
                                                  const std::string &path, Result &result) const {
         bool all_sub_schemas_passed = true;
         if (!allOf_def.is_array() || allOf_def.empty()) {
-            result.add_error(path, "schemaError.allOf", "'allOf' must be a non-empty array of schemas.", allOf_def);
+            result.add_error(path, "schemaError.allOf", "'allOf' must be a non-empty array of schemas.", std::make_optional(allOf_def));
             return false;
         }
 
@@ -426,7 +426,7 @@ namespace qb::http::validation {
             if (!sub_schema.is_object()) {
                 result.add_error(path, "schemaError.allOf.item",
                                  "Items in 'allOf' array must be schema objects (at index " + std::to_string(i) + ").",
-                                 sub_schema);
+                                 std::make_optional(sub_schema));
                 all_sub_schemas_passed = false;
                 continue;
             }
@@ -436,7 +436,7 @@ namespace qb::http::validation {
         }
 
         if (!all_sub_schemas_passed) {
-            result.add_error(path, "allOf", "Value does not validate against all specified schemas.", value);
+            result.add_error(path, "allOf", "Value does not validate against all specified schemas.", std::make_optional(value));
             return false;
         }
         return true;
@@ -445,7 +445,7 @@ namespace qb::http::validation {
     bool SchemaValidator::validate_anyOf_keyword(const qb::json &value, const qb::json &anyOf_def,
                                                  const std::string &path, Result &result) const {
         if (!anyOf_def.is_array() || anyOf_def.empty()) {
-            result.add_error(path, "schemaError.anyOf", "'anyOf' must be a non-empty array of schemas.", anyOf_def);
+            result.add_error(path, "schemaError.anyOf", "'anyOf' must be a non-empty array of schemas.", std::make_optional(anyOf_def));
             return false;
         }
 
@@ -457,21 +457,21 @@ namespace qb::http::validation {
         }
 
         // If we get here, no sub_schema passed. Add a general anyOf error to the main result.
-        result.add_error(path, "anyOf", "Value does not validate against any of the specified schemas.", value);
+        result.add_error(path, "anyOf", "Value does not validate against any of the specified schemas.", std::make_optional(value));
         return false;
     }
 
     bool SchemaValidator::validate_oneOf_keyword(const qb::json &value, const qb::json &oneOf_def,
                                                  const std::string &path, Result &result) const {
         if (!oneOf_def.is_array() || oneOf_def.empty()) {
-            result.add_error(path, "schemaError.oneOf", "'oneOf' must be a non-empty array of schemas.", oneOf_def);
+            result.add_error(path, "schemaError.oneOf", "'oneOf' must be a non-empty array of schemas.", std::make_optional(oneOf_def));
             return false;
         }
         int S_VAL_P_151_S_1_E_151_S_1 = 0;
         for (const auto &sub_schema: oneOf_def) {
             if (!sub_schema.is_object()) {
                 result.add_error(path, "schemaError.oneOf.item", "Items in 'oneOf' array must be schema objects.",
-                                 sub_schema);
+                                 std::make_optional(sub_schema));
                 continue;
             }
             Result temp_sub_result; // Fresh result for each sub-schema attempt
@@ -485,11 +485,11 @@ namespace qb::http::validation {
         if (S_VAL_P_151_S_1_E_151_S_1 == 0) {
             result.add_error(path, "oneOf",
                              "Value does not validate against exactly one of the specified schemas (matched 0).",
-                             value);
+                             std::make_optional(value));
         } else {
             result.add_error(path, "oneOf",
                              "Value validates against more than one of the specified schemas (matched " +
-                             std::to_string(S_VAL_P_151_S_1_E_151_S_1) + ").", value);
+                             std::to_string(S_VAL_P_151_S_1_E_151_S_1) + ").", std::make_optional(value));
         }
         return false;
     }
@@ -497,13 +497,13 @@ namespace qb::http::validation {
     bool SchemaValidator::validate_not_keyword(const qb::json &value, const qb::json &not_def, const std::string &path,
                                                Result &result) const {
         if (!not_def.is_object()) {
-            result.add_error(path, "schemaError.not", "'not' keyword must be a schema object.", not_def);
+            result.add_error(path, "schemaError.not", "'not' keyword must be a schema object.", std::make_optional(not_def));
             return false;
         }
         Result temp_sub_result; // Validate against the "not" schema with a temporary result
         if (validate_recursive(value, not_def, path, temp_sub_result)) {
             // If it *validates* against the not_def, then the "not" keyword fails.
-            result.add_error(path, "not", "Value must not validate against the specified schema.", value);
+            result.add_error(path, "not", "Value must not validate against the specified schema.", std::make_optional(value));
             return false;
         }
         return true; // It did not validate against not_def, so "not" keyword passes.

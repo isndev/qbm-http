@@ -3,7 +3,7 @@
 #include <qb/json.h>
 
 // Conditional include for compression tests
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h>
 #endif
 
@@ -200,7 +200,7 @@ TEST_F(BodyTest, MultipartAssignmentAndConversion) {
     }
 }
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
 TEST_F(BodyTest, CompressionAndDecompression) {
     std::string original_data = "This is some data to compress. Repeat: This is some data to compress.";
     body = original_data;
@@ -276,7 +276,7 @@ TEST_F(BodyTest, MultipleCompressionsDecompressions) {
     body.uncompress("deflate");
     EXPECT_EQ(original_data, body.as<std::string>());
 }
-#endif // QB_IO_WITH_ZLIB
+#endif // QB_HAS_COMPRESSION
 
 TEST_F(BodyTest, FormParsingEdgeCases) {
     // Empty key
@@ -573,7 +573,7 @@ TEST_F(BodyTest, MultipartViewAssignmentAndConversion) {
     EXPECT_EQ("V2", parsed_mpv_manual.parts()[1].header("H2"));
 }
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
 TEST_F(BodyTest, CompressionWithChunkedEncoding) {
     std::string original_data = "Test data for chunked encoding considerations.";
     body = original_data;
@@ -619,7 +619,7 @@ TEST_F(BodyTest, DecompressionMultipleEncodingsError) {
     EXPECT_THROW(body.uncompress("gzip, deflate"), std::runtime_error);
     EXPECT_THROW(body.uncompress("deflate, gzip"), std::runtime_error);
 }
-#endif // QB_IO_WITH_ZLIB
+#endif // QB_HAS_COMPRESSION
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
