@@ -110,7 +110,7 @@ public:
         auto global_error_handler_task = std::make_shared<qb::http::RouteLambdaTask<MiddlewareIntegrationSession> >(
             custom_global_server_error_handler_fn, "TestGlobalServerErrorHandlerTask"
         );
-        std::list<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession> > > error_chain_list;
+        std::vector<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession> > > error_chain_list;
         error_chain_list.push_back(global_error_handler_task);
         this->router().set_error_task_chain(std::move(error_chain_list));
 
@@ -775,7 +775,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
         // ErrorHandlingMiddleware itself calls ctx->complete(AsyncTaskResult::COMPLETE) after this handler.
     });
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession> > > error_chain;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession> > > error_chain;
     error_chain.push_back(
         std::make_shared<qb::http::MiddlewareTask<MiddlewareIntegrationSession> >(
             error_mw, "ErrorHandlingMiddlewareTask"));

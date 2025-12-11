@@ -18,7 +18,6 @@
 #include <memory>       // For std::shared_ptr, std::make_shared, std::weak_ptr
 #include <string>       // For std::string
 #include <vector>       // For std::vector (used by some underlying components)
-#include <list>         // For std::list (used by RouterCore for task chains)
 #include <type_traits>  // For std::enable_if_t, std::is_base_of_v
 #include <functional>   // For std::function (used in RouteHandlerFn, MiddlewareHandlerFn)
 #include <utility>      // For std::forward, std::move
@@ -226,9 +225,9 @@ namespace qb::http {
         /**
          * @brief Sets the global error handling task chain for this router.
          * This chain is invoked when a task signals `AsyncTaskResult::ERROR`.
-         * @param error_chain A list of `IAsyncTask` shared pointers forming the error handling chain.
+         * @param error_chain A vector of `IAsyncTask` shared pointers forming the error handling chain.
          */
-        void set_error_task_chain(std::list<std::shared_ptr<IAsyncTask<SessionType> > > error_chain);
+        void set_error_task_chain(std::vector<std::shared_ptr<IAsyncTask<SessionType> > > error_chain);
 
         /**
          * @brief Finalizes all route definitions and compiles them into an efficient structure for matching.

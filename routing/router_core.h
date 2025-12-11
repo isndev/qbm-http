@@ -17,9 +17,8 @@
 
 #include <memory>      // For std::shared_ptr, std::weak_ptr, std::enable_shared_from_this, std::make_shared
 #include <string>      // For std::string
-#include <list>        // For std::list (used for task chains)
+#include <vector>      // For std::vector (used for _top_level_nodes and task chains)
 #include <functional>  // For std::function (used for _on_request_finalized_callback)
-#include <vector>      // For std::vector (used for _top_level_nodes)
 #include <optional>    // For std::optional (used in MatchedRouteInfo)
 #include <algorithm>   // For std::copy, std::reverse (though reverse not used here currently)
 #include <utility>     // For std::move
@@ -34,9 +33,8 @@
 #include "../request.h"       // For qb::http::Request
 #include "../response.h"      // For qb::http::Response
 #include "../types.h"         // For qb::http::method, http_status constants, HookPoint
+#include "../logger.h"        // For LOG_HTTP_DEBUG, LOG_HTTP_ERROR, LOG_HTTP_TRACE
 #include <qb/io/uri.h>        // For qb::io::uri::decode
-
-// #include <iostream> // Removed: For std::cerr, not for production
 
 namespace qb::http {
     /**
@@ -64,15 +62,15 @@ namespace qb::http {
         ///< Stores top-level groups, controllers, or direct routes added to the router.
 
         RouteHandlerFn<SessionType> _default_not_found_handler; ///< User-defined or default handler for 404 Not Found.
-        std::list<std::shared_ptr<IAsyncTask<SessionType> > > _compiled_not_found_tasks;
+        std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _compiled_not_found_tasks;
         ///< Compiled task chain for 404 responses.
         bool _custom_not_found_handler_set = false; ///< Flag indicating if a custom 404 handler was set.
 
         // Cache of global middleware tasks (from the root group) to prepend to special handlers like 404.
-        std::list<std::shared_ptr<IAsyncTask<SessionType> > > _global_prefix_tasks_for_special_handlers;
+        std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _global_prefix_tasks_for_special_handlers;
 
         // Stores the user-defined task chain for handling errors signaled by AsyncTaskResult::ERROR.
-        std::list<std::shared_ptr<IAsyncTask<SessionType> > > _user_defined_error_chain;
+        std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _user_defined_error_chain;
         bool _user_error_chain_explicitly_set = false; ///< True if `set_error_task_chain` was explicitly called.
 
         /** @brief Callback invoked by the `Context` when request processing is fully finalized (after response is sent or context cancelled). */
@@ -82,10 +80,10 @@ namespace qb::http {
          * @brief (Private) Compiles the task chain for the "404 Not Found" handler.
          * It prepends any specified `global_prefix_tasks` (typically global middleware)
          * to the actual 404 handler task (which is either user-defined or a default one).
-         * @param global_prefix_tasks A list of tasks (usually global middleware) to execute before the 404 handler.
+         * @param global_prefix_tasks A vector of tasks (usually global middleware) to execute before the 404 handler.
          */
         void compile_default_not_found_handler(
-            const std::list<std::shared_ptr<IAsyncTask<SessionType> > > &global_prefix_tasks) {
+            const std::vector<std::shared_ptr<IAsyncTask<SessionType> > > &global_prefix_tasks) {
             if (!_default_not_found_handler || !_custom_not_found_handler_set) {
                 // Set a very basic default 404 handler if none was provided by the user.
                 _default_not_found_handler = [](std::shared_ptr<Context<SessionType> > ctx) {
@@ -96,6 +94,7 @@ namespace qb::http {
                 };
             }
             _compiled_not_found_tasks.clear();
+            _compiled_not_found_tasks.reserve(global_prefix_tasks.size() + 1);
             _compiled_not_found_tasks.insert(_compiled_not_found_tasks.end(), global_prefix_tasks.begin(),
                                              global_prefix_tasks.end());
             _compiled_not_found_tasks.push_back(
@@ -138,7 +137,7 @@ namespace qb::http {
          */
         void compile_all_routes() {
             _radix_tree.clear();
-            std::list<std::shared_ptr<IAsyncTask<SessionType> > > root_level_inherited_tasks; // Initially empty
+            std::vector<std::shared_ptr<IAsyncTask<SessionType> > > root_level_inherited_tasks; // Initially empty
 
             std::shared_ptr<RouteGroup<SessionType> > root_group_ptr = nullptr;
 
@@ -176,11 +175,11 @@ namespace qb::http {
          * This method is typically called by `IHandlerNode::compile_tasks_and_register` implementations.
          * @param full_path The complete, normalized URI path for the route.
          * @param method The HTTP method for the route.
-         * @param task_chain_list The final, ordered list of `IAsyncTask`s (middleware + handler) for this route.
+         * @param task_chain_list The final, ordered vector of `IAsyncTask`s (middleware + handler) for this route.
          */
         void register_compiled_route(const std::string &full_path,
                                      qb::http::method method_val,
-                                     std::list<std::shared_ptr<IAsyncTask<SessionType> > > task_chain_list) {
+                                     std::vector<std::shared_ptr<IAsyncTask<SessionType> > > task_chain_list) {
             _radix_tree.add_route(full_path, method_val, std::move(task_chain_list));
         }
 
@@ -200,23 +199,23 @@ namespace qb::http {
         /**
          * @brief Sets a user-defined task chain to be executed when an error occurs during normal request processing
          *        (i.e., when a task calls `ctx->complete(AsyncTaskResult::ERROR)`).
-         * @param error_chain A list of `IAsyncTask` shared pointers forming the error handling chain.
+         * @param error_chain A vector of `IAsyncTask` shared pointers forming the error handling chain.
          *                    This chain will be executed in its entirety.
          * @note Global middleware is **not** automatically prepended to this user-defined error chain.
          *       If global behaviors (like error logging) are desired, they must be explicitly included in `error_chain`.
          */
-        void set_error_task_chain(std::list<std::shared_ptr<IAsyncTask<SessionType> > > error_chain) {
+        void set_error_task_chain(std::vector<std::shared_ptr<IAsyncTask<SessionType> > > error_chain) {
             _user_defined_error_chain = std::move(error_chain);
             _user_error_chain_explicitly_set = true;
         }
 
         /**
          * @brief Retrieves the compiled, user-defined error handling task chain.
-         * @return A list of `IAsyncTask` shared pointers. Returns an empty list if no user-defined error chain was set.
-         * @note This list contains only the tasks explicitly set via `set_error_task_chain`.
+         * @return A vector of `IAsyncTask` shared pointers. Returns an empty vector if no user-defined error chain was set.
+         * @note This vector contains only the tasks explicitly set via `set_error_task_chain`.
          *       Global middleware is not automatically prepended here.
          */
-        [[nodiscard]] std::list<std::shared_ptr<IAsyncTask<SessionType> > > get_compiled_error_tasks() const {
+        [[nodiscard]] std::vector<std::shared_ptr<IAsyncTask<SessionType> > > get_compiled_error_tasks() const {
             if (!_user_error_chain_explicitly_set) {
                 return {};
             }
@@ -270,18 +269,37 @@ namespace qb::http {
             ctx->execute_hook(qb::http::HookPoint::PRE_ROUTING);
 
             std::string request_path_str = std::string(ctx->request().uri().path());
-            auto matched_info_opt = _radix_tree.match(request_path_str, ctx->request().method());
+            
+            // Security: Limit path length to prevent DoS attacks
+            // RFC 7230 recommends a practical limit of 8000 bytes for request-line, but we use a more conservative limit
+            // for the path component alone. 4096 characters is a reasonable limit that prevents excessive allocations
+            // while still allowing legitimate long paths (e.g., deep API hierarchies or encoded paths).
+            constexpr size_t MAX_PATH_LENGTH = 4096;
+            if (request_path_str.length() > MAX_PATH_LENGTH) {
+                LOG_HTTP_WARN("Path length exceeds maximum (" << request_path_str.length() 
+                    << " > " << MAX_PATH_LENGTH << "): " << request_path_str.substr(0, 100) << "...");
+                ctx->response().status() = qb::http::status::BAD_REQUEST;
+                ctx->response().body() = "Path too long";
+                ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                ctx->complete(AsyncTaskResult::COMPLETE);
+                return ctx;
+            }
+            
+            qb::http::method request_method = ctx->request().method();
+            
+            LOG_HTTP_TRACE("Routing request: " << std::to_string(request_method) << " " << request_path_str);
+            
+            auto matched_info_opt = _radix_tree.match(request_path_str, request_method);
 
             std::vector<std::shared_ptr<IAsyncTask<SessionType> > > tasks_to_execute_vec;
 
             if (matched_info_opt && matched_info_opt->route_tasks && matched_info_opt->route_tasks.value()) {
                 PathParameters decoded_params = std::move(matched_info_opt->path_parameters);
+                // Decode URI-encoded path parameters.
+                // RadixTree::match() stores raw (non-decoded) path segments in PathParameters.
+                // We decode them here once to convert percent-encoded characters (e.g., %20 -> space).
+                // Note: uri::decode() is idempotent, so calling it multiple times is safe but unnecessary.
                 for (auto &param_pair: decoded_params) {
-                    // PathParameters provides iterators for its map
-                    // Values in PathParameters are already std::string, copied from path segments.
-                    // Decoding should happen from raw path segment to these std::string values.
-                    // This implies RadixTree::match stores raw segments, and decoding is done here.
-                    // If RadixTree already decoded, this is a re-decode. Assuming RadixTree stores raw for now.
                     param_pair.second = qb::io::uri::decode(param_pair.second);
                 }
                 ctx->set_path_parameters(std::move(decoded_params));
@@ -290,17 +308,25 @@ namespace qb::http {
                 if (task_list_sptr) {
                     tasks_to_execute_vec = *task_list_sptr;
                 }
+                
+                LOG_HTTP_DEBUG("Route matched: " << std::to_string(request_method) << " " << request_path_str);
+                LOG_HTTP_TRACE("Route matched with " << decoded_params.size() << " path parameters");
+                
                 ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::NORMAL_CHAIN);
             } else {
                 // No route matched, use the compiled 404 tasks
-                std::copy(_compiled_not_found_tasks.begin(), _compiled_not_found_tasks.end(),
-                          std::back_inserter(tasks_to_execute_vec));
+                tasks_to_execute_vec = _compiled_not_found_tasks;
+                
+                LOG_HTTP_DEBUG("No route matched for: " << std::to_string(request_method) << " " << request_path_str << " (404)");
+                
                 ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::NOT_FOUND_CHAIN);
             }
 
             if (tasks_to_execute_vec.empty()) {
                 // This is a critical state: no tasks for a matched route or even for 404.
                 // Should ideally not happen if compile_default_not_found_handler ensures a task.
+                LOG_HTTP_ERROR("Router critical error: No task chain available for " 
+                    << std::to_string(request_method) << " " << request_path_str);
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body() = "Router critical error: No task chain available.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");

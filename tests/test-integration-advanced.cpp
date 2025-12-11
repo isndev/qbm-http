@@ -597,7 +597,7 @@ public:
             custom_global_server_error_handler_fn, "CustomGlobalServerErrorHandlerTask"
         );
         // Create a list of tasks for the error chain
-        std::list<std::shared_ptr<qb::http::IAsyncTask<AdvancedIntegrationSession> > > error_chain_list;
+        std::vector<std::shared_ptr<qb::http::IAsyncTask<AdvancedIntegrationSession> > > error_chain_list;
         error_chain_list.push_back(global_error_handler_task);
 
         // Set the error task chain

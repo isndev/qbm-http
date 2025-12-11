@@ -174,7 +174,13 @@ namespace qb::http {
                         task_to_execute->execute(this->shared_from_this());
                     } catch (...) {
                         task_to_execute->finishProcessing();
-                        this->complete(AsyncTaskResult::ERROR);
+                        // Only call complete() if context is not already finalized or cancelled
+                        // This prevents double finalization and ensures robust error handling
+                        if (!_finalize_called && !_is_cancelled) {
+                            this->complete(AsyncTaskResult::ERROR);
+                        }
+                        // If already finalized/cancelled, the exception is ignored as the context
+                        // is already in a terminal state
                     }
                 } else {
                     _current_task_index++;
@@ -629,12 +635,10 @@ namespace qb::http {
                         } else {
                             auto router_core_shared = _router_core_wptr.lock();
                             if (router_core_shared && router_core_shared->is_error_chain_set()) {
-                                auto error_chain_tasks_list = router_core_shared->get_compiled_error_tasks();
-                                if (!error_chain_tasks_list.empty()) {
+                                auto error_chain_tasks = router_core_shared->get_compiled_error_tasks();
+                                if (!error_chain_tasks.empty()) {
                                     set_processing_phase(ProcessingPhase::ERROR_CHAIN);
-                                    std::vector<std::shared_ptr<IAsyncTask<SessionType> > > error_chain_vec(
-                                        error_chain_tasks_list.begin(), error_chain_tasks_list.end());
-                                    _task_chain = std::move(error_chain_vec);
+                                    _task_chain = std::move(error_chain_tasks);
                                     _current_task_index = 0;
                                     proceed_to_next_task_internal();
                                 } else {

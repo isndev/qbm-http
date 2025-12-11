@@ -328,7 +328,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInHandlerTriggersErrorChain) {
         HTTP_STATUS_SERVICE_UNAVAILABLE, "Handled by error chain", true
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(error_chain_task);
     _router->set_error_task_chain(std::move(error_chain_list));
 
@@ -359,7 +359,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInHandlerTriggersErrorChain) {
         HTTP_STATUS_INTERNAL_SERVER_ERROR, "Handled by error chain (exception)", true
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(error_chain_handler_task);
     _router->set_error_task_chain(std::move(error_chain_list));
 
@@ -406,7 +406,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInMiddlewareTriggersErrorChain) {
         erroring_functional_middleware->name() // Use its own name
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     // Explicitly prepend the global middleware that is expected to error again
     error_chain_list.push_back(global_erroring_middleware_task);
     error_chain_list.push_back(error_chain_handler); // This handler should now NOT run
@@ -466,7 +466,7 @@ TEST_F(RouterErrorHandlingTest, GlobalMiddlewarePrependedToErrorChain) {
         global_functional_middleware->name()
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(global_mw_task_for_error_chain); // Explicitly prepend
     error_chain_list.push_back(custom_error_chain_handler);
     _router->set_error_task_chain(std::move(error_chain_list));
@@ -510,7 +510,7 @@ TEST_F(RouterErrorHandlingTest, ErrorChainNotSetDefaultsToFinalization) {
 
 
 TEST_F(RouterErrorHandlingTest, EmptyErrorChainDefaultsToFinalization) {
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > empty_error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > empty_error_chain_list;
     _router->set_error_task_chain(std::move(empty_error_chain_list));
 
     _router->get("/error_path_empty_chain", [this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession> > ctx) {
@@ -539,7 +539,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInErrorChainHandlerItselfFinalizes) {
         "ErrorChainErrorSignaler", _session_ptr, _task_executor
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(error_chain_task_that_also_errors);
     _router->set_error_task_chain(std::move(error_chain_list));
 
@@ -585,7 +585,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInMiddlewareTriggersErrorChain) {
         throwing_functional_middleware->name() // Use its own name
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list_for_mw_ex;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list_for_mw_ex;
     // Explicitly prepend the global middleware that is expected to throw again
     error_chain_list_for_mw_ex.push_back(global_throwing_middleware_task);
     error_chain_list_for_mw_ex.push_back(error_chain_handler_for_mw_exception); // This handler should now NOT run
@@ -617,7 +617,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInErrorChainHandlerFinalizes) {
         "ErrorChainExceptionThrower", _session_ptr, _task_executor, "Exception from error chain task"
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(error_chain_task_that_throws_exception);
     _router->set_error_task_chain(std::move(error_chain_list));
 
@@ -660,7 +660,7 @@ TEST_F(RouterErrorHandlingTest, CancellationDuringNormalProcessingTriggersFinali
         "ErrorChainShouldNotRunOnCancel", _session_ptr, _task_executor, HTTP_STATUS_NOT_IMPLEMENTED,
         "Error chain run on cancel!"
     );
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(error_chain_task_for_cancel_test);
     _router->set_error_task_chain(std::move(error_chain_list));
 
@@ -699,7 +699,7 @@ TEST_F(RouterErrorHandlingTest, CancellationDuringErrorChainProcessingFinalizes)
         HTTP_STATUS_NOT_IMPLEMENTED, "Error chain subsequent task ran after cancel!"
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(error_chain_cancelling_task);
     error_chain_list.push_back(error_chain_subsequent_task_after_cancel);
     _router->set_error_task_chain(std::move(error_chain_list));
@@ -738,7 +738,7 @@ TEST_F(RouterErrorHandlingTest, ErrorInNotFoundHandlerResultsInInternalServerErr
         "MainErrorHandlerShouldNotRun", _session_ptr, _task_executor,
         HTTP_STATUS_NOT_IMPLEMENTED, "Main error handler ran for not_found error!", true
     );
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
     main_error_chain_list.push_back(main_error_handler_should_not_run);
     _router->set_error_task_chain(std::move(main_error_chain_list));
 
@@ -789,7 +789,7 @@ TEST_F(RouterErrorHandlingTest, GlobalMiddlewareErrorPreventsNotFoundHandlerExec
         erroring_global_middleware->name()
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
     // Explicitly prepend the global middleware that is expected to error again in the main error chain
     main_error_chain_list.push_back(erroring_global_middleware_task_for_error_chain);
     main_error_chain_list.push_back(main_error_handler_should_run); // This handler should now NOT run
@@ -826,7 +826,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInNotFoundHandlerTriggersMainErrorChain
         "MainErrorHandlerForExceptionInNotFound", _session_ptr, _task_executor,
         HTTP_STATUS_BAD_GATEWAY, "Handled by main error chain (exception in not_found)", true
     );
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
     main_error_chain_list.push_back(main_error_handler);
     _router->set_error_task_chain(std::move(main_error_chain_list));
 
@@ -857,7 +857,7 @@ TEST_F(RouterErrorHandlingTest, FatalErrorInMainErrorChainIsStillFatal) {
         HTTP_STATUS_NOT_IMPLEMENTED, "Subsequent error handler ran after fatal!", true
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
     error_chain_list.push_back(fatal_error_chain_task);
     error_chain_list.push_back(subsequent_error_chain_task_should_not_run);
     _router->set_error_task_chain(std::move(error_chain_list));
@@ -896,7 +896,7 @@ TEST_F(RouterErrorHandlingTest, CancellationFromNotFoundHandlerFinalizes) {
         "MainErrorChainShouldNotRunOnNotFoundCancel", _session_ptr, _task_executor,
         HTTP_STATUS_NOT_IMPLEMENTED, "Main error handler ran for not_found cancellation!", true
     );
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
     main_error_chain_list.push_back(main_error_handler_should_not_run);
     _router->set_error_task_chain(std::move(main_error_chain_list));
 
@@ -941,7 +941,7 @@ TEST_F(RouterErrorHandlingTest, CancellationByGlobalMiddlewareDuringNotFoundProc
         "MainErrorChainShouldNotRunOnGlobalNotFoundCancel", _session_ptr, _task_executor,
         HTTP_STATUS_NOT_IMPLEMENTED, "Main error handler ran for global not_found cancellation!", true
     );
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > main_error_chain_list;
     main_error_chain_list.push_back(main_error_handler_should_not_run);
     _router->set_error_task_chain(std::move(main_error_chain_list));
 

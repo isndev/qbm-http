@@ -20,14 +20,14 @@
 #include "./types.h" // Contains the corrected RouteHandlerFn using std::shared_ptr<Context<SessionType>>
 #include "../types.h" // For qb::http::method
 #include "./custom_route.h" // For ICustomRoute
+#include "../logger.h" // For LOG_HTTP_ERROR
 
 #include <string>
 #include <functional>
 #include <memory>
-#include <list>
+#include <vector>
 #include <variant> // For std::variant
 #include <stdexcept> // For std::invalid_argument
-#include <iostream>  // For std::cerr in case of exceptions
 
 namespace qb::http {
     // Forward declaration
@@ -77,8 +77,16 @@ namespace qb::http {
         void execute(std::shared_ptr<Context<SessionType> > ctx) override {
             try {
                 _handler_fn(ctx);
-            } catch (const std::exception & /*e*/) {
-                // Log e.what() if logging is available
+            } catch (const std::exception &e) {
+                // Log the exception with request context if available
+                if (ctx) {
+                    LOG_HTTP_ERROR("RouteLambdaTask [" << name() << "]: Exception in route handler - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path() << ", "
+                        << "Error: " << e.what());
+                } else {
+                    LOG_HTTP_ERROR("RouteLambdaTask [" << name() << "]: Exception in route handler - " << e.what());
+                }
                 if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body() = "Internal server error in route handler.";
@@ -86,6 +94,14 @@ namespace qb::http {
                     ctx->complete(AsyncTaskResult::ERROR);
                 }
             } catch (...) {
+                // Log unknown exception with request context if available
+                if (ctx) {
+                    LOG_HTTP_ERROR("RouteLambdaTask [" << name() << "]: Unknown exception in route handler - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path());
+                } else {
+                    LOG_HTTP_ERROR("RouteLambdaTask [" << name() << "]: Unknown exception in route handler");
+                }
                 if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body() = "Unknown internal server error in route handler.";
@@ -143,8 +159,16 @@ namespace qb::http {
         void execute(std::shared_ptr<Context<SessionType> > ctx) override {
             try {
                 _custom_route->process(ctx);
-            } catch (const std::exception & /*e*/) {
-                // Log e.what() if logging is available
+            } catch (const std::exception &e) {
+                // Log the exception with request context if available
+                if (ctx) {
+                    LOG_HTTP_ERROR("CustomRouteAdapterTask [" << name() << "]: Exception in custom route handler - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path() << ", "
+                        << "Error: " << e.what());
+                } else {
+                    LOG_HTTP_ERROR("CustomRouteAdapterTask [" << name() << "]: Exception in custom route handler - " << e.what());
+                }
                 if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body() = "Internal server error in custom route handler.";
@@ -152,6 +176,14 @@ namespace qb::http {
                     ctx->complete(AsyncTaskResult::ERROR);
                 }
             } catch (...) {
+                // Log unknown exception with request context if available
+                if (ctx) {
+                    LOG_HTTP_ERROR("CustomRouteAdapterTask [" << name() << "]: Unknown exception in custom route handler - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path());
+                } else {
+                    LOG_HTTP_ERROR("CustomRouteAdapterTask [" << name() << "]: Unknown exception in custom route handler");
+                }
                 if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body() = "Unknown internal server error in custom route handler.";
@@ -169,8 +201,10 @@ namespace qb::http {
             if (_custom_route) {
                 try {
                     _custom_route->cancel();
+                } catch (const std::exception &e) {
+                    LOG_HTTP_WARN("CustomRouteAdapterTask [" << name() << "]: Exception during cancel() - " << e.what());
                 } catch (...) {
-                    /* Suppress exceptions from custom route's cancel */
+                    LOG_HTTP_WARN("CustomRouteAdapterTask [" << name() << "]: Unknown exception during cancel()");
                 }
             }
         }
@@ -275,9 +309,9 @@ namespace qb::http {
         void compile_tasks_and_register(
             RouterCore<SessionType> &router_core,
             const std::string &current_built_path,
-            const std::list<std::shared_ptr<IAsyncTask<SessionType> > > &inherited_tasks) override {
+            const std::vector<std::shared_ptr<IAsyncTask<SessionType> > > &inherited_tasks) override {
             std::string full_route_path = this->build_full_path(current_built_path);
-            std::list<std::shared_ptr<IAsyncTask<SessionType> > > final_tasks = this->combine_tasks(inherited_tasks);
+            std::vector<std::shared_ptr<IAsyncTask<SessionType> > > final_tasks = this->combine_tasks(inherited_tasks);
 
             // Add the actual route handler task (lambda or custom route adapter)
             std::visit([&final_tasks, &full_route_path](auto &&arg) {
@@ -296,7 +330,7 @@ namespace qb::http {
                 }
             }, _route_logic);
 
-            router_core.register_compiled_route(full_route_path, _http_method, final_tasks);
+            router_core.register_compiled_route(full_route_path, _http_method, std::move(final_tasks));
         }
     };
 } // namespace qb::http

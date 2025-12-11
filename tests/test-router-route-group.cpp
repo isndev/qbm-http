@@ -706,7 +706,7 @@ TEST_F(RouterRouteGroupTest, ErrorInGroupMiddlewareUsesRouterErrorHandler) {
         global_mw_for_error_test_instance->name()
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession> > > error_chain_tasks;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession> > > error_chain_tasks;
     error_chain_tasks.push_back(global_mw_task_for_error_chain); // Explicitly prepend
     error_chain_tasks.push_back(
         std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession> >(
@@ -857,7 +857,7 @@ TEST_F(RouterRouteGroupTest, ErrorInCustomRouteInGroup) {
         global_mw_instance->name()
     );
 
-    std::list<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession> > > error_chain_tasks;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession> > > error_chain_tasks;
     error_chain_tasks.push_back(global_mw_task_for_error_chain); // Explicitly prepend
     error_chain_tasks.push_back(
         std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession> >(

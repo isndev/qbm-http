@@ -24,7 +24,6 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include <list>
 #include <functional>
 #include <typeinfo>
 #include <type_traits> // For std::enable_if_t, std::is_base_of_v
@@ -372,7 +371,7 @@ namespace qb::http {
         void compile_tasks_and_register(
             RouterCore<Session> &router_core,
             const std::string &current_built_path,
-            const std::list<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) override {
+            const std::vector<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) override {
             // Ensure routes are defined by calling initialize_routes() once. 
             // This is a simple guard; a more robust one might use a std::once_flag or bool member.
             if (_controller_routes.empty()) {
@@ -380,7 +379,7 @@ namespace qb::http {
             }
 
             std::string controller_base_path = this->build_full_path(current_built_path);
-            std::list<std::shared_ptr<IAsyncTask<Session> > > tasks_for_controller_routes = this->combine_tasks(
+            std::vector<std::shared_ptr<IAsyncTask<Session> > > tasks_for_controller_routes = this->combine_tasks(
                 inherited_tasks);
 
             for (const auto &route_node: _controller_routes) {
