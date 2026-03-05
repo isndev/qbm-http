@@ -90,7 +90,10 @@ namespace qb::http {
     private:
         Request _request; ///< The HTTP request object associated with this context.
         Response _response; ///< The HTTP response object to be populated and sent.
-        std::shared_ptr<SessionType> _session; ///< Shared pointer to the client session object.
+        // Weak pointer to break the circular reference:
+        //   HttpSession._context (shared_ptr<Context>) <-> Context._session (originally shared_ptr<Session>).
+        // Using weak_ptr here prevents both objects from keeping each other alive indefinitely.
+        std::weak_ptr<SessionType> _session; ///< Weak pointer to the client session object.
         PathParameters _path_parameters; ///< Path parameters extracted from the route match.
         std::vector<LifecycleHook> _lifecycle_hooks; ///< List of registered lifecycle hook functions.
         CustomDataMap _custom_data; ///< Map for storing arbitrary custom data.
@@ -292,14 +295,15 @@ namespace qb::http {
         [[nodiscard]] const Response &response() const noexcept { return _response; }
         /**
          * @brief Gets a shared pointer to the mutable client session object.
-         * @return `std::shared_ptr<SessionType>` to the client session.
+         * @return `std::shared_ptr<SessionType>` to the client session, or nullptr if the session
+         *         has already been destroyed (e.g. after extraction or disconnection).
          */
-        [[nodiscard]] std::shared_ptr<SessionType> session() noexcept { return _session; }
+        [[nodiscard]] std::shared_ptr<SessionType> session() noexcept { return _session.lock(); }
         /**
          * @brief Gets a shared pointer to the constant client session object.
-         * @return `std::shared_ptr<const SessionType>` to the client session.
+         * @return `std::shared_ptr<const SessionType>` to the client session, or nullptr if expired.
          */
-        [[nodiscard]] std::shared_ptr<const SessionType> session() const noexcept { return _session; }
+        [[nodiscard]] std::shared_ptr<const SessionType> session() const noexcept { return _session.lock(); }
         /**
          * @brief Gets a mutable reference to the path parameters extracted from the URL.
          * @return Reference to the `qb::http::PathParameters` object.
@@ -708,6 +712,22 @@ namespace qb::http {
          */
         [[nodiscard]] bool is_completed() const noexcept {
             return _finalize_called;
+        }
+
+        /**
+         * @brief Marks this context as finalized without invoking the response-sending callback.
+         *
+         * Use when ownership of the request and/or response has been transferred elsewhere
+         * (e.g., during a WebSocket protocol upgrade) so that the Context destructor does not
+         * attempt to send a stale or moved-from HTTP response over the original transport.
+         *
+         * After this call `is_completed()` returns `true` and neither the finalisation
+         * callback nor any POST_HANDLER_EXECUTION hooks will be executed.
+         */
+        void suppress_response() noexcept {
+            _on_finalized_callback = nullptr;
+            _finalize_called       = true;
+            _is_completed_internally = true;
         }
 
         /**

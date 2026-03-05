@@ -211,8 +211,14 @@ namespace qb::http {
             void
             on(qb::io::async::event::extracted &&) {
                 LOG_HTTP_DEBUG_PA(this->id(), "HTTP/1.1 session extracted.");
+                // Stop the libev watcher immediately so this event loop stops monitoring
+                // the socket before it is moved to another io_handler (e.g. a WebSocket
+                // server on a different actor).  Without this, the watcher keeps the fd
+                // registered in the current backend until the session destructor runs,
+                // causing spurious read events to fire in the wrong handler.
+                this->stop();
                 if (_context) {
-                    _context->cancel();
+                    _context->cancel(); // no-op when suppress_response() was already called
                     _context.reset();
                 }
             }
