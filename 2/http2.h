@@ -297,6 +297,9 @@ namespace qb::http2 {
             void
             on(qb::io::async::event::extracted &&) {
                 LOG_HTTP_DEBUG_PA(this->id(), "HTTP/2 session extracted.");
+                // Stop the libev watcher immediately so this event loop stops monitoring
+                // the socket before it is moved to another io_handler.
+                this->stop();
                 for (auto& [stream_id, context] : _contexts) {
                     context->cancel("Session extracted");
                 }
