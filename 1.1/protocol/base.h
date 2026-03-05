@@ -346,7 +346,14 @@ namespace qb::http {
         reset() noexcept {
             http_init(static_cast<http_t *>(this), MessageType::type, &settings);
             this->data = this;
-            msg.reset();
+            // Explicitly destroy and reconstruct msg instead of calling msg.reset().
+            // server::onMessage() moves msg out (via std::move) before calling reset(),
+            // leaving msg in a moved-from state.  Calling assignment operators on a
+            // moved-from std::string crashes in MSVC debug mode due to iterator-proxy
+            // corruption in _Orphan_all.  Placement-new avoids all assignment operators
+            // on the moved-from object entirely, guaranteeing a clean initial state.
+            msg.~MessageType();
+            ::new (static_cast<void *>(&msg)) MessageType{};
             _headers_completed = false;
             _chunked.clear();
         }
