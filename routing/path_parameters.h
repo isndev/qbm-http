@@ -118,7 +118,7 @@ namespace qb::http {
          * @brief Swaps the contents of this `PathParameters` object with another.
          * @param other The `PathParameters` object to swap contents with.
          */
-        void swap(PathParameters &other) noexcept(noexcept(_params.swap(other._params))) {
+        void swap(PathParameters &other) noexcept {
             _params.swap(other._params);
         }
 
