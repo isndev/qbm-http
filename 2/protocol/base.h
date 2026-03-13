@@ -40,7 +40,7 @@
 #include <qb/io/uri.h>   // For qb::io::uri
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
 #include <qb/system/endian.h> // Added for endian conversion
-#include <qb/utility/type_traits.h> // For has_method_on
+#include <qb/utility/type_traits.h>
 
 #include "../../request.h" // For qb::http::Request
 #include "../../response.h" // For qb::http::Response
@@ -772,7 +772,7 @@ public:
                                   HTTP2_CONNECTION_PREFACE.size()) == 0) {
                         LOG_HTTP_DEBUG("HTTP/2 connection preface validated successfully");
                         _current_state = ParserState::EXPECTING_FRAME_HEADER;
-                        if constexpr (has_method_on<SideProtocol, void, qb::protocol::http2::PrefaceCompleteEvent>::value) {
+                        if constexpr (qb::has_on<SideProtocol, qb::protocol::http2::PrefaceCompleteEvent>) {
                            static_cast<SideProtocol*>(this)->on(qb::protocol::http2::PrefaceCompleteEvent{});
                         }
                     } else {
@@ -999,7 +999,7 @@ protected:
         frame_to_send.header.set_payload_length(static_cast<uint32_t>(payload_size_for_header));
         frame_to_send.payload = payload;
 
-        if constexpr (has_method_on<IO_Handler, IO_Handler&, Http2FrameData<FramePayloadType>>::value) {
+        if constexpr (qb::has_on_r<IO_Handler, IO_Handler&, Http2FrameData<FramePayloadType>>) {
             this->_io << frame_to_send;
         } else {
             this->not_ok(ErrorCode::INTERNAL_ERROR);
@@ -1014,7 +1014,7 @@ protected:
      * @param debug_message Error description
      */
     void on_connection_error(ErrorCode error_code, const std::string& debug_message) {
-        if constexpr (has_method_on<SideProtocol, void, ErrorCode, const std::string&>::value) {
+        if constexpr (qb::has_on<SideProtocol, ErrorCode, const std::string&>) {
             static_cast<SideProtocol*>(this)->on_connection_error(error_code, debug_message);
         } else {
             // Default implementation
@@ -1029,7 +1029,7 @@ protected:
      * @param debug_message Error description
      */
     void on_stream_error(uint32_t stream_id, ErrorCode error_code, const std::string& debug_message) {
-        if constexpr (has_method_on<SideProtocol, void, uint32_t, ErrorCode, const std::string&>::value) {
+        if constexpr (qb::has_on<SideProtocol, uint32_t, ErrorCode, const std::string&>) {
             static_cast<SideProtocol*>(this)->on_stream_error(stream_id, error_code, debug_message);
         } else {
             // Default implementation
@@ -1046,7 +1046,7 @@ protected:
     void handle_framer_detected_error(ErrorCode reason, 
                                     const std::string& message, 
                                     uint32_t stream_id_context) noexcept {
-        if constexpr (has_method_on<SideProtocol, void, ErrorCode, const std::string&, uint32_t>::value) {
+        if constexpr (qb::has_on<SideProtocol, ErrorCode, const std::string&, uint32_t>) {
             static_cast<SideProtocol*>(this)->handle_framer_detected_error(reason, message, stream_id_context);
         }
         // No default implementation needed - derived classes handle this
@@ -1099,7 +1099,7 @@ protected:
      * @return true if all streams are closed
      */
     [[nodiscard]] bool are_all_relevant_streams_closed(uint32_t last_processed_peer_stream_id) const {
-        if constexpr (has_method_on<SideProtocol, bool, uint32_t>::value) {
+        if constexpr (qb::has_on_r<SideProtocol, bool, uint32_t>) {
             return static_cast<const SideProtocol*>(this)->are_all_relevant_streams_closed(last_processed_peer_stream_id);
         } else {
             // Default implementation

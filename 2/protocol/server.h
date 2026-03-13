@@ -645,7 +645,7 @@ public:
             goaway_event.payload.last_stream_id,
             debug_data_str
         };
-        if constexpr (has_method_on<IO_Handler, void, Http2GoAwayEvent>::value) {
+        if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             this->get_io_handler().on(event_to_dispatch);
         }
 
@@ -686,7 +686,7 @@ public:
                     pushed_stream_ref.state = Http2StreamConcreteState::CLOSED;
                     pushed_stream_ref.error_code = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::CANCEL : error_code;
                     Http2StreamErrorEvent push_stream_error{pushed_stream_ref.id, pushed_stream_ref.error_code, "Pushed stream implicitly closed due to client GOAWAY"};
-                    if constexpr (has_method_on<IO_Handler, void, Http2StreamErrorEvent>::value) {
+                    if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                         this->get_io_handler().on(push_stream_error);
                     }
                     it_stream = _server_streams.erase(it_stream); // Erase and advance iterator
@@ -703,7 +703,7 @@ public:
                     client_stream_ref.rst_stream_received = true; // Treat as if RST received from client perspective for this stream
                     client_stream_ref.error_code = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::STREAM_CLOSED : error_code;
                     Http2StreamErrorEvent client_stream_error{client_stream_ref.id, client_stream_ref.error_code, "Client stream implicitly closed by client GOAWAY"};
-                    if constexpr (has_method_on<IO_Handler, void, Http2StreamErrorEvent>::value) {
+                    if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                         this->get_io_handler().on(client_stream_error);
                     }
                     it_stream = _server_streams.erase(it_stream); // Erase and advance iterator
@@ -1161,7 +1161,7 @@ public:
             // Notify IO_Handler if request wasn't dispatched or response wasn't fully sent
             if ((!it->second.request_dispatched || !it->second.end_stream_sent) && error_code != ErrorCode::NO_ERROR) {
                  Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by server: " + context_msg};
-                if constexpr (has_method_on<IO_Handler, void, Http2StreamErrorEvent>::value) {
+                if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                     this->get_io_handler().on(stream_error_event);
                 }
             }
@@ -1651,7 +1651,7 @@ private:
         _connection_active = false; // Connection is being shut down
 
         // Notify IO_Handler about sending GOAWAY
-        if constexpr (has_method_on<IO_Handler, void, Http2GoAwayEvent>::value) {
+        if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             Http2GoAwayEvent goaway_event_to_dispatch{error_code, _last_client_initiated_stream_id, "GOAWAY sent by server: " + debug_message};
             this->get_io_handler().on(goaway_event_to_dispatch);
         }

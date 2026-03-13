@@ -29,7 +29,7 @@ namespace qb::http {
      * Defines the maximum allowed length for cookie names to prevent
      * buffer overflow attacks and ensure efficient memory usage.
      */
-    constexpr const uint32_t COOKIE_NAME_MAX = 1024; // 1 KB
+    constexpr uint32_t COOKIE_NAME_MAX = 1024; // 1 KB
 
     /**
      * @brief Maximum length for cookie values in bytes
@@ -37,7 +37,7 @@ namespace qb::http {
      * Defines the maximum allowed length for cookie values to prevent
      * buffer overflow attacks and ensure efficient memory usage.
      */
-    constexpr const uint32_t COOKIE_VALUE_MAX = 1024 * 1024; // 1 MB
+    constexpr uint32_t COOKIE_VALUE_MAX = 1024 * 1024; // 1 MB
 
     /**
      * @brief Cookie SameSite policy enum
@@ -354,14 +354,14 @@ namespace qb::http {
         /**
          * @brief Get number of cookies
          */
-        [[nodiscard]] size_t size() const {
+        [[nodiscard]] size_t size() const noexcept {
             return _cookies.size();
         }
 
         /**
          * @brief Check if jar is empty
          */
-        [[nodiscard]] bool empty() const {
+        [[nodiscard]] bool empty() const noexcept {
             return _cookies.empty();
         }
     };

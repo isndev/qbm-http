@@ -34,6 +34,7 @@
  */
 #pragma once
 #include <filesystem>
+#include <utility>  // For std::to_underlying (C++23)
 #include <qb/io/protocol/handshake.h>
 // Re-using HTTP/1.1 Request/Response structures as a base
 #include "../1.1/http.h"
@@ -112,7 +113,7 @@ namespace qb::http2 {
              * @param stream_id Stream ID to validate
              * @return true if stream_id is valid for HTTP/2 (not 0)
              */
-            static constexpr bool is_valid_http2_stream_id(uint32_t stream_id) noexcept {
+            [[nodiscard]] static constexpr bool is_valid_http2_stream_id(uint32_t stream_id) noexcept {
                 return stream_id != constants::HTTP11_STREAM_ID;
             }
 
@@ -121,10 +122,10 @@ namespace qb::http2 {
              * @param res Response to validate
              * @return true if response is valid
              */
-            bool validate_response(const qb::http::Response &res) const noexcept {
+            [[nodiscard]] bool validate_response(const qb::http::Response &res) const noexcept {
                 // Basic validation - can be extended
-                // Status is an enum class, convert to underlying type for comparison
-                const auto status_code = static_cast<int>(res.status());
+                // Use code() method to get the integer status code
+                const auto status_code = res.status().code();
                 return status_code >= 100 && status_code < 600; // Valid HTTP status code range
             }
 
@@ -190,7 +191,7 @@ namespace qb::http2 {
              * @brief Handle SSL handshake completion
              * @param event Handshake event
              */
-            void on(qb::io::async::event::handshake &&) {
+            void on([[maybe_unused]] qb::io::async::event::handshake &&event) {
                 auto alpn_proto = this->transport().get_alpn_selected_protocol();
                 LOG_HTTP_INFO_PA(this->id(), "Handshake complete. ALPN selected: " << (alpn_proto.empty() ? "none/http1.1" : alpn_proto));
                 if (alpn_proto == "h2") {
@@ -253,7 +254,7 @@ namespace qb::http2 {
              * @brief Handle session timeout
              * @param event Timeout event
              */
-            void on(qb::io::async::event::timeout const &) {
+            void on([[maybe_unused]] qb::io::async::event::timeout const &event) {
                 LOG_HTTP_WARN_PA(this->id(), "Session timed out.");
                 this->disconnect(qb::http::DisconnectedReason::ByTimeout);
             }
@@ -262,7 +263,7 @@ namespace qb::http2 {
              * @brief Handle pending write event
              * @param event Pending write event
              */
-            void on(qb::io::async::event::pending_write &&) {
+            void on([[maybe_unused]] qb::io::async::event::pending_write &&event) {
                 LOG_HTTP_TRACE_PA(this->id(), "Pending write event, updating timeout.");
                 this->updateTimeout();
                 // Periodic cleanup of idle streams for DDoS protection
@@ -282,7 +283,7 @@ namespace qb::http2 {
              * @brief Handle end of stream event
              * @param event EOS event
              */
-            void on(qb::io::async::event::eos &&) {
+            void on([[maybe_unused]] qb::io::async::event::eos &&event) {
                 LOG_HTTP_DEBUG_PA(this->id(), "End of stream (eos) event.");
                 if (_http1_protocol) {
                     auto it = _contexts.find(constants::HTTP11_STREAM_ID);
@@ -551,8 +552,8 @@ public:
  * @endcode
  */
 template <typename Session = DefaultSession>
-std::unique_ptr<Server<Session>> make_server() {
-    return std::unique_ptr<Server<Session>>(new Server<Session>());
+[[nodiscard]] std::unique_ptr<Server<Session>> make_server() {
+    return std::make_unique<Server<Session>>();
 }
 
 // Type alias for the default server type for easier use.

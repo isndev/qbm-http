@@ -700,7 +700,7 @@ public:
             std::move(event_pseudo_headers_for_app) 
         };
 
-        if constexpr (has_method_on<IO_Handler, void, Http2PushPromiseEvent>::value) {
+        if constexpr (qb::has_on<IO_Handler, Http2PushPromiseEvent>) {
             this->get_io_handler().on(event_to_dispatch);
             // IO_Handler is now responsible for calling application_reject_push if it wants to reject.
             // If it doesn't call reject, the stream remains RESERVED_REMOTE until server sends HEADERS/DATA for it.
@@ -772,7 +772,7 @@ public:
         }
         
         // Dispatch a general GOAWAY event to the IO_Handler
-        if constexpr (has_method_on<IO_Handler, void, Http2GoAwayEvent>::value) {
+        if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             this->get_io_handler().on(Http2GoAwayEvent{goaway_event.payload.error_code, goaway_event.payload.last_stream_id, debug_data_str});
         }
 
@@ -1053,8 +1053,11 @@ public:
                               "Forbidden header in trailers: " + header_item.first);
                 return false;
             }
-            
-            trailer_fields.emplace_back(header_item.first, header_item.second);
+
+            // Handle multi-value headers: iterate over all values in the vector
+            for (const auto &value : header_item.second) {
+                trailer_fields.emplace_back(header_item.first, value);
+            }
         }
 
         // Encode trailers
@@ -1638,7 +1641,7 @@ private:
             // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Closing stream context for stream ID: " << stream_id);
             // Notify IO_Handler about stream closure before erasing.
             // This allows the application to clean up its own state related to the stream.
-            if constexpr (has_method_on<IO_Handler, void, Http2StreamErrorEvent>::value) {
+            if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                 // Re-evaluate if Http2StreamErrorEvent is the right event for graceful closure.
                 // Perhaps a new event like Http2StreamClosedEvent. For now, using existing.
                 // If rst_stream_sent or rst_stream_received, stream.error_code would be set.
@@ -1692,7 +1695,7 @@ private:
             if (!it->second.response_dispatched) {
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by client: " + debug_message};
                 // Check if IO_Handler has the 'on' method for this event type
-                if constexpr (has_method_on<IO_Handler, void, Http2StreamErrorEvent>::value) {
+                if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                     this->get_io_handler().on(stream_error_event);
                 }
             }
@@ -1739,7 +1742,7 @@ private:
         _graceful_shutdown_initiated = true; // Mark that we've started shutdown
 
         // Notify IO_Handler about sending GOAWAY
-        if constexpr (has_method_on<IO_Handler, void, Http2GoAwayEvent>::value) {
+        if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             Http2GoAwayEvent goaway_event_to_dispatch{error_code, last_stream_id_to_report, "GOAWAY sent by client: " + debug_message};
             this->get_io_handler().on(goaway_event_to_dispatch);
         }
@@ -1925,19 +1928,19 @@ private:
         stream.assembled_response.parse_set_cookie_headers();
         if (stream.rst_stream_received) {
             // Dispatch error response
-            if constexpr (has_method_on<IO_Handler, void, qb::http::Response, uint64_t, ErrorCode>::value) {
+            if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t, ErrorCode>) {
                 this->get_io_handler().on(std::move(stream.assembled_response), 
                                         stream.application_request_id, stream.error_code);
-            } else if constexpr (has_method_on<IO_Handler, void, qb::http::Response, uint64_t>::value) {
+            } else if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t>) {
                 this->get_io_handler().on(std::move(stream.assembled_response), 
                                         stream.application_request_id);
             }
         } else {
             // Dispatch successful response
-            if constexpr (has_method_on<IO_Handler, void, qb::http::Response, uint64_t, ErrorCode>::value) {
+            if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t, ErrorCode>) {
                 this->get_io_handler().on(std::move(stream.assembled_response), 
                                         stream.application_request_id, ErrorCode::NO_ERROR);
-            } else if constexpr (has_method_on<IO_Handler, void, qb::http::Response, uint64_t>::value) {
+            } else if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t>) {
                 this->get_io_handler().on(std::move(stream.assembled_response), 
                                         stream.application_request_id);
             }

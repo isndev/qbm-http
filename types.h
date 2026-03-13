@@ -18,6 +18,7 @@
 #include <string>        // For std::string, std::to_string
 #include <string_view>   // For std::string_view
 #include <ostream>       // For std::ostream
+#include <utility>       // For std::to_underlying (C++23)
 #include <qb/system/container/unordered_map.h> // For qb::icase_unordered_map
 #include "./logger.h"
 
@@ -132,7 +133,7 @@ namespace qb::http {
 
         /// Less-than comparison (for sorting, maps, sets, etc.).
         constexpr bool operator<(const Method &other) const {
-            return static_cast<int>(_value) < static_cast<int>(other._value);
+            return std::to_underlying(_value) < std::to_underlying(other._value);
         }
 
         /// Equality comparison with qb::http::Method::Value enum.
@@ -156,22 +157,22 @@ namespace qb::http {
         }
 
         /// Convert to raw ::http_method (from llhttp).
-        constexpr operator ::http_method() const {
+        [[nodiscard]] constexpr operator ::http_method() const {
             return static_cast<::http_method>(_value);
         }
 
         /// Convert to qb::http::Method::Value enum.
-        constexpr operator Value() const {
+        [[nodiscard]] constexpr operator Value() const {
             return _value;
         }
 
         /// Convert to std::string (e.g., "GET", "POST").
-        operator std::string() const {
+        [[nodiscard]] operator std::string() const {
             return ::http_method_name(static_cast<::http_method>(_value));
         }
 
         /// Convert to std::string_view (e.g., "GET", "POST").
-        operator std::string_view() const {
+        [[nodiscard]] operator std::string_view() const {
             return ::http_method_name(static_cast<::http_method>(_value));
         }
 
@@ -478,7 +479,7 @@ namespace qb::http {
 
         /// Less-than comparison (for sorting, maps, sets, etc.).
         constexpr bool operator<(const Status &other) const {
-            return static_cast<int>(_value) < static_cast<int>(other._value);
+            return std::to_underlying(_value) < std::to_underlying(other._value);
         }
 
         /// Equality comparison with qb::http::Status::Value enum.
@@ -487,7 +488,7 @@ namespace qb::http {
         constexpr bool operator!=(Value v) const { return !(*this == v); }
 
         /// Less-than comparison with qb::http::Status::Value enum.
-        constexpr bool operator<(Value v) const { return static_cast<int>(_value) < static_cast<int>(v); }
+        constexpr bool operator<(Value v) const { return std::to_underlying(_value) < std::to_underlying(v); }
 
         /// Equality comparison with raw ::http_status.
         constexpr bool operator==(::http_status s) const { return static_cast<::http_status>(*this) == s; }
@@ -495,32 +496,32 @@ namespace qb::http {
         constexpr bool operator!=(::http_status s) const { return !(*this == s); }
 
         /// Equality comparison with an integer status code.
-        constexpr bool operator==(int i) const { return static_cast<int>(_value) == i; }
+        constexpr bool operator==(int i) const { return std::to_underlying(_value) == i; }
         /// Inequality comparison with an integer status code.
         constexpr bool operator!=(int i) const { return !(*this == i); }
 
 
         /// Convert to raw ::http_status (from llhttp).
-        constexpr operator ::http_status() const { return static_cast<::http_status>(_value); }
+        [[nodiscard]] constexpr operator ::http_status() const { return static_cast<::http_status>(_value); }
         /// Convert to qb::http::Status::Value enum.
-        constexpr operator Value() const { return _value; }
+        [[nodiscard]] constexpr operator Value() const { return _value; }
 
         /// Convert to std::string (e.g., "OK", "Not Found").
-        operator std::string() const {
+        [[nodiscard]] operator std::string() const {
             const char *name = ::http_status_name(static_cast<::http_status>(_value));
             return name ? name : "Unknown Status";
         }
 
         /// Convert to std::string_view (e.g., "OK", "Not Found").
-        operator std::string_view() const {
+        [[nodiscard]] operator std::string_view() const {
             const char *name = ::http_status_name(static_cast<::http_status>(_value));
             return name ? name : "Unknown Status";
         }
 
         /// Convert to int (e.g., 200, 404).
-        constexpr int code() const { return static_cast<int>(_value); }
+        [[nodiscard]] constexpr int code() const { return std::to_underlying(_value); }
         /// Convert to std::string_view (e.g., "OK", "Not Found").
-        std::string_view str() const { return std::string_view(*this); }
+        [[nodiscard]] std::string_view str() const { return std::string_view(*this); }
 
         /// Output stream operator (writes status code and name).
         friend std::ostream &operator<<(std::ostream &os, const Status &s) {
@@ -731,7 +732,7 @@ namespace std {
          * @return The hash value.
          */
         [[nodiscard]] size_t operator()(qb::http::method const &m) const noexcept {
-            return static_cast<size_t>(m);
+            return static_cast<size_t>(m.operator qb::http::Method::Value());
         }
     };
 
@@ -748,7 +749,7 @@ namespace std {
          * @return The hash value.
          */
         [[nodiscard]] size_t operator()(qb::http::status const &s) const noexcept {
-            return static_cast<size_t>(s);
+            return static_cast<size_t>(s.operator qb::http::Status::Value());
         }
     };
 
