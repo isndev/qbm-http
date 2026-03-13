@@ -47,6 +47,15 @@ namespace qb::http {
      */
     qb::icase_unordered_map<std::string>
     parse_header_attributes(const char *ptr, const size_t len) {
+        // Security: Limit maximum input size to prevent DoS attacks via excessive memory allocation
+        constexpr size_t MAX_HEADER_ATTRIBUTES_SIZE = 64 * 1024; // 64KB limit as per security best practices
+        if (len > MAX_HEADER_ATTRIBUTES_SIZE) {
+            throw std::runtime_error("Header attributes exceed maximum allowed size of 64KB");
+        }
+        if (ptr == nullptr && len > 0) {
+            throw std::runtime_error("Invalid null pointer with non-zero length");
+        }
+        
         qb::icase_unordered_map<std::string> dict;
 
         enum class AttributeParseState {

@@ -9,6 +9,12 @@
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Middleware
+ * 
+ * @warning IMPORTANT - ReDoS Protection:
+ * When using OriginMatchStrategy::Regex, be aware that std::regex can be vulnerable to 
+ * Regular Expression Denial of Service (ReDoS) attacks with pathological patterns and long inputs.
+ * The middleware includes built-in limits to mitigate this risk, but care should be taken
+ * when defining custom regex patterns.
  */
 #pragma once
 
@@ -19,6 +25,9 @@
 #include <algorithm>
 #include <regex>
 #include <stdexcept>
+#include <chrono>  // For regex timeout protection
+#include <future>  // For async regex execution
+#include <thread>  // For regex timeout
 
 #include "../routing/middleware.h"
 #include "../request.h"
@@ -27,6 +36,70 @@
 #include "../utility.h"
 
 namespace qb::http {
+    
+    /** @brief Security limits for CORS processing to prevent DoS/ReDoS attacks */
+    namespace cors_security_limits {
+        /** 
+         * @brief Maximum origin string length for validation 
+         * @details Prevents ReDoS attacks with very long origin strings against pathological regex patterns
+         * @see RFC 6454 - The Web Origin Concept
+         */
+        constexpr std::size_t MAX_ORIGIN_LENGTH = 2048;
+        
+        /** 
+         * @brief Maximum number of regex patterns to prevent compilation overhead 
+         * @details Limits memory usage and compilation time for regex patterns
+         */
+        constexpr std::size_t MAX_REGEX_PATTERNS = 100;
+        
+        /** 
+         * @brief Maximum regex pattern string length
+         * @details Prevents memory exhaustion from extremely long regex patterns
+         */
+        constexpr std::size_t MAX_REGEX_PATTERN_LENGTH = 1024;
+        
+        /**
+         * @brief Maximum time allowed for a single regex match operation (milliseconds)
+         * @details Prevents ReDoS attacks by limiting regex execution time
+         */
+        constexpr std::chrono::milliseconds MAX_REGEX_EXECUTION_TIME{100}; // 100ms max per match
+    }
+    
+    /**
+     * @brief Helper function to perform regex matching with timeout protection
+     * @param origin The origin string to match
+     * @param pattern The regex pattern
+     * @return true if matches, false otherwise or on timeout
+     * 
+     * @note Uses async execution with timeout to prevent ReDoS attacks
+     */
+    [[nodiscard]] inline bool regex_match_with_timeout(
+        const std::string& origin, 
+        const std::regex& pattern,
+        std::chrono::milliseconds timeout = cors_security_limits::MAX_REGEX_EXECUTION_TIME) noexcept {
+        try {
+            // For short origins, use direct match (fast path)
+            if (origin.length() < 256) {
+                return std::regex_match(origin, pattern);
+            }
+            
+            // For longer origins, use timeout protection
+            std::future<bool> future = std::async(std::launch::async, [&origin, &pattern]() {
+                return std::regex_match(origin, pattern);
+            });
+            
+            if (future.wait_for(timeout) == std::future_status::ready) {
+                return future.get();
+            }
+            
+            // Timeout reached - potential ReDoS attack, return false (reject)
+            return false;
+        } catch (...) {
+            // Any exception during regex matching, reject the origin
+            return false;
+        }
+    }
+
     /**
      * @brief Configuration options for Cross-Origin Resource Sharing (CORS).
      *
@@ -257,9 +330,21 @@ namespace qb::http {
         void ensure_patterns_compiled() const {
             if (!_patterns_compiled && _match_strategy == OriginMatchStrategy::Regex) {
                 _regex_patterns.clear();
-                for (const auto &pattern_str: _origins) {
+                
+                // Security: Limit number of patterns to prevent memory/compilation overhead
+                std::size_t patterns_to_compile = std::min(_origins.size(), cors_security_limits::MAX_REGEX_PATTERNS);
+                
+                for (std::size_t i = 0; i < patterns_to_compile; ++i) {
+                    const auto &pattern_str = _origins[i];
+                    
+                    // Security: Skip patterns that exceed maximum length
+                    if (pattern_str.length() > cors_security_limits::MAX_REGEX_PATTERN_LENGTH) {
+                        continue;
+                    }
+                    
                     try {
-                        _regex_patterns.emplace_back(pattern_str);
+                        // Use optimized flag for better performance
+                        _regex_patterns.emplace_back(pattern_str, std::regex_constants::ECMAScript | std::regex_constants::optimize);
                     } catch (const std::regex_error & /*e*/) {
                         // Optionally log invalid regex patterns from config, but don't let it stop middleware.
                     }

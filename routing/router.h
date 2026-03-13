@@ -131,39 +131,39 @@ namespace qb::http {
          * @param ctor_args Constructor arguments for `CustomRouteType`.
          * @return Reference to this `Router` for chaining.
          */
-        template<typename CustomRouteType, typename... Args,
-            typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &add_custom_route(std::string path, qb::http::method method, Args &&... ctor_args);
 
         /** @brief Adds a GET route with a typed `ICustomRoute` handler directly to the router. @see add_custom_route */
-        template<typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<
-            SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &get(std::string path, Args &&... ctor_args);
 
         /** @brief Adds a POST route with a typed `ICustomRoute` handler directly to the router. @see add_custom_route */
-        template<typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<
-            SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &post(std::string path, Args &&... ctor_args);
 
         // ... Other HTTP methods for typed custom routes ...
-        template<typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<
-            SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &put(std::string path, Args &&... ctor_args);
 
-        template<typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<
-            SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &del(std::string path, Args &&... ctor_args);
 
-        template<typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<
-            SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &patch(std::string path, Args &&... ctor_args);
 
-        template<typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<
-            SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &options(std::string path, Args &&... ctor_args);
 
-        template<typename CustomRouteType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<
-            SessionType>, CustomRouteType> > >
+        template<typename CustomRouteType, typename... Args>
+            requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
         Router<SessionType> &head(std::string path, Args &&... ctor_args);
 
 
@@ -182,8 +182,8 @@ namespace qb::http {
          * @param args Constructor arguments to be forwarded to the controller `C`.
          * @return A `std::shared_ptr<C>` to the created and mounted controller instance.
          */
-        template<typename C, typename... Args,
-            typename = std::enable_if_t<std::is_base_of_v<Controller<SessionType>, C> > >
+        template<typename C, typename... Args>
+            requires DerivedFrom<C, Controller<SessionType>>
         std::shared_ptr<C> controller(std::string path_prefix, Args &&... args);
 
         // --- Middleware methods (apply to the root group, effectively global) --- 
@@ -212,8 +212,8 @@ namespace qb::http {
          * @param args Constructor arguments to be forwarded to `MiddlewareType`.
          * @return Reference to this `Router` for chaining.
          */
-        template<typename MiddlewareType, typename... Args,
-            typename = std::enable_if_t<std::is_base_of_v<IMiddleware<SessionType>, MiddlewareType> > >
+        template<typename MiddlewareType, typename... Args>
+            requires DerivedFrom<MiddlewareType, IMiddleware<SessionType>>
         Router<SessionType> &use(Args &&... args);
 
         /**

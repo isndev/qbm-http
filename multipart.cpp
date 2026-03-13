@@ -50,7 +50,15 @@ namespace qb::http {
         static const std::regex boundary_regex("^multipart/form-data;\\s{0,}boundary=(.+)$");
         std::smatch what;
         std::string to_find(content_type.data(), content_type.size());
-        return std::regex_match(to_find, what, boundary_regex) ? what[1].str() : "";
+        if (std::regex_match(to_find, what, boundary_regex)) {
+            std::string boundary = what[1].str();
+            // Security: Validate boundary length per RFC 2046 (max 70 characters)
+            if (boundary.length() > multipart_limits::MAX_BOUNDARY_LENGTH) {
+                throw std::runtime_error("Multipart boundary exceeds maximum allowed length of 70 characters");
+            }
+            return boundary;
+        }
+        return "";
     }
 
     template class TMultiPart<std::string>;

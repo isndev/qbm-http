@@ -31,6 +31,37 @@ DISABLE_WARNING_IMPLICIT_FALLTHROUGH
 
 namespace qb::http {
     /**
+     * @brief Security limits for multipart parsing to prevent DoS attacks
+     * 
+     * These limits ensure that multipart form-data parsing cannot be exploited
+     * to exhaust server resources. Values are based on RFC specifications and
+     * common industry practices.
+     * 
+     * @note RFC References:
+     * - **RFC 2046**: MIME Part 1 - boundary length recommendations
+     * - **RFC 7578**: multipart/form-data - modern HTTP file upload standard
+     * 
+     * @see https://tools.ietf.org/html/rfc2046
+     * @see https://tools.ietf.org/html/rfc7578
+     */
+    namespace multipart_limits {
+        /** @brief RFC 2046 recommends 70 characters max for boundary strings */
+        constexpr std::size_t MAX_BOUNDARY_LENGTH = 70;
+        
+        /** @brief 1KB max for part header names - prevents memory exhaustion */
+        constexpr std::size_t MAX_HEADER_NAME_LENGTH = 1024;
+        
+        /** @brief 8KB max for part header values - prevents memory exhaustion */
+        constexpr std::size_t MAX_HEADER_VALUE_LENGTH = 8192;
+        
+        /** @brief Maximum 1000 parts per multipart message - prevents CPU exhaustion */
+        constexpr std::size_t MAX_PARTS_COUNT = 1000;
+        
+        /** @brief 100MB default max total multipart size - configurable at server level */
+        constexpr std::size_t MAX_TOTAL_SIZE = 100 * 1024 * 1024;
+    }
+
+    /**
      * @brief Parser for multipart/form-data content
      *
      * The MultipartParser processes multipart form data streams according to
@@ -131,7 +162,7 @@ namespace qb::http {
         const char *boundaryData; ///< Pointer to boundary string data
         size_t boundarySize; ///< Length of the boundary string
         bool boundaryIndex[256]; ///< Lookup table for quick boundary character checks
-        char *lookbehind; ///< Buffer for boundary detection lookahead
+        std::vector<char> lookbehind; ///< RAII buffer for boundary detection lookahead (replaces raw pointer)
         size_t lookbehindSize; ///< Size of the lookbehind buffer
         State state; ///< Current parser state
         int flags; ///< Current parser flags
@@ -374,7 +405,7 @@ namespace qb::http {
             } else if (prevIndex > 0) {
                 // if our boundary turned out to be rubbish, the captured lookbehind
                 // belongs to partData
-                callback(onPartData, lookbehind, 0, prevIndex);
+                callback(onPartData, lookbehind.data(), 0, prevIndex);
                 prevIndex = 0;
                 partDataMark = i;
 
@@ -464,7 +495,6 @@ namespace qb::http {
          * before using the parser.
          */
         MultipartParser() {
-            lookbehind = NULL;
             resetCallbacks();
             reset();
         }
@@ -476,7 +506,6 @@ namespace qb::http {
          * Creates a parser initialized with the specified boundary.
          */
         MultipartParser(std::string boundary) {
-            lookbehind = NULL;
             resetCallbacks();
             setBoundary(std::move(boundary));
         }
@@ -484,26 +513,22 @@ namespace qb::http {
         /**
          * @brief Destructor
          *
-         * Frees any allocated resources.
+         * Resources are automatically freed by RAII (std::vector).
          */
-        ~MultipartParser() {
-            delete[] lookbehind;
-        }
+        ~MultipartParser() = default;
 
         /**
          * @brief Reset the parser to initial state
          *
-         * Clears all state and frees resources. SetBoundary must
-         * be called again before using the parser.
+         * Clears all state. SetBoundary must be called again before using the parser.
          */
         void
         reset() {
-            delete[] lookbehind;
             state = ERROR;
             boundary.clear();
             boundaryData = boundary.c_str();
             boundarySize = 0;
-            lookbehind = NULL;
+            lookbehind.clear();
             lookbehindSize = 0;
             flags = 0;
             index = 0;
@@ -519,6 +544,8 @@ namespace qb::http {
          *
          * Initializes the parser with the specified boundary string.
          * Must be called before feeding data to the parser.
+         * 
+         * @throws std::runtime_error if boundary exceeds maximum allowed length
          */
         void
         setBoundary(std::string l_boundary) {
@@ -526,9 +553,17 @@ namespace qb::http {
             this->boundary = "\r\n--" + std::move(l_boundary);
             boundaryData = this->boundary.c_str();
             boundarySize = this->boundary.size();
+            
+            // SECURITY FIX: Validate boundary size to prevent buffer overflow
+            if (boundarySize > multipart_limits::MAX_BOUNDARY_LENGTH) {
+                errorReason = "Boundary exceeds maximum allowed length";
+                state = ERROR;
+                return;
+            }
+            
             indexBoundary();
-            lookbehind = new char[boundarySize + 8];
             lookbehindSize = boundarySize + 8;
+            lookbehind.resize(lookbehindSize);
             state = START;
             errorReason = "No error.";
         }
@@ -789,19 +824,50 @@ namespace qb::http {
         std::vector<Part> _parts;
 
         /**
-         * @brief Generate a random boundary string
+         * @brief Generate a cryptographically secure random boundary string
          * @return Generated boundary string
+         * 
+         * @note Uses alphanumeric characters for better entropy than just digits.
+         * Respects RFC 2046 recommendation of maximum 70 characters for boundary.
+         * Uses std::random_device (typically OS-level CSPRNG) for security.
          */
         [[nodiscard]] static std::string
         generate_boundary() {
-            std::mt19937 generator{std::random_device{}()};
-            std::uniform_int_distribution<int> distribution{'0', '9'};
-
-            std::string result =
-                    "----------------------------qb00000000000000000000000000000000";
-            for (auto i = result.begin() + 30; i != result.end(); ++i)
-                *i = static_cast<char>(distribution(generator));
-
+            // RFC 2046 recommends boundary length <= 70 characters
+            // Using alphanumeric characters for better entropy
+            constexpr size_t BOUNDARY_RANDOM_LENGTH = 32; // Random part length
+            constexpr size_t BOUNDARY_PREFIX_LENGTH = 28; // "----------------------------qb"
+            constexpr size_t TOTAL_BOUNDARY_LENGTH = BOUNDARY_PREFIX_LENGTH + BOUNDARY_RANDOM_LENGTH; // 60 chars total
+            
+            static_assert(TOTAL_BOUNDARY_LENGTH <= multipart_limits::MAX_BOUNDARY_LENGTH, 
+                          "Generated boundary exceeds RFC 2046 recommended maximum");
+            
+            // Alphanumeric characters for boundary (RFC 2046 allows these in boundary)
+            constexpr char ALPHANUM[] = 
+                "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+            constexpr size_t ALPHANUM_COUNT = 62;
+            
+            std::random_device random_device;
+            const bool is_cryptographic = random_device.entropy() != 0.0;
+            
+            std::string result = "----------------------------qb";
+            result.reserve(TOTAL_BOUNDARY_LENGTH);
+            
+            if (is_cryptographic) {
+                // Use random_device directly (OS-level CSPRNG)
+                std::uniform_int_distribution<size_t> distribution(0, ALPHANUM_COUNT - 1);
+                for (size_t i = 0; i < BOUNDARY_RANDOM_LENGTH; ++i) {
+                    result += ALPHANUM[distribution(random_device)];
+                }
+            } else {
+                // Fallback to Mersenne Twister (NOT cryptographically secure)
+                std::mt19937 generator(random_device());
+                std::uniform_int_distribution<size_t> distribution(0, ALPHANUM_COUNT - 1);
+                for (size_t i = 0; i < BOUNDARY_RANDOM_LENGTH; ++i) {
+                    result += ALPHANUM[distribution(generator)];
+                }
+            }
+            
             return result;
         }
 

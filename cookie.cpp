@@ -80,8 +80,16 @@ namespace qb::http {
     qb::icase_unordered_map<std::string>
     parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
         qb::icase_unordered_map<std::string> dict;
+        
+        // Security: Validate input parameters
         if (!ptr || len == 0) {
             return dict;
+        }
+        
+        // Security: Limit maximum cookie header size to prevent DoS (16KB as per RFC 6265 guidance)
+        constexpr size_t MAX_COOKIE_HEADER_SIZE = 16 * 1024;
+        if (len > MAX_COOKIE_HEADER_SIZE) {
+            throw std::runtime_error("Cookie header exceeds maximum allowed size of 16KB");
         }
 
         enum class CookieParseState {

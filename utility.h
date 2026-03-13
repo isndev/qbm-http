@@ -219,8 +219,21 @@ namespace qb::http {
                      std::size_t reserve = 0) {
             std::vector<String> result;
             if (reserve > 0) {
-                // Ensure reserve is only called if reserve > 0
+                // User-provided reserve hint
                 result.reserve(reserve);
+            } else if (!str.empty() && !delimiters.empty()) {
+                // Performance: Estimate reserve based on delimiter frequency
+                // Count occurrences of any delimiter to estimate token count
+                std::size_t delim_count = 0;
+                for (char c : str) {
+                    if (delimiters.find(c) != std::string_view::npos) {
+                        ++delim_count;
+                    }
+                }
+                // Reserve for at most delim_count + 1 tokens (upper bound)
+                // Cap at reasonable limit to prevent excessive memory for malformed input
+                constexpr std::size_t MAX_RESERVE_TOKENS = 1024;
+                result.reserve(std::min(delim_count + 1, MAX_RESERVE_TOKENS));
             }
 
             auto first = str.begin();
@@ -264,8 +277,20 @@ namespace qb::http {
         split_string(std::string_view str, Pred pred, std::size_t reserve = 0) {
             std::vector<String> result;
             if (reserve > 0) {
-                // Ensure reserve is only called if reserve > 0
+                // User-provided reserve hint
                 result.reserve(reserve);
+            } else if (!str.empty()) {
+                // Performance: Estimate reserve based on predicate matches
+                std::size_t match_count = 0;
+                for (char c : str) {
+                    if (pred(c)) {
+                        ++match_count;
+                    }
+                }
+                // Reserve for at most match_count + 1 tokens (upper bound)
+                // Cap at reasonable limit to prevent excessive memory for malformed input
+                constexpr std::size_t MAX_RESERVE_TOKENS = 1024;
+                result.reserve(std::min(match_count + 1, MAX_RESERVE_TOKENS));
             }
 
             auto first = str.begin();

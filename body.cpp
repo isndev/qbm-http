@@ -165,22 +165,34 @@ namespace qb::http {
              * @brief Static callback for header field name
              *
              * Stores the current header field name for later use.
+             * Security: Validates header name length against MAX_HEADER_NAME_LENGTH.
              */
             static void
             cbHeaderField(const char *buffer, size_t start, size_t end, void *userData) {
                 MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
-                self->currentHeaderName = String(buffer + start, end - start);
+                const size_t length = end - start;
+                // Security: Validate header name length to prevent DoS
+                if (length > multipart_limits::MAX_HEADER_NAME_LENGTH) {
+                    throw std::runtime_error("Multipart header name exceeds maximum allowed length");
+                }
+                self->currentHeaderName = String(buffer + start, length);
             }
 
             /**
              * @brief Static callback for header field value
              *
              * Stores the current header field value for later use.
+             * Security: Validates header value length against MAX_HEADER_VALUE_LENGTH.
              */
             static void
             cbHeaderValue(const char *buffer, size_t start, size_t end, void *userData) {
                 MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
-                self->currentHeaderValue = String(buffer + start, end - start);
+                const size_t length = end - start;
+                // Security: Validate header value length to prevent DoS
+                if (length > multipart_limits::MAX_HEADER_VALUE_LENGTH) {
+                    throw std::runtime_error("Multipart header value exceeds maximum allowed length");
+                }
+                self->currentHeaderValue = String(buffer + start, length);
             }
 
             /**

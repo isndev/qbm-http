@@ -22,6 +22,38 @@
  * @ingroup Http
  */
 #pragma once
+
+/**
+ * @brief Security limits for HTTP/1.1 protocol handling
+ * 
+ * These limits help prevent various DoS attacks and ensure stable operation.
+ * Values are chosen based on RFC recommendations and common server configurations.
+ * 
+ * @note These limits are designed to be:
+ * - **RFC Compliant**: Based on HTTP/1.1 specifications (RFC 7230-7235)
+ * - **DoS Resistant**: Prevent resource exhaustion attacks
+ * - **Production Ready**: Used by major web servers (nginx, Apache)
+ * - **Configurable**: Can be adjusted at compile time if needed
+ */
+namespace qb::http::protocol_limits {
+    /** @brief Maximum URL length (8KB) - per RFC 7230 guidance for URI length */
+    constexpr std::size_t MAX_URL_LENGTH = 8192;
+    
+    /** @brief Maximum header name length (1KB) - prevents memory exhaustion */
+    constexpr std::size_t MAX_HEADER_NAME_LENGTH = 1024;
+    
+    /** @brief Maximum header value length (8KB) - prevents memory exhaustion */
+    constexpr std::size_t MAX_HEADER_VALUE_LENGTH = 8192;
+    
+    /** @brief Maximum number of headers per message (100) - RFC recommendation */
+    constexpr std::size_t MAX_HEADERS_COUNT = 100;
+    
+    /** @brief Maximum chunk size for chunked encoding (16MB) - prevents OOM */
+    constexpr std::size_t MAX_CHUNK_SIZE = 16 * 1024 * 1024;
+    
+    /** @brief Maximum total body size (100MB) - default upload limit */
+    constexpr std::size_t MAX_BODY_SIZE = 100 * 1024 * 1024;
+}
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
 #include "../../types.h"

@@ -12,6 +12,21 @@
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Middleware
+ * 
+ * @warning IMPORTANT - QB Actor Framework Threading Model:
+ * This middleware currently uses `std::mutex` for thread safety. However, in the QB Actor
+ * Framework, each Actor runs on a single VirtualCore (thread) and should follow the
+ * "share nothing" philosophy. Using mutexes in Actors is an ANTI-PATTERN.
+ * 
+ * RECOMMENDED ARCHITECTURE:
+ * For proper QB-style rate limiting, create a dedicated RateLimitActor that:
+ * 1. Receives request count messages from HTTP session actors via `qb::Pipe`
+ * 2. Maintains rate limit state in its own isolated actor state (no mutex needed)
+ * 3. Responds with allow/deny messages
+ * 4. Uses Actor message passing instead of shared state with locks
+ * 
+ * This current implementation uses mutex as a temporary measure and should be refactored
+ * to use the Actor model properly for production systems.
  */
 #pragma once
 
@@ -29,6 +44,18 @@
 #include "../request.h"            // For qb::http::Request (used by Context)
 #include "../response.h"           // For qb::http::Response (used by Context)
 #include "../types.h"              // For qb::http::status enum
+
+// Security limits for rate limiting to prevent memory exhaustion
+namespace qb::http::rate_limit_security {
+    /** @brief Maximum number of unique clients to track (prevents memory DoS) */
+    constexpr std::size_t MAX_TRACKED_CLIENTS = 100000;
+    
+    /** @brief Maximum client ID string length (prevents memory DoS) */
+    constexpr std::size_t MAX_CLIENT_ID_LENGTH = 256;
+    
+    /** @brief Default cleanup interval for stale entries (milliseconds) */
+    constexpr std::chrono::milliseconds STALE_ENTRY_CLEANUP_INTERVAL{60000}; // 1 minute
+}
 
 namespace qb::http {
     /**
@@ -182,24 +209,59 @@ namespace qb::http {
                 }
             }
 
-            // Default extraction logic
+            // Default extraction logic - SECURITY FIX: Improved X-Forwarded-For handling
             // TRequest::header returns String type, ensure conversion to std::string for processing.
             std::string client_id_str;
-            const auto &header_val_obj = ctx.request().header("X-Forwarded-For");
-            if constexpr (std::is_convertible_v<decltype(header_val_obj), std::string>) {
-                client_id_str = header_val_obj;
-            } else if constexpr (std::is_convertible_v<decltype(header_val_obj), std::string_view>) {
-                client_id_str = std::string(header_val_obj);
-            } else {
-                // Fallback for custom String types
-                client_id_str.assign(header_val_obj.data(), header_val_obj.length());
+            
+            // SECURITY FIX: Prefer more secure headers over X-Forwarded-For when available
+            // Order of preference (most secure to least):
+            // 1. CF-Connecting-IP (Cloudflare) - set by trusted proxy
+            // 2. True-Client-IP (Akamai) - set by trusted proxy
+            // 3. X-Forwarded-For - can be forged, take rightmost IP
+            const auto &cf_header = ctx.request().header("CF-Connecting-IP");
+            const auto &true_client_header = ctx.request().header("True-Client-IP");
+            const auto &xff_header = ctx.request().header("X-Forwarded-For");
+            
+            std::string_view header_val_obj;
+            
+            if (!cf_header.empty()) {
+                header_val_obj = cf_header;
+            } else if (!true_client_header.empty()) {
+                header_val_obj = true_client_header;
+            } else if (!xff_header.empty()) {
+                header_val_obj = xff_header;
             }
-
-            if (!client_id_str.empty()) {
-                size_t comma_pos = client_id_str.find(',');
-                if (comma_pos != std::string::npos) {
-                    return client_id_str.substr(0, comma_pos); // Return the first IP in a list
+            
+            if (!header_val_obj.empty()) {
+                if constexpr (std::is_convertible_v<decltype(header_val_obj), std::string>) {
+                    client_id_str = header_val_obj;
+                } else if constexpr (std::is_convertible_v<decltype(header_val_obj), std::string_view>) {
+                    client_id_str = std::string(header_val_obj);
+                } else {
+                    // Fallback for custom String types
+                    client_id_str.assign(header_val_obj.data(), header_val_obj.length());
                 }
+            }
+            
+            // SECURITY FIX: For X-Forwarded-For, use the RIGHTMOST IP (closest to server)
+            // This is less spoofable than the leftmost IP which is client-controlled
+            // Note: CF-Connecting-IP and True-Client-IP are already single IPs set by trusted proxies
+            if (!client_id_str.empty() && xff_header.empty() == false && 
+                header_val_obj.data() == xff_header.data()) {
+                // We got the value from X-Forwarded-For, extract rightmost IP
+                size_t last_comma = client_id_str.rfind(',');
+                if (last_comma != std::string::npos) {
+                    // Take the last IP and trim whitespace
+                    client_id_str = client_id_str.substr(last_comma + 1);
+                    // Trim leading whitespace
+                    size_t start = client_id_str.find_first_not_of(" \t");
+                    if (start != std::string::npos) {
+                        client_id_str = client_id_str.substr(start);
+                    }
+                }
+            }
+            
+            if (!client_id_str.empty()) {
                 return client_id_str;
             }
 
@@ -268,30 +330,58 @@ namespace qb::http {
          * @param ctx The shared `Context` for the current request.
          */
         void process(ContextPtr ctx) override {
-            // Mutex locking is not noexcept
-            const std::string client_id = _options->extract_client_id(*ctx);
+            // Security: Validate client ID length to prevent memory DoS
+            const std::string client_id_raw = _options->extract_client_id(*ctx);
+            if (client_id_raw.length() > rate_limit_security::MAX_CLIENT_ID_LENGTH) {
+                // Reject requests with excessively long client IDs
+                ctx->response().status() = qb::http::status::BAD_REQUEST;
+                ctx->response().body() = "Invalid client identifier";
+                ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                ctx->complete(AsyncTaskResult::COMPLETE);
+                return;
+            }
+            
+            // Use truncated client ID for tracking if needed
+            const std::string client_id = client_id_raw.substr(0, rate_limit_security::MAX_CLIENT_ID_LENGTH);
 
             bool rate_limited_flag = false;
+            bool memory_limit_reached = false;
             ClientData client_data_for_headers; // To store data for headers outside lock
 
             {
                 std::lock_guard<std::mutex> lock(_mutex); // Protect access to _client_data
-                auto now = std::chrono::steady_clock::now();
-                ClientData &current_client_record = _client_data[client_id]; // Creates if not exist
-
-                // Check if the window has reset for this client
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - current_client_record.last_reset_time) >= _options->get_window()) {
-                    current_client_record.request_count = 0;
-                    current_client_record.last_reset_time = now;
-                }
-
-                if (current_client_record.request_count >= _options->get_max_requests()) {
-                    rate_limited_flag = true;
+                
+                // Security: Limit total tracked clients to prevent memory exhaustion
+                if (_client_data.size() >= rate_limit_security::MAX_TRACKED_CLIENTS && 
+                    _client_data.find(client_id) == _client_data.end()) {
+                    memory_limit_reached = true;
                 } else {
-                    current_client_record.request_count++;
+                    auto now = std::chrono::steady_clock::now();
+                    ClientData &current_client_record = _client_data[client_id]; // Creates if not exist
+
+                    // Check if the window has reset for this client
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - current_client_record.last_reset_time) >= _options->get_window()) {
+                        current_client_record.request_count = 0;
+                        current_client_record.last_reset_time = now;
+                    }
+
+                    if (current_client_record.request_count >= _options->get_max_requests()) {
+                        rate_limited_flag = true;
+                    } else {
+                        current_client_record.request_count++;
+                    }
+                    client_data_for_headers = current_client_record; // Copy data for header setting (outside lock)
                 }
-                client_data_for_headers = current_client_record; // Copy data for header setting (outside lock)
+            }
+
+            // Handle memory limit reached
+            if (memory_limit_reached) {
+                ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
+                ctx->response().body() = "Server capacity exceeded";
+                ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                ctx->complete(AsyncTaskResult::COMPLETE);
+                return;
             }
 
             add_rate_limit_headers(ctx->response(), client_data_for_headers);

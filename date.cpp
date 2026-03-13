@@ -14,6 +14,7 @@
  */
 #include "./date.h"
 #include <array>
+#include <charconv>  // For std::from_chars - faster than std::stoi, no exceptions
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -190,10 +191,10 @@ namespace qb::http::date {
         pos += 2;
         if (pos >= str.size()) return std::nullopt;
 
-        // Extract day (2 digits)
+        // Extract day (2 digits) - Using from_chars for better performance (no exceptions, no allocations)
         if (pos + 2 > str.size()) return std::nullopt;
-        std::string_view day_str = str.substr(pos, 2);
-        int day = std::stoi(std::string(day_str.data(), day_str.size()));
+        int day = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 2, day).ec != std::errc{}) return std::nullopt;
         pos += 3; // Move past day and space
 
         // Extract month (3 chars)
@@ -203,18 +204,20 @@ namespace qb::http::date {
         if (month < 0) return std::nullopt;
         pos += 4; // Move past month and space
 
-        // Extract year (4 digits)
+        // Extract year (4 digits) - Using from_chars for better performance
         if (pos + 4 > str.size()) return std::nullopt;
-        std::string_view year_str = str.substr(pos, 4);
-        int year = std::stoi(std::string(year_str.data(), year_str.size()));
+        int year = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 4, year).ec != std::errc{}) return std::nullopt;
         pos += 5; // Move past year and space
 
-        // Extract time
+        // Extract time - Using from_chars for better performance
         if (pos + 8 > str.size()) return std::nullopt;
-        std::string_view time_str = str.substr(pos, 8);
-        int hour = std::stoi(std::string(time_str.substr(0, 2).data(), 2));
-        int minute = std::stoi(std::string(time_str.substr(3, 2).data(), 2));
-        int second = std::stoi(std::string(time_str.substr(6, 2).data(), 2));
+        int hour = 0, minute = 0, second = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 2, hour).ec != std::errc{}) return std::nullopt;
+        if (str[pos + 2] != ':') return std::nullopt;
+        if (std::from_chars(str.data() + pos + 3, str.data() + pos + 5, minute).ec != std::errc{}) return std::nullopt;
+        if (str[pos + 5] != ':') return std::nullopt;
+        if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{}) return std::nullopt;
 
         // Validate time components
         if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
@@ -256,10 +259,10 @@ namespace qb::http::date {
         pos += 2;
         if (pos >= str.size()) return std::nullopt;
 
-        // Extract day (2 digits)
+        // Extract day (2 digits) - Using from_chars for better performance
         if (pos + 2 > str.size()) return std::nullopt;
-        std::string_view day_str = str.substr(pos, 2);
-        int day = std::stoi(std::string(day_str.data(), day_str.size()));
+        int day = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 2, day).ec != std::errc{}) return std::nullopt;
         pos += 3; // Move past day and hyphen
 
         // Extract month (3 chars)
@@ -269,10 +272,10 @@ namespace qb::http::date {
         if (month < 0) return std::nullopt;
         pos += 4; // Move past month and hyphen
 
-        // Extract year (2 digits)
+        // Extract year (2 digits) - Using from_chars for better performance
         if (pos + 2 > str.size()) return std::nullopt;
-        std::string_view year_str = str.substr(pos, 2);
-        int year = std::stoi(std::string(year_str.data(), year_str.size()));
+        int year = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 2, year).ec != std::errc{}) return std::nullopt;
         if (year < 70) {
             year += 2000; // Y2K pivot for 2-digit years
         } else {
@@ -280,12 +283,14 @@ namespace qb::http::date {
         }
         pos += 3; // Move past year and space
 
-        // Extract time
+        // Extract time - Using from_chars for better performance
         if (pos + 8 > str.size()) return std::nullopt;
-        std::string_view time_str = str.substr(pos, 8);
-        int hour = std::stoi(std::string(time_str.substr(0, 2).data(), 2));
-        int minute = std::stoi(std::string(time_str.substr(3, 2).data(), 2));
-        int second = std::stoi(std::string(time_str.substr(6, 2).data(), 2));
+        int hour = 0, minute = 0, second = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 2, hour).ec != std::errc{}) return std::nullopt;
+        if (str[pos + 2] != ':') return std::nullopt;
+        if (std::from_chars(str.data() + pos + 3, str.data() + pos + 5, minute).ec != std::errc{}) return std::nullopt;
+        if (str[pos + 5] != ':') return std::nullopt;
+        if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{}) return std::nullopt;
 
         // Validate time components
         if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
@@ -342,16 +347,19 @@ namespace qb::http::date {
         }
         if (day_len == 0) return std::nullopt;
 
-        std::string_view day_str = str.substr(pos, day_len);
-        int day = std::stoi(std::string(day_str.data(), day_str.size()));
+        // Extract day (1-2 digits) - Using from_chars for better performance
+        int day = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + day_len, day).ec != std::errc{}) return std::nullopt;
         pos += day_len + 1; // Move past day and space
 
-        // Extract time
+        // Extract time - Using from_chars for better performance
         if (pos + 8 > str.size()) return std::nullopt;
-        std::string_view time_str = str.substr(pos, 8);
-        int hour = std::stoi(std::string(time_str.substr(0, 2).data(), 2));
-        int minute = std::stoi(std::string(time_str.substr(3, 2).data(), 2));
-        int second = std::stoi(std::string(time_str.substr(6, 2).data(), 2));
+        int hour = 0, minute = 0, second = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 2, hour).ec != std::errc{}) return std::nullopt;
+        if (str[pos + 2] != ':') return std::nullopt;
+        if (std::from_chars(str.data() + pos + 3, str.data() + pos + 5, minute).ec != std::errc{}) return std::nullopt;
+        if (str[pos + 5] != ':') return std::nullopt;
+        if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{}) return std::nullopt;
 
         // Validate time components
         if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
@@ -359,10 +367,10 @@ namespace qb::http::date {
         }
         pos += 9; // Move past time and space
 
-        // Extract year (4 digits)
+        // Extract year (4 digits) - Using from_chars for better performance
         if (pos + 4 > str.size()) return std::nullopt;
-        std::string_view year_str = str.substr(pos, 4);
-        int year = std::stoi(std::string(year_str.data(), year_str.size()));
+        int year = 0;
+        if (std::from_chars(str.data() + pos, str.data() + pos + 4, year).ec != std::errc{}) return std::nullopt;
 
         // Create a tm structure and convert to time_point
         tm tm_value{};

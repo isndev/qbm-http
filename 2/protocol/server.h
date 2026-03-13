@@ -114,6 +114,61 @@ private:
 
 public:
     /**
+     * @brief Validate HTTP/2 header name and value according to RFC 9113
+     * @param name Header field name
+     * @param value Header field value
+     * @return true if valid, false if contains forbidden characters
+     * 
+     * SECURITY FIX: Implements validation that was marked as TODO in the code.
+     * According to RFC 9113:
+     * - Header names must not contain uppercase letters (should be lowercase)
+     * - Neither name nor value may contain NUL (0x00), CR (0x0D), or LF (0x0A)
+     * - Values may contain TAB (0x09) but no other control characters (0x00-0x1F)
+     * - Names must be valid token strings (no separators like : , ; etc.)
+     */
+    [[nodiscard]] static bool is_valid_header_field(const std::string& name, const std::string& value) noexcept {
+        // Check for empty name
+        if (name.empty()) {
+            return false;
+        }
+        
+        // Validate header name: no control chars, no separators, lowercase only
+        for (unsigned char c : name) {
+            // Forbidden: NUL, CR, LF, and uppercase letters
+            if (c == 0x00 || c == 0x0D || c == 0x0A) {
+                return false; // NUL, CR, LF are never allowed
+            }
+            // Acceptable: tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+            //              "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+            bool is_valid_char = std::isalnum(c) || 
+                                c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+                                c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
+                                c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+            if (!is_valid_char) {
+                return false;
+            }
+        }
+        
+        // Validate header value: no control chars except TAB (0x09)
+        for (unsigned char c : value) {
+            // Forbidden: NUL (0x00)
+            if (c == 0x00) {
+                return false;
+            }
+            // Control characters 0x01-0x08, 0x0A-0x1F are forbidden
+            // Only TAB (0x09) is allowed among control chars
+            if (c < 0x20 && c != 0x09) {
+                return false;
+            }
+            // DEL (0x7F) is also forbidden
+            if (c == 0x7F) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    /**
      * @brief Construct HTTP/2 server protocol handler
      * @param io_handler_ref Reference to IO handler that receives requests
      */
@@ -1319,8 +1374,12 @@ private:
                     }
                 } else { // Regular header
                     pseudo_headers_finished = true;
-                    // TODO: Validate header name/value format per HTTP rules (e.g., no NULs etc.)
-                    // if invalid -> PROTOCOL_ERROR
+                    // SECURITY FIX: Validate header name/value format per RFC 9113
+                    if (!is_valid_header_field(name, value)) {
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, 
+                            "Invalid header field name or value format (contains forbidden characters).");
+                        return false;
+                    }
                     stream.assembled_request.add_header(name, value);
                 }
             }
