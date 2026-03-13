@@ -103,8 +103,10 @@ namespace qb::http {
                             try {
                                 _callback(duration_for_callback); // Invoke user callback.
                             } catch (...) {
-                                // Suppress exceptions from user-provided callback to avoid disrupting response sending.
-                                // Consider logging the callback exception here if a logging facility is available.
+                                // SECURITY FIX: Add logging for suppressed exceptions
+                                // Suppress exceptions from user-provided callback to avoid disrupting response sending,
+                                // but log for debugging purposes.
+                                LOG_HTTP_WARN("TimingMiddleware [" << _name << "]: Exception in user callback suppressed");
                             }
                             // Optionally remove the start time from the context, though usually not critical here.
                             // ctx_ref.remove(key);

@@ -1212,15 +1212,17 @@ private:
      * @param reason Error code
      * @param message Optional error message
      */
-    void try_close_stream_context(Http2ClientStream& stream_ref, 
-                                ErrorCode reason = ErrorCode::NO_ERROR, 
+    void try_close_stream_context(Http2ClientStream& stream_ref,
+                                ErrorCode reason = ErrorCode::NO_ERROR,
                                 const std::string& message = "") {
-	// Todo: use reason and message for ...
-	(void)reason;
-	(void)message;
+        // FIX: Use reason and message for logging (previously unused TODO)
+        if (reason != ErrorCode::NO_ERROR && !message.empty()) {
+            LOG_HTTP_DEBUG_PA(stream_ref.id, "Closing stream with reason: "
+                << static_cast<int>(reason) << " (" << message << ")");
+        }
         auto it = _client_streams.find(stream_ref.id);
-        if (it != _client_streams.end() && 
-            (it->second.state == Http2StreamConcreteState::CLOSED || 
+        if (it != _client_streams.end() &&
+            (it->second.state == Http2StreamConcreteState::CLOSED ||
              it->second.rst_stream_sent || it->second.rst_stream_received)) {
             _client_streams.erase(it);
         }

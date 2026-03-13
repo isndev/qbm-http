@@ -297,31 +297,35 @@ void Client::process_pending_requests() {
     if (!is_connected() || !_h2_protocol) {
         return;
     }
-    
+
     // Process pending requests up to concurrent limit
-    while (!_pending_requests.empty() && 
+    while (!_pending_requests.empty() &&
            _active_requests.size() < _max_concurrent_streams) {
-        
+
         auto context = std::move(_pending_requests.front());
         _pending_requests.pop();
-        
+
         // Send request via HTTP/2 protocol
-        uint64_t app_request_id = reinterpret_cast<uint64_t>(context.get());
-        
+        // SECURITY FIX: Use atomic counter instead of pointer casting for portable code
+        // The old code used reinterpret_cast<uint64_t>(context.get()) which is non-portable
+        // (undefined behavior on 32-bit platforms where sizeof(void*) != sizeof(uint64_t))
+        static std::atomic<uint32_t> next_request_id{1};
+        uint32_t app_request_id = next_request_id.fetch_add(1, std::memory_order_relaxed);
+
         if (_h2_protocol->send_request(std::move(context->request), app_request_id)) {
             // Store context with app_request_id as key (will be mapped to stream_id)
-            _active_requests[static_cast<uint32_t>(app_request_id)] = std::move(context);
-            
+            _active_requests[app_request_id] = std::move(context);
+
             LOG_HTTP_DEBUG_PA(_client_id, "Request sent successfully (app_id: " << app_request_id << ")");
         } else {
             LOG_HTTP_ERROR_PA(_client_id, "Failed to send request");
-            
+
             // Create error response
             auto error_response = create_error_response(
-                qb::http::status::SERVICE_UNAVAILABLE, 
+                qb::http::status::SERVICE_UNAVAILABLE,
                 "Failed to send HTTP/2 request"
             );
-            
+
             context->callback(std::move(error_response));
             _failed_requests++;
         }

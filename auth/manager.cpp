@@ -14,6 +14,7 @@
 
 #include "./manager.h"
 #include "../utility.h" // For qb::http::utility::iequals (used in extract_token_from_header)
+#include "../logger.h"  // For LOG_HTTP_WARN
 
 #include <qb/json.h>          // For qb::json manipulation
 #include <qb/io/crypto_jwt.h> // For qb::jwt::create, qb::jwt::verify, and related options/structs
@@ -57,8 +58,9 @@ namespace qb {
                 );
             }
 
-            // Implementation of generate_token_payload
-            std::string Manager::generate_token_payload(const User &user) const {
+            // Helper: Create payload JSON without serializing to string
+            // PERFORMANCE FIX: Avoids double conversion (serialize then immediately parse)
+            static json create_payload_json(const User &user, const Options &_options) {
                 json payload;
 
                 // Standard claims
@@ -93,15 +95,21 @@ namespace qb {
                     payload["metadata"] = meta;
                 }
 
-                return payload.dump();
+                return payload;
+            }
+
+            // Implementation of generate_token_payload
+            std::string Manager::generate_token_payload(const User &user) const {
+                // PERFORMANCE FIX: Use helper to create JSON, then serialize once
+                return create_payload_json(user, _options).dump();
             }
 
             // Implementation of generate_token
             std::string Manager::generate_token(const User &user) const {
-                std::string payload = generate_token_payload(user);
-
-                // Parse the payload JSON
-                json payload_json = json::parse(payload);
+                // PERFORMANCE FIX: Get JSON directly without serialize/parse cycle
+                // Previously: generate_token_payload() serialized to string, then we parsed it back
+                // Now: Get JSON object directly and convert to map
+                json payload_json = create_payload_json(user, _options);
 
                 // Convert to std::map<std::string, std::string>
                 std::map<std::string, std::string> jwt_payload;
@@ -336,7 +344,9 @@ namespace qb {
                             }
                         }
                     } catch (...) {
-                        // In case of parsing error, leave roles empty
+                        // SECURITY FIX: Add logging for silent exception swallowing
+                        // In case of parsing error, leave roles empty but log for audit trail
+                        LOG_HTTP_WARN("AuthManager: Failed to parse roles JSON for user: " << user.username);
                     }
                 }
 
@@ -355,7 +365,9 @@ namespace qb {
                             }
                         }
                     } catch (...) {
-                        // In case of parsing error, leave metadata empty
+                        // SECURITY FIX: Add logging for silent exception swallowing
+                        // In case of parsing error, leave metadata empty but log for audit trail
+                        LOG_HTTP_WARN("AuthManager: Failed to parse metadata JSON for user: " << user.username);
                     }
                 }
 

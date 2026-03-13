@@ -994,27 +994,28 @@ public:
                 continue;
             }
 
-            // Try to find exact match in dynamic table
-            bool found_in_dynamic_full = false;
-            for (size_t i = 0; i < _dynamic_table.size(); ++i) {
-                if (_dynamic_table[i].name == name && _dynamic_table[i].value == value) {
-                    encode_integer(out_buffer, static_cast<uint8_t>(InstructionType::INDEXED_HEADER_FIELD), 7, STATIC_TABLE.size() + i + 1);
-                    found_in_dynamic_full = true;
-                    _stats.dynamic_table_hits++;
-                    break;
-                }
-            }
-            if (found_in_dynamic_full) continue;
-            
-            // Find name matches
+            // PERFORMANCE FIX: Combined search for exact match and name match in single pass
+            // Previously: Two separate O(N) loops (2N comparisons worst case)
+            // Now: Single O(N) loop with early exit on exact match (N comparisons)
+            // For dynamic tables with 64 entries and 100 headers: saves ~6,400 comparisons
             auto static_name_idx = static_table::find_name_match(name);
             std::optional<std::size_t> dynamic_name_idx;
+            bool found_in_dynamic_full = false;
+
             for (size_t i = 0; i < _dynamic_table.size(); ++i) {
                 if (_dynamic_table[i].name == name) {
                     dynamic_name_idx = STATIC_TABLE.size() + i + 1;
-                    break;
+                    if (_dynamic_table[i].value == value) {
+                        // Exact match found - can stop here
+                        encode_integer(out_buffer, static_cast<uint8_t>(InstructionType::INDEXED_HEADER_FIELD), 7,
+                                      STATIC_TABLE.size() + i + 1);
+                        found_in_dynamic_full = true;
+                        _stats.dynamic_table_hits++;
+                        break;
+                    }
                 }
             }
+            if (found_in_dynamic_full) continue;
 
             // Determine encoding strategy
             bool is_sensitive = header_field.sensitive || header_field.is_sensitive_by_default();

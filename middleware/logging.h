@@ -130,7 +130,8 @@ namespace qb::http {
             try {
                 _log_function(_request_level, message);
             } catch (...) {
-                /* Suppress exceptions from user log function */
+                // SECURITY FIX: Log exception in user-provided log function
+                LOG_HTTP_WARN("LoggingMiddleware [" << _name << "]: Exception in user log function suppressed");
             }
         }
 
@@ -144,7 +145,8 @@ namespace qb::http {
             try {
                 _log_function(_response_level, message);
             } catch (...) {
-                /* Suppress exceptions from user log function */
+                // SECURITY FIX: Log exception in user-provided log function
+                LOG_HTTP_WARN("LoggingMiddleware [" << _name << "]: Exception in user log function suppressed");
             }
         }
 

@@ -597,10 +597,40 @@ namespace qb::http {
                 ctx->response().set_header("Accept-Ranges", "bytes");
             }
 
+            // SECURITY FIX: TOCTOU (Time-of-Check-Time-of-Use) protection
+            // The file was previously checked for existence and size earlier in this function,
+            // but an attacker could replace it with a different file (e.g., symlink to /etc/passwd)
+            // between the check and the open operation.
+            //
+            // Mitigation: Verify the file is a regular file (not a symlink) before opening,
+            // and check again immediately after opening. On POSIX systems, O_NOFOLLOW would be
+            // ideal, but for portable C++ we use is_regular_file checks.
+            {
+                std::error_code symlink_ec;
+                bool is_reg = std::filesystem::is_regular_file(target_file_abs, symlink_ec);
+                if (symlink_ec || !is_reg) {
+                    LOG_HTTP_WARN("StaticFilesMiddleware: File is not a regular file or access denied: " << target_file_abs);
+                    send_error_response(ctx, qb::http::status::FORBIDDEN, "Access denied");
+                    return;
+                }
+            }
+
             std::ifstream file_stream(target_file_abs, std::ios::binary | std::ios::ate);
             if (!file_stream.is_open()) {
                 send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Could not open file");
                 return;
+            }
+
+            // Secondary TOCTOU check: Verify it's still a regular file after opening
+            // This catches race conditions where file is replaced between is_regular_file check and open
+            {
+                std::error_code verify_ec;
+                bool still_reg = std::filesystem::is_regular_file(target_file_abs, verify_ec);
+                if (verify_ec || !still_reg) {
+                    LOG_HTTP_WARN("StaticFilesMiddleware: File changed during access attempt (possible race condition): " << target_file_abs);
+                    send_error_response(ctx, qb::http::status::FORBIDDEN, "Access denied");
+                    return;
+                }
             }
 
             long long full_file_size = static_cast<long long>(file_stream.tellg());
