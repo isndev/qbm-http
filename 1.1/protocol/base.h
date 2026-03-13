@@ -206,7 +206,7 @@ namespace qb::http {
         on_headers_complete(http_t *parser) {
             auto &msg = static_cast<Parser *>(parser->data)->msg;
             msg.major_version = parser->http_major;
-            msg.minor_version = parser->http_major;
+            msg.minor_version = parser->http_minor;
             if (parser->content_length != ULLONG_MAX) {
                 msg.body().raw().reserve(parser->content_length);
             }

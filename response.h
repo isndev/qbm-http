@@ -80,7 +80,7 @@ namespace qb::http {
 
         TResponse &operator=(TResponse &&) noexcept = default; // Assuming CookieJar and String move ops are noexcept
 
-        const Status &status() const noexcept { return _status; }
+        [[nodiscard]] const Status &status() const noexcept { return _status; }
         Status &status() noexcept { return _status; }
 
         /**

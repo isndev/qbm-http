@@ -111,7 +111,7 @@ namespace qb::http {
 
         TRequest &operator=(TRequest &&) noexcept = default;
 
-        const Method &method() const noexcept { return _method; }
+        [[nodiscard]] const Method &method() const noexcept { return _method; }
         Method &method() noexcept { return _method; }
 
         /**

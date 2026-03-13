@@ -278,7 +278,7 @@ namespace qb::http {
          * @return Body size
          */
         [[nodiscard]] inline std::size_t
-        size() const {
+        size() const noexcept {
             return _data.size();
         }
 
@@ -287,7 +287,7 @@ namespace qb::http {
          * @return true if body is empty
          */
         [[nodiscard]] inline bool
-        empty() const {
+        empty() const noexcept {
             return _data.empty();
         }
 

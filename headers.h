@@ -353,7 +353,7 @@ namespace qb::http {
          * @brief Gets the parsed `ContentType` object, allowing easy access to MIME type and charset.
          * @return A constant reference to the internal `ContentType` object.
          */
-        [[nodiscard]] const ContentType &
+        [[nodiscard]] constexpr const ContentType &
         content_type() const noexcept {
             return _content_type;
         }

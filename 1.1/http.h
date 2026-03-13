@@ -164,12 +164,12 @@ namespace qb::http {
              * server resources indefinitely.
              */
             void
-            on(qb::io::async::event::timeout const &) {
+            on([[maybe_unused]] qb::io::async::event::timeout const &) {
                 LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 session timed out.");
 
                 // disconnect session on timeout
                 // add reason for timeout
-                if constexpr (has_method_on<Derived, void, event::timeout const &>::value) {
+                if constexpr (qb::has_on<Derived, event::timeout const &>) {
                     static_cast<Derived &>(*this).on(event::timeout{});
                 } else
                     this->disconnect(DisconnectedReason::ByTimeout);
@@ -184,7 +184,7 @@ namespace qb::http {
              * during active data transfer operations.
              */
             void
-            on(qb::io::async::event::pending_write &&) {
+            on([[maybe_unused]] qb::io::async::event::pending_write &&) {
                 LOG_HTTP_TRACE_PA(this->id(), "Pending write event, updating timeout.");
                 this->updateTimeout();
             }
@@ -197,7 +197,7 @@ namespace qb::http {
              * By default, disconnects the session with ResponseTransmitted reason.
              */
             void
-            on(qb::io::async::event::eos &&) {
+            on([[maybe_unused]] qb::io::async::event::eos &&) {
                 LOG_HTTP_DEBUG_PA(this->id(), "End of stream (eos) event - response fully transmitted.");
 
                 if (_context) {
@@ -232,7 +232,7 @@ namespace qb::http {
              */
             void
             on(qb::io::async::event::disconnected &&e) {
-                if constexpr (has_method_on<Derived, void, event::disconnected>::value) {
+                if constexpr (qb::has_on<Derived, event::disconnected>) {
                     static_cast<Derived &>(*this).on(event::disconnected{e.reason});
                 } else {
                     static const auto reason = [](auto why) {
@@ -292,7 +292,7 @@ namespace qb::http {
              * Returns a shared pointer to the context for the session.
              * The context contains information about the current request and response.
              */
-            std::shared_ptr<Context<Derived> > context() const {
+            [[nodiscard]] std::shared_ptr<Context<Derived> > context() const {
                 return _context;
             }
 
@@ -400,7 +400,7 @@ namespace qb::http {
              */
             void
             on(qb::io::async::event::disconnected &&event) {
-                if constexpr (has_method_on<Derived, void, event::disconnected>::value) {
+                if constexpr (qb::has_on<Derived, event::disconnected>) {
                     static_cast<Derived &>(*this).on(event::disconnected{event.reason});
                 }
                 LOG_HTTP_WARN("HTTP/1.1 server disconnected. Reason: " << event.reason);
@@ -977,7 +977,7 @@ public:
  * @return A `std::unique_ptr` to the created server.
  */
 template <typename Session = DefaultSession>
-std::unique_ptr<Server<Session>> make_server() {
+[[nodiscard]] std::unique_ptr<Server<Session>> make_server() {
     return std::make_unique<Server<Session>>();
 }
 
@@ -1045,7 +1045,7 @@ namespace ssl {
  * @return A `std::unique_ptr` to the created server.
  */
 template <typename Session = DefaultSecureSession>
-std::unique_ptr<Server<Session>> make_server() {
+[[nodiscard]] std::unique_ptr<Server<Session>> make_server() {
     return std::make_unique<Server<Session>>();
 }
 

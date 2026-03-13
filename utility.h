@@ -18,8 +18,6 @@
 #include <string>        // For std::string
 #include <string_view>   // For std::string_view
 #include <vector>        // For std::vector
-#include <iomanip>       // For std::setw, std::uppercase, std::nouppercase
-#include <sstream>       // For std::ostringstream
 #include <type_traits>   // For std::enable_if_t, std::is_invocable_v
 
 namespace qb::http {
@@ -458,22 +456,22 @@ namespace qb::http {
          */
         [[nodiscard]] inline std::string
         uri_encode_component(std::string_view component) {
-            std::ostringstream escaped;
-            escaped.fill('0'); // Ensures leading zeros for hex values if setw is used (e.g. %0A for newline)
-            escaped << std::hex << std::uppercase; // Output hex in uppercase
-
-            for (char c_signed: component) {
-                unsigned char c = static_cast<unsigned char>(c_signed);
+            std::string result;
+            result.reserve(component.size() * 3); // Worst case: all chars encoded as %XX
+            
+            for (unsigned char c : component) {
                 // Keep alphanumeric and other unreserved characters as defined in RFC 3986, Section 2.3
                 if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-                    escaped << c;
+                    result += static_cast<char>(c);
                 } else {
                     // Any other characters are percent-encoded
-                    escaped << '%' << std::setw(2) << static_cast<int>(c);
+                    static constexpr char hex_digits[] = "0123456789ABCDEF";
+                    result += '%';
+                    result += hex_digits[c >> 4];
+                    result += hex_digits[c & 0xF];
                 }
             }
-            // No need for std::nouppercase here as std::hex settings are local to ostringstream state changes
-            return escaped.str();
+            return result;
         }
     } // namespace utility
 } // namespace qb::http
