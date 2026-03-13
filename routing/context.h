@@ -448,6 +448,7 @@ namespace qb::http {
         void redirect(const std::string& url, qb::http::status status_code = qb::http::status::FOUND) {
             _response.status() = status_code;
             _response.set_header("Location", url);
+            _response.set_header("Content-Length", "0");
             complete(AsyncTaskResult::COMPLETE);
         }
 
