@@ -58,14 +58,22 @@ namespace qb::http {
             // (entropy() != 0 indicates non-deterministic source)
             const bool is_cryptographic = random_device.entropy() != 0.0;
             
-            std::stringstream ss;
-            ss << std::hex << std::setfill('0');
-            
+            // PERFORMANCE FIX: Replace std::stringstream with std::string for better performance
+            // stringstream has significant overhead for simple concatenation operations.
+            // Pre-allocate exact size needed (2 chars per byte in hex format).
+            std::string result;
+            result.reserve(length);
+
+            // Hex digit lookup table for fast conversion without stringstream
+            static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+
             if (is_cryptographic) {
                 // Use random_device directly (typically backed by OS CSPRNG)
                 std::uniform_int_distribution<> distribution(0, 255);
                 for (size_t i = 0; i < length / 2; ++i) {
-                    ss << std::setw(2) << distribution(random_device);
+                    uint8_t byte = static_cast<uint8_t>(distribution(random_device));
+                    result.push_back(HEX_DIGITS[byte >> 4]);
+                    result.push_back(HEX_DIGITS[byte & 0x0F]);
                 }
             } else {
                 // Fallback: Seed Mersenne Twister with random_device
@@ -73,11 +81,13 @@ namespace qb::http {
                 std::mt19937 generator(random_device());
                 std::uniform_int_distribution<> distribution(0, 255);
                 for (size_t i = 0; i < length / 2; ++i) {
-                    ss << std::setw(2) << distribution(generator);
+                    uint8_t byte = static_cast<uint8_t>(distribution(generator));
+                    result.push_back(HEX_DIGITS[byte >> 4]);
+                    result.push_back(HEX_DIGITS[byte & 0x0F]);
                 }
             }
-            
-            return ss.str();
+
+            return result;
         }
     } // namespace internal
 

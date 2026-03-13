@@ -277,15 +277,17 @@ public:
      * @return true if header is forbidden
      */
     static bool is_forbidden_header(std::string_view name) {
-        static const std::array<std::string_view, 8> forbidden = {
+        // C++23 MODERNIZATION: Use std::ranges::contains instead of std::find
+        // More readable and expressive - directly states intent
+        static constexpr std::array<std::string_view, 8> forbidden = {
             "connection", "upgrade", "http2-settings", "te",
             "transfer-encoding", "proxy-connection", "keep-alive", "host"
         };
-        
+
         // Exception: "te: trailers" is allowed
         if (name == "te") return false; // Let caller check the value
-        
-        return std::find(forbidden.begin(), forbidden.end(), name) != forbidden.end();
+
+        return std::ranges::contains(forbidden, name);
     }
 
     /**

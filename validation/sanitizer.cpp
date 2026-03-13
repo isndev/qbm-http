@@ -53,11 +53,14 @@ namespace qb::http::validation {
 
     void Sanitizer::apply_sanitizers_to_node(qb::json &node, const std::vector<SanitizerFunction> &funcs) const {
         if (node.is_string()) {
+            // PERFORMANCE FIX: Use move semantics to eliminate N+1 string copies
+            // Previously: N sanitizers created N+1 copies (1 initial + N copies)
+            // Now: Only 1 move per sanitizer call, zero copies
             std::string val = node.get<std::string>();
             for (const auto &func: funcs) {
-                val = func(val);
+                val = func(std::move(val));  // MOVE instead of COPY
             }
-            node = val;
+            node = std::move(val);  // MOVE instead of COPY
         }
     }
 

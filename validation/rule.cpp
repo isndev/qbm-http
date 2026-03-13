@@ -117,8 +117,10 @@ namespace qb::http::validation {
     }
 
     // Security: Maximum string length for regex validation to prevent ReDoS attacks
-    // with pathological regex patterns and very long input strings
-    constexpr std::size_t MAX_REGEX_INPUT_LENGTH = 1024 * 1024; // 1MB
+    // with pathological regex patterns and very long input strings.
+    // REDUCED from 1MB to 256KB for better protection - most legitimate use cases
+    // don't need pattern matching on strings larger than 256KB.
+    constexpr std::size_t MAX_REGEX_INPUT_LENGTH = 256 * 1024; // 256KB
 
     PatternRule::PatternRule(std::string pattern_str) : _pattern_str(std::move(pattern_str)) {
         try {
