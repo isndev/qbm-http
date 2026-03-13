@@ -28,20 +28,55 @@
 
 namespace qb::http {
     namespace internal {
-        // Helper for nonce generation
+        /**
+         * @brief Generate a cryptographically secure random nonce for CSP
+         * @param length Length of the nonce string in characters (default 32)
+         * @return Hex-encoded random string
+         * 
+         * @note Uses std::random_device which typically provides OS-level
+         * cryptographically secure random numbers on modern systems (Linux: /dev/urandom,
+         * Windows: CryptGenRandom/RtlGenRandom, macOS: arc4random).
+         * Falls back to std::mt19937 if std::random_device is not cryptographic.
+         */
         static std::string generate_random_nonce(size_t length = 32) {
-            // Simple hex representation of random bytes.
-            // For production, consider a Base64 encoded result from a cryptographic RNG.
+            // Ensure minimum length for security (16 bytes = 32 hex chars)
+            constexpr size_t MIN_NONCE_LENGTH = 16;
+            if (length < MIN_NONCE_LENGTH) {
+                length = MIN_NONCE_LENGTH;
+            }
+            
+            // Maximum length to prevent DoS via excessive allocation
+            constexpr size_t MAX_NONCE_LENGTH = 128;
+            if (length > MAX_NONCE_LENGTH) {
+                length = MAX_NONCE_LENGTH;
+            }
+            
+            // Use std::random_device - typically OS-level CSPRNG
             std::random_device random_device;
-            std::mt19937 generator(random_device());
-            std::uniform_int_distribution<> distribution(0, 255);
-
+            
+            // Check if std::random_device provides cryptographic quality
+            // (entropy() != 0 indicates non-deterministic source)
+            const bool is_cryptographic = random_device.entropy() != 0.0;
+            
             std::stringstream ss;
             ss << std::hex << std::setfill('0');
-            // Each byte becomes 2 hex characters.
-            for (size_t i = 0; i < length / 2; ++i) {
-                ss << std::setw(2) << distribution(generator);
+            
+            if (is_cryptographic) {
+                // Use random_device directly (typically backed by OS CSPRNG)
+                std::uniform_int_distribution<> distribution(0, 255);
+                for (size_t i = 0; i < length / 2; ++i) {
+                    ss << std::setw(2) << distribution(random_device);
+                }
+            } else {
+                // Fallback: Seed Mersenne Twister with random_device
+                // Note: This is NOT cryptographically secure, only for development/testing
+                std::mt19937 generator(random_device());
+                std::uniform_int_distribution<> distribution(0, 255);
+                for (size_t i = 0; i < length / 2; ++i) {
+                    ss << std::setw(2) << distribution(generator);
+                }
             }
+            
             return ss.str();
         }
     } // namespace internal

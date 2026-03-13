@@ -116,6 +116,10 @@ namespace qb::http::validation {
         return true;
     }
 
+    // Security: Maximum string length for regex validation to prevent ReDoS attacks
+    // with pathological regex patterns and very long input strings
+    constexpr std::size_t MAX_REGEX_INPUT_LENGTH = 1024 * 1024; // 1MB
+
     PatternRule::PatternRule(std::string pattern_str) : _pattern_str(std::move(pattern_str)) {
         try {
             _regex = std::regex(_pattern_str, std::regex_constants::ECMAScript | std::regex_constants::optimize);
@@ -130,6 +134,16 @@ namespace qb::http::validation {
             return true; // Pattern rule only applies to strings.
         }
         const auto &str_val = value.get<std::string>();
+        
+        // Security: ReDoS protection - limit input size for regex matching
+        // Pathological regex patterns can cause exponential time complexity
+        if (str_val.length() > MAX_REGEX_INPUT_LENGTH) {
+            result.add_error(field_path, rule_name(), 
+                "String exceeds maximum length for pattern validation (" + std::to_string(MAX_REGEX_INPUT_LENGTH) + " chars). "
+                "This limit protects against ReDoS attacks.", std::make_optional(value));
+            return false;
+        }
+        
         if (!std::regex_match(str_val, _regex)) {
             result.add_error(field_path, rule_name(), "String does not match pattern: " + _pattern_str, std::make_optional(value));
             return false;

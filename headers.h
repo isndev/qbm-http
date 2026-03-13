@@ -402,6 +402,27 @@ namespace qb::http {
             values_vec.clear();
             values_vec.emplace_back(std::forward<HeaderValueType>(value));
         }
+
+        /**
+         * @brief Returns the total number of unique header names.
+         * @return The count of distinct header names in the container.
+         * @note This counts unique header names, not total values. For multi-value headers,
+         *       each name is counted once regardless of how many values it has.
+         */
+        [[nodiscard]] std::size_t header_count() const noexcept {
+            return _headers.size();
+        }
+
+        /**
+         * @brief Checks if the number of headers exceeds a security limit.
+         * @param max_headers Maximum allowed number of unique header names.
+         * @return `true` if the header count exceeds the limit, `false` otherwise.
+         * @note This is useful for DoS protection. Typical limit is 100 headers (RFC recommendation).
+         * @see qb::http::protocol_limits::MAX_HEADERS_COUNT for the default recommended limit.
+         */
+        [[nodiscard]] bool exceeds_header_limit(std::size_t max_headers = 100) const noexcept {
+            return _headers.size() > max_headers;
+        }
     };
 
     /** @brief Convenience alias for `THeaders<std::string>`, representing mutable HTTP headers where values are owned `std::string`s. */

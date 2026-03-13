@@ -156,8 +156,8 @@ namespace qb::http {
 
     // --- Typed ICustomRoute support at root level ---
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::add_custom_route(std::string path, qb::http::method method,
                                                                Args &&... ctor_args) {
         if (_root_group) {
@@ -169,56 +169,56 @@ namespace qb::http {
     }
 
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::get(std::string path, Args &&... ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::GET,
                                                  std::forward<Args>(ctor_args)...);
     }
 
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::post(std::string path, Args &&... ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::POST,
                                                  std::forward<Args>(ctor_args)...);
     }
 
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::put(std::string path, Args &&... ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::PUT,
                                                  std::forward<Args>(ctor_args)...);
     }
 
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::del(std::string path, Args &&... ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::DEL,
                                                  std::forward<Args>(ctor_args)...);
     }
 
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::patch(std::string path, Args &&... ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::PATCH,
                                                  std::forward<Args>(ctor_args)...);
     }
 
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::options(std::string path, Args &&... ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::OPTIONS,
                                                  std::forward<Args>(ctor_args)...);
     }
 
     template<typename SessionType>
-    template<typename CustomRouteType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<ICustomRoute<SessionType>, CustomRouteType>> */>
+    template<typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<SessionType>>
     Router<SessionType> &Router<SessionType>::head(std::string path, Args &&... ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HEAD,
                                                  std::forward<Args>(ctor_args)...);
@@ -232,9 +232,8 @@ namespace qb::http {
     }
 
     template<typename SessionType>
-    template<typename C, typename... Args,
-        typename
-        /* = std::enable_if_t<std::is_base_of_v<IController<SessionType>, C> && std::is_constructible_v<C, Args...>> */>
+    template<typename C, typename... Args>
+        requires DerivedFrom<C, Controller<SessionType>>
     std::shared_ptr<C> Router<SessionType>::controller(std::string path_prefix, Args &&... args) {
         _is_compiled = false;
         return _root_group
@@ -263,8 +262,8 @@ namespace qb::http {
     }
 
     template<typename SessionType>
-    template<typename MiddlewareType, typename... Args,
-        typename /* = std::enable_if_t<std::is_base_of_v<IMiddleware<SessionType>, MiddlewareType>> */>
+    template<typename MiddlewareType, typename... Args>
+        requires DerivedFrom<MiddlewareType, IMiddleware<SessionType>>
     Router<SessionType> &Router<SessionType>::use(Args &&... args) {
         if (_root_group) {
             _root_group->template use<MiddlewareType>(std::forward<Args>(args)...);

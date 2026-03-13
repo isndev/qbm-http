@@ -17,6 +17,7 @@
 #include <functional>
 #include <string> // For std::string
 #include <memory> // Required for std::shared_ptr
+#include <concepts> // C++20 concepts for modern template constraints
 #include "../types.h" // For qb::http::method, qb::http::status
 
 namespace qb::http {
@@ -99,4 +100,43 @@ namespace qb::http {
     template<typename SessionType>
     using MiddlewareHandlerFn = std::function<void(std::shared_ptr<Context<SessionType> > ctx,
                                                    std::function<void()> next)>;
+
+    // ============================================================================
+    // C++20/23 Concepts for Modern Template Constraints
+    // ============================================================================
+
+    /**
+     * @brief Concept for types that can be used as route handlers.
+     * Requires a callable that accepts a shared_ptr to Context.
+     */
+    template<typename F, typename SessionType>
+    concept RouteHandler = requires(F f, std::shared_ptr<Context<SessionType>> ctx) {
+        { f(ctx) } -> std::same_as<void>;
+    };
+
+    /**
+     * @brief Concept for types that can be used as middleware handlers.
+     * Requires a callable that accepts Context and next callback.
+     */
+    template<typename F, typename SessionType>
+    concept MiddlewareHandler = requires(F f, std::shared_ptr<Context<SessionType>> ctx, std::function<void()> next) {
+        { f(ctx, next) } -> std::same_as<void>;
+    };
+
+    /**
+     * @brief Concept for types that derive from a specific base class.
+     * Used for validating CustomRoute and Middleware types.
+     */
+    template<typename Derived, typename Base>
+    concept DerivedFrom = std::is_base_of_v<Base, Derived>;
+
+    /**
+     * @brief Concept for session types that can send responses.
+     * Used to validate session types at compile time.
+     */
+    template<typename S>
+    concept SessionType = requires(S s) {
+        { s.id() } -> std::convertible_to<uint32_t>;
+    };
+
 } // namespace qb::http

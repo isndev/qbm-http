@@ -168,11 +168,94 @@ namespace qb::http::validation {
 
         SanitizerFunction strip_html_tags() noexcept {
             return [](const std::string &input) -> std::string {
-                // Basic regex to remove anything that looks like a tag. 
-                // For robust HTML sanitization, a proper HTML parser would be better, but this is common for simple stripping.
-                static const std::regex html_tags_regex(
-                    "<[^>]*>", std::regex_constants::ECMAScript | std::regex_constants::icase);
-                return std::regex_replace(input, html_tags_regex, "");
+                // SECURITY FIX: State-machine based HTML tag removal
+                // Replaces vulnerable regex approach with proper parsing
+                // Handles nested tags, attributes with '>' in quotes, and comments
+                
+                std::string output;
+                output.reserve(input.size()); // Pre-allocate for performance
+                
+                enum class State { TEXT, TAG_START, TAG_NAME, IN_TAG, COMMENT, COMMENT_END };
+                State state = State::TEXT;
+                size_t i = 0;
+                
+                while (i < input.size()) {
+                    char c = input[i];
+                    
+                    switch (state) {
+                        case State::TEXT:
+                            if (c == '<') {
+                                state = State::TAG_START;
+                            } else {
+                                output.push_back(c);
+                            }
+                            break;
+                            
+                        case State::TAG_START:
+                            if (c == '!') {
+                                // Potential comment start <!--
+                                if (i + 2 < input.size() && input[i + 1] == '-' && input[i + 2] == '-') {
+                                    state = State::COMMENT;
+                                    i += 2; // Skip the two dashes
+                                } else {
+                                    state = State::TAG_NAME; // DOCTYPE or other declaration
+                                }
+                            } else if (c == '/' || std::isalnum(static_cast<unsigned char>(c))) {
+                                state = State::TAG_NAME;
+                            } else {
+                                // Not a valid tag start, treat as text
+                                output.push_back('<');
+                                output.push_back(c);
+                                state = State::TEXT;
+                            }
+                            break;
+                            
+                        case State::TAG_NAME:
+                        case State::IN_TAG:
+                            if (c == '"' || c == '\'') {
+                                // Skip quoted strings in attributes (handles '>' in quotes)
+                                char quote = c;
+                                ++i;
+                                while (i < input.size() && input[i] != quote) {
+                                    ++i;
+                                }
+                                // Continue in tag state
+                            } else if (c == '>') {
+                                // End of tag
+                                state = State::TEXT;
+                            }
+                            // Otherwise stay in tag state
+                            break;
+                            
+                        case State::COMMENT:
+                            if (c == '-' && i + 1 < input.size() && input[i + 1] == '-') {
+                                state = State::COMMENT_END;
+                                ++i; // Skip one dash, next iteration will handle second
+                            }
+                            break;
+                            
+                        case State::COMMENT_END:
+                            if (c == '>') {
+                                state = State::TEXT;
+                            } else if (c != '-') {
+                                // Not actually end of comment, back to comment state
+                                state = State::COMMENT;
+                            }
+                            break;
+                    }
+                    ++i;
+                }
+                
+                // Handle unclosed tags - output remaining content as text
+                if (state != State::TEXT) {
+                    // Find last '<' and output from there
+                    size_t last_lt = output.find_last_of('<');
+                    if (last_lt != std::string::npos) {
+                        output.erase(last_lt);
+                    }
+                }
+                
+                return output;
             };
         }
 

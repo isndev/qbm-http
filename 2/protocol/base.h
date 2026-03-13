@@ -56,6 +56,43 @@ constexpr char HTTP2_CONNECTION_PREFACE_BYTES[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\
  */
 constexpr std::string_view HTTP2_CONNECTION_PREFACE(HTTP2_CONNECTION_PREFACE_BYTES, sizeof(HTTP2_CONNECTION_PREFACE_BYTES) - 1);
 
+/**
+ * @brief Security limits for HTTP/2 protocol handling
+ * 
+ * These limits help prevent various DoS attacks and ensure stable operation.
+ * Values are chosen based on RFC 9113 recommendations and common server configurations.
+ * 
+ * @note HTTP/2 specific considerations:
+ * - **Frame Size**: RFC 9113 mandates 16,384 octets default, max 16,777,215 (2^24-1)
+ * - **Concurrent Streams**: Limited by SETTINGS_MAX_CONCURRENT_STREAMS
+ * - **HPack Table Size**: Controlled by SETTINGS_HEADER_TABLE_SIZE
+ * - **Window Size**: Controlled by SETTINGS_INITIAL_WINDOW_SIZE (max 2^31-1)
+ * 
+ * @see https://tools.ietf.org/html/rfc9113
+ */
+namespace qb::http2::protocol_limits {
+    /** @brief Maximum frame payload size per RFC 9113 (2^24-1 = 16,777,215 octets) */
+    constexpr std::size_t MAX_FRAME_SIZE = 16777215;
+    
+    /** @brief Default frame size (16,384 octets) per RFC 9113 */
+    constexpr std::size_t DEFAULT_FRAME_SIZE = 16384;
+    
+    /** @brief Minimum frame size (16,384 octets) - allows 9-byte header + 1 payload */
+    constexpr std::size_t MIN_FRAME_SIZE = 16384;
+    
+    /** @brief Maximum header list size ( advisory only in HTTP/2) */
+    constexpr std::size_t MAX_HEADER_LIST_SIZE = 1024 * 1024; // 1MB
+    
+    /** @brief Maximum HPack dynamic table size */
+    constexpr std::size_t MAX_HEADER_TABLE_SIZE = 4 * 1024 * 1024; // 4MB
+    
+    /** @brief Maximum concurrent streams per connection (safe default) */
+    constexpr std::size_t MAX_CONCURRENT_STREAMS = 1000;
+    
+    /** @brief Maximum connection idle time before GOAWAY (seconds) */
+    constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
+}
+
 namespace qb::protocol::http2 {
 
 // --- Binary Utilities ---
