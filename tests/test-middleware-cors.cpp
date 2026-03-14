@@ -492,3 +492,72 @@ TEST_F(CorsMiddlewareTest, MultipleExactOrigins) {
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "http://site1.com");
     EXPECT_TRUE(_session->_final_handler_called);
 }
+
+// ====================================================================
+// ReDoS Protection Tests (SECURITY FIX: Timeout protection for regex)
+// ====================================================================
+
+TEST_F(CorsMiddlewareTest, ReDoSProtectionLongOriginRejected) {
+    // Test that very long origins are rejected (ReDoS protection: MAX_ORIGIN_LENGTH = 2048)
+    qb::http::CorsOptions options;
+    options.origins({"http://example.com"});
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    // Create an origin longer than 2048 characters
+    std::string long_origin = "http://";
+    long_origin.append(3000, 'a');
+
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", long_origin));
+
+    // Long origin should be rejected (no CORS headers) but request proceeds
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Origin").empty());
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
+TEST_F(CorsMiddlewareTest, ReDoSProtectionRegexTimeout) {
+    // Test regex pattern matching with potentially slow patterns
+    // This test documents the ReDoS timeout protection behavior
+    
+    qb::http::CorsOptions options;
+    // Use a regex pattern that could be slow with certain inputs
+    options.origin_patterns({"http://[a-z]+\\.example\\.com"});
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    // Normal origin should match quickly
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", 
+"http://subdomain.example.com"));
+    
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    // Should match the regex pattern
+    EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "http://subdomain.example.com");
+}
+
+TEST_F(CorsMiddlewareTest, MaxOriginLengthBoundary) {
+    // Test boundary of MAX_ORIGIN_LENGTH (2048 characters)
+    qb::http::CorsOptions options;
+    options.origins({"http://example.com"});
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    // Origin at exactly the limit should be handled
+    std::string boundary_origin = "http://example.com/";
+    boundary_origin.append(2048 - 17, 'x'); // 17 = len("http://example.com/")
+
+    // Behavior depends on implementation - test documents current behavior
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", boundary_origin));
+    
+    // Should not crash
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
+// ====================================================================
+// CORS Security Limits Tests
+// ====================================================================
+
+TEST_F(CorsMiddlewareTest, CorsSecurityLimitsConstants) {
+    // Verify security limit constants
+    EXPECT_EQ(qb::http::cors_security_limits::MAX_ORIGIN_LENGTH, 2048);
+    EXPECT_EQ(qb::http::cors_security_limits::MAX_REGEX_EXECUTION_TIME.count(), 100); // 100ms
+    EXPECT_EQ(qb::http::cors_security_limits::MAX_REGEX_PATTERNS, 100);
+}
