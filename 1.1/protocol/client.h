@@ -21,6 +21,7 @@
  */
 #pragma once
 #include "../../response.h"
+#include "../../logger.h"  // For LOG_HTTP_WARN - SECURITY FIX: Required for exception logging
 #include "./base.h"
 
 namespace qb::protocol::http {
@@ -57,12 +58,24 @@ namespace qb::protocol::http {
          * This method is called when a complete HTTP response is received from a server.
          * It parses the response data using the HTTP parser, then passes the
          * response to the client's callback handler.
+         *
+         * @security CRITICAL FIX: All cookie parsing exceptions are caught to prevent
+         * std::terminate() in noexcept context. Malformed cookies are logged and ignored.
          */
         void
         onMessage(std::size_t) noexcept final {
             auto &response_obj = this->_http_obj.get_parsed_message();
             // Parse cookies from the Set-Cookie headers
-            response_obj.parse_set_cookie_headers();
+            // SECURITY: Wrap in try/catch - parse_set_cookie_headers() can throw
+            try {
+                response_obj.parse_set_cookie_headers();
+            } catch (const std::exception &e) {
+                // Log error but continue processing response without cookies
+                // This prevents std::terminate() in noexcept context
+                LOG_HTTP_WARN("Failed to parse Set-Cookie headers: " << e.what());
+            } catch (...) {
+                LOG_HTTP_WARN("Failed to parse Set-Cookie headers: unknown exception");
+            }
             this->_io.on(std::move(response_obj));
             this->_http_obj.reset();
         }
@@ -100,13 +113,25 @@ namespace qb::protocol::http {
          * This method is called when a complete HTTP response is received from a server.
          * It parses the response data using the HTTP parser with string_view semantics,
          * then passes the response to the client's callback handler.
+         *
+         * @security CRITICAL FIX: All cookie parsing exceptions are caught to prevent
+         * std::terminate() in noexcept context. Malformed cookies are logged and ignored.
          */
         void
         onMessage(std::size_t) noexcept final {
             auto &response_obj = this->_http_obj.get_parsed_message();
             // Parse cookies from the Set-Cookie headers
-            response_obj.parse_set_cookie_headers();
-            this->_io.on(std::move(response_obj) );
+            // SECURITY: Wrap in try/catch - parse_set_cookie_headers() can throw
+            try {
+                response_obj.parse_set_cookie_headers();
+            } catch (const std::exception &e) {
+                // Log error but continue processing response without cookies
+                // This prevents std::terminate() in noexcept context
+                LOG_HTTP_WARN("Failed to parse Set-Cookie headers: " << e.what());
+            } catch (...) {
+                LOG_HTTP_WARN("Failed to parse Set-Cookie headers: unknown exception");
+            }
+            this->_io.on(std::move(response_obj));
             this->_http_obj.reset();
         }
     };
