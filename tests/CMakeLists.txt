@@ -55,6 +55,9 @@ set(HTTP_TESTS
         http2-hpack
         integration-make-server
         integration-http2-client
+        dos-protection
+        multipart-security
+        date-parsing
 )
 
 # Register each standard test

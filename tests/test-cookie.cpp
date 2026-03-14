@@ -515,6 +515,321 @@ TEST(CookieIntegration, RemoveCookieWithDomainAndPath) {
     EXPECT_EQ(0, removed->max_age().value());
 }
 
+//////////////////////////////////////////////////
+// Max-Age Parsing Tests (std::from_chars performance fix)
+//////////////////////////////////////////////////
+
+TEST_F(CookieTest, MaxAgeParsingValidValues) {
+    // Test valid positive Max-Age values
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=3600");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(3600, result->max_age().value());
+    }
+
+    // Test Max-Age = 0 (delete cookie)
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=0");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(0, result->max_age().value());
+    }
+
+    // Test large Max-Age value
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=31536000"); // 1 year
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(31536000, result->max_age().value());
+    }
+
+    // Test negative Max-Age (should be parsed but treated as delete)
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=-1");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(-1, result->max_age().value());
+    }
+}
+
+TEST_F(CookieTest, MaxAgeParsingInvalidValues) {
+    // Test invalid Max-Age (non-numeric) - should be ignored
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=invalid");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_FALSE(result->max_age().has_value());
+    }
+
+    // Test empty Max-Age - should be ignored
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_FALSE(result->max_age().has_value());
+    }
+
+    // Test Max-Age with trailing garbage - should be ignored
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=123abc");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_FALSE(result->max_age().has_value());
+    }
+
+    // Test Max-Age with leading whitespace in value
+    {
+        auto result = parse_set_cookie("test=value; Max-Age= 456");
+        ASSERT_TRUE(result.has_value());
+        // Note: Some implementations of std::from_chars may skip leading whitespace
+        // The important thing is that the cookie is valid and max_age is either
+        // set (if parsed) or not set (if parsing failed)
+        // Either behavior is acceptable for this edge case
+        if (result->max_age().has_value()) {
+            EXPECT_EQ(456, result->max_age().value());
+        }
+        // If not set, that's also acceptable
+    }
+}
+
+TEST_F(CookieTest, MaxAgeParsingEdgeCases) {
+    // Test Max-Age with very large number (near int limit)
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=2147483647"); // INT_MAX
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(2147483647, result->max_age().value());
+    }
+
+    // Test Max-Age at int min
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=-2147483648"); // INT_MIN
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(-2147483648, result->max_age().value());
+    }
+
+    // Test Max-Age combined with Expires (both should be present)
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=3600; Expires=Wed, 21 Oct 2025 07:28:00 GMT");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(3600, result->max_age().value());
+        EXPECT_TRUE(result->expires().has_value());
+    }
+}
+
+TEST_F(CookieTest, MaxAgeCaseInsensitive) {
+    // Test case variations of Max-Age (should all work)
+    {
+        auto result = parse_set_cookie("test=value; max-age=3600");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(3600, result->max_age().value());
+    }
+
+    {
+        auto result = parse_set_cookie("test=value; MAX-AGE=3600");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(3600, result->max_age().value());
+    }
+
+    {
+        auto result = parse_set_cookie("test=value; Max-age=3600");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(3600, result->max_age().value());
+    }
+}
+
+//////////////////////////////////////////////////
+// Cookie::to_header() Optimization Tests
+//////////////////////////////////////////////////
+
+TEST_F(CookieTest, ToHeaderOptimizationBasic) {
+    Cookie cookie("test", "value");
+
+    std::string header = cookie.to_header();
+
+    // Basic format verification
+    EXPECT_EQ("test=value; Path=/", header);
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationWithAllAttributes) {
+    Cookie cookie("session", "abc123");
+    cookie.domain(".example.com")
+          .path("/api")
+          .max_age(7200)
+          .secure(true)
+          .http_only(true)
+          .same_site(SameSite::Strict);
+
+    std::string header = cookie.to_header();
+
+    // Verify all attributes are present
+    EXPECT_NE(header.find("session=abc123"), std::string::npos);
+    EXPECT_NE(header.find("Domain=.example.com"), std::string::npos);
+    EXPECT_NE(header.find("Path=/api"), std::string::npos);
+    EXPECT_NE(header.find("Max-Age=7200"), std::string::npos);
+    EXPECT_NE(header.find("Secure"), std::string::npos);
+    EXPECT_NE(header.find("HttpOnly"), std::string::npos);
+    EXPECT_NE(header.find("SameSite=Strict"), std::string::npos);
+
+    // Verify format starts with name=value
+    EXPECT_EQ(header.find("session="), 0); // Starts with session=
+    EXPECT_NE(header.find("; Max-Age="), std::string::npos); // Has semicolon before Max-Age
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationLargeCookie) {
+    // Test with large name and value (common scenario)
+    std::string large_name(256, 'n');
+    std::string large_value(4096, 'v');
+
+    Cookie cookie(large_name, large_value);
+    cookie.domain(".subdomain.example.com")
+          .path("/very/long/path/segment")
+          .max_age(86400);
+
+    std::string header = cookie.to_header();
+
+    // Verify the cookie is correctly formatted even with large content
+    EXPECT_NE(header.find(large_name + "=" + large_value), std::string::npos);
+    EXPECT_NE(header.find("Domain=.subdomain.example.com"), std::string::npos);
+    EXPECT_NE(header.find("Path=/very/long/path/segment"), std::string::npos);
+    EXPECT_NE(header.find("Max-Age=86400"), std::string::npos);
+
+    // Verify no buffer overflow or truncation issues
+    EXPECT_EQ(header.substr(0, large_name.length()), large_name);
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationNoAttributes) {
+    // Minimal cookie with only name and value
+    Cookie cookie("minimal", "data");
+
+    std::string header = cookie.to_header();
+
+    // Should only have name=value and default Path=/
+    EXPECT_EQ("minimal=data; Path=/", header);
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationOnlyExpires) {
+    Cookie cookie("expiring", "soon");
+    auto future = std::chrono::system_clock::now() + std::chrono::hours(24);
+    cookie.expires(future);
+
+    std::string header = cookie.to_header();
+
+    // Should include Expires
+    EXPECT_NE(header.find("Expires="), std::string::npos);
+    EXPECT_NE(header.find("expiring=soon"), std::string::npos);
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationOnlyMaxAge) {
+    Cookie cookie("temp", "data");
+    cookie.max_age(1800); // 30 minutes
+
+    std::string header = cookie.to_header();
+
+    EXPECT_EQ("temp=data; Max-Age=1800; Path=/", header);
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationSameSiteVariations) {
+    // Test SameSite=None
+    {
+        Cookie cookie("s1", "v1");
+        cookie.same_site(SameSite::None);
+        EXPECT_EQ("s1=v1; Path=/; SameSite=None", cookie.to_header());
+    }
+
+    // Test SameSite=Lax
+    {
+        Cookie cookie("s2", "v2");
+        cookie.same_site(SameSite::Lax);
+        EXPECT_EQ("s2=v2; Path=/; SameSite=Lax", cookie.to_header());
+    }
+
+    // Test SameSite=Strict
+    {
+        Cookie cookie("s3", "v3");
+        cookie.same_site(SameSite::Strict);
+        EXPECT_EQ("s3=v3; Path=/; SameSite=Strict", cookie.to_header());
+    }
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationAttributeOrdering) {
+    // Verify consistent attribute ordering
+    Cookie cookie("ordered", "test");
+    cookie.max_age(3600)
+          .domain("example.com")
+          .path("/secure")
+          .secure(true)
+          .http_only(true)
+          .same_site(SameSite::Lax);
+
+    std::string header = cookie.to_header();
+
+    // Expected order: name=value; Max-Age; Domain; Path; Secure; HttpOnly; SameSite
+    size_t pos_max_age = header.find("Max-Age");
+    size_t pos_domain = header.find("Domain");
+    size_t pos_path = header.find("Path");
+    size_t pos_secure = header.find("Secure");
+    size_t pos_http_only = header.find("HttpOnly");
+    size_t pos_same_site = header.find("SameSite");
+
+    // Verify ordering
+    EXPECT_LT(pos_max_age, pos_domain);
+    EXPECT_LT(pos_domain, pos_path);
+    EXPECT_LT(pos_path, pos_secure);
+    EXPECT_LT(pos_secure, pos_http_only);
+    EXPECT_LT(pos_http_only, pos_same_site);
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationWithEmptyPath) {
+    // Test that empty path is handled correctly
+    Cookie cookie("empty_path", "value");
+    cookie.path("");
+
+    std::string header = cookie.to_header();
+
+    // Empty path should not be included in header (implementation skips empty)
+    // Path defaults to "/" in constructor, so setting it to empty is different
+    EXPECT_EQ(header.find("Path="), std::string::npos);
+}
+
+TEST_F(CookieTest, ToHeaderOptimizationSpecialCharactersInValue) {
+    // Test special characters that might need escaping (implementation dependent)
+    Cookie cookie("special", "value with spaces!@#$%");
+
+    std::string header = cookie.to_header();
+
+    // Verify basic structure is maintained
+    EXPECT_EQ(header.substr(0, 8), "special=");
+    EXPECT_NE(header.find("Path=/"), std::string::npos);
+}
+
+//////////////////////////////////////////////////
+// Round-trip Tests (parse -> to_header -> parse)
+//////////////////////////////////////////////////
+
+TEST_F(CookieTest, MaxAgeRoundTrip) {
+    // Set-Cookie -> parse -> to_header -> parse
+    std::string original = "session=abc123; Max-Age=3600; Path=/; Secure";
+
+    auto parsed = parse_set_cookie(original);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(3600, parsed->max_age().value());
+
+    // Serialize and re-parse
+    std::string serialized = parsed->to_header();
+    auto reparsed = parse_set_cookie(serialized);
+
+    ASSERT_TRUE(reparsed.has_value());
+    EXPECT_EQ("session", reparsed->name());
+    EXPECT_EQ("abc123", reparsed->value());
+    // Max-Age should survive round-trip
+    EXPECT_TRUE(reparsed->max_age().has_value());
+    EXPECT_EQ(3600, reparsed->max_age().value());
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
