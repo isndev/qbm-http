@@ -25,6 +25,7 @@
 
 #include "client.h"
 #include <algorithm>
+#include <charconv>  // For std::from_chars - faster than std::stoi, no exceptions
 #include <sstream>
 
 namespace qb::http2 {
@@ -61,11 +62,14 @@ void Client::initialize_from_uri(const qb::io::uri& uri) {
     _base_uri = uri;
     _host = std::string(uri.host());
     
-    // Parse port
+    // Parse port using std::from_chars for better performance and no exceptions
     if (!uri.port().empty()) {
-        try {
-            _port = static_cast<uint16_t>(std::stoi(std::string(uri.port())));
-        } catch (const std::exception&) {
+        std::string port_str = std::string(uri.port());
+        int port_value = 0;
+        auto [ptr, ec] = std::from_chars(port_str.data(), port_str.data() + port_str.size(), port_value);
+        if (ec == std::errc{} && port_value > 0 && port_value <= 65535) {
+            _port = static_cast<uint16_t>(port_value);
+        } else {
             _port = (uri.scheme() == "https") ? 443 : 80;
         }
     } else {

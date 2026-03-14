@@ -17,8 +17,9 @@
 #include "./utility.h"   // For qb::http::utility::iequals, is_control
 
 #include <algorithm>   // For std::find_if_not, std::transform
-#include <sstream>     // For std::ostringstream
-#include <stdexcept>   // For std::runtime_error, std::stoi related exceptions
+// PERFORMANCE FIX: Removed <sstream> - no longer using std::ostringstream
+#include <stdexcept>   // For std::runtime_error
+#include <charconv>    // PERFORMANCE FIX: For std::from_chars (C++17) - faster than std::stoi
 // #include <qb/system/timestamp.h> // Not directly used here, date.h handles conversions
 // <chrono>, <string>, <vector> are included via cookie.h or other headers above
 
@@ -284,17 +285,21 @@ namespace qb::http {
                         result_cookie.expires(*tp);
                     }
                 } else if (utility::iequals(attr_name_sv, "Max-Age")) {
-                    try {
-                        // Ensure attr_value_sv is null-terminated for std::stoi, or use std::from_chars
-                        std::string temp_max_age(attr_value_sv);
-                        if (!temp_max_age.empty()) {
-                            result_cookie.max_age(std::stoi(temp_max_age));
+                    // PERFORMANCE FIX: Use std::from_chars instead of std::stoi
+                    // - No exceptions thrown (no try/catch overhead)
+                    // - No memory allocation for temp string
+                    // - Direct parsing from string_view data
+                    if (!attr_value_sv.empty()) {
+                        int max_age_value = 0;
+                        const char* begin = attr_value_sv.data();
+                        const char* end = begin + attr_value_sv.size();
+                        auto [ptr, ec] = std::from_chars(begin, end, max_age_value);
+                        if (ec == std::errc() && ptr == end) {
+                            // Successful parse, consumed entire value
+                            result_cookie.max_age(max_age_value);
                         }
-                    } catch (const std::invalid_argument &) {
-                        /* ignore */
-                    }
-                    catch (const std::out_of_range &) {
-                        /* ignore */
+                        // If parsing failed or didn't consume all input, ignore silently
+                        // (same behavior as previous std::stoi version with catch blocks)
                     }
                 } else if (utility::iequals(attr_name_sv, "Domain")) {
                     result_cookie.domain(std::string(attr_value_sv));
@@ -326,48 +331,96 @@ namespace qb::http {
     /**
      * @brief Convert a Cookie to a Set-Cookie header value
      * @return Formatted header value according to RFC 6265
+     *
+     * @performance PERFORMANCE FIX: Replaced std::ostringstream with direct std::string
+     *       construction. This eliminates:
+     *       - Dynamic memory allocations from ostringstream internals
+     *       - Virtual function calls from stream operations
+     *       - Locale overhead from stream formatting
+     *       Uses reserve() to pre-allocate capacity and minimize reallocations.
      */
     std::string Cookie::to_header() const {
-        std::ostringstream ss;
-        ss << _name << "=" << _value; // Name and value are assumed to not need special encoding here
-        // as per Set-Cookie syntax (they are tokens or quoted-strings).
-        // If they could contain delimiters, they must be quoted by the caller or setter.
+        // Pre-calculate approximate size to minimize reallocations
+        // Base: name=value (name + 1 + value)
+        std::size_t estimated_size = _name.size() + 1 + _value.size();
 
+        // Add size for attributes
         if (_expires) {
-            ss << "; Expires=" << date::format_http_date(*_expires);
+            // "; Expires=" + formatted date (~29 chars for HTTP date)
+            estimated_size += 10 + 29;
         }
         if (_max_age) {
-            ss << "; Max-Age=" << *_max_age;
+            // "; Max-Age=" + number (max ~11 chars for int32)
+            estimated_size += 11 + 11;
         }
         if (!_domain.empty()) {
-            ss << "; Domain=" << _domain;
+            estimated_size += 9 + _domain.size(); // "; Domain="
+        }
+        if (!_path.empty()) {
+            estimated_size += 7 + _path.size(); // "; Path="
+        }
+        if (_secure) {
+            estimated_size += 8; // "; Secure"
+        }
+        if (_http_only) {
+            estimated_size += 10; // "; HttpOnly"
+        }
+        if (_same_site) {
+            estimated_size += 12; // "; SameSite=" + longest value ("Strict" = 6)
+        }
+
+        std::string result;
+        result.reserve(estimated_size);
+
+        // Name and value are assumed to not need special encoding here
+        // as per Set-Cookie syntax (they are tokens or quoted-strings).
+        // If they could contain delimiters, they must be quoted by the caller or setter.
+        result += _name;
+        result += '=';
+        result += _value;
+
+        if (_expires) {
+            result += "; Expires=";
+            result += date::format_http_date(*_expires);
+        }
+        if (_max_age) {
+            result += "; Max-Age=";
+            result += std::to_string(*_max_age);
+        }
+        if (!_domain.empty()) {
+            result += "; Domain=";
+            result += _domain;
         }
         // Path defaults to "/" in constructor, so it's usually present.
         // RFC 6265 says if Path is not specified, it defaults to the path of the request URI.
         // However, when sending Set-Cookie, servers often explicitly set Path=/ for wide applicability.
         if (!_path.empty()) {
-            // Ensure path is not empty before adding, though default is "/"
-            ss << "; Path=" << _path;
+            result += "; Path=";
+            result += _path;
         }
         if (_secure) {
-            ss << "; Secure";
+            result += "; Secure";
         }
         if (_http_only) {
-            ss << "; HttpOnly";
+            result += "; HttpOnly";
         }
         if (_same_site) {
-            ss << "; SameSite=";
+            result += "; SameSite=";
             switch (*_same_site) {
-                case SameSite::Strict: ss << "Strict";
+                case SameSite::Strict:
+                    result += "Strict";
                     break;
-                case SameSite::Lax: ss << "Lax";
+                case SameSite::Lax:
+                    result += "Lax";
                     break;
-                case SameSite::None: ss << "None";
+                case SameSite::None:
+                    result += "None";
                     break;
-                case SameSite::NOT_SET: break; // Should not happen if _same_site is std::optional and NOT_SET clears it
+                case SameSite::NOT_SET:
+                    break; // Should not happen if _same_site is std::optional and NOT_SET clears it
             }
         }
-        return ss.str();
+        return result;
     }
 
     std::string Cookie::serialize() const {

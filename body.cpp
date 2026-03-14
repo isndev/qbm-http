@@ -726,8 +726,12 @@ namespace qb::http {
     Body::as<Multipart>() const {
         auto view = _data.view();
         auto pos = view.find_first_of(qb::http::endl);
-        if (pos == std::string::npos || pos < 2)
-            throw std::runtime_error("boundary not found");
+        // SECURITY FIX: Changed from pos < 2 to pos <= 2
+        // - pos < 2 prevents underflow (pos - 2 would be negative)
+        // - pos <= 2 also rejects empty boundaries (when pos == 2, boundary length is 0)
+        // RFC 2046 requires boundary to be 1-70 characters, so empty is invalid
+        if (pos == std::string::npos || pos <= 2)
+            throw std::runtime_error("boundary not found or empty");
         auto boundary = std::string(_data.begin() + 2, pos - 2);
 
         internal::MultipartReader<std::string> reader(boundary);
