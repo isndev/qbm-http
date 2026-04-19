@@ -1,11 +1,6 @@
 #include "./response.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
 
-// templates instantiation
-// objects
-template class qb::http::TResponse<std::string>;
-template class qb::http::TResponse<std::string_view>;
-
 namespace qb::allocator {
     /**
      * @brief Serialize an HTTP Response into a byte stream

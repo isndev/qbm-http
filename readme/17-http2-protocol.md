@@ -7,7 +7,7 @@ The `qb::http` module provides comprehensive support for HTTP/2, enabling high-p
 HTTP/2 introduces several key improvements over HTTP/1.1, all of which are supported by `qb-http` when using the `qb::http2` namespace components:
 
 -   **Multiplexing**: Multiple requests and responses can be sent and received concurrently over a single TCP connection, eliminating head-of-line blocking.
--   **Header Compression (HPACK)**: Reduces header overhead using HPACK compression (RFC 7541). The `qb::protocol::hpack` namespace provides the underlying implementation (`HpackEncoderImpl`, `HpackDecoderImpl`).
+-   **Header Compression (HPACK)**: Reduces header overhead using HPACK compression (RFC 7541). The `qb::protocol::hpack` namespace provides the concrete `Encoder` and `Decoder` classes (de-virtualised since F35 &mdash; no base interface, owned by value in the HTTP/2 sessions).
 -   **Server Push**: Allows the server to proactively send resources to the client that it anticipates will be needed (though direct application-level control of push might be evolving or require specific patterns).
 -   **Binary Framing Layer**: HTTP/2 messages are broken down into binary frames (DATA, HEADERS, SETTINGS, etc.), simplifying parsing and reducing ambiguity compared to HTTP/1.1's text-based format.
 -   **Stream Prioritization**: Allows clients to indicate preference for how streams are allocated resources (though server-side implementation of prioritization can vary).
@@ -205,7 +205,7 @@ HTTP/2 uses HPACK (Header Compression for HTTP/2, RFC 7541) to compress request 
     -   **Literal Header Field without Indexing**: Sends a header field literally but does not add it to the dynamic table (e.g., for sensitive headers or one-time headers).
     -   **Literal Header Field Never Indexed**: Similar to "without indexing," but also instructs intermediaries never to index it.
 -   **Huffman Coding**: String literals (names and values) can be optionally Huffman coded for further size reduction.
--   **SETTINGS_HEADER_TABLE_SIZE**: An HTTP/2 setting allows endpoints to declare the maximum size (in octets) of the dynamic table their decoder can handle. Encoders must respect this limit. The `qb::protocol::hpack::HpackEncoderImpl` and `HpackDecoderImpl` manage these table sizes.
+-   **SETTINGS_HEADER_TABLE_SIZE**: An HTTP/2 setting allows endpoints to declare the maximum size (in octets) of the dynamic table their decoder can handle. Encoders must respect this limit. The `qb::protocol::hpack::Encoder` and `Decoder` classes manage these table sizes through a shared `DynamicTable` ring buffer (F34).
 
 `qb-http` handles HPACK encoding and decoding transparently within `ClientHttp2Protocol` and `ServerHttp2Protocol`.
 

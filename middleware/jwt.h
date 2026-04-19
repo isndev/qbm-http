@@ -87,7 +87,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object.
      */
     template<typename SessionType>
-    class JwtMiddleware : public IMiddleware<SessionType> {
+    class JwtMiddleware final : public IMiddleware<SessionType> {
     public:
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
         /**

@@ -2,10 +2,10 @@
  * @file qbm/http/response.h
  * @brief Defines the HTTP Response message class.
  *
- * This file contains the `TResponse` template class, representing an HTTP response.
- * It inherits from `MessageBase` for common message properties and adds
- * response-specific details like status code, reason phrase, and methods for
- * managing `Set-Cookie` headers via an internal `CookieJar`.
+ * This file contains the `Response` class, representing an HTTP response.
+ * It inherits from `internal::MessageBase` for common message properties
+ * and adds response-specific details like status code, reason phrase, and
+ * methods for managing `Set-Cookie` headers via an internal `CookieJar`.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
@@ -17,28 +17,23 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <optional>      // For std::optional (used by Cookie)
-#include <algorithm>     // For std::remove_if (used in update_cookie_header)
-#include <utility>       // For std::move
+#include <optional>
+#include <algorithm>
+#include <utility>
 
-#include "./message_base.h" // For internal::MessageBase
-#include "./cookie.h"       // For Cookie, CookieJar, parse_set_cookie
-#include "./types.h"        // For http_status, HTTP_RESPONSE (via llhttp.h)
+#include "./message_base.h"
+#include "./cookie.h"
+#include "./types.h"
 
 namespace qb::http {
     /**
-     * @brief Represents an HTTP response message.
+     * @brief Represents an HTTP response message (owning `std::string` headers / body).
      *
-     * This class template models an HTTP response, providing access to its status code,
-     * reason phrase (status message), headers, body, and methods for managing cookies
-     * to be sent to the client via `Set-Cookie` headers.
-     * It inherits common message properties from `MessageBase`.
-     *
-     * @tparam String The string type used for headers (e.g., `std::string`, `std::string_view`).
-     *                The `status` member (reason phrase) will also use this String type.
+     * Provides access to status, headers, body and a `CookieJar` whose
+     * entries are serialised to `Set-Cookie` headers. Inherits common
+     * message properties from `internal::MessageBase`.
      */
-    template<typename String>
-    class TResponse : public internal::MessageBase<String> {
+    class Response : public internal::MessageBase {
     public:
         /** @brief Indicates that this message type is an HTTP response, used by parsers. */
         constexpr static http_type type = HTTP_RESPONSE;
@@ -57,28 +52,27 @@ namespace qb::http {
          * the server or inferred from `status_code` during serialization).
          * The cookie jar is empty. HTTP version defaults to 1.1 via `MessageBase`.
          */
-        TResponse() noexcept
-            : internal::MessageBase<String>()
+        Response() noexcept
+            : internal::MessageBase()
               , _status(Status::OK)
-              , _cookies() // Default construct CookieJar
+              , _cookies()
         {
-            this->internal::MessageBase<String>::reset(); // Reset headers and Content-Type in base
+            this->internal::MessageBase::reset();
         }
 
-        TResponse(Status s,
-                  qb::icase_unordered_map<std::vector<String> > h = {},
-                  Body b = {}) noexcept
-            : internal::MessageBase<String>(std::move(h), std::move(b))
+        Response(Status s,
+                 qb::icase_unordered_map<std::vector<std::string> > h = {},
+                 Body b = {}) noexcept
+            : internal::MessageBase(std::move(h), std::move(b))
             , _status(s)
         {}
 
-        // Defaulted copy/move constructors and assignment operators
-        TResponse(const TResponse &) = default;
+        Response(const Response &) = default;
 
-        TResponse(TResponse &&) noexcept = default; // Assuming CookieJar and String move ops are noexcept
-        TResponse &operator=(const TResponse &) = default;
+        Response(Response &&) noexcept = default;
+        Response &operator=(const Response &) = default;
 
-        TResponse &operator=(TResponse &&) noexcept = default; // Assuming CookieJar and String move ops are noexcept
+        Response &operator=(Response &&) noexcept = default;
 
         [[nodiscard]] const Status &status() const noexcept { return _status; }
         Status &status() noexcept { return _status; }
@@ -94,16 +88,15 @@ namespace qb::http {
          */
         void
         reset() noexcept {
-            // noexcept if String clear/assign and CookieJar::clear are noexcept
             _status = Status::OK;
             _cookies.clear();
-            this->internal::MessageBase<String>::reset();
+            this->internal::MessageBase::reset();
         }
 
         /**
          * @brief Parses `Set-Cookie` headers present in `this->_headers` and populates the internal `CookieJar`.
          *
-         * This method is useful if a `TResponse` object is populated from an existing set of raw headers
+         * This method is useful if a `Response` object is populated from an existing set of raw headers
          * that might already contain `Set-Cookie` directives (e.g., when proxying or modifying a response).
          * It clears the internal `_cookies` jar before parsing.
          * @note This can throw if `parse_set_cookie` or `CookieJar::add` throws.
@@ -111,24 +104,12 @@ namespace qb::http {
         void parse_set_cookie_headers() {
             _cookies.clear();
             const auto &set_cookie_iter = this->_headers.find("Set-Cookie");
-            if (set_cookie_iter != this->_headers.end()) {
-                for (const String &header_value_str: set_cookie_iter->second) {
-                    // parse_set_cookie expects std::string_view.
-                    // Ensure `header_value_str` (which is `const String&`) can be converted.
-                    std::string_view header_sv;
-                    if constexpr (std::is_convertible_v<const String &, std::string_view>) {
-                        header_sv = header_value_str;
-                    } else {
-                        // Fallback for custom String types not directly convertible to string_view.
-                        // This might involve creating a temporary std::string.
-                        // For common std::string or std::string_view, this branch won't be hit often.
-                        std::string temp_val(header_value_str.data(), header_value_str.length());
-                        header_sv = temp_val;
-                    }
-
-                    if (auto cookie_opt = parse_set_cookie(header_sv)) {
-                        _cookies.add(std::move(*cookie_opt));
-                    }
+            if (set_cookie_iter == this->_headers.end()) {
+                return;
+            }
+            for (const std::string &header_value_str : set_cookie_iter->second) {
+                if (auto cookie_opt = parse_set_cookie(std::string_view(header_value_str))) {
+                    _cookies.add(std::move(*cookie_opt));
                 }
             }
         }
@@ -178,10 +159,15 @@ namespace qb::http {
          * with an expiration date in the past and Max-Age of 0.
          * @param name The name of the cookie to remove.
          */
+        /** Offset used by `remove_cookie()` to force immediate expiry. */
+        static constexpr int EXPIRED_COOKIE_OFFSET_SECONDS = -86400; // one day in the past
+        /** `Max-Age` value used by `remove_cookie()`. */
+        static constexpr int EXPIRED_COOKIE_MAX_AGE = 0;
+
         void remove_cookie(const std::string &name) {
-            Cookie removal_cookie(name, ""); // Value can be empty
-            removal_cookie.expires_in(-3600 * 24); // Expire one day ago
-            removal_cookie.max_age(0); // Max-Age=0 also instructs removal
+            Cookie removal_cookie(name, "");
+            removal_cookie.expires_in(EXPIRED_COOKIE_OFFSET_SECONDS);
+            removal_cookie.max_age(EXPIRED_COOKIE_MAX_AGE);
             add_cookie(std::move(removal_cookie));
         }
 
@@ -195,8 +181,8 @@ namespace qb::http {
          */
         void remove_cookie(const std::string &name, const std::string &domain, const std::string &path = "/") {
             Cookie removal_cookie(name, "");
-            removal_cookie.expires_in(-3600 * 24);
-            removal_cookie.max_age(0);
+            removal_cookie.expires_in(EXPIRED_COOKIE_OFFSET_SECONDS);
+            removal_cookie.max_age(EXPIRED_COOKIE_MAX_AGE);
             removal_cookie.domain(domain);
             removal_cookie.path(path);
             add_cookie(std::move(removal_cookie));
@@ -236,28 +222,19 @@ namespace qb::http {
          */
         void update_cookie_header(const std::string &name) {
             Cookie *modified_cookie = _cookies.get(name);
-            if (modified_cookie) {
-                auto &set_cookie_headers = this->_headers["Set-Cookie"];
-                // Remove existing Set-Cookie headers that start with "name="
-                // This is a simple removal; complex scenarios might need more robust parsing.
-                std::string prefix_to_find = name + "=";
-                set_cookie_headers.erase(
-                    std::remove_if(set_cookie_headers.begin(), set_cookie_headers.end(),
-                                   [&](const String &header_val) {
-                                       // Ensure String is comparable with string/char*
-                                       if constexpr (std::is_convertible_v<const String &, std::string_view>) {
-                                           return std::string_view(header_val).rfind(prefix_to_find, 0) == 0;
-                                       } else {
-                                           // Fallback for custom String, less efficient
-                                           return std::string(header_val.data(), header_val.length()).rfind(
-                                                      prefix_to_find, 0) == 0;
-                                       }
-                                   }),
-                    set_cookie_headers.end()
-                );
-                // Add the updated header
-                this->add_header("Set-Cookie", modified_cookie->to_header());
+            if (!modified_cookie) {
+                return;
             }
+            auto &set_cookie_headers = this->_headers["Set-Cookie"];
+            const std::string prefix_to_find = name + "=";
+            set_cookie_headers.erase(
+                std::remove_if(set_cookie_headers.begin(), set_cookie_headers.end(),
+                               [&](const std::string &header_val) {
+                                   return std::string_view(header_val).starts_with(prefix_to_find);
+                               }),
+                set_cookie_headers.end()
+            );
+            this->add_header("Set-Cookie", modified_cookie->to_header());
         }
 
         /**
@@ -309,8 +286,15 @@ namespace qb::http {
          * @brief Sets the HTTP status for the response.
          * @param s The HTTP status to set.
          * @return A reference to the response object.
+         *
+         * @note Only `with_status` is genuinely non-throwing; the other
+         * `with_*` methods previously claimed `noexcept` although their
+         * bodies performed allocations (`add_header`, `CookieJar::add`,
+         * body assignment). `std::bad_alloc` would therefore have
+         * triggered `std::terminate`. `noexcept` is now reserved for
+         * operations that are actually non-throwing.
          */
-        TResponse &with_status(Status s) noexcept {
+        Response &with_status(Status s) noexcept {
             _status = s;
             return *this;
         }
@@ -320,7 +304,7 @@ namespace qb::http {
          * @param c The cookie to add.
          * @return A reference to the response object.
          */
-        TResponse &with_cookie(const Cookie &c) noexcept {
+        Response &with_cookie(const Cookie &c) {
             _cookies.add(c);
             return *this;
         }
@@ -330,7 +314,7 @@ namespace qb::http {
          * @param cookies The cookies to set.
          * @return A reference to the response object.
          */
-        TResponse &with_cookies(const CookieJar &cookies) noexcept {
+        Response &with_cookies(const CookieJar &cookies) {
             _cookies = cookies;
             return *this;
         }
@@ -341,7 +325,7 @@ namespace qb::http {
          * @param value The value of the header.
          * @return A reference to the response object.
          */
-        TResponse &with_header(std::string name, std::string value) noexcept {
+        Response &with_header(std::string name, std::string value) {
             this->add_header(std::move(name), std::move(value));
             return *this;
         }
@@ -351,7 +335,7 @@ namespace qb::http {
          * @param h The headers to set.
          * @return A reference to the response object.
          */
-        TResponse &with_headers(qb::icase_unordered_map<std::vector<String> > h) noexcept {
+        Response &with_headers(qb::icase_unordered_map<std::vector<std::string> > h) {
             this->headers() = std::move(h);
             return *this;
         }
@@ -362,20 +346,14 @@ namespace qb::http {
          * @return A reference to the response object.
          */
         template<typename BodyType>
-        TResponse &with_body(BodyType &&b) noexcept {
+        Response &with_body(BodyType &&b) {
             this->body() = std::forward<BodyType>(b);
             return *this;
         }
     };
 
-    /** @brief Convenience alias for `TResponse<std::string>`, representing a response with mutable string headers and status. */
-    using Response = TResponse<std::string>;
     /** @brief Shorthand alias for `Response`. */
-    using response = Response; // Common lowercase alias
-    /** @brief Convenience alias for `TResponse<std::string_view>`, representing a response with immutable string_view headers and status. */
-    using ResponseView = TResponse<std::string_view>;
-    /** @brief Shorthand alias for `ResponseView`. */
-    using response_view = ResponseView;
+    using response = Response;
 } // namespace qb::http
 
 namespace qb::allocator {

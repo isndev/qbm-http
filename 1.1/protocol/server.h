@@ -7,13 +7,18 @@
  *
  * - HTTP/1.1 request parsing and processing
  * - Cookie parsing from Cookie headers
- * - Support for both string and string_view semantics
  * - Asynchronous request handling through callbacks
  * - Integration with the base HTTP/1.1 protocol parser
  * - Request routing and response generation
  *
- * The implementation supports both owning (string-based) and non-owning
- * (string_view-based) request handling for optimal performance.
+ * @note The historic `server_view` template used `std::string_view`-based
+ *       request storage to avoid header-copy allocations. It has been
+ *       retired in favour of a single owning implementation: the async
+ *       processing model of `qbm-http` (shared `Context`, lifecycle
+ *       hooks, middleware chain, coroutine plan) fundamentally requires
+ *       that request data outlive the socket read that produced it,
+ *       which is incompatible with view semantics (the qb-io input pipe
+ *       can `memmove`/reallocate between reads).
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
@@ -32,11 +37,10 @@ namespace qb::protocol::http {
      *
      * This class implements the HTTP protocol for server-side operations.
      * It handles HTTP request parsing and dispatches the parsed requests
-     * to the IO handler for processing.
-     *
-     * This implementation uses std::string for storing request data,
-     * which means the request objects can be modified and stored
-     * independently of the input buffer.
+     * to the IO handler for processing. Request data is owned
+     * (`std::string`-backed) so handlers may safely move the request
+     * into long-lived structures (async chain, shared context,
+     * coroutine frames, etc.).
      */
     template<typename IO_Handler>
     class server : public base<IO_Handler, qb::http::Request> {
@@ -60,66 +64,6 @@ namespace qb::protocol::http {
 
         /**
          * @brief Process an incoming HTTP request
-         * @param size Size of the incoming message
-         *
-         * This method is called when a complete HTTP request is received.
-         * It parses the request data using the HTTP parser, then routes it
-         * to the appropriate handler based on the request path and method.
-         * The response is automatically sent back to the client.
-         *
-         * @security CRITICAL FIX: All cookie parsing exceptions are caught to prevent
-         * std::terminate() in noexcept context. Malformed cookies are logged and ignored.
-         */
-        void
-        onMessage(std::size_t) noexcept final {
-            auto &request_obj = this->_http_obj.get_parsed_message();
-            // Parse cookies from the Cookie header
-            // SECURITY: Wrap in try/catch - parse_cookie_header() can throw std::runtime_error
-            try {
-                request_obj.parse_cookie_header();
-            } catch (const std::exception &e) {
-                // Log error but continue processing request without cookies
-                // This prevents std::terminate() in noexcept context
-                LOG_HTTP_WARN("Failed to parse Cookie header: " << e.what());
-            } catch (...) {
-                LOG_HTTP_WARN("Failed to parse Cookie header: unknown exception");
-            }
-            this->_io.on(std::move(request_obj));
-            // Reset the parser without consuming (pipe API might have changed)
-            this->_http_obj.reset();
-        }
-    };
-
-    /**
-     * @brief HTTP server protocol implementation using string_view
-     * @tparam IO_Handler Handler type for I/O operations
-     *
-     * Similar to server, but uses string_view instead of string
-     * for better performance when the request data doesn't need to be
-     * modified or stored independently of the input buffer.
-     */
-    template<typename IO_Handler>
-    class server_view : public base<IO_Handler, qb::http::RequestView> {
-        using base_t = base<IO_Handler, qb::http::RequestView>;
-
-    public:
-        server_view() = delete;
-
-        /**
-         * @brief Constructor with IO handler
-         * @param io IO handler for network operations
-         *
-         * Creates an HTTP server protocol handler with view semantics,
-         * attached to the provided IO handler.
-         */
-        explicit server_view(IO_Handler &io) noexcept
-            : base_t(io) {
-        }
-
-        using request = qb::http::RequestView;
-
-        /**
-         * @brief Process an incoming HTTP request with view semantics
          * @param size Size of the incoming message
          *
          * This method is called when a complete HTTP request is received.

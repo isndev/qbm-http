@@ -23,6 +23,7 @@
 #include <chrono>
 #include <optional>
 
+#include <qb/io/uri.h>
 #include <qb/system/container/unordered_map.h>
 #include "../routing/middleware.h"
 #include "../date.h"
@@ -49,8 +50,21 @@ namespace qb::http {
         bool enable_last_modified = true;
         bool enable_range_requests = true; // New option for Range Requests
         bool enable_directory_listing = false; // New option for Directory Listing (default false for security)
+        /// Maximum file size (in bytes) eligible for full-body materialisation.
+        /// Requests that would allocate more than this are refused with
+        /// `413 Payload Too Large`. Defaults to 64 MiB; set to `0` to disable
+        /// the cap (not recommended for production). See F44.
+        std::size_t max_file_size = 64ULL * 1024 * 1024;
+        /// If `true`, requests whose final path component is a symbolic link
+        /// are rejected with `403 Forbidden`, even when the link resolves
+        /// inside the root directory. Matches `O_NOFOLLOW` semantics for
+        /// deployments that do not intentionally publish a symlink graph. The
+        /// default is `false` to preserve historical behaviour and to align
+        /// with mainstream static servers; symlinks that escape the base
+        /// directory are rejected unconditionally by path canonicalisation.
+        bool reject_symlinks = false;
 
-        StaticFilesOptions(std::filesystem::path root_dir)
+        explicit StaticFilesOptions(std::filesystem::path root_dir)
             : root_directory(std::move(root_dir)) {
             // Pre-populate with common MIME types
             mime_types[".html"] = "text/html; charset=utf-8";
@@ -139,22 +153,75 @@ namespace qb::http {
             enable_directory_listing = enabled;
             return *this;
         }
+
+        /// Fluent setter for `max_file_size`. See the member for semantics.
+        StaticFilesOptions &with_max_file_size(std::size_t bytes) noexcept {
+            max_file_size = bytes;
+            return *this;
+        }
+
+        /// Fluent setter for `reject_symlinks`. See the member for semantics.
+        StaticFilesOptions &with_reject_symlinks(bool reject) noexcept {
+            reject_symlinks = reject;
+            return *this;
+        }
     };
 
     namespace internal {
-        // Helper to normalize a path and prevent directory traversal.
-        // Returns an empty path if traversal is detected or path is invalid.
+        /**
+         * @brief Sanitises a request URI path and resolves it against a
+         *        canonical base directory, returning an empty path if the
+         *        input is unsafe or escapes the base (F44).
+         *
+         * The function is defence-in-depth: each security check is intentional
+         * and independent so that a regression in one stage is still caught by
+         * the next.
+         *   1. URL-decode the segment so that percent-encoded traversal
+         *      sequences (`%2e%2e%2f`) collapse to the literal `../` and are
+         *      caught by the canonicalisation step.
+         *   2. Reject embedded NUL bytes that would be silently truncated by
+         *      C-string filesystem APIs on some platforms.
+         *   3. Refuse absolute inputs on POSIX/Windows to avoid bypassing the
+         *      base directory via an absolute path.
+         *   4. Normalise and run `weakly_canonical` so symlinks, `.` and `..`
+         *      are resolved before the prefix check.
+         *   5. Enforce the prefix check with a separator boundary to avoid
+         *      `/srv/www_backup` being accepted because `/srv/www` is a prefix.
+         */
         inline std::filesystem::path
         sanitize_and_resolve_path(const std::filesystem::path &base_path, std::string_view original_relative_path_sv) {
             // base_path is assumed to be canonical already from StaticFilesMiddleware constructor
             const std::filesystem::path &canonical_base_path = base_path;
 
-            size_t first_char_pos = original_relative_path_sv.find_first_not_of('/');
+            // (1) URL-decode. `qb::io::uri::decode` is tolerant of raw bytes and
+            // returns a std::string, which the filesystem library can consume
+            // without further conversion.
+            std::string decoded = qb::io::uri::decode(original_relative_path_sv);
+
+            // (2) A NUL byte inside a path is never legitimate for static-file
+            // serving. Reject immediately rather than relying on OS-specific
+            // APIs to notice the truncation.
+            if (decoded.find('\0') != std::string::npos) {
+                return {};
+            }
+
+            std::string_view decoded_view{decoded};
+
+            const size_t first_char_pos = decoded_view.find_first_not_of('/');
             std::string_view path_to_append_sv = (first_char_pos == std::string_view::npos)
                                                      ? std::string_view{}
-                                                     : original_relative_path_sv.substr(first_char_pos);
+                                                     : decoded_view.substr(first_char_pos);
 
-            std::filesystem::path relative_part = std::filesystem::path(path_to_append_sv).lexically_normal();
+            std::filesystem::path relative_candidate{path_to_append_sv};
+
+            // (3) After stripping the leading slashes the path must be relative.
+            // If the platform interprets the remainder as absolute (e.g. a
+            // Windows drive letter sneaked in via encoding) we refuse.
+            if (relative_candidate.is_absolute()) {
+                return {};
+            }
+
+            std::filesystem::path relative_part = relative_candidate.lexically_normal();
 
             std::filesystem::path combined_path;
             if (relative_part.empty() || relative_part == std::filesystem::path(".")) {
@@ -163,6 +230,7 @@ namespace qb::http {
                 combined_path = canonical_base_path / relative_part;
             }
 
+            // (4) Resolve symlinks, `.` and `..` against the real filesystem.
             std::error_code ec_canonical;
             std::filesystem::path fully_resolved_path = std::filesystem::weakly_canonical(combined_path, ec_canonical);
 
@@ -170,36 +238,35 @@ namespace qb::http {
                 return {};
             }
 
-            // Security check: Ensure the *fully resolved* path is still within or equal to the *canonical_base_path*.
-            // Convert both to strings for a robust prefix check that handles symlink differences in parent paths.
-            std::string resolved_str = fully_resolved_path.string();
-            std::string base_str = canonical_base_path.string();
+            // (5) Prefix check with separator boundary.
+            const std::string resolved_str = fully_resolved_path.string();
+            const std::string base_str = canonical_base_path.string();
 
-            if (resolved_str.rfind(base_str, 0) == 0) {
-                // Check if resolved_str starts with base_str
-                // Further check: if base_str is "/a/b" and resolved_str is "/a/b_c", it's not a subdirectory match.
-                // The resolved path must be base_str itself or base_str + "/" + something_else.
+            if (std::string_view(resolved_str).starts_with(base_str)) {
                 if (resolved_str.length() == base_str.length()) {
-                    return fully_resolved_path; // It's the base directory itself
+                    return fully_resolved_path; // base itself
                 }
                 if (resolved_str.length() > base_str.length() && resolved_str[base_str.length()] ==
                     std::filesystem::path::preferred_separator) {
-                    return fully_resolved_path; // It's a subdirectory or file within base
+                    return fully_resolved_path;
                 }
             }
 
-            return {}; // Path is outside the base directory.
+            return {}; // Path escapes the base directory.
         }
 
         inline std::string get_mime_type_for_file(const std::filesystem::path &file_path,
                                                   const StaticFilesOptions &opts) {
             std::string ext = file_path.extension().string();
             if (!ext.empty()) {
-                // Convert extension to lowercase for case-insensitive map lookup
-                // std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                // Using a loop for wider compatibility if ::tolower isn't suitable for all char types directly
+                // Locale-independent ASCII lowercasing: file extensions are
+                // ASCII by contract, we explicitly avoid std::tolower whose
+                // behaviour varies with the current C locale (F52).
                 for (char &c: ext) {
-                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    const unsigned char uc = static_cast<unsigned char>(c);
+                    if (uc >= 'A' && uc <= 'Z') {
+                        c = static_cast<char>(uc | 0x20);
+                    }
                 }
                 auto it = opts.mime_types.find(ext);
                 if (it != opts.mime_types.end()) {
@@ -209,63 +276,93 @@ namespace qb::http {
             return opts.default_mime_type;
         }
 
-        // Helper to parse a single byte range from the Range header
-        // Supports: "bytes=start-end", "bytes=start-", "bytes=-suffixLength"
-        // Returns {start_offset, length_to_read}, or nullopt if invalid/unsupported
-        inline std::optional<std::pair<long long, long long> >
-        parse_byte_range(std::string_view range_header_value, long long total_file_size) {
-            if (range_header_value.rfind("bytes=", 0) != 0) {
-                // Must start with "bytes="
+        /**
+         * @brief Parses a single-range `Range: bytes=...` header (F44).
+         *
+         * Supported forms:
+         *   - `bytes=start-end`
+         *   - `bytes=start-`
+         *   - `bytes=-suffixLength`
+         *
+         * Multi-range specs (comma-separated) and any numeric token with a
+         * leading sign or whitespace are rejected &mdash; per RFC 7233 a valid
+         * byte-range spec consists solely of ASCII digits.
+         *
+         * @return `{start_offset, length_to_read}` on success, `std::nullopt`
+         *         for malformed, unsupported or unsatisfiable inputs.
+         */
+        [[nodiscard]] inline std::optional<std::pair<long long, long long> >
+        parse_byte_range(std::string_view range_header_value, long long total_file_size) noexcept {
+            constexpr std::string_view prefix = "bytes=";
+            if (!range_header_value.starts_with(prefix)) {
                 return std::nullopt;
             }
-            std::string_view range_spec = range_header_value.substr(6); // Skip "bytes="
+            const std::string_view range_spec = range_header_value.substr(prefix.size());
 
-            size_t dash_pos = range_spec.find('-');
+            // Multi-range is not supported and must be rejected, not silently
+            // interpreted as the first range only.
+            if (range_spec.find(',') != std::string_view::npos) {
+                return std::nullopt;
+            }
+
+            const auto dash_pos = range_spec.find('-');
             if (dash_pos == std::string_view::npos) {
-                return std::nullopt; // Invalid format
+                return std::nullopt;
             }
 
-            long long start = -1, end = -1;
+            // Strictly parse a non-negative decimal integer (digits only, no
+            // sign, no whitespace, no leading zeroes tolerated).
+            const auto parse_u64 = [](std::string_view token) -> std::optional<long long> {
+                if (token.empty()) {
+                    return std::nullopt;
+                }
+                long long value = 0;
+                for (char c: token) {
+                    if (c < '0' || c > '9') {
+                        return std::nullopt;
+                    }
+                    const long long digit = c - '0';
+                    // Overflow guard: LLONG_MAX / 10 - 1 to leave headroom.
+                    if (value > (std::numeric_limits<long long>::max() - digit) / 10) {
+                        return std::nullopt;
+                    }
+                    value = value * 10 + digit;
+                }
+                return value;
+            };
 
-            // Parse start part (before dash)
-            std::string start_str(range_spec.substr(0, dash_pos));
-            if (!start_str.empty()) {
-                try {
-                    size_t parsed_chars_start = 0;
-                    start = std::stoll(start_str, &parsed_chars_start);
-                    if (parsed_chars_start != start_str.length()) return std::nullopt;
-                    // Ensure all of start_str was number
-                } catch (const std::out_of_range &) { return std::nullopt; }
-                catch (const std::invalid_argument &) { return std::nullopt; }
+            const std::string_view start_tok = range_spec.substr(0, dash_pos);
+            const std::string_view end_tok = range_spec.substr(dash_pos + 1);
+
+            std::optional<long long> start_opt;
+            std::optional<long long> end_opt;
+            if (!start_tok.empty()) {
+                start_opt = parse_u64(start_tok);
+                if (!start_opt) return std::nullopt;
+            }
+            if (!end_tok.empty()) {
+                end_opt = parse_u64(end_tok);
+                if (!end_opt) return std::nullopt;
             }
 
-            // Parse end part (after dash)
-            std::string end_str(range_spec.substr(dash_pos + 1));
-            if (!end_str.empty()) {
-                try {
-                    size_t parsed_chars_end = 0;
-                    end = std::stoll(end_str, &parsed_chars_end);
-                    if (parsed_chars_end != end_str.length()) return std::nullopt; // Ensure all of end_str was number
-                } catch (const std::out_of_range &) { return std::nullopt; }
-                catch (const std::invalid_argument &) { return std::nullopt; }
-            }
-
-            if (start != -1 && end != -1) {
-                // bytes=start-end
+            if (start_opt && end_opt) {
+                long long start = *start_opt;
+                long long end = *end_opt;
                 if (start > end || start >= total_file_size) return std::nullopt;
                 end = std::min(end, total_file_size - 1);
                 return std::make_pair(start, (end - start) + 1);
-            } else if (start != -1) {
-                // bytes=start-
+            }
+            if (start_opt) {
+                long long start = *start_opt;
                 if (start >= total_file_size) return std::nullopt;
                 return std::make_pair(start, total_file_size - start);
-            } else if (end != -1) {
-                // bytes=-suffixLength (end here means suffix length)
-                if (end == 0 || end > total_file_size) return std::nullopt;
-                return std::make_pair(total_file_size - end, end);
-            } else {
-                return std::nullopt; // Invalid like "bytes=-"
             }
+            if (end_opt) {
+                long long suffix = *end_opt;
+                if (suffix == 0 || suffix > total_file_size) return std::nullopt;
+                return std::make_pair(total_file_size - suffix, suffix);
+            }
+            return std::nullopt; // `bytes=-` or similar malformed input.
         }
 
         // Helper to generate HTML for directory listing
@@ -368,7 +465,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object.
      */
     template<typename SessionType>
-    class StaticFilesMiddleware : public IMiddleware<SessionType> {
+    class StaticFilesMiddleware final : public IMiddleware<SessionType> {
     public:
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
 
@@ -409,7 +506,7 @@ namespace qb::http {
             std::string_view effective_request_path_sv = request_path_sv;
 
             if (!_options.path_prefix_to_strip.empty()) {
-                if (request_path_sv.rfind(_options.path_prefix_to_strip, 0) == 0) {
+                if (request_path_sv.starts_with(_options.path_prefix_to_strip)) {
                     effective_request_path_sv.remove_prefix(_options.path_prefix_to_strip.length());
                 } else {
                     ctx->complete(AsyncTaskResult::CONTINUE); // Let other handlers try
@@ -426,6 +523,42 @@ namespace qb::http {
                 // Path traversal or invalid path detected by sanitize_and_resolve_path
                 send_error_response(ctx, qb::http::status::FORBIDDEN, "Forbidden");
                 return;
+            }
+
+            // F44 defence-in-depth: `target_file_abs` is already the real,
+            // canonicalised path, so `is_symlink(target_file_abs)` would
+            // always be `false`. To implement `O_NOFOLLOW`-like semantics we
+            // walk the *requested* path against the real filesystem, stopping
+            // at the first symlink we encounter.
+            if (_options.reject_symlinks) {
+                const std::string decoded_req = qb::io::uri::decode(effective_request_path_sv);
+                std::string_view rel_view{decoded_req};
+                if (const auto first = rel_view.find_first_not_of('/');
+                    first != std::string_view::npos) {
+                    rel_view.remove_prefix(first);
+                } else {
+                    rel_view = {};
+                }
+
+                std::filesystem::path walker = _options.root_directory;
+                bool symlink_seen = false;
+                if (!rel_view.empty()) {
+                    const std::filesystem::path rel_path{rel_view};
+                    for (const auto &segment: rel_path) {
+                        if (segment.empty() || segment == std::filesystem::path(".")) continue;
+                        walker /= segment;
+                        std::error_code st_ec;
+                        const auto st = std::filesystem::symlink_status(walker, st_ec);
+                        if (!st_ec && std::filesystem::is_symlink(st)) {
+                            symlink_seen = true;
+                            break;
+                        }
+                    }
+                }
+                if (symlink_seen) {
+                    send_error_response(ctx, qb::http::status::FORBIDDEN, "Symlinks are not served");
+                    return;
+                }
             }
 
             // Check existence and type
@@ -636,6 +769,16 @@ namespace qb::http {
             long long full_file_size = static_cast<long long>(file_stream.tellg());
             file_stream.seekg(0, std::ios::beg);
 
+            // F44 DoS guard: refuse full-body materialisation above the
+            // configured budget. Zero means "unlimited" and is opt-in.
+            if (_options.max_file_size != 0 &&
+                full_file_size >= 0 &&
+                static_cast<unsigned long long>(full_file_size) > _options.max_file_size) {
+                send_error_response(ctx, qb::http::status::PAYLOAD_TOO_LARGE,
+                                    "File exceeds configured max_file_size");
+                return;
+            }
+
             long long offset = 0;
             long long length_to_read = full_file_size;
             bool is_range_request = false;
@@ -651,6 +794,14 @@ namespace qb::http {
                     if (parsed_range_opt) {
                         offset = parsed_range_opt->first;
                         length_to_read = parsed_range_opt->second;
+                        // F44 DoS guard: even for ranges, bound the single
+                        // allocation under `max_file_size`.
+                        if (_options.max_file_size != 0 && length_to_read >= 0 &&
+                            static_cast<unsigned long long>(length_to_read) > _options.max_file_size) {
+                            send_error_response(ctx, qb::http::status::PAYLOAD_TOO_LARGE,
+                                                "Range exceeds configured max_file_size");
+                            return;
+                        }
                         is_range_request = true;
                         ctx->response().status() = qb::http::status::PARTIAL_CONTENT;
                         std::string content_range_val = "bytes " + std::to_string(offset) + "-" +

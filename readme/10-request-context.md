@@ -26,13 +26,50 @@ The `Context` serves several key purposes:
 
 Middleware and handlers can store and retrieve arbitrary, request-specific data within the context using a type-safe mechanism based on `std::any`. This is particularly useful for passing state between different middleware components or from a middleware to a route handler.
 
+Two interchangeable APIs are available:
+
+1. **String-keyed (legacy / dynamic)** &mdash; best when the key is computed at runtime.
+2. **Typed `Slot<T>` (recommended)** &mdash; compile-time type checking, self-documenting call sites, no silent type-mismatch `nullopt`.
+
+**String-keyed API:**
+
 -   **`set<T>(const std::string& key, T value)`**: Stores a value of type `T` (e.g., `std::string`, `int`, `std::shared_ptr<MyUserObject>`) associated with a string `key`.
     *Example: An authentication middleware might store the authenticated user object: `ctx->set<std::shared_ptr<auth::User>>("authenticated_user", user_ptr);`*
 -   **`get<T>(const std::string& key)`**: Retrieves an `std::optional<T>` for the given `key`. If the key exists and the stored value is of type `T` (or convertible), it returns the value. Otherwise, it returns `std::nullopt`. Handles `std::bad_any_cast` internally.
     *Example: A handler retrieves the user: `if (auto user_opt = ctx->get<std::shared_ptr<auth::User>>("authenticated_user")) { (*user_opt)->doSomething(); }`*
 -   **`get_ptr<T>(const std::string& key)`**: Returns a raw pointer `T*` (or `const T*` for const context) to the stored data if the key exists and the type matches. Returns `nullptr` otherwise. This is useful for accessing non-copyable types stored in `std::any` or for modifying objects in place (if `T*` is non-const).
 -   **`has(const std::string& key)`**: Checks if a custom data entry with the given `key` exists.
+-   **`contains(const std::string& key)`**: STL-aligned alias for `has`.
 -   **`remove(const std::string& key)`**: Removes the custom data associated with `key`.
+
+**Typed `Slot<T>` API (preferred):**
+
+A `qb::http::Slot<T>` pairs a compile-time string identifier with the value type stored under it. Declare a slot once (typically as an `inline constexpr` global shared between the producer middleware and the consumer handler) and use it everywhere:
+
+```cpp
+// shared_slots.h
+struct AuthUser { std::string id; std::string email; };
+inline constexpr qb::http::Slot<AuthUser>    kAuthUser{"auth.user"};
+inline constexpr qb::http::Slot<std::string> kTraceId{"trace.id"};
+
+// producer (middleware)
+ctx->set(kAuthUser, std::move(user));                 // compile-checked type
+ctx->emplace(kAuthUser, "u-1", "alice@example.com");  // in-place construction
+
+// consumer (handler)
+if (const auto* user = ctx->get_if(kAuthUser)) {      // no any_cast cost, no copy
+    ctx->response().body() = user->email;
+}
+std::string tid = ctx->get_or(kTraceId, std::string{"<none>"});
+if (ctx->contains(kAuthUser)) { /* ... */ }
+ctx->remove(kAuthUser);
+```
+
+Key advantages:
+-   **Compile-time safety**: `ctx->set(kAuthUser, 42)` is a compile error &mdash; the stored type is encoded in the slot.
+-   **No silent `nullopt`**: reading with the same slot you wrote through is guaranteed to hit the right type (the legacy `get<T>(string)` could return `nullopt` silently on a type mismatch).
+-   **Self-documenting**: the slot declaration is the single source of truth for "what gets stored under this key and by which middleware".
+-   **Full interop**: slots share the same underlying `CustomDataMap` as the string-keyed API, so you can migrate incrementally &mdash; `ctx->set(kAuthUser, x)` and `ctx->set<AuthUser>("auth.user", x)` are strictly equivalent.
 
 **Use Cases for Custom Data:**
 -   An authentication middleware stores the `auth::User` object.

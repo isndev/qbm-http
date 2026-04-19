@@ -1,11 +1,6 @@
 #include "./request.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
 
-// templates instantiation
-// objects
-template class qb::http::TRequest<std::string>;
-template class qb::http::TRequest<std::string_view>;
-
 namespace qb::allocator {
     /**
      * @brief Serialize an HTTP Request into a byte stream

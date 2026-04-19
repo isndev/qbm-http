@@ -103,7 +103,7 @@ namespace qb::http {
      */
     template<typename MessageType>
     struct Parser : public http_t {
-        using String = typename MessageType::string_type;
+        using String = std::string;
 
         /**
          * @brief Default callback for HTTP data
@@ -513,21 +513,45 @@ namespace qb::protocol::http {
          */
         std::size_t
         getMessageSize() noexcept final {
+            //
+            // Buffer semantics (important, see qb::allocator::pipe):
+            //
+            //   * `_io.in().begin()` is always the first **unconsumed**
+            //     byte of the buffer. `allocate_back()` (called when new
+            //     bytes arrive between two `getMessageSize()` invocations)
+            //     may `memmove` the content down (reorder) or reallocate
+            //     the storage entirely. In both cases the *logical*
+            //     position of each unread byte relative to `begin()` is
+            //     preserved — but the raw pointer may move.
+            //
+            //   * llhttp can invoke `on_header_field` / `on_header_value`
+            //     multiple times per logical header when a field spans
+            //     two `http_execute` calls (see llhttp docs: "may be
+            //     called with a partial value"). Our callbacks copy into
+            //     owning `std::string` by assignment / push_back, which
+            //     overwrites rather than appends — so we must guarantee
+            //     that each header is parsed in a single `http_execute`
+            //     call. The simplest correct strategy is to reset the
+            //     parser whenever the header block is incomplete and
+            //     re-feed it the full current buffer on the next call.
+            //     Once headers are complete the body is parsed
+            //     incrementally (chunked branch / Content-Length check),
+            //     where the callback contract allows partial calls
+            //     because `on_body` already appends.
+            //
             if (!_http_obj.headers_completed()) {
-                // parse headers
-                const auto ret =
-                        _http_obj.parse(this->_io.in().begin(), this->_io.in().size());
+                const auto ret = _http_obj.parse(this->_io.in().begin(),
+                                                 this->_io.in().size());
                 if (ret == HPE_OK) {
-                    // restart parsing for next time;
+                    // Headers still incomplete — reset to guarantee the
+                    // next pass sees every header in one shot.
                     _http_obj.reset();
                     return 0;
                 }
-
                 if (!_http_obj.headers_completed()) {
                     this->not_ok();
                     return 0;
                 }
-
                 body_offset = _http_obj.error_pos - this->_io.in().begin();
             }
 
@@ -541,25 +565,18 @@ namespace qb::protocol::http {
                 if (ret == HPE_CB_MESSAGE_COMPLETE) {
                     body_offset = 0;
                     return _http_obj.error_pos - this->_io.in().begin();
-                } else if (ret == HPE_OK) {
-                    if constexpr (std::is_same_v<std::string_view, String>) {
-                        _http_obj.reset();
-                        body_offset = 0;
-                    } else
-                        body_offset = this->_io.in().size();
-                } else
+                }
+                if (ret == HPE_OK) {
+                    body_offset = this->_io.in().size();
+                } else {
                     this->not_ok();
+                }
                 return 0;
             }
 
             const auto full_size = body_offset + _http_obj.content_length;
             if (this->_io.in().size() < full_size) {
-                // if is protocol view reset parser for next read
-                if constexpr (std::is_same_v<std::string_view, String>) {
-                    _http_obj.reset();
-                    body_offset = 0;
-                }
-                return 0; // incomplete body
+                return 0; // incomplete body, keep accumulating
             }
 
             if (_http_obj.content_length)

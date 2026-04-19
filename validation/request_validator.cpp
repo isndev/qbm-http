@@ -72,6 +72,11 @@ namespace qb::http::validation {
 
     bool RequestValidator::validate(qb::http::Request &request, Result &result,
                                     const qb::http::PathParameters *path_params) {
+        // F48 &mdash; propagate the configured policy to the caller-provided
+        // `Result`. Every sub-validator merges into a temporary `Result` and
+        // then into this one; the policy travels with each temporary via
+        // explicit setup below.
+        result.set_error_value_policy(_error_value_policy, _error_value_preview_bytes);
         bool overall_valid = true;
 
         // 1. Apply Sanitizers
@@ -108,7 +113,7 @@ namespace qb::http::validation {
         }
 
         if (_body_sanitizer && !request.body().empty()) {
-            Result sanitize_body_result;
+            Result sanitize_body_result = result.make_child();
             try {
                 qb::json body_json = qb::json::parse(request.body().as<std::string_view>());
                 _body_sanitizer->sanitize(body_json);
@@ -124,7 +129,7 @@ namespace qb::http::validation {
 
         // 2. Perform Validations
         if (_body_schema_validator) {
-            Result body_val_result;
+            Result body_val_result = result.make_child();
             if (request.body().empty()) {
                 // If schema expects an object/array but body is empty, this is usually an error.
                 // A common case is a schema like `{"type": "object", "properties": {...}}`
@@ -174,7 +179,7 @@ namespace qb::http::validation {
             // We just need to adapt the Request's query map to what ParameterValidator::validate expects.
             // For multi-value query params (e.g., ids=1&ids=2), we validate each occurrence.
             qb::icase_unordered_map<std::string> single_value_query_params_for_strict_check;
-            Result query_param_val_result;
+            Result query_param_val_result = result.make_child();
 
             for (const auto &[param_name_defined, rules]: _query_param_validator->get_param_definitions()) {
                 auto it_query = request.queries().find(param_name_defined);
@@ -182,7 +187,7 @@ namespace qb::http::validation {
                     single_value_query_params_for_strict_check[param_name_defined] = it_query->second.front();
                     // For strict check, one instance is enough
                     for (const std::string &value_str: it_query->second) {
-                        Result single_value_result;
+                        Result single_value_result = result.make_child();
                         _query_param_validator->validate_single(param_name_defined, std::make_optional(value_str),
                                                                 rules, single_value_result, "query");
                         if (!single_value_result.success()) {
@@ -192,7 +197,7 @@ namespace qb::http::validation {
                     }
                 } else {
                     // Parameter not present in request
-                    Result single_value_result; // For required/default checks
+                    Result single_value_result = result.make_child(); // For required/default checks
                     _query_param_validator->validate_single(param_name_defined, std::nullopt, rules,
                                                             single_value_result, "query");
                     if (!single_value_result.success()) {
@@ -218,12 +223,12 @@ namespace qb::http::validation {
 
         // Validate Headers (similar logic to query params)
         if (_header_validator) {
-            Result header_val_result;
+            Result header_val_result = result.make_child();
             for (const auto &[header_name_defined, rules]: _header_validator->get_param_definitions()) {
                 auto it_header = request.headers().find(header_name_defined);
                 if (it_header != request.headers().end() && !it_header->second.empty()) {
                     for (const std::string &value_str: it_header->second) {
-                        Result single_value_result;
+                        Result single_value_result = result.make_child();
                         _header_validator->validate_single(header_name_defined, std::make_optional(value_str), rules,
                                                            single_value_result, "header");
                         if (!single_value_result.success()) {
@@ -232,7 +237,7 @@ namespace qb::http::validation {
                         }
                     }
                 } else {
-                    Result single_value_result;
+                    Result single_value_result = result.make_child();
                     _header_validator->validate_single(header_name_defined, std::nullopt, rules, single_value_result,
                                                        "header");
                     if (!single_value_result.success()) {
@@ -256,7 +261,7 @@ namespace qb::http::validation {
 
         // Validate Path Parameters
         if (_path_param_validator && path_params) {
-            Result path_param_val_result;
+            Result path_param_val_result = result.make_child();
             for (const auto &[param_name_defined, rules]: _path_param_validator->get_param_definitions()) {
                 std::optional<std::string_view> sv_opt = path_params->get(rules.name);
                 std::optional<std::string> string_opt;
@@ -264,7 +269,7 @@ namespace qb::http::validation {
                     string_opt = std::string(sv_opt.value());
                 }
 
-                Result single_value_result;
+                Result single_value_result = result.make_child();
                 _path_param_validator->validate_single(rules.name, string_opt, rules, single_value_result, "path");
 
                 if (!single_value_result.success()) {

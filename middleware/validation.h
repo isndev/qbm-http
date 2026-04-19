@@ -42,7 +42,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object managed by the router.
      */
     template<typename SessionType>
-    class ValidationMiddleware : public IMiddleware<SessionType> {
+    class ValidationMiddleware final : public IMiddleware<SessionType> {
     public:
         /** @brief Convenience alias for a shared pointer to the request `Context`. */
         using ContextPtr = std::shared_ptr<Context<SessionType> >;

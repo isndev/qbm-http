@@ -197,7 +197,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object managed by the router, used by `Context`.
      */
     template<typename SessionType>
-    class RecaptchaMiddleware : public IMiddleware<SessionType> {
+    class RecaptchaMiddleware final : public IMiddleware<SessionType> {
     public:
         /** @brief Convenience alias for a shared pointer to the request `Context`. */
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
@@ -375,21 +375,10 @@ namespace qb::http {
             const std::string &field_name = _options->get_token_field_name();
             switch (_options->get_token_location()) {
                 case RecaptchaOptions::TokenLocation::Header: {
-                    // Assuming TRequest::header returns a type convertible to std::string or std::string_view
-                    std::string header_val_str;
-                    const auto &header_val_obj = request.header(field_name);
-                    // Default value of header() is empty string_type
-                    if constexpr (std::is_convertible_v<decltype(header_val_obj), std::string>) {
-                        header_val_str = header_val_obj;
-                    } else if constexpr (std::is_convertible_v<decltype(header_val_obj), std::string_view>) {
-                        header_val_str = std::string(header_val_obj);
-                    } else {
-                        // Fallback, assumes .data() and .length()
-                        header_val_str.assign(header_val_obj.data(), header_val_obj.length());
-                    }
-                    return header_val_str.empty()
+                    const std::string &header_val = request.header(field_name);
+                    return header_val.empty()
                                ? std::nullopt
-                               : std::optional<std::string>(std::move(header_val_str));
+                               : std::optional<std::string>(header_val);
                 }
                 case RecaptchaOptions::TokenLocation::Body:
                     try {
@@ -406,18 +395,10 @@ namespace qb::http {
                     }
                     break;
                 case RecaptchaOptions::TokenLocation::Query: {
-                    // Assuming TRequest::query returns a type convertible to std::string or std::string_view
-                    std::string query_val_str;
-                    const auto &query_val_obj = request.query(field_name); // Default value is empty string_type
-                    if constexpr (std::is_convertible_v<decltype(query_val_obj), std::string>) {
-                        query_val_str = query_val_obj;
-                    } else if constexpr (std::is_convertible_v<decltype(query_val_obj), std::string_view>) {
-                        query_val_str = std::string(query_val_obj);
-                    } else {
-                        // Fallback
-                        query_val_str.assign(query_val_obj.data(), query_val_obj.length());
-                    }
-                    return query_val_str.empty() ? std::nullopt : std::optional<std::string>(std::move(query_val_str));
+                    const std::string &query_val = request.query(field_name);
+                    return query_val.empty()
+                               ? std::nullopt
+                               : std::optional<std::string>(query_val);
                 }
             }
             return std::nullopt;

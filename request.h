@@ -2,10 +2,10 @@
  * @file qbm/http/request.h
  * @brief Defines the HTTP Request message class.
  *
- * This file contains the `TRequest` template class, which represents an HTTP request.
- * It inherits from `MessageBase` to include common HTTP message properties like
- * version, headers, and body, and adds request-specific details such as the
- * HTTP method, URI, and parsed cookies.
+ * This file contains the `Request` class, which represents an HTTP request.
+ * It inherits from `internal::MessageBase` to include common HTTP message
+ * properties like version, headers, and body, and adds request-specific
+ * details such as the HTTP method, URI, and parsed cookies.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
@@ -14,35 +14,26 @@
  */
 #pragma once
 
-#include <string>       // For std::string (used in TRequest members if String is std::string)
-#include <vector>       // For std::vector (used in TRequest members if String is std::string)
-#include <utility>      // For std::move, std::forward
+#include <string>
+#include <vector>
+#include <utility>
 
-#include "./message_base.h" // For internal::MessageBase
-#include "./cookie.h"       // For CookieJar, parse_cookies
-#include <qb/io/uri.h>      // For qb::io::uri
-#include "./types.h"        // For qb::http::method, HTTP_REQUEST (via llhttp.h)
+#include "./message_base.h"
+#include "./cookie.h"
+#include <qb/io/uri.h>
+#include "./types.h"
 
 namespace qb::http {
-    // Forward declaration for the Router class, if it were to be a friend or closely related.
-    // However, the `using Router = Router<Session>` below is a using-declaration for a template.
-    // If `qb::http::Router` is a distinct class template, this forward declaration is fine.
-    // If `TRequest::Router` is meant to be a nested class, it would be defined inside TRequest.
-    // Based on context of routing.h, Router is likely a standalone class template.
     template<typename Session>
     class Router;
 
     /**
-     * @brief Represents an HTTP request message.
+     * @brief Represents an HTTP request message (owning `std::string` headers / body).
      *
-     * This class template models an HTTP request, providing access to its method, URI,
-     * headers, body, and cookies. It inherits common message properties from `MessageBase`.
-     * The `String` template parameter allows flexibility in the underlying string type used for headers.
-     *
-     * @tparam String The string type used for headers (e.g., `std::string`, `std::string_view`).
+     * Provides access to method, URI, headers, body and cookies. Inherits
+     * common message properties from `internal::MessageBase`.
      */
-    template<typename String>
-    class TRequest : public internal::MessageBase<String> {
+    class Request : public internal::MessageBase {
     public:
         /** @brief Indicates that this message type is an HTTP request, used by parsers. */
         constexpr static http_type type = HTTP_REQUEST;
@@ -63,13 +54,13 @@ namespace qb::http {
          * The URI, headers, body, and cookies are default-initialized (empty).
          * HTTP version defaults to 1.1 via `MessageBase`.
          */
-        TRequest() noexcept
-            : internal::MessageBase<String>() // Ensure MessageBase default constructor is called
+        Request() noexcept
+            : internal::MessageBase()
               , _method(Method::UNINITIALIZED)
-              , _uri() // Default construct URI
-              , _cookies() // Default construct CookieJar
+              , _uri()
+              , _cookies()
         {
-            this->internal::MessageBase<String>::reset(); // Resets headers and content_type in MessageBase
+            this->internal::MessageBase::reset();
         }
 
         /**
@@ -79,13 +70,12 @@ namespace qb::http {
          * @param h A map of headers for the request (moved). Defaults to an empty map.
          * @param b The body content for the request (moved). Defaults to an empty body.
          */
-        TRequest(qb::http::method m, qb::io::uri u,
-                 qb::icase_unordered_map<std::vector<String> > h = {},
-                 Body b = {})
-            : internal::MessageBase<String>(std::move(h), std::move(b))
+        Request(qb::http::method m, qb::io::uri u,
+                qb::icase_unordered_map<std::vector<std::string> > h = {},
+                Body b = {})
+            : internal::MessageBase(std::move(h), std::move(b))
               , _method(m)
               , _uri(std::move(u)) {
-            // Cookies would be parsed separately if this constructor is used for incoming requests.
         }
 
         /**
@@ -94,22 +84,21 @@ namespace qb::http {
          * @param h A map of headers for the request (moved). Defaults to an empty map.
          * @param b The body content for the request (moved). Defaults to an empty body.
          */
-        explicit TRequest(qb::io::uri u,
-                          qb::icase_unordered_map<std::vector<String> > h = {},
-                          Body b = {})
-            : internal::MessageBase<String>(std::move(h), std::move(b))
+        explicit Request(qb::io::uri u,
+                         qb::icase_unordered_map<std::vector<std::string> > h = {},
+                         Body b = {})
+            : internal::MessageBase(std::move(h), std::move(b))
               , _method(Method::GET)
               , _uri(std::move(u)) {
         }
 
-        // Defaulted copy/move constructors and assignment operators
-        TRequest(const TRequest &) = default;
+        Request(const Request &) = default;
 
-        TRequest(TRequest &&) noexcept = default;
+        Request(Request &&) noexcept = default;
 
-        TRequest &operator=(const TRequest &) = default;
+        Request &operator=(const Request &) = default;
 
-        TRequest &operator=(TRequest &&) noexcept = default;
+        Request &operator=(Request &&) noexcept = default;
 
         [[nodiscard]] const Method &method() const noexcept { return _method; }
         Method &method() noexcept { return _method; }
@@ -180,31 +169,13 @@ namespace qb::http {
          */
         void parse_cookie_header() {
             _cookies.clear();
-            // Use this->header to access headers from MessageBase/THeaders
-            const String &cookie_header_value = this->header("Cookie", 0, String{});
-
-            if (!cookie_header_value.empty()) {
-                // parse_cookies expects std::string_view or const char*, String might need conversion.
-                std::string_view cookie_header_sv;
-                if constexpr (std::is_convertible_v<const String &, std::string_view>) {
-                    cookie_header_sv = cookie_header_value;
-                } else {
-                    // If String is not convertible (e.g. custom string type), this path needs handling.
-                    // Assuming String is std::string or std::string_view for now.
-                    // This part might need adjustment if String is more complex.
-                    static_assert(std::is_same_v<String, std::string> || std::is_same_v<String, std::string_view>,
-                                  "TRequest::parse_cookie_header expects String to be std::string or std::string_view or convertible for parse_cookies.")
-                            ;
-                    // If it's std::string, it's convertible. If it's string_view, it's direct.
-                    cookie_header_sv = std::string_view(cookie_header_value.data(), cookie_header_value.length());
-                }
-
-                if (!cookie_header_sv.empty()) {
-                    auto cookies_map = parse_cookies(cookie_header_sv, false); // false for parsing "Cookie" header
-                    for (const auto &[name, value]: cookies_map) {
-                        _cookies.add(name, value); // CookieJar::add handles name case-insensitivity
-                    }
-                }
+            const std::string &cookie_header_value = this->header("Cookie", 0);
+            if (cookie_header_value.empty()) {
+                return;
+            }
+            auto cookies_map = parse_cookies(std::string_view(cookie_header_value), false);
+            for (const auto &[name, value] : cookies_map) {
+                _cookies.add(name, value);
             }
         }
 
@@ -270,17 +241,22 @@ namespace qb::http {
         void
         reset() noexcept {
             _method = Method::GET;
-            _uri = qb::io::uri{}; // Reset URI to default
-            _cookies.clear(); // Clear all cookies
-            this->internal::MessageBase<String>::reset(); // Reset headers and Content-Type in base
+            _uri = qb::io::uri{};
+            _cookies.clear();
+            this->internal::MessageBase::reset();
         }
 
         /**
          * @brief Sets the HTTP method for the request.
          * @param m The HTTP method to set.
          * @return A reference to the request object.
+         *
+         * @note Only `with_method` is truly non-throwing; the other
+         * `with_*` setters allocate (URI / headers / cookies / body) and
+         * therefore cannot be `noexcept` without risking
+         * `std::terminate` on allocation failure.
          */
-        TRequest &with_method(Method m) noexcept {
+        Request &with_method(Method m) noexcept {
             _method = m;
             return *this;
         }
@@ -290,7 +266,7 @@ namespace qb::http {
          * @param u The URI to set.
          * @return A reference to the request object.
          */
-        TRequest &with_uri(qb::io::uri u) noexcept {
+        Request &with_uri(qb::io::uri u) {
             _uri = std::move(u);
             return *this;
         }
@@ -301,7 +277,7 @@ namespace qb::http {
          * @param value The value of the header.
          * @return A reference to the request object.
          */
-        TRequest &with_header(std::string name, std::string value) noexcept {
+        Request &with_header(std::string name, std::string value) {
             this->add_header(std::move(name), std::move(value));
             return *this;
         }
@@ -311,7 +287,7 @@ namespace qb::http {
          * @param h The headers to set.
          * @return A reference to the request object.
          */
-        TRequest &with_headers(qb::icase_unordered_map<std::vector<String> > h) noexcept {
+        Request &with_headers(qb::icase_unordered_map<std::vector<std::string> > h) {
             this->headers() = std::move(h);
             return *this;
         }
@@ -321,7 +297,7 @@ namespace qb::http {
          * @param c The cookie to add.
          * @return A reference to the request object.
          */
-        TRequest &with_cookie(const Cookie &c) noexcept {
+        Request &with_cookie(const Cookie &c) {
             _cookies.add(c);
             return *this;
         }
@@ -331,7 +307,7 @@ namespace qb::http {
          * @param cookies The cookies to set.
          * @return A reference to the request object.
          */
-        TRequest &with_cookies(const CookieJar &cookies) noexcept {
+        Request &with_cookies(const CookieJar &cookies) {
             _cookies = cookies;
             return *this;
         }
@@ -342,7 +318,7 @@ namespace qb::http {
          * @return A reference to the request object.
          */
         template<typename BodyType>
-        TRequest &with_body(BodyType &&b) noexcept {
+        Request &with_body(BodyType &&b) {
             this->body() = std::forward<BodyType>(b);
             return *this;
         }
@@ -351,21 +327,15 @@ namespace qb::http {
          * @brief Using-declaration for `qb::http::Router` template.
          *
          * This declaration makes the `qb::http::Router<Session>` template accessible
-         * as `TRequest::Router<Session>` within contexts where `TRequest` is known.
+         * as `Request::Router<Session>` within contexts where `Request` is known.
          * It does not define a nested Router class but rather aliases the external one.
          */
         template<typename Session>
         using Router = qb::http::Router<Session>;
     };
 
-    /** @brief Convenience alias for `TRequest<std::string>`, representing a request with mutable string headers. */
-    using Request = TRequest<std::string>;
     /** @brief Shorthand alias for `Request`. */
     using request = Request;
-    /** @brief Convenience alias for `TRequest<std::string_view>`, representing a request with immutable string_view headers. */
-    using RequestView = TRequest<std::string_view>;
-    /** @brief Shorthand alias for `RequestView`. */
-    using request_view = RequestView;
 } // namespace qb::http
 
 namespace qb::allocator {

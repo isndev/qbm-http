@@ -61,7 +61,7 @@ namespace qb::http {
      * @brief Adapts an IMiddleware instance to the IAsyncTask interface.
      */
     template<typename SessionType>
-    class MiddlewareTask : public IAsyncTask<SessionType> {
+    class MiddlewareTask final : public IAsyncTask<SessionType> {
     private:
         std::shared_ptr<IMiddleware<SessionType> > _middleware;
         std::string _name;

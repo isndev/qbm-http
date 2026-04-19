@@ -14,13 +14,13 @@
 #include <cassert>
 #include <cstring>
 #include <iostream>
-#include <random>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <sys/types.h>
 #include <vector>
 
+#include <qb/io/crypto.h>
 #include <qb/system/allocator/pipe.h>
 #include <qb/utility/build_macros.h>
 
@@ -775,8 +775,7 @@ namespace qb::http {
     [[nodiscard]] std::string parse_boundary(std::string const &content_type);
 
     /**
-     * @brief Template class for multipart form data handling
-     * @tparam String String type (std::string or std::string_view)
+     * @brief Multipart form-data container (RFC 7578).
      *
      * Provides functionality for creating and managing multipart/form-data content
      * as defined in RFC 7578. This class supports:
@@ -788,11 +787,14 @@ namespace qb::http {
      * - Support for file uploads and form field data
      * - Proper MIME type handling for each part
      *
-     * The implementation follows standards for multipart MIME types and supports
-     * both client-side content creation and server-side content parsing.
+     * @note Previously exposed a companion `TMultiPart<std::string_view>`
+     * alias (`MultipartView`) to parse incoming multipart payloads
+     * in-place. The view variant has been retired together with
+     * `RequestView` / `ResponseView` (owning `std::string` is the sole
+     * supported mode; buffers are owned, stable, and safe to move into
+     * handlers).
      */
-    template<typename String>
-    class TMultiPart {
+    class Multipart {
         friend class Body;
 
     public:
@@ -801,8 +803,8 @@ namespace qb::http {
          *
          * Contains headers and body for one part of a multipart message.
          */
-        struct Part : public THeaders<String> {
-            String body;
+        struct Part : public Headers {
+            std::string body;
 
             /**
              * @brief Get the total size of this part
@@ -824,50 +826,25 @@ namespace qb::http {
         std::vector<Part> _parts;
 
         /**
-         * @brief Generate a cryptographically secure random boundary string
-         * @return Generated boundary string
-         * 
-         * @note Uses alphanumeric characters for better entropy than just digits.
-         * Respects RFC 2046 recommendation of maximum 70 characters for boundary.
-         * Uses std::random_device (typically OS-level CSPRNG) for security.
+         * @brief Generate a cryptographically secure random boundary string (F49/F50).
+         *
+         * Uses `qb::crypto::generate_secure_random_string` (OpenSSL RAND_bytes)
+         * to avoid the `std::mt19937` fallback. Respects RFC 2046 boundary
+         * length recommendations (<= 70 chars).
          */
         [[nodiscard]] static std::string
         generate_boundary() {
-            // RFC 2046 recommends boundary length <= 70 characters
-            // Using alphanumeric characters for better entropy
-            constexpr size_t BOUNDARY_RANDOM_LENGTH = 32; // Random part length
+            constexpr size_t BOUNDARY_RANDOM_LENGTH = 32;
             constexpr size_t BOUNDARY_PREFIX_LENGTH = 28; // "----------------------------qb"
-            constexpr size_t TOTAL_BOUNDARY_LENGTH = BOUNDARY_PREFIX_LENGTH + BOUNDARY_RANDOM_LENGTH; // 60 chars total
-            
-            static_assert(TOTAL_BOUNDARY_LENGTH <= multipart_limits::MAX_BOUNDARY_LENGTH, 
+            constexpr size_t TOTAL_BOUNDARY_LENGTH = BOUNDARY_PREFIX_LENGTH + BOUNDARY_RANDOM_LENGTH;
+
+            static_assert(TOTAL_BOUNDARY_LENGTH <= multipart_limits::MAX_BOUNDARY_LENGTH,
                           "Generated boundary exceeds RFC 2046 recommended maximum");
-            
-            // Alphanumeric characters for boundary (RFC 2046 allows these in boundary)
-            constexpr char ALPHANUM[] = 
-                "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-            constexpr size_t ALPHANUM_COUNT = 62;
-            
-            std::random_device random_device;
-            const bool is_cryptographic = random_device.entropy() != 0.0;
-            
+
             std::string result = "----------------------------qb";
             result.reserve(TOTAL_BOUNDARY_LENGTH);
-            
-            if (is_cryptographic) {
-                // Use random_device directly (OS-level CSPRNG)
-                std::uniform_int_distribution<size_t> distribution(0, ALPHANUM_COUNT - 1);
-                for (size_t i = 0; i < BOUNDARY_RANDOM_LENGTH; ++i) {
-                    result += ALPHANUM[distribution(random_device)];
-                }
-            } else {
-                // Fallback to Mersenne Twister (NOT cryptographically secure)
-                std::mt19937 generator(random_device());
-                std::uniform_int_distribution<size_t> distribution(0, ALPHANUM_COUNT - 1);
-                for (size_t i = 0; i < BOUNDARY_RANDOM_LENGTH; ++i) {
-                    result += ALPHANUM[distribution(generator)];
-                }
-            }
-            
+            result += qb::crypto::generate_secure_random_string(
+                BOUNDARY_RANDOM_LENGTH, qb::crypto::range_alpha_numeric);
             return result;
         }
 
@@ -877,7 +854,7 @@ namespace qb::http {
          *
          * Creates a multipart object with a random boundary.
          */
-        TMultiPart()
+        Multipart()
             : _boundary(generate_boundary()) {
         }
 
@@ -885,7 +862,7 @@ namespace qb::http {
          * @brief Constructor with custom boundary
          * @param boundary Boundary string to use
          */
-        explicit TMultiPart(std::string boundary)
+        explicit Multipart(std::string boundary)
             : _boundary(std::move(boundary)) {
         }
 
@@ -941,10 +918,7 @@ namespace qb::http {
         }
     };
 
-    using Multipart = TMultiPart<std::string>;
     using multipart = Multipart;
-    using MultipartView = TMultiPart<std::string_view>;
-    using multipart_view = MultipartView;
 } // namespace qb::http
 DISABLE_WARNING_POP
 
@@ -966,22 +940,4 @@ namespace qb::allocator {
      */
     template<>
     pipe<char> &pipe<char>::put<qb::http::Multipart>(const qb::http::Multipart &f);
-
-    /**
-     * @brief HTTP Multipart content serialization specialization
-     *
-     * Specialization of the pipe<char>::put template for HTTP multipart content.
-     * This function formats multipart/form-data content according to RFC 7578.
-     *
-     * The formatted multipart content includes:
-     * - Boundary markers between parts
-     * - Headers for each part (Content-Type, Content-Disposition, etc.)
-     * - Content for each part
-     * - Final boundary marker to indicate the end of the multipart content
-     *
-     * @param f MultipartView form data to serialize
-     * @return Reference to the pipe for method chaining
-     */
-    template<>
-    pipe<char> &pipe<char>::put<qb::http::MultipartView>(const qb::http::MultipartView &f);
 } // namespace qb::allocator

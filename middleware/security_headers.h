@@ -16,11 +16,10 @@
 #include <string>
 #include <optional>
 #include <vector>
-#include <random> // For nonce generation
-#include <algorithm> // For nonce generation
-#include <sstream> // For nonce generation
-#include <iomanip> // For nonce generation
+#include <algorithm>
 #include <iostream> // For debug logging
+
+#include <qb/io/crypto.h>
 
 #include "../routing/middleware.h"
 #include "../response.h"
@@ -29,65 +28,28 @@
 namespace qb::http {
     namespace internal {
         /**
-         * @brief Generate a cryptographically secure random nonce for CSP
-         * @param length Length of the nonce string in characters (default 32)
-         * @return Hex-encoded random string
-         * 
-         * @note Uses std::random_device which typically provides OS-level
-         * cryptographically secure random numbers on modern systems (Linux: /dev/urandom,
-         * Windows: CryptGenRandom/RtlGenRandom, macOS: arc4random).
-         * Falls back to std::mt19937 if std::random_device is not cryptographic.
+         * @brief Generate a cryptographically secure random nonce for CSP (F49/F50).
+         *
+         * Delegates to `qb::crypto::generate_secure_random_string`, which is
+         * backed by OpenSSL's `RAND_bytes` (system CSPRNG) regardless of the
+         * platform. We keep the hex encoding and enforce a bounded length so
+         * the CSP header cannot be weaponised for DoS. Previously this helper
+         * fell back to `std::mt19937`, which is not cryptographically secure.
+         *
+         * @param length Length of the nonce string in hex characters (16 to 128,
+         *        clamped). Defaults to 32 hex chars (128 bits of entropy).
+         * @return Hex-encoded random string of the requested length.
          */
-        static std::string generate_random_nonce(size_t length = 32) {
-            // Ensure minimum length for security (16 bytes = 32 hex chars)
+        [[nodiscard]] inline std::string generate_random_nonce(size_t length = 32) {
             constexpr size_t MIN_NONCE_LENGTH = 16;
+            constexpr size_t MAX_NONCE_LENGTH = 128;
             if (length < MIN_NONCE_LENGTH) {
                 length = MIN_NONCE_LENGTH;
-            }
-            
-            // Maximum length to prevent DoS via excessive allocation
-            constexpr size_t MAX_NONCE_LENGTH = 128;
-            if (length > MAX_NONCE_LENGTH) {
+            } else if (length > MAX_NONCE_LENGTH) {
                 length = MAX_NONCE_LENGTH;
             }
-            
-            // Use std::random_device - typically OS-level CSPRNG
-            std::random_device random_device;
-            
-            // Check if std::random_device provides cryptographic quality
-            // (entropy() != 0 indicates non-deterministic source)
-            const bool is_cryptographic = random_device.entropy() != 0.0;
-            
-            // PERFORMANCE FIX: Replace std::stringstream with std::string for better performance
-            // stringstream has significant overhead for simple concatenation operations.
-            // Pre-allocate exact size needed (2 chars per byte in hex format).
-            std::string result;
-            result.reserve(length);
-
-            // Hex digit lookup table for fast conversion without stringstream
-            static constexpr char HEX_DIGITS[] = "0123456789abcdef";
-
-            if (is_cryptographic) {
-                // Use random_device directly (typically backed by OS CSPRNG)
-                std::uniform_int_distribution<> distribution(0, 255);
-                for (size_t i = 0; i < length / 2; ++i) {
-                    uint8_t byte = static_cast<uint8_t>(distribution(random_device));
-                    result.push_back(HEX_DIGITS[byte >> 4]);
-                    result.push_back(HEX_DIGITS[byte & 0x0F]);
-                }
-            } else {
-                // Fallback: Seed Mersenne Twister with random_device
-                // Note: This is NOT cryptographically secure, only for development/testing
-                std::mt19937 generator(random_device());
-                std::uniform_int_distribution<> distribution(0, 255);
-                for (size_t i = 0; i < length / 2; ++i) {
-                    uint8_t byte = static_cast<uint8_t>(distribution(generator));
-                    result.push_back(HEX_DIGITS[byte >> 4]);
-                    result.push_back(HEX_DIGITS[byte & 0x0F]);
-                }
-            }
-
-            return result;
+            return qb::crypto::generate_secure_random_string(
+                length, qb::crypto::range_hex_lower);
         }
     } // namespace internal
 
@@ -287,7 +249,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object managed by the router.
      */
     template<typename SessionType>
-    class SecurityHeadersMiddleware : public IMiddleware<SessionType> {
+    class SecurityHeadersMiddleware final : public IMiddleware<SessionType> {
     public:
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
 

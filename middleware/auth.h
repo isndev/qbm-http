@@ -41,7 +41,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object managed by the router, used by `Context`.
      */
     template<typename SessionType>
-    class AuthMiddleware : public IMiddleware<SessionType> {
+    class AuthMiddleware final : public IMiddleware<SessionType> {
     public:
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
 
@@ -121,8 +121,7 @@ namespace qb::http {
             // 2. If no user from context, try extracting and verifying token from header
             if (!user_opt) {
                 const std::string &auth_header_name = _auth_manager.get_options().get_auth_header_name();
-                // header() returns String type of TRequest, convert to std::string for processing
-                std::string auth_header_str = std::string(ctx->request().header(auth_header_name));
+                const std::string &auth_header_str = ctx->request().header(auth_header_name);
 
                 if (auth_header_str.empty()) {
                     if (_require_auth) {
@@ -379,29 +378,19 @@ namespace qb::http {
         const std::string &name = "JwtAuthMiddleware"
     ) {
         auth::Options options;
-        // Determine if secret is for HMAC or if it's a public key for asymmetric
-        // This logic is simplified; a real scenario might need more context or different setters in Options
-        if (algorithm_str.rfind("HS", 0) == 0) {
-            // Starts with HS -> HMAC
+        // HMAC ("HS*") needs a symmetric secret, asymmetric algorithms expect a public key.
+        if (std::string_view(algorithm_str).starts_with("HS")) {
             options.secret_key(secret);
         } else {
-            // Assume it's a public key for RSA/EC/EdDSA
             options.public_key(secret);
         }
 
-        // Convert string algorithm to enum Options::Algorithm
-        // This mapping should be robust. For brevity, a simple if-else chain.
-        if (utility::iequals(algorithm_str, "HS256")) options.algorithm(auth::Options::Algorithm::HMAC_SHA256);
-        else if (utility::iequals(algorithm_str, "HS384")) options.algorithm(auth::Options::Algorithm::HMAC_SHA384);
-        else if (utility::iequals(algorithm_str, "HS512")) options.algorithm(auth::Options::Algorithm::HMAC_SHA512);
-        else if (utility::iequals(algorithm_str, "RS256")) options.algorithm(auth::Options::Algorithm::RSA_SHA256);
-        else if (utility::iequals(algorithm_str, "RS384")) options.algorithm(auth::Options::Algorithm::RSA_SHA384);
-        else if (utility::iequals(algorithm_str, "RS512")) options.algorithm(auth::Options::Algorithm::RSA_SHA512);
-        else if (utility::iequals(algorithm_str, "ES256")) options.algorithm(auth::Options::Algorithm::ECDSA_SHA256);
-        else if (utility::iequals(algorithm_str, "ES384")) options.algorithm(auth::Options::Algorithm::ECDSA_SHA384);
-        else if (utility::iequals(algorithm_str, "ES512")) options.algorithm(auth::Options::Algorithm::ECDSA_SHA512);
-        else if (utility::iequals(algorithm_str, "EdDSA")) options.algorithm(auth::Options::Algorithm::ED25519);
-        // else: default in Options is HS256, or could throw std::invalid_argument here
+        // Centralised parsing lives on `auth::Options` (see F51); fall back to the
+        // constructor default (`HMAC_SHA256`) for unknown strings so the middleware
+        // remains usable with legacy config.
+        if (const auto resolved = auth::Options::algorithm_from_string(algorithm_str)) {
+            options.algorithm(*resolved);
+        }
 
         return std::make_shared<AuthMiddleware<SessionType> >(options, name);
     }

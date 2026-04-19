@@ -1,9 +1,9 @@
 /**
  * @file qbm/http/headers.h
- * @brief Defines HTTP header management classes, including `THeaders` and `ContentType`,
+ * @brief Defines HTTP header management classes, including `Headers` and `ContentType`,
  *        and utility functions for header attribute parsing and content encoding negotiation.
  *
- * This file provides the `THeaders` template class for managing collections of HTTP headers,
+ * This file provides the `Headers` class for managing collections of HTTP headers,
  * supporting case-insensitive header names and multi-value headers. It includes a nested
  * `ContentType` class for specialized parsing and handling of `Content-Type` headers.
  * Additionally, free functions are provided for parsing complex header attributes (like those
@@ -25,7 +25,7 @@
 
 #include <qb/system/container/unordered_map.h> // For qb::icase_unordered_map
 
-#include "./types.h"    // For common HTTP types (though not directly used in THeaders API, often a peer include)
+#include "./types.h"    // For common HTTP types (though not directly used in Headers API, often a peer include)
 #include "./utility.h"  // For utility::split_string, utility::iequals, utility::trim_http_whitespace
 
 namespace qb::http {
@@ -47,7 +47,6 @@ namespace qb::http {
      * Uses a case-insensitive string key (for header names like "Content-Type", "Authorization")
      * and a `std::vector<std::string>` for header values, allowing for multiple headers with
      * the same name (e.g., multiple `Set-Cookie` headers).
-     * @note This specific alias uses `std::string` for values. `THeaders` is templated to allow `std::string_view` as well.
      */
     using headers_map = qb::icase_unordered_map<std::vector<std::string> >;
 
@@ -112,21 +111,24 @@ namespace qb::http {
     [[nodiscard]] std::string content_encoding(std::string_view accept_encoding_header);
 
     /**
-     * @brief Template class for managing a collection of HTTP headers.
+     * @brief Manages a collection of HTTP headers with owning `std::string`
+     *        values and case-insensitive lookup.
      *
-     * This class provides a common interface and storage mechanism for HTTP headers, used by both
-     * `Request` and `Response` objects. It features:
+     * Features:
      * - Case-insensitive lookup for header names.
-     * - Support for multiple values for a single header name (e.g., `Set-Cookie`).
-     * - A nested `ContentType` class for specialized handling of `Content-Type` headers.
-     * - Methods for adding, setting, retrieving, and removing headers.
+     * - Support for multiple values for a single header name
+     *   (`Set-Cookie`, `Via`, etc.).
+     * - Nested `ContentType` helper for `Content-Type`.
      *
-     * @tparam StringType The string type used for storing header names and values.
-     *                  Typically `std::string` for mutable headers or `std::string_view`
-     *                  for immutable, efficient read-only access (e.g., in `RequestView`).
+     * @note Historically this class was templated on `StringType` to
+     * support both `std::string` (owning) and `std::string_view`
+     * (zero-copy) header values. The view mode has been retired: the qb
+     * input pipe relocates buffer bytes between reads (reorder /
+     * realloc), and the async request lifecycle (shared `Context`,
+     * middleware chain, coroutine plan) makes it impossible to guarantee
+     * that captured views outlive the socket read.
      */
-    template<typename StringType>
-    class THeaders {
+    class Headers {
     public:
         /** @brief Default MIME type used if `Content-Type` is not specified or cannot be parsed. */
         static constexpr std::string_view default_content_type = "application/octet-stream";
@@ -134,7 +136,7 @@ namespace qb::http {
         static constexpr std::string_view default_charset = "utf-8";
 
         /** @brief Type alias for the underlying map storing headers. Keys are case-insensitive header names. */
-        using headers_map_type = qb::icase_unordered_map<std::vector<StringType> >;
+        using headers_map_type = qb::icase_unordered_map<std::vector<std::string> >;
 
         /**
          * @brief Represents and parses the HTTP `Content-Type` header.
@@ -148,20 +150,20 @@ namespace qb::http {
              * @brief Parses a `Content-Type` header string into its MIME type and charset components.
              *
              * If parsing fails or components are missing, defaults are used:
-             * - MIME type defaults to `THeaders::default_content_type` (`application/octet-stream`).
-             * - Charset defaults to `THeaders::default_charset` (`utf-8`).
+             * - MIME type defaults to `Headers::default_content_type` (`application/octet-stream`).
+             * - Charset defaults to `Headers::default_charset` (`utf-8`).
              * The parsing logic attempts to handle formats like `type/subtype` and `type/subtype; charset=value`,
              * including trimming whitespace and handling quoted charset values (though full unquoting of quoted-pairs is not implemented here).
              *
              * @param content_type_str The full `Content-Type` header string, as a `std::string_view`.
-             * @return A `std::pair` containing the MIME type (as `StringType`) as the first element
-             *         and the charset (as `StringType`) as the second.
+             * @return A `std::pair` containing the MIME type (as `std::string`) as the first element
+             *         and the charset (as `std::string`) as the second.
              */
-            [[nodiscard]] static std::pair<StringType, StringType>
+            [[nodiscard]] static std::pair<std::string, std::string>
             parse(std::string_view content_type_str) {
-                std::pair<StringType, StringType> ret{StringType(default_content_type), StringType(default_charset)};
+                std::pair<std::string, std::string> ret{std::string(default_content_type), std::string(default_charset)};
 
-                auto words = utility::split_string<StringType>(content_type_str, " \t;=");
+                auto words = utility::split_string<std::string>(content_type_str, " \t;=");
                 if (!words.size())
                     return ret;
                 ret.first = std::move(words.front());
@@ -177,7 +179,7 @@ namespace qb::http {
 
         private:
             /** @brief Pair storing the MIME type (`.first`) and charset (`.second`). */
-            std::pair<StringType, StringType> _type_charset;
+            std::pair<std::string, std::string> _type_charset;
 
         public:
             /**
@@ -201,7 +203,7 @@ namespace qb::http {
              * @brief Gets the MIME type component of the Content-Type.
              * @return A constant reference to the MIME type string (e.g., `"text/html"`).
              */
-            [[nodiscard]] const StringType &type() const noexcept {
+            [[nodiscard]] const std::string &type() const noexcept {
                 return _type_charset.first;
             }
 
@@ -209,39 +211,39 @@ namespace qb::http {
              * @brief Gets the charset component of the Content-Type.
              * @return A constant reference to the charset string (e.g., `"utf-8"`).
              */
-            [[nodiscard]] const StringType &charset() const noexcept {
+            [[nodiscard]] const std::string &charset() const noexcept {
                 return _type_charset.second;
             }
         };
 
     protected:
-        /** @brief The map storing all headers. Keys are case-insensitive header names. Values are vectors of `StringType`. */
+        /** @brief The map storing all headers. Keys are case-insensitive header names. Values are vectors of `std::string`. */
         headers_map_type _headers;
         /** @brief Parsed `Content-Type` header object, providing easy access to MIME type and charset. */
         ContentType _content_type;
 
     public:
         /** @brief Default constructor. Initializes an empty set of headers and a default `ContentType`. */
-        THeaders() noexcept : _content_type(default_content_type) {
+        Headers() noexcept : _content_type(default_content_type) {
         }
 
         /**
-         * @brief Constructs `THeaders` with an initial map of headers.
+         * @brief Constructs `Headers` with an initial map of headers.
          * The `Content-Type` member is initialized by parsing the "Content-Type" header from `initial_headers`,
          * or defaults if not present.
          * @param initial_headers A map of headers to initialize with. The map is moved.
          */
-        explicit THeaders(headers_map_type initial_headers)
+        explicit Headers(headers_map_type initial_headers)
             : _headers(std::move(initial_headers))
-              , _content_type(header("Content-Type", 0, StringType(default_content_type))) {
+              , _content_type(header("Content-Type", 0, std::string(default_content_type))) {
         }
 
-        THeaders(const THeaders &) = default;
+        Headers(const Headers &) = default;
 
-        THeaders(THeaders &&) noexcept = default; // Assuming headers_map_type and ContentType are noexcept-movable
-        THeaders &operator=(const THeaders &) = default;
+        Headers(Headers &&) noexcept = default; // Assuming headers_map_type and ContentType are noexcept-movable
+        Headers &operator=(const Headers &) = default;
 
-        THeaders &operator=(THeaders &&) noexcept = default;
+        Headers &operator=(Headers &&) noexcept = default;
 
         // Assuming headers_map_type and ContentType are noexcept-move-assignable
 
@@ -270,25 +272,23 @@ namespace qb::http {
          * @tparam HeaderNameType The type of the header name (e.g., `const char*`, `std::string`, `std::string_view`).
          * @param name The name of the header to retrieve.
          * @param index The 0-based index for headers with multiple values. Defaults to 0 (the first value).
-         * @param not_found_value The value to return (as a `StringType` reference) if the header is not found or the index is out of bounds.
-         *                        Defaults to a static empty `StringType`.
+         * @param not_found_value The value to return (as a `std::string` reference) if the header is not found or the index is out of bounds.
+         *                        Defaults to a static empty `std::string`.
          * @return A constant reference to the header value string if found. If not found or index is invalid,
-         *         returns a reference to `not_found_value` (or a static empty `StringType` if `not_found_value` was the default empty string).
+         *         returns a reference to `not_found_value` (or a static empty `std::string` if `not_found_value` was the default empty string).
          */
         template<typename HeaderNameType>
-        [[nodiscard]] const StringType &
-        header(HeaderNameType &&name, std::size_t index = 0, const StringType &not_found_value = StringType{}) const {
-            // Use a static empty string to return a reference to for the default case,
-            // especially important if StringType is std::string to avoid dangling references.
-            static const StringType static_empty_string_value{};
+        [[nodiscard]] const std::string &
+        header(HeaderNameType &&name, std::size_t index = 0, const std::string &not_found_value = std::string{}) const {
+            // Use a static empty string to return a reference to for the default case
+            // (avoids dangling references to the temporary default argument).
+            static const std::string static_empty_string_value{};
 
             const auto it = _headers.find(std::forward<HeaderNameType>(name));
             if (it != _headers.cend() && index < it->second.size()) {
                 return it->second[index];
             }
-            // If the provided not_found_value is the default-constructed one, return our static empty one.
-            // This comparison is safe for std::string and std::string_view (empty views compare equal).
-            if (not_found_value == StringType{}) {
+            if (not_found_value.empty()) {
                 return static_empty_string_value;
             }
             return not_found_value;
@@ -309,12 +309,9 @@ namespace qb::http {
         [[nodiscard]] qb::icase_unordered_map<std::string>
         attributes(HeaderNameType &&name, std::size_t index = 0,
                    std::string_view default_value_for_parsing = "") const {
-            // Get the header value. If StringType is std::string_view, this is efficient.
-            // If StringType is std::string, header() returns const std::string&.
-            // parse_header_attributes takes std::string_view, so conversion is fine.
-            const StringType &header_value = header(std::forward<HeaderNameType>(name), index,
-                                                    StringType(default_value_for_parsing));
-            return parse_header_attributes(std::string_view(header_value.data(), header_value.length()));
+            const std::string &header_value = header(std::forward<HeaderNameType>(name), index,
+                                                     std::string(default_value_for_parsing));
+            return parse_header_attributes(std::string_view(header_value));
         }
 
         /**
@@ -338,15 +335,8 @@ namespace qb::http {
          */
         void
         set_content_type(std::string_view value) {
-            // StringType construction and map operations can allocate
             _content_type = ContentType{value};
-            // Construct StringType from string_view for setting header
-            if constexpr (std::is_constructible_v<StringType, std::string_view>) {
-                set_header("Content-Type", StringType(value));
-            } else {
-                // Fallback if StringType not directly constructible from string_view (e.g., needs explicit std::string conversion)
-                set_header("Content-Type", StringType(std::string(value)));
-            }
+            set_header("Content-Type", std::string(value));
         }
 
         /**
@@ -425,12 +415,6 @@ namespace qb::http {
         }
     };
 
-    /** @brief Convenience alias for `THeaders<std::string>`, representing mutable HTTP headers where values are owned `std::string`s. */
-    using Headers = THeaders<std::string>;
     /** @brief Shorthand alias for `Headers`, often used for brevity. */
     using headers = Headers;
-    /** @brief Convenience alias for `THeaders<std::string_view>`, representing potentially immutable HTTP header views (values are `std::string_view`s). */
-    using HeadersView = THeaders<std::string_view>;
-    /** @brief Shorthand alias for `HeadersView`. */
-    using headers_view = HeadersView;
 } // namespace qb::http

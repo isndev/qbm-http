@@ -101,9 +101,12 @@ namespace qb::http {
         }
 
         /// Construct from std::string_view (case-insensitive).
-        Method(std::string_view sv) : _value(Value::UNINITIALIZED) {
-            const auto& map = get_string_to_method_map();
-            auto it = map.find(std::string(sv)); // Convert to string for icase_unordered_map lookup
+        explicit Method(std::string_view sv) : _value(Value::UNINITIALIZED) {
+            // `icase_unordered_map::find` accepts any string-like key and performs
+            // the lowercase conversion internally, so passing the view directly
+            // avoids the double-allocation of wrapping it in a temporary `std::string`.
+            const auto &map = get_string_to_method_map();
+            const auto it = map.find(sv);
             if (it != map.end()) {
                 _value = it->second;
             }
@@ -688,35 +691,6 @@ namespace qb::http {
         Undefined ///< Undefined reason (should never happen)
     };
 } // namespace qb::http
-
-/**
- * @def HTTP_SERVER_METHOD_MAP(XX)
- * @brief Macro to generate mappings for HTTP server methods.
- *
- * This macro is typically used by the `llhttp` library or similar parsers
- * to iterate over supported HTTP methods. The `XX` parameter is a macro
- * that takes three arguments: an index, a lowercase name, and an uppercase name.
- *
- * Example usage:
- * @code
- * #define PRINT_METHOD(index, lower, upper) \
- *     std::cout << #index << ": " << #lower << " (" << #upper << ")" << std::endl;
- * HTTP_SERVER_METHOD_MAP(PRINT_METHOD)
- * @endcode
- */
-#define HTTP_SERVER_METHOD_MAP(XX) \
-  XX(0, del, DELETE)               \
-  XX(1, get, GET)                 \
-  XX(2, head, HEAD)               \
-  XX(3, post, POST)               \
-  XX(4, put, PUT)                 \
-  /* pathological */                \
-  XX(5, connect, CONNECT)         \
-  XX(6, options, OPTIONS)         \
-  XX(7, trace, TRACE)             \
-  /* WebDAV */                      \
-  /* RFC-5789 */                    \
-  XX(28, patch, PATCH)
 
 namespace std {
     /**

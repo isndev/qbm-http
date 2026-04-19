@@ -30,6 +30,12 @@
 #include "./security_headers.h"
 #include "./static_files.h"
 
+// Unified `qb::http::middleware::make<Tag, Session>(args...)` entry point that
+// aggregates every standard middleware factory under a single, tag-dispatched
+// API (see F45). The legacy `create_*_middleware` / `*_middleware` helpers are
+// still exported verbatim by the individual headers for source compatibility.
+#include "./make.h"
+
 // Additional custom or third-party middleware components can be added by users
 // or included here if they become part of the standard set.
 

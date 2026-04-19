@@ -30,6 +30,7 @@
 #include "./path_parameters.h" // For qb::http::PathParameters
 #include "./types.h"       // For HookPoint, AsyncTaskResult, http_method_to_string, HTTP_STATUS_*
 #include "./async_task.h"  // For IAsyncTask
+#include "./slot.h"        // For qb::http::Slot<T> &mdash; typed compile-time keys
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
 
 // Forward declaration for RouterCore to break circular dependency if Context needs methods from it.
@@ -75,6 +76,20 @@ namespace qb::http {
             ERROR_CHAIN ///< Currently executing a user-defined error handling task chain.
         };
 
+        /**
+         * @brief High-level lifecycle state of the context.
+         *
+         * Consolidates the former `_is_completed_internally` / `_finalize_called` flags
+         * into a single enum. Cancellation is tracked orthogonally via an sticky flag
+         * because cancel happens *before* finalisation (the chain still needs to run its
+         * finalise callback exactly once after a cancel).
+         */
+        enum class State : std::uint8_t {
+            Ready,     ///< Context constructed, no task chain started yet.
+            Running,   ///< A task chain is currently executing on this context.
+            Finalised  ///< Terminal state: `finalize_processing_internal()` has run.
+        };
+
         /** 
          * @brief Defines the signature for a lifecycle hook function.
          * @param context Reference to the current `Context` object.
@@ -103,20 +118,62 @@ namespace qb::http {
         std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _task_chain;
         ///< The current chain of tasks to be executed.
         size_t _current_task_index = 0; ///< Index of the next task to be executed in `_task_chain`.
-        bool _is_cancelled = false; ///< Flag: `true` if `cancel()` has been called.
-        bool _is_completed_internally = false;
-        ///< Flag: `true` if `complete()` has been called with a terminal result (COMPLETE, CANCELLED, ERROR leading to finalization).
 
         /** @brief Callback invoked when the context processing is fully finalized. Typically sends the response. */
         std::function<void(Context<SessionType> &)> _on_finalized_callback;
         /** @brief Weak pointer to the `RouterCore` that created this context. Used to access global error handlers. */
         std::weak_ptr<RouterCore<SessionType> > _router_core_wptr;
-        /** @brief The current processing phase of this context (e.g., normal chain, error chain). */
-        ProcessingPhase _current_processing_phase = ProcessingPhase::INITIAL;
-        /** @brief Stores the result provided by the most recently completed `IAsyncTask`. */
-        AsyncTaskResult _last_task_result = AsyncTaskResult::COMPLETE;
-        /** @brief Guards against multiple calls to `finalize_processing_internal()`. */
-        bool _finalize_called = false;
+
+        /**
+         * @brief Consolidated lifecycle state (F24).
+         *
+         * Packs the five orthogonal state fields previously scattered across
+         * the class into a single cache-friendly POD:
+         *
+         *   - `state`: high-level 3-state machine (Ready / Running / Finalised).
+         *   - `phase`: which task chain is being executed (Normal / NotFound / Error / Initial).
+         *   - `last_result`: the `AsyncTaskResult` returned by the most recently
+         *     completed task. Carried across `complete()` calls so `cancel()` /
+         *     `finalize()` know how the chain exited.
+         *   - `is_cancelled`: sticky cancellation flag. Orthogonal to `state`:
+         *     cancellation can happen at any point while the chain is `Running`
+         *     and must survive across finalisation so POST hooks can observe it.
+         *   - `task_in_flight`: true between an `IAsyncTask::execute()` call
+         *     and the matching `complete()`. Consulted exclusively by
+         *     `cancel()` to decide whether to call `IAsyncTask::cancel()` on
+         *     the in-flight task &mdash; replaces the per-task
+         *     `_is_being_processed` flag, which was unsound because
+         *     `IAsyncTask` instances are shared across pipelined/multiplexed
+         *     requests.
+         *
+         * Invariants (asserted in debug builds where applicable):
+         *   - `task_in_flight` => `state == Running`
+         *   - `is_cancelled` is monotonic: once set, never cleared
+         *   - `state` transitions only forward: Ready &rarr; Running &rarr; Finalised
+         */
+        struct Lifecycle {
+            State           state          = State::Ready;
+            ProcessingPhase phase          = ProcessingPhase::INITIAL;
+            AsyncTaskResult last_result    = AsyncTaskResult::COMPLETE;
+            bool            is_cancelled   = false;
+            bool            task_in_flight = false;
+        };
+        Lifecycle _lc;
+
+        // --- Semantic queries (all `noexcept`) ---
+
+        /// @return `true` when the context has entered its terminal
+        /// `Finalised` state &mdash; no further tasks will run.
+        [[nodiscard]] bool is_finalised_internal() const noexcept {
+            return _lc.state == State::Finalised;
+        }
+
+        /// @return `true` when either the context has been cancelled or
+        /// already reached its terminal state. This is the guard the
+        /// task-dispatch loop uses to bail out of further work.
+        [[nodiscard]] bool is_cancelled_or_done_internal() const noexcept {
+            return _lc.is_cancelled || _lc.state == State::Finalised;
+        }
 
         /**
          * @brief (Private) Executes all registered lifecycle hooks for a given `HookPoint`.
@@ -141,11 +198,11 @@ namespace qb::http {
          * Guards against multiple invocations.
          */
         void finalize_processing_internal() {
-            if (_finalize_called) {
+            if (_lc.state == State::Finalised) {
                 return;
             }
-            _finalize_called = true;
-            _is_completed_internally = true;
+            _lc.state = State::Finalised;
+            _lc.task_in_flight = false;
 
             execute_hook_internal(HookPoint::POST_HANDLER_EXECUTION);
 
@@ -164,22 +221,22 @@ namespace qb::http {
          * Handles exceptions from task execution by calling `complete(AsyncTaskResult::ERROR)`.
          */
         void proceed_to_next_task_internal() {
-            if (_is_cancelled || _finalize_called) {
-                if (!_finalize_called) finalize_processing_internal();
+            if (is_cancelled_or_done_internal()) {
+                if (!is_finalised_internal()) finalize_processing_internal();
                 return;
             }
 
             if (_current_task_index < _task_chain.size()) {
                 auto task_to_execute = _task_chain[_current_task_index];
                 if (task_to_execute) {
-                    task_to_execute->startProcessing();
+                    _lc.task_in_flight = true;
                     try {
                         task_to_execute->execute(this->shared_from_this());
                     } catch (...) {
-                        task_to_execute->finishProcessing();
+                        _lc.task_in_flight = false;
                         // Only call complete() if context is not already finalized or cancelled
                         // This prevents double finalization and ensures robust error handling
-                        if (!_finalize_called && !_is_cancelled) {
+                        if (!is_cancelled_or_done_internal()) {
                             this->complete(AsyncTaskResult::ERROR);
                         }
                         // If already finalized/cancelled, the exception is ignored as the context
@@ -190,7 +247,6 @@ namespace qb::http {
                     proceed_to_next_task_internal();
                 }
             } else {
-                _is_completed_internally = true;
                 finalize_processing_internal();
             }
         }
@@ -207,11 +263,12 @@ namespace qb::http {
          *              The vector is moved into the context.
          */
         void set_task_chain_and_start(std::vector<std::shared_ptr<IAsyncTask<SessionType> > > chain) {
-            if (_is_completed_internally || _is_cancelled) {
+            if (is_cancelled_or_done_internal()) {
                 return;
             }
             _task_chain = std::move(chain);
             _current_task_index = 0;
+            _lc.state = State::Running;
 
             if (_task_chain.empty()) {
                 complete(AsyncTaskResult::COMPLETE);
@@ -227,7 +284,7 @@ namespace qb::http {
          * @param new_phase The `ProcessingPhase` to set.
          */
         void set_processing_phase(ProcessingPhase new_phase) noexcept {
-            _current_processing_phase = new_phase;
+            _lc.phase = new_phase;
         }
 
                 /**
@@ -262,14 +319,30 @@ namespace qb::http {
 
         /**
          * @brief Destructor.
-         * Ensures finalization logic (`finalize_processing_internal()`) is executed if not already done.
-         * Also executes any `REQUEST_COMPLETE` lifecycle hooks.
+         *
+         * Acts as a defensive safety net for misuse: callers are expected to drive
+         * the context to `State::Finalised` via `complete()` / `cancel()` before
+         * the last `shared_ptr` reference is dropped. If that invariant is broken
+         * (e.g. the task chain throws and no one catches it), the destructor:
+         *   1. Marks the context as `Finalised` to prevent further state changes.
+         *   2. Invokes the finalisation callback inside a `try/catch` (never throws).
+         *   3. Fires the `REQUEST_COMPLETE` hook chain, also inside `try/catch`.
+         *
+         * The destructor is `noexcept`: any exception from the hooks or the
+         * finalisation callback is swallowed rather than propagated during stack
+         * unwinding. Hooks invoked here MUST NOT call `shared_from_this()` on the
+         * context – the control block is already in terminal release state.
          */
-        ~Context() {
-            if (!_finalize_called) {
-                finalize_processing_internal();
+        ~Context() noexcept {
+            try {
+                if (!is_finalised_internal()) {
+                    finalize_processing_internal();
+                }
+                execute_hook_internal(qb::http::HookPoint::REQUEST_COMPLETE);
+            } catch (...) {
+                // Intentionally swallow: a failing hook must never take down the process
+                // during stack unwinding. See the contract described above.
             }
-            execute_hook_internal(qb::http::HookPoint::REQUEST_COMPLETE);
         }
 
         // --- Accessors ---
@@ -354,9 +427,13 @@ namespace qb::http {
          * @brief Stores a custom key-value pair in the context. Useful for sharing data between middleware and handlers.
          * The value is stored as `std::any`, allowing for arbitrary types.
          * If the key already exists, its value is overwritten.
-         * @tparam T The type of the value to store.
+         * @tparam T The (deduced) type of the value to store. May be specified explicitly (e.g.
+         *            `ctx->set<qb::json>("key", payload)`) to guarantee a specific `std::any` tag.
          * @param key The string key for the custom data.
-         * @param value The value to store (moved into `std::any`).
+         * @param value The value to store. Accepted by value so that rvalues are moved into the
+         *              `std::any` and lvalues incur a single copy – on par with perfect forwarding
+         *              for practical payload sizes while remaining robust against explicit
+         *              template-parameter specification.
          */
         template<typename T>
         void set(const std::string &key, T value) {
@@ -424,16 +501,164 @@ namespace qb::http {
          * @return `true` if data with the specified key exists, `false` otherwise.
          */
         [[nodiscard]] bool has(const std::string &key) const noexcept {
-            return _custom_data.count(key) > 0;
+            return _custom_data.find(key) != _custom_data.end();
+        }
+
+        /**
+         * @brief Alias of `has()`; provided for STL alignment.
+         */
+        [[nodiscard]] bool contains(const std::string &key) const noexcept {
+            return _custom_data.find(key) != _custom_data.end();
         }
 
         /**
          * @brief Removes custom data associated with the given key from the context.
          * @param key The string key of the custom data to remove.
          * @return `true` if an element was removed, `false` otherwise (e.g., if the key was not found).
+         * @note The return value is informational — callers legitimately ignore it when performing
+         *       best-effort cleanup; we therefore deliberately do NOT annotate this with `[[nodiscard]]`.
          */
-        [[nodiscard]] bool remove(const std::string &key) noexcept {
+        bool remove(const std::string &key) noexcept {
             return _custom_data.erase(key) > 0;
+        }
+
+        // --- Typed slot API (F23) -------------------------------------------------
+        //
+        // Overloads of the string-keyed API that accept a strongly-typed `Slot<T>`
+        // instead of a raw string. They share the same underlying `CustomDataMap`
+        // so they interoperate transparently with the legacy API:
+        //
+        //   inline constexpr qb::http::Slot<User> kUser{"auth.user"};
+        //   ctx->set(kUser, user);                    // typed
+        //   const User* u = ctx->get_if(kUser);       // typed, no any_cast cost footgun
+        //   std::optional<User> copy = ctx->get(kUser);
+        //   if (ctx->contains(kUser)) { ... }
+        //   ctx->remove(kUser);
+        //
+        // The compile-time type check fires at `set` / `get` sites. Reads stay as
+        // fast as the existing `get_ptr<T>(key)` since `any_cast<T>(&any)` is the
+        // same operation &mdash; what you gain is the impossibility of writing
+        // `int` and reading `std::size_t` into a silent `nullopt`.
+
+        /**
+         * @brief Stores a value under a strongly-typed slot.
+         *
+         * Equivalent to `set<Slot<T>::value_type>(slot.name, value)` but the
+         * declared value type of the slot must match `T` &mdash; passing the
+         * wrong type is a compile error.
+         *
+         * @tparam T Deduced; must be the slot's `value_type`.
+         * @param slot  The strongly-typed slot (usually a `constexpr` global).
+         * @param value The value to store (moved into the map's `std::any`).
+         */
+        template<typename T>
+        void set(const Slot<T>& slot, T value) {
+            _custom_data[detail::slot_key_to_string(slot.name)] = std::move(value);
+        }
+
+        /**
+         * @brief Constructs a value in-place under a strongly-typed slot.
+         *
+         * Avoids the move that `set()` performs. Useful for non-movable types or
+         * to save one relocation for large payloads.
+         *
+         * @tparam T The slot's `value_type`.
+         * @tparam Args The argument types forwarded to `T`'s constructor.
+         * @param slot The strongly-typed slot.
+         * @param args Constructor arguments for `T`.
+         * @return Reference to the newly-constructed value.
+         */
+        template<typename T, typename... Args>
+        T& emplace(const Slot<T>& slot, Args&&... args) {
+            auto& any_ref = _custom_data[detail::slot_key_to_string(slot.name)];
+            any_ref.template emplace<T>(std::forward<Args>(args)...);
+            return *std::any_cast<T>(&any_ref);
+        }
+
+        /**
+         * @brief Retrieves a copy of the value under a strongly-typed slot.
+         * @return `std::optional<T>` containing the value if present and
+         *         type-compatible; `std::nullopt` otherwise. With typed slots
+         *         a `nullopt` return strictly means "slot not set yet" &mdash;
+         *         there is no runtime type mismatch path unless the slot key
+         *         was also written to via the legacy string API with a
+         *         different `T`.
+         */
+        template<typename T>
+        [[nodiscard]] std::optional<T> get(const Slot<T>& slot) const {
+            auto it = _custom_data.find(detail::slot_key_to_string(slot.name));
+            if (it != _custom_data.end()) {
+                if (const T* ptr = std::any_cast<T>(&(it->second))) {
+                    return *ptr;
+                }
+            }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief Returns a mutable pointer to the value under a typed slot, or
+         *        `nullptr` if absent.
+         *
+         * Preferred over `get()` in the hot path: no copy, no `std::optional`
+         * wrapping. Mirrors `std::get_if` semantics.
+         */
+        template<typename T>
+        [[nodiscard]] T* get_if(const Slot<T>& slot) noexcept {
+            auto it = _custom_data.find(detail::slot_key_to_string(slot.name));
+            if (it != _custom_data.end()) {
+                return std::any_cast<T>(&(it->second));
+            }
+            return nullptr;
+        }
+
+        /**
+         * @brief `get_if` overload returning `const T*`.
+         */
+        template<typename T>
+        [[nodiscard]] const T* get_if(const Slot<T>& slot) const noexcept {
+            auto it = _custom_data.find(detail::slot_key_to_string(slot.name));
+            if (it != _custom_data.end()) {
+                return std::any_cast<const T>(&(it->second));
+            }
+            return nullptr;
+        }
+
+        /**
+         * @brief Returns the value under the slot, or `fallback` if the slot
+         *        is not set (or holds an incompatible type).
+         *
+         * @tparam T The slot's `value_type`.
+         * @tparam U A type convertible to `T` used to produce the fallback.
+         *           Defaults to `T` to allow `ctx->get_or(kUser, User{})`.
+         */
+        template<typename T, typename U = T>
+        [[nodiscard]] T get_or(const Slot<T>& slot, U&& fallback) const {
+            if (const T* ptr = get_if(slot)) {
+                return *ptr;
+            }
+            return static_cast<T>(std::forward<U>(fallback));
+        }
+
+        /**
+         * @brief Returns whether a value has been stored under the typed slot.
+         *
+         * Mirrors the semantics of the string-keyed `contains()` but with
+         * compile-time checking of the slot name / value type pair. Does not
+         * verify the stored type &mdash; it only checks key presence &mdash;
+         * so this remains a cheap map lookup.
+         */
+        template<typename T>
+        [[nodiscard]] bool contains(const Slot<T>& slot) const noexcept {
+            return _custom_data.find(detail::slot_key_to_string(slot.name)) != _custom_data.end();
+        }
+
+        /**
+         * @brief Removes the value stored under the typed slot.
+         * @return `true` if an element was removed.
+         */
+        template<typename T>
+        bool remove(const Slot<T>& slot) noexcept {
+            return _custom_data.erase(detail::slot_key_to_string(slot.name)) > 0;
         }
 
         // --- Response Helpers ---
@@ -572,38 +797,32 @@ namespace qb::http {
          * - `AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR`: Indicates a critical error in a special handler (like 404 or error chain).
          *   Sets a 500 error and finalizes immediately, bypassing further error chain logic.
          *
-         * If the context is already finalized (`_finalize_called` is true) or cancelled (`_is_cancelled` is true),
+         * If the context is already finalized (`_lc.state == State::Finalised`) or cancelled (`_lc.is_cancelled` is true),
          * most calls to `complete()` (except with `AsyncTaskResult::CANCELLED`) will be ignored to prevent conflicts.
-         * The method also ensures that the `finishProcessing()` method of the current task is called.
+         * The method also clears the in-flight flag of the current task.
          *
          * @param result The outcome of the current task. Defaults to `AsyncTaskResult::COMPLETE`.
          * @throws Can indirectly lead to exceptions if `finalize_processing_internal()` or subsequent task executions throw,
          *         though this method itself tries to catch exceptions during its switch statement logic and set a 500 error.
          */
         void complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE) {
-            if (_finalize_called && result != AsyncTaskResult::CANCELLED) {
+            if (is_finalised_internal() && result != AsyncTaskResult::CANCELLED) {
                 return;
             }
-            if (_is_cancelled && result != AsyncTaskResult::CANCELLED) {
-                if (!_finalize_called) {
+            if (_lc.is_cancelled && result != AsyncTaskResult::CANCELLED) {
+                if (!is_finalised_internal()) {
                     finalize_processing_internal();
                 }
                 return;
             }
 
-            if (!_task_chain.empty() && _current_task_index < _task_chain.size()) {
-                auto current_task_ptr = _task_chain[_current_task_index];
-                if (current_task_ptr) {
-                    current_task_ptr->finishProcessing();
-                }
-            }
-
-            _last_task_result = result;
+            _lc.task_in_flight = false;
+            _lc.last_result    = result;
 
             try {
                 switch (result) {
                     case AsyncTaskResult::CONTINUE:
-                        if (_is_cancelled) {
+                        if (_lc.is_cancelled) {
                             finalize_processing_internal();
                             return;
                         }
@@ -612,30 +831,26 @@ namespace qb::http {
                         break;
 
                     case AsyncTaskResult::COMPLETE:
-                        _is_completed_internally = true;
                         finalize_processing_internal();
                         break;
 
                     case AsyncTaskResult::CANCELLED:
-                        _is_cancelled = true;
-                        _is_completed_internally = true;
+                        _lc.is_cancelled = true;
                         finalize_processing_internal();
                         break;
 
                     case AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR:
                         _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                        _is_completed_internally = true;
                         finalize_processing_internal();
                         break;
 
                     case AsyncTaskResult::ERROR:
-                        if (_is_cancelled) {
+                        if (_lc.is_cancelled) {
                             finalize_processing_internal();
                             return;
                         }
-                        if (_current_processing_phase == ProcessingPhase::ERROR_CHAIN) {
+                        if (_lc.phase == ProcessingPhase::ERROR_CHAIN) {
                             _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                            _is_completed_internally = true;
                             finalize_processing_internal();
                         } else {
                             auto router_core_shared = _router_core_wptr.lock();
@@ -648,12 +863,10 @@ namespace qb::http {
                                     proceed_to_next_task_internal();
                                 } else {
                                     _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                                    _is_completed_internally = true;
                                     finalize_processing_internal();
                                 }
                             } else {
                                 _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                                _is_completed_internally = true;
                                 finalize_processing_internal();
                             }
                         }
@@ -661,7 +874,6 @@ namespace qb::http {
                 }
             } catch (...) {
                 _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                _is_completed_internally = true;
                 finalize_processing_internal();
             }
         }
@@ -675,15 +887,16 @@ namespace qb::http {
          * @param reason The reason for cancellation. Defaults to "Cancelled by application".
          */
         void cancel(const std::string &reason = "Cancelled by application") noexcept {
-            if (_is_cancelled || _finalize_called) {
+            if (is_cancelled_or_done_internal()) {
                 return;
             }
-            _is_cancelled = true;
+            _lc.is_cancelled = true;
             _cancellation_reason_internal = reason;
 
-            if (!_task_chain.empty() && _current_task_index < _task_chain.size()) {
+            if (_lc.task_in_flight && !_task_chain.empty()
+                && _current_task_index < _task_chain.size()) {
                 auto current_task_shared_ptr = _task_chain[_current_task_index];
-                if (current_task_shared_ptr && current_task_shared_ptr->isCurrentlyProcessing()) {
+                if (current_task_shared_ptr) {
                     try {
                         current_task_shared_ptr->cancel();
                     } catch (...) {
@@ -703,17 +916,22 @@ namespace qb::http {
          * @return `true` if `cancel()` has been called on this context, `false` otherwise.
          */
         [[nodiscard]] bool is_cancelled() const noexcept {
-            return _is_cancelled;
+            return _lc.is_cancelled;
         }
 
         /**
          * @brief Checks if the request processing has been fully completed and finalized.
-         * @return `true` if the finalization logic has been run (i.e., `finalize_processing_internal()` has been called
-         *         and `_finalize_called` is true), `false` otherwise.
+         * @return `true` if the finalization logic has been run (i.e., the context is in
+         *         `State::Finalised`), `false` otherwise.
          */
         [[nodiscard]] bool is_completed() const noexcept {
-            return _finalize_called;
+            return is_finalised_internal();
         }
+
+        /**
+         * @brief Returns the current lifecycle state of the context.
+         */
+        [[nodiscard]] State state() const noexcept { return _lc.state; }
 
         /**
          * @brief Marks this context as finalized without invoking the response-sending callback.
@@ -727,8 +945,8 @@ namespace qb::http {
          */
         void suppress_response() noexcept {
             _on_finalized_callback = nullptr;
-            _finalize_called       = true;
-            _is_completed_internally = true;
+            _lc.state              = State::Finalised;
+            _lc.task_in_flight     = false;
         }
 
         /**
@@ -745,7 +963,18 @@ namespace qb::http {
          * @return The current `ProcessingPhase` (e.g., `NORMAL_CHAIN`, `ERROR_CHAIN`).
          */
         [[nodiscard]] ProcessingPhase get_processing_phase() const noexcept {
-            return _current_processing_phase;
+            return _lc.phase;
+        }
+
+        /**
+         * @brief Returns the `AsyncTaskResult` reported by the most recently
+         *        completed task in the chain.
+         *
+         * Exposed for instrumentation / testing &mdash; the normal request
+         * lifecycle does not need to inspect this value.
+         */
+        [[nodiscard]] AsyncTaskResult last_task_result() const noexcept {
+            return _lc.last_result;
         }
     };
 } // namespace qb::http 

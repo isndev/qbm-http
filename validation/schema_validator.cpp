@@ -28,11 +28,65 @@ namespace qb::http::validation {
     }
 
     bool SchemaValidator::validate(const qb::json &data_to_validate, Result &result) const {
+        // F48 &mdash; propagate the validator's configured error-value policy
+        // to the `Result` before validation runs. This is the public entry
+        // point, so the mapping happens once here rather than in every
+        // rule/keyword call site.
+        const auto mapped = [policy = _error_value_policy] {
+            switch (policy) {
+                case ErrorValuePolicy::None:    return Result::ErrorValuePolicy::None;
+                case ErrorValuePolicy::Preview: return Result::ErrorValuePolicy::Preview;
+                case ErrorValuePolicy::Full:
+                default:                        return Result::ErrorValuePolicy::Full;
+            }
+        }();
+        result.set_error_value_policy(mapped, _offending_value_preview_bytes);
         return validate_recursive(data_to_validate, _schema_definition, "", result);
     }
 
+    SchemaValidator &SchemaValidator::set_error_value_policy(ErrorValuePolicy policy,
+                                                             std::size_t preview_bytes) noexcept {
+        constexpr std::size_t kMinPreview = 16;
+        constexpr std::size_t kMaxPreview = 64 * 1024;
+        if (preview_bytes < kMinPreview) preview_bytes = kMinPreview;
+        if (preview_bytes > kMaxPreview) preview_bytes = kMaxPreview;
+        _error_value_policy = policy;
+        _offending_value_preview_bytes = preview_bytes;
+        return *this;
+    }
+
+    std::optional<qb::json>
+    SchemaValidator::make_offending_value(const qb::json &value) const {
+        // Reuses the `Result` policy shim so all entry points share identical
+        // behaviour; we simulate a single `add_error` to borrow its policy
+        // transform, then take the reshaped payload back.
+        Result tmp;
+        const auto mapped = [policy = _error_value_policy] {
+            switch (policy) {
+                case ErrorValuePolicy::None:    return Result::ErrorValuePolicy::None;
+                case ErrorValuePolicy::Preview: return Result::ErrorValuePolicy::Preview;
+                case ErrorValuePolicy::Full:
+                default:                        return Result::ErrorValuePolicy::Full;
+            }
+        }();
+        tmp.set_error_value_policy(mapped, _offending_value_preview_bytes);
+        tmp.add_error({}, {}, {}, std::make_optional(value));
+        if (tmp.errors().empty()) return std::nullopt;
+        return tmp.errors().front().offending_value;
+    }
+
+    const std::vector<std::shared_ptr<IRule> > &
+    SchemaValidator::rules_for_schema_node(const qb::json &schema_node) const {
+        const qb::json *key = &schema_node;
+        if (const auto it = _rules_cache.find(key); it != _rules_cache.end()) {
+            return it->second;
+        }
+        auto [inserted, _] = _rules_cache.emplace(key, build_rules_for_schema_node(schema_node));
+        return inserted->second;
+    }
+
     std::vector<std::shared_ptr<IRule> >
-    SchemaValidator::create_rules_for_schema_node(const qb::json &schema_node) const {
+    SchemaValidator::build_rules_for_schema_node(const qb::json &schema_node) {
         std::vector<std::shared_ptr<IRule> > rules;
 
         if (schema_node.contains("minLength") && schema_node["minLength"].is_number_integer()) {
@@ -96,7 +150,7 @@ namespace qb::http::validation {
     bool SchemaValidator::apply_primitive_rules(const qb::json &value, const qb::json &schema_node,
                                                 const std::string &path, Result &result) const {
         bool all_rules_passed = true;
-        auto rules = create_rules_for_schema_node(schema_node);
+        const auto &rules = rules_for_schema_node(schema_node);
 
         for (const auto &rule: rules) {
             if (!rule->validate(value, path, result)) {

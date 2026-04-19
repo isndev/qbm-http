@@ -1466,6 +1466,105 @@ TEST_F(ValidationLogicTest, PatternRuleReDoSProtection) {
     // Result depends on implementation - test documents current behavior
 }
 
+// ====================================================================
+// F48 &mdash; Error-value policy tests
+// ====================================================================
+
+// Full (default) keeps the offending value verbatim.
+TEST_F(ValidationLogicTest, ErrorValuePolicyFullKeepsValue) {
+    Result r;
+    EXPECT_EQ(r.error_value_policy(), Result::ErrorValuePolicy::Full);
+    qb::json big = qb::json::object();
+    for (int i = 0; i < 100; ++i) {
+        big["k" + std::to_string(i)] = std::string(64, 'x');
+    }
+    r.add_error("body", "type", "nope", big);
+    ASSERT_EQ(r.errors().size(), 1);
+    ASSERT_TRUE(r.errors().front().offending_value.has_value());
+    EXPECT_EQ(r.errors().front().offending_value->size(), big.size());
+}
+
+// Preview: small values are passed through; large values are truncated.
+TEST_F(ValidationLogicTest, ErrorValuePolicyPreviewTruncatesLargeValues) {
+    Result r;
+    r.set_error_value_policy(Result::ErrorValuePolicy::Preview, 64);
+
+    // Small number stays untouched.
+    r.add_error("a", "rule", "msg", qb::json(42));
+    ASSERT_EQ(r.errors().size(), 1);
+    ASSERT_TRUE(r.errors().front().offending_value.has_value());
+    EXPECT_EQ(r.errors().front().offending_value.value(), qb::json(42));
+
+    // Huge object is truncated and marked.
+    qb::json big = qb::json::object();
+    for (int i = 0; i < 50; ++i) {
+        big["k" + std::to_string(i)] = std::string(32, 'x');
+    }
+    r.add_error("b", "rule", "msg", big);
+    ASSERT_EQ(r.errors().size(), 2);
+    ASSERT_TRUE(r.errors()[1].offending_value.has_value());
+    const auto &preview = *r.errors()[1].offending_value;
+    ASSERT_TRUE(preview.is_object());
+    ASSERT_TRUE(preview.contains("_truncated"));
+    EXPECT_TRUE(preview["_truncated"].get<bool>());
+    ASSERT_TRUE(preview.contains("preview"));
+    EXPECT_LE(preview["preview"].get<std::string>().size(), 64u);
+    EXPECT_EQ(preview["original_kind"].get<std::string>(), std::string(big.type_name()));
+}
+
+// Preview: long strings are cut to the budget.
+TEST_F(ValidationLogicTest, ErrorValuePolicyPreviewTruncatesLongStrings) {
+    Result r;
+    r.set_error_value_policy(Result::ErrorValuePolicy::Preview, 32);
+    std::string huge(1024, 'a');
+    r.add_error("s", "rule", "msg", qb::json(huge));
+    ASSERT_EQ(r.errors().size(), 1);
+    ASSERT_TRUE(r.errors().front().offending_value.has_value());
+    EXPECT_EQ(r.errors().front().offending_value->get<std::string>().size(), 32u);
+}
+
+// None: offending_value is dropped entirely.
+TEST_F(ValidationLogicTest, ErrorValuePolicyNoneDropsValue) {
+    Result r;
+    r.set_error_value_policy(Result::ErrorValuePolicy::None);
+    r.add_error("field", "rule", "msg", qb::json("whatever"));
+    ASSERT_EQ(r.errors().size(), 1);
+    EXPECT_FALSE(r.errors().front().offending_value.has_value());
+}
+
+// The policy survives merge: errors already shaped stay as-is.
+TEST_F(ValidationLogicTest, ErrorValuePolicyMergePreservesErrors) {
+    Result parent;
+    parent.set_error_value_policy(Result::ErrorValuePolicy::None);
+
+    Result child = parent.make_child();
+    EXPECT_EQ(child.error_value_policy(), Result::ErrorValuePolicy::None);
+    child.add_error("x", "rule", "msg", qb::json("omitted"));
+    parent.merge(child);
+
+    ASSERT_EQ(parent.errors().size(), 1);
+    EXPECT_FALSE(parent.errors().front().offending_value.has_value());
+}
+
+// SchemaValidator propagates its policy into the Result passed to validate().
+TEST_F(ValidationLogicTest, SchemaValidatorPropagatesErrorValuePolicy) {
+    qb::json schema = {
+        {"type", "object"},
+        {"properties", {{"name", {{"type", "string"}, {"minLength", 3}}}}},
+        {"required", {"name"}}
+    };
+    SchemaValidator v(schema);
+    v.set_error_value_policy(SchemaValidator::ErrorValuePolicy::None);
+
+    Result out;
+    qb::json data = {{"name", "ab"}};
+    EXPECT_FALSE(v.validate(data, out));
+    EXPECT_FALSE(out.success());
+    for (const auto &err: out.errors()) {
+        EXPECT_FALSE(err.offending_value.has_value());
+    }
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

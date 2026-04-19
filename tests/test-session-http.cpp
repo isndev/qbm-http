@@ -42,29 +42,29 @@ TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
     EXPECT_EQ(res.type(), "application/octet-stream");
     EXPECT_EQ(res.charset(), "utf-8");
     // std::string_view
-    auto res2 = qb::http::RequestView::ContentType("application/json;charset=utf-16");
+    auto res2 = qb::http::Request::ContentType("application/json;charset=utf-16");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-16");
-    res2 = qb::http::RequestView::ContentType(
+    res2 = qb::http::Request::ContentType(
         "   application/json   ;   charset    =   utf-16   ");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-16");
-    res2 = qb::http::RequestView::ContentType("application/json;charset=\"utf-16\"");
+    res2 = qb::http::Request::ContentType("application/json;charset=\"utf-16\"");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-16");
-    res2 = qb::http::RequestView::ContentType("application/json;charset=utf-16;");
+    res2 = qb::http::Request::ContentType("application/json;charset=utf-16;");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-16");
-    res2 = qb::http::RequestView::ContentType("application/json;charset=");
+    res2 = qb::http::Request::ContentType("application/json;charset=");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-8");
-    res2 = qb::http::RequestView::ContentType("application/json;charlot=utf-16");
+    res2 = qb::http::Request::ContentType("application/json;charlot=utf-16");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-8");
-    res2 = qb::http::RequestView::ContentType("application/json;");
+    res2 = qb::http::Request::ContentType("application/json;");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-8");
-    res2 = qb::http::RequestView::ContentType("");
+    res2 = qb::http::Request::ContentType("");
     EXPECT_EQ(res2.type(), "application/octet-stream");
     EXPECT_EQ(res2.charset(), "utf-8");
 }
@@ -261,7 +261,7 @@ class TestSecureServer;
 class TestSecureServerClient
         : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
 public:
-    using Protocol = qb::http::protocol_view<TestSecureServerClient>;
+    using Protocol = qb::http::protocol<TestSecureServerClient>;
 
     explicit TestSecureServerClient(IOServer &server)
         : client(server) {
@@ -305,7 +305,7 @@ public:
 
 class TestSecureClient : public use<TestSecureClient>::tcp::ssl::client<> {
 public:
-    using Protocol = qb::http::protocol_view<TestSecureClient>;
+    using Protocol = qb::http::protocol<TestSecureClient>;
 
     ~TestSecureClient() {
         EXPECT_EQ(msg_count_client_side, NB_ITERATION);

@@ -44,68 +44,138 @@ namespace qb::http::validation {
 
     /**
      * @brief Stores the result of a validation process.
+     *
+     * F48 &mdash; the `Result` owns an `ErrorValuePolicy` which applies to
+     * every `Error` appended through `add_error(field, rule, message, value)`.
+     * Rules and validators should use that overload; pre-constructed `Error`
+     * objects passed to `add_error(Error)` are trusted as-is so the caller can
+     * opt out of the policy when they really want the full payload (e.g. a
+     * synthetic "root schema" error).
      */
     class Result {
-        // Renamed from ValidationResult
+    public:
+        /**
+         * @brief Controls how the `offending_value` of each appended `Error`
+         *        is captured.
+         *  - `Full`    : deep-copy the value (legacy behaviour).
+         *  - `Preview` : serialise and truncate to `preview_bytes`.
+         *  - `None`    : omit the value entirely; the `field_path` remains the
+         *                only way to locate the offending data.
+         */
+        enum class ErrorValuePolicy { Full, Preview, None };
+
     private:
         std::vector<Error> _errors;
+        ErrorValuePolicy _policy{ErrorValuePolicy::Full};
+        std::size_t _preview_bytes{256};
 
     public:
         Result() = default;
 
         /**
-         * @brief Checks if the validation was successful (no errors).
-         * @return True if no errors were recorded, false otherwise.
+         * @brief Configure how subsequent `add_error(...)` invocations capture
+         *        their offending value payload (F48).
          */
-        [[nodiscard]] bool success() const {
-            return _errors.empty();
+        Result &set_error_value_policy(ErrorValuePolicy policy,
+                                       std::size_t preview_bytes = 256) noexcept {
+            constexpr std::size_t kMinPreview = 16;
+            constexpr std::size_t kMaxPreview = 64 * 1024;
+            if (preview_bytes < kMinPreview) preview_bytes = kMinPreview;
+            if (preview_bytes > kMaxPreview) preview_bytes = kMaxPreview;
+            _policy = policy;
+            _preview_bytes = preview_bytes;
+            return *this;
         }
+
+        [[nodiscard]] ErrorValuePolicy error_value_policy() const noexcept { return _policy; }
+
+        [[nodiscard]] std::size_t offending_value_preview_bytes() const noexcept {
+            return _preview_bytes;
+        }
+
+        /**
+         * @brief Checks if the validation was successful (no errors).
+         */
+        [[nodiscard]] bool success() const { return _errors.empty(); }
 
         /**
          * @brief Retrieves all recorded validation errors.
-         * @return A constant reference to the vector of errors.
          */
-        [[nodiscard]] const std::vector<Error> &errors() const {
-            return _errors;
-        }
+        [[nodiscard]] const std::vector<Error> &errors() const { return _errors; }
 
         /**
-         * @brief Adds a new validation error.
-         * @param field_path JSON pointer-like path to the field that failed validation.
-         * @param rule_violated Name of the rule that was violated.
-         * @param message Descriptive message for the error.
-         * @param offending_value Optional qb::json value that caused the error.
+         * @brief Appends a validation error, applying the active error-value
+         *        policy to the supplied `offending_value`.
          */
         void add_error(std::string field_path,
                        std::string rule_violated,
                        std::string message,
                        std::optional<qb::json> offending_value = std::nullopt) {
-            _errors.emplace_back(std::move(field_path), std::move(rule_violated), std::move(message),
-                                 std::move(offending_value));
+            _errors.emplace_back(std::move(field_path), std::move(rule_violated),
+                                 std::move(message), apply_policy(std::move(offending_value)));
         }
 
         /**
-         * @brief Adds a pre-constructed Error object.
-         * @param validation_error The Error object to add.
+         * @brief Appends a pre-constructed Error object without touching its
+         *        `offending_value`. Use this when the caller has already
+         *        shaped the payload explicitly.
          */
         void add_error(Error validation_error) {
             _errors.push_back(std::move(validation_error));
         }
 
         /**
-         * @brief Clears all recorded validation errors.
+         * @brief Clears all recorded validation errors (keeps the policy).
          */
-        void clear() {
-            _errors.clear();
-        }
+        void clear() { _errors.clear(); }
 
         /**
          * @brief Merges errors from another Result object into this one.
-         * @param other The Result object whose errors are to be merged.
+         *        The other result's policy is irrelevant here; we copy the
+         *        already-shaped errors verbatim.
          */
         void merge(const Result &other) {
             if (other._errors.empty()) return;
             _errors.insert(_errors.end(), other._errors.begin(), other._errors.end());
+        }
+
+        /**
+         * @brief Create an empty `Result` that inherits this result's
+         *        error-value policy. Useful for sub-validations whose errors
+         *        will later be merged back into the parent `Result`.
+         */
+        [[nodiscard]] Result make_child() const {
+            Result r;
+            r._policy = _policy;
+            r._preview_bytes = _preview_bytes;
+            return r;
+        }
+
+    private:
+        [[nodiscard]] std::optional<qb::json>
+        apply_policy(std::optional<qb::json> value) const {
+            if (!value.has_value() || _policy == ErrorValuePolicy::Full) {
+                return value;
+            }
+            if (_policy == ErrorValuePolicy::None) {
+                return std::nullopt;
+            }
+            // Preview: cheap kinds pass through, compound kinds are truncated.
+            const qb::json &v = *value;
+            if (v.is_null() || v.is_boolean() || v.is_number()) {
+                return value;
+            }
+            if (v.is_string()) {
+                const auto &s = v.get_ref<const std::string &>();
+                if (s.size() <= _preview_bytes) return value;
+                return qb::json(s.substr(0, _preview_bytes));
+            }
+            std::string dumped = v.dump();
+            if (dumped.size() <= _preview_bytes) return value;
+            dumped.resize(_preview_bytes);
+            return qb::json{{"_truncated", true},
+                            {"preview", std::move(dumped)},
+                            {"original_kind", v.type_name()}};
         }
     };
 } // namespace qb::http::validation 
