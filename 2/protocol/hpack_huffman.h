@@ -167,10 +167,14 @@ inline std::unique_ptr<HuffmanDecodeNode> build_decode_tree() {
 
 /**
  * @brief Check if Huffman encoding should be used for a string
+ *
+ * Accepts any contiguous byte sequence; callers holding views / spans no
+ * longer need to materialise a `std::string` just to probe this function.
+ *
  * @param input The string to check
  * @return true if Huffman encoding would save space
  */
-inline bool should_use_huffman(const std::string& input) {
+inline bool should_use_huffman(std::string_view input) noexcept {
     size_t huffman_bits = 0;
     for (unsigned char c : input) {
         huffman_bits += HUFFMAN_TABLE[c].bits;
@@ -180,34 +184,34 @@ inline bool should_use_huffman(const std::string& input) {
 
 /**
  * @brief Encode a string using HPACK Huffman encoding
- * @param input The string to encode
+ * @param input The bytes to encode (view; no ownership)
  * @param output The output buffer (data will be appended)
  * @return true if encoding succeeded
  */
-inline bool huffman_encode(const std::string& input, std::vector<uint8_t>& output) {
+inline bool huffman_encode(std::string_view input, std::vector<uint8_t>& output) {
     size_t bit_buffer = 0;
     size_t bits_in_buffer = 0;
-    
+
     for (unsigned char c : input) {
         const auto& code_entry = HUFFMAN_TABLE[c];
-        
+
         bit_buffer = (bit_buffer << code_entry.bits) | code_entry.code;
         bits_in_buffer += code_entry.bits;
-        
+
         while (bits_in_buffer >= 8) {
             bits_in_buffer -= 8;
             output.push_back(static_cast<uint8_t>(bit_buffer >> bits_in_buffer));
             bit_buffer &= (1ULL << bits_in_buffer) - 1;
         }
     }
-    
+
     // Pad with 1s if necessary
     if (bits_in_buffer > 0) {
         bit_buffer <<= (8 - bits_in_buffer);
         bit_buffer |= (1ULL << (8 - bits_in_buffer)) - 1;
         output.push_back(static_cast<uint8_t>(bit_buffer));
     }
-    
+
     return true;
 }
 

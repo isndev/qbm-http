@@ -7,8 +7,6 @@
  * (like Content-Type parameters), `accept_encoding` for generating an appropriate
  * Accept-Encoding header value based on server capabilities, and `content_encoding`
  * for selecting a suitable Content-Encoding from a client's Accept-Encoding header.
- * It also contains explicit template instantiations for `THeaders<std::string>`
- * and `THeaders<std::string_view>`.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
@@ -314,10 +312,4 @@ namespace qb::http {
 #endif
         return ""; // No suitable encoding found or compression disabled
     }
-
-    // Explicit template instantiations for THeaders defined in headers.h
-    // This ensures that the compiler generates code for these common types, which can
-    // speed up link times for users of this library.
-    template class THeaders<std::string>;
-    template class THeaders<std::string_view>;
 } // namespace qb::http

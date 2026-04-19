@@ -14,11 +14,11 @@
  */
 #pragma once
 
+#include <array>          // For std::array (method-indexed handler slots)
 #include <string>         // For std::string
 #include <string_view>    // For std::string_view
 #include <vector>         // For std::vector
-#include <map>            // For std::map (handlers)
-#include <unordered_map>  // For std::unordered_map (static_children - O(1) lookup)
+#include <qb/system/container/unordered_map.h>  // For qb::unordered_map (ska::flat_hash_map, cache-friendly O(1) lookup for static_children)
 #include <memory>         // For std::shared_ptr, std::make_shared, std::unique_ptr (used by Node)
 #include <list>           // For std::list (task chains, _path_segment_storage)
 #include <optional>       // For std::optional (match result)
@@ -97,6 +97,28 @@ namespace qb::http {
         };
 
         /**
+         * @brief Number of slots reserved for HTTP method-indexed handler lookup.
+         * Covers the full range of `llhttp` method codes (0..46 for HTTP_QUERY).
+         * Selected as a compile-time constant so that dispatch is an O(1) array index
+         * rather than an O(log n) `std::map` lookup.
+         */
+        static constexpr std::size_t METHOD_SLOT_COUNT = 64;
+
+        /**
+         * @brief Maps a `qb::http::method` to its handler-array slot.
+         * @return A valid index in `[0, METHOD_SLOT_COUNT)`, or a sentinel value
+         *         greater than or equal to `METHOD_SLOT_COUNT` for uninitialised /
+         *         out-of-range methods (which never receive a handler).
+         */
+        [[nodiscard]] static constexpr std::size_t method_slot(qb::http::method m) noexcept {
+            const auto raw = std::to_underlying(static_cast<qb::http::method::Value>(m));
+            if (raw < 0 || static_cast<std::size_t>(raw) >= METHOD_SLOT_COUNT) {
+                return METHOD_SLOT_COUNT; // invalid / uninitialised
+            }
+            return static_cast<std::size_t>(raw);
+        }
+
+        /**
          * @brief Represents a node within the Radix Tree.
          * Each node corresponds to a part of a URL path and can hold handlers for specific HTTP methods.
          */
@@ -105,24 +127,39 @@ namespace qb::http {
             std::string_view segment_match;
             ///< For STATIC nodes: the exact segment string. For PARAMETER/WILDCARD nodes: the name of the parameter/wildcard (e.g., "id", "filepath").
 
-            /** 
-             * @brief Map of HTTP methods to their corresponding handler task lists.
-             * The `TaskList` is a vector of `IAsyncTask` shared pointers, representing the compiled chain
-             * of middleware and the final route handler to be executed for this specific path and method.
+            /**
+             * @brief Flat, method-indexed table of handler task lists.
+             *
+             * The slot at index `method_slot(method)` contains the compiled chain
+             * (middleware + final handler) registered for that method, or a null
+             * pointer if no route is registered. Selected over `std::map` for
+             * constant-time dispatch and cache-friendly layout; at fewer than 64
+             * method slots per node, the extra 8*64 = 512 B per node is negligible
+             * compared to the `std::map` node overhead that was previously paid
+             * per registered method.
              */
-            std::map<qb::http::method, std::shared_ptr<const TaskList> > handlers;
+            std::array<std::shared_ptr<const TaskList>, METHOD_SLOT_COUNT> handlers{};
 
             /** @brief Children nodes representing static path segments. Keyed by the segment string.
-             *  Uses std::unordered_map for O(1) average lookup time instead of O(log n) with std::map.
-             *  Order is not important as we only perform lookups, never iterate in order.
+             *
+             *  Backed by `qb::unordered_map` (an open-addressed `ska::flat_hash_map`) so
+             *  both the buckets and the `string_view` keys live in a single contiguous
+             *  buffer. This gives us O(1) average lookup with one cache line touch for
+             *  small fanouts, which is the dominant case in real HTTP routers (a handful
+             *  of children per node). Iteration order does not matter: we only perform
+             *  `find()`, never range-scan, during matching.
+             *
+             *  Ownership is exclusive: routes are immutable after `compile()`, so a
+             *  `std::unique_ptr` is sufficient and avoids the atomic refcount traffic a
+             *  `std::shared_ptr` would incur on every traversal.
              */
-            qb::unordered_map<std::string_view, std::shared_ptr<Node> > static_children;
+            qb::unordered_map<std::string_view, std::unique_ptr<Node> > static_children;
             /** @brief Child node for a parameterized segment, if one exists at this level. */
-            std::shared_ptr<Node> param_child = nullptr;
+            std::unique_ptr<Node> param_child;
             /** @brief The name of the parameter for `param_child` (e.g., "id" for a `:id` segment). */
             std::string_view param_name;
             /** @brief Child node for a wildcard segment, if one exists at this level. */
-            std::shared_ptr<Node> wildcard_child = nullptr;
+            std::unique_ptr<Node> wildcard_child;
 
             /**
              * @brief Constructs a Node.
@@ -134,7 +171,7 @@ namespace qb::http {
             }
         };
 
-        std::shared_ptr<Node> _root; ///< The root node of the Radix Tree.
+        std::unique_ptr<Node> _root; ///< The root node of the Radix Tree.
 
         /**
          * @brief Internal storage for path segments to ensure `std::string_view` stability.
@@ -189,7 +226,7 @@ namespace qb::http {
         /**
          * @brief Constructs an empty `RadixTree` with a root node.
          */
-        RadixTree() : _root(std::make_shared<Node>(NodeType::ROOT)) {
+        RadixTree() : _root(std::make_unique<Node>(NodeType::ROOT)) {
         }
 
         /**
@@ -209,7 +246,7 @@ namespace qb::http {
                        std::vector<std::shared_ptr<IAsyncTask<SessionType> > > task_chain_list) {
             TaskList task_chain_vec = std::move(task_chain_list); // RadixTree::Node stores a vector internally for handlers.
 
-            std::shared_ptr<Node> current_node = _root;
+            Node *current_node = _root.get();
             std::vector<std::string_view> segments = split_path_to_segments(path_pattern_str);
 
             for (size_t i = 0; i < segments.size(); ++i) {
@@ -247,14 +284,14 @@ namespace qb::http {
                     std::string_view wildcard_name_sv = _path_segment_storage.back();
 
                     if (!current_node->wildcard_child) {
-                        current_node->wildcard_child = std::make_shared<Node>(NodeType::WILDCARD, wildcard_name_sv);
+                        current_node->wildcard_child = std::make_unique<Node>(NodeType::WILDCARD, wildcard_name_sv);
                     } else if (current_node->wildcard_child->segment_match != wildcard_name_sv) {
                         throw std::invalid_argument(
                             "Wildcard segment '" + std::string(segment_sv) + "' conflicts with existing wildcard '*" +
                             std::string(current_node->wildcard_child->segment_match) +
                             "' at the same level in path: " + path_pattern_str);
                     }
-                    current_node = current_node->wildcard_child;
+                    current_node = current_node->wildcard_child.get();
                     break; // Wildcard is always the last segment, so stop iterating path segments.
                 } else if (segment_sv[0] == ':') {
                     // Parameter segment
@@ -274,7 +311,7 @@ namespace qb::http {
                     std::string_view p_name_sv = _path_segment_storage.back();
 
                     if (!current_node->param_child) {
-                        current_node->param_child = std::make_shared<Node>(NodeType::PARAMETER, p_name_sv);
+                        current_node->param_child = std::make_unique<Node>(NodeType::PARAMETER, p_name_sv);
                         current_node->param_name = p_name_sv;
                     } else if (current_node->param_name != p_name_sv) {
                         throw std::invalid_argument(
@@ -282,7 +319,7 @@ namespace qb::http {
                             std::string(current_node->param_name) +
                             "' at the same level in path: " + path_pattern_str);
                     }
-                    current_node = current_node->param_child;
+                    current_node = current_node->param_child.get();
                 } else {
                     // Static segment
                     _path_segment_storage.emplace_back(segment_sv);
@@ -290,22 +327,29 @@ namespace qb::http {
 
                     auto it = current_node->static_children.find(static_segment_sv);
                     if (it == current_node->static_children.end()) {
-                        auto new_node = std::make_shared<Node>(NodeType::STATIC, static_segment_sv);
-                        current_node->static_children[static_segment_sv] = new_node;
-                        current_node = new_node;
+                        auto new_node = std::make_unique<Node>(NodeType::STATIC, static_segment_sv);
+                        Node *raw = new_node.get();
+                        current_node->static_children.emplace(static_segment_sv, std::move(new_node));
+                        current_node = raw;
                     } else {
-                        current_node = it->second;
+                        current_node = it->second.get();
                     }
                 }
             }
             // After iterating all segments, current_node is the terminal node for this path.
-            current_node->handlers[method] = std::make_shared<const TaskList>(std::move(task_chain_vec));
+            const auto slot = method_slot(method);
+            if (slot >= METHOD_SLOT_COUNT) {
+                throw std::invalid_argument(
+                    "Cannot register a handler for an uninitialised / out-of-range HTTP method on path: "
+                    + path_pattern_str);
+            }
+            current_node->handlers[slot] = std::make_shared<const TaskList>(std::move(task_chain_vec));
         }
 
         /**
          * @brief Matches a request path and HTTP method against the stored routes.
          *
-         * Traverses the Radix Tree based on the segments of the input `path_str`.
+         * Traverses the Radix Tree based on the segments of the input `path_sv`.
          * It attempts to find a node that corresponds to the full path and has a handler
          * registered for the given `method`.
          * Parameter and wildcard values are extracted into `PathParameters`.
@@ -313,25 +357,38 @@ namespace qb::http {
          * 1. Static segments are preferred over parameterized segments.
          * 2. Parameterized segments are preferred over wildcard segments (though a wildcard can only be terminal).
          *
-         * @param path_str The request URI path string (e.g., "/users/123/profile").
+         * The caller owns the backing storage for `path_sv`; the returned
+         * `MatchedRouteInfo` may contain `std::string_view`s that reference
+         * slices of it, so it must remain valid for the lifetime of the match
+         * result (typically: the current request processing chain).
+         *
+         * @param path_sv The request URI path (e.g., "/users/123/profile").
          * @param method The HTTP method of the request.
          * @return An `std::optional<MatchedRouteInfo<SessionType>>`. If a match is found, it contains the
          *         extracted path parameters and a shared pointer to the compiled task list for the route.
          *         If no match is found, `std::nullopt` is returned.
          */
         [[nodiscard]] std::optional<MatchedRouteInfo<SessionType> > match(
-            const std::string &path_str, qb::http::method method) const {
+            std::string_view path_sv, qb::http::method method) const {
             PathParameters params;
-            std::vector<std::string_view> segments = split_path_to_segments(path_str);
+            std::vector<std::string_view> segments = split_path_to_segments(path_sv);
 
-            // Lazy allocation: path_segments_str_for_wildcard is only created if a wildcard is actually matched.
-            // This avoids unnecessary allocations for the common case where no wildcard routes exist.
-            std::optional<std::vector<std::string> > path_segments_str_for_wildcard;
+            const std::size_t slot = method_slot(method);
+            if (slot >= METHOD_SLOT_COUNT) {
+                return std::nullopt; // unknown / uninitialised method -> cannot match anything
+            }
 
-            // Recursive lambda for matching
-            std::function<std::optional<MatchedRouteInfo<SessionType> >(std::shared_ptr<Node>, size_t, PathParameters)>
+            // For wildcard capture: reconstructing the slice joined by '/' is
+            // a single substring of the original `path_sv`. This avoids the
+            // per-request string copy / byte-wise concatenation the legacy
+            // implementation performed.
+
+            // Recursive lambda for matching. Nodes are borrowed via raw pointers:
+            // the tree owns them through `std::unique_ptr`, so for the duration of
+            // this call `const Node*` is guaranteed to outlive the recursion frame.
+            std::function<std::optional<MatchedRouteInfo<SessionType> >(const Node *, size_t, PathParameters)>
                     find_match_recursive =
-                            [&](std::shared_ptr<Node> current_node_ptr, size_t segment_idx,
+                            [&](const Node *current_node_ptr, size_t segment_idx,
                                 PathParameters current_params)
                         -> std::optional<MatchedRouteInfo<SessionType> > {
                         if (!current_node_ptr) {
@@ -353,18 +410,18 @@ namespace qb::http {
 
                         // Base case: All path segments have been consumed
                         if (segment_idx == segments.size()) {
-                            auto handler_it = current_node_ptr->handlers.find(method);
-                            if (handler_it != current_node_ptr->handlers.end()) {
-                                return MatchedRouteInfo<SessionType>(current_params, handler_it->second);
+                            const auto &handler_here = current_node_ptr->handlers[slot];
+                            if (handler_here) {
+                                return MatchedRouteInfo<SessionType>(current_params, handler_here);
                             }
                             // Special case for routes like /foo/* that can match /foo/ (wildcard captures empty)
                             if (current_node_ptr->wildcard_child) {
-                                auto wc_handler_it = current_node_ptr->wildcard_child->handlers.find(method);
-                                if (wc_handler_it != current_node_ptr->wildcard_child->handlers.end()) {
+                                const auto &wc_handler = current_node_ptr->wildcard_child->handlers[slot];
+                                if (wc_handler) {
                                     PathParameters final_params_for_wc = current_params;
                                     final_params_for_wc.set(current_node_ptr->wildcard_child->segment_match, "");
                                     // Wildcard value is empty
-                                    return MatchedRouteInfo<SessionType>(final_params_for_wc, wc_handler_it->second);
+                                    return MatchedRouteInfo<SessionType>(final_params_for_wc, wc_handler);
                                 }
                             }
                             return std::nullopt;
@@ -376,7 +433,7 @@ namespace qb::http {
                         // 1. Try static child match (highest priority)
                         auto static_child_it = current_node_ptr->static_children.find(current_path_segment_view);
                         if (static_child_it != current_node_ptr->static_children.end()) {
-                            auto res = find_match_recursive(static_child_it->second, segment_idx + 1, current_params);
+                            auto res = find_match_recursive(static_child_it->second.get(), segment_idx + 1, current_params);
                             // Pass params by value for fork
                             if (res) return res;
                         }
@@ -385,50 +442,46 @@ namespace qb::http {
                         if (current_node_ptr->param_child) {
                             PathParameters params_for_param_branch = current_params;
                             params_for_param_branch.set(current_node_ptr->param_name, current_path_segment_view);
-                            auto res = find_match_recursive(current_node_ptr->param_child, segment_idx + 1,
+                            auto res = find_match_recursive(current_node_ptr->param_child.get(), segment_idx + 1,
                                                             std::move(params_for_param_branch));
                             if (res) return res;
                         }
 
                         // 3. Try wildcard child match (lowest priority, and it consumes all remaining segments)
                         if (current_node_ptr->wildcard_child) {
-                            // Lazy creation: only create path_segments_str_for_wildcard if we actually need it
-                            if (!path_segments_str_for_wildcard.has_value()) {
-                                path_segments_str_for_wildcard.emplace();
-                                path_segments_str_for_wildcard->reserve(segments.size());
-                                for (const auto &sv: segments) {
-                                    path_segments_str_for_wildcard->emplace_back(sv);
-                                }
-                            }
-                            
-                            std::string wildcard_captured_value;
-                            for (size_t i = segment_idx; i < segments.size(); ++i) {
-                                if (i > segment_idx) wildcard_captured_value += "/";
-                                wildcard_captured_value += (*path_segments_str_for_wildcard)[i];
-                                // Use pre-converted strings for safety
-                            }
+                            // Zero-copy wildcard slice: segments are views into `path_sv`, so
+                            // the span "/segments[idx]/.../segments[last]" is a single
+                            // contiguous substring. Compute it without allocations and let
+                            // `PathParameters::set` do the sole owning copy.
+                            const auto &first_seg = segments[segment_idx];
+                            const auto &last_seg = segments.back();
+                            const char *slice_begin = first_seg.data();
+                            const char *slice_end = last_seg.data() + last_seg.size();
+                            std::string_view wildcard_captured_view{
+                                slice_begin, static_cast<std::size_t>(slice_end - slice_begin)};
+
                             PathParameters params_for_wildcard_branch = current_params;
                             params_for_wildcard_branch.set(current_node_ptr->wildcard_child->segment_match,
-                                                           wildcard_captured_value);
+                                                           wildcard_captured_view);
 
                             // Wildcard consumes all remaining segments, so we must find the handler on the wildcard_child itself.
-                            auto handler_it = current_node_ptr->wildcard_child->handlers.find(method);
-                            if (handler_it != current_node_ptr->wildcard_child->handlers.end()) {
-                                return MatchedRouteInfo<SessionType>(params_for_wildcard_branch, handler_it->second);
+                            const auto &wc_handler = current_node_ptr->wildcard_child->handlers[slot];
+                            if (wc_handler) {
+                                return MatchedRouteInfo<SessionType>(params_for_wildcard_branch, wc_handler);
                             }
                         }
 
                         return std::nullopt; // No match found down any path from this node
                     };
 
-            return find_match_recursive(_root, 0, params);
+            return find_match_recursive(_root.get(), 0, params);
         }
 
         /**
          * @brief Clears all routes from the Radix Tree, resetting it to an empty state with only a root node.
          */
         void clear() noexcept {
-            _root = std::make_shared<Node>(NodeType::ROOT); // Reset to a new root node
+            _root = std::make_unique<Node>(NodeType::ROOT); // Reset to a new root node
             _path_segment_storage.clear(); // Clear stored path segments as well
         }
 

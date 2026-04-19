@@ -874,7 +874,105 @@ TEST_F(StaticFilesMiddlewareTest, SecurityMaxPathLength) {
     EXPECT_FALSE(_session->_final_handler_called && _session->_response.status() == qb::http::status::OK);
 }
 
-// --- End of New Test Cases ---
+// --- F44 Hardening Tests ---
+
+TEST_F(StaticFilesMiddlewareTest, EncodedTraversalIsRejected) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+
+    // %2e%2e%2f decodes to "../" which must be caught by the canonical prefix
+    // check once the sanitizer url-decodes the path.
+    configure_router_and_run(sf_mw,
+                             create_request(qb::http::method::GET,
+                                            "/%2e%2e%2f%2e%2e%2fetc%2fpasswd"));
+    EXPECT_NE(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND)
+        << "Status was " << _session->_response.status();
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, MaxFileSizeRejectsLargeFiles) {
+    // Craft a file that is larger than the configured cap.
+    const auto big_path = _test_root_dir / "big.bin";
+    create_test_file(big_path, std::string(2048, 'x'));
+
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_max_file_size(1024);
+
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/big.bin"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, MaxFileSizeZeroDisablesCap) {
+    const auto big_path = _test_root_dir / "huge.bin";
+    create_test_file(big_path, std::string(4096, 'y'));
+
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_max_file_size(0); // 0 = unlimited
+
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/huge.bin"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().size(), 4096u);
+}
+
+TEST_F(StaticFilesMiddlewareTest, RejectSymlinksOptionBlocksInsideLinks) {
+    std::error_code ec;
+    if (!std::filesystem::exists(_test_root_dir / "symlink_to_inside.txt", ec) &&
+        !std::filesystem::is_symlink(_test_root_dir / "symlink_to_inside.txt", ec)) {
+        GTEST_SKIP() << "Platform did not allow symlink creation";
+    }
+
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_reject_symlinks(true);
+
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+    configure_router_and_run(sf_mw,
+                             create_request(qb::http::method::GET,
+                                            "/symlink_to_inside.txt"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, RangeParserRejectsNegativeNumbers) {
+    using qb::http::internal::parse_byte_range;
+    // A leading '-' before the dash is a negative start — must be refused.
+    EXPECT_FALSE(parse_byte_range("bytes=-5-10", 100).has_value());
+    // A leading '+' is not a digit and must be refused.
+    EXPECT_FALSE(parse_byte_range("bytes=+5-10", 100).has_value());
+    // Whitespace inside the token is not a digit.
+    EXPECT_FALSE(parse_byte_range("bytes= 5-10", 100).has_value());
+    // Multi-range specs must be refused (we serve single ranges only).
+    EXPECT_FALSE(parse_byte_range("bytes=0-5,10-15", 100).has_value());
+}
+
+TEST_F(StaticFilesMiddlewareTest, RangeParserAcceptsValidForms) {
+    using qb::http::internal::parse_byte_range;
+    constexpr long long total = 1000;
+
+    auto r1 = parse_byte_range("bytes=0-99", total);
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(r1->first, 0);
+    EXPECT_EQ(r1->second, 100);
+
+    auto r2 = parse_byte_range("bytes=500-", total);
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(r2->first, 500);
+    EXPECT_EQ(r2->second, 500);
+
+    auto r3 = parse_byte_range("bytes=-200", total);
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(r3->first, 800);
+    EXPECT_EQ(r3->second, 200);
+}
+
+// --- End of F44 Hardening Tests ---
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

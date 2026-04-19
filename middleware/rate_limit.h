@@ -12,21 +12,15 @@
  * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Middleware
- * 
- * @warning IMPORTANT - QB Actor Framework Threading Model:
- * This middleware currently uses `std::mutex` for thread safety. However, in the QB Actor
- * Framework, each Actor runs on a single VirtualCore (thread) and should follow the
- * "share nothing" philosophy. Using mutexes in Actors is an ANTI-PATTERN.
- * 
- * RECOMMENDED ARCHITECTURE:
- * For proper QB-style rate limiting, create a dedicated RateLimitActor that:
- * 1. Receives request count messages from HTTP session actors via `qb::Pipe`
- * 2. Maintains rate limit state in its own isolated actor state (no mutex needed)
- * 3. Responds with allow/deny messages
- * 4. Uses Actor message passing instead of shared state with locks
- * 
- * This current implementation uses mutex as a temporary measure and should be refactored
- * to use the Actor model properly for production systems.
+ *
+ * @note Threading model:
+ * Each qb listener / VirtualCore is strictly mono-thread; HTTP sessions
+ * registered on a given listener are never accessed concurrently. The
+ * `RateLimitMiddleware` therefore stores its client map without any
+ * locking.  If the same middleware instance is shared across multiple
+ * listeners (e.g. a multi-core server), each listener must own its own
+ * instance &mdash; use the `make_rate_limit_middleware` factory per
+ * `io_handler` rather than as a static singleton.
  */
 #pragma once
 
@@ -34,7 +28,6 @@
 #include <functional>  // For std::function
 #include <memory>      // For std::shared_ptr, std::make_shared
 #include <string>      // For std::string, std::to_string
-#include <mutex>       // For std::mutex, std::lock_guard
 #include <vector>      // For std::vector (used in RateLimitOptions setters indirectly)
 #include <utility>     // For std::move
 
@@ -210,7 +203,6 @@ namespace qb::http {
             }
 
             // Default extraction logic - SECURITY FIX: Improved X-Forwarded-For handling
-            // TRequest::header returns String type, ensure conversion to std::string for processing.
             std::string client_id_str;
             
             // SECURITY FIX: Prefer more secure headers over X-Forwarded-For when available
@@ -290,12 +282,15 @@ namespace qb::http {
      * and a custom message. It also adds standard rate limit headers (`X-RateLimit-Limit`,
      * `X-RateLimit-Remaining`, `X-RateLimit-Reset`) to all responses for clients being tracked.
      *
-     * Thread safety for request counting is managed internally using a `std::mutex`.
+     * @note The middleware is lock-free: it relies on the qb mono-thread
+     * per-listener guarantee. If the same instance is used from multiple
+     * listeners, instantiate one per listener (see the factory helper at
+     * the bottom of this file).
      *
      * @tparam SessionType The type of the session object managed by the router, used by `Context`.
      */
     template<typename SessionType>
-    class RateLimitMiddleware : public IMiddleware<SessionType> {
+    class RateLimitMiddleware final : public IMiddleware<SessionType> {
     public:
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
 
@@ -346,33 +341,31 @@ namespace qb::http {
 
             bool rate_limited_flag = false;
             bool memory_limit_reached = false;
-            ClientData client_data_for_headers; // To store data for headers outside lock
+            ClientData client_data_for_headers; // Snapshot used to build rate-limit headers.
 
-            {
-                std::lock_guard<std::mutex> lock(_mutex); // Protect access to _client_data
-                
-                // Security: Limit total tracked clients to prevent memory exhaustion
-                if (_client_data.size() >= rate_limit_security::MAX_TRACKED_CLIENTS && 
-                    _client_data.find(client_id) == _client_data.end()) {
-                    memory_limit_reached = true;
-                } else {
-                    auto now = std::chrono::steady_clock::now();
-                    ClientData &current_client_record = _client_data[client_id]; // Creates if not exist
+            // qb sessions on a given listener are mono-thread, so no locking
+            // is required to access `_client_data`. See the note on the
+            // class doc for multi-listener topologies.
+            if (_client_data.size() >= rate_limit_security::MAX_TRACKED_CLIENTS &&
+                _client_data.find(client_id) == _client_data.end()) {
+                memory_limit_reached = true;
+            } else {
+                const auto now = std::chrono::steady_clock::now();
+                ClientData &current_client_record = _client_data[client_id]; // Creates if not exist
 
-                    // Check if the window has reset for this client
-                    if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                            now - current_client_record.last_reset_time) >= _options->get_window()) {
-                        current_client_record.request_count = 0;
-                        current_client_record.last_reset_time = now;
-                    }
-
-                    if (current_client_record.request_count >= _options->get_max_requests()) {
-                        rate_limited_flag = true;
-                    } else {
-                        current_client_record.request_count++;
-                    }
-                    client_data_for_headers = current_client_record; // Copy data for header setting (outside lock)
+                // Check if the window has reset for this client
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - current_client_record.last_reset_time) >= _options->get_window()) {
+                    current_client_record.request_count = 0;
+                    current_client_record.last_reset_time = now;
                 }
+
+                if (current_client_record.request_count >= _options->get_max_requests()) {
+                    rate_limited_flag = true;
+                } else {
+                    current_client_record.request_count++;
+                }
+                client_data_for_headers = current_client_record;
             }
 
             // Handle memory limit reached
@@ -412,9 +405,7 @@ namespace qb::http {
          * This clears all client request counts and effectively starts fresh windows for everyone.
          * @return Reference to this `RateLimitMiddleware` for chaining.
          */
-        RateLimitMiddleware &reset_all_clients() {
-            // Not noexcept due to lock
-            std::lock_guard<std::mutex> lock(_mutex);
+        RateLimitMiddleware &reset_all_clients() noexcept {
             _client_data.clear();
             return *this;
         }
@@ -425,8 +416,6 @@ namespace qb::http {
          * @return Reference to this `RateLimitMiddleware` for chaining.
          */
         RateLimitMiddleware &reset_client(const std::string &client_id) {
-            // Not noexcept due to lock
-            std::lock_guard<std::mutex> lock(_mutex);
             _client_data.erase(client_id);
             return *this;
         }
@@ -446,8 +435,7 @@ namespace qb::http {
 
         std::shared_ptr<RateLimitOptions> _options; ///< Shared pointer to the rate limiting configuration.
         std::string _name; ///< Name of this middleware instance.
-        mutable std::mutex _mutex; ///< Mutex to protect concurrent access to `_client_data`.
-        mutable qb::unordered_map<std::string, ClientData> _client_data; ///< Stores request counts per client ID.
+        qb::unordered_map<std::string, ClientData> _client_data; ///< Stores request counts per client ID. Accessed from the owning listener only.
 
         /**
          * @brief (Private) Adds standard `X-RateLimit-*` headers to the HTTP response.

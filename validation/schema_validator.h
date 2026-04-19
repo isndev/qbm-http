@@ -14,6 +14,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 #include <qb/json.h>
@@ -32,6 +33,28 @@ namespace qb::http::validation {
     class SchemaValidator {
     public:
         /**
+         * @brief Policy controlling how much of the offending value is copied
+         *        into each `Error` record (F48).
+         *
+         * A single failed validation can produce a long chain of `Error`
+         * records, each carrying a `std::optional<qb::json>` captured at the
+         * failure site. For deep schemas, copying the full subtree per error
+         * dominates the validator's allocation profile. This enum lets the
+         * caller trade debug detail for memory:
+         *   - `Full`    &mdash; capture the offending subtree verbatim (legacy
+         *                  behaviour, kept as default for back-compat).
+         *   - `Preview` &mdash; store a serialised preview truncated to
+         *                  `max_offending_value_bytes`. Useful in production
+         *                  where error logs are forwarded to external systems
+         *                  with strict payload budgets.
+         *   - `None`    &mdash; omit the value entirely; the error still
+         *                  carries `field_path` (JSON-pointer-ish) that the
+         *                  caller can use to resolve the value lazily from the
+         *                  original document.
+         */
+        enum class ErrorValuePolicy { Full, Preview, None };
+
+        /**
          * @brief Constructs a SchemaValidator with a given JSON schema definition.
          * @param schema_definition The qb::json object representing the root schema.
          * @throws std::invalid_argument if the schema_definition is not a JSON object.
@@ -45,6 +68,33 @@ namespace qb::http::validation {
          * @return True if the data is valid according to the schema, false otherwise.
          */
         bool validate(const qb::json &data_to_validate, Result &result) const;
+
+        /**
+         * @brief Configure how offending values are stored in `Error` records (F48).
+         *
+         * @param policy       One of `Full`, `Preview`, `None`.
+         * @param preview_bytes Cap (in bytes of the `dump()` output) used when
+         *                     `policy == Preview`. Ignored otherwise. Defaults
+         *                     to 256 which comfortably fits a log line.
+         */
+        SchemaValidator &set_error_value_policy(ErrorValuePolicy policy,
+                                                std::size_t preview_bytes = 256) noexcept;
+
+        [[nodiscard]] ErrorValuePolicy error_value_policy() const noexcept {
+            return _error_value_policy;
+        }
+
+        [[nodiscard]] std::size_t offending_value_preview_bytes() const noexcept {
+            return _offending_value_preview_bytes;
+        }
+
+        /**
+         * @brief Builds an `offending_value` payload respecting the active
+         *        policy. Exposed publicly so that external rule implementations
+         *        can honour the same policy.
+         */
+        [[nodiscard]] std::optional<qb::json>
+        make_offending_value(const qb::json &value) const;
 
     private:
         qb::json _schema_definition; // Store a copy of the schema definition.
@@ -91,7 +141,26 @@ namespace qb::http::validation {
                                   Result &result) const;
 
         // Helper to create a list of IRule objects based on keywords in a schema node.
-        std::vector<std::shared_ptr<IRule> >
-        create_rules_for_schema_node(const qb::json &schema_node) const;
+        // The returned vector is cached per schema-node pointer so we only pay the
+        // compilation cost once per route (F46). Callers must not keep the reference
+        // past the validator's lifetime.
+        const std::vector<std::shared_ptr<IRule> > &
+        rules_for_schema_node(const qb::json &schema_node) const;
+
+        static std::vector<std::shared_ptr<IRule> >
+        build_rules_for_schema_node(const qb::json &schema_node);
+
+        /// Cache of pre-compiled rule lists keyed by schema-node pointer.
+        /// `_schema_definition` is stored by value and never mutated after
+        /// construction, which keeps those pointers stable for the full lifetime
+        /// of the validator. We rely on `std::unordered_map` for reference
+        /// stability on insertion, required since callers hold the returned
+        /// vector by reference across inner recursion.
+        mutable std::unordered_map<const qb::json *, std::vector<std::shared_ptr<IRule> > >
+                _rules_cache;
+
+        /// F48 &mdash; offending-value policy. Default is `Full` (legacy).
+        ErrorValuePolicy _error_value_policy{ErrorValuePolicy::Full};
+        std::size_t _offending_value_preview_bytes{256};
     };
 } // namespace qb::http::validation 

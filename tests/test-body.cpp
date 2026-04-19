@@ -482,96 +482,9 @@ TEST_F(BodyTest, FormEncodingDecodingComplexValues) {
     EXPECT_EQ("unicode✓value", parsed_form.get_first("unicode✓key").value_or(""));
 }
 
-// Helper function to create a simple multipart_view body
-MultipartView create_simple_multipart_view() {
-    // Note: For MultipartView, the part bodies and header values should be string_views
-    // that have a lifetime managed outside, or point to parts of a larger string_view.
-    // For simplicity in this test, we use string literals which are safe.
-    MultipartView mpv;
-    auto &part1 = mpv.create_part();
-    part1.set_header("Content-Disposition", "form-data; name=\"text_field_sv\"");
-    part1.body = "Simple text from StringView";
-
-    auto &part2 = mpv.create_part();
-    part2.set_header("Content-Disposition", "form-data; name=\"file_field_sv\"; filename=\"test_sv.txt\"");
-    part2.set_header("Content-Type", "text/plain");
-    part2.body = "Content of the file from StringView.";
-    return mpv;
-}
-
-TEST_F(BodyTest, MultipartViewAssignmentAndConversion) {
-    MultipartView original_mpv = create_simple_multipart_view();
-
-    // Test const& assignment
-    body = original_mpv;
-    std::string body_str_const_ref = body.as<std::string>();
-    EXPECT_NE(body_str_const_ref.find(original_mpv.boundary()), std::string::npos);
-    EXPECT_NE(body_str_const_ref.find("Simple text from StringView"), std::string::npos);
-
-    MultipartView parsed_mpv_const_ref = body.as<MultipartView>();
-    EXPECT_EQ(original_mpv.boundary(), parsed_mpv_const_ref.boundary());
-    ASSERT_EQ(original_mpv.parts().size(), parsed_mpv_const_ref.parts().size());
-    for (size_t i = 0; i < original_mpv.parts().size(); ++i) {
-        EXPECT_EQ(original_mpv.parts()[i].body, parsed_mpv_const_ref.parts()[i].body);
-        EXPECT_EQ(original_mpv.parts()[i].headers().size(), parsed_mpv_const_ref.parts()[i].headers().size());
-    }
-
-    // Test && assignment
-    body.clear();
-    MultipartView mpv_to_move = create_simple_multipart_view();
-    mpv_to_move.create_part().body = "extra part for move test"; // Make it unique
-    std::string moved_boundary = mpv_to_move.boundary(); // Capture boundary before move
-    size_t moved_parts_count = mpv_to_move.parts().size();
-
-    body = std::move(mpv_to_move);
-    // Check if mpv_to_move is cleared (its parts vector should be empty)
-    EXPECT_TRUE(mpv_to_move.parts().empty());
-
-    std::string body_str_move_ref = body.as<std::string>();
-    EXPECT_NE(body_str_move_ref.find(moved_boundary), std::string::npos);
-    EXPECT_NE(body_str_move_ref.find("extra part for move test"), std::string::npos);
-
-    MultipartView parsed_mpv_move_ref = body.as<MultipartView>();
-    EXPECT_EQ(moved_boundary, parsed_mpv_move_ref.boundary());
-    ASSERT_EQ(moved_parts_count, parsed_mpv_move_ref.parts().size());
-    bool found_extra_part = false;
-    for (const auto &part: parsed_mpv_move_ref.parts()) {
-        if (part.body == "extra part for move test") {
-            found_extra_part = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(found_extra_part);
-
-    // Test as<MultipartView>() with manually constructed body (original part of the test)
-    std::string manual_boundary_str = "manual_boundary_for_mpv";
-    MultipartView manual_mpv_setup(manual_boundary_str);
-    auto &p1 = manual_mpv_setup.create_part();
-    p1.set_header("H1", "V1");
-    p1.body = "ViewPart1";
-    auto &p2 = manual_mpv_setup.create_part();
-    p2.set_header("H2", "V2");
-    p2.body = "ViewPart2";
-
-    std::string raw_body_content = "--" + manual_boundary_str + "\r\n";
-    raw_body_content += "H1: V1\r\n";
-    raw_body_content += "\r\n";
-    raw_body_content += "ViewPart1\r\n";
-    raw_body_content += "--" + manual_boundary_str + "\r\n";
-    raw_body_content += "H2: V2\r\n";
-    raw_body_content += "\r\n";
-    raw_body_content += "ViewPart2\r\n";
-    raw_body_content += "--" + manual_boundary_str + "--\r\n";
-
-    body = raw_body_content;
-    MultipartView parsed_mpv_manual = body.as<MultipartView>();
-    EXPECT_EQ(manual_boundary_str, parsed_mpv_manual.boundary());
-    ASSERT_EQ(2, parsed_mpv_manual.parts().size());
-    EXPECT_EQ("ViewPart1", parsed_mpv_manual.parts()[0].body);
-    EXPECT_EQ("V1", parsed_mpv_manual.parts()[0].header("H1"));
-    EXPECT_EQ("ViewPart2", parsed_mpv_manual.parts()[1].body);
-    EXPECT_EQ("V2", parsed_mpv_manual.parts()[1].header("H2"));
-}
+// Note: `MultipartView` (zero-copy `std::string_view`-backed multipart)
+// has been retired alongside `RequestView`/`ResponseView`. The owning
+// `Multipart` is tested above and is the only supported variant.
 
 #ifdef QB_HAS_COMPRESSION
 TEST_F(BodyTest, CompressionWithChunkedEncoding) {

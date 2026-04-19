@@ -104,7 +104,38 @@ namespace qb::http::validation {
         bool validate(qb::http::Request &request, Result &result,
                       const qb::http::PathParameters *path_params = nullptr);
 
+        /**
+         * @brief F48 &mdash; configure the default error-value policy applied
+         *        to the `Result` passed to `validate()`. The policy is forwarded
+         *        to the underlying body schema validator and to any parameter
+         *        validators. Callers can still override the policy on the
+         *        `Result` after `validate()` returns (but that only affects
+         *        future errors; the errors already stored keep their shape).
+         */
+        RequestValidator &set_error_value_policy(Result::ErrorValuePolicy policy,
+                                                 std::size_t preview_bytes = 256) noexcept {
+            _error_value_policy = policy;
+            // Clamp to the same bounds `Result` uses to keep behaviour identical.
+            constexpr std::size_t kMinPreview = 16;
+            constexpr std::size_t kMaxPreview = 64 * 1024;
+            if (preview_bytes < kMinPreview) preview_bytes = kMinPreview;
+            if (preview_bytes > kMaxPreview) preview_bytes = kMaxPreview;
+            _error_value_preview_bytes = preview_bytes;
+            return *this;
+        }
+
+        [[nodiscard]] Result::ErrorValuePolicy error_value_policy() const noexcept {
+            return _error_value_policy;
+        }
+
+        [[nodiscard]] std::size_t offending_value_preview_bytes() const noexcept {
+            return _error_value_preview_bytes;
+        }
+
     private:
+        Result::ErrorValuePolicy _error_value_policy{Result::ErrorValuePolicy::Full};
+        std::size_t _error_value_preview_bytes{256};
+
         std::optional<SchemaValidator> _body_schema_validator;
         std::optional<ParameterValidator> _query_param_validator;
         std::optional<ParameterValidator> _header_validator;

@@ -103,8 +103,8 @@ private:
     bool _connection_active = true;                                       ///< Connection active flag
     bool _graceful_shutdown_initiated = false;                            ///< Graceful shutdown flag
 
-    std::unique_ptr<qb::protocol::hpack::Decoder> _hpack_decoder;        ///< HPACK decoder instance
-    std::unique_ptr<qb::protocol::hpack::Encoder> _hpack_encoder;        ///< HPACK encoder instance
+    qb::protocol::hpack::Decoder _hpack_decoder;        ///< HPACK decoder (F35 &mdash; owned by value)
+    qb::protocol::hpack::Encoder _hpack_encoder;        ///< HPACK encoder (F35 &mdash; owned by value)
 
     int64_t _connection_bytes_consumed_since_last_window_update = 0;     ///< Bytes consumed for window update
 
@@ -173,18 +173,16 @@ public:
      * @param io_handler_ref Reference to IO handler that receives requests
      */
     explicit ServerHttp2Protocol(IO_Handler& io_handler_ref)
-        : FramerBase(io_handler_ref),
-          _hpack_decoder(std::make_unique<qb::protocol::hpack::HpackDecoderImpl>()),
-          _hpack_encoder(std::make_unique<qb::protocol::hpack::HpackEncoderImpl>())
+        : FramerBase(io_handler_ref)
     {
         LOG_HTTP_DEBUG("ServerHttp2Protocol: Constructing HTTP/2 server protocol handler");
         this->_our_max_frame_size = this->initialize_our_max_frame_size();
         _connection_send_window = this->get_initial_window_size_from_settings();
-        
-        // Apply HPACK encoder settings based on _our_settings
+
+        // Apply HPACK encoder settings based on _our_settings.
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
-        if (it_table_size != _our_settings.end() && _hpack_encoder) {
-            _hpack_encoder->set_max_capacity(it_table_size->second);
+        if (it_table_size != _our_settings.end()) {
+            _hpack_encoder.set_max_capacity(it_table_size->second);
             LOG_HTTP_DEBUG("ServerHttp2Protocol: HPACK encoder max capacity set to " << it_table_size->second);
         }
         
@@ -228,13 +226,11 @@ public:
         _peer_max_header_list_size = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
         _peer_allows_push = true;
 
-        if (_hpack_decoder) _hpack_decoder->reset();
-        if (_hpack_encoder) {
-            _hpack_encoder->reset();
-            auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
-            if (it_table_size != _our_settings.end()) {
-                _hpack_encoder->set_max_capacity(it_table_size->second);
-            }
+        _hpack_decoder.reset();
+        _hpack_encoder.reset();
+        auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
+        if (it_table_size != _our_settings.end()) {
+            _hpack_encoder.set_max_capacity(it_table_size->second);
         }
         LOG_HTTP_INFO("ServerHttp2Protocol: Protocol state reset completed");
     }
@@ -591,7 +587,7 @@ public:
                 case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
                     // Client informs us the max table size its decoder supports for headers we send.
                     // Our encoder must respect this.
-                    if (_hpack_encoder) _hpack_encoder->set_peer_max_dynamic_table_size(value);
+                    _hpack_encoder.set_peer_max_dynamic_table_size(value);
                     break;
                     
                 case Http2SettingIdentifier::SETTINGS_ENABLE_PUSH:
@@ -950,7 +946,7 @@ public:
         }
 
         std::vector<uint8_t> encoded_headers;
-        if (!_hpack_encoder || !_hpack_encoder->encode(hf_vector, encoded_headers)) {
+        if (!_hpack_encoder.encode(hf_vector, encoded_headers)) {
             LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: HPACK encoding failed for response headers");
             this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK encoder failed for response headers.");
             return false;
@@ -1093,7 +1089,7 @@ public:
         }
 
         std::vector<uint8_t> encoded_headers;
-        if (!_hpack_encoder || !_hpack_encoder->encode(hf_vector, encoded_headers)) {
+        if (!_hpack_encoder.encode(hf_vector, encoded_headers)) {
             LOG_HTTP_ERROR_PA(associated_stream_id, "Server: HPACK encoding failed for PUSH_PROMISE on promised_stream_id " << promised_stream_id);
             _server_streams.erase(promised_stream_id); 
             return PushPromiseFailureReason::INTERNAL_HPACK_ERROR;
@@ -1301,7 +1297,7 @@ private:
         qb::http::Headers current_headers_decoded; // Decoded headers for this block
         bool possibly_incomplete_hpack = false;
 
-        if (!_hpack_decoder || !_hpack_decoder->decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)) {
+        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)) {
             // QB_LOG_ERROR_PA(this->getName(), "Stream " << stream.id << ": HPACK decoding failed.");
             this->on_stream_error(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
             return false;
@@ -1967,7 +1963,7 @@ private:
 
             if (!hf_vector_trailers.empty()) {
                 // QB_LOG_TRACE_PA(this->getName(), "Server Stream " << stream_id_param << ": Encoding " << hf_vector_trailers.size() << " trailer fields.");
-                if (_hpack_encoder && _hpack_encoder->encode(hf_vector_trailers, trailers_frame_event.payload.header_block_fragment)) {
+                if (_hpack_encoder.encode(hf_vector_trailers, trailers_frame_event.payload.header_block_fragment)) {
                     // Successfully encoded trailers
                 } else {
                     // QB_LOG_ERROR_PA(this->getName(), "Server Stream " << stream_id_param << ": HPACK trailer encoding error.");

@@ -101,9 +101,9 @@ private:
     bool _connection_active = true; // Removed std::atomic
     bool _graceful_shutdown_initiated = false; // Removed std::atomic // True if we sent or received GOAWAY(NO_ERROR)
 
-    // HPACK
-    std::unique_ptr<hpack::Decoder> _hpack_decoder;
-    std::unique_ptr<hpack::Encoder> _hpack_encoder;
+    // HPACK (F35 &mdash; owned by value; no vtable, no heap allocation).
+    hpack::Decoder _hpack_decoder;
+    hpack::Encoder _hpack_encoder;
 
     // For sending a single request
     bool _single_request_mode = false;
@@ -144,13 +144,11 @@ public:
         _connection_send_window = this->get_initial_window_size_from_settings();
         
         LOG_HTTP_DEBUG_PA(0, "Client: Initializing HPACK encoder/decoder");
-        _hpack_decoder = std::make_unique<hpack::HpackDecoderImpl>();
-        _hpack_encoder = std::make_unique<hpack::HpackEncoderImpl>();
-        
-        // Apply HPACK encoder settings based on _our_settings
+
+        // Apply HPACK encoder settings based on _our_settings.
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
-        if (it_table_size != _our_settings.end() && _hpack_encoder) {
-            _hpack_encoder->set_max_capacity(it_table_size->second);
+        if (it_table_size != _our_settings.end()) {
+            _hpack_encoder.set_max_capacity(it_table_size->second);
             LOG_HTTP_DEBUG_PA(0, "Client: Set HPACK encoder table size to " << it_table_size->second);
         }
         
@@ -199,14 +197,12 @@ public:
         _peer_allows_push = true; // Default for server
 
         // Reset HPACK state
-        if (_hpack_decoder) _hpack_decoder->reset();
-        if (_hpack_encoder) {
-            _hpack_encoder->reset();
-            // Apply our SETTINGS_HEADER_TABLE_SIZE to the encoder
-            auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
-            if (it_table_size != _our_settings.end()) {
-                _hpack_encoder->set_max_capacity(it_table_size->second);
-            }
+        _hpack_decoder.reset();
+        _hpack_encoder.reset();
+        // Apply our SETTINGS_HEADER_TABLE_SIZE to the encoder
+        auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
+        if (it_table_size != _our_settings.end()) {
+            _hpack_encoder.set_max_capacity(it_table_size->second);
         }
     }
 
@@ -423,7 +419,7 @@ public:
             std::vector<hpack::HeaderField> decoded_fields;
             bool hpack_incomplete = false;
 
-            if (!_hpack_decoder->decode(_current_header_block_fragment, decoded_fields, hpack_incomplete)) {
+            if (!_hpack_decoder.decode(_current_header_block_fragment, decoded_fields, hpack_incomplete)) {
                 // LOG_ERROR_PA("ClientHttp2Protocol", "[HTTP/2 Client] HPACK decoding failed for CONTINUATION on stream " << stream.id);
                 send_rst_stream(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed (CONTINUATION)");
                 this->send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decoding error.");
@@ -526,10 +522,8 @@ public:
 
             switch(id) {
                 case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
-                    if (_hpack_encoder) {
-                        _hpack_encoder->set_peer_max_dynamic_table_size(value);
-                        LOG_HTTP_DEBUG_PA(0, "Client: Updated HPACK encoder peer table size to " << value);
-                    }
+                    _hpack_encoder.set_peer_max_dynamic_table_size(value);
+                    LOG_HTTP_DEBUG_PA(0, "Client: Updated HPACK encoder peer table size to " << value);
                     break;
                 case Http2SettingIdentifier::SETTINGS_ENABLE_PUSH:
                     _peer_allows_push = (value == 1); 
@@ -652,7 +646,7 @@ public:
         // Decode headers from PUSH_PROMISE payload
         std::vector<hpack::HeaderField> temp_decoded_hpack_fields; 
         bool is_incomplete_dummy = false; 
-        if (!_hpack_decoder || !_hpack_decoder->decode(pp_event.payload.header_block_fragment, temp_decoded_hpack_fields, is_incomplete_dummy)) { 
+        if (!_hpack_decoder.decode(pp_event.payload.header_block_fragment, temp_decoded_hpack_fields, is_incomplete_dummy)) {
             LOG_HTTP_ERROR_PA(associated_stream_id, "Client: HPACK decode failed for PUSH_PROMISE headers.");
             send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decode failed for PUSH_PROMISE headers");
             return;
@@ -929,7 +923,7 @@ public:
         LOG_HTTP_DEBUG_PA(stream_id, "Client: Prepared " << hf_vector.size() << " headers for encoding");
 
         std::vector<uint8_t> encoded_header_block;
-        if (!_hpack_encoder || !_hpack_encoder->encode(hf_vector, encoded_header_block)) {
+        if (!_hpack_encoder.encode(hf_vector, encoded_header_block)) {
             LOG_HTTP_ERROR_PA(stream_id, "Client: HPACK encoding failed for new request headers");
             _client_streams.erase(iter); // Remove the stream we just created
             send_goaway_and_close(ErrorCode::INTERNAL_ERROR, "HPACK encoding failed for new request headers");
@@ -1062,7 +1056,7 @@ public:
 
         // Encode trailers
         std::vector<uint8_t> encoded_trailers;
-        if (!_hpack_encoder->encode(trailer_fields, encoded_trailers)) {
+        if (!_hpack_encoder.encode(trailer_fields, encoded_trailers)) {
             send_rst_stream(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
             return false;
         }
@@ -1503,7 +1497,7 @@ private:
         std::vector<hpack::HeaderField> decoded_fields;
         bool is_hpack_incomplete = false; 
 
-        if (!_hpack_decoder || !_hpack_decoder->decode(_current_header_block_fragment, decoded_fields, is_hpack_incomplete)) {
+        if (!_hpack_decoder.decode(_current_header_block_fragment, decoded_fields, is_hpack_incomplete)) {
             send_rst_stream(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decode failed for response headers/trailers");
             return false;
         }
@@ -1514,7 +1508,7 @@ private:
         }
 
         std::optional<std::string> status_str_opt;
-        qb::http::THeaders<std::string> temp_headers_for_validation; // Used for validation logic before modifying response
+        qb::http::Headers temp_headers_for_validation; // Used for validation logic before modifying response
 
         for (const auto& hf : decoded_fields) {
             const std::string& name = hf.name;
@@ -1550,7 +1544,7 @@ private:
                     send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header: " + name); return false;
                 }
             }
-            temp_headers_for_validation.add_header(name, value); // Add to temp THeaders for validation consistency if needed by THeaders itself
+            temp_headers_for_validation.add_header(name, value);
         }
 
         if (!is_trailers_block) {
@@ -1990,7 +1984,7 @@ private:
             std::vector<hpack::HeaderField> decoded_fields;
             bool hpack_incomplete = false;
             
-            if (!_hpack_decoder->decode(_current_header_block_fragment, decoded_fields, hpack_incomplete)) {
+            if (!_hpack_decoder.decode(_current_header_block_fragment, decoded_fields, hpack_incomplete)) {
                 send_rst_stream(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
                 this->send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decoding error.");
                 clear_header_assembly_state();
@@ -2282,7 +2276,7 @@ private:
             trailers_frame_data.header.set_stream_id(active_stream.id);
 
             if (!trailer_fields_to_send.empty()) { 
-                if (!(_hpack_encoder && _hpack_encoder->encode(trailer_fields_to_send, trailers_frame_data.payload.header_block_fragment))) {
+                if (!_hpack_encoder.encode(trailer_fields_to_send, trailers_frame_data.payload.header_block_fragment)) {
                     // QB_LOG_ERROR_PA(this->getName(), "Client Stream " << active_stream.id << ": HPACK encoding failed for trailers.");
                     send_rst_stream(active_stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
                      if (active_stream.state == Http2StreamConcreteState::CLOSED || active_stream.rst_stream_sent) {

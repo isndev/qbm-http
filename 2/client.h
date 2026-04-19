@@ -41,8 +41,6 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
-#include <atomic>
-#include <future>
 #include <chrono>
 
 #include <qb/io/async.h>

@@ -560,7 +560,7 @@ TEST(HPACK_Huffman, CompressionComparison) {
 // ====================================================================
 
 TEST(HPACK_Decoder, IndexedHeaderField) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -575,7 +575,7 @@ TEST(HPACK_Decoder, IndexedHeaderField) {
 }
 
 TEST(HPACK_Decoder, LiteralHeaderWithIncrementalIndexing) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -595,7 +595,7 @@ TEST(HPACK_Decoder, LiteralHeaderWithIncrementalIndexing) {
 }
 
 TEST(HPACK_Decoder, LiteralHeaderWithIndexedName) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -614,7 +614,7 @@ TEST(HPACK_Decoder, LiteralHeaderWithIndexedName) {
 }
 
 TEST(HPACK_Decoder, LiteralHeaderWithoutIndexing) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -633,7 +633,7 @@ TEST(HPACK_Decoder, LiteralHeaderWithoutIndexing) {
 }
 
 TEST(HPACK_Decoder, LiteralHeaderNeverIndexed) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -652,7 +652,7 @@ TEST(HPACK_Decoder, LiteralHeaderNeverIndexed) {
 }
 
 TEST(HPACK_Decoder, DynamicTableSizeUpdate) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -667,7 +667,7 @@ TEST(HPACK_Decoder, DynamicTableSizeUpdate) {
 }
 
 TEST(HPACK_Decoder, MultipleHeaders) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -695,7 +695,7 @@ TEST(HPACK_Decoder, MultipleHeaders) {
 }
 
 TEST(HPACK_Decoder, HuffmanEncodedString) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -720,7 +720,7 @@ TEST(HPACK_Decoder, HuffmanEncodedString) {
 // ====================================================================
 
 TEST(HPACK_Encoder, BasicEncoding) {
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     std::vector<HeaderField> headers = {
         {":method", "GET"},
         {":path", "/"},
@@ -735,7 +735,7 @@ TEST(HPACK_Encoder, BasicEncoding) {
 }
 
 TEST(HPACK_Encoder, StaticTableMatching) {
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     std::vector<HeaderField> headers = {
         {":method", "GET"},    // Should use static table index 2
         {":method", "POST"},   // Should use static table index 3
@@ -754,7 +754,7 @@ TEST(HPACK_Encoder, StaticTableMatching) {
 }
 
 TEST(HPACK_Encoder, SensitiveHeaders) {
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     std::vector<HeaderField> headers = {
         {"authorization", "Bearer token123"},
         {"cookie", "session=abc123"},
@@ -769,7 +769,7 @@ TEST(HPACK_Encoder, SensitiveHeaders) {
 }
 
 TEST(HPACK_Encoder, PseudoHeaders) {
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     std::vector<HeaderField> headers = {
         {":custom-pseudo", "value"}
     };
@@ -782,7 +782,7 @@ TEST(HPACK_Encoder, PseudoHeaders) {
 }
 
 TEST(HPACK_Encoder, EmptyHeaderName) {
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     std::vector<HeaderField> headers = {
         {"", "value"}  // Invalid empty name
     };
@@ -796,8 +796,8 @@ TEST(HPACK_Encoder, EmptyHeaderName) {
 // ====================================================================
 
 TEST(HPACK_RoundTrip, BasicRoundTrip) {
-    HpackEncoderImpl encoder;
-    HpackDecoderImpl decoder;
+    Encoder encoder;
+    Decoder decoder;
     
     std::vector<HeaderField> original_headers = {
         {":method", "GET"},
@@ -828,8 +828,8 @@ TEST(HPACK_RoundTrip, BasicRoundTrip) {
 }
 
 TEST(HPACK_RoundTrip, DynamicTableRoundTrip) {
-    HpackEncoderImpl encoder;
-    HpackDecoderImpl decoder;
+    Encoder encoder;
+    Decoder decoder;
     
     // First request - should populate dynamic table
     std::vector<HeaderField> headers1 = {
@@ -870,7 +870,7 @@ TEST(HPACK_RoundTrip, DynamicTableRoundTrip) {
 // ====================================================================
 
 TEST(HPACK_ErrorHandling, InvalidIndex) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -881,7 +881,7 @@ TEST(HPACK_ErrorHandling, InvalidIndex) {
 }
 
 TEST(HPACK_ErrorHandling, IndexOutOfRange) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -892,7 +892,7 @@ TEST(HPACK_ErrorHandling, IndexOutOfRange) {
 }
 
 TEST(HPACK_ErrorHandling, IntegerOverflow) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -906,7 +906,7 @@ TEST(HPACK_ErrorHandling, IntegerOverflow) {
 }
 
 TEST(HPACK_ErrorHandling, IncompleteData) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -921,7 +921,7 @@ TEST(HPACK_ErrorHandling, IncompleteData) {
 }
 
 TEST(HPACK_ErrorHandling, UnknownInstruction) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -936,7 +936,7 @@ TEST(HPACK_ErrorHandling, UnknownInstruction) {
 // ====================================================================
 
 TEST(HPACK_DynamicTable, TableSizeLimit) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     
     // Set a small table size
     decoder.set_max_dynamic_table_size(100);
@@ -957,7 +957,7 @@ TEST(HPACK_DynamicTable, TableSizeLimit) {
 }
 
 TEST(HPACK_DynamicTable, TableEviction) {
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     
     // Set a very small table size to force eviction
     encoder.set_max_capacity(50);
@@ -974,7 +974,7 @@ TEST(HPACK_DynamicTable, TableEviction) {
 }
 
 TEST(HPACK_DynamicTable, HeaderListSizeLimit) {
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     
     // Set a small header list size limit
     decoder.set_max_header_list_size(50);
@@ -999,7 +999,7 @@ TEST(HPACK_DynamicTable, HeaderListSizeLimit) {
 TEST(HPACK_Performance, EncodingPerformance) {
     const int iterations = 1000;
     
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     std::vector<HeaderField> headers = {
         {":method", "GET"},
         {":path", "/api/v1/users/12345"},
@@ -1032,7 +1032,7 @@ TEST(HPACK_Performance, DecodingPerformance) {
     const int iterations = 1000;
     
     // Pre-encode some headers
-    HpackEncoderImpl encoder;
+    Encoder encoder;
     std::vector<HeaderField> headers = {
         {":method", "GET"},
         {":path", "/api/v1/users/12345"},
@@ -1052,7 +1052,7 @@ TEST(HPACK_Performance, DecodingPerformance) {
     auto start = std::chrono::high_resolution_clock::now();
     
     for (int i = 0; i < iterations; i++) {
-        HpackDecoderImpl decoder;
+        Decoder decoder;
         std::vector<HeaderField> decoded_headers;
         bool incomplete = false;
         EXPECT_TRUE(decoder.decode(encoded, decoded_headers, incomplete));
@@ -1095,7 +1095,7 @@ TEST(HPACK_Performance, HuffmanPerformance) {
 
 TEST(HPACK_RFC7541, ExampleC2_1) {
     // RFC 7541 Appendix C.2.1 - Literal Header Field with Incremental Indexing — New Name
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -1111,7 +1111,7 @@ TEST(HPACK_RFC7541, ExampleC2_1) {
 
 TEST(HPACK_RFC7541, ExampleC2_4) {
     // RFC 7541 Appendix C.2.4 - Indexed Header Field
-    HpackDecoderImpl decoder;
+    Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
     
@@ -1131,8 +1131,8 @@ TEST(HPACK_RFC7541, ExampleC2_4) {
 
 TEST(HPACK_Integration, HTTPRequestHeaders) {
     // Simulate typical HTTP/2 request headers
-    HpackEncoderImpl encoder;
-    HpackDecoderImpl decoder;
+    Encoder encoder;
+    Decoder decoder;
     
     std::vector<HeaderField> request_headers = {
         {":method", "GET"},
@@ -1169,8 +1169,8 @@ TEST(HPACK_Integration, HTTPRequestHeaders) {
 
 TEST(HPACK_Integration, HTTPResponseHeaders) {
     // Simulate typical HTTP/2 response headers
-    HpackEncoderImpl encoder;
-    HpackDecoderImpl decoder;
+    Encoder encoder;
+    Decoder decoder;
     
     std::vector<HeaderField> response_headers = {
         {":status", "200"},
@@ -1203,6 +1203,189 @@ TEST(HPACK_Integration, HTTPResponseHeaders) {
         EXPECT_EQ(decoded_headers[i].name, response_headers[i].name);
         EXPECT_EQ(decoded_headers[i].value, response_headers[i].value);
     }
+}
+
+// ====================================================================
+// F33 &mdash; Compile-time static-table index tests
+// ====================================================================
+
+// Every static-table entry is reachable through the compile-time index
+// and the index returns the SMALLEST 1-based index for duplicate names.
+TEST(HPACK_StaticTableIndex, FindNameMatchReturnsFirstOccurrence) {
+    EXPECT_EQ(static_table::find_name_match(std::string_view(":authority")).value(), 1u);
+    EXPECT_EQ(static_table::find_name_match(std::string_view(":method")).value(), 2u);
+    EXPECT_EQ(static_table::find_name_match(std::string_view(":path")).value(), 4u);
+    EXPECT_EQ(static_table::find_name_match(std::string_view(":scheme")).value(), 6u);
+    EXPECT_EQ(static_table::find_name_match(std::string_view(":status")).value(), 8u);
+    EXPECT_EQ(static_table::find_name_match(std::string_view("accept-encoding")).value(), 16u);
+    EXPECT_EQ(static_table::find_name_match(std::string_view("www-authenticate")).value(), 61u);
+    EXPECT_FALSE(static_table::find_name_match(std::string_view("x-custom-header")).has_value());
+    EXPECT_FALSE(static_table::find_name_match(std::string_view("")).has_value());
+}
+
+// Exact-match lookups (name + value) must resolve every unique pair.
+TEST(HPACK_StaticTableIndex, FindExactMatchCoversDuplicateNames) {
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":method"), std::string_view("GET")).value(), 2u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":method"), std::string_view("POST")).value(), 3u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":path"), std::string_view("/")).value(), 4u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":path"), std::string_view("/index.html")).value(), 5u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":scheme"), std::string_view("http")).value(), 6u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":scheme"), std::string_view("https")).value(), 7u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":status"), std::string_view("200")).value(), 8u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":status"), std::string_view("404")).value(), 13u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view(":status"), std::string_view("500")).value(), 14u);
+    EXPECT_EQ(static_table::find_exact_match(std::string_view("accept-encoding"), std::string_view("gzip, deflate")).value(), 16u);
+    // Name is present but value is not a static-table value.
+    EXPECT_FALSE(static_table::find_exact_match(std::string_view(":status"), std::string_view("418")).has_value());
+    // Name is not present at all.
+    EXPECT_FALSE(static_table::find_exact_match(std::string_view("x-custom"), std::string_view("v")).has_value());
+}
+
+// Every entry must be reachable via its exact (name, value) pair or, for
+// empty-value entries, via a name-match to itself.
+TEST(HPACK_StaticTableIndex, EveryStaticTableEntryIsIndexed) {
+    for (std::size_t i = 0; i < STATIC_TABLE.size(); ++i) {
+        const auto &[name, value] = STATIC_TABLE[i];
+        const auto name_idx = static_table::find_name_match(name);
+        ASSERT_TRUE(name_idx.has_value()) << "Missing name index for row " << (i + 1);
+        // The reported index must be the smallest for the name.
+        EXPECT_LE(*name_idx, i + 1);
+        // The exact entry must also be reachable via find_exact_match.
+        const auto exact_idx = static_table::find_exact_match(name, value);
+        ASSERT_TRUE(exact_idx.has_value()) << "Missing exact index for row " << (i + 1);
+        EXPECT_EQ(*exact_idx, i + 1);
+    }
+}
+
+// The legacy std::string overloads must still compile and yield the same
+// result as the string_view entry points (source compatibility).
+TEST(HPACK_StaticTableIndex, LegacyStringOverloadsStillWork) {
+    const std::string name(":method");
+    const std::string value("POST");
+    EXPECT_EQ(static_table::find_name_match(name).value(), 2u);
+    EXPECT_EQ(static_table::find_exact_match(name, value).value(), 3u);
+}
+
+// ---------------------------------------------------------------------------
+// F34 &mdash; DynamicTable ring buffer tests.
+// ---------------------------------------------------------------------------
+
+TEST(HPACK_DynamicTable, DefaultStateIsEmpty) {
+    DynamicTable table;
+    EXPECT_TRUE(table.empty());
+    EXPECT_EQ(table.size(), 0u);
+    EXPECT_EQ(table.byte_size(), 0u);
+    EXPECT_EQ(table.max_byte_size(), HPACK_DEFAULT_MAX_TABLE_SIZE);
+}
+
+TEST(HPACK_DynamicTable, AddBringsEntryToFront) {
+    DynamicTable table;
+    const auto r1 = table.add("a", "1");
+    EXPECT_TRUE(r1.added);
+    EXPECT_EQ(r1.evicted, 0u);
+    const auto r2 = table.add("b", "22");
+    EXPECT_TRUE(r2.added);
+    EXPECT_EQ(r2.evicted, 0u);
+    ASSERT_EQ(table.size(), 2u);
+    // Newest first.
+    EXPECT_EQ(table[0].name, "b");
+    EXPECT_EQ(table[0].value, "22");
+    EXPECT_EQ(table[1].name, "a");
+    EXPECT_EQ(table[1].value, "1");
+    EXPECT_EQ(table.back().name, "a");
+    EXPECT_EQ(table.byte_size(),
+              (1u + 1u + HPACK_ENTRY_OVERHEAD) + (1u + 2u + HPACK_ENTRY_OVERHEAD));
+}
+
+TEST(HPACK_DynamicTable, EvictionHonoursByteBudget) {
+    DynamicTable table;
+    // Budget fits ~2 minimal entries (each = 32 + 1 + 1 = 34 octets).
+    table.set_max_byte_size(70);
+    table.add("a", "1");
+    table.add("b", "2");
+    ASSERT_EQ(table.size(), 2u);
+    // Third insertion must evict the oldest.
+    const auto r = table.add("c", "3");
+    EXPECT_TRUE(r.added);
+    EXPECT_EQ(r.evicted, 1u);
+    ASSERT_EQ(table.size(), 2u);
+    EXPECT_EQ(table[0].name, "c");
+    EXPECT_EQ(table[1].name, "b");
+    EXPECT_LE(table.byte_size(), 70u);
+}
+
+TEST(HPACK_DynamicTable, OversizedEntryClearsTableAndIsDropped) {
+    DynamicTable table;
+    table.set_max_byte_size(128); // Enough for 3 minimal entries (3 * 34 = 102).
+    table.add("a", "1");
+    table.add("b", "2");
+    table.add("c", "3");
+    ASSERT_EQ(table.size(), 3u);
+    // Entry exceeds budget => table cleared and entry not stored (RFC 7541 §4.4).
+    const auto r = table.add("name", std::string(200, 'x'));
+    EXPECT_FALSE(r.added);
+    EXPECT_EQ(r.evicted, 3u);
+    EXPECT_TRUE(table.empty());
+    EXPECT_EQ(table.byte_size(), 0u);
+}
+
+TEST(HPACK_DynamicTable, SetMaxByteSizeShrinksFromTheBack) {
+    DynamicTable table;
+    table.add("a", "1"); // size = 34
+    table.add("b", "2"); // size = 34
+    table.add("c", "3"); // size = 34
+    ASSERT_EQ(table.size(), 3u);
+    const auto evicted = table.set_max_byte_size(35); // Room for one entry.
+    EXPECT_EQ(evicted, 2u);
+    ASSERT_EQ(table.size(), 1u);
+    EXPECT_EQ(table[0].name, "c"); // Newest survives.
+    EXPECT_LE(table.byte_size(), 35u);
+}
+
+TEST(HPACK_DynamicTable, ClearReleasesEntriesButKeepsCapacity) {
+    DynamicTable table;
+    for (int i = 0; i < 10; ++i) {
+        table.add("header-" + std::to_string(i), "value");
+    }
+    const std::size_t cap_before = table.capacity();
+    EXPECT_GT(cap_before, 0u);
+    table.clear();
+    EXPECT_TRUE(table.empty());
+    EXPECT_EQ(table.byte_size(), 0u);
+    EXPECT_EQ(table.capacity(), cap_before);
+}
+
+TEST(HPACK_DynamicTable, RingBufferWrapsCorrectlyOverManyOperations) {
+    // Budget sized so that only 4 of the final entries (k996..k999, each
+    // 4-char name + 1-char value + 32 octets overhead = 37 octets) survive:
+    // 4 * 37 = 148 <= 150 < 5 * 37.
+    DynamicTable table;
+    table.set_max_byte_size(150);
+    for (int i = 0; i < 1000; ++i) {
+        table.add("k" + std::to_string(i), "v");
+    }
+    ASSERT_EQ(table.size(), 4u);
+    // Ensure logical ordering matches the last 4 insertions: newest first.
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(table[i].name, "k" + std::to_string(999 - i));
+    }
+    // Capacity should stay bounded &mdash; doubling from 128 only triggers
+    // when the live count grows, which it never does past 4 here.
+    EXPECT_EQ(table.capacity(), 128u);
+}
+
+TEST(HPACK_DynamicTable, GrowsCapacityWhenCountExceedsInitial) {
+    DynamicTable table;
+    table.set_max_byte_size(1'000'000); // Effectively unbounded for the test.
+    // Insert more than `kInitialCapacity` (=128) entries; storage must grow.
+    for (int i = 0; i < 200; ++i) {
+        table.add("k" + std::to_string(i), "v");
+    }
+    ASSERT_EQ(table.size(), 200u);
+    EXPECT_GE(table.capacity(), 256u); // Doubled at least once.
+    // Newest first ordering preserved across the rehash.
+    EXPECT_EQ(table[0].name, "k199");
+    EXPECT_EQ(table[199].name, "k0");
 }
 
 int main(int argc, char **argv) {

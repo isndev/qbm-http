@@ -74,15 +74,13 @@ namespace qb::http {
 
     namespace internal {
         /**
-         * @brief Multipart form data parser for HTTP
-         * @tparam String String type used for storage (std::string or std::string_view)
+         * @brief Multipart form-data parser for HTTP (owning `std::string`).
          *
          * Parses multipart/form-data content according to RFC 7578.
          * Provides a callback-based interface for processing multipart body parts.
          * The reader processes each part of a multipart message sequentially,
          * calling appropriate callbacks at different stages of parsing.
          */
-        template<typename String>
         class MultipartReader {
         public:
             /**
@@ -91,7 +89,7 @@ namespace qb::http {
              * Called after all headers for a part have been parsed,
              * but before any part data is processed.
              */
-            typedef void (*PartBeginCallback)(THeaders<String> &headers, void *userData);
+            typedef void (*PartBeginCallback)(Headers &headers, void *userData);
 
             /**
              * @brief Callback type for part data chunks
@@ -111,8 +109,8 @@ namespace qb::http {
         private:
             MultipartParser parser;
             bool headersProcessed;
-            THeaders<String> currentHeaders;
-            String currentHeaderName, currentHeaderValue;
+            Headers currentHeaders;
+            std::string currentHeaderName, currentHeaderValue;
 
             /**
              * @brief Reset all reader callbacks to NULL
@@ -154,11 +152,11 @@ namespace qb::http {
              */
             static void
             cbPartBegin(const char *, size_t, size_t, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 self->headersProcessed = false;
                 self->currentHeaders.headers().clear();
-                self->currentHeaderName = {};
-                self->currentHeaderValue = {};
+                self->currentHeaderName.clear();
+                self->currentHeaderValue.clear();
             }
 
             /**
@@ -169,13 +167,12 @@ namespace qb::http {
              */
             static void
             cbHeaderField(const char *buffer, size_t start, size_t end, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 const size_t length = end - start;
-                // Security: Validate header name length to prevent DoS
                 if (length > multipart_limits::MAX_HEADER_NAME_LENGTH) {
                     throw std::runtime_error("Multipart header name exceeds maximum allowed length");
                 }
-                self->currentHeaderName = String(buffer + start, length);
+                self->currentHeaderName.assign(buffer + start, length);
             }
 
             /**
@@ -186,13 +183,12 @@ namespace qb::http {
              */
             static void
             cbHeaderValue(const char *buffer, size_t start, size_t end, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 const size_t length = end - start;
-                // Security: Validate header value length to prevent DoS
                 if (length > multipart_limits::MAX_HEADER_VALUE_LENGTH) {
                     throw std::runtime_error("Multipart header value exceeds maximum allowed length");
                 }
-                self->currentHeaderValue = String(buffer + start, length);
+                self->currentHeaderValue.assign(buffer + start, length);
             }
 
             /**
@@ -203,11 +199,11 @@ namespace qb::http {
              */
             static void
             cbHeaderEnd(const char *, size_t, size_t, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 self->currentHeaders.headers()[self->currentHeaderName].push_back(
-                    self->currentHeaderValue);
-                self->currentHeaderName = {};
-                self->currentHeaderValue = {};
+                    std::move(self->currentHeaderValue));
+                self->currentHeaderName.clear();
+                self->currentHeaderValue.clear();
             }
 
             /**
@@ -218,13 +214,13 @@ namespace qb::http {
              */
             static void
             cbHeadersEnd(const char *, size_t, size_t, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 if (self->onPartBegin != nullptr) {
                     self->onPartBegin(self->currentHeaders, self->userData);
                 }
                 self->currentHeaders.headers().clear();
-                self->currentHeaderName = {};
-                self->currentHeaderValue = {};
+                self->currentHeaderName.clear();
+                self->currentHeaderValue.clear();
             }
 
             /**
@@ -235,7 +231,7 @@ namespace qb::http {
              */
             static void
             cbPartData(const char *buffer, size_t start, size_t end, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 if (self->onPartData != nullptr) {
                     self->onPartData(buffer + start, end - start, self->userData);
                 }
@@ -249,7 +245,7 @@ namespace qb::http {
              */
             static void
             cbPartEnd(const char *, size_t, size_t, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 if (self->onPartEnd != nullptr) {
                     self->onPartEnd(self->userData);
                 }
@@ -263,7 +259,7 @@ namespace qb::http {
              */
             static void
             cbEnd(const char *, size_t, size_t, void *userData) {
-                MultipartReader<String> *self = static_cast<MultipartReader<String> *>(userData);
+                MultipartReader *self = static_cast<MultipartReader *>(userData);
                 if (self->onEnd != nullptr) {
                     self->onEnd(self->userData);
                 }
@@ -734,10 +730,10 @@ namespace qb::http {
             throw std::runtime_error("boundary not found or empty");
         auto boundary = std::string(_data.begin() + 2, pos - 2);
 
-        internal::MultipartReader<std::string> reader(boundary);
+        internal::MultipartReader reader(boundary);
         Multipart mp(boundary);
         reader.userData = &mp;
-        reader.onPartBegin = [](THeaders<std::string> &headers, void *userData) {
+        reader.onPartBegin = [](Headers &headers, void *userData) {
             auto &part = reinterpret_cast<Multipart *>(userData)->create_part();
             part.headers() = std::move(headers.headers());
             if (part.has_header("Content-Type"))
@@ -745,55 +741,7 @@ namespace qb::http {
         };
         reader.onPartData = [](const char *buffer, size_t size, void *userData) {
             auto &part = reinterpret_cast<Multipart *>(userData)->parts().back();
-            part.body = std::string(buffer, size);
-        };
-        reader.onPartEnd = [](void *) {
-        };
-        reader.onEnd = [](void *) {
-        };
-
-        reader.feed(_data.begin(), _data.size());
-        if (reader.hasError())
-            throw std::runtime_error("failed to parse multipart: " +
-                                     std::string(reader.getErrorMessage()));
-
-        return mp;
-    }
-
-    /**
-     * @brief Parse the body as a multipart form-data content
-     * @return Multipart object containing the parsed parts
-     *
-     * Parses the body content as multipart/form-data format and returns
-     * a Multipart object containing the individual parts.
-     *
-     * The function extracts the boundary from the body's first line,
-     * then uses a MultipartReader to parse each part.
-     *
-     * @throws std::runtime_error If the body doesn't contain a valid boundary
-     *                            or if parsing fails
-     */
-    template<>
-    MultipartView
-    Body::as<MultipartView>() const {
-        auto view = _data.view();
-        auto pos = view.find_first_of(qb::http::endl);
-        if (pos == std::string::npos || pos < 2)
-            throw std::runtime_error("boundary not found");
-        auto boundary = std::string(_data.begin() + 2, pos - 2);
-
-        internal::MultipartReader<std::string_view> reader(boundary);
-        MultipartView mp(boundary);
-        reader.userData = &mp;
-        reader.onPartBegin = [](THeaders<std::string_view> &headers, void *userData) {
-            auto &part = reinterpret_cast<MultipartView *>(userData)->create_part();
-            part.headers() = std::move(headers.headers());
-            if (part.has_header("Content-Type"))
-                part.set_content_type(part.header("Content-Type"));
-        };
-        reader.onPartData = [](const char *buffer, size_t size, void *userData) {
-            auto &part = reinterpret_cast<MultipartView *>(userData)->parts().back();
-            part.body = std::string_view(buffer, size);
+            part.body.assign(buffer, size);
         };
         reader.onPartEnd = [](void *) {
         };
@@ -929,42 +877,4 @@ namespace qb::http {
         return *this;
     }
 
-    /**
-     * @brief Assign a MultipartView object to the body by copying its structure.
-     * @param mpv MultipartView object to serialize into the body.
-     * @return Reference to this body.
-     *
-     * Note: This serializes the content referenced by MultipartView. The string_views
-     * in MultipartView must be valid when this operator is called.
-     */
-    template<>
-    Body &Body::operator=<MultipartView>(MultipartView const &mpv) {
-        _data.clear();
-        // The actual serialization logic uses qb::allocator::pipe<char>::put<MultipartView>
-        // which is already defined in multipart.cpp using a common put_impl.
-        // So, we can directly use the stream operator here.
-        _data << mpv;
-        return *this;
-    }
-
-    /**
-     * @brief Assign a MultipartView object to the body by moving its structure.
-     * @param mpv MultipartView object to serialize and then clear.
-     * @return Reference to this body.
-     *
-     * Note: This serializes the content referenced by MultipartView. The string_views
-     * in MultipartView must be valid. After serialization, the source mpv is cleared.
-     */
-    template<>
-    Body &Body::operator=<MultipartView>(MultipartView &&mpv) noexcept {
-        _data.clear();
-        _data << mpv; // Serialize the content
-        // Clearing a MultipartView typically means clearing its internal parts vector.
-        // The actual data pointed to by string_views is not owned by MultipartView.
-        mpv.parts().clear(); // Example: clear the parts. Actual clear might differ based on TMultiPart impl.
-        // If TMultiPart for string_view doesn't have a clear() or if clearing parts isn't enough,
-        // this might need adjustment based on MultipartView's specific clear semantics.
-        // For now, clearing parts is a reasonable assumption for "moved-from" state.
-        return *this;
-    }
 } // namespace qb::http

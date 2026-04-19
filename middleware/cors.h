@@ -26,7 +26,6 @@
 #include <regex>
 #include <stdexcept>
 #include <chrono>  // For regex timeout protection
-#include <future>  // For async regex execution
 #include <thread>  // For regex timeout
 
 #include "../routing/middleware.h"
@@ -69,33 +68,28 @@ namespace qb::http {
      * @brief Helper function to perform regex matching with timeout protection
      * @param origin The origin string to match
      * @param pattern The regex pattern
-     * @return true if matches, false otherwise or on timeout
-     * 
-     * @note Uses async execution with timeout to prevent ReDoS attacks
+     * @return true if matches, false otherwise or if the origin exceeds the safety cut-off
+     *
+     * @note ReDoS mitigation is enforced by bounding the origin length. qb's HTTP stack is
+     *       strictly single-threaded per listener (see qb::io::async::listener contract), so
+     *       spawning a worker thread via `std::async(std::launch::async)` would both violate
+     *       the threading model and — because `std::thread::join()` cannot be hardened against
+     *       runaway libstdc++ regex back-tracking — provide no real protection. We instead
+     *       reject any origin whose length exceeds the documented maximum, on top of which the
+     *       caller MUST keep `std::regex` patterns linear (no unbounded alternation on
+     *       repetitions, no nested quantifiers).
      */
     [[nodiscard]] inline bool regex_match_with_timeout(
-        const std::string& origin, 
+        const std::string& origin,
         const std::regex& pattern,
-        std::chrono::milliseconds timeout = cors_security_limits::MAX_REGEX_EXECUTION_TIME) noexcept {
+        std::chrono::milliseconds /*timeout*/
+            = cors_security_limits::MAX_REGEX_EXECUTION_TIME) noexcept {
         try {
-            // For short origins, use direct match (fast path)
-            if (origin.length() < 256) {
-                return std::regex_match(origin, pattern);
+            if (origin.length() > cors_security_limits::MAX_ORIGIN_LENGTH) {
+                return false;
             }
-            
-            // For longer origins, use timeout protection
-            std::future<bool> future = std::async(std::launch::async, [&origin, &pattern]() {
-                return std::regex_match(origin, pattern);
-            });
-            
-            if (future.wait_for(timeout) == std::future_status::ready) {
-                return future.get();
-            }
-            
-            // Timeout reached - potential ReDoS attack, return false (reject)
-            return false;
+            return std::regex_match(origin, pattern);
         } catch (...) {
-            // Any exception during regex matching, reject the origin
             return false;
         }
     }
@@ -365,7 +359,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object managed by the router.
      */
     template<typename SessionType>
-    class CorsMiddleware : public IMiddleware<SessionType> {
+    class CorsMiddleware final : public IMiddleware<SessionType> {
     public:
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
 

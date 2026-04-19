@@ -2,9 +2,9 @@
  * @file qbm/http/message_base.h
  * @brief Defines the base class for HTTP request and response messages.
  *
- * This file contains the `MessageBase` template class, which provides common
+ * This file contains the `MessageBase` class, which provides common
  * functionalities and properties for HTTP messages, such as version handling,
- * header management (via inheritance from `THeaders`), and body access (via
+ * header management (via inheritance from `Headers`), and body access (via
  * inheritance from `Body`).
  *
  * @author qb - C++ Actor Framework
@@ -26,21 +26,19 @@ namespace qb::http {
         /**
          * @brief Base class for HTTP messages (Requests and Responses).
          *
-         * This template class encapsulates common properties of HTTP messages, including
-         * HTTP version, header management (through `THeaders`), and message body handling
-         * (through `Body`). It serves as a CRTP (Curiously Recurring Template Pattern) base
-         * for concrete message types like `TRequest` and `TResponse`.
+         * Encapsulates common message properties: HTTP version, header
+         * management (through `Headers`), and body (through `Body`).
          *
-         * @tparam String The string type used for storing header names and values
-         *                (typically `std::string` or `std::string_view`).
+         * @note Previously templated on `String` (`std::string` vs
+         * `std::string_view`); the view mode has been retired
+         * (see `headers.h` for rationale).
          */
-        template<typename String>
         struct MessageBase
-                : public THeaders<String> // Inherits header management capabilities
-                  , public Body // Inherits body management capabilities
+                : public Headers // header management capabilities
+                  , public Body // body management capabilities
         {
-            /** @brief Type alias for the string type used in headers. */
-            using string_type = String;
+            /** @brief Type alias kept for backwards source-compat. */
+            using string_type = std::string;
 
             /** @brief Major HTTP version number (e.g., 1 for HTTP/1.1). */
             uint16_t major_version;
@@ -72,22 +70,17 @@ namespace qb::http {
             MessageBase() noexcept
                 : major_version(1)
                   , minor_version(1)
-                  , upgrade(false) // Explicitly initialize upgrade flag
-                  , stream_id(0) // Default to 0 for HTTP/1.1
+                  , upgrade(false)
+                  , stream_id(0)
             {
-                // reset() is called to clear headers from THeaders, Body is default constructed.
-                // The THeaders part of MessageBase is default constructed before this body,
-                // then its _content_type is initialized using its default ContentType constructor.
-                // Then MessageBase::reset() is called.
-                this->THeaders<String>::_headers.clear(); // Ensures headers are cleared.
-                // Body is default constructed. ContentType in THeaders is default constructed.
+                this->Headers::_headers.clear();
             }
 
             /**
              * @brief Copy constructor.
              * @param other Message to copy from.
              * Creates a deep copy of another message including its HTTP version,
-             * upgrade status, all headers (via `THeaders` copy constructor),
+             * upgrade status, all headers (via `Headers` copy constructor),
              * and body content (via `Body` copy constructor).
              */
             MessageBase(const MessageBase &) = default;
@@ -98,13 +91,13 @@ namespace qb::http {
              * @param initial_headers A map of headers to initialize with. Values will be moved.
              * @param initial_body The initial body content for the message. Will be moved.
              */
-            MessageBase(qb::icase_unordered_map<std::vector<String> > initial_headers, Body initial_body)
-                : THeaders<String>(std::move(initial_headers)) // Initialize THeaders part
-                  , Body(std::move(initial_body)) // Initialize Body part
+            MessageBase(qb::icase_unordered_map<std::vector<std::string> > initial_headers, Body initial_body)
+                : Headers(std::move(initial_headers))
+                  , Body(std::move(initial_body))
                   , major_version(1)
                   , minor_version(1)
                   , upgrade(false)
-                  , stream_id(0) // Default to 0 for HTTP/1.1
+                  , stream_id(0)
             {
             }
 
@@ -135,15 +128,14 @@ namespace qb::http {
             /**
              * @brief Resets the message headers to an empty state.
              *
-             * Clears all headers managed by the `THeaders` base part of this message.
+             * Clears all headers managed by the `Headers` base part of this message.
              * The HTTP version, upgrade flag, and body content are not affected by this method.
              * Derived classes may override or extend this to reset their specific fields.
              */
             constexpr void
             reset() noexcept {
-                this->THeaders<String>::_headers.clear();
-                // Reset ContentType to its default state as well, as it's part of THeaders state
-                this->THeaders<String>::_content_type = typename THeaders<String>::ContentType{};
+                this->Headers::_headers.clear();
+                this->Headers::_content_type = typename Headers::ContentType{};
                 // Note: Body is not cleared here by design, typically managed separately or by derived reset().
                 // HTTP version and upgrade flag are also not reset here, typically set at construction or explicitly.
                 // stream_id is not reset here - it should be explicitly set by the protocol layer

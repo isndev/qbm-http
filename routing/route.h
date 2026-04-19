@@ -48,7 +48,7 @@ namespace qb::http {
      * @tparam SessionType The session type used by the `Context`.
      */
     template<typename SessionType>
-    class RouteLambdaTask : public IAsyncTask<SessionType> {
+    class RouteLambdaTask final : public IAsyncTask<SessionType> {
     private:
         RouteHandlerFn<SessionType> _handler_fn; ///< The stored lambda or function pointer.
         std::string _name; ///< A descriptive name for this task instance.
@@ -132,7 +132,7 @@ namespace qb::http {
      * @tparam SessionType The session type used by the `Context` and `ICustomRoute`.
      */
     template<typename SessionType>
-    class CustomRouteAdapterTask : public IAsyncTask<SessionType> {
+    class CustomRouteAdapterTask final : public IAsyncTask<SessionType> {
     private:
         std::shared_ptr<ICustomRoute<SessionType> > _custom_route; ///< The stored custom route handler object.
 

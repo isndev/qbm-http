@@ -15,9 +15,12 @@
 #pragma once
 
 #include <chrono>      // For std::chrono::seconds
+#include <optional>    // For std::optional
 #include <string>      // For std::string
+#include <string_view> // For std::string_view
 #include <vector>      // For std::vector<unsigned char>
 #include <utility>     // For std::move (used in setters if string is rvalue)
+#include "../utility.h" // For utility::iequals
 
 namespace qb {
     namespace http {
@@ -266,6 +269,34 @@ namespace qb {
                 [[nodiscard]] bool get_verify_not_before() const noexcept { return _verify_not_before; }
                 [[nodiscard]] bool get_verify_issuer() const noexcept { return _verify_issuer; }
                 [[nodiscard]] bool get_verify_audience() const noexcept { return _verify_audience; }
+
+                /**
+                 * @brief Resolves a case-insensitive JWT algorithm string (e.g. `"HS256"`,
+                 *        `"RS512"`, `"EdDSA"`) into the corresponding `Algorithm` enum value.
+                 *
+                 * Centralising this mapping avoids duplicated `iequals` chains scattered
+                 * across middleware factories and lets callers reject malformed inputs
+                 * before constructing an `Options` object.
+                 *
+                 * @param algorithm_str The textual algorithm identifier as used in JWT
+                 *                      headers or configuration files.
+                 * @return The matching `Algorithm` value, or `std::nullopt` if the string
+                 *         does not correspond to a supported algorithm.
+                 */
+                [[nodiscard]] static std::optional<Algorithm>
+                algorithm_from_string(std::string_view algorithm_str) noexcept {
+                    if (qb::http::utility::iequals(algorithm_str, "HS256")) return Algorithm::HMAC_SHA256;
+                    if (qb::http::utility::iequals(algorithm_str, "HS384")) return Algorithm::HMAC_SHA384;
+                    if (qb::http::utility::iequals(algorithm_str, "HS512")) return Algorithm::HMAC_SHA512;
+                    if (qb::http::utility::iequals(algorithm_str, "RS256")) return Algorithm::RSA_SHA256;
+                    if (qb::http::utility::iequals(algorithm_str, "RS384")) return Algorithm::RSA_SHA384;
+                    if (qb::http::utility::iequals(algorithm_str, "RS512")) return Algorithm::RSA_SHA512;
+                    if (qb::http::utility::iequals(algorithm_str, "ES256")) return Algorithm::ECDSA_SHA256;
+                    if (qb::http::utility::iequals(algorithm_str, "ES384")) return Algorithm::ECDSA_SHA384;
+                    if (qb::http::utility::iequals(algorithm_str, "ES512")) return Algorithm::ECDSA_SHA512;
+                    if (qb::http::utility::iequals(algorithm_str, "EdDSA")) return Algorithm::ED25519;
+                    return std::nullopt;
+                }
             };
 
             /** @brief Type alias for `qb::http::auth::Options` for backward compatibility or conciseness. */

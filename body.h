@@ -13,6 +13,8 @@
  */
 #pragma once
 
+#include <array>
+#include <concepts>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -21,6 +23,7 @@
 #include <type_traits>
 
 #include <qb/json.h>
+#include <qb/string.h>
 #include <qb/system/allocator/pipe.h>
 #include <qb/utility/build_macros.h>
 #ifdef QB_HAS_COMPRESSION
@@ -67,13 +70,71 @@ namespace qb::http {
         Body &operator=(Body const &rhs);
 
         /**
+         * @brief Compile-time predicate: can @p T be safely appended to a
+         *        HTTP body via `pipe<char>::operator<<`?
+         *
+         * The predicate rejects arbitrary pointers / nullptr and arbitrary
+         * class types that would otherwise drop into the generic
+         * `pipe::put(U const&) { return put(std::to_string(rhs)); }`
+         * fallback, which does not compile for most types but silently
+         * compiles for arithmetic types (producing `Body(42)` &equiv;
+         * `Body("42")`, almost always unintended).
+         *
+         * Accepted categories:
+         *  - byte-like arrays / ranges (`char[N]`, `const char *`,
+         *    `std::string`, `std::string_view`, `qb::string<N>`,
+         *    `std::vector<char>`, `std::array<char, N>`).
+         *  - existing `Body` (copy / move).
+         *  - `Chunk` / `Multipart` / `Form` / `qb::json` (via the
+         *    specialised `operator=`).
+         *  - arithmetic types (explicitly, so the behaviour remains
+         *    predictable: they are stringified).
+         */
+    private:
+        template<typename T>
+        static constexpr bool _is_char_array =
+            std::is_array_v<std::remove_reference_t<T>> &&
+            std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<std::remove_reference_t<T>>>, char>;
+
+        template<typename T>
+        static constexpr bool _is_char_pointer =
+            std::is_pointer_v<std::remove_reference_t<T>> &&
+            std::is_same_v<std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<T>>>, char>;
+
+    public:
+        template<typename T>
+        struct is_body_appendable : std::disjunction<
+            std::is_same<std::remove_cvref_t<T>, Body>,
+            std::is_same<std::remove_cvref_t<T>, Chunk>,
+            std::is_same<std::remove_cvref_t<T>, Multipart>,
+            std::is_same<std::remove_cvref_t<T>, Form>,
+            std::is_same<std::remove_cvref_t<T>, qb::json>,
+            std::is_same<std::remove_cvref_t<T>, std::string>,
+            std::is_same<std::remove_cvref_t<T>, std::string_view>,
+            std::is_same<std::remove_cvref_t<T>, std::vector<char>>,
+            std::is_arithmetic<std::remove_cvref_t<T>>,
+            std::bool_constant<_is_char_array<T>>,
+            std::bool_constant<_is_char_pointer<T>>
+        > {};
+
+        template<typename T>
+        static constexpr bool is_body_appendable_v = is_body_appendable<T>::value;
+
+        /**
          * @brief Constructor with variadic arguments
          * @param args Arguments to add to the body
+         *
+         * Disabled for the single-argument `Body` case (so that copy/move
+         * constructors are picked) and for any argument that does not
+         * satisfy `is_body_appendable`. Previously, any type would compile
+         * through `pipe::put` fallback &mdash; `Body(nullptr)` or
+         * `Body(std::map<int,int>{})` silently produced ill-formed output.
          */
-        template<typename... Args,
-            typename = std::enable_if_t<
-                !(std::conjunction_v<std::is_same<std::decay_t<Args>, Body>...> && (sizeof...(Args) == 1))
-            > >
+        template<typename... Args>
+            requires (sizeof...(Args) > 0
+                      && !(sizeof...(Args) == 1
+                           && (std::is_same_v<std::remove_cvref_t<Args>, Body> && ...))
+                      && (is_body_appendable_v<Args> && ...))
         Body(Args &&... args) {
             (_data << ... << std::forward<Args>(args));
         }
@@ -82,11 +143,14 @@ namespace qb::http {
          * @brief Append data to the body
          * @param args Data to append
          * @return Reference to this body
+         *
+         * Same appendability constraint as the variadic constructor.
          */
-        template<typename... Args,
-            typename = std::enable_if_t<
-                !(std::conjunction_v<std::is_same<std::decay_t<Args>, Body>...> && (sizeof...(Args) == 1))
-            > >
+        template<typename... Args>
+            requires (sizeof...(Args) > 0
+                      && !(sizeof...(Args) == 1
+                           && (std::is_same_v<std::remove_cvref_t<Args>, Body> && ...))
+                      && (is_body_appendable_v<Args> && ...))
         Body &
         operator<<(Args &&... args) {
             (_data << ... << std::forward<Args>(args));
@@ -291,16 +355,29 @@ namespace qb::http {
             return _data.empty();
         }
 
+    private:
+        template<typename T>
+        struct dependent_false : std::false_type {};
+
+    public:
         /**
          * @brief Convert the body to a specific type
          * @tparam T Type to convert to
          * @return Converted value
+         *
+         * Only the explicitly specialised conversions below are supported
+         * (`std::string_view`, `std::string`, `qb::json`, `Multipart`,
+         * `Form`). Any other instantiation triggers a compile-time error
+         * &mdash; the previous `static_assert("...")` was a silent no-op
+         * because a non-empty string literal is always truthy.
          */
         template<typename T>
-        [[nodiscard]] T
-        as() const {
-            static_assert("cannot convert http body to a not implemented type");
-            return {};
+        [[nodiscard]] T as() const {
+            static_assert(dependent_false<T>::value,
+                          "Body::as<T>() is not implemented for this T. "
+                          "Supported specialisations: std::string_view, std::string, "
+                          "qb::json, Multipart, Form.");
+            return T{};
         }
 
         /**
@@ -351,12 +428,6 @@ namespace qb::http {
     Body &Body::operator=<const char *>(char const *const &str);
 
     template<>
-    Body &Body::operator=<MultipartView>(MultipartView const &mpv);
-
-    template<>
-    Body &Body::operator=<MultipartView>(MultipartView &&mpv) noexcept;
-
-    template<>
     std::string_view Body::as<std::string_view>() const;
 
     template<>
@@ -367,9 +438,6 @@ namespace qb::http {
 
     template<>
     Multipart Body::as<Multipart>() const;
-
-    template<>
-    MultipartView Body::as<MultipartView>() const;
 
     template<>
     Form Body::as<Form>() const;

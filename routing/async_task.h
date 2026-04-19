@@ -31,6 +31,13 @@ namespace qb {
          * executes a chain of these tasks sequentially for an incoming request.
          * The `Context` object orchestrates this execution.
          *
+         * @note `IAsyncTask` instances are immutable after router `compile()` — the same
+         *       instance may be reused across many concurrent requests on the same
+         *       single-threaded listener (pipelining, HTTP/2 multiplexing). Implementations
+         *       **must not** store per-request state on the task itself; all per-request
+         *       bookkeeping (current-task cursor, in-flight flag, cancellation) is owned
+         *       by the `Context`.
+         *
          * @tparam SessionType The type of the session object associated with the request context.
          */
         template<typename SessionType>
@@ -55,14 +62,15 @@ namespace qb {
             virtual void execute(std::shared_ptr<Context<SessionType> > ctx) = 0;
 
             /**
-             * @brief Called by the `Context` if the overall request processing is cancelled while this task is active
-             *        or before it has a chance to execute in a cancelled chain.
+             * @brief Called by the `Context` if the overall request processing is cancelled while this task is
+             *        the currently in-flight task for the context.
              *
              * The task should attempt to gracefully terminate any ongoing operations it initiated
-             * (e.g., cancel pending I/O, release resources). This method might be called from a
-             * different thread than `execute()` if cancellation is triggered externally.
+             * (e.g., cancel pending I/O, release resources). Because qb listeners are strictly
+             * single-threaded, this method is always invoked on the same thread that is running
+             * `execute()`; implementations do not need their own synchronisation.
              *
-             * @warning Implementations of `cancel()` **should not** call `ctx->complete()`. The `Context` object
+             * @warning Implementations of `cancel()` **must not** call `ctx->complete()`. The `Context` object
              *          is already managing the cancellation and finalization process.
              */
             virtual void cancel() = 0;
@@ -72,33 +80,6 @@ namespace qb {
              * @return A `std::string` representing the name of the task.
              */
             [[nodiscard]] virtual std::string name() const = 0;
-
-            /** 
-             * @brief Called by Context to indicate that this task is about to be executed.
-             */
-            void startProcessing() { _is_being_processed = true; }
-
-            /** 
-             * @brief Called by Context to indicate that this task has finished execution (normally or via exception).
-             */
-            void finishProcessing() { _is_being_processed = false; }
-
-            /** 
-             * @brief Checks if the Context is currently processing this task.
-             * @return True if processing has started and not yet finished, false otherwise.
-             */
-            [[nodiscard]] bool isCurrentlyProcessing() const { return _is_being_processed; }
-
-        private:
-            /** 
-             * @brief Flag indicating whether the `Context` is currently executing this task.
-             * This flag is set to `true` by the `Context` just before calling `execute()` on this task,
-             * and set back to `false` when this task calls `ctx->complete()` or if an exception occurs.
-             * It can be inspected by the `Context` during cancellation to determine if `cancel()` needs
-             * to be called on this specific task instance.
-             * It is managed via startProcessing()/finishProcessing() by Context.
-             */
-            bool _is_being_processed = false;
         };
     }
 } // namespace qb::http 

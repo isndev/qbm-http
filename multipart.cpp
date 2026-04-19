@@ -61,27 +61,9 @@ namespace qb::http {
         return "";
     }
 
-    template class TMultiPart<std::string>;
-    template class TMultiPart<std::string_view>;
 } // namespace qb::http
 
 namespace qb::allocator {
-    template<typename MultiPartType>
-    pipe<char> &
-    put_impl(pipe<char> &pipe, const MultiPartType &mp) {
-        pipe.reserve(mp.content_length());
-        for (const auto &part: mp.parts()) {
-            pipe << "--" << mp.boundary() << qb::http::endl;
-            for (const auto &[key, headers]: part.headers()) {
-                for (const auto &header: headers)
-                    pipe << key << ": " << header << qb::http::endl;
-            }
-            pipe << qb::http::endl << part.body << qb::http::endl;
-        }
-        pipe << "--" << mp.boundary() << "--";
-        return pipe;
-    }
-
     /**
      * @brief Serialize a Multipart form-data content into a byte stream
      * @param mp Multipart object to serialize
@@ -103,30 +85,16 @@ namespace qb::allocator {
     template<>
     pipe<char> &
     pipe<char>::put<qb::http::Multipart>(const qb::http::Multipart &mp) {
-        return put_impl(*this, mp);
-    }
-
-    /**
-     * @brief Serialize a MultipartView form-data content into a byte stream
-     * @param mp MultipartView object to serialize
-     * @return Reference to this pipe
-     *
-     * Formats a multipart/form-data content according to RFC 7578.
-     * Each part is formatted with its headers and body, separated
-     * by the multipart boundary.
-     *
-     * The format is:
-     * - For each part:
-     *   - Boundary line (--boundary)
-     *   - Part headers
-     *   - Empty line
-     *   - Part body
-     *   - CRLF
-     * - Final boundary (--boundary--)
-     */
-    template<>
-    pipe<char> &
-    pipe<char>::put<qb::http::MultipartView>(const qb::http::MultipartView &mp) {
-        return put_impl(*this, mp);
+        this->reserve(mp.content_length());
+        for (const auto &part : mp.parts()) {
+            *this << "--" << mp.boundary() << qb::http::endl;
+            for (const auto &[key, values] : part.headers()) {
+                for (const auto &header : values)
+                    *this << key << ": " << header << qb::http::endl;
+            }
+            *this << qb::http::endl << part.body << qb::http::endl;
+        }
+        *this << "--" << mp.boundary() << "--";
+        return *this;
     }
 } // namespace qb::allocator

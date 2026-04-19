@@ -440,7 +440,6 @@ namespace qb::http {
         template<typename IO_Handler, bool has_server = IO_Handler::has_server>
         struct side {
             using protocol = qb::protocol::http::server<IO_Handler>;
-            using protocol_view = qb::protocol::http::server_view<IO_Handler>;
         };
 
         /**
@@ -452,7 +451,6 @@ namespace qb::http {
         template<typename IO_Handler>
         struct side<IO_Handler, false> {
             using protocol = qb::protocol::http::client<IO_Handler>;
-            using protocol_view = qb::protocol::http::client_view<IO_Handler>;
         };
     } // namespace internal
 
@@ -462,13 +460,6 @@ namespace qb::http {
      */
     template<typename IO_Handler>
     using protocol = typename internal::side<IO_Handler>::protocol;
-
-    /**
-     * @brief Get the appropriate string_view-based protocol type for an IO handler
-     * @tparam IO_Handler The IO handler type
-     */
-    template<typename IO_Handler>
-    using protocol_view = typename internal::side<IO_Handler>::protocol_view;
 
     /**
      * @brief Asynchronous HTTP client implementation namespace
@@ -865,14 +856,6 @@ namespace qb::http {
             qb::protocol::http::server, Server>;
 
         /**
-         * @brief Standard TCP HTTP session type with string_view optimization
-         * @tparam Server Server handler type
-         */
-        template<typename Server>
-        using session_view = internal::session<Derived, qb::io::transport::tcp,
-            qb::protocol::http::server_view, Server>;
-
-        /**
          * @brief Standard HTTP IO handler
          * @tparam Session Session type
          */
@@ -897,14 +880,6 @@ namespace qb::http {
             template<typename Server>
             using session = internal::session<Derived, qb::io::transport::stcp,
                 qb::protocol::http::server, Server>;
-
-            /**
-             * @brief Secure HTTPS session type with string_view optimization
-             * @tparam Server Server handler type
-             */
-            template<typename Server>
-            using session_view = internal::session<Derived, qb::io::transport::stcp,
-                qb::protocol::http::server_view, Server>;
 
             /**
              * @brief Secure HTTPS IO handler

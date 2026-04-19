@@ -53,6 +53,7 @@ set(HTTP_TESTS
         dos-protection
         multipart-security
         date-parsing
+        context-slots
 )
 
 # Register each standard test

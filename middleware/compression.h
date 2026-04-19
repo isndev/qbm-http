@@ -154,7 +154,7 @@ namespace qb::http {
      * @tparam SessionType The type of the session object managed by the router, used by `Context`.
      */
     template<typename SessionType>
-    class CompressionMiddleware : public IMiddleware<SessionType> {
+    class CompressionMiddleware final : public IMiddleware<SessionType> {
     public:
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
         using RequestType = Request; // Usually qb::http::Request
@@ -264,7 +264,6 @@ namespace qb::http {
          * @return `true` if `Content-Encoding` header is present and not empty, `false` otherwise.
          */
         [[nodiscard]] bool can_decompress_request(const RequestType &request) const noexcept {
-            // TRequest::header returns String type. Check if it's empty.
             // The actual encoding value is checked by Body::uncompress and its helpers.
             return request.has_header("Content-Encoding") && !request.header("Content-Encoding").empty();
         }
@@ -278,15 +277,10 @@ namespace qb::http {
          */
         void decompress_request_body(RequestType &request) {
 #ifdef QB_HAS_COMPRESSION
-            // header() returns `const String&`. Body::uncompress needs `const std::string&`.
-            std::string encoding_str;
-            const auto &enc_header_val = request.header("Content-Encoding");
-            if constexpr (std::is_same_v<std::decay_t<decltype(enc_header_val)>, std::string>) {
-                encoding_str = enc_header_val;
-            } else {
-                // Assume std::string_view or convertible
-                encoding_str = std::string(enc_header_val);
-            }
+            // `request.header()` now always returns `const std::string&` – the template
+            // dance around `std::string_view` headers was retired along with the owning
+            // purge. Just borrow the reference and hand it off to `Body::uncompress`.
+            const std::string &encoding_str = request.header("Content-Encoding");
 
             if (request.body().empty() || encoding_str.empty()) {
                 return;
@@ -368,39 +362,31 @@ namespace qb::http {
          * @return The name of the best matching encoding (e.g., "gzip") or an empty string if no suitable match.
          */
         [[nodiscard]] std::string select_best_encoding(const RequestType &request) const noexcept {
-            std::string accept_encoding_header_str;
-            const auto &acc_enc_val = request.header("Accept-Encoding");
-            if constexpr (std::is_same_v<std::decay_t<decltype(acc_enc_val)>, std::string>) {
-                accept_encoding_header_str = acc_enc_val;
-            } else {
-                accept_encoding_header_str = std::string(acc_enc_val);
-            }
+            // After the string_view purge, `request.header()` always returns `const std::string&`.
+            const std::string &accept_encoding_header_str = request.header("Accept-Encoding");
 
             if (accept_encoding_header_str.empty()) {
                 return ""; // Client did not specify Accept-Encoding
             }
 
-            // Parse Accept-Encoding: value1;q=x, value2;q=y, ... or just value1, value2
-            // For simplicity, we'll iterate preferred encodings and see if client accepts them.
-            // A full q-value parsing is more complex.
-            auto client_accepted_raw_tokens = utility::split_string<std::string>(accept_encoding_header_str, ",");
-            std::vector<std::string_view> client_accepted_encodings;
-            for (const auto &raw_token: client_accepted_raw_tokens) {
-                std::string_view token_sv = utility::trim_http_whitespace(raw_token);
-                size_t q_pos = token_sv.find(';'); // Strip q-value part
-                if (q_pos != std::string_view::npos) {
-                    token_sv = token_sv.substr(0, q_pos);
-                    token_sv = utility::trim_http_whitespace(token_sv); // Trim again after substr
-                }
-                if (!token_sv.empty()) {
-                    client_accepted_encodings.push_back(token_sv);
+            // Parse `Accept-Encoding: value1;q=x, value2;q=y, ...` entirely over
+            // `string_view`s — no intermediate owning allocations (F43). A full
+            // q-value prioritisation is deferred; we simply honour the server's
+            // preferred-encoding order which mirrors the traditional qb behaviour.
+            auto client_tokens = utility::split_string<std::string_view>(accept_encoding_header_str, ",");
+            for (auto &token: client_tokens) {
+                token = utility::trim_http_whitespace(token);
+                if (const auto q_pos = token.find(';'); q_pos != std::string_view::npos) {
+                    token = utility::trim_http_whitespace(token.substr(0, q_pos));
                 }
             }
 
             for (const auto &preferred_server_encoding: _options.get_preferred_encodings()) {
-                for (const auto &client_encoding: client_accepted_encodings) {
-                    if (utility::iequals(client_encoding, preferred_server_encoding) || client_encoding == "*") {
-                        return preferred_server_encoding; // Found a match
+                for (const auto &client_encoding: client_tokens) {
+                    if (client_encoding.empty()) continue;
+                    if (utility::iequals(client_encoding, preferred_server_encoding) ||
+                        client_encoding == "*") {
+                        return preferred_server_encoding;
                     }
                 }
             }

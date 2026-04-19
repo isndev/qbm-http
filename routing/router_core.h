@@ -272,39 +272,46 @@ namespace qb::http {
 
             ctx->execute_hook(qb::http::HookPoint::PRE_ROUTING);
 
-            std::string request_path_str = std::string(ctx->request().uri().path());
-            
+            // Pass the path as a string_view to avoid an up-front copy. The request
+            // (owner of the URI string) lives inside the context for the whole routing
+            // call, so the view is stable. Lazy-decoding path parameters happens below.
+            const std::string_view request_path_sv = ctx->request().uri().path();
+
             // Security: Limit path length to prevent DoS attacks
             // RFC 7230 recommends a practical limit of 8000 bytes for request-line, but we use a more conservative limit
             // for the path component alone. 4096 characters is a reasonable limit that prevents excessive allocations
             // while still allowing legitimate long paths (e.g., deep API hierarchies or encoded paths).
             constexpr size_t MAX_PATH_LENGTH = 4096;
-            if (request_path_str.length() > MAX_PATH_LENGTH) {
-                LOG_HTTP_WARN("Path length exceeds maximum (" << request_path_str.length() 
-                    << " > " << MAX_PATH_LENGTH << "): " << request_path_str.substr(0, 100) << "...");
+            if (request_path_sv.length() > MAX_PATH_LENGTH) {
+                LOG_HTTP_WARN("Path length exceeds maximum (" << request_path_sv.length()
+                    << " > " << MAX_PATH_LENGTH << "): " << request_path_sv.substr(0, 100) << "...");
                 ctx->response().status() = qb::http::status::BAD_REQUEST;
                 ctx->response().body() = "Path too long";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
                 ctx->complete(AsyncTaskResult::COMPLETE);
                 return ctx;
             }
-            
+
             qb::http::method request_method = ctx->request().method();
-            
-            LOG_HTTP_TRACE("Routing request: " << std::to_string(request_method) << " " << request_path_str);
-            
-            auto matched_info_opt = _radix_tree.match(request_path_str, request_method);
+
+            LOG_HTTP_TRACE("Routing request: " << std::to_string(request_method) << " " << request_path_sv);
+
+            auto matched_info_opt = _radix_tree.match(request_path_sv, request_method);
 
             std::vector<std::shared_ptr<IAsyncTask<SessionType> > > tasks_to_execute_vec;
 
             if (matched_info_opt && matched_info_opt->route_tasks && matched_info_opt->route_tasks.value()) {
                 PathParameters decoded_params = std::move(matched_info_opt->path_parameters);
-                // Decode URI-encoded path parameters.
-                // RadixTree::match() stores raw (non-decoded) path segments in PathParameters.
-                // We decode them here once to convert percent-encoded characters (e.g., %20 -> space).
-                // Note: uri::decode() is idempotent, so calling it multiple times is safe but unnecessary.
-                for (auto &param_pair: decoded_params) {
-                    param_pair.second = qb::io::uri::decode(param_pair.second);
+                // Decode URI-encoded path parameters in place.
+                // `RadixTree::match()` stores raw (non-decoded) segments in `PathParameters`;
+                // we decode them here once so middleware / handlers see %20 -> space, etc.
+                // `uri::decode()` is idempotent so double-decoding is harmless but avoided.
+                // NOTE: Decoding only happens when a parameterised route matches – static
+                // routes never allocate decoded strings.
+                if (!decoded_params.empty()) {
+                    for (auto &param_pair: decoded_params) {
+                        param_pair.second = qb::io::uri::decode(param_pair.second);
+                    }
                 }
                 ctx->set_path_parameters(std::move(decoded_params));
 
@@ -312,8 +319,8 @@ namespace qb::http {
                 if (task_list_sptr) {
                     tasks_to_execute_vec = *task_list_sptr;
                 }
-                
-                LOG_HTTP_DEBUG("Route matched: " << std::to_string(request_method) << " " << request_path_str);
+
+                LOG_HTTP_DEBUG("Route matched: " << std::to_string(request_method) << " " << request_path_sv);
                 LOG_HTTP_TRACE("Route matched with " << decoded_params.size() << " path parameters");
                 
                 ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::NORMAL_CHAIN);
@@ -321,7 +328,7 @@ namespace qb::http {
                 // No route matched, use the compiled 404 tasks
                 tasks_to_execute_vec = _compiled_not_found_tasks;
                 
-                LOG_HTTP_DEBUG("No route matched for: " << std::to_string(request_method) << " " << request_path_str << " (404)");
+                LOG_HTTP_DEBUG("No route matched for: " << std::to_string(request_method) << " " << request_path_sv << " (404)");
                 
                 ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::NOT_FOUND_CHAIN);
             }
@@ -329,8 +336,8 @@ namespace qb::http {
             if (tasks_to_execute_vec.empty()) {
                 // This is a critical state: no tasks for a matched route or even for 404.
                 // Should ideally not happen if compile_default_not_found_handler ensures a task.
-                LOG_HTTP_ERROR("Router critical error: No task chain available for " 
-                    << std::to_string(request_method) << " " << request_path_str);
+                LOG_HTTP_ERROR("Router critical error: No task chain available for "
+                    << std::to_string(request_method) << " " << request_path_sv);
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body() = "Router critical error: No task chain available.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
