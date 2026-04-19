@@ -15,11 +15,6 @@
 #         limitations under the License.
 #
 
-include(CTest)
-
-# Find OpenSSL for the authentication tests
-find_package(OpenSSL REQUIRED)
-
 # Define test files and their corresponding test names
 set(HTTP_TESTS
         uri-only

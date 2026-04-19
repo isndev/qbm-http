@@ -291,11 +291,11 @@ TEST_F(DateParsingTest, NullOptForInvalidDates) {
 
 TEST_F(DateParsingTest, ExceptionSafety) {
     // All parsing functions should be noexcept (no exceptions thrown)
-    EXPECT_NO_THROW(parse_http_date(std::string_view("")));
-    EXPECT_NO_THROW(parse_http_date(std::string_view("invalid")));
-    EXPECT_NO_THROW(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT")));
-    EXPECT_NO_THROW(parse_cookie_date(std::string_view("")));
-    EXPECT_NO_THROW(parse_cookie_date(std::string_view("invalid")));
+    EXPECT_NO_THROW((void)parse_http_date(std::string_view("")));
+    EXPECT_NO_THROW((void)parse_http_date(std::string_view("invalid")));
+    EXPECT_NO_THROW((void)parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT")));
+    EXPECT_NO_THROW((void)parse_cookie_date(std::string_view("")));
+    EXPECT_NO_THROW((void)parse_cookie_date(std::string_view("invalid")));
 }
 
 int main(int argc, char **argv) {

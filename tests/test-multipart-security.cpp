@@ -72,7 +72,7 @@ TEST_F(MultipartSecurityTest, BoundaryOverMaxLengthIsRejected) {
 
     // Should throw due to security limit
     EXPECT_THROW({
-        parse_boundary(content_type);
+        (void)parse_boundary(content_type);
     }, std::runtime_error);
 }
 
@@ -83,7 +83,7 @@ TEST_F(MultipartSecurityTest, BoundaryMuchOverMaxLength) {
 
     // Should throw immediately without allocating huge memory
     EXPECT_THROW({
-        parse_boundary(content_type);
+        (void)parse_boundary(content_type);
     }, std::runtime_error);
 }
 
@@ -164,7 +164,7 @@ TEST_F(MultipartSecurityTest, HeaderAttributesOverLimitIsRejected) {
     std::string attrs = "data=" + huge_value;
 
     EXPECT_THROW({
-        parse_header_attributes(attrs.data(), attrs.size());
+        (void)parse_header_attributes(attrs.data(), attrs.size());
     }, std::runtime_error);
 }
 
@@ -212,19 +212,19 @@ TEST_F(MultipartSecurityTest, MalformedContentTypes) {
     // Malformed content types should not crash
     {
         std::string ct1 = "";
-        EXPECT_NO_THROW(parse_boundary(ct1));
+        EXPECT_NO_THROW((void)parse_boundary(ct1));
     }
     {
         std::string ct2 = "boundary=test";
-        EXPECT_NO_THROW(parse_boundary(ct2));
+        EXPECT_NO_THROW((void)parse_boundary(ct2));
     }
     {
         std::string ct3 = "multipart/form-data; boundary=";
-        EXPECT_NO_THROW(parse_boundary(ct3));
+        EXPECT_NO_THROW((void)parse_boundary(ct3));
     }
     {
         std::string ct4 = "multipart/form-data boundary=test"; // Missing semicolon
-        EXPECT_NO_THROW(parse_boundary(ct4));
+        EXPECT_NO_THROW((void)parse_boundary(ct4));
     }
 }
 
@@ -241,7 +241,7 @@ TEST_F(MultipartSecurityTest, SpecialCharactersInBoundary) {
     for (const auto& b : test_boundaries) {
         std::string ct = "multipart/form-data; boundary=" + b;
         EXPECT_NO_THROW({
-            parse_boundary(ct);
+            (void)parse_boundary(ct);
         });
     }
 }

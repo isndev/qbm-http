@@ -26,6 +26,7 @@
 #include <vector> // Required by qb::http::Headers if it uses std::vector for multi-value headers
 #include <unordered_set>
 #include <chrono>
+#include <qb/system/container/unordered_set.h> // for qb::unordered_set (previously picked up transitively via listener.h)
 
 #include "../../request.h"
 #include "../../response.h"
