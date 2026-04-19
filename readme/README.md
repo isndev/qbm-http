@@ -29,7 +29,7 @@ This documentation is broken down into several sections to help you understand a
 7.  **Error Handling:**
     *   [Error Handling Strategies](./13-error-handling.md) (Router error chain, `ErrorHandlingMiddleware`)
 8.  **Client & Low-Level Details:**
-    *   [Asynchronous HTTP Client](./14-async-http-client.md) (Using `qb::http::async`)
+    *   [Asynchronous HTTP Client](./14-async-http-client.md) (callback API &mdash; `qb::http::async` &mdash; and coroutine API &mdash; `qb::http::GET` / `run_sync`)
     *   [HTTP Message Parsing](./15-http-parsing.md) (Overview of internal parser)
 9.  **Advanced Topics:**
     *   [Advanced Usage & Performance](./16-advanced-topics.md) (Best practices, `string_view`, body handling)

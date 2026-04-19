@@ -54,6 +54,10 @@ set(HTTP_TESTS
         multipart-security
         date-parsing
         context-slots
+        coro-client
+        coro-http2-client
+        coro-server
+        coro-integration
 )
 
 # Register each standard test

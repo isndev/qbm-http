@@ -176,7 +176,7 @@ public:
 TEST(Session, HTTP_OVER_TCP) {
     async::init();
 
-    auto res = qb::http::GET(qb::http::Request{{"https://isndev.com"}});
+    auto res = qb::http::run_sync(qb::http::GET(qb::http::Request{{"https://isndev.com"}})).response;
 
     msg_count_server_side = 0;
     msg_count_client_side = 0;
@@ -241,7 +241,7 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
         };
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
-            auto res = qb::http::GET(r);
+            auto res = qb::http::run_sync(qb::http::GET(r)).response;
             EXPECT_EQ(res.status(), HTTP_STATUS_OK);
             ++msg_count_client_side;
         }

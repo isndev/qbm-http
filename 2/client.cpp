@@ -168,7 +168,7 @@ bool Client::push_request(qb::http::Request request, ResponseCallback callback) 
         process_pending_requests();
     } else if (!_is_connecting) {
         // Auto-connect if not already connecting
-        connect();
+        connect(nullptr);
     }
     
     return true;
@@ -266,7 +266,7 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
         process_pending_requests();
     } else if (!_is_connecting) {
         // Auto-connect if not already connecting
-        connect();
+        connect(nullptr);
     }
     
     return true;
@@ -519,7 +519,7 @@ void Client::attempt_reconnection() {
     
     // Add a small delay before reconnecting
     // In a real implementation, you might want exponential backoff
-    connect();
+    connect(nullptr);
 }
 
 qb::http::Response Client::create_error_response(qb::http::status status, const std::string& message) {
@@ -657,4 +657,50 @@ std::shared_ptr<Client> make_client(const qb::io::uri& uri) {
     return std::make_shared<Client>(uri);
 }
 
-} // namespace qb::http2 
+// ---------------------------------------------------------------------------
+// Coroutine overloads
+//
+// Each overload wraps the callback-based counterpart inside an
+// `async::awaiter<T>`. They don't re-implement any protocol logic &mdash;
+// they just bridge the existing callback machinery to a coroutine-friendly
+// return value, exactly like `qbm/redis::redis_awaiter` and
+// `qbm/pgsql::pg_reply_awaiter` do.
+// ---------------------------------------------------------------------------
+
+qb::http::async::awaiter<ConnectResult>
+Client::connect() {
+    return qb::http::async::make_awaiter<ConnectResult>(
+        [this](std::function<void(ConnectResult&&)> complete) {
+            this->connect([complete = std::move(complete)]
+                          (bool ok, const std::string& err) mutable {
+                complete(ConnectResult{ok, err});
+            });
+        });
+}
+
+qb::http::async::awaiter<qb::http::Response>
+Client::push_request(qb::http::Request request) {
+    return qb::http::async::make_awaiter<qb::http::Response>(
+        [this, req = std::move(request)]
+        (std::function<void(qb::http::Response&&)> complete) mutable {
+            this->push_request(std::move(req),
+                [complete = std::move(complete)](qb::http::Response response) mutable {
+                    complete(std::move(response));
+                });
+        });
+}
+
+qb::http::async::awaiter<std::vector<qb::http::Response>>
+Client::push_requests(std::vector<qb::http::Request> requests) {
+    return qb::http::async::make_awaiter<std::vector<qb::http::Response>>(
+        [this, reqs = std::move(requests)]
+        (std::function<void(std::vector<qb::http::Response>&&)> complete) mutable {
+            this->push_requests(std::move(reqs),
+                [complete = std::move(complete)]
+                (std::vector<qb::http::Response> responses) mutable {
+                    complete(std::move(responses));
+                });
+        });
+}
+
+} // namespace qb::http2

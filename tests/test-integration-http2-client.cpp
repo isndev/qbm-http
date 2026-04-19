@@ -300,7 +300,7 @@ TEST_F(Http2ClientIntegrationTest, PostRequestWithData) {
             EXPECT_EQ(response.header("X-Protocol"), "HTTP/2");
         });
 
-        client->connect();
+        client->connect(nullptr);
 
         auto response_start_time = std::chrono::steady_clock::now();
         while (!response_received.load(std::memory_order_acquire) && 
@@ -338,7 +338,7 @@ TEST_F(Http2ClientIntegrationTest, ConcurrentRequests) {
             });
         }
 
-        client->connect();
+        client->connect(nullptr);
 
         auto response_start_time = std::chrono::steady_clock::now();
         while (responses_received.load(std::memory_order_acquire) < 3 && 
@@ -380,7 +380,7 @@ TEST_F(Http2ClientIntegrationTest, BatchRequests) {
             }
         });
 
-        client->connect();
+        client->connect(nullptr);
 
         auto response_start_time = std::chrono::steady_clock::now();
         while (!batch_completed.load(std::memory_order_acquire) && 
@@ -415,7 +415,7 @@ TEST_F(Http2ClientIntegrationTest, ErrorHandling) {
             EXPECT_EQ(response.header("X-Protocol"), "HTTP/2");
         });
 
-        client->connect();
+        client->connect(nullptr);
 
         auto response_start_time = std::chrono::steady_clock::now();
         while (!response_received.load(std::memory_order_acquire) && 

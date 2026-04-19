@@ -42,12 +42,17 @@
 namespace qb::http::rate_limit_security {
     /** @brief Maximum number of unique clients to track (prevents memory DoS) */
     constexpr std::size_t MAX_TRACKED_CLIENTS = 100000;
-    
+
     /** @brief Maximum client ID string length (prevents memory DoS) */
     constexpr std::size_t MAX_CLIENT_ID_LENGTH = 256;
-    
-    /** @brief Default cleanup interval for stale entries (milliseconds) */
+
+    /** @brief Default interval at which the opportunistic stale-entry sweep fires. */
     constexpr std::chrono::milliseconds STALE_ENTRY_CLEANUP_INTERVAL{60000}; // 1 minute
+
+    /** @brief Fraction (numerator / denominator) of `MAX_TRACKED_CLIENTS` above which an
+     *         emergency sweep is triggered on every incoming request. */
+    constexpr std::size_t MEMORY_PRESSURE_NUMERATOR   = 9;
+    constexpr std::size_t MEMORY_PRESSURE_DENOMINATOR = 10;
 }
 
 namespace qb::http {
@@ -339,6 +344,34 @@ namespace qb::http {
             // Use truncated client ID for tracking if needed
             const std::string client_id = client_id_raw.substr(0, rate_limit_security::MAX_CLIENT_ID_LENGTH);
 
+            const auto now = std::chrono::steady_clock::now();
+
+            // Opportunistic housekeeping.
+            //
+            // The `_client_data` map is append-only in the happy path: every
+            // unseen client adds an entry that never gets removed unless the
+            // admin calls `reset_client`/`reset_all_clients`. On a long-running
+            // server facing a scan, this grows until it hits
+            // `MAX_TRACKED_CLIENTS`, at which point genuine new clients get
+            // shut out with 503. To prevent that, we evict entries whose
+            // window has elapsed (i.e. the client has been silent for at
+            // least one full window) either:
+            //
+            //   * periodically, throttled by STALE_ENTRY_CLEANUP_INTERVAL, so
+            //     the O(N) sweep is at most once per minute by default;
+            //   * eagerly, whenever the map crosses the memory-pressure
+            //     threshold (90 % of the cap by default), regardless of the
+            //     throttle &mdash; this is what actually recovers capacity
+            //     before the hard cap starts refusing clients.
+            const bool periodic_due    = (now >= _next_cleanup_time);
+            const bool memory_pressure = _client_data.size() * rate_limit_security::MEMORY_PRESSURE_DENOMINATOR
+                                         >= rate_limit_security::MAX_TRACKED_CLIENTS
+                                          * rate_limit_security::MEMORY_PRESSURE_NUMERATOR;
+            if (periodic_due || memory_pressure) {
+                evict_stale_entries_internal(now);
+                _next_cleanup_time = now + rate_limit_security::STALE_ENTRY_CLEANUP_INTERVAL;
+            }
+
             bool rate_limited_flag = false;
             bool memory_limit_reached = false;
             ClientData client_data_for_headers; // Snapshot used to build rate-limit headers.
@@ -350,7 +383,6 @@ namespace qb::http {
                 _client_data.find(client_id) == _client_data.end()) {
                 memory_limit_reached = true;
             } else {
-                const auto now = std::chrono::steady_clock::now();
                 ClientData &current_client_record = _client_data[client_id]; // Creates if not exist
 
                 // Check if the window has reset for this client
@@ -425,6 +457,36 @@ namespace qb::http {
             return *_options;
         }
 
+        /**
+         * @brief Returns the number of clients currently tracked.
+         *
+         * Primarily useful for tests, telemetry, and diagnostics: it
+         * reflects how many entries survived the last opportunistic
+         * eviction pass. In production code, prefer driving behaviour from
+         * the rate-limit response headers instead of this figure.
+         */
+        [[nodiscard]] std::size_t tracked_client_count() const noexcept {
+            return _client_data.size();
+        }
+
+        /**
+         * @brief Forces an immediate sweep of stale entries, on demand.
+         *
+         * Entries whose window has elapsed (i.e. the corresponding client
+         * has been silent for at least one full window duration) are
+         * removed. This is the same sweep that `process()` runs
+         * opportunistically; exposing it here lets callers reclaim memory
+         * proactively without waiting for the next periodic tick or for
+         * the memory-pressure threshold to trip.
+         *
+         * @return Number of entries evicted.
+         */
+        std::size_t evict_stale_entries_now() {
+            const auto before = _client_data.size();
+            evict_stale_entries_internal(std::chrono::steady_clock::now());
+            return before - _client_data.size();
+        }
+
     private:
         /** @brief Internal struct to store rate limit tracking data per client. */
         struct ClientData {
@@ -433,9 +495,38 @@ namespace qb::http {
             ///< Time when the window was last reset.
         };
 
+        /**
+         * @brief (Private) Evicts entries whose rate-limit window has already elapsed.
+         *
+         * "Stale" is defined as `now - entry.last_reset_time >= window`,
+         * which is the exact condition that `process()` uses to reset a
+         * client's counter: any entry matching it would, on its next
+         * request, be reset to a fresh window anyway &mdash; so holding on
+         * to it only burns memory. The sweep is O(N); it is gated by the
+         * opportunistic schedule in `process()` so that the hot path stays
+         * O(1) amortised.
+         */
+        void evict_stale_entries_internal(std::chrono::steady_clock::time_point now) noexcept {
+            const auto window = _options->get_window();
+            for (auto it = _client_data.begin(); it != _client_data.end(); ) {
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - it->second.last_reset_time) >= window) {
+                    it = _client_data.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         std::shared_ptr<RateLimitOptions> _options; ///< Shared pointer to the rate limiting configuration.
         std::string _name; ///< Name of this middleware instance.
         qb::unordered_map<std::string, ClientData> _client_data; ///< Stores request counts per client ID. Accessed from the owning listener only.
+        /// Time point of the next scheduled periodic stale-entry sweep.
+        /// Initialised lazily on the first call to `process()`; reset every
+        /// time a sweep runs.
+        std::chrono::steady_clock::time_point _next_cleanup_time{
+            std::chrono::steady_clock::now() + rate_limit_security::STALE_ENTRY_CLEANUP_INTERVAL
+        };
 
         /**
          * @brief (Private) Adds standard `X-RateLimit-*` headers to the HTTP response.

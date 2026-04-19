@@ -90,7 +90,7 @@ protected:
 TEST_F(HttpMakeServerTest, PingDefaultSessionHttpServer) {
     std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping to HTTP server (default session) on port " << TEST_PORT << std::endl;
     qb::http::Request request{{"http://localhost:" + std::to_string(TEST_PORT) + "/ping"}};
-    auto response = qb::http::GET(request);
+    auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
     EXPECT_EQ(HTTP_STATUS_OK, response.status());
     EXPECT_EQ("pong_http_default", response.body().as<std::string>());
@@ -185,7 +185,7 @@ TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
     std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_ssl to HTTPS server (default session) on port " << TEST_PORT_SSL << std::endl;
     qb::http::Request request{{"https://localhost:" + std::to_string(TEST_PORT_SSL) + "/ping_ssl"}};
     
-    auto response = qb::http::GET(request); 
+    auto response = qb::http::run_sync(qb::http::GET(request)).response; 
 
     EXPECT_EQ(HTTP_STATUS_OK, response.status());
     EXPECT_EQ("pong_https_default", response.body().as<std::string>());
