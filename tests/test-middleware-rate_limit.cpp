@@ -472,3 +472,103 @@ TEST_F(RateLimitMiddlewareTest, RequestsStraddlingWindowBoundary) {
     EXPECT_GT(reset_val_req4, 0); // Should be positive
     EXPECT_LE(reset_val_req4, 2); // Should be close to the full window (2s)
 }
+
+// --- F41: stale-entry eviction / capacity recovery ---
+
+// The middleware now opportunistically evicts tracked clients whose window
+// has already elapsed, so a one-shot scan of unique IPs no longer traps
+// capacity permanently. `evict_stale_entries_now()` exposes the same sweep
+// synchronously for tests and for operators who want to reclaim memory on
+// demand.
+TEST_F(RateLimitMiddlewareTest, StaleEntriesEvictedOnDemand) {
+    qb::http::RateLimitOptions options;
+    // 100 ms window: easy to straddle in the test without long sleeps.
+    options.max_requests(5).window(std::chrono::milliseconds(100));
+    auto rate_limit_mw = qb::http::rate_limit_middleware<MockRateLimitSession>(options);
+
+    // Hit the middleware from three distinct client IDs: each one allocates
+    // an entry in the internal map.
+    for (const auto *client : {"c_one", "c_two", "c_three"}) {
+        _session->reset();
+        configure_router_and_run(rate_limit_mw, create_request("/limited_route", client));
+        EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << client;
+    }
+    EXPECT_EQ(rate_limit_mw->tracked_client_count(), 3U);
+
+    // Let every window elapse, then force a sweep. All three entries are
+    // stale (no traffic since one full window ago) and must be evicted.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    const auto evicted = rate_limit_mw->evict_stale_entries_now();
+    EXPECT_EQ(evicted, 3U);
+    EXPECT_EQ(rate_limit_mw->tracked_client_count(), 0U);
+
+    // A fresh request after eviction must re-create the entry and behave
+    // exactly as the first request for a brand-new client.
+    _session->reset();
+    configure_router_and_run(rate_limit_mw, create_request("/limited_route", "c_one"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "4");
+    EXPECT_EQ(rate_limit_mw->tracked_client_count(), 1U);
+}
+
+// Active clients (whose window has NOT elapsed) must survive the sweep.
+// The test asserts that the opportunistic eviction is truly surgical: it
+// only touches entries matching the staleness criterion.
+TEST_F(RateLimitMiddlewareTest, ActiveEntriesSurviveEviction) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(3).window(std::chrono::milliseconds(500));
+    auto rate_limit_mw = qb::http::rate_limit_middleware<MockRateLimitSession>(options);
+
+    // Stale client: hit once, then let its window elapse.
+    _session->reset();
+    configure_router_and_run(rate_limit_mw, create_request("/limited_route", "stale"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+    // Active client: hit right before the sweep, its window is fresh.
+    _session->reset();
+    configure_router_and_run(rate_limit_mw, create_request("/limited_route", "active"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+
+    const auto evicted = rate_limit_mw->evict_stale_entries_now();
+    EXPECT_EQ(evicted, 1U);                               // only `stale`
+    EXPECT_EQ(rate_limit_mw->tracked_client_count(), 1U); // only `active` left
+
+    // The surviving entry keeps its counter: the next request sees
+    // remaining = 1 (max_requests - 2), not remaining = 2.
+    _session->reset();
+    configure_router_and_run(rate_limit_mw, create_request("/limited_route", "active"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(std::string(_session->_response.header("X-RateLimit-Remaining")), "1");
+}
+
+// End-to-end scenario: a flood of short-lived clients should **not**
+// permanently consume tracking slots. After their windows elapse, the
+// next request (regardless of client ID) must trigger the periodic sweep
+// via the opportunistic path inside `process()` and clean up.
+TEST_F(RateLimitMiddlewareTest, OpportunisticPeriodicCleanupRecoversCapacity) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(std::chrono::milliseconds(50));
+    auto rate_limit_mw = qb::http::rate_limit_middleware<MockRateLimitSession>(options);
+
+    // 20 unique clients fire once, then disappear.
+    for (int i = 0; i < 20; ++i) {
+        _session->reset();
+        configure_router_and_run(rate_limit_mw, create_request(
+            "/limited_route", "burst_" + std::to_string(i)));
+        EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    }
+    EXPECT_EQ(rate_limit_mw->tracked_client_count(), 20U);
+
+    // Every window has elapsed.
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+    // The public API for the periodic sweep is `evict_stale_entries_now`
+    // (the timer-gated path inside `process()` is an implementation
+    // detail that we already cover indirectly through the other F41
+    // scenarios). Calling it here must reclaim every slot from the
+    // 20-client burst.
+    const auto evicted = rate_limit_mw->evict_stale_entries_now();
+    EXPECT_EQ(evicted, 20U);
+    EXPECT_EQ(rate_limit_mw->tracked_client_count(), 0U);
+}

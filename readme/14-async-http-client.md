@@ -4,17 +4,20 @@ The `qb::http` module includes a powerful asynchronous HTTP client, located in t
 
 It supports:
 -   HTTP and HTTPS (if `QB_IO_WITH_SSL` is enabled).
--   Standard HTTP methods (GET, POST, PUT, DELETE, etc.).n-   Custom headers, request bodies.
+-   Standard HTTP methods (GET, POST, PUT, DELETE, etc.).
+-   Custom headers, request bodies.
 -   Automatic `Accept-Encoding` header for supported compressions (e.g., gzip, deflate if `QB_IO_WITH_ZLIB` is enabled).
 -   Automatic decompression of response bodies if `Content-Encoding` is present and supported.
 -   Connection timeouts.
 
 ## Core Client Usage
 
-The client offers two main ways to make requests, both stemming from functions available directly under the `qb::http` namespace (e.g., `qb::http::GET`, `qb::http::POST`) which are defined in `http/http.h` and implemented in `http/http.cpp`.
+The client offers two APIs, both available directly under the `qb::http` namespace (defined in `qbm/http/1.1/http.h` / `qbm/http/coro.h`):
 
-1.  **Asynchronous Calls with Callbacks**: This is the native non-blocking way. You provide a callback function that will be invoked when the HTTP response is received or an error occurs.
-2.  **Synchronous-Style Calls**: These are convenience wrappers around the asynchronous calls. They block the calling thread until the response is received or a timeout occurs, returning the `qb::http::Response` directly. These are useful for simpler scenarios or when integrating with synchronous code, but should be used judiciously in highly concurrent actors to avoid blocking their event processing.
+1.  **Callback-based asynchronous calls** &mdash; the native non-blocking form. You pass a callable that receives the `qb::http::async::Reply` when the response is ready (or an error occurs). Signatures live in `qb::http::async::*`.
+2.  **Coroutine-style calls** &mdash; the recommended form for modern application code. `qb::http::GET`, `POST`, `PUT`, `DEL`, `HEAD`, `OPTIONS`, `PATCH`, and the generic `REQUEST` return an *awaiter* that yields a `qb::http::async::Reply`. You can `co_await` it from any coroutine, or drive it synchronously via `qb::http::run_sync(...)`.
+
+The old blocking overloads (`Response GET(Request, timeout)`) have been retired &mdash; the coroutine API plus `run_sync` covers the same use case without threading an implicit event-loop pump through every call site. See [Coroutine-Style Calls](#coroutine-style-calls) below.
 
 ### Preparing a Request (`qb::http::Request`)
 
@@ -118,53 +121,109 @@ int main() {
 
 If the request fails due to connection issues or timeouts before a response is fully parsed, the `reply.response.status()` will typically be set to an error status like `qb::http::status::SERVICE_UNAVAILABLE` (503) or `qb::http::status::GATEWAY_TIMEOUT` (504).
 
-### 2. Synchronous-Style Calls
+### 2. Coroutine-Style Calls {#coroutine-style-calls}
 
-For convenience, especially in less performance-critical sections or simpler applications, synchronous wrappers are provided. These functions block until the response is available.
+Every HTTP verb under `qb::http` is also exposed as a coroutine-returning overload. These overloads are thin wrappers over the callback-based API and do **not** allocate a new thread or a dedicated event loop; they merely bridge the callback to `co_await`.
 
-**Function Signatures (from `http/http.h`):**
+**Function Signatures (from `qbm/http/coro.h` / `qbm/http/1.1/http.h`):**
 
 ```cpp
-Response GET(Request request, double timeout = 3.);
-Response POST(Request request, double timeout = 3.);
-// Similar functions for PUT, DELETE, PATCH, HEAD, OPTIONS, and REQUEST
+namespace qb::http {
+
+    // HTTP/1.1 coroutine client: one overload per verb.
+    [[nodiscard]] async::awaiter<async::Reply> REQUEST(Request request, double timeout = 3.);
+    [[nodiscard]] async::awaiter<async::Reply> GET    (Request request, double timeout = 3.);
+    [[nodiscard]] async::awaiter<async::Reply> POST   (Request request, double timeout = 3.);
+    [[nodiscard]] async::awaiter<async::Reply> PUT    (Request request, double timeout = 3.);
+    [[nodiscard]] async::awaiter<async::Reply> DEL    (Request request, double timeout = 3.);
+    [[nodiscard]] async::awaiter<async::Reply> HEAD   (Request request, double timeout = 3.);
+    [[nodiscard]] async::awaiter<async::Reply> OPTIONS(Request request, double timeout = 3.);
+    [[nodiscard]] async::awaiter<async::Reply> PATCH  (Request request, double timeout = 3.);
+
+    // Convenience: drive any awaitable to completion on the current thread's
+    // qb-io event loop. Alias over qb::io::async::run_sync.
+    template <typename Awaitable>
+    auto run_sync(Awaitable&& a);
+
+} // namespace qb::http
 ```
 
--   `request`: The `qb::http::Request` object (typically moved).
--   `timeout`: Optional timeout in seconds. Default is often around 3 seconds.
--   Returns: A `qb::http::Response` object.
+**`async::Reply`** carries both the original `Request` (useful for correlating traces / request IDs) and the parsed `Response`, so there is no information loss compared to the legacy synchronous API.
 
-**Example:**
+**Usage from inside a coroutine:**
 
 ```cpp
-#include <http/http.h>
-#include <qb/io/uri.h>
-#include <qb/io/async.h> // Required for the underlying async mechanisms
+#include <qbm/http/http.h>
+#include <qbm/http/coro.h>
 
-int main() {
-    qb::io::async::init(); // Still needed for the underlying async operations
-
+qb::io::async::task<void> fetch_time() {
     qb::http::Request req(qb::io::uri("http://worldtimeapi.org/api/ip"));
     req.add_header("Accept", "application/json");
 
-    std::cout << "Sending sync GET request..." << std::endl;
-    qb::http::Response response = qb::http::GET(std::move(req), 5.0); // 5 second timeout
+    auto reply = co_await qb::http::GET(std::move(req), 5.0);
 
-    if (response.status() == qb::http::status::OK) {
-        std::cout << "Sync Success! Body: " << response.body().as<std::string_view>() << std::endl;
-    } else {
-        std::cerr << "Sync Request failed. Status: " << response.status().code()
-                  << " Body: " << response.body().as<std::string_view>() << std::endl;
+    if (reply.response.status() == qb::http::status::OK) {
+        // reply.request is the original request; reply.response the parsed reply.
+        handle_json(reply.response.body().as<std::string_view>());
     }
-    // No need to explicitly run event loop for the sync call itself in this simple main,
-    // as qb::http::GET (sync) internally runs qb::io::async::run_until().
+    co_return;
+}
+```
+
+**Driving a single call from non-coroutine code (tests, bootstrap, CLIs):**
+
+```cpp
+#include <qbm/http/http.h>
+#include <qbm/http/coro.h>
+
+int main() {
+    qb::io::async::init();
+
+    qb::http::Request req(qb::io::uri("http://worldtimeapi.org/api/ip"));
+    auto reply = qb::http::run_sync(qb::http::GET(std::move(req), 5.0));
+
+    if (reply.response.status() == qb::http::status::OK) {
+        std::cout << reply.response.body().as<std::string_view>() << '\n';
+    }
     return 0;
 }
 ```
 
-Internally, these synchronous functions use `qb::io::async::run_until(wait_flag)` to drive the event loop just enough for that single request to complete.
+`qb::http::run_sync` pumps the *current* thread's `qb-io` event loop just enough to resolve the awaitable, without ever spawning threads or mutating the global scheduler &mdash; consistent with the mono-thread-per-listener contract of the framework.
 
-**Caution**: Extensive use of synchronous client calls in an actor or a single-threaded event loop designed for high concurrency can lead to performance bottlenecks, as they block the calling thread.
+**HTTP/2 coroutine surface (`qb::http2::Client`):**
+
+```cpp
+struct qb::http2::ConnectResult {
+    bool        ok;
+    std::string error_message;
+    explicit operator bool() const noexcept;
+};
+
+class qb::http2::Client {
+public:
+    // ... existing callback-based overloads ...
+
+    [[nodiscard]] async::awaiter<ConnectResult>             connect();
+    [[nodiscard]] async::awaiter<qb::http::Response>        push_request(qb::http::Request);
+    [[nodiscard]] async::awaiter<std::vector<Response>>     push_requests(std::vector<qb::http::Request>);
+};
+```
+
+Typical usage:
+
+```cpp
+auto client = qb::http2::make_client("https://api.example.com");
+
+qb::io::async::task<void> run() {
+    if (!co_await client->connect()) co_return;             // bool-converts
+    auto resp = co_await client->push_request(build_req());
+    std::cout << resp.status().code() << '\n';
+    co_return;
+}
+```
+
+**Why coroutines here?** The coroutine style eliminates the need for a separately blocking synchronous API without giving up readability. Compared to the callback form, call-site logic reads top-to-bottom: the request is sent, the response arrives, error handling is a regular `if`/`try`, and loops over multiple calls simply `co_await` in sequence or via `qb::io::async::all(...)` for fan-out.
 
 ## HTTPS Support
 

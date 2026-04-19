@@ -124,6 +124,75 @@ Specifically, when `next()` is called by your functional middleware:
 2. Once the rest of the chain (subsequent middleware and the final route handler) completes and control unwinds back to the `FunctionalMiddleware` adapter, the code in your lambda *after* the `next()` call is executed.
 3. After your lambda finishes its post-`next()` logic, the `FunctionalMiddleware` adapter ensures the context is properly completed again, typically by calling `ctx->complete(AsyncTaskResult::CONTINUE)` if your lambda doesn't make a different terminal `complete` call.
 
+## Coroutine Middleware &amp; Handlers (`qb::http::coro_*`)
+
+For server-side code, `qbm/http` ships two small helpers that adapt a coroutine-returning lambda into the classical middleware / route-handler signatures the router expects. They are declared in `qbm/http/routing/coro_task.h` (transparently included by `routing.h`).
+
+```cpp
+namespace qb::http {
+
+    // Concept: the callable must have signature task<void>(shared_ptr<Context<Session>>).
+    template <typename F, typename SessionType>
+    concept CoroRouteHandler      = /* ... */;
+    template <typename F, typename SessionType>
+    concept CoroMiddlewareHandler = /* ... */;
+
+    template <typename SessionType, typename CoroFn>
+        requires CoroRouteHandler<CoroFn, SessionType>
+    RouteHandlerFn<SessionType>      coro_handler(CoroFn&&);
+
+    template <typename SessionType, typename CoroFn>
+        requires CoroMiddlewareHandler<CoroFn, SessionType>
+    MiddlewareHandlerFn<SessionType> coro_middleware(CoroFn&&);
+
+} // namespace qb::http
+```
+
+**Default outcomes** when the coroutine body returns normally without having called `ctx->complete(...)` or `ctx->cancel()`:
+
+| Wrapper               | Default terminal outcome                     | Rationale                                |
+|-----------------------|----------------------------------------------|------------------------------------------|
+| `coro_handler`        | `AsyncTaskResult::COMPLETE`                  | A handler is the leaf &mdash; the response is ready. |
+| `coro_middleware`     | `AsyncTaskResult::CONTINUE`                  | A middleware's job is to yield to the next task. |
+
+If the body calls `ctx->complete(...)` explicitly, the wrapper **does not** override that decision &mdash; the existing outcome wins. Exceptions thrown from the body are caught, logged with route context, and translated into `500 Internal Server Error` with `AsyncTaskResult::ERROR` (same policy as `RouteLambdaTask`).
+
+**Usage example &mdash; handler + middleware with `co_await`:**
+
+```cpp
+#include <qbm/http/http.h>
+#include <qbm/http/coro.h>
+
+using Session = MySession;
+
+router.use(qb::http::coro_middleware<Session>(
+    [this](auto ctx) -> qb::io::async::task<void> {
+        if (auto user = co_await auth_lookup(ctx->request().header("Authorization"))) {
+            ctx->template set<CurrentUser>(std::move(*user));
+            co_return;                          // default: CONTINUE
+        }
+        ctx->response().status() = qb::http::status::UNAUTHORIZED;
+        ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // short-circuit
+        co_return;
+    }));
+
+router.get("/users/:id",
+    qb::http::coro_handler<Session>(
+        [this](auto ctx) -> qb::io::async::task<void> {
+            auto profile = co_await db_load_profile(ctx->path_param("id"));
+            auto stats   = co_await stats_service(profile.id);
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = render(profile, stats);
+            co_return;                          // default: COMPLETE
+        }));
+```
+
+**Design notes:**
+
+-   The coroutine body receives a `std::shared_ptr<Context<Session>>`, which outlives every suspension point the body may hit, so it is safe to capture it across `co_await`s.
+-   `coro_middleware` does **not** give the body an explicit `next()` callback &mdash; the framework drives chain progress via `ctx->complete(...)`. Short-circuiting is therefore just *setting the response and calling `complete(COMPLETE)`*.
+-   The body is spawned on `qb::io::async::coro_scheduler()` &mdash; the same thread-local scheduler the rest of `qb-io` uses, preserving the mono-thread-per-listener contract.
+
 ## Asynchronous Custom Middleware
 
 If your custom middleware needs to perform non-blocking asynchronous operations (e.g., querying a database, calling an external service):

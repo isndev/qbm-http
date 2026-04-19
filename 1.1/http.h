@@ -33,6 +33,7 @@
 #ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h>
 #endif
+#include "../coro.h"
 #include "../routing.h"
 #include "./protocol/server.h"
 #include "./protocol/client.h"
@@ -775,64 +776,126 @@ namespace qb::http {
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "PATCH");
     }
 
-    // --- Synchronous HTTP Client Function Declarations ---
+    // --- Coroutine HTTP/1.1 Client Functions ----------------------------------
+    //
+    // These overloads replace the former synchronous blocking helpers
+    // (`Response qb::http::GET(Request, double)` &hellip;). They return an
+    // `async::awaiter<async::Reply>` that must be driven by a coroutine runtime:
+    //
+    //   - From a coroutine:  `auto reply = co_await qb::http::GET(request);`
+    //   - From a test/main:  `auto reply = qb::http::run_sync(qb::http::GET(request));`
+    //
+    // Overload resolution is unambiguous with the callback-based async API:
+    //     qb::http::GET(Request, _Func, double)    // 3-arg, callback-style
+    //     qb::http::GET(Request, double)           // 2-arg, coroutine-style
+    // --------------------------------------------------------------------------
+
+    namespace detail {
+        /// Bridge a callback-async `qb::http::async::*`-style function into an
+        /// `async::awaiter<async::Reply>`. Each of the eight overloads below
+        /// simply forwards to the appropriate method.
+        template <typename AsyncOp>
+        [[nodiscard]] inline async::awaiter<async::Reply>
+        _co_invoke(AsyncOp op, Request request, double timeout) {
+            return async::make_awaiter<async::Reply>(
+                [op = std::move(op), req = std::move(request), timeout]
+                (std::function<void(async::Reply&&)> complete) mutable {
+                    op(std::move(req),
+                       [complete = std::move(complete)](async::Reply&& reply) mutable {
+                           complete(std::move(reply));
+                       },
+                       timeout);
+                });
+        }
+    } // namespace detail
 
     /**
-     * @brief Sends a generic HTTP/1.1 request synchronously.
-     * @param request The HTTP request object.
-     * @param timeout Optional timeout in seconds. Default is 3 seconds.
-     * @return The HTTP response.
+     * @brief Coroutine-style HTTP/1.1 request.
+     *
+     * The HTTP method must be pre-set on @p request.
+     *
+     * @param request  Fully-formed request (uri, method, headers, body).
+     * @param timeout  Socket timeout in seconds; 0 means "no timeout".
+     * @return An awaitable that yields `async::Reply` (original request + response).
      */
-    Response REQUEST(Request request, double timeout = 3.);
-    /**
-     * @brief Sends an HTTP GET request synchronously.
-     * @param request The HTTP request object. Its method will be set to GET.
-     * @param timeout Optional timeout.
-     * @return The HTTP response.
-     */
-    Response GET(Request request, double timeout = 3.);
-    /**
-     * @brief Sends an HTTP POST request synchronously.
-     * @param request The HTTP request object. Its method will be set to POST.
-     * @param timeout Optional timeout.
-     * @return The HTTP response.
-     */
-    Response POST(Request request, double timeout = 3.);
-    /**
-     * @brief Sends an HTTP PUT request synchronously.
-     * @param request The HTTP request object. Its method will be set to PUT.
-     * @param timeout Optional timeout.
-     * @return The HTTP response.
-     */
-    Response PUT(Request request, double timeout = 3.);
-    /**
-     * @brief Sends an HTTP DELETE request synchronously.
-     * @param request The HTTP request object. Its method will be set to DELETE.
-     * @param timeout Optional timeout.
-     * @return The HTTP response.
-     */
-    Response DEL(Request request, double timeout = 3.); // For DELETE
-    /**
-     * @brief Sends an HTTP HEAD request synchronously.
-     * @param request The HTTP request object. Its method will be set to HEAD.
-     * @param timeout Optional timeout.
-     * @return The HTTP response.
-     */
-    Response HEAD(Request request, double timeout = 3.);
-    /**
-     * @brief Sends an HTTP OPTIONS request synchronously.
-     * @param request The HTTP request object. Its method will be set to OPTIONS.
-     * @param timeout Optional timeout.
-     * @return The HTTP response.
-     */
-    Response OPTIONS(Request request, double timeout = 3.);
-    /**
-     * @brief Sends an HTTP PATCH request synchronously.
-     * @param request The HTTP request object. Its method will be set to PATCH.
-     * @param timeout Optional timeout.
-     * @return The HTTP response.
-     */
-    Response PATCH(Request request, double timeout = 3.);
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    REQUEST(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                REQUEST(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
+
+    /// @brief Coroutine-style HTTP GET. See `REQUEST` for the contract.
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    GET(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                GET(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
+
+    /// @brief Coroutine-style HTTP POST. See `REQUEST` for the contract.
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    POST(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                POST(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
+
+    /// @brief Coroutine-style HTTP PUT. See `REQUEST` for the contract.
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    PUT(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                PUT(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
+
+    /// @brief Coroutine-style HTTP DELETE. See `REQUEST` for the contract.
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    DEL(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                DEL(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
+
+    /// @brief Coroutine-style HTTP HEAD. See `REQUEST` for the contract.
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    HEAD(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                HEAD(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
+
+    /// @brief Coroutine-style HTTP OPTIONS. See `REQUEST` for the contract.
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    OPTIONS(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                OPTIONS(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
+
+    /// @brief Coroutine-style HTTP PATCH. See `REQUEST` for the contract.
+    [[nodiscard]] inline async::awaiter<async::Reply>
+    PATCH(Request request, double timeout = 0.) {
+        return detail::_co_invoke(
+            [](Request r, auto cb, double t) {
+                PATCH(std::move(r), std::move(cb), t);
+            },
+            std::move(request), timeout);
+    }
 
 }
 

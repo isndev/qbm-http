@@ -49,6 +49,7 @@
 #include <qb/uuid.h>
 
 #include "protocol/client.h"
+#include "../coro.h"
 #include "../request.h"
 #include "../response.h"
 #include "../logger.h"
@@ -69,6 +70,21 @@ using BatchResponseCallback = std::function<void(std::vector<qb::http::Response>
  * @brief Connection state callback
  */
 using ConnectionCallback = std::function<void(bool connected, const std::string& error_message)>;
+
+/**
+ * @brief Result returned by the coroutine-style `connect()` awaiter.
+ *
+ * Boolean-convertible so that call sites read naturally:
+ * @code
+ * if (!co_await client->connect()) co_return;   // ok on failure
+ * @endcode
+ */
+struct ConnectResult {
+    bool        ok{false};
+    std::string error_message;
+
+    explicit operator bool() const noexcept { return ok; }
+};
 
 /**
  * @brief Request context for tracking pending requests
@@ -182,12 +198,42 @@ public:
     Client& operator=(Client&&) = delete;
 
     /**
-     * @brief Connect to the server
-     * @param callback Optional callback for connection status
-     * @return true if connection attempt started, false if already connected/connecting
+     * @brief Connect to the server (callback-style).
+     * @param callback Callback invoked on success or failure. Pass `nullptr`
+     *                 for fire-and-forget (you will still be able to
+     *                 `push_request` before connection completes; they will
+     *                 be queued and flushed on handshake).
+     * @return true if connection attempt started, false if already connected/connecting.
+     *
+     * @note The default argument is intentionally removed (compared to pre-coroutine
+     *       versions of this API) so that the coroutine overload `connect()` is
+     *       unambiguous. Call sites that want the old fire-and-forget semantic
+     *       should write `connect(nullptr)`.
      */
-    bool connect(ConnectionCallback callback = nullptr);
-    
+    bool connect(ConnectionCallback callback);
+
+    /**
+     * @brief Connect to the server (coroutine-style).
+     *
+     * Yields a `ConnectResult` once the HTTP/2 handshake is complete (or
+     * failed). Usage:
+     *
+     * @code
+     * if (!co_await client->connect()) {
+     *     LOG_ERROR("HTTP/2 connect failed");
+     *     co_return;
+     * }
+     * @endcode
+     *
+     * Blocking equivalent (tests, main):
+     * @code
+     * auto r = qb::http::run_sync(client->connect());
+     * @endcode
+     *
+     * @return Awaitable yielding a `ConnectResult`.
+     */
+    [[nodiscard]] qb::http::async::awaiter<ConnectResult> connect();
+
     /**
      * @brief Disconnect from server
      */
@@ -206,20 +252,51 @@ public:
     [[nodiscard]] bool is_connecting() const noexcept { return _is_connecting; }
 
     /**
-     * @brief Send a single HTTP request
+     * @brief Send a single HTTP request (callback-style).
      * @param request HTTP request to send
      * @param callback Callback to handle the response
      * @return true if request was queued successfully
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
-    
+
     /**
-     * @brief Send multiple HTTP requests as a batch
+     * @brief Send a single HTTP request (coroutine-style).
+     *
+     * The returned awaitable yields the `qb::http::Response` when available.
+     * Connection is established lazily &mdash; you can `co_await` without
+     * calling `connect()` first.
+     *
+     * @code
+     * auto response = co_await client->push_request(std::move(req));
+     * @endcode
+     *
+     * @return Awaitable yielding a `qb::http::Response`.
+     */
+    [[nodiscard]] qb::http::async::awaiter<qb::http::Response>
+    push_request(qb::http::Request request);
+
+    /**
+     * @brief Send multiple HTTP requests as a batch (callback-style).
      * @param requests Vector of HTTP requests to send
      * @param callback Callback to handle all responses (in same order as requests)
      * @return true if batch was queued successfully
      */
     bool push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback);
+
+    /**
+     * @brief Send multiple HTTP requests as a batch (coroutine-style).
+     *
+     * The requests are sent on separate HTTP/2 streams concurrently; the
+     * returned awaitable yields when all responses are in (order preserved).
+     *
+     * @code
+     * auto responses = co_await client->push_requests(std::move(reqs));
+     * @endcode
+     *
+     * @return Awaitable yielding a `std::vector<qb::http::Response>`.
+     */
+    [[nodiscard]] qb::http::async::awaiter<std::vector<qb::http::Response>>
+    push_requests(std::vector<qb::http::Request> requests);
 
     /**
      * @brief Set connection timeout

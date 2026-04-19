@@ -28,6 +28,7 @@
 #include "./controller.h"   // For Controller class
 #include "./middleware.h"   // For IMiddleware interface
 #include "./types.h"        // For RouteHandlerFn, MiddlewareHandlerFn, etc.
+#include "./coro_task.h"    // Coroutine adapters (qb::http::coro_handler / coro_middleware)
 #include "../request.h"     // For qb::http::Request
 #include "../types.h"       // For qb::http::method enum
 
