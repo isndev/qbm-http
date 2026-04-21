@@ -132,7 +132,7 @@ namespace qb::http {
              * The HTTP version, upgrade flag, and body content are not affected by this method.
              * Derived classes may override or extend this to reset their specific fields.
              */
-            constexpr void
+            void
             reset() noexcept {
                 this->Headers::_headers.clear();
                 this->Headers::_content_type = typename Headers::ContentType{};
