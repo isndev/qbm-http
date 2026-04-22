@@ -123,6 +123,32 @@ public:
                     co_return;
                 }));
 
+        // Manual CONTINUE path: MW1 explicitly continues early, then resumes later.
+        // The wrapper must not emit a second implicit CONTINUE when MW1 returns.
+        group->use(qb::http::coro_middleware<Session>(
+            [](auto ctx) -> qb::io::async::task<void> {
+                if (ctx->request().uri().path() == "/coro/mw/manual-continue") {
+                    ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+                    co_await qb::io::async::sleep(1ms);
+                }
+                co_return;
+            }));
+        group->use(qb::http::coro_middleware<Session>(
+            [](auto ctx) -> qb::io::async::task<void> {
+                if (ctx->request().uri().path() == "/coro/mw/manual-continue") {
+                    co_await qb::io::async::sleep(10ms);
+                    ctx->request().set_header("X-MW2", "yes");
+                }
+                co_return;
+            }));
+        group->get("/manual-continue",
+            qb::http::coro_handler<Session>(
+                [](auto ctx) -> qb::io::async::task<void> {
+                    ctx->response().status() = qb::http::status::OK;
+                    ctx->response().body()   = std::string{ctx->request().header("X-MW2")};
+                    co_return;
+                }));
+
         router().compile();
     }
 };
@@ -197,6 +223,12 @@ TEST_F(CoroServerTest, CoroMiddlewareCanShortCircuitChain) {
     auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{url("/coro/mw/gate")}}));
     EXPECT_EQ(reply.response.status(), qb::http::status::FORBIDDEN);
     EXPECT_EQ(reply.response.body().template as<std::string>(), "blocked-by-coro-mw");
+}
+
+TEST_F(CoroServerTest, CoroMiddlewareManualContinueDoesNotDoubleAdvanceChain) {
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{url("/coro/mw/manual-continue")}}));
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.response.body().template as<std::string>(), "yes");
 }
 
 } // namespace

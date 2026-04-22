@@ -961,6 +961,42 @@ TEST_F(RouterMiddlewareTest, FunctionalMiddlewareConditionalEarlyExit) {
     EXPECT_EQ(_mock_session->get_trace(), "mw_after_conditional;handler_for_conditional");
 }
 
+TEST_F(RouterMiddlewareTest, FunctionalMiddlewareNextIsOneShotEvenWhenCalledTwice) {
+    _router.use(
+        std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession> >(
+            [](auto ctx, auto next_fn) {
+                if (ctx && ctx->session()) {
+                    ctx->session()->trace("double_next_pre");
+                }
+                next_fn();
+                next_fn(); // Must be ignored by the framework.
+                if (ctx && ctx->session()) {
+                    ctx->session()->trace("double_next_post");
+                }
+            },
+            "DoubleNextFunctionalMiddleware"
+        )
+    );
+    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw", &_task_executor));
+    _router.get("/double-next", final_handler("double_next_handler"));
+    _router.compile();
+
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/double-next"));
+
+    // First middleware invocation reaches async middleware "handle" synchronously.
+    EXPECT_EQ(_mock_session->get_trace(), "double_next_pre;async_mw_handle;double_next_post");
+    EXPECT_FALSE(_mock_session->_final_handler_called);
+    EXPECT_EQ(_task_executor.getPendingTaskCount(), 1);
+
+    _task_executor.processAllTasks();
+
+    // The async task must complete before the final handler; no duplicate chain advance is allowed.
+    EXPECT_EQ(_mock_session->get_trace(),
+              "double_next_pre;async_mw_handle;double_next_post;async_mw_task;double_next_handler");
+    EXPECT_TRUE(_mock_session->_final_handler_called);
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
+}
+
 // Test for state sharing between router-level middleware (e.g., via request headers)
 TEST_F(RouterMiddlewareTest, MiddlewareStateSharingViaRequestHeaders) {
     _router.use(

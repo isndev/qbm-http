@@ -10,6 +10,7 @@
 #include <sstream>   // For ostringstream in session mock
 #include <thread>    // For std::this_thread::sleep_for
 #include <chrono>    // For std::chrono literals
+#include <stdexcept>
 
 // --- Mock Session for RateLimitMiddleware Tests ---
 struct MockRateLimitSession {
@@ -152,6 +153,26 @@ TEST_F(RateLimitMiddlewareTest, CustomClientIdExtractor) {
     req3.set_header("X-Client-ID", "custom_client_2");
     configure_router_and_run(rate_limit_mw, std::move(req3));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+}
+
+TEST_F(RateLimitMiddlewareTest, ThrowingCustomExtractorFallsBackToDefaultExtraction) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(std::chrono::seconds(60));
+    options.client_id_extractor<MockRateLimitSession>(
+        [](const qb::http::Context<MockRateLimitSession> & /*ctx*/) -> std::string {
+            throw std::runtime_error("extractor crash");
+        });
+    auto rate_limit_mw = qb::http::rate_limit_middleware<MockRateLimitSession>(options);
+
+    auto req1 = create_request();
+    req1.set_header("X-Forwarded-For", "10.0.0.1");
+    EXPECT_NO_THROW(configure_router_and_run(rate_limit_mw, std::move(req1)));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+
+    auto req2 = create_request();
+    req2.set_header("X-Forwarded-For", "10.0.0.1");
+    EXPECT_NO_THROW(configure_router_and_run(rate_limit_mw, std::move(req2)));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
 }
 
 TEST_F(RateLimitMiddlewareTest, CustomErrorMessageAndStatusCode) {

@@ -270,6 +270,7 @@ namespace qb::http {
          */
         bool is_origin_allowed(const std::string &origin) const {
             if (origin.empty()) return false; // Origin header must be present
+            if (origin.length() > cors_security_limits::MAX_ORIGIN_LENGTH) return false;
 
             switch (_match_strategy) {
                 case OriginMatchStrategy::Exact:
@@ -280,13 +281,22 @@ namespace qb::http {
                 case OriginMatchStrategy::Regex:
                     ensure_patterns_compiled();
                     for (const auto &pattern: _regex_patterns) {
-                        if (std::regex_match(origin, pattern)) {
+                        if (regex_match_with_timeout(origin, pattern)) {
                             return true;
                         }
                     }
                     return false;
                 case OriginMatchStrategy::Function:
-                    return _origin_matcher_fn && _origin_matcher_fn(origin);
+                    if (!_origin_matcher_fn) {
+                        return false;
+                    }
+                    try {
+                        return _origin_matcher_fn(origin);
+                    } catch (...) {
+                        // Fail closed: an exception in user matcher must not
+                        // grant CORS access or break request processing.
+                        return false;
+                    }
                 default:
                     return false;
             }

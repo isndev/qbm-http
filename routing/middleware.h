@@ -25,6 +25,7 @@
 #include <string>
 #include <memory>
 #include <variant>
+#include <atomic>
 
 namespace qb::http {
     /**
@@ -95,6 +96,19 @@ namespace qb::http {
                     const qb::http::AsyncTaskResult error_result = qb::http::AsyncTaskResult::ERROR;
                     ctx->complete(error_result);
                 }
+            } catch (...) {
+                if (ctx) {
+                    LOG_HTTP_ERROR("MiddlewareTask [" << name() << "]: Unknown exception during process() - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path());
+                } else {
+                    LOG_HTTP_ERROR("MiddlewareTask [" << name() << "]: Unknown exception during process()");
+                }
+                if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                    const qb::http::AsyncTaskResult error_result = qb::http::AsyncTaskResult::ERROR;
+                    ctx->complete(error_result);
+                }
             }
         }
 
@@ -133,10 +147,15 @@ namespace qb::http {
         }
 
         void process(std::shared_ptr<Context<SessionType> > ctx) override {
-            _handler_fn(ctx, [ctx_capture = ctx, middleware_name = _name]() {
+            auto next_called = std::make_shared<std::atomic_bool>(false);
+            _handler_fn(ctx, [ctx_capture = ctx, middleware_name = _name, next_called]() {
                 // Pass the 'next' callback
                 // If 'next' is called by the MiddlewareHandlerFn, it means this middleware
                 // has finished its part and wants the chain to continue.
+                if (next_called->exchange(true, std::memory_order_acq_rel)) {
+                    LOG_HTTP_WARN("FunctionalMiddleware [" << middleware_name << "]: next() called more than once; ignoring duplicate call.");
+                    return;
+                }
                 if (!ctx_capture->is_completed() && !ctx_capture->is_cancelled()) {
                     ctx_capture->complete(qb::http::AsyncTaskResult::CONTINUE);
                 }

@@ -18,6 +18,17 @@
 
 
 namespace qb::http::validation {
+    namespace {
+        [[nodiscard]] Result::ErrorValuePolicy to_result_policy(const SchemaValidator::ErrorValuePolicy policy) {
+            switch (policy) {
+                case SchemaValidator::ErrorValuePolicy::None: return Result::ErrorValuePolicy::None;
+                case SchemaValidator::ErrorValuePolicy::Preview: return Result::ErrorValuePolicy::Preview;
+                case SchemaValidator::ErrorValuePolicy::Full:
+                default: return Result::ErrorValuePolicy::Full;
+            }
+        }
+    } // namespace
+
     // Changed namespace
 
     SchemaValidator::SchemaValidator(const qb::json &schema_definition)
@@ -28,19 +39,7 @@ namespace qb::http::validation {
     }
 
     bool SchemaValidator::validate(const qb::json &data_to_validate, Result &result) const {
-        // F48 &mdash; propagate the validator's configured error-value policy
-        // to the `Result` before validation runs. This is the public entry
-        // point, so the mapping happens once here rather than in every
-        // rule/keyword call site.
-        const auto mapped = [policy = _error_value_policy] {
-            switch (policy) {
-                case ErrorValuePolicy::None:    return Result::ErrorValuePolicy::None;
-                case ErrorValuePolicy::Preview: return Result::ErrorValuePolicy::Preview;
-                case ErrorValuePolicy::Full:
-                default:                        return Result::ErrorValuePolicy::Full;
-            }
-        }();
-        result.set_error_value_policy(mapped, _offending_value_preview_bytes);
+        result.set_error_value_policy(to_result_policy(_error_value_policy), _offending_value_preview_bytes);
         return validate_recursive(data_to_validate, _schema_definition, "", result);
     }
 
@@ -61,15 +60,7 @@ namespace qb::http::validation {
         // behaviour; we simulate a single `add_error` to borrow its policy
         // transform, then take the reshaped payload back.
         Result tmp;
-        const auto mapped = [policy = _error_value_policy] {
-            switch (policy) {
-                case ErrorValuePolicy::None:    return Result::ErrorValuePolicy::None;
-                case ErrorValuePolicy::Preview: return Result::ErrorValuePolicy::Preview;
-                case ErrorValuePolicy::Full:
-                default:                        return Result::ErrorValuePolicy::Full;
-            }
-        }();
-        tmp.set_error_value_policy(mapped, _offending_value_preview_bytes);
+        tmp.set_error_value_policy(to_result_policy(_error_value_policy), _offending_value_preview_bytes);
         tmp.add_error({}, {}, {}, std::make_optional(value));
         if (tmp.errors().empty()) return std::nullopt;
         return tmp.errors().front().offending_value;
@@ -282,23 +273,37 @@ namespace qb::http::validation {
             }
             return TypeRule(dt).validate(value, path, result);
         } else if (schema_type_def.is_array()) {
+            std::vector<DataType> allowed_types;
+            allowed_types.reserve(schema_type_def.size());
             for (const auto &type_option_json: schema_type_def) {
-                if (type_option_json.is_string()) {
-                    std::string type_str = type_option_json.get<std::string>();
-                    DataType dt = DataType::ANY;
-                    if (type_str == "string") dt = DataType::STRING;
-                    else if (type_str == "integer") dt = DataType::INTEGER;
-                    else if (type_str == "number") dt = DataType::NUMBER;
-                    else if (type_str == "boolean") dt = DataType::BOOLEAN;
-                    else if (type_str == "object") dt = DataType::OBJECT;
-                    else if (type_str == "array") dt = DataType::ARRAY;
-                    else if (type_str == "null") dt = DataType::NUL;
-                    else { continue; }
+                if (!type_option_json.is_string()) {
+                    result.add_error(path, "schemaError.type",
+                                     "Elements in schema 'type' array must be strings.", std::make_optional(type_option_json));
+                    return false;
+                }
 
-                    Result temp_result_for_type_array_check;
-                    if (TypeRule(dt).validate(value, path, temp_result_for_type_array_check)) {
-                        return true;
-                    }
+                std::string type_str = type_option_json.get<std::string>();
+                DataType dt = DataType::ANY;
+                if (type_str == "string") dt = DataType::STRING;
+                else if (type_str == "integer") dt = DataType::INTEGER;
+                else if (type_str == "number") dt = DataType::NUMBER;
+                else if (type_str == "boolean") dt = DataType::BOOLEAN;
+                else if (type_str == "object") dt = DataType::OBJECT;
+                else if (type_str == "array") dt = DataType::ARRAY;
+                else if (type_str == "null") dt = DataType::NUL;
+                else {
+                    result.add_error(path, "schemaError.type",
+                                     "Unknown type specified in schema type array: " + type_str,
+                                     std::make_optional(type_option_json));
+                    return false;
+                }
+                allowed_types.push_back(dt);
+            }
+
+            for (const auto dt: allowed_types) {
+                Result temp_result_for_type_array_check;
+                if (TypeRule(dt).validate(value, path, temp_result_for_type_array_check)) {
+                    return true;
                 }
             }
             result.add_error(path, "type", "Value does not match any of the allowed types: " + schema_type_def.dump(),
@@ -439,6 +444,7 @@ namespace qb::http::validation {
                 }
             } else if (additional_props_def.is_object()) {
                 SchemaValidator additional_validator(additional_props_def);
+                additional_validator.set_error_value_policy(_error_value_policy, _offending_value_preview_bytes);
                 Result sub_result;
                 if (!additional_validator.validate(val, sub_result)) {
                     for (const auto &err: sub_result.errors()) {
@@ -503,7 +509,17 @@ namespace qb::http::validation {
             return false;
         }
 
-        for (const auto &sub_schema: anyOf_def) {
+        for (std::size_t i = 0; i < anyOf_def.size(); ++i) {
+            if (!anyOf_def[i].is_object()) {
+                result.add_error(path, "schemaError.anyOf.item",
+                                 "Items in 'anyOf' array must be schema objects (at index " + std::to_string(i) + ").",
+                                 std::make_optional(anyOf_def[i]));
+                return false;
+            }
+        }
+
+        for (std::size_t i = 0; i < anyOf_def.size(); ++i) {
+            const auto &sub_schema = anyOf_def[i];
             Result temp_sub_result; // Each sub-schema validation gets a fresh Result
             if (validate_recursive(value, sub_schema, path, temp_sub_result)) {
                 return true; // One passed, anyOf is satisfied. No errors added to main result from this anyOf check.

@@ -17,6 +17,7 @@
 #include <vector>
 #include <functional>
 #include <sstream> // For ostringstream in session mock
+#include <stdexcept>
 
 // --- Mock Session for JwtMiddleware Tests ---
 struct MockJwtSession {
@@ -226,6 +227,16 @@ TEST_F(JwtMiddlewareTest, MissingToken) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+TEST_F(JwtMiddlewareTest, WhitespaceOnlyAuthorizationHeaderIsHandledGracefully) {
+    auto req = create_request();
+    req.set_header(_jwt_options.token_name, "    \t   ");
+    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, std::move(req)));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
 TEST_F(JwtMiddlewareTest, InvalidTokenFormat) {
     auto req = create_request();
     req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " not.a.valid.jwt.token");
@@ -384,6 +395,22 @@ TEST_F(JwtMiddlewareTest, CustomValidator) {
     EXPECT_TRUE(body_str_missing.find("Custom claim 'custom_claim' is missing.") != std::string::npos ||
         body_str_missing.find("Custom JWT validation failed") != std::string::npos)
                  << "Body: " << body_str_missing;
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(JwtMiddlewareTest, ThrowingValidatorIsConvertedToUnauthorized) {
+    _jwt_mw->with_validator([](const qb::json &, qb::http::JwtErrorInfo &) -> bool {
+        throw std::runtime_error("validator crash");
+    });
+
+    qb::json payload = {{"sub", "validator_throw_user"}};
+    std::string token = generate_token(payload);
+    auto req = create_request();
+    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
+
+    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, std::move(req)));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("Custom JWT validator threw exception"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -660,6 +687,45 @@ _response.body().as<std::string>();
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+TEST_F(JwtMiddlewareTest, VerifyIatRejectsFutureIssuedAtClaim) {
+    _jwt_options.verify_iat = true;
+    _jwt_mw->with_options(_jwt_options);
+
+    qb::json payload = {
+        {"sub", "future_iat_user"},
+        {"iat", static_cast<long long>(std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now() + std::chrono::hours(1)))}
+    };
+    std::string token = generate_token(payload);
+
+    auto req = create_request();
+    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
+    configure_router_and_run(_jwt_mw, std::move(req));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("future"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(JwtMiddlewareTest, VerifyIatCanBeDisabled) {
+    _jwt_options.verify_iat = false;
+    _jwt_mw->with_options(_jwt_options);
+
+    qb::json payload = {
+        {"sub", "future_iat_ignored_user"},
+        {"iat", static_cast<long long>(std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now() + std::chrono::hours(1)))}
+    };
+    std::string token = generate_token(payload);
+
+    auto req = create_request();
+    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
+    configure_router_and_run(_jwt_mw, std::move(req));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
 TEST_F(JwtMiddlewareTest, CustomErrorHandler) {
     bool custom_handler_called = false;
     _jwt_mw->with_error_handler(
@@ -677,6 +743,19 @@ TEST_F(JwtMiddlewareTest, CustomErrorHandler) {
     EXPECT_EQ(_session->_response.status(), qb::http::status::IM_A_TEAPOT);
     EXPECT_NE(_session->_response.body().as<std::string>().find("Custom JWT Error: JWT token is missing"),
               std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(JwtMiddlewareTest, ThrowingErrorHandlerFallsBackToDefaultUnauthorized) {
+    _jwt_mw->with_error_handler(
+        [](std::shared_ptr<qb::http::Context<MockJwtSession> > /*ctx*/,
+           const qb::http::JwtErrorInfo & /*error_info*/) {
+            throw std::runtime_error("error handler crash");
+        });
+
+    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, create_request()));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -715,6 +794,24 @@ TEST_F(JwtMiddlewareTest, SuccessHandlerCanAccessPayload) {
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "payload_access_user");
     EXPECT_EQ(_session->_jwt_payload_in_context->at("data").get<std::string>(), "secret_info");
+}
+
+TEST_F(JwtMiddlewareTest, ThrowingSuccessHandlerReturnsInternalServerError) {
+    _jwt_mw->with_success_handler(
+        [](std::shared_ptr<qb::http::Context<MockJwtSession> > /*ctx*/,
+           const qb::json & /*payload*/) {
+            throw std::runtime_error("success handler crash");
+        });
+
+    qb::json payload = {{"sub", "success_throw_user"}};
+    std::string token = generate_token(payload);
+    auto req = create_request();
+    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
+
+    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, std::move(req)));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("Error in JWT success handler"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
 }
 
 

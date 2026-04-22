@@ -61,6 +61,11 @@ Client::~Client() {
 void Client::initialize_from_uri(const qb::io::uri& uri) {
     _base_uri = uri;
     _host = std::string(uri.host());
+
+    // This implementation is TLS+ALPN only; plaintext h2c is not supported.
+    if (uri.scheme() != "https") {
+        throw std::invalid_argument("HTTP/2 client only supports https scheme");
+    }
     
     // Parse port using std::from_chars for better performance and no exceptions
     if (!uri.port().empty()) {
@@ -70,19 +75,10 @@ void Client::initialize_from_uri(const qb::io::uri& uri) {
         if (ec == std::errc{} && port_value > 0 && port_value <= 65535) {
             _port = static_cast<uint16_t>(port_value);
         } else {
-            _port = (uri.scheme() == "https") ? 443 : 80;
+            _port = 443;
         }
     } else {
-        _port = (uri.scheme() == "https") ? 443 : 80;
-    }
-    
-    // Validate scheme
-    if (uri.scheme() != "https" && uri.scheme() != "http") {
-        throw std::invalid_argument("HTTP/2 client only supports http and https schemes");
-    }
-    
-    if (uri.scheme() == "http") {
-        LOG_HTTP_WARN_PA(_client_id, "Using HTTP/2 over plain HTTP (h2c) - not recommended for production");
+        _port = 443;
     }
 }
 
@@ -280,18 +276,23 @@ void Client::start_connection() {
     qb::io::transport::stcp::transport_io_type socket;
     socket.init();
     socket.set_alpn_protocols({"h2"});
+    auto weak_self = weak_from_this();
     qb::io::async::tcp::connect<qb::io::transport::stcp::transport_io_type>(
         std::move(socket),
         _base_uri,
-        [this](qb::io::transport::stcp::transport_io_type&& transport_socket) {
+        [weak_self](qb::io::transport::stcp::transport_io_type&& transport_socket) {
+            auto self = weak_self.lock();
+            if (!self) {
+                return;
+            }
             if (!transport_socket.is_open() || !transport_socket.ssl_handle()) {
-                handle_connection_failure("TCP/SSL connection failed");
+                self->handle_connection_failure("TCP/SSL connection failed");
                 return;
             }
             transport_socket.set_alpn_protocols({"h2"});
-            LOG_HTTP_DEBUG_PA(_client_id, "TCP/SSL connection established, starting handshake");
-            this->transport() = std::move(transport_socket);
-            this->start(); // Start handshake protocol
+            LOG_HTTP_DEBUG_PA(self->_client_id, "TCP/SSL connection established, starting handshake");
+            self->transport() = std::move(transport_socket);
+            self->start(); // Start handshake protocol
         },
         _connect_timeout
     );
@@ -354,6 +355,7 @@ void Client::handle_connection_success() {
 
 void Client::handle_connection_failure(const std::string& error_message) {
     LOG_HTTP_ERROR_PA(_client_id, "Connection failed: " << error_message);
+    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     _is_connected = false;
     _is_connecting = false;
@@ -369,7 +371,7 @@ void Client::handle_connection_failure(const std::string& error_message) {
     fail_all_requests("Connection failed: " + error_message);
     
     // Attempt reconnection if enabled
-    if (_auto_reconnect && (!_pending_requests.empty() || !_active_requests.empty())) {
+    if (should_reconnect) {
         attempt_reconnection();
     }
 }
@@ -418,9 +420,19 @@ void Client::fail_request(uint32_t stream_id, const std::string& error_message) 
 
 void Client::fail_all_requests(const std::string& error_message) {
     LOG_HTTP_WARN_PA(_client_id, "Failing all requests: " << error_message);
-    
+
+    // Reentrancy-safe draining: user callbacks may enqueue new requests/batches.
+    // We move current work out before invoking any callback so newly queued work
+    // is not lost or invalidated by this failure pass.
+    qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>> active_requests_to_fail;
+    std::queue<std::unique_ptr<RequestContext>> pending_requests_to_fail;
+    qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> active_batches_to_fail;
+    active_requests_to_fail.swap(_active_requests);
+    pending_requests_to_fail.swap(_pending_requests);
+    active_batches_to_fail.swap(_active_batches);
+
     // Fail active requests
-    for (auto& [stream_id, context] : _active_requests) {
+    for (auto& [stream_id, context] : active_requests_to_fail) {
         _failed_requests++;
         
         auto error_response = create_error_response(
@@ -430,12 +442,11 @@ void Client::fail_all_requests(const std::string& error_message) {
         
         context->callback(std::move(error_response));
     }
-    _active_requests.clear();
-    
+
     // Fail pending requests
-    while (!_pending_requests.empty()) {
-        auto context = std::move(_pending_requests.front());
-        _pending_requests.pop();
+    while (!pending_requests_to_fail.empty()) {
+        auto context = std::move(pending_requests_to_fail.front());
+        pending_requests_to_fail.pop();
         
         _failed_requests++;
         
@@ -448,7 +459,7 @@ void Client::fail_all_requests(const std::string& error_message) {
     }
     
     // Fail incomplete batches
-    for (auto& [batch_id, batch_context] : _active_batches) {
+    for (auto& [batch_id, batch_context] : active_batches_to_fail) {
         if (!batch_context->all_completed) {
             LOG_HTTP_WARN_PA(_client_id, "Failing incomplete batch " << batch_id);
             
@@ -465,7 +476,6 @@ void Client::fail_all_requests(const std::string& error_message) {
             batch_context->callback(std::move(batch_context->responses));
         }
     }
-    _active_batches.clear();
 }
 
 void Client::check_request_timeouts() {
@@ -508,6 +518,10 @@ void Client::check_request_timeouts() {
     }
     
     _pending_requests = std::move(non_timed_out_requests);
+}
+
+bool Client::has_pending_or_active_work() const noexcept {
+    return !_pending_requests.empty() || !_active_requests.empty();
 }
 
 void Client::attempt_reconnection() {
@@ -572,6 +586,7 @@ void Client::on(const qb::protocol::http2::Http2StreamErrorEvent& event) {
 
 void Client::on(const qb::protocol::http2::Http2GoAwayEvent& event) {
     LOG_HTTP_WARN_PA(_client_id, "Received GOAWAY frame: " << event.debug_data);
+    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     std::string error_msg = "Server sent GOAWAY: " + event.debug_data;
     fail_all_requests(error_msg);
@@ -579,7 +594,7 @@ void Client::on(const qb::protocol::http2::Http2GoAwayEvent& event) {
     // Disconnect and potentially reconnect
     disconnect();
     
-    if (_auto_reconnect && (!_pending_requests.empty() || !_active_requests.empty())) {
+    if (should_reconnect) {
         attempt_reconnection();
     }
 }
@@ -595,13 +610,14 @@ void Client::on(const qb::protocol::http2::Http2PushPromiseEvent& event) {
 
 void Client::on(const qb::protocol::http2::Http2ConnectionErrorEvent& event) {
     LOG_HTTP_ERROR_PA(_client_id, "HTTP/2 connection error: " << event.message);
+    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     std::string error_msg = "Connection error: " + event.message;
     fail_all_requests(error_msg);
     
     disconnect();
     
-    if (_auto_reconnect && (!_pending_requests.empty() || !_active_requests.empty())) {
+    if (should_reconnect) {
         attempt_reconnection();
     }
 }
@@ -619,19 +635,26 @@ void Client::on(qb::io::async::event::timeout const&) {
 
 void Client::on(qb::io::async::event::disconnected const& event) {
     LOG_HTTP_INFO_PA(_client_id, "Disconnected (reason: " << event.reason << ")");
+    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     std::string error_msg = "Connection lost";
     if (event.reason != 0) {
         error_msg += " (reason: " + std::to_string(event.reason) + ")";
     }
     
+    if (_is_connecting && _connection_callback) {
+        _connection_callback(false, error_msg);
+        _connection_callback = nullptr;
+    }
+
     _is_connected = false;
+    _is_connecting = false;
     _handshake_completed = false;
     _h2_protocol = nullptr;
     
     fail_all_requests(error_msg);
     
-    if (_auto_reconnect && (!_pending_requests.empty() || !_active_requests.empty())) {
+    if (should_reconnect) {
         attempt_reconnection();
     }
 }
@@ -669,21 +692,47 @@ std::shared_ptr<Client> make_client(const qb::io::uri& uri) {
 
 qb::http::async::awaiter<ConnectResult>
 Client::connect() {
+    auto weak_self = weak_from_this();
     return qb::http::async::make_awaiter<ConnectResult>(
-        [this](std::function<void(ConnectResult&&)> complete) {
-            this->connect([complete = std::move(complete)]
+        [weak_self](std::function<void(ConnectResult&&)> complete) mutable {
+            auto self = weak_self.lock();
+            if (!self) {
+                complete(ConnectResult{false, "HTTP/2 client no longer available"});
+                return;
+            }
+            if (!self->connect([complete = std::move(complete)]
                           (bool ok, const std::string& err) mutable {
                 complete(ConnectResult{ok, err});
-            });
+            })) {
+                if (self->is_connected()) {
+                    complete(ConnectResult{true, ""});
+                } else if (self->is_connecting()) {
+                    complete(ConnectResult{false, "Connection already in progress"});
+                } else {
+                    complete(ConnectResult{false, "Unable to start connection"});
+                }
+            }
         });
 }
 
 qb::http::async::awaiter<qb::http::Response>
 Client::push_request(qb::http::Request request) {
+    auto weak_self = weak_from_this();
     return qb::http::async::make_awaiter<qb::http::Response>(
-        [this, req = std::move(request)]
+        [weak_self, req = std::move(request)]
         (std::function<void(qb::http::Response&&)> complete) mutable {
-            this->push_request(std::move(req),
+            auto self = weak_self.lock();
+            if (!self) {
+                qb::http::Response error_response;
+                error_response.status() = qb::http::status::SERVICE_UNAVAILABLE;
+                error_response.body() = "HTTP/2 client no longer available";
+                error_response.add_header("content-type", "text/plain");
+                error_response.add_header("content-length",
+                                          std::to_string(error_response.body().raw().size()));
+                complete(std::move(error_response));
+                return;
+            }
+            self->push_request(std::move(req),
                 [complete = std::move(complete)](qb::http::Response response) mutable {
                     complete(std::move(response));
                 });
@@ -692,10 +741,16 @@ Client::push_request(qb::http::Request request) {
 
 qb::http::async::awaiter<std::vector<qb::http::Response>>
 Client::push_requests(std::vector<qb::http::Request> requests) {
+    auto weak_self = weak_from_this();
     return qb::http::async::make_awaiter<std::vector<qb::http::Response>>(
-        [this, reqs = std::move(requests)]
+        [weak_self, reqs = std::move(requests)]
         (std::function<void(std::vector<qb::http::Response>&&)> complete) mutable {
-            this->push_requests(std::move(reqs),
+            auto self = weak_self.lock();
+            if (!self) {
+                complete({});
+                return;
+            }
+            self->push_requests(std::move(reqs),
                 [complete = std::move(complete)]
                 (std::vector<qb::http::Response> responses) mutable {
                     complete(std::move(responses));

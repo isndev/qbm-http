@@ -274,12 +274,8 @@ namespace qb::http {
                     if (point == HookPoint::PRE_RESPONSE_SEND) {
                         const auto &opts = *options_capture; // Dereference shared_ptr to get options
 
-                        // Conditional HSTS: Only send over HTTPS
-                        if (opts.get_hsts_value()) {
-                            std::string_view scheme_view = ctx_ref.request().uri().scheme();
-                            if (scheme_view.compare("https") == 0) {
-                                ctx_ref.response().set_header("Strict-Transport-Security", *opts.get_hsts_value());
-                            }
+                        if (opts.get_hsts_value() && ctx_ref.request().uri().scheme() == "https") {
+                            ctx_ref.response().set_header("Strict-Transport-Security", *opts.get_hsts_value());
                         }
                         if (opts.get_set_x_content_type_options_nosniff()) {
                             ctx_ref.response().set_header("X-Content-Type-Options", "nosniff");

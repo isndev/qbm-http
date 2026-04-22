@@ -236,6 +236,47 @@ TEST_F(ConditionalMiddlewareTest, NestedConditionalMiddleware) {
     EXPECT_EQ(_session->get_trace(), "OuterElse;FinalHandler");
 }
 
+TEST_F(ConditionalMiddlewareTest, PredicateExceptionReturnsInternalServerError) {
+    auto throwing_predicate = [](const auto & /*ctx*/) -> bool {
+        throw std::runtime_error("predicate failure");
+    };
+    auto if_mw = std::make_shared<TracerMiddleware>("IfMiddleware");
+    auto cond_mw = qb::http::conditional_middleware<MockConditionalSession>(throwing_predicate, if_mw);
+
+    configure_and_run(cond_mw, create_request("/test"));
+
+    EXPECT_FALSE(_session->_final_handler_called);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Error during conditional middleware evaluation.");
+}
+
+class ThrowingMiddleware final : public qb::http::IMiddleware<MockConditionalSession> {
+public:
+    explicit ThrowingMiddleware(std::string id) : _id(std::move(id)) {}
+
+    void process(std::shared_ptr<qb::http::Context<MockConditionalSession> >) override {
+        throw std::runtime_error("child middleware failure");
+    }
+
+    std::string name() const override { return _id; }
+    void cancel() noexcept override {}
+
+private:
+    std::string _id;
+};
+
+TEST_F(ConditionalMiddlewareTest, ChildMiddlewareExceptionReturnsInternalServerError) {
+    auto predicate = [](const auto & /*ctx*/) { return true; };
+    auto throwing_child = std::make_shared<ThrowingMiddleware>("ThrowingChild");
+    auto cond_mw = qb::http::conditional_middleware<MockConditionalSession>(predicate, throwing_child);
+
+    configure_and_run(cond_mw, create_request("/test"));
+
+    EXPECT_FALSE(_session->_final_handler_called);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Error during conditional middleware evaluation.");
+}
+
 class CompletingTracerMiddleware : public qb::http::IMiddleware<MockConditionalSession> {
 public:
     CompletingTracerMiddleware(std::string id) : _id(std::move(id)) {

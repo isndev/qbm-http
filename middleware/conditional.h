@@ -87,12 +87,20 @@ namespace qb::http {
          * @param ctx The shared `Context` for the current request.
          */
         void process(ContextPtr ctx) override {
-            if (_predicate(ctx)) {
-                _if_middleware->process(ctx);
-            } else if (_else_middleware) {
-                _else_middleware->process(ctx);
-            } else {
-                ctx->complete(AsyncTaskResult::CONTINUE);
+            try {
+                if (_predicate(ctx)) {
+                    _if_middleware->process(ctx);
+                } else if (_else_middleware) {
+                    _else_middleware->process(ctx);
+                } else {
+                    ctx->complete(AsyncTaskResult::CONTINUE);
+                }
+            } catch (...) {
+                // Protect the middleware chain from user predicate/child middleware exceptions.
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                ctx->response().body() = "Error during conditional middleware evaluation.";
+                ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                ctx->complete(AsyncTaskResult::ERROR);
             }
         }
 

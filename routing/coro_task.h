@@ -101,9 +101,13 @@ namespace qb::http {
 
                 auto spawn = [handler, default_outcome, kind, ctx]() mutable
                     -> qb::io::async::task<void> {
+                    const auto completion_count_before = ctx->completion_count();
                     try {
                         co_await handler(ctx);
-                        if (!ctx->is_completed() && !ctx->is_cancelled()) {
+                        // Auto-complete only if user code did not already signal an outcome.
+                        if (ctx->completion_count() == completion_count_before &&
+                            !ctx->is_completed() &&
+                            !ctx->is_cancelled()) {
                             ctx->complete(default_outcome == DefaultCoroOutcome::COMPLETE_RESPONSE
                                               ? AsyncTaskResult::COMPLETE
                                               : AsyncTaskResult::CONTINUE);

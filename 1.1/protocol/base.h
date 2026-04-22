@@ -23,6 +23,9 @@
  */
 #pragma once
 
+#include <algorithm>
+#include <climits>
+
 /**
  * @brief Security limits for HTTP/1.1 protocol handling
  * 
@@ -105,6 +108,12 @@ namespace qb::http {
     struct Parser : public http_t {
         using String = std::string;
 
+    private:
+        static int fail_with_reason(http_t* parser, const char* reason) noexcept {
+            http_set_error_reason(parser, reason);
+            return HPE_USER;
+        }
+
         /**
          * @brief Default callback for HTTP data
          *
@@ -150,9 +159,20 @@ namespace qb::http {
         static int
         on_url(http_t *parser, const char *at, size_t length) {
             if constexpr (MessageType::type == HTTP_REQUEST) {
-                auto &msg = static_cast<Parser *>(parser->data)->msg;
+                auto *self = static_cast<Parser *>(parser->data);
+                const auto next_url_size = self->_url_bytes_seen + length;
+                if (next_url_size > protocol_limits::MAX_URL_LENGTH) {
+                    return fail_with_reason(parser, "HTTP URL exceeds configured size limit");
+                }
+                auto &msg = self->msg;
                 msg.method() = static_cast<http_method>(parser->method);
-                msg.uri() = std::string{at, length};
+                if (self->_url_bytes_seen == 0) {
+                    self->_url_buffer.clear();
+                    self->_url_buffer.reserve(std::min(next_url_size, protocol_limits::MAX_URL_LENGTH));
+                }
+                self->_url_buffer.append(at, length);
+                self->_url_bytes_seen = next_url_size;
+                msg.uri() = self->_url_buffer;
             } else {
                 (void) at;
                 (void) length;
@@ -195,7 +215,29 @@ namespace qb::http {
          */
         static int
         on_header_field(http_t *parser, const char *at, size_t length) {
-            static_cast<Parser *>(parser->data)->_last_header_key = String(at, length);
+            auto *self = static_cast<Parser *>(parser->data);
+            if (self->_last_header_token == HeaderToken::VALUE &&
+                !self->_last_header_key.empty()) {
+                if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                    return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+                }
+                self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
+                self->_last_header_key.clear();
+                self->_last_header_value.clear();
+            }
+
+            if (self->_last_header_token != HeaderToken::FIELD) {
+                if (++self->_header_pairs_seen > protocol_limits::MAX_HEADERS_COUNT) {
+                    return fail_with_reason(parser, "HTTP header count exceeds configured limit");
+                }
+                self->_last_header_key.clear();
+            }
+
+            self->_last_header_key.append(at, length);
+            if (self->_last_header_key.size() > protocol_limits::MAX_HEADER_NAME_LENGTH) {
+                return fail_with_reason(parser, "HTTP header name exceeds configured size limit");
+            }
+            self->_last_header_token = HeaderToken::FIELD;
             return 0;
         }
 
@@ -212,9 +254,15 @@ namespace qb::http {
          */
         static int
         on_header_value(http_t *parser, const char *at, size_t length) {
-            auto &msg = static_cast<Parser *>(parser->data)->msg;
-            msg.headers()[String{static_cast<Parser *>(parser->data)->_last_header_key}]
-                    .push_back(String(at, length));
+            auto *self = static_cast<Parser *>(parser->data);
+            if (self->_last_header_token != HeaderToken::VALUE) {
+                self->_last_header_value.clear();
+            }
+            self->_last_header_value.append(at, length);
+            if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+            }
+            self->_last_header_token = HeaderToken::VALUE;
             return 0;
         }
 
@@ -236,14 +284,39 @@ namespace qb::http {
          */
         static int
         on_headers_complete(http_t *parser) {
-            auto &msg = static_cast<Parser *>(parser->data)->msg;
+            auto *self = static_cast<Parser *>(parser->data);
+            auto &msg = self->msg;
+            if (self->_last_header_token == HeaderToken::VALUE &&
+                !self->_last_header_key.empty()) {
+                if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                    return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+                }
+                msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
+                self->_last_header_key.clear();
+                self->_last_header_value.clear();
+            }
+            self->_last_header_token = HeaderToken::NONE;
             msg.major_version = parser->http_major;
             msg.minor_version = parser->http_minor;
+            if constexpr (MessageType::type == HTTP_REQUEST) {
+                // llhttp uses ULLONG_MAX as "unknown length". For HTTP requests,
+                // absence of both Content-Length and Transfer-Encoding means an
+                // empty body by default (RFC 9112 framing). Normalize this here
+                // so downstream framing code never treats header-only requests as
+                // waiting for an impossible body length.
+                if (parser->content_length == ULLONG_MAX &&
+                    !msg.has_header("Transfer-Encoding")) {
+                    parser->content_length = 0;
+                }
+            }
             if (parser->content_length != ULLONG_MAX) {
+                if (parser->content_length > protocol_limits::MAX_BODY_SIZE) {
+                    return fail_with_reason(parser, "HTTP Content-Length exceeds configured body size limit");
+                }
                 msg.body().raw().reserve(parser->content_length);
             }
             msg.upgrade = static_cast<bool>(parser->upgrade);
-            static_cast<Parser *>(parser->data)->_headers_completed = true;
+            self->_headers_completed = true;
             return HPE_PAUSED;
         }
 
@@ -261,8 +334,17 @@ namespace qb::http {
          */
         static int
         on_body(http_t *parser, const char *at, size_t length) {
-            auto &chunked = static_cast<Parser *>(parser->data)->_chunked;
+            auto *self = static_cast<Parser *>(parser->data);
+            if (length > protocol_limits::MAX_CHUNK_SIZE) {
+                return fail_with_reason(parser, "HTTP chunk exceeds configured chunk size limit");
+            }
+            const auto next_total = self->_body_bytes_seen + length;
+            if (next_total > protocol_limits::MAX_BODY_SIZE) {
+                return fail_with_reason(parser, "HTTP body exceeds configured size limit");
+            }
+            auto &chunked = self->_chunked;
             std::copy_n(at, length, chunked.allocate_back(length));
+            self->_body_bytes_seen = next_total;
             return 0;
         }
 
@@ -324,9 +406,16 @@ namespace qb::http {
             &Parser::default_http_cb, // on chunk complete
             &Parser::default_http_cb // on reset
         };
+        enum class HeaderToken { NONE, FIELD, VALUE };
         String _last_header_key; ///< Storage for the current header field name
+        String _last_header_value; ///< Storage for the current header field value
+        String _url_buffer; ///< Storage for request-target when URL callback is fragmented
+        HeaderToken _last_header_token = HeaderToken::NONE;
         bool _headers_completed = false; ///< Flag indicating if headers have been fully parsed
         qb::allocator::pipe<char> _chunked; ///< Buffer for body content
+        std::size_t _header_pairs_seen = 0; ///< Number of parsed header fields in the current message
+        std::size_t _body_bytes_seen = 0; ///< Total parsed body bytes for the current message
+        std::size_t _url_bytes_seen = 0; ///< Total URL bytes seen across fragmented on_url callbacks
 
     public:
         /**
@@ -388,6 +477,13 @@ namespace qb::http {
             ::new (static_cast<void *>(&msg)) MessageType{};
             _headers_completed = false;
             _chunked.clear();
+            _header_pairs_seen = 0;
+            _body_bytes_seen = 0;
+            _last_header_key.clear();
+            _last_header_value.clear();
+            _url_buffer.clear();
+            _last_header_token = HeaderToken::NONE;
+            _url_bytes_seen = 0;
         }
 
         /**

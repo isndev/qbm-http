@@ -168,6 +168,51 @@ namespace qb::http {
     };
 
     namespace internal {
+        [[nodiscard]] inline std::string_view
+        trim_optional_whitespace(std::string_view value) noexcept {
+            const auto begin = value.find_first_not_of(" \t");
+            if (begin == std::string_view::npos) {
+                return {};
+            }
+            const auto end = value.find_last_not_of(" \t");
+            return value.substr(begin, end - begin + 1);
+        }
+
+        [[nodiscard]] inline bool
+        if_none_match_contains(std::string_view if_none_match, std::string_view current_etag) noexcept {
+            current_etag = trim_optional_whitespace(current_etag);
+            if (current_etag.size() > 2 && current_etag.substr(0, 2) == "W/") {
+                current_etag.remove_prefix(2);
+            }
+
+            while (!if_none_match.empty()) {
+                const auto comma_pos = if_none_match.find(',');
+                auto candidate = trim_optional_whitespace(
+                    comma_pos == std::string_view::npos
+                        ? if_none_match
+                        : if_none_match.substr(0, comma_pos));
+
+                if (candidate == "*") {
+                    return true;
+                }
+
+                if (candidate.size() > 2 && candidate.substr(0, 2) == "W/") {
+                    candidate.remove_prefix(2);
+                }
+
+                if (candidate == current_etag) {
+                    return true;
+                }
+
+                if (comma_pos == std::string_view::npos) {
+                    break;
+                }
+                if_none_match.remove_prefix(comma_pos + 1);
+            }
+
+            return false;
+        }
+
         /**
          * @brief Sanitises a request URI path and resolves it against a
          *        canonical base directory, returning an empty path if the
@@ -359,7 +404,10 @@ namespace qb::http {
             }
             if (end_opt) {
                 long long suffix = *end_opt;
-                if (suffix == 0 || suffix > total_file_size) return std::nullopt;
+                if (suffix == 0) return std::nullopt;
+                if (suffix >= total_file_size) {
+                    return std::make_pair(0LL, total_file_size);
+                }
                 return std::make_pair(total_file_size - suffix, suffix);
             }
             return std::nullopt; // `bytes=-` or similar malformed input.
@@ -686,10 +734,7 @@ namespace qb::http {
 
                     std::string_view if_none_match_sv = ctx->request().header("If-None-Match");
                     if (!if_none_match_sv.empty()) {
-                        // Basic check, more robust parsing might be needed for multiple ETags or weak ETags
-                        // Example: split by comma for lists of ETags
-                        if (if_none_match_sv.find(etag_value) != std::string_view::npos) {
-                            // Check if our ETag is in the list
+                        if (internal::if_none_match_contains(if_none_match_sv, etag_value)) {
                             send_not_modified_response(ctx);
                             return;
                         }

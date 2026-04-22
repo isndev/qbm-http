@@ -113,6 +113,11 @@ private:
     //    bool _debug_send_padded_data = false; // Set to true to test sending padded DATA frames
 
 public:
+    [[nodiscard]] bool is_stream_closed(uint32_t stream_id) const {
+        auto it = _server_streams.find(stream_id);
+        return it == _server_streams.end() || it->second.is_closed();
+    }
+
     /**
      * @brief Validate HTTP/2 header name and value according to RFC 9113
      * @param name Header field name
@@ -127,46 +132,7 @@ public:
      * - Names must be valid token strings (no separators like : , ; etc.)
      */
     [[nodiscard]] static bool is_valid_header_field(const std::string& name, const std::string& value) noexcept {
-        // Check for empty name
-        if (name.empty()) {
-            return false;
-        }
-        
-        // Validate header name: no control chars, no separators, lowercase only
-        for (unsigned char c : name) {
-            // Forbidden: NUL, CR, LF, and uppercase letters
-            if (c == 0x00 || c == 0x0D || c == 0x0A) {
-                return false; // NUL, CR, LF are never allowed
-            }
-            // Acceptable: tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
-            //              "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
-            bool is_valid_char = std::isalnum(c) || 
-                                c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
-                                c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
-                                c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
-            if (!is_valid_char) {
-                return false;
-            }
-        }
-        
-        // Validate header value: no control chars except TAB (0x09)
-        for (unsigned char c : value) {
-            // Forbidden: NUL (0x00)
-            if (c == 0x00) {
-                return false;
-            }
-            // Control characters 0x01-0x08, 0x0A-0x1F are forbidden
-            // Only TAB (0x09) is allowed among control chars
-            if (c < 0x20 && c != 0x09) {
-                return false;
-            }
-            // DEL (0x7F) is also forbidden
-            if (c == 0x7F) {
-                return false;
-            }
-        }
-        
-        return true;
+        return HeaderValidator::is_valid_header_field(name, value);
     }
     /**
      * @brief Construct HTTP/2 server protocol handler
@@ -1365,8 +1331,9 @@ private:
                         }
                         authority_sv = value;
                     } else {
-                        // Unknown pseudo-header, could be :status in response or other extension
-                        // For now, ignore unknown pseudo-headers in requests
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                              "Unknown pseudo-header in request: " + name);
+                        return false;
                     }
                 } else { // Regular header
                     pseudo_headers_finished = true;
@@ -1374,6 +1341,12 @@ private:
                     if (!is_valid_header_field(name, value)) {
                         this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, 
                             "Invalid header field name or value format (contains forbidden characters).");
+                        return false;
+                    }
+                    if (HeaderValidator::is_forbidden_header(name) ||
+                        (name == "te" && !HeaderValidator::is_valid_request_te_value(value))) {
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                              "Forbidden connection-specific header in request: " + name);
                         return false;
                     }
                     stream.assembled_request.add_header(name, value);
@@ -1414,16 +1387,23 @@ private:
 
         } else { // Trailers block
             stream.trailers_received = true;
-            std::vector<hpack::HeaderField> temp_trailers; // Temporary storage for trailer key-value pairs
             for (const auto& hf : stream.decoded_header_fields) {
                 const std::string& name = hf.name;
                 const std::string& value = hf.value;
                 if (name.empty() || name[0] == ':') {
                     this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid header field name in trailers (empty or pseudo-header)."); return false;
                 }
-                // TODO: Validate header name/value format
+                if (!is_valid_header_field(name, value)) {
+                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                          "Invalid trailer header field name or value format.");
+                    return false;
+                }
+                if (HeaderValidator::is_forbidden_trailer_header(name)) {
+                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                          "Forbidden header in trailers: " + name);
+                    return false;
+                }
                 stream.assembled_request.add_header(name, value); // Add to request trailers
-                temp_trailers.push_back(hf);
             }
 
             // As per RFC 9113, a trailer section's final frame MUST contain END_STREAM.
@@ -1943,15 +1923,18 @@ private:
 
             for (const auto& header_item : original_response.headers()) { 
                 if (stream.headers_sent_in_initial_frame.count(header_item.first)) continue; 
+                std::string name_lower = header_item.first;
+                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
                 // Standard pseudo-headers and connection-specific headers are forbidden in trailers
-                if (header_item.first.empty() || header_item.first[0] == ':' || 
-                    qb::http::well_known::is_hop_by_hop(header_item.first) ||
-                    header_item.first == qb::http::well_known::CONTENT_LENGTH_SV ||
-                    header_item.first == qb::http::well_known::TRANSFER_ENCODING_SV || 
-                    header_item.first == qb::http::well_known::TRAILER_SV) { // The "Trailer" header itself shouldn't be a trailer
+                if (header_item.first.empty() || header_item.first[0] == ':' ||
+                    HeaderValidator::is_forbidden_trailer_header(name_lower)) { // The "Trailer" header itself shouldn't be a trailer
                     continue;
                 }
                 for (const auto& value : header_item.second) {
+                    if (!HeaderValidator::is_valid_header_field(header_item.first, value)) {
+                        continue;
+                    }
                     hf_vector_trailers.push_back({std::string(header_item.first), value});
                 }
             }

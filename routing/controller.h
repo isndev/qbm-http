@@ -53,6 +53,7 @@ namespace qb::http {
     protected:
         // Routes defined within this controller. They are relative to the controller's base path.
         std::vector<std::shared_ptr<IHandlerNode<Session> > > _controller_routes;
+        bool _routes_initialized = false;
 
         // Helper methods for derived controllers to define routes
         // These can remain protected as they are implementation details for the public API below
@@ -372,10 +373,15 @@ namespace qb::http {
             RouterCore<Session> &router_core,
             const std::string &current_built_path,
             const std::vector<std::shared_ptr<IAsyncTask<Session> > > &inherited_tasks) override {
-            // Ensure routes are defined by calling initialize_routes() once. 
-            // This is a simple guard; a more robust one might use a std::once_flag or bool member.
-            if (_controller_routes.empty()) {
-                initialize_routes();
+            // Ensure routes are defined by calling initialize_routes() once.
+            // If a derived controller already called initialize_routes() manually
+            // (e.g. in its constructor), routes and/or middleware are already
+            // populated and we must not run it again.
+            if (!_routes_initialized) {
+                if (_controller_routes.empty()) {
+                    initialize_routes();
+                }
+                _routes_initialized = true;
             }
 
             std::string controller_base_path = this->build_full_path(current_built_path);

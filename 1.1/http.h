@@ -643,9 +643,34 @@ namespace qb::http {
     } // namespace async
 
     namespace detail {
+        inline std::string make_host_header_value(const qb::io::uri &uri) {
+            std::string host_value = std::string(uri.host());
+            const bool already_bracketed_ipv6 =
+                host_value.size() >= 2 && host_value.front() == '[' && host_value.back() == ']';
+            if (!already_bracketed_ipv6 && host_value.find(':') != std::string::npos) {
+                host_value = "[" + host_value + "]";
+            }
+
+            const std::string_view port = uri.port();
+            if (port.empty()) {
+                return host_value;
+            }
+
+            const std::string_view scheme = uri.scheme();
+            const bool is_default_http_port = (scheme == "http" && port == "80");
+            const bool is_default_https_port = (scheme == "https" && port == "443");
+            if (!is_default_http_port && !is_default_https_port) {
+                host_value += ":";
+                host_value += port;
+            }
+            return host_value;
+        }
+
         template <typename _Func>
         void _execute_async_request_internal(Request request, _Func &&func, double timeout, const char* method_name_for_log) {
-            request.headers()["host"].emplace_back(request.uri().host());
+            if (!request.has_header("host")) {
+                request.set_header("host", make_host_header_value(request.uri()));
+            }
             LOG_HTTP_DEBUG("Executing HTTP/1.1 " << method_name_for_log << " request: " << request.method() << " " << request.uri().source());
 #if QB_HAS_SSL
             if (request.uri().scheme() == "https") {

@@ -291,12 +291,102 @@ public:
     }
 
     /**
+     * @brief Check if a header name is forbidden in an HTTP/2 response header section.
+     * @param name Header name (lowercase)
+     * @return true if forbidden in responses
+     */
+    static bool is_forbidden_response_header(std::string_view name) {
+        // "te" exception only applies to request headers.
+        return is_forbidden_header(name) || name == "te";
+    }
+
+    /**
+     * @brief Check if a header name is forbidden in an HTTP/2 trailer section.
+     * @param name Header name (lowercase)
+     * @return true if forbidden in trailers
+     */
+    static bool is_forbidden_trailer_header(std::string_view name) {
+        return is_forbidden_response_header(name) || name == "trailer" || name == "content-length";
+    }
+
+    /**
+     * @brief Validate request `te` header value for HTTP/2.
+     * @details RFC 9113 allows only the token `trailers` for `te`.
+     *          A comma-separated list is accepted only if every token is `trailers`.
+     * @param value Raw header field value
+     * @return true when valid for HTTP/2 requests
+     */
+    [[nodiscard]] static bool is_valid_request_te_value(std::string_view value) noexcept {
+        std::string_view remaining = value;
+        bool saw_token = false;
+
+        while (!remaining.empty()) {
+            const auto comma = remaining.find(',');
+            const std::string_view token = qb::http::utility::trim_http_whitespace(
+                comma == std::string_view::npos ? remaining : remaining.substr(0, comma));
+
+            if (!token.empty()) {
+                saw_token = true;
+                if (!qb::http::utility::iequals(token, "trailers")) {
+                    return false;
+                }
+            }
+
+            if (comma == std::string_view::npos) {
+                break;
+            }
+            remaining.remove_prefix(comma + 1);
+        }
+
+        return saw_token;
+    }
+
+    /**
      * @brief Check if header name is a pseudo-header
      * @param name Header name
      * @return true if it's a pseudo-header (starts with ':')
      */
     static bool is_pseudo_header(std::string_view name) {
         return !name.empty() && name[0] == ':';
+    }
+
+    /**
+     * @brief Validate HTTP/2 header name/value format according to RFC 9113.
+     *
+     * Rules enforced:
+     * - header name must be non-empty and lowercase
+     * - name and value must not contain NUL/CR/LF
+     * - value may contain TAB but no other CTL bytes
+     * - name must be a valid token character sequence
+     */
+    [[nodiscard]] static bool is_valid_header_field(std::string_view name, std::string_view value) noexcept {
+        if (name.empty()) {
+            return false;
+        }
+
+        for (unsigned char c : name) {
+            if (c == 0x00 || c == 0x0D || c == 0x0A || std::isupper(c)) {
+                return false;
+            }
+            const bool is_valid_char = std::isalnum(c) ||
+                                       c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+                                       c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
+                                       c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+            if (!is_valid_char) {
+                return false;
+            }
+        }
+
+        for (unsigned char c : value) {
+            if (c == 0x00 || c == 0x0D || c == 0x0A) {
+                return false;
+            }
+            if ((c < 0x20 && c != 0x09) || c == 0x7F) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

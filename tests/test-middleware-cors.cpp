@@ -298,6 +298,20 @@ TEST_F(CorsMiddlewareTest, FunctionOriginMatching) {
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
+TEST_F(CorsMiddlewareTest, ThrowingFunctionMatcherFailsClosedAndRequestContinues) {
+    qb::http::CorsOptions options;
+    options.origin_matcher([](const std::string &) -> bool {
+        throw std::runtime_error("matcher failure");
+    });
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://example.com"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Origin").empty());
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
 TEST_F(CorsMiddlewareTest, PreflightAllowHeadersDetailed) {
     qb::http::CorsOptions options;
     options.origins({"http://example.com"})
@@ -531,6 +545,38 @@ TEST_F(CorsMiddlewareTest, ReDoSProtectionRegexTimeout) {
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     // Should match the regex pattern
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "http://subdomain.example.com");
+}
+
+TEST_F(CorsMiddlewareTest, RegexStrategyRejectsOverlongOriginInput) {
+    qb::http::CorsOptions options;
+    options.origin_patterns({"http://.*"});
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    std::string long_origin = "http://";
+    long_origin.append(qb::http::cors_security_limits::MAX_ORIGIN_LENGTH + 64, 'a');
+
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", long_origin));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Origin").empty());
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
+TEST_F(CorsMiddlewareTest, OverlongOriginRejectedEvenWithWildcardAndCredentials) {
+    qb::http::CorsOptions options;
+    options.origins({"*"})
+            .credentials(qb::http::CorsOptions::AllowCredentials::Yes);
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    std::string long_origin = "http://";
+    long_origin.append(qb::http::cors_security_limits::MAX_ORIGIN_LENGTH + 128, 'b');
+
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", long_origin));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Origin").empty());
+    EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Credentials").empty());
+    EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(CorsMiddlewareTest, MaxOriginLengthBoundary) {

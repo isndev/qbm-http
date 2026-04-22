@@ -181,6 +181,7 @@ namespace qb::http::validation {
                 enum class State { TEXT, TAG_START, TAG_NAME, IN_TAG, COMMENT, COMMENT_END };
                 State state = State::TEXT;
                 size_t i = 0;
+                size_t pending_tag_start = std::string::npos;
                 
                 while (i < input.size()) {
                     char c = input[i];
@@ -189,6 +190,7 @@ namespace qb::http::validation {
                         case State::TEXT:
                             if (c == '<') {
                                 state = State::TAG_START;
+                                pending_tag_start = i;
                             } else {
                                 output.push_back(c);
                             }
@@ -210,6 +212,7 @@ namespace qb::http::validation {
                                 output.push_back('<');
                                 output.push_back(c);
                                 state = State::TEXT;
+                                pending_tag_start = std::string::npos;
                             }
                             break;
                             
@@ -226,6 +229,7 @@ namespace qb::http::validation {
                             } else if (c == '>') {
                                 // End of tag
                                 state = State::TEXT;
+                                pending_tag_start = std::string::npos;
                             }
                             // Otherwise stay in tag state
                             break;
@@ -240,6 +244,7 @@ namespace qb::http::validation {
                         case State::COMMENT_END:
                             if (c == '>') {
                                 state = State::TEXT;
+                                pending_tag_start = std::string::npos;
                             } else if (c != '-') {
                                 // Not actually end of comment, back to comment state
                                 state = State::COMMENT;
@@ -249,13 +254,9 @@ namespace qb::http::validation {
                     ++i;
                 }
                 
-                // Handle unclosed tags - output remaining content as text
-                if (state != State::TEXT) {
-                    // Find last '<' and output from there
-                    size_t last_lt = output.find_last_of('<');
-                    if (last_lt != std::string::npos) {
-                        output.erase(last_lt);
-                    }
+                // Handle unclosed tags/comments by preserving the original tail.
+                if (state != State::TEXT && pending_tag_start != std::string::npos) {
+                    output.append(input.substr(pending_tag_start));
                 }
                 
                 return output;

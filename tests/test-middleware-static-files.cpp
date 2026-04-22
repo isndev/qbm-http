@@ -314,6 +314,49 @@ TEST_F(StaticFilesMiddlewareTest, ETagAndIfNoneMatch) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+TEST_F(StaticFilesMiddlewareTest, IfNoneMatchDoesNotUseSubstringMatching) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_etags(true);
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    ASSERT_EQ(_session->_response.status(), qb::http::status::OK);
+    const std::string etag = std::string(_session->_response.header("ETag"));
+    ASSERT_FALSE(etag.empty());
+
+    const std::string misleading_if_none_match = "\"prefix-" + etag.substr(1, etag.size() - 2) + "-suffix\"";
+    configure_router_and_run(
+        sf_mw,
+        create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", misleading_if_none_match}}));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, IfNoneMatchSupportsWeakComparisonAndWildcard) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_etags(true);
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    ASSERT_EQ(_session->_response.status(), qb::http::status::OK);
+    const std::string etag = std::string(_session->_response.header("ETag"));
+    ASSERT_FALSE(etag.empty());
+
+    configure_router_and_run(
+        sf_mw,
+        create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", "W/" + etag}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
+    EXPECT_TRUE(_session->_response.body().empty());
+
+    configure_router_and_run(
+        sf_mw,
+        create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", "*"}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
+    EXPECT_TRUE(_session->_response.body().empty());
+}
+
 TEST_F(StaticFilesMiddlewareTest, LastModifiedAndIfModifiedSince) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     options.with_last_modified(true);
@@ -364,6 +407,26 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestSuffix) {
               "bytes " + std::to_string(file_content.length() - 4) + "-" + std::to_string(file_content.length() - 1) +
               "/" + std::to_string(file_content.length()));
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), "4");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, RangeRequestSuffixLargerThanFileServesWholeRepresentation) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_range_requests(true);
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+    const std::string file_content = "Contents of file1.txt";
+
+    configure_router_and_run(
+        sf_mw,
+        create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=-9999"}}));
+
+    ASSERT_EQ(_session->_response.status(), qb::http::status::PARTIAL_CONTENT);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), file_content);
+    EXPECT_EQ(std::string(_session->_response.header("Content-Range")),
+              "bytes 0-" + std::to_string(file_content.length() - 1) +
+                  "/" + std::to_string(file_content.length()));
+    EXPECT_EQ(std::string(_session->_response.header("Content-Length")),
+              std::to_string(file_content.length()));
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -970,6 +1033,11 @@ TEST_F(StaticFilesMiddlewareTest, RangeParserAcceptsValidForms) {
     ASSERT_TRUE(r3.has_value());
     EXPECT_EQ(r3->first, 800);
     EXPECT_EQ(r3->second, 200);
+
+    auto r4 = parse_byte_range("bytes=-2000", total);
+    ASSERT_TRUE(r4.has_value());
+    EXPECT_EQ(r4->first, 0);
+    EXPECT_EQ(r4->second, total);
 }
 
 // --- End of F44 Hardening Tests ---

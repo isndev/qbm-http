@@ -24,6 +24,7 @@
 #include <stdexcept>    // For std::bad_any_cast, std::runtime_error (potentially from user code)
 #include <optional>     // For std::optional
 #include <utility>      // For std::move
+#include <cstdint>      // For std::uint64_t
 
 #include "../request.h"  // For qb::http::Request
 #include "../response.h" // For qb::http::Response
@@ -155,6 +156,7 @@ namespace qb::http {
             State           state          = State::Ready;
             ProcessingPhase phase          = ProcessingPhase::INITIAL;
             AsyncTaskResult last_result    = AsyncTaskResult::COMPLETE;
+            std::uint64_t   completion_count = 0;
             bool            is_cancelled   = false;
             bool            task_in_flight = false;
         };
@@ -818,6 +820,7 @@ namespace qb::http {
 
             _lc.task_in_flight = false;
             _lc.last_result    = result;
+            ++_lc.completion_count;
 
             try {
                 switch (result) {
@@ -975,6 +978,16 @@ namespace qb::http {
          */
         [[nodiscard]] AsyncTaskResult last_task_result() const noexcept {
             return _lc.last_result;
+        }
+
+        /**
+         * @brief Returns how many times `complete()` has been invoked on this context.
+         *
+         * Intended for advanced adapters (e.g., coroutine wrappers) that need to know
+         * whether user code already signaled a completion outcome.
+         */
+        [[nodiscard]] std::uint64_t completion_count() const noexcept {
+            return _lc.completion_count;
         }
     };
 } // namespace qb::http 

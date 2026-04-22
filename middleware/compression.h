@@ -327,28 +327,21 @@ namespace qb::http {
                 return;
             }
 
+            const std::size_t original_size = response.body().size();
+            const std::string original_body = response.body().as<std::string>();
+
             // Body::compress can throw std::runtime_error
             std::size_t compressed_size = response.body().compress(selected_encoding);
 
-            if (compressed_size > 0 && compressed_size < response.body().raw().size()) {
+            if (compressed_size > 0 && compressed_size < original_size) {
                 // Only set headers if compression was effective
                 response.set_header("Content-Encoding", selected_encoding);
                 response.add_header("Vary", "Accept-Encoding"); // Add to existing Vary or create new
                 response.set_header("Content-Length", std::to_string(compressed_size));
-            } else if (compressed_size > 0 && compressed_size >= response.body().raw().size()) {
-                // Compression did not reduce size or made it larger. Revert to original.
-                // This requires Body::compress to return original if ineffective or Body to store original temporarily.
-                // Current Body::compress overwrites. This aspect needs careful handling in Body::compress or here.
-                // For now, assume if compress was called, we stick with it unless it critically failed (threw).
-                // To be truly robust, Body::compress should ideally not modify if not beneficial or return original data.
-                // Assuming current Body::compress always replaces, we might send larger data if not careful.
-                // Let's assume for now: if compressed_size > 0, it means *some* compression happened.
-                // A better check might be `if (compressed_size > 0 && compressed_size < original_size_before_compress)`
-                // This part of logic is tricky without knowing exact Body::compress behavior on incompressible data.
-                // For now, setting headers if compressed_size > 0, implying it was successful operation.
-                response.set_header("Content-Encoding", selected_encoding);
-                response.add_header("Vary", "Accept-Encoding");
-                response.set_header("Content-Length", std::to_string(compressed_size));
+            } else if (compressed_size > 0) {
+                response.body() = original_body;
+                response.remove_header("Content-Encoding");
+                response.remove_header("Content-Length");
             }
             // If compressed_size is 0 (e.g. error or empty result from compress not throwing), headers are not set.
 #else

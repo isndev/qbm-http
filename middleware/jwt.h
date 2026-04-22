@@ -21,6 +21,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <charconv>  // For std::from_chars (C++17) - PERFORMANCE FIX
 #include <cstdlib>   // For std::strtod - PERFORMANCE FIX (exception-free parsing)
 
@@ -208,10 +209,18 @@ namespace qb::http {
 
             if (_validator) {
                 JwtErrorInfo validator_error{JwtError::NONE, ""};
-                if (!_validator(*payload_opt, validator_error)) {
-                    handle_error(ctx, validator_error.code != JwtError::NONE
-                                          ? validator_error
-                                          : JwtErrorInfo{JwtError::INVALID_CLAIM, "Custom JWT validation failed."});
+                try {
+                    if (!_validator(*payload_opt, validator_error)) {
+                        handle_error(ctx, validator_error.code != JwtError::NONE
+                                              ? validator_error
+                                              : JwtErrorInfo{JwtError::INVALID_CLAIM, "Custom JWT validation failed."});
+                        return;
+                    }
+                } catch (const std::exception &e) {
+                    handle_error(ctx, {JwtError::INVALID_CLAIM, "Custom JWT validator threw exception: " + std::string(e.what())});
+                    return;
+                } catch (...) {
+                    handle_error(ctx, {JwtError::INVALID_CLAIM, "Custom JWT validator threw unknown exception."});
                     return;
                 }
             }
@@ -219,7 +228,15 @@ namespace qb::http {
             ctx->template set<qb::json>("jwt_payload", *payload_opt);
 
             if (_success_handler) {
-                _success_handler(ctx, *payload_opt);
+                try {
+                    _success_handler(ctx, *payload_opt);
+                } catch (...) {
+                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                    ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                    ctx->response().body() = "Error in JWT success handler.";
+                    ctx->complete(AsyncTaskResult::ERROR);
+                    return;
+                }
             }
 
             ctx->complete(AsyncTaskResult::CONTINUE);
@@ -257,8 +274,12 @@ namespace qb::http {
                     return std::nullopt;
                 }
 
-                header_value.erase(0, header_value.find_first_not_of(" \t\n\r\f "));
-                header_value.erase(header_value.find_last_not_of(" \t\n\r\f ") + 1);
+                const auto first_non_ws = header_value.find_first_not_of(" \t\n\r\f ");
+                if (first_non_ws == std::string::npos) {
+                    return std::nullopt;
+                }
+                const auto last_non_ws = header_value.find_last_not_of(" \t\n\r\f ");
+                header_value = header_value.substr(first_non_ws, last_non_ws - first_non_ws + 1);
 
                 if (_options.auth_scheme.empty()) {
                     return header_value.empty() ? std::nullopt : std::make_optional(header_value);
@@ -300,6 +321,29 @@ namespace qb::http {
         }
 
         std::optional<qb::json> verify_token(const std::string &token, JwtErrorInfo &error_info) const {
+            const auto parse_int64_claim = [](const qb::json &claim) -> std::optional<int64_t> {
+                if (claim.is_number_integer()) {
+                    return claim.get<int64_t>();
+                }
+                if (claim.is_number_unsigned()) {
+                    const auto v = claim.get<uint64_t>();
+                    if (v > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                        return std::nullopt;
+                    }
+                    return static_cast<int64_t>(v);
+                }
+                if (claim.is_string()) {
+                    const auto &s = claim.get_ref<const std::string &>();
+                    int64_t out = 0;
+                    const auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
+                    if (ec == std::errc() && ptr == s.data() + s.size()) {
+                        return out;
+                    }
+                    return std::nullopt;
+                }
+                return std::nullopt;
+            };
+
             qb::jwt::VerifyOptions jwt_verify_options;
 
             auto alg_opt = qb::jwt::algorithm_from_string(_options.algorithm);
@@ -372,6 +416,22 @@ namespace qb::http {
                         }
                     }
                 }
+
+                if (_options.verify_iat && payload_json.contains("iat")) {
+                    const auto iat_opt = parse_int64_claim(payload_json["iat"]);
+                    if (!iat_opt) {
+                        error_info = {JwtError::INVALID_CLAIM, "Invalid 'iat' claim format."};
+                        return std::nullopt;
+                    }
+                    const int64_t now = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                    const int64_t leeway = static_cast<int64_t>(_options.leeway_seconds);
+                    if (*iat_opt > now + leeway) {
+                        error_info = {JwtError::TOKEN_NOT_ACTIVE, "Token issued in the future (invalid 'iat')."};
+                        return std::nullopt;
+                    }
+                }
+
                 return payload_json;
             } else {
                 switch (result.error) {
@@ -417,11 +477,15 @@ namespace qb::http {
 
         void handle_error(ContextPtr ctx, const JwtErrorInfo &error) const {
             if (_error_handler) {
-                _error_handler(ctx, error);
-                if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
-                    ctx->complete(AsyncTaskResult::COMPLETE);
+                try {
+                    _error_handler(ctx, error);
+                    if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+                        ctx->complete(AsyncTaskResult::COMPLETE);
+                    }
+                    return;
+                } catch (...) {
+                    // Fall through to default error response.
                 }
-                return;
             }
 
             qb::json response_body = {{"error", error.message}};

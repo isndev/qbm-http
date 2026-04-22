@@ -204,6 +204,8 @@ namespace qb::http {
                     return _client_id_extractor_fn(static_cast<const void *>(&ctx));
                 } catch (const std::bad_function_call & /*e*/) {
                     // Fallthrough to default if custom extractor fails (e.g. null after move)
+                } catch (...) {
+                    // Fall through to the built-in extractor to keep middleware resilient.
                 }
             }
 
