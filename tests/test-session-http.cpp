@@ -109,6 +109,58 @@ TEST(Session, HTTP_PARSE_MULTIPART) {
     EXPECT_EQ(attrs.at("Filename"), "file1.txt");
 }
 
+class HostHeaderCaptureServer;
+
+class HostHeaderCaptureClient : public qb::io::use<HostHeaderCaptureClient>::tcp::client<HostHeaderCaptureServer> {
+public:
+    constexpr static const bool has_server = true;
+    using Protocol = qb::http::protocol<HostHeaderCaptureClient>;
+
+    explicit HostHeaderCaptureClient(HostHeaderCaptureServer &server)
+        : client(server) {
+    }
+
+    static std::string captured_host_header;
+
+    void on(Protocol::request &&request) {
+        captured_host_header = request.header("host");
+        qb::http::Response r;
+        r.status() = qb::http::status::OK;
+        r.body() = "ok";
+        *this << r;
+    }
+};
+
+class HostHeaderCaptureServer : public qb::http::use<HostHeaderCaptureServer>::server<HostHeaderCaptureClient> {
+};
+
+std::string HostHeaderCaptureClient::captured_host_header;
+
+TEST(Session, HTTP_CLIENT_SETS_HOST_HEADER_WITH_NON_DEFAULT_PORT) {
+    async::init();
+    HostHeaderCaptureClient::captured_host_header.clear();
+
+    HostHeaderCaptureServer server;
+    server.transport().listen_v4(9987);
+    server.start();
+
+    qb::http::Request req{{"http://localhost:9987/host-check"}};
+    auto reply = qb::http::run_sync(qb::http::GET(req, 3.0));
+
+    EXPECT_EQ(reply.response.status(), HTTP_STATUS_OK);
+    EXPECT_EQ(HostHeaderCaptureClient::captured_host_header, "localhost:9987");
+}
+
+TEST(Session, HTTP_HOST_HEADER_FORMATS_IPV6_WITH_BRACKETS) {
+    qb::io::uri uri{"http://[2001:db8::1]/resource"};
+    EXPECT_EQ(qb::http::detail::make_host_header_value(uri), "[2001:db8::1]");
+}
+
+TEST(Session, HTTP_HOST_HEADER_FORMATS_IPV6_WITH_PORT_AND_BRACKETS) {
+    qb::io::uri uri{"http://[2001:db8::1]:8080/resource"};
+    EXPECT_EQ(qb::http::detail::make_host_header_value(uri), "[2001:db8::1]:8080");
+}
+
 // OVER TCP
 
 class TestServer;
@@ -359,4 +411,3 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
 }
 
 #endif
-

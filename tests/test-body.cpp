@@ -200,6 +200,23 @@ TEST_F(BodyTest, MultipartAssignmentAndConversion) {
     }
 }
 
+TEST_F(BodyTest, MultipartConversionPreservesPartDataAcrossMultipleParserCallbacks) {
+    const std::string boundary = "Boundary123";
+    const std::string tricky_payload =
+        "alpha\r\n--Boundary123Xbeta\r\n--Boundary123Ygamma";
+
+    body =
+        "--" + boundary + "\r\n"
+        "Content-Disposition: form-data; name=\"file\"\r\n"
+        "\r\n" +
+        tricky_payload +
+        "\r\n--" + boundary + "--";
+
+    Multipart parsed_mp = body.as<Multipart>();
+    ASSERT_EQ(parsed_mp.parts().size(), 1u);
+    EXPECT_EQ(parsed_mp.parts()[0].body, tricky_payload);
+}
+
 #ifdef QB_HAS_COMPRESSION
 TEST_F(BodyTest, CompressionAndDecompression) {
     std::string original_data = "This is some data to compress. Repeat: This is some data to compress.";

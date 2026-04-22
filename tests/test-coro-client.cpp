@@ -266,3 +266,14 @@ TEST_F(CoroClientTest, CallbackApiStillWorks) {
 }
 
 } // namespace
+
+TEST(HttpCoroAwaiterTest, CompletionCallbackIsOneShot) {
+    auto value = qb::http::run_sync(
+        qb::http::async::make_awaiter<int>(
+            [](std::function<void(int&&)> complete) {
+                complete(1);
+                complete(2); // Must be ignored.
+            }));
+
+    EXPECT_EQ(value, 1);
+}

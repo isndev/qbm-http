@@ -15,6 +15,8 @@
 #include "./rule.h" // For TypeRule::data_type_to_string
 #include <charconv>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace qb::http::validation {
     // Changed namespace
@@ -44,9 +46,21 @@ namespace qb::http::validation {
                     std::size_t parsed_chars_count;
                     double val_double = std::stod(input_value, &parsed_chars_count);
                     if (parsed_chars_count == input_value.length()) {
-                        long long val_ll = static_cast<long long>(val_double);
-                        if (static_cast<double>(val_ll) == val_double) {
-                            return val_ll;
+                        // Reject NaN/Infinity explicitly: they are not valid JSON numbers
+                        // and casting them to integral types is undefined/unsafe.
+                        if (!std::isfinite(val_double)) {
+                            result.add_error(field_path, "type", "Must be a valid finite number.", input_value);
+                            success = false;
+                            return nullptr;
+                        }
+
+                        // Preserve integer values as integer JSON when representable.
+                        if (val_double >= static_cast<double>(std::numeric_limits<long long>::min()) &&
+                            val_double <= static_cast<double>(std::numeric_limits<long long>::max())) {
+                            const long long val_ll = static_cast<long long>(val_double);
+                            if (static_cast<double>(val_ll) == val_double) {
+                                return val_ll;
+                            }
                         }
                         return val_double;
                     }
@@ -61,7 +75,8 @@ namespace qb::http::validation {
             }
             case DataType::BOOLEAN: {
                 std::string lower_val = input_value;
-                std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(), ::tolower);
+                std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 if (lower_val == "true" || lower_val == "1") return true;
                 if (lower_val == "false" || lower_val == "0") return false;
                 result.add_error(field_path, "type", "Must be a valid boolean (true, false, 1, 0).", input_value);
@@ -125,7 +140,19 @@ namespace qb::http::validation {
         bool parse_success = true;
 
         if (rules.custom_parser) {
-            parsed_value = rules.custom_parser(current_value_str, parse_success);
+            try {
+                parsed_value = rules.custom_parser(current_value_str, parse_success);
+            } catch (const std::exception &e) {
+                result.add_error(field_path, "customParseException",
+                                 "Custom parser threw exception: " + std::string(e.what()),
+                                 current_value_str);
+                return nullptr;
+            } catch (...) {
+                result.add_error(field_path, "customParseException",
+                                 "Custom parser threw unknown exception.",
+                                 current_value_str);
+                return nullptr;
+            }
             if (!parse_success) {
                 // The custom parser is responsible for adding an error to 'result' if it fails.
                 // However, if it didn't, but still indicated failure, add a generic one.
@@ -146,11 +173,23 @@ namespace qb::http::validation {
         // Apply validation rules to the (potentially type-converted) value.
         bool all_rules_passed = true;
         for (const auto &rule: rules.rules) {
-            if (!rule->validate(parsed_value, field_path, result)) {
+            try {
+                if (!rule->validate(parsed_value, field_path, result)) {
+                    all_rules_passed = false;
+                    // Unlike schema keywords, for parameters, we typically stop at the first rule failure for a single parameter.
+                    // However, the current loop continues, which might be desired if multiple errors for one param are needed.
+                    // For now, let it collect all. If first-fail is desired, add 'break;' here.
+                }
+            } catch (const std::exception &e) {
+                result.add_error(field_path, "ruleExecutionException",
+                                 "Validation rule threw exception: " + std::string(e.what()),
+                                 parsed_value);
                 all_rules_passed = false;
-                // Unlike schema keywords, for parameters, we typically stop at the first rule failure for a single parameter.
-                // However, the current loop continues, which might be desired if multiple errors for one param are needed.
-                // For now, let it collect all. If first-fail is desired, add 'break;' here.
+            } catch (...) {
+                result.add_error(field_path, "ruleExecutionException",
+                                 "Validation rule threw unknown exception.",
+                                 parsed_value);
+                all_rules_passed = false;
             }
         }
 
@@ -171,7 +210,8 @@ namespace qb::http::validation {
                 // Assuming single string value for simplicity here. Multi-value handled by RequestValidator.
             }
 
-            Result single_param_result; // Create a fresh result for each parameter to isolate its errors
+            // Inherit parent policy (ErrorValuePolicy / preview budget) for each child result.
+            Result single_param_result = result.make_child();
             validate_single(name, value_opt, rules, single_param_result, param_source_name);
             if (!single_param_result.success()) {
                 result.merge(single_param_result); // Merge errors into the main result

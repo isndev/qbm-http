@@ -26,8 +26,29 @@
 #pragma once
 
 #include "./base.h"
+#include <charconv>
+#include <optional>
 
 namespace qb::protocol::http2 {
+
+namespace detail {
+    [[nodiscard]] inline std::optional<int> parse_status_code(std::string_view status) noexcept {
+        if (status.size() != 3) {
+            return std::nullopt;
+        }
+        int code = 0;
+        const char *begin = status.data();
+        const char *end = begin + status.size();
+        const auto [ptr, ec] = std::from_chars(begin, end, code);
+        if (ec != std::errc() || ptr != end) {
+            return std::nullopt;
+        }
+        if (code < 100 || code > 999) {
+            return std::nullopt;
+        }
+        return code;
+    }
+} // namespace detail
 
 /**
  * @brief Type alias for PING frame opaque data
@@ -1025,24 +1046,10 @@ public:
                 return false;
             }
             
-            // Check for forbidden headers in trailers
             std::string name_lower = header_item.first;
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-            
-            static const std::array<std::string_view, 7> forbidden_headers = {
-                "host", "content-length", "transfer-encoding", "connection", 
-                "proxy-connection", "keep-alive", "upgrade"
-            };
-            
-            bool is_forbidden = false;
-            for (const auto& forbidden : forbidden_headers) {
-                if (name_lower == forbidden) {
-                    is_forbidden = true;
-                    break;
-                }
-            }
-            
-            if (is_forbidden) {
+
+            if (HeaderValidator::is_forbidden_trailer_header(name_lower)) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, 
                               "Forbidden header in trailers: " + header_item.first);
                 return false;
@@ -1050,6 +1057,11 @@ public:
 
             // Handle multi-value headers: iterate over all values in the vector
             for (const auto &value : header_item.second) {
+                if (!HeaderValidator::is_valid_header_field(header_item.first, value)) {
+                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                  "Invalid trailer header field format: " + header_item.first);
+                    return false;
+                }
                 trailer_fields.emplace_back(header_item.first, value);
             }
         }
@@ -1320,6 +1332,11 @@ private:
         std::string authority;
         if (!uri.host().empty()) {
             authority = std::string(uri.host());
+            const bool already_bracketed_ipv6 =
+                authority.size() >= 2 && authority.front() == '[' && authority.back() == ']';
+            if (!already_bracketed_ipv6 && authority.find(':') != std::string::npos) {
+                authority = "[" + authority + "]";
+            }
             if (!uri.port().empty()) {
                 authority += ":" + std::string(uri.port());
             }
@@ -1348,7 +1365,8 @@ private:
             
             // Skip connection-specific headers
             std::string name_lower = name;
-            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             
             static const std::array<std::string_view, 8> forbidden_headers = {
                 "connection", "proxy-connection", "keep-alive", "transfer-encoding", 
@@ -1358,7 +1376,7 @@ private:
             bool skip = false;
             for (const auto& forbidden : forbidden_headers) {
                 if (name_lower == forbidden) {
-                    if (name_lower == "te" && value == TE_TRAILERS_VALUE) {
+                    if (name_lower == "te" && HeaderValidator::is_valid_request_te_value(value)) {
                         // TE: trailers is allowed
                     } else if (name_lower == "host") {
                         // Host header is converted to :authority
@@ -1371,7 +1389,9 @@ private:
             }
             
             if (!skip) {
-                out_hf_vector.emplace_back(name, value);
+                if (HeaderValidator::is_valid_header_field(name_lower, value)) {
+                    out_hf_vector.emplace_back(name_lower, value);
+                }
             }
             
             // Check for trailer announcement
@@ -1507,6 +1527,11 @@ private:
             return false;
         }
 
+        if (!HeaderValidator::validate_pseudo_header_order(decoded_fields)) {
+            send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header after regular header");
+            return false;
+        }
+
         std::optional<std::string> status_str_opt;
         qb::http::Headers temp_headers_for_validation; // Used for validation logic before modifying response
 
@@ -1529,19 +1554,22 @@ private:
                         send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :status pseudo-header"); return false;
                     }
                     status_str_opt = value;
-                } else if (name.length() > 0 && name[0] == ':') { 
-                    if (name == ":method" || name == ":scheme" || name == ":path" || name == ":authority") {
-                        send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid request pseudo-header in response"); return false;
-                    }
+                } else if (name.length() > 0 && name[0] == ':') {
+                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid pseudo-header in response: " + name); return false;
                 }
             }
-            
-            static const std::array<std::string_view, 5> forbidden_h = {"connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade"};
-            std::string name_lower = name;
-            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-            for(const auto& forbidden_header_sv : forbidden_h) {
-                if (name_lower == forbidden_header_sv) {
-                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header: " + name); return false;
+
+            if (name[0] != ':') {
+                if (!HeaderValidator::is_valid_header_field(name, value)) {
+                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid header field name or value format");
+                    return false;
+                }
+
+                std::string name_lower = name;
+                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                if (HeaderValidator::is_forbidden_response_header(name_lower)) {
+                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header: " + name);
+                    return false;
                 }
             }
             temp_headers_for_validation.add_header(name, value);
@@ -1551,12 +1579,11 @@ private:
             if (!status_str_opt) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing :status in response headers"); return false;
             }
-            int status_code_val = 0;
-            try {
-                status_code_val = std::stoi(status_str_opt.value());
-            } catch (const std::exception&) {
+            const auto status_code_opt = detail::parse_status_code(status_str_opt.value());
+            if (!status_code_opt) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid :status value in response"); return false;
             }
+            const int status_code_val = *status_code_opt;
             
             if (status_code_val >= 100 && status_code_val < 200) {
                 if (status_code_val == 101) { 
@@ -2072,32 +2099,24 @@ private:
 
         // Validation flags
         bool regular_headers_started = false;
-        std::optional<std::string> method_from_connect_response;
+
+        if (!HeaderValidator::validate_pseudo_header_order(decoded_fields)) {
+            send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header after regular header");
+            return false;
+        }
+
+        if (!is_trailers_block) {
+            const auto response_pseudo_validation = HeaderValidator::validate_response_pseudo_headers(decoded_fields);
+            if (!response_pseudo_validation.is_valid) {
+                send_rst_stream(stream.id, response_pseudo_validation.error_code, response_pseudo_validation.error_message);
+                return false;
+            }
+        }
 
         for (const auto& hf : decoded_fields) {
             if (hf.name.empty()) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header name");
                 return false;
-            }
-
-            // Check for uppercase letters in header names (except pseudo-headers)
-            if (hf.name[0] != ':') {
-                for (char c : hf.name) {
-                    if (c >= 'A' && c <= 'Z') {
-                        send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, 
-                                      "Uppercase in header name: " + hf.name);
-                        return false;
-                    }
-                }
-            }
-            
-            // Check for invalid characters in header values
-            for (char c_val : hf.value) {
-                if ((c_val > 0 && c_val < 0x20 && c_val != '\t') || c_val == 0x7F) {
-                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, 
-                                  "Invalid char in header value: " + hf.name);
-                    return false;
-                }
             }
 
             if (hf.name[0] == ':') { // Pseudo-header
@@ -2129,38 +2148,24 @@ private:
                         }
                     }
                     status_str = hf.value;
-                } else if (hf.name == ":method" && stream.method == "CONNECT") {
-                    method_from_connect_response = hf.value;
-                } else if (hf.name == ":scheme" || hf.name == ":authority" || hf.name == ":path") {
-                    response.add_header(std::string(hf.name), std::string(hf.value));
                 } else {
-                    response.add_header(std::string(hf.name), std::string(hf.value));
+                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                  "Invalid pseudo-header in response: " + hf.name);
+                    return false;
                 }
             } else { // Regular header
                 regular_headers_started = true;
 
-                // Check for forbidden headers
-                static const std::array<std::string_view, 7> forbidden_headers = {
-                    "connection", "proxy-connection", "keep-alive", "transfer-encoding", 
-                    "upgrade", "host", "te"
-                };
-                
-                std::string name_lower = hf.name;
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-
-                bool is_forbidden = false;
-                for (const auto& forbidden_header_sv : forbidden_headers) {
-                    if (name_lower == forbidden_header_sv) {
-                        if (name_lower == "te" && hf.value == TE_TRAILERS_VALUE) {
-                            // TE: trailers is allowed
-                        } else {
-                            is_forbidden = true;
-                            break;
-                        }
-                    }
+                if (!HeaderValidator::is_valid_header_field(hf.name, hf.value)) {
+                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                  "Invalid header field name or value format");
+                    return false;
                 }
 
-                if (is_forbidden) {
+                // Check for forbidden headers
+                std::string name_lower = hf.name;
+                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                if (HeaderValidator::is_forbidden_response_header(name_lower)) {
                     send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, 
                                   "Forbidden connection-specific header: " + hf.name);
                     return false;
@@ -2175,28 +2180,14 @@ private:
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing :status header");
                 return false;
             }
-            
-            try {
-                int status_code = std::stoi(status_str);
-                response.status() = status_code;
-                
-                // Validate CONNECT responses
-                if (stream.method == "CONNECT" && (status_code >= 200 && status_code < 300)) {
-                    if (method_from_connect_response.has_value() ||
-                        response.headers().has(":scheme") || 
-                        response.headers().has(":authority") || 
-                        response.headers().has(":path")) {
-                        send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, 
-                                      "Invalid pseudo-headers in 2xx CONNECT response");
-                        return false;
-                    }
-                }
 
-            } catch (const std::exception&) {
+            const auto status_code_opt = detail::parse_status_code(status_str);
+            if (!status_code_opt) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, 
                               "Invalid :status value: " + status_str);
                 return false;
             }
+            response.status() = *status_code_opt;
         }
         
         return true;

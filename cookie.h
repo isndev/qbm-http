@@ -289,7 +289,8 @@ namespace qb::http {
          * @return Reference to the created cookie
          */
         Cookie &add(std::string name, std::string value) {
-            return _cookies.emplace(std::move(name), Cookie(name, std::move(value))).first->second;
+            Cookie cookie(name, std::move(value));
+            return _cookies.emplace(std::move(name), std::move(cookie)).first->second;
         }
 
         /**

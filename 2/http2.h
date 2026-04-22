@@ -173,12 +173,14 @@ namespace qb::http2 {
                     if (!res.has_header("content-length") && !res.body().empty()) {
                        res.set_header("content-length", std::to_string(res.body().size()));
                     }
-                    _http2_protocol->send_response(stream_id, res);
-                    auto it = _contexts.find(stream_id);
-                    if (it != _contexts.end() && it->second) {
-                        it->second->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
-                        _contexts.erase(it);
+                    if (!_http2_protocol->send_response(stream_id, res)) {
+                        LOG_HTTP_ERROR_PA(this->id(), "HTTP/2 response send failed for stream " << stream_id);
+                        return this->out();
                     }
+                    // Keep stream context alive until the protocol lifecycle reports
+                    // stream closure through the write/cleanup path. This avoids firing
+                    // POST_RESPONSE_SEND immediately after enqueue, before bytes have
+                    // actually progressed through transport flow control.
                     this->ready_to_write();
                     this->updateTimeout();
                 } else {
@@ -233,8 +235,7 @@ namespace qb::http2 {
                 LOG_HTTP_INFO_PA(this->id(), "Received HTTP/2 request on stream " << stream_id << ": " << request.method() << " " << request.uri().source());
                 // Store stream_id directly in request (no string conversion needed)
                 request.stream_id = stream_id;
-                request.set_header("server", "qb/http2");
-                
+
                 auto context = router().route(this->shared_from_this(), std::move(request));
                 if (!context) {
                     LOG_HTTP_WARN_PA(this->id(), "HTTP/2 request on stream " << stream_id << " not routed. Sending RST_STREAM.");
@@ -268,6 +269,14 @@ namespace qb::http2 {
                 this->updateTimeout();
                 // Periodic cleanup of idle streams for DDoS protection
                 if (_http2_protocol) {
+                    for (auto it = _contexts.begin(); it != _contexts.end();) {
+                        if (it->second && _http2_protocol->is_stream_closed(it->first)) {
+                            it->second->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
+                            it = _contexts.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - _last_stream_cleanup).count();
                     if (elapsed >= constants::CLEANUP_INTERVAL_SECONDS) {

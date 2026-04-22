@@ -56,6 +56,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <coroutine>
 #include <functional>
 #include <memory>
@@ -97,6 +98,9 @@ namespace qb::http::async {
         T                       _result{};
         std::coroutine_handle<> _handle{};
         std::shared_ptr<bool>   _alive{std::make_shared<bool>(true)};
+        std::shared_ptr<std::atomic<bool>> _completed{
+            std::make_shared<std::atomic<bool>>(false)
+        };
         Operation               _op;
 
     public:
@@ -119,8 +123,13 @@ namespace qb::http::async {
         void await_suspend(std::coroutine_handle<> h) {
             _handle = h;
             auto alive = _alive;
-            _op([this, alive](T&& value) {
+            auto completed = _completed;
+            _op([this, alive, completed](T&& value) {
                 if (!*alive) {
+                    return;
+                }
+                bool expected = false;
+                if (!completed->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                     return;
                 }
                 _result = std::move(value);

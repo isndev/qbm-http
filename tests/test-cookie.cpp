@@ -334,6 +334,18 @@ TEST_F(CookieJarTest, AddAndRetrieve) {
     EXPECT_EQ(nullptr, jar.get("nonexistent"));
 }
 
+TEST_F(CookieJarTest, AddByNameAndValuePreservesCookieName) {
+    Cookie &cookie = jar.add("session_id", "abc123");
+
+    EXPECT_EQ(cookie.name(), "session_id");
+    EXPECT_EQ(cookie.value(), "abc123");
+
+    const Cookie *stored_cookie = jar.get("session_id");
+    ASSERT_NE(nullptr, stored_cookie);
+    EXPECT_EQ(stored_cookie->name(), "session_id");
+    EXPECT_EQ(stored_cookie->value(), "abc123");
+}
+
 TEST_F(CookieJarTest, ModifyCookies) {
     // Add a new cookie
     jar.add("test3", "value3");

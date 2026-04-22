@@ -82,42 +82,107 @@ namespace qb::http::validation {
         // 1. Apply Sanitizers
         if (!_query_param_sanitizers.empty()) {
             auto &queries_map = request.uri().queries(); // mutable reference
+            Result query_sanitize_result = result.make_child();
             for (auto &query_pair: queries_map) {
                 const auto &param_name = query_pair.first;
                 auto it_sanitizers = _query_param_sanitizers.find(param_name);
                 if (it_sanitizers != _query_param_sanitizers.end()) {
                     for (std::string &value_str: query_pair.second) {
                         // mutable reference to each value string
+                        bool sanitizer_failed = false;
                         for (const auto &sanitizer_func: it_sanitizers->second) {
-                            value_str = sanitizer_func(value_str);
+                            try {
+                                value_str = sanitizer_func(value_str);
+                            } catch (const std::exception &e) {
+                                query_sanitize_result.add_error(
+                                    "query." + param_name, "sanitizeException.query",
+                                    "Query sanitizer threw exception: " + std::string(e.what()),
+                                    value_str);
+                                overall_valid = false;
+                                sanitizer_failed = true;
+                                break;
+                            } catch (...) {
+                                query_sanitize_result.add_error(
+                                    "query." + param_name, "sanitizeException.query",
+                                    "Query sanitizer threw unknown exception.",
+                                    value_str);
+                                overall_valid = false;
+                                sanitizer_failed = true;
+                                break;
+                            }
+                        }
+                        if (sanitizer_failed) {
+                            break;
                         }
                     }
                 }
             }
+            result.merge(query_sanitize_result);
         }
 
         if (!_header_sanitizers.empty()) {
             auto &headers_map = request.headers(); // mutable reference
+            Result header_sanitize_result = result.make_child();
             for (auto &header_pair: headers_map) {
                 const auto &header_name = header_pair.first;
                 auto it_sanitizers = _header_sanitizers.find(header_name);
                 if (it_sanitizers != _header_sanitizers.end()) {
                     for (std::string &value_str: header_pair.second) {
                         // mutable reference
+                        bool sanitizer_failed = false;
                         for (const auto &sanitizer_func: it_sanitizers->second) {
-                            value_str = sanitizer_func(value_str);
+                            try {
+                                value_str = sanitizer_func(value_str);
+                            } catch (const std::exception &e) {
+                                header_sanitize_result.add_error(
+                                    "header." + header_name, "sanitizeException.header",
+                                    "Header sanitizer threw exception: " + std::string(e.what()),
+                                    value_str);
+                                overall_valid = false;
+                                sanitizer_failed = true;
+                                break;
+                            } catch (...) {
+                                header_sanitize_result.add_error(
+                                    "header." + header_name, "sanitizeException.header",
+                                    "Header sanitizer threw unknown exception.",
+                                    value_str);
+                                overall_valid = false;
+                                sanitizer_failed = true;
+                                break;
+                            }
+                        }
+                        if (sanitizer_failed) {
+                            break;
                         }
                     }
                 }
             }
+            result.merge(header_sanitize_result);
         }
 
         if (_body_sanitizer && !request.body().empty()) {
             Result sanitize_body_result = result.make_child();
+            bool body_sanitization_failed = false;
             try {
                 qb::json body_json = qb::json::parse(request.body().as<std::string_view>());
-                _body_sanitizer->sanitize(body_json);
-                request.body() = body_json.dump(); // Update request body with sanitized version
+                try {
+                    _body_sanitizer->sanitize(body_json);
+                } catch (const std::exception &e) {
+                    sanitize_body_result.add_error("body", "sanitizeException.body",
+                                                   "Body sanitizer threw exception: " + std::string(e.what()),
+                                                   request.body().as<std::string_view>());
+                    overall_valid = false;
+                    body_sanitization_failed = true;
+                } catch (...) {
+                    sanitize_body_result.add_error("body", "sanitizeException.body",
+                                                   "Body sanitizer threw unknown exception.",
+                                                   request.body().as<std::string_view>());
+                    overall_valid = false;
+                    body_sanitization_failed = true;
+                }
+                if (!body_sanitization_failed) {
+                    request.body() = body_json.dump(); // Update request body with sanitized version
+                }
             } catch (const qb::json::parse_error &e) {
                 sanitize_body_result.add_error("body", "invalidFormat.sanitize",
                                                "Request body is not valid JSON, cannot apply body sanitizers. Error: " +

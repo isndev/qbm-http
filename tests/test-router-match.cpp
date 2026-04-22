@@ -219,6 +219,42 @@ TEST_F(RouterMatchTest, ParameterWithStaticSegmentAfter) {
     ASSERT_EQ(param_val.value(), "item007");
 }
 
+TEST_F(RouterMatchTest, ConsecutiveParameterSegmentsMatch) {
+    router.get("/:tenant/:resource", make_verifying_handler("double_param_handler"));
+    router.compile();
+
+    auto request = create_request(HTTP_GET, "/acme/users");
+    router.route(mock_session, std::move(request));
+
+    ASSERT_TRUE(mock_session->_handler_executed);
+    ASSERT_EQ(mock_session->_handler_id, "double_param_handler");
+
+    auto tenant = mock_session->_captured_params.get("tenant");
+    auto resource = mock_session->_captured_params.get("resource");
+    ASSERT_TRUE(tenant.has_value());
+    ASSERT_TRUE(resource.has_value());
+    ASSERT_EQ(tenant.value(), "acme");
+    ASSERT_EQ(resource.value(), "users");
+}
+
+TEST_F(RouterMatchTest, WildcardUnderParameterSegmentMatchesRemainingPath) {
+    router.get("/:tenant/*rest", make_verifying_handler("param_wildcard_handler"));
+    router.compile();
+
+    auto request = create_request(HTTP_GET, "/acme/api/v1/users");
+    router.route(mock_session, std::move(request));
+
+    ASSERT_TRUE(mock_session->_handler_executed);
+    ASSERT_EQ(mock_session->_handler_id, "param_wildcard_handler");
+
+    auto tenant = mock_session->_captured_params.get("tenant");
+    auto rest = mock_session->_captured_params.get("rest");
+    ASSERT_TRUE(tenant.has_value());
+    ASSERT_TRUE(rest.has_value());
+    ASSERT_EQ(tenant.value(), "acme");
+    ASSERT_EQ(rest.value(), "api/v1/users");
+}
+
 TEST_F(RouterMatchTest, ParameterMissingFollowingStaticSegment) {
     router.get("/item/:itemId/details", make_verifying_handler("item_details_handler"));
     router.compile();

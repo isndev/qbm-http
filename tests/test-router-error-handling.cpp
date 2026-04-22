@@ -607,6 +607,46 @@ TEST_F(RouterErrorHandlingTest, ExceptionInMiddlewareTriggersErrorChain) {
     EXPECT_TRUE(_session_ptr->_last_error_handler_name_executed.empty());
 }
 
+TEST_F(RouterErrorHandlingTest, NonStdExceptionInMiddlewareTriggersErrorChain) {
+    auto normal_handler_after_mw = std::make_shared<NormalCompletingTask>(
+        "NormalHandlerAfterNonStdThrow", _session_ptr, _task_executor, HTTP_STATUS_OK, "OK from normal handler"
+    );
+
+    qb::http::MiddlewareHandlerFn<MockErrorHandlingSession> throwing_non_std_mw_fn =
+        [this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession> > /*ctx*/,
+               std::function<void()> /*next_fn*/) {
+            _session_ptr->record_task_execution("ThrowingNonStdMiddlewareLambda");
+            throw 1337;
+        };
+    auto throwing_non_std_middleware =
+        std::make_shared<qb::http::FunctionalMiddleware<MockErrorHandlingSession> >(
+            throwing_non_std_mw_fn, "ThrowingNonStdFunctionalMiddleware"
+        );
+
+    auto error_chain_handler = std::make_shared<NormalCompletingTask>(
+        "NonStdMiddlewareExceptionChainHandler", _session_ptr, _task_executor,
+        HTTP_STATUS_BAD_GATEWAY, "Handled by error chain (non-std middleware exception)", true
+    );
+
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockErrorHandlingSession> > > error_chain_list;
+    error_chain_list.push_back(error_chain_handler);
+    _router->set_error_task_chain(std::move(error_chain_list));
+
+    _router->use(throwing_non_std_middleware);
+    _router->get("/mw_non_std_exception_path", normal_handler_after_mw);
+    _router->compile();
+
+    make_request(HTTP_GET, "/mw_non_std_exception_path");
+
+    EXPECT_TRUE(_session_ptr->_finalized_cb_called);
+    EXPECT_TRUE(was_task_executed("ThrowingNonStdMiddlewareLambda"));
+    EXPECT_FALSE(was_task_executed("NormalHandlerAfterNonStdThrow"));
+    EXPECT_TRUE(was_task_executed("NonStdMiddlewareExceptionChainHandler"));
+    EXPECT_EQ(_session_ptr->_response_received.status(), HTTP_STATUS_BAD_GATEWAY);
+    EXPECT_EQ(_session_ptr->_response_received.body().as<std::string>(),
+              "Handled by error chain (non-std middleware exception)");
+}
+
 TEST_F(RouterErrorHandlingTest, ExceptionInErrorChainHandlerFinalizes) {
     auto initial_error_trigger_task = std::make_shared<ErrorSignalingTask>(
         "InitialErrorTriggerForExceptionInErrorChain", _session_ptr, _task_executor

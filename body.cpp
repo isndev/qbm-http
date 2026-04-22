@@ -741,7 +741,7 @@ namespace qb::http {
         };
         reader.onPartData = [](const char *buffer, size_t size, void *userData) {
             auto &part = reinterpret_cast<Multipart *>(userData)->parts().back();
-            part.body.assign(buffer, size);
+            part.body.append(buffer, size);
         };
         reader.onPartEnd = [](void *) {
         };

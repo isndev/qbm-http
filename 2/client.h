@@ -136,7 +136,8 @@ struct BatchRequestContext {
  * });
  * ```
  */
-class Client : public qb::io::async::tcp::client<Client, qb::io::transport::stcp>,
+class Client : public std::enable_shared_from_this<Client>,
+               public qb::io::async::tcp::client<Client, qb::io::transport::stcp>,
                public qb::io::use<Client>::timeout {
 public:
     using H2Protocol = qb::protocol::http2::ClientHttp2Protocol<Client>;
@@ -408,6 +409,11 @@ private:
      */
     void check_request_timeouts();
     
+    /**
+     * @brief Returns true when there is outstanding client work tied to the current connection.
+     */
+    [[nodiscard]] bool has_pending_or_active_work() const noexcept;
+
     /**
      * @brief Attempt reconnection if auto-reconnect is enabled
      */

@@ -32,6 +32,20 @@
 
 
 namespace qb::http {
+    namespace detail {
+        [[nodiscard]] inline std::string build_recaptcha_verification_body(std::string_view secret,
+                                                                           std::string_view response,
+                                                                           std::optional<std::string_view> remote_ip =
+                                                                                   std::nullopt) {
+            std::string request_body = "secret=" + qb::io::uri::encode(secret) +
+                                       "&response=" + qb::io::uri::encode(response);
+            if (remote_ip && !remote_ip->empty()) {
+                request_body += "&remoteip=" + qb::io::uri::encode(*remote_ip);
+            }
+            return request_body;
+        }
+    }
+
     /**
      * @brief Configuration options for the `RecaptchaMiddleware`.
      *
@@ -287,25 +301,33 @@ namespace qb::http {
             api_req.method() = qb::http::method::POST;
             api_req.set_header("Content-Type", "application/x-www-form-urlencoded");
 
-            std::string request_body_str = "secret=" + _options->get_secret_key() + "&response=" + *token_opt;
+            std::string request_body_str = detail::build_recaptcha_verification_body(
+                _options->get_secret_key(), *token_opt);
             // Optionally, include remoteip if available and desired by Google API policies.
             // std::string client_ip = std::string(ctx->request().header("X-Forwarded-For")); 
             // if (!client_ip.empty()) { 
             //    // Take first IP if multiple are present
             //    auto comma_pos = client_ip.find(',');
             //    if (comma_pos != std::string::npos) client_ip = client_ip.substr(0, comma_pos);
-            //    request_body_str += "&remoteip=" + qb::io::uri::encode_form_component(client_ip); 
+            //    request_body_str = detail::build_recaptcha_verification_body(
+            //        _options->get_secret_key(), *token_opt, client_ip);
             // }
             api_req.body() = request_body_str;
 
             auto shared_ctx = ctx; // Capture context by shared_ptr for async callback
             // Using qb::http::request for the async call (assuming it's the correct alias from http.h)
-            qb::http::request(std::move(api_req),
+            qb::http::REQUEST(std::move(api_req),
                               [shared_ctx, this](qb::http::async::Reply &&api_reply) mutable {
+                                  // The request may have been cancelled while the outbound verification
+                                  // call was in flight. In that case, do not mutate the response/context.
+                                  if (!shared_ctx || shared_ctx->is_cancelled() || shared_ctx->is_completed()) {
+                                      return;
+                                  }
+
                                   RecaptchaResult verification_result = parse_google_recaptcha_response(
                                       api_reply.response);
 
-                                  shared_ctx->set<RecaptchaResult>("recaptcha_result", verification_result);
+                                  shared_ctx->template set<RecaptchaResult>("recaptcha_result", verification_result);
 
                                   if (!verification_result.success || verification_result.score < _options->
                                       get_min_score()) {
@@ -384,7 +406,7 @@ namespace qb::http {
                     try {
                         if (!request.body().empty()) {
                             // Assuming body is JSON. For form-urlencoded, specific parsing would be needed.
-                            auto body_json = qb::json::parse(request.body().as_string_view());
+                            auto body_json = qb::json::parse(request.body().template as<std::string_view>());
                             if (body_json.is_object() && body_json.contains(field_name) && body_json[field_name].
                                 is_string()) {
                                 return body_json[field_name].get<std::string>();
@@ -413,11 +435,12 @@ namespace qb::http {
             RecaptchaResult result;
             if (google_response.status() != qb::http::status::OK) {
                 result.success = false;
-                result.error_codes = "Google API HTTP error: " + qb::http::to_string(google_response.status());
+                result.error_codes = "Google API HTTP error: " +
+                                     std::to_string(static_cast<int>(google_response.status()));
                 return result;
             }
             try {
-                auto json_body = qb::json::parse(google_response.body().as_string_view());
+                auto json_body = qb::json::parse(google_response.body().template as<std::string_view>());
                 result.success = json_body.value("success", false);
                 if (json_body.contains("score") && json_body["score"].is_number()) {
                     // Score is for v3
@@ -550,6 +573,4 @@ namespace qb::http {
     ) {
         return RecaptchaMiddleware<SessionType>::strict(secret_key, name);
     }
-} // namespace qb::http
-
 } // namespace qb::http 

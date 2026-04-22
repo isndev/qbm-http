@@ -20,6 +20,7 @@ set(HTTP_TESTS
         uri-only
         body
         cookie
+        headers
         validation
         router
         router-api
@@ -39,10 +40,12 @@ set(HTTP_TESTS
         middleware-compression
         middleware-cors
         middleware-auth
+        middleware-recaptcha
         middleware-error-handling
         middleware-jwt
         middleware-validator
         middleware-static-files
+        http2-header-validator
         session-http
         integration-basic
         integration-advanced

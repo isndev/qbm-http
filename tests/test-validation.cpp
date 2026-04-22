@@ -709,6 +709,23 @@ TEST_F(ValidationLogicTest, SchemaValidatorAnyOf) {
     }
 }
 
+TEST_F(ValidationLogicTest, SchemaValidatorAnyOfRejectsNonObjectSchemaItems) {
+    qb::json schema = {
+        {"anyOf", qb::json::array({
+            qb::json::object({{"type", "string"}}),
+            42
+        })}
+    };
+
+    SchemaValidator validator(schema);
+    result.clear();
+    bool is_valid = validator.validate(qb::json("value"), result);
+    EXPECT_FALSE(is_valid);
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.anyOf.item");
+}
+
 // Helper function (can be a lambda in the test too)
 static qb::json validation_errors_to_json_helper(const std::vector<qb::http::validation::Error> &errors) {
     qb::json errors_array = qb::json::array();
@@ -801,6 +818,20 @@ TEST_F(ValidationLogicTest, SchemaValidatorNot) {
         ASSERT_EQ(result.errors().size(), 1);
         EXPECT_EQ(result.errors()[0].rule_violated, "not");
     }
+}
+
+TEST_F(ValidationLogicTest, SchemaValidatorTypeArrayRejectsUnknownTypeEntries) {
+    qb::json schema = {
+        {"type", qb::json::array({"string", "mystery"})}
+    };
+    SchemaValidator validator(schema);
+
+    result.clear();
+    bool is_valid = validator.validate(qb::json("hello"), result);
+    EXPECT_FALSE(is_valid);
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.type");
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorMinMaxProperties) {
@@ -938,6 +969,27 @@ TEST_F(ValidationLogicTest, ParameterValidatorTypeConversionAndRule) {
     EXPECT_EQ(result.errors()[0].rule_violated, "type");
 }
 
+TEST_F(ValidationLogicTest, ParameterValidatorNumberRejectsNaNAndInfinity) {
+    ParameterValidator pv;
+    pv.add_param(ParameterRuleSet("value").set_type(DataType::NUMBER));
+
+    result.clear();
+    qb::icase_unordered_map<std::string> params_nan = {{"value", "nan"}};
+    EXPECT_FALSE(pv.validate(params_nan, result, "query"));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].field_path, "query.value");
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+
+    result.clear();
+    qb::icase_unordered_map<std::string> params_inf = {{"value", "inf"}};
+    EXPECT_FALSE(pv.validate(params_inf, result, "query"));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].field_path, "query.value");
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+}
+
 TEST_F(ValidationLogicTest, ParameterValidatorDefaultValue) {
     ParameterValidator pv;
     pv.add_param(
@@ -1012,6 +1064,43 @@ TEST_F(ValidationLogicTest, ParameterValidatorCustomParser) {
     EXPECT_EQ(result.errors()[0].rule_violated, "customParse");
 }
 
+TEST_F(ValidationLogicTest, ParameterValidatorCustomParserExceptionIsCaptured) {
+    ParameterValidator pv;
+    auto throwing_parser = [](const std::string &, bool &) -> qb::json {
+        throw std::runtime_error("parser blew up");
+    };
+    pv.add_param(ParameterRuleSet("enabled").set_custom_parser(throwing_parser));
+
+    result.clear();
+    qb::icase_unordered_map<std::string> params = {{"enabled", "yes"}};
+    EXPECT_FALSE(pv.validate(params, result, "query"));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].field_path, "query.enabled");
+    EXPECT_EQ(result.errors()[0].rule_violated, "customParseException");
+}
+
+TEST_F(ValidationLogicTest, ParameterValidatorRuleExceptionIsCaptured) {
+    ParameterValidator pv;
+    auto throwing_rule = std::make_shared<CustomRule>(
+        [](const qb::json &, const std::string &, Result &) -> bool {
+            throw std::runtime_error("rule blew up");
+        },
+        "throwing_rule");
+
+    pv.add_param(ParameterRuleSet("name")
+        .set_type(DataType::STRING)
+        .add_rule(throwing_rule));
+
+    result.clear();
+    qb::icase_unordered_map<std::string> params = {{"name", "alice"}};
+    EXPECT_FALSE(pv.validate(params, result, "query"));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].field_path, "query.name");
+    EXPECT_EQ(result.errors()[0].rule_violated, "ruleExecutionException");
+}
+
 TEST_F(ValidationLogicTest, ParameterValidatorStrictMode) {
     ParameterValidator pv_strict(true);
     pv_strict.add_param(ParameterRuleSet("id").set_type(DataType::INTEGER));
@@ -1043,6 +1132,41 @@ TEST_F(ValidationLogicTest, ParameterValidatorStrictMode) {
     EXPECT_TRUE(result.success()) << "Error details: " << (result.errors().empty()
                                                                ? "No errors"
                                                                : result.errors()[0].message);
+}
+
+TEST_F(ValidationLogicTest, RequestValidatorQuerySanitizerExceptionIsCaptured) {
+    RequestValidator validator;
+    validator.add_query_param_sanitizer("q", [](const std::string &) -> std::string {
+        throw std::runtime_error("query sanitizer crash");
+    });
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/search?q=test");
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "query.q");
+    EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.query");
+}
+
+TEST_F(ValidationLogicTest, RequestValidatorBodySanitizerExceptionIsCaptured) {
+    RequestValidator validator;
+    validator.add_body_sanitizer("name", [](const std::string &) -> std::string {
+        throw std::runtime_error("body sanitizer crash");
+    });
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/submit");
+    req.body() = R"({"name":"alice"})";
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "body");
+    EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.body");
 }
 
 
@@ -1345,6 +1469,19 @@ TEST_F(ValidationLogicTest, SanitizerStripHtmlTagsEdgeCases) {
     EXPECT_EQ(data4["content"].get<std::string>(), "Plain text without HTML");
 }
 
+TEST_F(ValidationLogicTest, SanitizerStripHtmlTagsPreservesUnclosedTagLikeText) {
+    Sanitizer s;
+    s.add_rule("content", PredefinedSanitizers::strip_html_tags());
+
+    qb::json trailing_lt = {{"content", "text<"}};
+    s.sanitize(trailing_lt);
+    EXPECT_EQ(trailing_lt["content"].get<std::string>(), "text<");
+
+    qb::json unclosed_tag = {{"content", "prefix <div class=\"x\""}};
+    s.sanitize(unclosed_tag);
+    EXPECT_EQ(unclosed_tag["content"].get<std::string>(), "prefix <div class=\"x\"");
+}
+
 TEST_F(ValidationLogicTest, SanitizerStripHtmlTagsSpecialChars) {
     Sanitizer s;
     s.add_rule("content", PredefinedSanitizers::strip_html_tags());
@@ -1563,6 +1700,47 @@ TEST_F(ValidationLogicTest, SchemaValidatorPropagatesErrorValuePolicy) {
     for (const auto &err: out.errors()) {
         EXPECT_FALSE(err.offending_value.has_value());
     }
+}
+
+TEST_F(ValidationLogicTest, SchemaValidatorAdditionalPropertiesInheritsErrorValuePolicy) {
+    qb::json schema = {
+        {"type", "object"},
+        {"additionalProperties", {
+            {"type", "integer"}
+        }}
+    };
+
+    SchemaValidator validator(schema);
+    validator.set_error_value_policy(SchemaValidator::ErrorValuePolicy::None);
+
+    Result out;
+    qb::json data = {{"dynamicField", "not-integer"}};
+    EXPECT_FALSE(validator.validate(data, out));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "dynamicField");
+    EXPECT_FALSE(out.errors().front().offending_value.has_value());
+}
+
+TEST_F(ValidationLogicTest, ParameterValidatorPropagatesErrorValuePolicyToChildResults) {
+    ParameterValidator pv;
+    pv.add_param(
+        ParameterRuleSet("name")
+            .set_type(DataType::STRING)
+            .add_rule(std::make_shared<MinLengthRule>(3)));
+
+    qb::icase_unordered_map<std::string> params;
+    params["name"] = "ab";
+
+    Result out;
+    out.set_error_value_policy(Result::ErrorValuePolicy::None);
+
+    EXPECT_FALSE(pv.validate(params, out, "query"));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1u);
+    EXPECT_EQ(out.errors().front().field_path, "query.name");
+    EXPECT_EQ(out.errors().front().rule_violated, "minLength");
+    EXPECT_FALSE(out.errors().front().offending_value.has_value());
 }
 
 int main(int argc, char **argv) {

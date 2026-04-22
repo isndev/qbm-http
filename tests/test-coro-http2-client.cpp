@@ -23,6 +23,7 @@
 #include <chrono>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -63,9 +64,77 @@ public:
             ctx->complete();
         });
 
+        router().get("/echo-header", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(ctx->request().header("x-custom-header"));
+            ctx->response().add_header("X-Protocol", "HTTP/2");
+            ctx->complete();
+        });
+
         router().compile();
     }
 };
+
+TEST(Http2ClientConfigTest, RejectsPlainHttpBaseUri) {
+    EXPECT_THROW(
+        {
+            auto client = qb::http2::make_client("http://localhost:19877");
+            (void)client;
+        },
+        std::invalid_argument);
+}
+
+TEST(Http2ClientReentrancyTest, BatchCallbackMayQueueAnotherBatchAcrossFailurePasses) {
+    auto client = qb::http2::make_client("https://localhost:1");
+    client->set_auto_reconnect(false);
+
+    auto make_get_request = [](const std::string &path) {
+        qb::http::Request req;
+        req.method() = qb::http::Method::GET;
+        req.uri() = qb::io::uri(path);
+        return req;
+    };
+
+    bool first_batch_callback_called = false;
+    bool second_batch_callback_called = false;
+    std::size_t second_batch_response_count = 0;
+
+    ASSERT_TRUE(client->push_requests(
+        {make_get_request("/first")},
+        [&](std::vector<qb::http::Response> responses) {
+            first_batch_callback_called = true;
+            EXPECT_EQ(responses.size(), 1u);
+            ASSERT_TRUE(client->push_requests(
+                {make_get_request("/second")},
+                [&](std::vector<qb::http::Response> second_responses) {
+                    second_batch_callback_called = true;
+                    second_batch_response_count = second_responses.size();
+                }));
+        }));
+
+    client->on(qb::io::async::event::disconnected{1});
+    EXPECT_TRUE(first_batch_callback_called);
+    EXPECT_FALSE(second_batch_callback_called);
+
+    // The second batch is queued by the first callback; a new failure pass must
+    // still observe and complete it.
+    client->on(qb::io::async::event::disconnected{1});
+    EXPECT_TRUE(second_batch_callback_called);
+    EXPECT_EQ(second_batch_response_count, 1u);
+}
+
+TEST(Http2ClientLifetimeTest, ConnectAwaiterReturnsErrorWhenClientExpiresBeforeAwait) {
+    auto connect_result = qb::io::async::run_sync([]() -> qb::io::async::task<qb::http2::ConnectResult> {
+        auto client = qb::http2::make_client("https://localhost:1");
+        auto awaiter = client->connect();
+        client.reset();
+        auto result = co_await awaiter;
+        co_return result;
+    }());
+
+    EXPECT_FALSE(connect_result.ok);
+    EXPECT_FALSE(connect_result.error_message.empty());
+}
 
 class CoroH2ClientTest : public ::testing::Test {
 protected:
@@ -148,6 +217,21 @@ TEST_F(CoroH2ClientTest, PushRequestAwaiterYieldsResponse) {
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().template as<std::string>(), "pong-h2");
     EXPECT_EQ(response.header("X-Protocol"), "HTTP/2");
+}
+
+TEST_F(CoroH2ClientTest, PushRequestNormalizesCustomHeaderNamesToHttp2Lowercase) {
+    if (IsSkipped()) return;
+    auto client = qb::http2::make_client(url());
+    client->set_connect_timeout(5.0);
+
+    qb::http::Request req;
+    req.method() = qb::http::Method::GET;
+    req.uri()    = qb::io::uri("/echo-header");
+    req.set_header("X-CUSTOM-HEADER", "UPPERCASE-KEY");
+
+    auto response = qb::http::run_sync(client->push_request(std::move(req)));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().template as<std::string>(), "UPPERCASE-KEY");
 }
 
 TEST_F(CoroH2ClientTest, CoAwaitPushRequestInsideCoroutine) {

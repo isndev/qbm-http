@@ -26,6 +26,7 @@
 #include <stdexcept>      // For std::runtime_error, std::invalid_argument
 #include <utility>        // For std::move
 #include <cassert>        // For assert (debug mode checks)
+#include <unordered_set>  // For duplicate capture name validation
 
 #include "../types.h"             // For qb::http::method enum
 #include "./async_task.h"       // For IAsyncTask
@@ -248,6 +249,7 @@ namespace qb::http {
 
             Node *current_node = _root.get();
             std::vector<std::string_view> segments = split_path_to_segments(path_pattern_str);
+            std::unordered_set<std::string> seen_capture_names;
 
             for (size_t i = 0; i < segments.size(); ++i) {
                 const auto &segment_sv = segments[i];
@@ -273,15 +275,13 @@ namespace qb::http {
                             "Wildcard segment '" + std::string(segment_sv) +
                             "' must be the last segment in the path pattern: " + path_pattern_str);
                     }
-                    if (current_node->type == NodeType::PARAMETER || current_node->type == NodeType::WILDCARD) {
-                        throw std::invalid_argument(
-                            "Cannot define a wildcard segment ('" + std::string(segment_sv) +
-                            "') under a parent that is already a parameter or wildcard ('" + std::string(
-                                current_node->segment_match) + "') in path: " + path_pattern_str);
-                    }
-
                     _path_segment_storage.emplace_back(segment_sv.substr(1));
                     std::string_view wildcard_name_sv = _path_segment_storage.back();
+                    if (!seen_capture_names.emplace(std::string(wildcard_name_sv)).second) {
+                        throw std::invalid_argument(
+                            "Duplicate capture name '" + std::string(wildcard_name_sv) +
+                            "' in path pattern: " + path_pattern_str);
+                    }
 
                     if (!current_node->wildcard_child) {
                         current_node->wildcard_child = std::make_unique<Node>(NodeType::WILDCARD, wildcard_name_sv);
@@ -300,15 +300,13 @@ namespace qb::http {
                             "Parameter segment must have a name (e.g., :id), got: '" + std::string(segment_sv) +
                             "' in path: " + path_pattern_str);
                     }
-                    if (current_node->type == NodeType::PARAMETER || current_node->type == NodeType::WILDCARD) {
-                        throw std::invalid_argument(
-                            "Cannot define a parameter segment ('" + std::string(segment_sv) +
-                            "') under a parent that is already a parameter or wildcard ('" + std::string(
-                                current_node->segment_match) + "') in path: " + path_pattern_str);
-                    }
-
                     _path_segment_storage.emplace_back(segment_sv.substr(1));
                     std::string_view p_name_sv = _path_segment_storage.back();
+                    if (!seen_capture_names.emplace(std::string(p_name_sv)).second) {
+                        throw std::invalid_argument(
+                            "Duplicate capture name '" + std::string(p_name_sv) +
+                            "' in path pattern: " + path_pattern_str);
+                    }
 
                     if (!current_node->param_child) {
                         current_node->param_child = std::make_unique<Node>(NodeType::PARAMETER, p_name_sv);

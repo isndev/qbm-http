@@ -17,12 +17,93 @@
 #include "./headers.h" // Includes utility, types, icase_unordered_map, string, string_view, etc.
 #include <stdexcept>    // For std::runtime_error (thrown by parse_header_attributes)
 #include <charconv>     // For std::to_chars (used in accept_encoding)
+#include <optional>
+#include <vector>
 
 #ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h> // For qb::compression::builtin factories
 #endif
 
 namespace qb::http {
+    namespace {
+        // Parse RFC 9110 qvalue into milli-units [0..1000].
+        // Accepts:
+        // - "1" / "1.0" / "1.00" / "1.000"
+        // - "0" / "0.123" (up to 3 fractional digits)
+        [[nodiscard]] std::optional<int>
+        parse_qvalue_milli(std::string_view raw_q) noexcept {
+            const std::string_view q = utility::trim_http_whitespace(raw_q);
+            if (q.empty()) {
+                return std::nullopt;
+            }
+            if (q == "1" || q == "1.0" || q == "1.00" || q == "1.000") {
+                return 1000;
+            }
+            if (q[0] != '0') {
+                return std::nullopt;
+            }
+            if (q.size() == 1) {
+                return 0;
+            }
+            if (q.size() < 3 || q[1] != '.') {
+                return std::nullopt;
+            }
+
+            int milli = 0;
+            int place = 100;
+            for (std::size_t i = 2; i < q.size(); ++i) {
+                const char c = q[i];
+                if (c < '0' || c > '9') {
+                    return std::nullopt;
+                }
+                if (place > 0) {
+                    milli += (c - '0') * place;
+                    place /= 10;
+                } else {
+                    // More than 3 fractional digits is invalid for qvalue.
+                    return std::nullopt;
+                }
+            }
+            return milli;
+        }
+
+        // Extract q from a single Accept-Encoding token.
+        // If no q parameter is present, defaults to 1000.
+        [[nodiscard]] int
+        parse_accept_encoding_q(std::string_view token_full) noexcept {
+            auto semicolon_pos = token_full.find(';');
+            if (semicolon_pos == std::string_view::npos) {
+                return 1000;
+            }
+
+            std::string_view params = token_full.substr(semicolon_pos + 1);
+            while (!params.empty()) {
+                const auto next = params.find(';');
+                const std::string_view param = utility::trim_http_whitespace(
+                    next == std::string_view::npos ? params : params.substr(0, next));
+
+                if (!param.empty()) {
+                    const auto eq_pos = param.find('=');
+                    if (eq_pos != std::string_view::npos) {
+                        const std::string_view key = utility::trim_http_whitespace(param.substr(0, eq_pos));
+                        const std::string_view value = utility::trim_http_whitespace(param.substr(eq_pos + 1));
+                        if (utility::iequals(key, "q")) {
+                            const auto q = parse_qvalue_milli(value);
+                            return q.value_or(0);
+                        }
+                    }
+                }
+
+                if (next == std::string_view::npos) {
+                    break;
+                }
+                params.remove_prefix(next + 1);
+            }
+
+            return 1000;
+        }
+    } // namespace
+
     /**
      * @brief Parses attributes from a raw HTTP header value string.
      *
@@ -249,11 +330,7 @@ namespace qb::http {
             }
             first_algorithm = false;
         }
-        if (!algorithms_str.empty()) {
-            algorithms_str += ", ";
-        }
 #endif
-        algorithms_str += "chunked"; // "chunked" is a Transfer-Encoding, also often accepted.
         return algorithms_str;
     }
 
@@ -279,9 +356,12 @@ namespace qb::http {
             accept_encoding_header, ",");
 
         const auto &server_compress_factories = qb::compression::builtin::get_compress_factories();
+        std::vector<std::string> explicitly_disabled_encodings;
 
         for (const auto &client_token_full: client_accepted_tokens) {
             std::string_view client_encoding_name = utility::trim_http_whitespace(client_token_full);
+            const int q_milli = parse_accept_encoding_q(client_encoding_name);
+
             // Remove q-value part if present, e.g., "gzip;q=0.8" -> "gzip"
             auto q_param_pos = client_encoding_name.find(';');
             if (q_param_pos != std::string_view::npos) {
@@ -289,13 +369,30 @@ namespace qb::http {
                 client_encoding_name = utility::trim_http_whitespace(client_encoding_name); // Trim again after substr
             }
 
+            if (q_milli <= 0) {
+                if (!client_encoding_name.empty() && client_encoding_name != "*") {
+                    explicitly_disabled_encodings.emplace_back(client_encoding_name);
+                }
+                continue; // Explicitly unacceptable (`q=0`) or malformed q-value.
+            }
+
             if (client_encoding_name.empty() || client_encoding_name == "*") {
                 // Wildcard '*' could mean any encoding not explicitly mentioned. Server can pick its best.
-                // For simplicity, if '*' is present and we have factories, pick the first available one.
-                // A more advanced implementation might use server preferences or q-values.
-                if (client_encoding_name == "*" && !server_compress_factories.empty() && server_compress_factories.
-                    front()) {
-                    return server_compress_factories.front()->algorithm();
+                // If a specific coding was already disabled via `q=0`, wildcard must not resurrect it.
+                if (client_encoding_name == "*") {
+                    for (const auto &server_factory: server_compress_factories) {
+                        if (!server_factory) {
+                            continue;
+                        }
+                        const auto &algo = server_factory->algorithm();
+                        const bool disabled = std::any_of(
+                            explicitly_disabled_encodings.begin(),
+                            explicitly_disabled_encodings.end(),
+                            [&](const std::string &name) { return utility::iequals(name, algo); });
+                        if (!disabled) {
+                            return algo;
+                        }
+                    }
                 }
                 continue;
             }

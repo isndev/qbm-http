@@ -164,6 +164,76 @@ TEST_F(AuthMiddlewareTest, InvalidToken) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+TEST_F(AuthMiddlewareTest, SignatureVerificationCanBeDisabledWithoutBypassingClaimChecks) {
+    qb::http::auth::User test_user{"user_sigless", "sigless", {"user"}};
+    std::string token = generate_test_token(test_user);
+
+    qb::http::auth::Options relaxed_options = _auth_options;
+    relaxed_options.require_signature_verification(false);
+    _auth_mw->with_options(relaxed_options).with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    auto req = create_request();
+    req.set_header(relaxed_options.get_auth_header_name(), relaxed_options.get_auth_scheme() + " " + token);
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "user_sigless");
+
+    _session->reset();
+
+    qb::http::auth::Options expiring_options = _auth_options;
+    expiring_options.token_expiration(std::chrono::seconds(-1));
+    qb::http::auth::Manager expiring_manager(expiring_options);
+    const std::string expired_token = expiring_manager.generate_token(test_user);
+
+    relaxed_options.token_expiration(std::chrono::seconds(-1));
+    _auth_mw->with_options(relaxed_options).with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    auto expired_req = create_request();
+    expired_req.set_header(relaxed_options.get_auth_header_name(),
+                           relaxed_options.get_auth_scheme() + " " + expired_token);
+    make_request(std::move(expired_req));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(AuthMiddlewareTest, SignatureDisabledInvalidExpClaimIsRejectedWithoutThrowing) {
+    qb::http::auth::Options relaxed_options = _auth_options;
+    relaxed_options.require_signature_verification(false);
+    relaxed_options.verify_expiration(true);
+
+    _auth_mw->with_options(relaxed_options).with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::jwt::CreateOptions jwt_create_opts;
+    jwt_create_opts.algorithm = qb::jwt::Algorithm::HS256;
+    const auto &secret_vec = relaxed_options.get_secret_key();
+    ASSERT_FALSE(secret_vec.empty());
+    jwt_create_opts.key = std::string(secret_vec.begin(), secret_vec.end());
+
+    std::map<std::string, std::string> payload{
+        {"sub", "user_invalid_exp"},
+        {"username", "invalidexp"},
+        {"roles", qb::json::array({"user"}).dump()},
+        {"iat", std::to_string(current_epoch_time())},
+        {"exp", "not-a-number"}
+    };
+    const std::string malformed_token = qb::jwt::create(payload, jwt_create_opts);
+
+    auto req = create_request();
+    req.set_header(relaxed_options.get_auth_header_name(),
+                   relaxed_options.get_auth_scheme() + " " + malformed_token);
+
+    EXPECT_NO_THROW(make_request(std::move(req)));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
 TEST_F(AuthMiddlewareTest, ValidRoleAuthorization) {
     _auth_mw->with_auth_required(true).with_roles({"admin"});
     configure_router_with_auth_mw(_auth_mw);

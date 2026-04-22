@@ -535,6 +535,24 @@ private:
     std::string _last_modifier_id;
 };
 
+class MiddlewareOnlyController : public qb::http::Controller<MockControllerSession> {
+public:
+    static int initialize_calls;
+
+    void initialize_routes() override {
+        ++initialize_calls;
+        use([](std::shared_ptr<qb::http::Context<MockControllerSession>> ctx, std::function<void()> next) {
+            if (ctx && ctx->session()) {
+                ctx->session()->_handler_id_executed += "middleware_only_ctrl;";
+            }
+            next();
+        }, "MiddlewareOnlyControllerInitMw");
+        // Intentionally no routes.
+    }
+};
+
+int MiddlewareOnlyController::initialize_calls = 0;
+
 
 // --- Basic Controller Tests ---
 
@@ -686,6 +704,17 @@ TEST_F(RouterControllerTest, ControllerInstanceReusabilityAndState) {
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Current Count: 2, Last Modifier ID: mod2");
     EXPECT_EQ(_mock_session->_handler_id_executed, "StatefulCtrl_get_state");
+}
+
+TEST_F(RouterControllerTest, ControllerInitializeRoutesRunsOnlyOnceWithoutRoutes) {
+    MiddlewareOnlyController::initialize_calls = 0;
+    auto controller = _router.controller<MiddlewareOnlyController>("/mw_only");
+    ASSERT_NE(controller, nullptr);
+
+    _router.compile();
+    _router.compile();
+
+    EXPECT_EQ(MiddlewareOnlyController::initialize_calls, 1);
 }
 
 TEST_F(RouterControllerTest, ControllerMiddlewareAndCustomRouteOrdering) {

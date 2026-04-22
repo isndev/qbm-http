@@ -204,6 +204,33 @@ TEST_F(ErrorHandlingMiddlewareTest, NoMatchingErrorHandlerUsesDefaultBehavior) {
     EXPECT_EQ(_session->get_trace(), "ErrorTrigger406_triggered"); // Only the trigger traces
 }
 
+TEST_F(ErrorHandlingMiddlewareTest, GenericHandlerRunsWhenSpecificHandlerThrows) {
+    bool generic_handler_called = false;
+
+    _error_mw->on_status(qb::http::status::FORBIDDEN,
+                         [this](auto /*ctx*/) {
+                             if (_session) _session->trace("SpecificForbiddenHandler");
+                             throw std::runtime_error("specific handler failure");
+                         });
+
+    _error_mw->on_any_error([&generic_handler_called, this](auto ctx, const auto &msg) {
+        generic_handler_called = true;
+        if (_session) _session->trace("GenericAfterSpecificThrow");
+        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+        ctx->response().body() = "Generic fallback: " + std::string(msg);
+    });
+
+    auto trigger_task = std::make_shared<ErrorSignalerTask>("ErrorTrigger403", qb::http::status::FORBIDDEN,
+                                                            "forbidden path");
+    configure_router_and_make_request(trigger_task);
+
+    EXPECT_TRUE(generic_handler_called);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Generic fallback: forbidden path");
+    EXPECT_EQ(_session->get_trace(),
+              "ErrorTrigger403_triggered;SpecificForbiddenHandler;GenericAfterSpecificThrow");
+}
+
 TEST_F(ErrorHandlingMiddlewareTest, HandlerPrioritySpecificOverGeneric) {
     bool specific_handler_called = false;
     bool generic_handler_called = false;

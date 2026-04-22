@@ -159,12 +159,12 @@ namespace qb::http {
                 // Check if handler is valid (not null)
                 try {
                     it->second(ctx);
+                    handled = true;
                 } catch (...) {
                     // Log that a status-specific handler threw, then try generic or default.
                     // If logging isn't available: std::cerr << "Exception in status handler for " << current_status << std::endl;
                     // Fall through to generic handler or let response be as is.
                 }
-                handled = true;
             }
 
             if (!handled && _generic_handler) {

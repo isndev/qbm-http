@@ -205,6 +205,49 @@ TEST_F(RequestDoSProtectionTest, RequestWithLongButValidHeaders) {
     EXPECT_GT(pipe.size(), 0);
 }
 
+TEST_F(RequestDoSProtectionTest, OversizedHeaderNameIsRejected) {
+    Request req;
+    req.method() = method::GET;
+    req.uri() = qb::io::uri("/api/data");
+
+    std::string long_name(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H');
+    req.set_header(long_name, "value1");
+
+    pipe.put(req);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(RequestDoSProtectionTest, OversizedHeaderValueIsRejected) {
+    Request req;
+    req.method() = method::GET;
+    req.uri() = qb::io::uri("/api/data");
+
+    std::string long_value(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');
+    req.set_header("X-Data", long_value);
+
+    pipe.put(req);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(RequestDoSProtectionTest, RejectedSerializationClearsExistingBufferContent) {
+    Request ok_req;
+    ok_req.method() = method::GET;
+    ok_req.uri() = qb::io::uri("/ok");
+    ok_req.set_header("X-Test", "ok");
+    pipe.put(ok_req);
+    ASSERT_GT(pipe.size(), 0);
+
+    Request bad_req;
+    bad_req.method() = method::GET;
+    bad_req.uri() = qb::io::uri("/bad");
+    bad_req.set_header(
+        std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'),
+        "value");
+
+    pipe.put(bad_req);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
 TEST_F(RequestDoSProtectionTest, FragmentExceedingLimitIsRejected) {
     // Create a URL with an oversized fragment
     std::string oversized_fragment;
@@ -308,6 +351,46 @@ TEST_F(ResponseDoSProtectionTest, MultipleNormalHeadersSucceed) {
     EXPECT_GT(pipe.size(), 0);
 }
 
+TEST_F(ResponseDoSProtectionTest, OversizedHeaderNameIsRejected) {
+    Response resp;
+    resp.status() = status::OK;
+
+    std::string long_name(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H');
+    resp.set_header(long_name, "value1");
+
+    pipe.put(resp);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(ResponseDoSProtectionTest, OversizedHeaderValueIsRejected) {
+    Response resp;
+    resp.status() = status::OK;
+
+    std::string long_value(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');
+    resp.set_header("X-Data", long_value);
+
+    pipe.put(resp);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(ResponseDoSProtectionTest, RejectedSerializationClearsExistingBufferContent) {
+    Response ok_resp;
+    ok_resp.status() = status::OK;
+    ok_resp.set_header("Content-Type", "text/plain");
+    ok_resp.body() = "ok";
+    pipe.put(ok_resp);
+    ASSERT_GT(pipe.size(), 0);
+
+    Response bad_resp;
+    bad_resp.status() = status::OK;
+    bad_resp.set_header(
+        std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'),
+        "value");
+
+    pipe.put(bad_resp);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
 // ====================================================================
 // Protocol Limits Constants Tests
 // ====================================================================
@@ -336,6 +419,133 @@ TEST_F(ProtocolLimitsTest, ChunkSizeLimitIs16MB) {
 
 TEST_F(ProtocolLimitsTest, BodySizeLimitIs100MB) {
     EXPECT_EQ(protocol_limits::MAX_BODY_SIZE, 100 * 1024 * 1024);
+}
+
+// ====================================================================
+// Incoming Parser Limits Tests
+// ====================================================================
+
+class IncomingParserLimitsTest : public ::testing::Test {};
+
+TEST_F(IncomingParserLimitsTest, OversizedUrlIsRejectedWhileParsing) {
+    qb::http::Parser<Request> parser;
+    std::string raw = "GET /" + std::string(protocol_limits::MAX_URL_LENGTH + 1, 'x') + " HTTP/1.1\r\n\r\n";
+
+    EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
+}
+
+TEST_F(IncomingParserLimitsTest, OversizedHeaderNameIsRejectedWhileParsing) {
+    qb::http::Parser<Request> parser;
+    std::string raw =
+        "GET / HTTP/1.1\r\n" +
+        std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') +
+        ": value\r\n\r\n";
+
+    EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
+}
+
+TEST_F(IncomingParserLimitsTest, OversizedHeaderValueIsRejectedWhileParsing) {
+    qb::http::Parser<Request> parser;
+    std::string raw =
+        "GET / HTTP/1.1\r\nX-Test: " +
+        std::string(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V') +
+        "\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
+}
+
+TEST_F(IncomingParserLimitsTest, TooManyHeadersAreRejectedWhileParsing) {
+    qb::http::Parser<Request> parser;
+    std::string raw = "GET / HTTP/1.1\r\n";
+    for (std::size_t i = 0; i < protocol_limits::MAX_HEADERS_COUNT + 1; ++i) {
+        raw += "X-Test-" + std::to_string(i) + ": value\r\n";
+    }
+    raw += "\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
+}
+
+TEST_F(IncomingParserLimitsTest, OversizedContentLengthIsRejectedBeforeBodyAllocation) {
+    qb::http::Parser<Request> parser;
+    std::string raw =
+        "POST /upload HTTP/1.1\r\nContent-Length: " +
+        std::to_string(protocol_limits::MAX_BODY_SIZE + 1) +
+        "\r\n\r\n";
+
+    EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
+}
+
+TEST_F(IncomingParserLimitsTest, HeaderOnlyRequestNormalizesUnknownLengthToZero) {
+    qb::http::Parser<Request> parser;
+    std::string raw = "GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+    // Parser pauses at end-of-headers in this implementation.
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+    EXPECT_EQ(parser.content_length, 0u);
+}
+
+TEST_F(IncomingParserLimitsTest, FragmentedHeaderFieldAndValueAreReassembledCorrectly) {
+    qb::http::Parser<Request> parser;
+
+    const std::string chunk1 = "GET / HTTP/1.1\r\nX-Cus";
+    const std::string chunk2 = "tom-Hea";
+    const std::string chunk3 = "der: value-";
+    const std::string chunk4 = "part-1";
+    const std::string chunk5 = "part-2\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(chunk1.data(), chunk1.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(chunk2.data(), chunk2.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(chunk3.data(), chunk3.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(chunk4.data(), chunk4.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(chunk5.data(), chunk5.size()), HPE_PAUSED);
+
+    EXPECT_TRUE(parser.headers_completed());
+    EXPECT_EQ(parser.get_parsed_message().header("X-Custom-Header"), "value-part-1part-2");
+}
+
+TEST_F(IncomingParserLimitsTest, IncrementalParsingDoesNotOvercountFragmentedHeaderFields) {
+    qb::http::Parser<Request> parser;
+    std::string raw = "GET / HTTP/1.1\r\n";
+    for (std::size_t i = 0; i < protocol_limits::MAX_HEADERS_COUNT; ++i) {
+        raw += "X-H-" + std::to_string(i) + ": v\r\n";
+    }
+    raw += "\r\n";
+
+    http_errno_t last_err = HPE_OK;
+    for (char c : raw) {
+        last_err = parser.parse(&c, 1);
+        if (last_err != HPE_OK) {
+            break;
+        }
+    }
+
+    EXPECT_EQ(last_err, HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+}
+
+TEST_F(IncomingParserLimitsTest, FragmentedUrlIsReassembledCorrectly) {
+    qb::http::Parser<Request> parser;
+
+    const std::string chunk1 = "GET /api/v1/";
+    const std::string chunk2 = "users?name=ali";
+    const std::string chunk3 = "ce HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(chunk1.data(), chunk1.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(chunk2.data(), chunk2.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(chunk3.data(), chunk3.size()), HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+    EXPECT_EQ(parser.get_parsed_message().uri().source(), "/api/v1/users?name=alice");
+}
+
+TEST_F(IncomingParserLimitsTest, FragmentedUrlRespectsCumulativeLimit) {
+    qb::http::Parser<Request> parser;
+
+    const std::string part1 = "GET /" + std::string(protocol_limits::MAX_URL_LENGTH - 10, 'a');
+    const std::string part2 = std::string(20, 'b') + " HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(part1.data(), part1.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(part2.data(), part2.size()), HPE_USER);
 }
 
 // ====================================================================

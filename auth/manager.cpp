@@ -20,11 +20,13 @@
 #include <qb/io/crypto_jwt.h> // For qb::jwt::create, qb::jwt::verify, and related options/structs
 
 #include <chrono>      // For std::chrono::system_clock, std::time (used via current_timestamp)
+#include <charconv>
 #include <ctime>       // For std::time_t, std::time, std::gmtime (if timestamp_to_iso8601 were used)
 #include <iomanip>     // For std::put_time, std::get_time (if ISO8601 helpers were used)
 #include <sstream>     // For std::ostringstream, std::istringstream (if ISO8601 helpers were used)
 #include <algorithm>   // For std::transform, std::isspace, std::find_if_not
 #include <cctype>      // For std::tolower, std::isspace
+#include <limits>
 
 namespace qb {
     namespace http {
@@ -56,6 +58,40 @@ namespace qb {
                         std::chrono::system_clock::now().time_since_epoch()
                     ).count()
                 );
+            }
+
+            static std::optional<json> decode_unverified_payload(const std::string &token) {
+                try {
+                    const auto token_parts = qb::jwt::decode(token);
+                    return json::parse(token_parts.payload);
+                } catch (...) {
+                    return std::nullopt;
+                }
+            }
+
+            static std::optional<int64_t> parse_time_claim_as_int64(const json &claim) noexcept {
+                if (claim.is_number_integer()) {
+                    return claim.get<int64_t>();
+                }
+                if (claim.is_number_unsigned()) {
+                    const auto as_uint = claim.get<uint64_t>();
+                    if (as_uint > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                        return std::nullopt;
+                    }
+                    return static_cast<int64_t>(as_uint);
+                }
+                if (claim.is_string()) {
+                    const auto &s = claim.get_ref<const std::string &>();
+                    int64_t parsed = 0;
+                    const char *begin = s.data();
+                    const char *end = begin + s.size();
+                    const auto [ptr, ec] = std::from_chars(begin, end, parsed);
+                    if (ec == std::errc() && ptr == end) {
+                        return parsed;
+                    }
+                    return std::nullopt;
+                }
+                return std::nullopt;
             }
 
             // Helper: Create payload JSON without serializing to string
@@ -222,96 +258,163 @@ namespace qb {
 
             // Implementation of verify_token
             std::optional<User> Manager::verify_token(const std::string &token) const {
-                // Configure JWT verification options
-                qb::jwt::VerifyOptions options;
+                json payload_json;
+                if (_options.get_require_signature_verification()) {
+                    qb::jwt::VerifyOptions options;
 
-                // Map the algorithm
-                switch (_options.get_algorithm()) {
-                    case Options::Algorithm::HMAC_SHA256:
-                        options.algorithm = qb::jwt::Algorithm::HS256;
-                        break;
-                    case Options::Algorithm::HMAC_SHA384:
-                        options.algorithm = qb::jwt::Algorithm::HS384;
-                        break;
-                    case Options::Algorithm::HMAC_SHA512:
-                        options.algorithm = qb::jwt::Algorithm::HS512;
-                        break;
-                    case Options::Algorithm::RSA_SHA256:
-                        options.algorithm = qb::jwt::Algorithm::RS256;
-                        break;
-                    case Options::Algorithm::RSA_SHA384:
-                        options.algorithm = qb::jwt::Algorithm::RS384;
-                        break;
-                    case Options::Algorithm::RSA_SHA512:
-                        options.algorithm = qb::jwt::Algorithm::RS512;
-                        break;
-                    case Options::Algorithm::ECDSA_SHA256:
-                        options.algorithm = qb::jwt::Algorithm::ES256;
-                        break;
-                    case Options::Algorithm::ECDSA_SHA384:
-                        options.algorithm = qb::jwt::Algorithm::ES384;
-                        break;
-                    case Options::Algorithm::ECDSA_SHA512:
-                        options.algorithm = qb::jwt::Algorithm::ES512;
-                        break;
-                    case Options::Algorithm::ED25519:
-                        options.algorithm = qb::jwt::Algorithm::EdDSA;
-                        break;
-                    default:
-                        options.algorithm = qb::jwt::Algorithm::HS256;
-                        break;
-                }
+                    switch (_options.get_algorithm()) {
+                        case Options::Algorithm::HMAC_SHA256:
+                            options.algorithm = qb::jwt::Algorithm::HS256;
+                            break;
+                        case Options::Algorithm::HMAC_SHA384:
+                            options.algorithm = qb::jwt::Algorithm::HS384;
+                            break;
+                        case Options::Algorithm::HMAC_SHA512:
+                            options.algorithm = qb::jwt::Algorithm::HS512;
+                            break;
+                        case Options::Algorithm::RSA_SHA256:
+                            options.algorithm = qb::jwt::Algorithm::RS256;
+                            break;
+                        case Options::Algorithm::RSA_SHA384:
+                            options.algorithm = qb::jwt::Algorithm::RS384;
+                            break;
+                        case Options::Algorithm::RSA_SHA512:
+                            options.algorithm = qb::jwt::Algorithm::RS512;
+                            break;
+                        case Options::Algorithm::ECDSA_SHA256:
+                            options.algorithm = qb::jwt::Algorithm::ES256;
+                            break;
+                        case Options::Algorithm::ECDSA_SHA384:
+                            options.algorithm = qb::jwt::Algorithm::ES384;
+                            break;
+                        case Options::Algorithm::ECDSA_SHA512:
+                            options.algorithm = qb::jwt::Algorithm::ES512;
+                            break;
+                        case Options::Algorithm::ED25519:
+                            options.algorithm = qb::jwt::Algorithm::EdDSA;
+                            break;
+                        default:
+                            options.algorithm = qb::jwt::Algorithm::HS256;
+                            break;
+                    }
 
-                // Set the key based on algorithm
-                if (options.algorithm == qb::jwt::Algorithm::HS256 ||
-                    options.algorithm == qb::jwt::Algorithm::HS384 ||
-                    options.algorithm == qb::jwt::Algorithm::HS512) {
-                    // For HMAC, convert the byte vector to string
-                    options.key = std::string(_options.get_secret_key().begin(),
-                                              _options.get_secret_key().end());
+                    if (options.algorithm == qb::jwt::Algorithm::HS256 ||
+                        options.algorithm == qb::jwt::Algorithm::HS384 ||
+                        options.algorithm == qb::jwt::Algorithm::HS512) {
+                        options.key = std::string(_options.get_secret_key().begin(),
+                                                  _options.get_secret_key().end());
+                    } else {
+                        options.key = _options.get_public_key();
+                    }
+
+                    options.verify_expiration = _options.get_verify_expiration();
+                    options.verify_issuer = _options.get_verify_issuer();
+                    options.verify_audience = _options.get_verify_audience();
+                    options.verify_not_before = _options.get_verify_not_before();
+                    options.clock_skew = _options.get_clock_skew_tolerance();
+
+                    if (_options.get_verify_issuer()) {
+                        options.issuer = _options.get_token_issuer();
+                    }
+
+                    if (_options.get_verify_audience()) {
+                        options.audience = _options.get_token_audience();
+                    }
+
+                    auto result = qb::jwt::verify(token, options);
+                    if (!result.is_valid()) {
+                        return std::nullopt;
+                    }
+
+                    payload_json = json::object();
+                    for (const auto &[key, value]: result.payload) {
+                        try {
+                            payload_json[key] = json::parse(value);
+                        } catch (...) {
+                            payload_json[key] = value;
+                        }
+                    }
                 } else {
-                    // For asymmetric, use the public key
-                    options.key = _options.get_public_key();
-                }
+                    auto payload_opt = decode_unverified_payload(token);
+                    if (!payload_opt || !payload_opt->is_object()) {
+                        return std::nullopt;
+                    }
+                    payload_json = std::move(*payload_opt);
 
-                // Configure verification options
-                options.verify_expiration = _options.get_verify_expiration();
-                options.verify_issuer = _options.get_verify_issuer();
-                options.verify_audience = _options.get_verify_audience();
-                options.verify_not_before = _options.get_verify_not_before();
-                options.clock_skew = _options.get_clock_skew_tolerance();
+                    const auto now = static_cast<int64_t>(current_timestamp());
+                    const auto skew = _options.get_clock_skew_tolerance().count();
 
-                if (_options.get_verify_issuer()) {
-                    options.issuer = _options.get_token_issuer();
-                }
+                    if (_options.get_verify_expiration() && payload_json.contains("exp")) {
+                        const auto exp_opt = parse_time_claim_as_int64(payload_json["exp"]);
+                        if (!exp_opt) {
+                            return std::nullopt;
+                        }
+                        const int64_t exp = *exp_opt;
+                        if (now > exp + skew) {
+                            return std::nullopt;
+                        }
+                    }
 
-                if (_options.get_verify_audience()) {
-                    options.audience = _options.get_token_audience();
-                }
+                    if (_options.get_verify_not_before() && payload_json.contains("nbf")) {
+                        const auto nbf_opt = parse_time_claim_as_int64(payload_json["nbf"]);
+                        if (!nbf_opt) {
+                            return std::nullopt;
+                        }
+                        const int64_t nbf = *nbf_opt;
+                        if (now + skew < nbf) {
+                            return std::nullopt;
+                        }
+                    }
 
-                // Verify the token
-                auto result = qb::jwt::verify(token, options);
+                    if (_options.get_verify_issuer()) {
+                        if (!payload_json.contains("iss") || !payload_json["iss"].is_string() ||
+                            payload_json["iss"].get<std::string>() != _options.get_token_issuer()) {
+                            return std::nullopt;
+                        }
+                    }
 
-                if (!result.is_valid()) {
-                    return std::nullopt;
+                    if (_options.get_verify_audience()) {
+                        if (!payload_json.contains("aud")) {
+                            return std::nullopt;
+                        }
+                        if (payload_json["aud"].is_string()) {
+                            if (payload_json["aud"].get<std::string>() != _options.get_token_audience()) {
+                                return std::nullopt;
+                            }
+                        } else if (payload_json["aud"].is_array()) {
+                            bool found = false;
+                            for (const auto &aud: payload_json["aud"]) {
+                                if (aud.is_string() && aud.get<std::string>() == _options.get_token_audience()) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                return std::nullopt;
+                            }
+                        } else {
+                            return std::nullopt;
+                        }
+                    }
                 }
 
                 // Extract user data
                 User user;
 
                 // Extract standard claims
-                if (result.payload.find("sub") != result.payload.end()) {
-                    user.id = result.payload["sub"];
+                if (payload_json.contains("sub") && payload_json["sub"].is_string()) {
+                    user.id = payload_json["sub"].get<std::string>();
                 }
 
-                if (result.payload.find("username") != result.payload.end()) {
-                    user.username = result.payload["username"];
+                if (payload_json.contains("username") && payload_json["username"].is_string()) {
+                    user.username = payload_json["username"].get<std::string>();
                 }
 
-                // Extract roles (from string JSON representation)
-                if (result.payload.find("roles") != result.payload.end()) {
+                if (payload_json.contains("roles")) {
                     try {
-                        json roles_json = json::parse(result.payload["roles"]);
+                        json roles_json = payload_json["roles"].is_string()
+                                              ? json::parse(payload_json["roles"].get<std::string>())
+                                              : payload_json["roles"];
                         if (roles_json.is_array()) {
                             for (const auto &role: roles_json) {
                                 user.roles.push_back(role.get<std::string>());
@@ -324,10 +427,11 @@ namespace qb {
                     }
                 }
 
-                // Extract metadata (from string JSON representation)
-                if (result.payload.find("metadata") != result.payload.end()) {
+                if (payload_json.contains("metadata")) {
                     try {
-                        json metadata_json = json::parse(result.payload["metadata"]);
+                        json metadata_json = payload_json["metadata"].is_string()
+                                                 ? json::parse(payload_json["metadata"].get<std::string>())
+                                                 : payload_json["metadata"];
                         if (metadata_json.is_object()) {
                             for (json::iterator it = metadata_json.begin();
                                  it != metadata_json.end(); ++it) {
