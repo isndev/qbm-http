@@ -39,8 +39,8 @@ namespace qb::http {
      *
      * This middleware captures basic information about an incoming request (e.g., method, URI path)
      * when it processes the request. It then registers a lifecycle hook with the `Context`
-     * to log information about the outgoing response (e.g., status code) once the request
-     * processing is complete (at `HookPoint::REQUEST_COMPLETE`).
+     * to log information about the outgoing response (e.g., status code) once the response
+     * has been fully assembled and is about to be sent (at `HookPoint::PRE_RESPONSE_SEND`).
      *
      * Logging is performed via a user-provided `LogFunction` callback, allowing customization
      * of the logging destination and format. Different log levels can be specified for
@@ -88,7 +88,7 @@ namespace qb::http {
 
         /**
          * @brief Processes the incoming request by logging its details and registering a hook
-         *        for logging the response when the request processing completes.
+         *        for logging the response immediately before it is written to the transport.
          * Calls `ctx->complete(AsyncTaskResult::CONTINUE)` to pass control to the next task.
          * @param ctx The shared `Context` for the current request.
          */
@@ -96,9 +96,10 @@ namespace qb::http {
             // User log_fn can throw, add_lifecycle_hook might allocate
             log_request(ctx->request());
 
-            // Add a lifecycle hook to log the response details when the request is fully processed.
+            // Log the response at PRE_RESPONSE_SEND so integration/server tests do not
+            // depend on transport teardown timing to observe the response log.
             ctx->add_lifecycle_hook([this](Context<SessionType> &ctx_ref, HookPoint point) {
-                if (point == HookPoint::REQUEST_COMPLETE) {
+                if (point == HookPoint::PRE_RESPONSE_SEND) {
                     log_response(ctx_ref.response());
                 }
             });

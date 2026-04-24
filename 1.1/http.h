@@ -38,6 +38,8 @@
 #include "./protocol/server.h"
 #include "./protocol/client.h"
 #include "../logger.h"
+#include <cctype>
+#include <string_view>
 
 namespace qb::http {
     /**
@@ -642,34 +644,51 @@ namespace qb::http {
 
     } // namespace async
 
-    namespace detail {
-        inline std::string make_host_header_value(const qb::io::uri &uri) {
-            std::string host_value = std::string(uri.host());
-            const bool already_bracketed_ipv6 =
-                host_value.size() >= 2 && host_value.front() == '[' && host_value.back() == ']';
-            if (!already_bracketed_ipv6 && host_value.find(':') != std::string::npos) {
-                host_value = "[" + host_value + "]";
+    namespace {
+        /// @brief @p scheme equals @p lower_ascii (fixed), ASCII case-insensitive.
+        [[nodiscard]] inline bool
+        scheme_eq_ignore_case(std::string_view scheme, std::string_view lower) noexcept {
+            if (scheme.size() != lower.size()) {
+                return false;
             }
+            for (std::size_t i = 0; i < scheme.size(); ++i) {
+                if (static_cast<char>(::tolower(static_cast<unsigned char>(scheme[i]))) != lower[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    } // namespace
 
-            const std::string_view port = uri.port();
-            if (port.empty()) {
-                return host_value;
-            }
+    /// Value for the HTTP @c Host header derived from @p uri (bracketed IPv6, default ports omitted for @c http:80 and @c https:443). Scheme is compared case-insensitively.
+    [[nodiscard]] inline std::string host_header_value(const qb::io::uri &uri) {
+        std::string host_value = std::string(uri.host());
+        const bool already_bracketed_ipv6 =
+            host_value.size() >= 2 && host_value.front() == '[' && host_value.back() == ']';
+        if (!already_bracketed_ipv6 && host_value.find(':') != std::string::npos) {
+            host_value = "[" + host_value + "]";
+        }
 
-            const std::string_view scheme = uri.scheme();
-            const bool is_default_http_port = (scheme == "http" && port == "80");
-            const bool is_default_https_port = (scheme == "https" && port == "443");
-            if (!is_default_http_port && !is_default_https_port) {
-                host_value += ":";
-                host_value += port;
-            }
+        const std::string_view port = uri.port();
+        if (port.empty()) {
             return host_value;
         }
 
+        const std::string_view scheme = uri.scheme();
+        const bool is_default_http_port = scheme_eq_ignore_case(scheme, std::string_view{ "http", 4u }) && port == "80";
+        const bool is_default_https_port = scheme_eq_ignore_case(scheme, std::string_view{ "https", 5u }) && port == "443";
+        if (!is_default_http_port && !is_default_https_port) {
+            host_value += ":";
+            host_value += port;
+        }
+        return host_value;
+    }
+
+    namespace detail {
         template <typename _Func>
         void _execute_async_request_internal(Request request, _Func &&func, double timeout, const char* method_name_for_log) {
             if (!request.has_header("host")) {
-                request.set_header("host", make_host_header_value(request.uri()));
+                request.set_header("host", host_header_value(request.uri()));
             }
             LOG_HTTP_DEBUG("Executing HTTP/1.1 " << method_name_for_log << " request: " << request.method() << " " << request.uri().source());
 #if QB_HAS_SSL

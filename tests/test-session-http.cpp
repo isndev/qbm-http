@@ -1,7 +1,36 @@
 #include <gtest/gtest.h>
 #include "../http.h"
+#include <chrono>
+#include <exception>
+#include <filesystem>
+#include <thread>
 
 using namespace qb::io;
+
+namespace {
+    std::filesystem::path find_ssl_test_resource(const char *file_name) {
+        const auto repo_root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+        const std::filesystem::path candidates[] = {
+            repo_root / "qb" / "resources" / "ssl" / file_name,
+            repo_root / "out" / "build" / "x64-Release" / "bin" / "tests" / "ssl" / file_name,
+            std::filesystem::current_path() / file_name,
+            std::filesystem::current_path() / "ssl" / file_name,
+            std::filesystem::current_path().parent_path() / "bin" / "tests" / "ssl" / file_name
+        };
+
+        for (const auto &candidate: candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec) && !ec) {
+                return candidate;
+            }
+        }
+        return candidates[0];
+    }
+
+    std::filesystem::path ssl_test_resource(const char *file_name) {
+        return find_ssl_test_resource(file_name);
+    }
+}
 
 constexpr const std::size_t NB_ITERATION = 4096;
 constexpr const char STRING_MESSAGE[] = "Here is my content test";
@@ -13,6 +42,29 @@ all_done() {
     return msg_count_server_side == (NB_ITERATION) &&
            msg_count_client_side == NB_ITERATION;
 }
+
+namespace {
+    /// Pumps the current thread's @c async loop until @p done(), or the wall @p time_budget,
+    /// whichever comes first. @return true if @p done() became true; false on timeout.
+    /// Used for two-threaded SSL/TCP session tests: the main and worker threads must both
+    /// keep dispatching the reactor until the test completes; a fixed EVRUN_ONCE count can
+    /// end early on the server thread, then thread join blocks while the client still needs
+    /// the server to run on the main event loop.
+    template <typename F>
+    bool
+    pump_event_loop_while(const F &done, const std::chrono::steady_clock::duration time_budget) {
+        const auto deadline = std::chrono::steady_clock::now() + time_budget;
+        for (;;) {
+            if (done()) {
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            async::run(EVRUN_ONCE);
+        }
+    }
+} // namespace
 
 TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
     // std::string
@@ -153,12 +205,44 @@ TEST(Session, HTTP_CLIENT_SETS_HOST_HEADER_WITH_NON_DEFAULT_PORT) {
 
 TEST(Session, HTTP_HOST_HEADER_FORMATS_IPV6_WITH_BRACKETS) {
     qb::io::uri uri{"http://[2001:db8::1]/resource"};
-    EXPECT_EQ(qb::http::detail::make_host_header_value(uri), "[2001:db8::1]");
+    EXPECT_EQ(qb::http::host_header_value(uri), "[2001:db8::1]");
 }
 
 TEST(Session, HTTP_HOST_HEADER_FORMATS_IPV6_WITH_PORT_AND_BRACKETS) {
     qb::io::uri uri{"http://[2001:db8::1]:8080/resource"};
-    EXPECT_EQ(qb::http::detail::make_host_header_value(uri), "[2001:db8::1]:8080");
+    EXPECT_EQ(qb::http::host_header_value(uri), "[2001:db8::1]:8080");
+}
+
+TEST(Session, HTTP_HOST_VALUE_OMITS_EXPLICIT_DEFAULT_HTTP_PORT) {
+    const qb::io::uri u{"http://api.example.com:80/v1"};
+    EXPECT_EQ(u.port(), "80");
+    EXPECT_EQ(qb::http::host_header_value(u), "api.example.com");
+}
+
+TEST(Session, HTTP_HOST_VALUE_OMITS_EXPLICIT_DEFAULT_HTTPS_PORT) {
+    const qb::io::uri u{"https://api.example.com:443/secure"};
+    EXPECT_EQ(u.port(), "443");
+    EXPECT_EQ(qb::http::host_header_value(u), "api.example.com");
+}
+
+TEST(Session, HTTP_HOST_VALUE_OMITS_HTTPS_DEFAULT_PORT_ON_IPV6) {
+    const qb::io::uri u{"https://[2001:db8::1]:443/secure"};
+    EXPECT_EQ(qb::http::host_header_value(u), "[2001:db8::1]");
+}
+
+TEST(Session, HTTP_HOST_VALUE_RETAINS_NON_DEFAULT_PORT) {
+    const qb::io::uri u{"https://api.example.com:4443/secure"};
+    EXPECT_EQ(qb::http::host_header_value(u), "api.example.com:4443");
+}
+
+TEST(Session, HTTP_HOST_VALUE_DEFAULT_PORTS_SCHEMES_CASE_INSENSITIVE) {
+    // Mixed-case schemes must still elide :80 / :443; value matches uri.host() (any casing the parser uses).
+    const qb::io::uri a{"HTTP://host-ssl-test.example:80/p"};
+    const qb::io::uri b{"HtTpS://host-ssl-test2.example:443/p"};
+    EXPECT_EQ(a.port(), "80");
+    EXPECT_EQ(b.port(), "443");
+    EXPECT_EQ(qb::http::host_header_value(a), std::string(a.host()));
+    EXPECT_EQ(qb::http::host_header_value(b), std::string(b.host()));
 }
 
 // OVER TCP
@@ -319,9 +403,7 @@ public:
         : client(server) {
     }
 
-    ~TestSecureServerClient() {
-        EXPECT_EQ(msg_count_server_side, NB_ITERATION);
-    }
+    ~TestSecureServerClient() = default;
 
     void
     on(Protocol::request &&request) {
@@ -345,23 +427,19 @@ class TestSecureServer
     std::size_t connection_count = 0u;
 
 public:
-    ~TestSecureServer() {
-        EXPECT_EQ(connection_count, 1u);
-    }
-
     void
     on(IOSession &) {
         ++connection_count;
+    }
+
+    [[nodiscard]] std::size_t connectionCount() const noexcept {
+        return connection_count;
     }
 };
 
 class TestSecureClient : public use<TestSecureClient>::tcp::ssl::client<> {
 public:
     using Protocol = qb::http::protocol<TestSecureClient>;
-
-    ~TestSecureClient() {
-        EXPECT_EQ(msg_count_client_side, NB_ITERATION);
-    }
 
     void
     on(Protocol::response &&response) {
@@ -372,42 +450,77 @@ public:
 
 TEST(Session, HTTP_OVER_SECURE_TCP) {
     async::init();
+
+    const auto cert_path = ssl_test_resource("cert.pem");
+    const auto key_path = ssl_test_resource("key.pem");
+    ASSERT_TRUE(std::filesystem::exists(cert_path)) << "Missing SSL certificate: " << cert_path;
+    ASSERT_TRUE(std::filesystem::exists(key_path)) << "Missing SSL key: " << key_path;
+
     msg_count_server_side = 0;
     msg_count_client_side = 0;
-
+    // Wall-clock budget: TLS is slower than plain TCP, and the main thread (server) must
+    // keep running until all work completes; a limited EVRUN_ONCE count on one thread can
+    // return before t.join (deadlock on Windows with asymmetric scheduling).
+    const auto kSslSessionBudget = std::chrono::minutes(3);
     TestSecureServer server;
     server.transport().init(
-        ssl::create_server_context(SSLv23_server_method(), "cert.pem", "key.pem"));
-    server.transport().listen_v6(9999);
+        ssl::create_server_context(
+            SSLv23_server_method(),
+            cert_path.string(),
+            key_path.string()));
+    ASSERT_EQ(server.transport().listen_v6(9999), 0);
     server.start();
 
-    std::thread t([]() {
-        async::init();
-        TestSecureClient client;
-        if (SocketStatus::Done !=
-            client.transport().connect(uri{"tcp://localhost:9999", AF_INET6})) {
-            throw std::runtime_error("could not connect");
+    std::exception_ptr worker_error;
+    std::thread t([&worker_error, kSslSessionBudget]() {
+        try {
+            async::init();
+            TestSecureClient client;
+            if (SocketStatus::Done !=
+                client.transport().connect(uri{"tcp://[::1]:9999", AF_INET6})) {
+                throw std::runtime_error("could not connect");
+            }
+            client.start();
+
+            qb::http::Request r{
+                HTTP_GET,
+                {"http://www.isndev.test:9999/?happy=true"},
+                {{"Host", {"www.isndev.test:9999"}}, {"Connection", {"keep-alive"}}},
+                {STRING_MESSAGE}
+            };
+
+            for (auto i = 0u; i < NB_ITERATION; ++i) {
+                client << r;
+            }
+
+            (void) pump_event_loop_while(
+                [] {
+                    return all_done();
+                },
+                kSslSessionBudget);
+        } catch (...) {
+            worker_error = std::current_exception();
         }
-        client.start();
-
-        qb::http::Request r{
-            HTTP_GET,
-            {"http://www.isndev.test:9999/?happy=true"},
-            {{"Host", {"www.isndev.test:9999"}}, {"Connection", {"keep-alive"}}},
-            {STRING_MESSAGE}
-        };
-
-        for (auto i = 0u; i < NB_ITERATION; ++i) {
-            client << r;
-        }
-
-        for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
-            async::run(EVRUN_ONCE);
     });
 
-    for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
-        async::run(EVRUN_ONCE);
+    (void) pump_event_loop_while(
+        [&worker_error] {
+            if (worker_error != std::exception_ptr()) {
+                return true;
+            }
+            return all_done();
+        },
+        kSslSessionBudget);
+
     t.join();
+
+    if (worker_error) {
+        std::rethrow_exception(worker_error);
+    }
+
+    EXPECT_EQ(msg_count_server_side.load(), NB_ITERATION);
+    EXPECT_EQ(msg_count_client_side.load(), NB_ITERATION);
+    EXPECT_EQ(server.connectionCount(), 1u);
 }
 
 #endif

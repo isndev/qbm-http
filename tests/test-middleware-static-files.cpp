@@ -78,8 +78,10 @@ protected:
         create_test_file(_test_root_dir / "file with spaces.txt", "File with spaces in name");
         create_test_file(_test_root_dir / "file&name.html", "File with ampersand");
         create_test_file(_test_root_dir / "file'quote.txt", "File with single quote");
+#ifndef _WIN32
         create_test_file(_test_root_dir / "file\"double.txt", "File with double quote");
         create_test_file(_test_root_dir / "<tag>.xml", "File with tags");
+#endif
 
         // Create the file outside the root for symlink testing
         create_test_file(_outside_file_path, "Contents of file outside root");
@@ -632,10 +634,12 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryListingWithSpecialCharsInFilenames) {
     EXPECT_NE(body.find("<a href=\"/file%26name.html\">file&amp;name.html</a>"), std::string::npos) << body;
     // "file'quote.txt" -> URI: file%27quote.txt, HTML: file&#39;quote.txt
     EXPECT_NE(body.find("<a href=\"/file%27quote.txt\">file&#39;quote.txt</a>"), std::string::npos) << body;
+#ifndef _WIN32
     // "file\"double.txt" -> URI: file%22double.txt, HTML: file&quot;double.txt
     EXPECT_NE(body.find("<a href=\"/file%22double.txt\">file&quot;double.txt</a>"), std::string::npos) << body;
     // "<tag>.xml" -> URI: %3Ctag%3E.xml, HTML: &lt;tag&gt;.xml
     EXPECT_NE(body.find("<a href=\"/%3Ctag%3E.xml\">&lt;tag&gt;.xml</a>"), std::string::npos) << body;
+#endif
 }
 
 // 4. Path Prefix leading to Empty Relative Path
