@@ -49,6 +49,11 @@ struct TestLogCapture {
         std::lock_guard<std::mutex> guard(log_mutex);
         return messages.size();
     }
+
+    std::vector<std::pair<qb::http::LogLevel, std::string> > snapshot_messages() {
+        std::lock_guard<std::mutex> guard(log_mutex);
+        return messages;
+    }
 };
 
 // --- Session Class for Middleware Integration Tests ---
@@ -260,8 +265,11 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
     EXPECT_EQ("Logged route content", response.body().as<std::string>());
     mid_request_count_client++;
 
-    // Allow a brief moment for any asynchronous logging hooks to complete.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (_test_log_capture.count_messages() < 2 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
     ASSERT_EQ(_test_log_capture.count_messages(), 2)
         << "Expected 2 log messages (1 request, 1 response).";
@@ -269,7 +277,7 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
     bool request_log_found = false;
     bool response_log_found = false;
 
-    for (const auto &log_entry: _test_log_capture.messages) {
+    for (const auto &log_entry: _test_log_capture.snapshot_messages()) {
         if (log_entry.first == qb::http::LogLevel::Info &&
             log_entry.second.find("Request: GET /logged_route") != std::string::npos) {
             request_log_found = true;
@@ -329,7 +337,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     bool timing_log_found = false;
-    for (const auto &log_entry: _test_log_capture.messages) {
+    for (const auto &log_entry: _test_log_capture.snapshot_messages()) {
         if (log_entry.first == qb::http::LogLevel::Info &&
             log_entry.second.find("Response time: ") != std::string::npos) {
             // Simpler check

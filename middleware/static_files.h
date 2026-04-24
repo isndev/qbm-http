@@ -22,6 +22,7 @@
 #include <system_error> // For std::error_code
 #include <chrono>
 #include <optional>
+#include <limits>
 
 #include <qb/io/uri.h>
 #include <qb/system/container/unordered_map.h>
@@ -180,6 +181,11 @@ namespace qb::http {
 
         [[nodiscard]] inline bool
         if_none_match_contains(std::string_view if_none_match, std::string_view current_etag) noexcept {
+            if_none_match = trim_optional_whitespace(if_none_match);
+            if (if_none_match == "*") {
+                return true;
+            }
+
             current_etag = trim_optional_whitespace(current_etag);
             if (current_etag.size() > 2 && current_etag.substr(0, 2) == "W/") {
                 current_etag.remove_prefix(2);
@@ -338,11 +344,18 @@ namespace qb::http {
          */
         [[nodiscard]] inline std::optional<std::pair<long long, long long> >
         parse_byte_range(std::string_view range_header_value, long long total_file_size) noexcept {
+            if (total_file_size <= 0) {
+                return std::nullopt;
+            }
+
             constexpr std::string_view prefix = "bytes=";
             if (!range_header_value.starts_with(prefix)) {
                 return std::nullopt;
             }
             const std::string_view range_spec = range_header_value.substr(prefix.size());
+            if (range_spec.empty()) {
+                return std::nullopt;
+            }
 
             // Multi-range is not supported and must be rejected, not silently
             // interpreted as the first range only.
@@ -379,38 +392,34 @@ namespace qb::http {
             const std::string_view start_tok = range_spec.substr(0, dash_pos);
             const std::string_view end_tok = range_spec.substr(dash_pos + 1);
 
-            std::optional<long long> start_opt;
-            std::optional<long long> end_opt;
-            if (!start_tok.empty()) {
-                start_opt = parse_u64(start_tok);
-                if (!start_opt) return std::nullopt;
-            }
-            if (!end_tok.empty()) {
-                end_opt = parse_u64(end_tok);
-                if (!end_opt) return std::nullopt;
-            }
-
-            if (start_opt && end_opt) {
+            if (!start_tok.empty() && !end_tok.empty()) {
+                const auto start_opt = parse_u64(start_tok);
+                const auto end_opt = parse_u64(end_tok);
+                if (!start_opt || !end_opt) return std::nullopt;
                 long long start = *start_opt;
                 long long end = *end_opt;
                 if (start > end || start >= total_file_size) return std::nullopt;
                 end = std::min(end, total_file_size - 1);
                 return std::make_pair(start, (end - start) + 1);
             }
-            if (start_opt) {
+
+            if (!start_tok.empty()) {
+                const auto start_opt = parse_u64(start_tok);
+                if (!start_opt) return std::nullopt;
                 long long start = *start_opt;
                 if (start >= total_file_size) return std::nullopt;
                 return std::make_pair(start, total_file_size - start);
             }
-            if (end_opt) {
-                long long suffix = *end_opt;
-                if (suffix == 0) return std::nullopt;
-                if (suffix >= total_file_size) {
-                    return std::make_pair(0LL, total_file_size);
-                }
-                return std::make_pair(total_file_size - suffix, suffix);
+
+            const auto suffix_opt = parse_u64(end_tok);
+            if (!suffix_opt) return std::nullopt;
+
+            const long long suffix = *suffix_opt;
+            if (suffix <= 0) return std::nullopt;
+            if (suffix >= total_file_size) {
+                return std::make_pair(0LL, total_file_size);
             }
-            return std::nullopt; // `bytes=-` or similar malformed input.
+            return std::make_pair(total_file_size - suffix, suffix);
         }
 
         // Helper to generate HTML for directory listing
