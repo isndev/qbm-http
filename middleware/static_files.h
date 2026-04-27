@@ -12,7 +12,6 @@
  */
 #pragma once
 
-#include <iostream> // Added for logging
 #include <memory>
 #include <string>
 #include <vector>

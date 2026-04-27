@@ -510,7 +510,7 @@ namespace qb::http {
          * @brief Alias of `has()`; provided for STL alignment.
          */
         [[nodiscard]] bool contains(const std::string &key) const noexcept {
-            return _custom_data.find(key) != _custom_data.end();
+            return has(key);
         }
 
         /**
@@ -666,8 +666,13 @@ namespace qb::http {
         // --- Response Helpers ---
 
         /**
-         * @brief Sets the response for a redirect.
-         * This method updates the response status code and sets the "Location" header.
+         * @brief Sets the response for a redirect and finalises the context.
+         *
+         * Sets the status and `Location` header. Does not force `Content-Length`; if you attach
+         * an HTML body for clients that ignore the status, set `_response.body()` (and headers)
+         * **before** calling this method. Always calls `complete(AsyncTaskResult::COMPLETE)` —
+         * no further headers or body changes apply after this returns.
+         *
          * @param url The URL to redirect to.
          * @param status_code The HTTP status code for the redirect (e.g., `qb::http::status::FOUND` (302),
          *                    `qb::http::status::MOVED_PERMANENTLY` (301)). Defaults to `qb::http::status::FOUND`.
@@ -675,13 +680,15 @@ namespace qb::http {
         void redirect(const std::string& url, qb::http::status status_code = qb::http::status::FOUND) {
             _response.status() = status_code;
             _response.set_header("Location", url);
-            _response.set_header("Content-Length", "0");
             complete(AsyncTaskResult::COMPLETE);
         }
 
         /**
-         * @brief Sets the response body to a JSON object.
-         * Sets Content-Type to "application/json; charset=utf-8".
+         * @brief Sets the response body to a JSON object and finalises the context.
+         *
+         * Sets Content-Type to "application/json; charset=utf-8", then calls
+         * `complete(AsyncTaskResult::COMPLETE)`. Set all headers first if you need custom fields.
+         *
          * @param json_data The qb::json object to send.
          * @param status_code The HTTP status code. Defaults to 200 OK (`qb::http::status::OK`).
          */
@@ -693,7 +700,10 @@ namespace qb::http {
         }
 
         /**
-         * @brief Sets the response body to a plain text string.
+         * @brief Sets the response body to a plain text string and finalises the context.
+         *
+         * Ends with `complete(AsyncTaskResult::COMPLETE)`; add headers before calling.
+         *
          * @param text_data The string to send.
          * @param status_code The HTTP status code. Defaults to 200 OK (`qb::http::status::OK`).
          * @param content_type The Content-Type header value. Defaults to "text/plain; charset=utf-8".
@@ -706,8 +716,10 @@ namespace qb::http {
         }
 
         /**
-         * @brief Sets the response body to an HTML string.
-         * Sets Content-Type to "text/html; charset=utf-8".
+         * @brief Sets the response body to an HTML string and finalises the context.
+         *
+         * Sets Content-Type to "text/html; charset=utf-8", then `complete(AsyncTaskResult::COMPLETE)`.
+         *
          * @param html_data The HTML string to send.
          * @param status_code The HTTP status code. Defaults to 200 OK (`qb::http::status::OK`).
          */

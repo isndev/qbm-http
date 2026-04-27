@@ -16,7 +16,6 @@
 #include <string>
 #include <vector>
 #include <functional>
-#include <map> // Not strictly needed by this header anymore, qb::unordered_map is used in .cpp
 #include <qb/json.h>
 #include <qb/system/container/unordered_map.h> // For _rules member
 

@@ -8,6 +8,8 @@
  * - Oversized headers (names > 1KB, values > 8KB)
  * - Total serialized size caps (> 110MB)
  *
+ * Oversized serialization fails with std::length_error and clears the output pipe.
+ *
  * qb - C++ Actor Framework
  * Copyright (C) 2011-2025 isndev (www.qbaf.io). All rights reserved.
  *
@@ -28,6 +30,7 @@
 #include "../http.h"
 #include "../1.1/protocol/base.h"
 #include <qb/system/allocator/pipe.h>
+#include <stdexcept>
 
 using namespace qb::http;
 
@@ -88,10 +91,8 @@ TEST_F(RequestDoSProtectionTest, URLExceedingLimitIsRejected) {
         return;
     }
 
-    // If URI parsing succeeded, serialization should reject it
-    pipe.put(req);
-
-    // Pipe should be empty (rejected)
+    // If URI parsing succeeded, serialization must reject (throws after clearing the pipe).
+    EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -104,8 +105,7 @@ TEST_F(RequestDoSProtectionTest, QueryStringExceedingLimitIsRejected) {
     req.method() = method::GET;
     req.uri() = qb::io::uri("/search?" + oversized_query);
 
-    // Serialization should reject oversized URL
-    pipe.put(req);
+    EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -213,7 +213,7 @@ TEST_F(RequestDoSProtectionTest, OversizedHeaderNameIsRejected) {
     std::string long_name(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H');
     req.set_header(long_name, "value1");
 
-    pipe.put(req);
+    EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -225,7 +225,7 @@ TEST_F(RequestDoSProtectionTest, OversizedHeaderValueIsRejected) {
     std::string long_value(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');
     req.set_header("X-Data", long_value);
 
-    pipe.put(req);
+    EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -244,7 +244,7 @@ TEST_F(RequestDoSProtectionTest, RejectedSerializationClearsExistingBufferConten
         std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'),
         "value");
 
-    pipe.put(bad_req);
+    EXPECT_THROW(pipe.put(bad_req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -257,8 +257,7 @@ TEST_F(RequestDoSProtectionTest, FragmentExceedingLimitIsRejected) {
     req.method() = method::GET;
     req.uri() = qb::io::uri("/page#" + oversized_fragment);
 
-    // Serialization should reject oversized URL (path + fragment)
-    pipe.put(req);
+    EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -358,7 +357,7 @@ TEST_F(ResponseDoSProtectionTest, OversizedHeaderNameIsRejected) {
     std::string long_name(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H');
     resp.set_header(long_name, "value1");
 
-    pipe.put(resp);
+    EXPECT_THROW(pipe.put(resp), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -369,7 +368,7 @@ TEST_F(ResponseDoSProtectionTest, OversizedHeaderValueIsRejected) {
     std::string long_value(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');
     resp.set_header("X-Data", long_value);
 
-    pipe.put(resp);
+    EXPECT_THROW(pipe.put(resp), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -387,7 +386,7 @@ TEST_F(ResponseDoSProtectionTest, RejectedSerializationClearsExistingBufferConte
         std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'),
         "value");
 
-    pipe.put(bad_resp);
+    EXPECT_THROW(pipe.put(bad_resp), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
@@ -621,7 +620,7 @@ TEST_F(DoSEdgeCasesTest, URLJustOverBoundaryIsRejected) {
     req.method() = method::GET;
     req.uri() = qb::io::uri(path);
 
-    pipe.put(req);
+    EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 

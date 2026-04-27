@@ -37,9 +37,9 @@ namespace qb::http {
 
     /**
      * @brief Maximum allowed length for HTTP header attribute values in bytes (e.g., `utf-8` in `charset=utf-8`).
-     * Helps prevent excessive memory usage or potential denial-of-service by overly long attribute values.
+     * Large enough for filenames in Content-Disposition; small enough to bound memory on hostile inputs.
      */
-    constexpr uint32_t ATTRIBUTE_VALUE_MAX = 1024 * 1024; // 1 Megabyte
+    constexpr uint32_t ATTRIBUTE_VALUE_MAX = 8192;
 
     /**
      * @brief Type alias for a map storing HTTP headers.

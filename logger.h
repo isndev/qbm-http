@@ -30,8 +30,8 @@
            NANO_LOG(nanolog::LogLevel::WARN) << QBM_HTTP_LOG_PREFIX << "WARN: " << X)
 
 #define LOG_HTTP_ERROR(X) \
-    (void)(nanolog::is_logged(nanolog::LogLevel::CRIT) && \
-           NANO_LOG(nanolog::LogLevel::CRIT) << QBM_HTTP_LOG_PREFIX << "ERROR: " << X) // Map ERROR to CRIT for higher visibility
+    (void)(nanolog::is_logged(nanolog::LogLevel::WARN) && \
+           NANO_LOG(nanolog::LogLevel::WARN) << QBM_HTTP_LOG_PREFIX << "ERROR: " << X)
 
 #define LOG_HTTP_CRIT(X) \
     (void)(nanolog::is_logged(nanolog::LogLevel::CRIT) && \
@@ -55,8 +55,8 @@
            NANO_LOG(nanolog::LogLevel::WARN) << QBM_HTTP_LOG_PREFIX << "S-" << STREAM_ID << " WARN: " << X)
            
 #define LOG_HTTP_ERROR_PA(STREAM_ID, X) \
-    (void)(nanolog::is_logged(nanolog::LogLevel::CRIT) && \
-           NANO_LOG(nanolog::LogLevel::CRIT) << QBM_HTTP_LOG_PREFIX << "S-" << STREAM_ID << " ERROR: " << X)
+    (void)(nanolog::is_logged(nanolog::LogLevel::WARN) && \
+           NANO_LOG(nanolog::LogLevel::WARN) << QBM_HTTP_LOG_PREFIX << "S-" << STREAM_ID << " ERROR: " << X)
 
 #define LOG_HTTP_CRIT_PA(STREAM_ID, X) \
     (void)(nanolog::is_logged(nanolog::LogLevel::CRIT) && \

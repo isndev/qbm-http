@@ -34,10 +34,11 @@ namespace qb::http {
     /**
      * @brief Maximum length for cookie values in bytes
      *
-     * Defines the maximum allowed length for cookie values to prevent
-     * buffer overflow attacks and ensure efficient memory usage.
+     * RFC 6265 expects implementations to support at least ~4096 octets per cookie
+     * (name + value + attributes). Capping the value alone keeps memory bounded while
+     * remaining interoperable with common user agents.
      */
-    constexpr uint32_t COOKIE_VALUE_MAX = 1024 * 1024; // 1 MB
+    constexpr uint32_t COOKIE_VALUE_MAX = 4096;
 
     /**
      * @brief Cookie SameSite policy enum

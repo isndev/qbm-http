@@ -1,6 +1,9 @@
 #include "./response.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
 
+#include <stdexcept>
+#include <string>
+
 namespace qb::allocator {
     namespace {
         [[nodiscard]] bool header_is_within_limits(const std::string& name, const std::string& value) noexcept {
@@ -35,8 +38,8 @@ namespace qb::allocator {
      * This method also handles automatic compression of the body
      * if Content-Encoding header is present.
      *
-     * @security SECURITY FIX: Added validation to prevent DoS attacks via oversized
-     *       bodies or headers. Uses qb::http::protocol_limits for maximum sizes.
+     * @security Validation uses qb::http::protocol_limits; oversize messages throw
+     *       std::length_error instead of emitting a truncated or empty wire format.
      *
      * @note Performance: Uses reserve() to minimize allocations during serialization.
      *       Estimates output size based on status line, headers, and body size.
@@ -47,10 +50,10 @@ namespace qb::allocator {
         // SECURITY FIX: Validate body size to prevent DoS
         const std::size_t body_size = r.body().size();
         if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-            // Body too large - return empty pipe to prevent memory exhaustion
-            // This is a security measure against DoS attacks
-            this->clear();
-            return *this;
+            this->clear(); throw std::length_error(
+                "qb::http::Response serialization: body size (" + std::to_string(body_size) + ") exceeds "
+                "qb::http::protocol_limits::MAX_BODY_SIZE (" + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE)
+                + "); refusing to emit a truncated or empty wire representation.");
         }
 
         // Performance: Pre-calculate approximate output size to minimize allocations
@@ -61,14 +64,13 @@ namespace qb::allocator {
         // Add headers size
         for (const auto &it: r.headers()) {
             if (it.first.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
-                this->clear();
-                return *this;
+                this->clear(); throw std::length_error("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
             }
             estimated_size += it.first.size() + 2; // ": "
             for (const auto &value: it.second) {
                 if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-                    this->clear();
-                    return *this;
+                    this->clear(); throw std::length_error(
+                        "qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
                 }
                 estimated_size += value.size() + 2; // CRLF
             }
@@ -79,8 +81,9 @@ namespace qb::allocator {
         // SECURITY FIX: Cap maximum serialized size to prevent overflow
         constexpr std::size_t MAX_SERIALIZED_SIZE = 110 * 1024 * 1024; // 110MB (slightly above MAX_BODY_SIZE + headers)
         if (estimated_size > MAX_SERIALIZED_SIZE) {
-            this->clear();
-            return *this; // Too large, would cause memory issues
+            this->clear(); throw std::length_error(
+                "qb::http::Response serialization: estimated wire size exceeds internal cap (decompression "
+                "or header explosion); refusing to allocate.");
         }
 
         // Reserve space in pipe to reduce allocations
@@ -96,8 +99,8 @@ namespace qb::allocator {
         for (const auto &it: r.headers()) {
             for (const auto &value: it.second) {
                 if (!header_is_within_limits(it.first, value)) {
-                    this->clear();
-                    return *this;
+                    this->clear(); throw std::length_error(
+                        "qb::http::Response serialization: header name/value outside protocol_limits.");
                 }
                 *this << it.first << ": " << value << qb::http::endl;
             }
