@@ -187,6 +187,8 @@ namespace qb::http {
         // Static accessors for convenient use of enum values (e.g., Method::POST).
         static constexpr Value UNINITIALIZED = Value::UNINITIALIZED; ///< @see Value::UNINITIALIZED
         static constexpr Value DEL = Value::DEL; ///< @see Value::DEL
+        /// Same as `DEL` — readable name for the HTTP DELETE verb (avoids the C++ `delete` keyword).
+        static constexpr Value DELETE_METHOD = Value::DEL;
         static constexpr Value GET = Value::GET; ///< @see Value::GET
         static constexpr Value HEAD = Value::HEAD; ///< @see Value::HEAD
         static constexpr Value POST = Value::POST; ///< @see Value::POST

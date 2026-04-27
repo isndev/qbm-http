@@ -2,6 +2,12 @@
  * @file qbm/http/routing/types.h
  * @brief Core enumerations and type aliases for the HTTP routing system.
  *
+ * @note Windows headers (`windows.h`) often define a preprocessor macro `ERROR`.
+ *       `AsyncTaskResult` therefore uses `#undef ERROR` immediately before the
+ *       enumerator `ERROR` so the enum compiles. If you include both this header
+ *       and `windows.h`, expect the Win32 `ERROR` macro to be absent after the
+ *       enum definition.
+ *
  * This file defines fundamental types used throughout the qb-http routing module,
  * including lifecycle hook points (`HookPoint`), asynchronous task outcomes (`AsyncTaskResult`),
  * and function signatures for route and middleware handlers (`RouteHandlerFn`, `MiddlewareHandlerFn`).

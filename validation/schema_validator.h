@@ -14,7 +14,7 @@
 #pragma once
 
 #include <string>
-#include <unordered_map>
+#include <unordered_map> // Node-based map: stable references to cached rule vectors (see member note).
 #include <vector>
 #include <memory>
 #include <qb/json.h>
@@ -153,9 +153,9 @@ namespace qb::http::validation {
         /// Cache of pre-compiled rule lists keyed by schema-node pointer.
         /// `_schema_definition` is stored by value and never mutated after
         /// construction, which keeps those pointers stable for the full lifetime
-        /// of the validator. We rely on `std::unordered_map` for reference
-        /// stability on insertion, required since callers hold the returned
-        /// vector by reference across inner recursion.
+        /// of the validator. Deliberately `std::unordered_map` (not `qb::unordered_map`):
+        /// node-based layout preserves references to mapped `vector`s across rehash;
+        /// `rules_for_schema_node` returns those references into recursion.
         mutable std::unordered_map<const qb::json *, std::vector<std::shared_ptr<IRule> > >
                 _rules_cache;
 

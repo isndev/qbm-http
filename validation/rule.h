@@ -124,7 +124,13 @@ namespace qb::http::validation {
         std::string rule_name() const override { return "maxLength"; }
     };
 
-    /** @brief Validates a string against a regular expression pattern. */
+    /**
+     * @brief Validates a string against a regular expression pattern.
+     *
+     * ReDoS mitigation: pattern length is capped at compile time and matching input
+     * length is capped in the implementation (see `rule.cpp`). Prefer simple,
+     * linear-time patterns; `std::regex` does not offer execution timeouts.
+     */
     class PatternRule : public IRule {
     private:
         std::string _pattern_str;

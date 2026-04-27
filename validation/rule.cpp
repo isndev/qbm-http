@@ -15,6 +15,8 @@
 #include "./schema_validator.h"
 #include <qb/system/container/unordered_set.h>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace qb::http::validation {
     // Implementations for TypeRule, RequiredRule, MinLengthRule, MaxLengthRule,
@@ -121,8 +123,16 @@ namespace qb::http::validation {
     // REDUCED from 1MB to 256KB for better protection - most legitimate use cases
     // don't need pattern matching on strings larger than 256KB.
     constexpr std::size_t MAX_REGEX_INPUT_LENGTH = 256 * 1024; // 256KB
+    // Align with cors_security_limits::MAX_REGEX_PATTERN_LENGTH — huge patterns are rarely
+    // legitimate JSON Schema and are expensive to compile in libstdc++.
+    constexpr std::size_t MAX_REGEX_PATTERN_LENGTH = 1024;
 
     PatternRule::PatternRule(std::string pattern_str) : _pattern_str(std::move(pattern_str)) {
+        if (_pattern_str.length() > MAX_REGEX_PATTERN_LENGTH) {
+            throw std::invalid_argument(
+                "JSON Schema pattern exceeds maximum length (" + std::to_string(MAX_REGEX_PATTERN_LENGTH)
+                + " chars); shorten the pattern or split validation.");
+        }
         try {
             _regex = std::regex(_pattern_str, std::regex_constants::ECMAScript | std::regex_constants::optimize);
         } catch (const std::regex_error &e) {

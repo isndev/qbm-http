@@ -1,6 +1,9 @@
 #include "./request.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
 
+#include <stdexcept>
+#include <string>
+
 namespace qb::allocator {
     namespace {
         [[nodiscard]] bool header_is_within_limits(const std::string& name, const std::string& value) noexcept {
@@ -32,8 +35,8 @@ namespace qb::allocator {
      * - Empty line separator
      * - Request body (if present)
      *
-     * @security SECURITY FIX: Added validation to prevent DoS attacks via oversized URLs
-     *       or bodies. Uses qb::http::protocol_limits for maximum sizes.
+     * @security Validation uses qb::http::protocol_limits; oversize messages throw
+     *       std::length_error instead of emitting a truncated or empty wire format.
      *
      * @note Performance: Uses reserve() to minimize allocations during serialization.
      *       Estimates output size based on path, headers, and body size.
@@ -48,18 +51,19 @@ namespace qb::allocator {
         const std::size_t total_url_size = path_size + query_size + fragment_size;
 
         if (total_url_size > qb::http::protocol_limits::MAX_URL_LENGTH) {
-            // URL too large - return empty pipe to prevent memory exhaustion
-            // This is a security measure against DoS attacks
-            this->clear();
-            return *this;
+            this->clear(); throw std::length_error(
+                "qb::http::Request serialization: URL length (" + std::to_string(total_url_size) + ") exceeds "
+                "qb::http::protocol_limits::MAX_URL_LENGTH (" + std::to_string(qb::http::protocol_limits::MAX_URL_LENGTH)
+                + ").");
         }
 
         // SECURITY FIX: Validate body size to prevent DoS
         const std::size_t body_size = r.body().size();
         if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-            // Body too large - return empty pipe to prevent memory exhaustion
-            this->clear();
-            return *this;
+            this->clear(); throw std::length_error(
+                "qb::http::Request serialization: body size (" + std::to_string(body_size) + ") exceeds "
+                "qb::http::protocol_limits::MAX_BODY_SIZE (" + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE)
+                + ").");
         }
 
         // Performance: Pre-calculate approximate output size to minimize allocations
@@ -71,14 +75,13 @@ namespace qb::allocator {
         // Add headers size
         for (const auto &it: r.headers()) {
             if (it.first.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
-                this->clear();
-                return *this;
+                this->clear(); throw std::length_error("qb::http::Request serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
             }
             estimated_size += it.first.size() + 2; // ": "
             for (const auto &value: it.second) {
                 if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-                    this->clear();
-                    return *this;
+                    this->clear(); throw std::length_error(
+                        "qb::http::Request serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
                 }
                 estimated_size += value.size() + 2; // CRLF
             }
@@ -89,8 +92,8 @@ namespace qb::allocator {
         // SECURITY FIX: Cap maximum serialized size to prevent overflow
         constexpr std::size_t MAX_SERIALIZED_SIZE = 110 * 1024 * 1024; // 110MB (slightly above MAX_BODY_SIZE + headers)
         if (estimated_size > MAX_SERIALIZED_SIZE) {
-            this->clear();
-            return *this; // Too large, would cause memory issues
+            this->clear(); throw std::length_error(
+                "qb::http::Request serialization: estimated wire size exceeds internal cap; refusing to allocate.");
         }
 
         // Reserve space in pipe to reduce allocations
@@ -110,8 +113,8 @@ namespace qb::allocator {
         for (const auto &it: r.headers()) {
             for (const auto &value: it.second) {
                 if (!header_is_within_limits(it.first, value)) {
-                    this->clear();
-                    return *this;
+                    this->clear(); throw std::length_error(
+                        "qb::http::Request serialization: header name/value outside protocol_limits.");
                 }
                 *this << it.first << ": " << value << qb::http::endl;
             }

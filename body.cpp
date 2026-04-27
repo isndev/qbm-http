@@ -13,6 +13,11 @@
  */
 #include <qb/io/uri.h>
 #include "./body.h"
+#ifdef QB_HAS_COMPRESSION
+#include "./1.1/protocol/base.h" // protocol_limits::MAX_BODY_SIZE — decompressed output cap
+#endif
+#include <stdexcept>
+#include <string>
 
 namespace qb::allocator {
     /**
@@ -543,6 +548,11 @@ namespace qb::http {
                 reinterpret_cast<uint8_t *>(out.begin()) + o_processed,
                 out.size() - o_processed, qb::compression::is_last, i_tmp, done);
             i_processed += i_tmp;
+            if (o_processed > qb::http::protocol_limits::MAX_BODY_SIZE) {
+                throw std::length_error(
+                    "Body::uncompress: decompressed size exceeds qb::http::protocol_limits::MAX_BODY_SIZE "
+                    "(" + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE) + " bytes); possible zip-bomb.");
+            }
         }
         out.free_back(out.size() - o_processed);
         _data = std::move(out);

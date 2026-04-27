@@ -354,6 +354,7 @@ namespace qb::allocator {
      *
      * @param r HTTP request to serialize
      * @return Reference to the pipe for method chaining
+     * @throws std::length_error if the message exceeds qb::http::protocol_limits.
      */
     template<>
     pipe<char> &pipe<char>::put<qb::http::Request>(const qb::http::Request &r);

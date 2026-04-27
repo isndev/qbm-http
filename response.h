@@ -62,7 +62,7 @@ namespace qb::http {
 
         Response(Status s,
                  qb::icase_unordered_map<std::vector<std::string> > h = {},
-                 Body b = {}) noexcept
+                 Body b = {})
             : internal::MessageBase(std::move(h), std::move(b))
             , _status(s)
         {}
@@ -300,22 +300,23 @@ namespace qb::http {
         }
 
         /**
-         * @brief Adds a cookie to the response.
+         * @brief Adds a cookie to the response (same wire semantics as add_cookie()).
          * @param c The cookie to add.
          * @return A reference to the response object.
          */
         Response &with_cookie(const Cookie &c) {
-            _cookies.add(c);
+            add_cookie(c);
             return *this;
         }
 
         /**
-         * @brief Sets the cookies for the response.
+         * @brief Replaces the response cookie jar and synchronises all Set-Cookie headers.
          * @param cookies The cookies to set.
          * @return A reference to the response object.
          */
         Response &with_cookies(const CookieJar &cookies) {
             _cookies = cookies;
+            update_cookie_headers();
             return *this;
         }
 
@@ -373,6 +374,8 @@ namespace qb::allocator {
      *
      * @param r HTTP response to serialize
      * @return Reference to the pipe for method chaining
+     * @throws std::length_error if the message exceeds qb::http::protocol_limits
+     *         (oversized body, headers, or estimated wire size).
      */
     template<>
     pipe<char> &pipe<char>::put<qb::http::Response>(const qb::http::Response &r);

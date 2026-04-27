@@ -180,6 +180,7 @@ TEST_F(ValidationLogicTest, PatternRuleValidation) {
     EXPECT_TRUE(result.success());
 
     ASSERT_THROW(PatternRule("["), std::invalid_argument);
+    ASSERT_THROW(PatternRule(std::string(1025, 'a')), std::invalid_argument);
 }
 
 TEST_F(ValidationLogicTest, MinimumRuleValidation) {
