@@ -168,7 +168,7 @@ namespace qb::http {
                         // Ignore whitespace
                         if (utility::is_control(c) || current_attribute_name.size() >= ATTRIBUTE_NAME_MAX) {
                             throw std::runtime_error(
-                                "Control character in attribute name or max name length exceeded.");
+                                "Control character in attribute name or attribute name size exceeds maximum allowed length.");
                         }
                         current_attribute_name.push_back(c);
                     }
@@ -197,7 +197,7 @@ namespace qb::http {
                             // Non-delimiter, non-quote, non-space character
                             if (utility::is_control(c) || current_attribute_value.size() >= ATTRIBUTE_VALUE_MAX) {
                                 throw std::runtime_error(
-                                    "Control character in attribute value or max value length exceeded.");
+                                    "Control character in attribute value or attribute value size exceeds maximum allowed length.");
                             }
                             current_attribute_value.push_back(c);
                         }
@@ -212,7 +212,7 @@ namespace qb::http {
                             value_quote_char = '\0';
                             parse_state = AttributeParseState::IGNORE; // Ignore chars until next delimiter
                         } else if (current_attribute_value.size() >= ATTRIBUTE_VALUE_MAX) {
-                            throw std::runtime_error("Max attribute value length exceeded (quoted).");
+                            throw std::runtime_error("Quoted attribute value size exceeds maximum allowed length.");
                         } else {
                             // Note: HTTP quoted-string can have quoted-pair escapes (e.g., \\"). This parser doesn't handle them.
                             current_attribute_value.push_back(c);
