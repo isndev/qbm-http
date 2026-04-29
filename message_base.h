@@ -63,6 +63,15 @@ namespace qb::http {
             std::uint64_t stream_id{0};
 
             /**
+             * @brief HTTP/1.x persistence decision computed by the parser.
+             *
+             * For HTTP/1.1 this is true by default unless @c Connection: close
+             * is present. For HTTP/1.0 it is true only with
+             * @c Connection: keep-alive. HTTP/2 and HTTP/3 ignore this flag.
+             */
+            bool keep_alive{false};
+
+            /**
              * @brief Default constructor.
              *
              * Initializes a message with HTTP version 1.1 (`major_version = 1`, `minor_version = 1`)
@@ -74,6 +83,7 @@ namespace qb::http {
                   , minor_version(1)
                   , upgrade(false)
                   , stream_id(0)
+                  , keep_alive(false)
             {
                 this->Headers::_headers.clear();
             }
@@ -100,6 +110,7 @@ namespace qb::http {
                   , minor_version(1)
                   , upgrade(false)
                   , stream_id(0)
+                  , keep_alive(false)
             {
             }
 

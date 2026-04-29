@@ -39,6 +39,8 @@
 #include "./protocol/client.h"
 #include "../logger.h"
 #include <cctype>
+#include <deque>
+#include <optional>
 #include <string_view>
 
 namespace qb::http {
@@ -130,8 +132,95 @@ namespace qb::http {
             friend Protocol;
             friend qb::io::async::with_timeout<session>;
 
-            std::shared_ptr<Context<Derived> > _context{};
-            bool _keep_alive{false}; ///< Keep-alive flag for persistent connections
+            using ContextType = Context<Derived>;
+
+            std::shared_ptr<ContextType> _context{};
+            std::deque<Request> _pending_requests{};
+            std::optional<Response> _ready_response{};
+            qb::http::method _active_request_method{qb::http::method::GET};
+            bool _active_should_keep_alive{false};
+            bool _keep_alive{false}; ///< Application override for persistent connections
+            std::size_t _max_pipelined_requests{128};
+
+            [[nodiscard]] static bool
+            has_connection_token(qb::http::Headers const& headers, std::string_view token) {
+                auto it = headers.headers().find("Connection");
+                if (it == headers.headers().end()) {
+                    return false;
+                }
+                for (const auto& value : it->second) {
+                    for (auto part : qb::http::utility::split_string<std::string>(value, ",")) {
+                        if (qb::http::utility::iequals(qb::http::utility::trim_http_whitespace(part), token)) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+
+            void
+            prepare_response_for_active_request(Response& response) {
+                const bool response_closes = has_connection_token(response, "close");
+                if (response_closes) {
+                    _active_should_keep_alive = false;
+                }
+
+                if (_active_request_method == qb::http::method::HEAD) {
+                    if (!response.has_header("Content-Length") && !response.body().empty()) {
+                        response.set_header("Content-Length", std::to_string(response.body().size()));
+                    }
+                    response.body().clear();
+                }
+
+                if (!_active_should_keep_alive && !response.has_header("Connection")) {
+                    response.set_header("Connection", "close");
+                } else if (_active_should_keep_alive &&
+                           _context &&
+                           _context->request().major_version == 1 &&
+                           _context->request().minor_version == 0 &&
+                           !response.has_header("Connection")) {
+                    response.set_header("Connection", "keep-alive");
+                }
+            }
+
+            void
+            drain_ready_response() {
+                if (!_context || !_ready_response) {
+                    return;
+                }
+                auto response = std::move(*_ready_response);
+                _ready_response.reset();
+                prepare_response_for_active_request(response);
+                *this << response;
+                this->updateTimeout();
+            }
+
+            void
+            start_request(Request&& request) {
+                _active_request_method = request.method();
+                _active_should_keep_alive = request.keep_alive || _keep_alive;
+                _ready_response.reset();
+
+                auto context = this->server().router().route(this->shared_from_this(), std::move(request));
+                if (!context) {
+                    LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 request not routed, disconnecting.");
+                    this->disconnect(DisconnectedReason::Undefined);
+                    return;
+                }
+
+                _context = std::move(context);
+                drain_ready_response();
+            }
+
+            void
+            start_next_request_if_possible() {
+                if (_context || _pending_requests.empty()) {
+                    return;
+                }
+                auto request = std::move(_pending_requests.front());
+                _pending_requests.pop_front();
+                start_request(std::move(request));
+            }
 
             /**
              * @brief Handle incoming HTTP request
@@ -144,14 +233,17 @@ namespace qb::http {
             on(typename Protocol::request &&request) {
                 LOG_HTTP_INFO_PA(this->id(), "Received HTTP/1.1 request: " << request.method() << " " << request.uri().source());
 
-                _context = this->server().router().route(this->shared_from_this(), std::move(request));
-
-                if (!_context) {
-                    LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 request not routed, disconnecting.");
-                    this->disconnect(DisconnectedReason::Undefined);
-                } else {
-                    LOG_HTTP_DEBUG_PA(this->id(), "HTTP/1.1 request successfully routed.");
+                if (_context) {
+                    if (_pending_requests.size() >= _max_pipelined_requests) {
+                        LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 pipelined request queue limit reached.");
+                        this->disconnect(DisconnectedReason::ByProtocolError);
+                        return;
+                    }
+                    _pending_requests.emplace_back(std::move(request));
+                    LOG_HTTP_DEBUG_PA(this->id(), "HTTP/1.1 request queued behind active response.");
+                    return;
                 }
+                start_request(std::move(request));
             }
 
             /**
@@ -207,8 +299,11 @@ namespace qb::http {
                     _context->execute_hook(HookPoint::POST_RESPONSE_SEND);
                     _context.reset();
                 }
-                if (!_keep_alive)
+                if (!_active_should_keep_alive) {
                     this->disconnect(DisconnectedReason::ResponseTransmitted);
+                    return;
+                }
+                start_next_request_if_possible();
             }
 
             void
@@ -224,6 +319,8 @@ namespace qb::http {
                     _context->cancel(); // no-op when suppress_response() was already called
                     _context.reset();
                 }
+                _pending_requests.clear();
+                _ready_response.reset();
             }
 
             /**
@@ -258,6 +355,8 @@ namespace qb::http {
                     LOG_HTTP_DEBUG_PA(this->id(), "Cancelling incomplete context due to user disconnection.");
                     _context->cancel();
                 }
+                _pending_requests.clear();
+                _ready_response.reset();
             }
 
         public:
@@ -308,6 +407,20 @@ namespace qb::http {
              */
             void keep_alive(bool value = true) {
                 _keep_alive = value;
+            }
+
+            void max_pipelined_requests(std::size_t value) noexcept {
+                _max_pipelined_requests = value;
+            }
+
+            void send_response(ContextType& ctx) {
+                if (_context && _context.get() != &ctx) {
+                    LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 response completed for a non-active context; closing session.");
+                    this->disconnect(DisconnectedReason::ServerError);
+                    return;
+                }
+                _ready_response = ctx.response();
+                drain_ready_response();
             }
         };
 

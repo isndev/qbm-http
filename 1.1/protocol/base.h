@@ -352,6 +352,7 @@ namespace qb::http {
                 msg.body().raw().reserve(parser->content_length);
             }
             msg.upgrade = static_cast<bool>(parser->upgrade);
+            msg.keep_alive = static_cast<bool>(http_should_keep_alive(parser));
             self->_headers_completed = true;
             return HPE_PAUSED;
         }
