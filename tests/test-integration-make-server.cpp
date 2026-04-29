@@ -37,7 +37,7 @@ class HttpMakeServerTest : public ::testing::Test {
 protected:
     std::unique_ptr<qb::http::Server<>> server_instance;
     std::thread server_thread;
-    const uint16_t TEST_PORT = 9878;
+    const uint16_t TEST_PORT = 29878;
 
     void SetUp() override {
         qb::io::async::init(); 
@@ -107,7 +107,7 @@ class HttpsMakeServerTest : public ::testing::Test {
 protected:
     std::unique_ptr<qb::http::ssl::Server<>> server_instance;
     std::thread server_thread;
-    const uint16_t TEST_PORT_SSL = 9880; 
+    const uint16_t TEST_PORT_SSL = 29880;
     const char* CERT_FILE = "cert.pem"; 
     const char* KEY_FILE  = "key.pem";
 
@@ -203,7 +203,7 @@ class Http2MakeServerTest : public ::testing::Test {
 protected:
     std::unique_ptr<qb::http2::Server<>> server_instance_h2;
     std::thread server_thread_h2;
-    const uint16_t TEST_PORT_HTTP2 = 9882;
+    const uint16_t TEST_PORT_HTTP2 = 29882;
     const char* CERT_FILE = "cert.pem"; 
     const char* KEY_FILE  = "key.pem";
 

@@ -157,10 +157,10 @@ protected:
         _server_thread = std::thread([this]() {
             qb::io::async::init();
 
-            _server->transport().listen_v4(9878);
+            _server->transport().listen_v4(29888);
             _server->start();
             mid_server_ready = true;
-            std::cout << "MiddlewareIntegrationServer is ready on port 9878 for test: "
+            std::cout << "MiddlewareIntegrationServer is ready on port 29888 for test: "
                     << GetCurrentTestNameMid()
                     << "\n";
 
@@ -222,7 +222,7 @@ TEST_F(MiddlewareHttpIntegrationTest, InitialPing) {
     mid_expected_server_assertions = 1; // Ping handler increments mid_server_side_assertions once.
 
     std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /ping\n";
-    qb::http::Request request{{"http://localhost:9878/ping"}};
+    qb::http::Request request{{"http://localhost:29888/ping"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_middleware_test", response.body().as<std::string>());
@@ -258,7 +258,7 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
     _server->router().compile();
 
     std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /logged_route\n";
-    qb::http::Request request{{"http://localhost:9878/logged_route"}};
+    qb::http::Request request{{"http://localhost:29888/logged_route"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
@@ -316,7 +316,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
     _server->router().compile();
 
     std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /timed_route\n";
-    qb::http::Request request{{"http://localhost:9878/timed_route"}};
+    qb::http::Request request{{"http://localhost:29888/timed_route"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
@@ -384,7 +384,7 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
     _server->router().compile();
 
     std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /secure_route (HTTPS)\n";
-    qb::http::Request request{{"https://localhost:9878/secure_route"}};
+    qb::http::Request request{{"https://localhost:29888/secure_route"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
@@ -468,7 +468,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /compressible_route with Accept-Encoding: gzip\n";
-        qb::http::Request request{{"http://localhost:9878/compressible_route"}};
+        qb::http::Request request{{"http://localhost:29888/compressible_route"}};
         request.add_header("Accept-Encoding", "gzip, deflate");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -495,7 +495,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending POST /decompress_test_route with pseudo-compressed data\n";
-        qb::http::Request request{qb::http::method::POST, {"http://localhost:9878/decompress_test_route"}};
+        qb::http::Request request{qb::http::method::POST, {"http://localhost:29888/decompress_test_route"}};
         std::string data_sent_in_post_request = "invalid gzipped data";
         request.body() = data_sent_in_post_request;
         request.add_header("Content-Encoding", "gzip");
@@ -584,7 +584,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     // 1. Simple GET from allowed origin
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /cors_test_route from allowed origin\n";
-        qb::http::Request request{{"http://localhost:9878/cors_test_route"}};
+        qb::http::Request request{{"http://localhost:29888/cors_test_route"}};
         request.add_header("Origin", "http://allowed.example.com");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -601,7 +601,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /cors_test_route from disallowed origin\n";
-        qb::http::Request request{{"http://localhost:9878/cors_test_route"}};
+        qb::http::Request request{{"http://localhost:29888/cors_test_route"}};
         request.add_header("Origin", "http://disallowed.example.com");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -614,7 +614,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     // 3. Preflight OPTIONS request from allowed origin
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending OPTIONS /cors_test_route (preflight)\n";
-        qb::http::Request request{qb::http::method::OPTIONS, {"http://localhost:9878/cors_test_route"}};
+        qb::http::Request request{qb::http::method::OPTIONS, {"http://localhost:29888/cors_test_route"}};
         request.add_header("Origin", "http://allowed.example.com");
         request.add_header("Access-Control-Request-Method", "POST");
         request.add_header("Access-Control-Request-Headers", "X-Custom-Header, Content-Type");
@@ -636,7 +636,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /cors_test_route_credentials with Origin and credentials\n";
-        qb::http::Request request{{"http://localhost:9878/cors_test_route_credentials"}};
+        qb::http::Request request{{"http://localhost:29888/cors_test_route_credentials"}};
         request.add_header("Origin", "http://allowed.example.com");
         request.add_header("Cookie", "sessionid=12345");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -683,7 +683,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
     });
     _server->router().compile();
 
-    qb::http::Request base_request{{"http://localhost:9878/rate_limited_route"}};
+    qb::http::Request base_request{{"http://localhost:29888/rate_limited_route"}};
     base_request.add_header("X-Forwarded-For", "127.0.0.1"); // Consistent client ID for test
 
     // 1. Send requests within the limit
@@ -819,7 +819,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_generic_error" <<
                 std::endl;
-        qb::http::Request request{{"http://localhost:9878/route_triggering_generic_error"}};
+        qb::http::Request request{{"http://localhost:29888/route_triggering_generic_error"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::IM_A_TEAPOT, response.status()); // Corrected Teapot
         EXPECT_EQ("Generic Error from ErrorHandlingMiddleware: Something bad happened generically",
@@ -832,7 +832,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_specific_error" <<
                 std::endl;
-        qb::http::Request request{{"http://localhost:9878/route_triggering_specific_error"}};
+        qb::http::Request request{{"http://localhost:29888/route_triggering_specific_error"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::FORBIDDEN, response.status());
         EXPECT_EQ("Custom Forbidden Error Page from ErrorHandlingMiddleware", response.body().as<std::string>());
@@ -844,7 +844,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
     {
         std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_500_for_range" <<
                 std::endl;
-        qb::http::Request request{{"http://localhost:9878/route_triggering_500_for_range"}};
+        qb::http::Request request{{"http://localhost:29888/route_triggering_500_for_range"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::SERVICE_UNAVAILABLE, response.status()); // Changed by range handler
         EXPECT_EQ("Custom 50x Error Page (became 503) from ErrorHandlingMiddleware", response.body().as<std::string>());
@@ -955,7 +955,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
 
     // 1. No token
     {
-        qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
+        qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         mid_request_count_client++;
@@ -963,7 +963,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
 
     // 2. Invalid token (garbage)
     {
-        qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
+        qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer garbage");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
@@ -974,7 +974,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
     {
         std::string expired_token = generate_simple_test_jwt_for_mid_test(
             "simple_user", {{"custom_claim", qb::json("value")}}, -10); // Expired 10s ago
-        qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
+        qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + expired_token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
@@ -987,7 +987,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
                                                                       {
                                                                           {"custom_claim", qb::json("value")}
                                                                       }, 3600, 60); // NBF in 60s
-        qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
+        qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + nbf_token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
@@ -997,7 +997,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
     // 5. Valid token but missing required claim
     {
         std::string token_no_req_claim = generate_simple_test_jwt_for_mid_test("simple_user"); // No custom_claim here
-        qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
+        qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + token_no_req_claim);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
@@ -1010,7 +1010,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
     {
         std::string valid_token = generate_simple_test_jwt_for_mid_test("simple_user", {{"custom_claim", "value"}},
                                                                         3600, -5);
-        qb::http::Request request{{"http://localhost:9878/jwt_simplified_route"}};
+        qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + valid_token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status());
@@ -1077,7 +1077,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
 
     // 1. No Authorization header
     {
-        qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
+        qb::http::Request request{{"http://localhost:29888/auth_route_new"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         EXPECT_NE(response.body().as<std::string>().find("Authentication required"), std::string::npos);
@@ -1086,7 +1086,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
 
     // 2. Invalid JWT token (malformed)
     {
-        qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
+        qb::http::Request request{{"http://localhost:29888/auth_route_new"}};
         request.add_header("Authorization", "Bearer aninvalidtokenstring");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
@@ -1099,7 +1099,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
         std::string token_wrong_role = generate_simple_test_jwt_for_mid_test("user123", {
                                                                                  {"roles", qb::json::array({"viewer"})}
                                                                              });
-        qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
+        qb::http::Request request{{"http://localhost:29888/auth_route_new"}};
         request.add_header("Authorization", "Bearer " + token_wrong_role);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::FORBIDDEN, response.status());
@@ -1117,7 +1117,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
                                                                                        })
                                                                                    }
                                                                                });
-        qb::http::Request request{{"http://localhost:9878/auth_route_new"}};
+        qb::http::Request request{{"http://localhost:29888/auth_route_new"}};
         request.add_header("Authorization", "Bearer " + token_correct_role);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status());
@@ -1184,7 +1184,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S1_PredicateFalse_No
     });
     _server->router().compile();
 
-    qb::http::Request request_s1{{"http://localhost:9878/cond_test_s1"}};
+    qb::http::Request request_s1{{"http://localhost:29888/cond_test_s1"}};
     auto response_s1 = qb::http::run_sync(qb::http::GET(request_s1)).response;
 
     EXPECT_EQ(qb::http::status::OK, response_s1.status());
@@ -1214,7 +1214,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S2_PredicateTrue_IfR
     });
     _server->router().compile();
 
-    qb::http::Request request_s2{{"http://localhost:9878/cond_test_s2?exec_if=1"}};
+    qb::http::Request request_s2{{"http://localhost:29888/cond_test_s2?exec_if=1"}};
     auto response_s2 = qb::http::run_sync(qb::http::GET(request_s2)).response;
 
     EXPECT_EQ(qb::http::status::OK, response_s2.status());
@@ -1287,7 +1287,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         });
         _server->router().compile();
 
-        qb::http::Request request{{"http://localhost:9878/file1.txt"}};
+        qb::http::Request request{{"http://localhost:29888/file1.txt"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
         EXPECT_EQ(qb::http::status::OK, response.status());
@@ -1311,7 +1311,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         });
         _server->router().compile();
 
-        qb::http::Request request{{"http://localhost:9878/nonexistent.txt"}};
+        qb::http::Request request{{"http://localhost:29888/nonexistent.txt"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::NOT_FOUND, response.status());
         // The body for 404 is set by StaticFilesMiddleware itself
@@ -1333,7 +1333,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         });
         _server->router().compile();
 
-        qb::http::Request request{{"http://localhost:9878/"}};
+        qb::http::Request request{{"http://localhost:29888/"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Root Index HTML", response.body().as<std::string>());
@@ -1357,7 +1357,7 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         _server->router().compile();
 
         std::string file_content = "Contents of file1.txt";
-        qb::http::Request request{{"http://localhost:9878/file1.txt"}};
+        qb::http::Request request{{"http://localhost:29888/file1.txt"}};
         request.add_header("Range", "bytes=9-14");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -1411,7 +1411,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S1_RequestBodyAndHeade
     });
     _server->router().compile();
 
-    qb::http::Request http_req{qb::http::method::POST, {"http://localhost:9878/transformed_route_final"}};
+    qb::http::Request http_req{qb::http::method::POST, {"http://localhost:29888/transformed_route_final"}};
     http_req.body() = "OriginalData";
     auto response = qb::http::run_sync(qb::http::POST(http_req)).response;
 
@@ -1446,7 +1446,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S2_RequestMethodChange
     });
     _server->router().compile();
 
-    qb::http::Request http_req_post{qb::http::method::POST, {"http://localhost:9878/method_change_test"}};
+    qb::http::Request http_req_post{qb::http::method::POST, {"http://localhost:29888/method_change_test"}};
     http_req_post.body() = "data";
     auto response = qb::http::run_sync(qb::http::POST(http_req_post)).response;
 
@@ -1484,7 +1484,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S1_ValidBody) {
     });
     _server->router().compile();
 
-    qb::http::Request req{qb::http::method::POST, {"http://localhost:9878/val_test_body"}};
+    qb::http::Request req{qb::http::method::POST, {"http://localhost:29888/val_test_body"}};
     qb::json valid_body_data = {{"name", "Test User"}};
     req.body() = valid_body_data.dump();
     req.set_header("Content-Type", "application/json");
@@ -1521,7 +1521,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S2_InvalidBody) {
     });
     _server->router().compile();
 
-    qb::http::Request req{qb::http::method::POST, {"http://localhost:9878/val_test_body_invalid"}};
+    qb::http::Request req{qb::http::method::POST, {"http://localhost:29888/val_test_body_invalid"}};
     qb::json invalid_body_data = {{"email", "not-an-email"}};
     req.body() = invalid_body_data.dump();
     req.set_header("Content-Type", "application/json");

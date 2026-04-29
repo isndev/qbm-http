@@ -40,12 +40,13 @@
 #include <vector>
 #include <queue>
 #include <string>
-#include <unordered_map>
 #include <chrono>
+#include <optional>
 
 #include <qb/io/async.h>
 #include <qb/io/protocol/handshake.h>
 #include <qb/io/uri.h>
+#include <qb/system/container/unordered_map.h>
 #include <qb/uuid.h>
 
 #include "protocol/client.h"
@@ -170,7 +171,7 @@ private:
     bool _auto_reconnect = true;
     
     // Callbacks
-    ConnectionCallback _connection_callback;
+    std::vector<ConnectionCallback> _connection_callbacks;
     
     // Statistics
     uint64_t _total_requests{0};
@@ -367,6 +368,17 @@ private:
      * @brief Start connection attempt
      */
     void start_connection();
+
+    /**
+     * @brief Normalize relative request URI against the client's HTTPS base URI.
+     */
+    void ensure_absolute_uri(qb::http::Request& request);
+
+    /**
+     * @brief Normalize and validate a request before it can be queued.
+     */
+    [[nodiscard]] std::optional<qb::http::Response>
+    prepare_request(qb::http::Request& request);
     
     /**
      * @brief Process pending requests queue

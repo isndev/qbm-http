@@ -108,7 +108,7 @@ public:
 /// Shared fixture: boots the server on a dedicated thread, tears it down cleanly.
 class CoroClientTest : public ::testing::Test {
 protected:
-    static constexpr int kPort = 19876;
+    static constexpr int kPort = 29879;
 
     std::thread                     _server_thread;
     std::atomic<bool>               _server_ready{false};

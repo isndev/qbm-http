@@ -93,10 +93,15 @@ bool Client::connect(ConnectionCallback callback) {
     
     if (_is_connecting) {
         LOG_HTTP_DEBUG_PA(_client_id, "Connection already in progress");
-        return false;
+        if (callback) {
+            _connection_callbacks.push_back(std::move(callback));
+        }
+        return true;
     }
     
-    _connection_callback = callback;
+    if (callback) {
+        _connection_callbacks.push_back(std::move(callback));
+    }
     _is_connecting = true;
     _handshake_completed = false;
     
@@ -121,6 +126,39 @@ void Client::disconnect() {
     BaseTcpClient::disconnect();
 }
 
+void Client::ensure_absolute_uri(qb::http::Request& request) {
+    if (!request.uri().host().empty()) {
+        return;
+    }
+    std::string absolute_uri_str =
+        std::string(_base_uri.scheme()) + "://" + std::string(_base_uri.host());
+    if (!_base_uri.port().empty()) {
+        absolute_uri_str += ":" + std::string(_base_uri.port());
+    }
+    if (!request.uri().path().empty()) {
+        absolute_uri_str += std::string(request.uri().path());
+    } else {
+        absolute_uri_str += "/";
+    }
+    if (!request.uri().encoded_queries().empty()) {
+        absolute_uri_str += "?" + std::string(request.uri().encoded_queries());
+    }
+    request.uri() = qb::io::uri(absolute_uri_str);
+}
+
+std::optional<qb::http::Response> Client::prepare_request(qb::http::Request& request) {
+    ensure_absolute_uri(request);
+    if (request.uri().host().empty()) {
+        return create_error_response(qb::http::status::BAD_REQUEST,
+                                     "HTTP/2 request URI is missing a host");
+    }
+    if (request.uri().scheme() != "https") {
+        return create_error_response(qb::http::status::BAD_REQUEST,
+                                     "HTTP/2 request URI must use https");
+    }
+    return std::nullopt;
+}
+
 bool Client::push_request(qb::http::Request request, ResponseCallback callback) {
     if (!callback) {
         LOG_HTTP_ERROR_PA(_client_id, "Request callback cannot be null");
@@ -128,30 +166,18 @@ bool Client::push_request(qb::http::Request request, ResponseCallback callback) 
     }
     
     _total_requests++;
+
+    if (auto error = prepare_request(request)) {
+        ++_failed_requests;
+        callback(std::move(*error));
+        return true;
+    }
     
     // Create request context
     auto context = std::make_unique<RequestContext>();
     context->request = std::move(request);
     context->callback = callback;
     context->created_at = std::chrono::steady_clock::now();
-    
-    // Ensure request has proper URI if relative
-    if (context->request.uri().host().empty()) {
-        // Build absolute URI from base URI and request path
-        std::string absolute_uri_str = std::string(_base_uri.scheme()) + "://" + std::string(_base_uri.host());
-        if (!_base_uri.port().empty()) {
-            absolute_uri_str += ":" + std::string(_base_uri.port());
-        }
-        if (!context->request.uri().path().empty()) {
-            absolute_uri_str += std::string(context->request.uri().path());
-        } else {
-            absolute_uri_str += "/";
-        }
-        if (!context->request.uri().encoded_queries().empty()) {
-            absolute_uri_str += "?" + std::string(context->request.uri().encoded_queries());
-        }
-        context->request.uri() = qb::io::uri(absolute_uri_str);
-    }
     
     LOG_HTTP_DEBUG_PA(_client_id, "Queuing request: " << context->request.method() 
                       << " " << context->request.uri().path());
@@ -201,22 +227,12 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
     // Queue individual requests with batch tracking
     for (size_t i = 0; i < batch_context->requests.size(); ++i) {
         auto& req = batch_context->requests[i];
-        
-        // Ensure request has proper URI if relative
-        if (req.uri().host().empty()) {
-            std::string absolute_uri_str = std::string(_base_uri.scheme()) + "://" + std::string(_base_uri.host());
-            if (!_base_uri.port().empty()) {
-                absolute_uri_str += ":" + std::string(_base_uri.port());
-            }
-            if (!req.uri().path().empty()) {
-                absolute_uri_str += std::string(req.uri().path());
-            } else {
-                absolute_uri_str += "/";
-            }
-            if (!req.uri().encoded_queries().empty()) {
-                absolute_uri_str += "?" + std::string(req.uri().encoded_queries());
-            }
-            req.uri() = qb::io::uri(absolute_uri_str);
+
+        if (auto error = prepare_request(req)) {
+            ++_failed_requests;
+            batch_context->responses[i] = std::move(*error);
+            ++batch_context->completed_count;
+            continue;
         }
         
         auto context = std::make_unique<RequestContext>();
@@ -252,6 +268,12 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
         };
         
         _pending_requests.push(std::move(context));
+    }
+
+    if (batch_context->completed_count == batch_context->requests.size()) {
+        batch_context->all_completed = true;
+        batch_context->callback(std::move(batch_context->responses));
+        return true;
     }
     
     // Store batch context
@@ -344,9 +366,12 @@ void Client::handle_connection_success() {
     _is_connecting = false;
     _handshake_completed = true;
     
-    if (_connection_callback) {
-        _connection_callback(true, "");
-        _connection_callback = nullptr;
+    auto callbacks = std::move(_connection_callbacks);
+    _connection_callbacks.clear();
+    for (auto& callback : callbacks) {
+        if (callback) {
+            callback(true, "");
+        }
     }
     
     // Process any pending requests
@@ -355,23 +380,25 @@ void Client::handle_connection_success() {
 
 void Client::handle_connection_failure(const std::string& error_message) {
     LOG_HTTP_ERROR_PA(_client_id, "Connection failed: " << error_message);
-    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     _is_connected = false;
     _is_connecting = false;
     _handshake_completed = false;
     _h2_protocol = nullptr;
     
-    if (_connection_callback) {
-        _connection_callback(false, error_message);
-        _connection_callback = nullptr;
+    auto callbacks = std::move(_connection_callbacks);
+    _connection_callbacks.clear();
+    for (auto& callback : callbacks) {
+        if (callback) {
+            callback(false, error_message);
+        }
     }
     
     // Fail all pending requests
     fail_all_requests("Connection failed: " + error_message);
     
-    // Attempt reconnection if enabled
-    if (should_reconnect) {
+    // Reconnect only if failure callbacks queued fresh work.
+    if (_auto_reconnect && has_pending_or_active_work()) {
         attempt_reconnection();
     }
 }
@@ -586,7 +613,6 @@ void Client::on(const qb::protocol::http2::Http2StreamErrorEvent& event) {
 
 void Client::on(const qb::protocol::http2::Http2GoAwayEvent& event) {
     LOG_HTTP_WARN_PA(_client_id, "Received GOAWAY frame: " << event.debug_data);
-    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     std::string error_msg = "Server sent GOAWAY: " + event.debug_data;
     fail_all_requests(error_msg);
@@ -594,7 +620,7 @@ void Client::on(const qb::protocol::http2::Http2GoAwayEvent& event) {
     // Disconnect and potentially reconnect
     disconnect();
     
-    if (should_reconnect) {
+    if (_auto_reconnect && has_pending_or_active_work()) {
         attempt_reconnection();
     }
 }
@@ -610,14 +636,13 @@ void Client::on(const qb::protocol::http2::Http2PushPromiseEvent& event) {
 
 void Client::on(const qb::protocol::http2::Http2ConnectionErrorEvent& event) {
     LOG_HTTP_ERROR_PA(_client_id, "HTTP/2 connection error: " << event.message);
-    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     std::string error_msg = "Connection error: " + event.message;
     fail_all_requests(error_msg);
     
     disconnect();
     
-    if (should_reconnect) {
+    if (_auto_reconnect && has_pending_or_active_work()) {
         attempt_reconnection();
     }
 }
@@ -635,16 +660,20 @@ void Client::on(qb::io::async::event::timeout const&) {
 
 void Client::on(qb::io::async::event::disconnected const& event) {
     LOG_HTTP_INFO_PA(_client_id, "Disconnected (reason: " << event.reason << ")");
-    const bool should_reconnect = _auto_reconnect && has_pending_or_active_work();
     
     std::string error_msg = "Connection lost";
     if (event.reason != 0) {
         error_msg += " (reason: " + std::to_string(event.reason) + ")";
     }
     
-    if (_is_connecting && _connection_callback) {
-        _connection_callback(false, error_msg);
-        _connection_callback = nullptr;
+    if (_is_connecting && !_connection_callbacks.empty()) {
+        auto callbacks = std::move(_connection_callbacks);
+        _connection_callbacks.clear();
+        for (auto& callback : callbacks) {
+            if (callback) {
+                callback(false, error_msg);
+            }
+        }
     }
 
     _is_connected = false;
@@ -654,7 +683,7 @@ void Client::on(qb::io::async::event::disconnected const& event) {
     
     fail_all_requests(error_msg);
     
-    if (should_reconnect) {
+    if (_auto_reconnect && has_pending_or_active_work()) {
         attempt_reconnection();
     }
 }

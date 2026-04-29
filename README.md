@@ -492,6 +492,7 @@ This detailed documentation covers:
 - **[Advanced Topics](./readme/16-advanced-topics.md)** - Performance tuning, security, and best practices
 - **[HTTP/2 Protocol](./readme/17-http2-protocol.md)** - HTTP/2 features, server push, and optimization
 - **[HTTPS & SSL/TLS](./readme/18-https-ssl-tls.md)** - Secure connections, certificates, and encryption
+- **[HTTP/3 Protocol](./readme/19-http3-protocol.md)** - Native HTTP/3 over QB-IO QUIC
 
 ## Documentation & Examples
 

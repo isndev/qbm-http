@@ -1075,10 +1075,10 @@ protected:
         _server_thread = std::thread([this]() {
             qb::io::async::init();
 
-            _server->transport().listen_v4(9877);
+            _server->transport().listen_v4(29887);
             _server->start();
             adv_server_ready = true;
-            std::cout << "AdvancedIntegrationServer is ready and listening at port 9877 for test: "
+            std::cout << "AdvancedIntegrationServer is ready and listening at port 29887 for test: "
                     << GetCurrentTestName()
                     << std::endl;
 
@@ -1149,7 +1149,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                                                       {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /ping" << std::endl;
-                                                          qb::http::Request request{{"http://localhost:9877/ping"}};
+                                                          qb::http::Request request{{"http://localhost:29887/ping"}};
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
                                                           EXPECT_EQ("pong", response.body().as<std::string>());
@@ -1161,7 +1161,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                                                                   "): Sending GET /api/v1/status (unauthorized)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/api/v1/status"}
+                                                              {"http://localhost:29887/api/v1/status"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status());
@@ -1177,7 +1177,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                                                                   "): Sending GET /api/v1/status (authorized)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/api/v1/status"}
+                                                              {"http://localhost:29887/api/v1/status"}
                                                           };
                                                           request.add_header("Authorization", "Bearer valid_token_v1");
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1205,7 +1205,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerOperations) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /api/v1/data/item123" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/api/v1/data/item123"}
+                                                              {"http://localhost:29887/api/v1/data/item123"}
                                                           };
                                                           request.add_header("Authorization", "Bearer valid_token_v1");
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1219,7 +1219,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerOperations) {
                                                                   "): Sending POST /api/v1/data" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::POST,
-                                                              {"http://localhost:9877/api/v1/data"}
+                                                              {"http://localhost:29887/api/v1/data"}
                                                           };
                                                           request.add_header("Authorization", "Bearer valid_token_v1");
                                                           // <<< THIS LINE
@@ -1248,7 +1248,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /legacy/custom" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/legacy/custom"}
+                                                              {"http://localhost:29887/legacy/custom"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1266,7 +1266,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /legacy/async_op" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/legacy/async_op"}
+                                                              {"http://localhost:29887/legacy/async_op"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request, 7.0)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1282,7 +1282,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /legacy/error_test" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/legacy/error_test"}
+                                                              {"http://localhost:29887/legacy/error_test"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_SERVICE_UNAVAILABLE, response.status());
@@ -1315,7 +1315,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                                                                   "): Sending GET /files/some/long/path/to/file.txt" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/files/some/long/path/to/file.txt"}
+                                                              {"http://localhost:29887/files/some/long/path/to/file.txt"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1330,7 +1330,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/short_circuit_test/admin_only/resource"
+                                                                  "http://localhost:29887/short_circuit_test/admin_only/resource"
                                                               }
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1347,7 +1347,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/short_circuit_test/admin_only/resource"
+                                                                  "http://localhost:29887/short_circuit_test/admin_only/resource"
                                                               }
                                                           };
                                                           request.add_header("X-User-Role", "admin");
@@ -1378,7 +1378,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /multi_method_resource" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/multi_method_resource"}
+                                                              {"http://localhost:29887/multi_method_resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1392,7 +1392,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                                   "): Sending POST /multi_method_resource" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::POST,
-                                                              {"http://localhost:9877/multi_method_resource"}
+                                                              {"http://localhost:29887/multi_method_resource"}
                                                           };
                                                           request.body() = "payload_for_post";
                                                           auto response = qb::http::run_sync(qb::http::POST(request)).response;
@@ -1407,7 +1407,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                                   "): Sending PUT /multi_method_resource" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::PUT,
-                                                              {"http://localhost:9877/multi_method_resource"}
+                                                              {"http://localhost:29887/multi_method_resource"}
                                                           };
                                                           request.body() = "payload_for_put";
                                                           auto response = qb::http::run_sync(qb::http::PUT(request)).response;
@@ -1423,7 +1423,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                                   std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::DEL,
-                                                              {"http://localhost:9877/multi_method_resource"}
+                                                              {"http://localhost:29887/multi_method_resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::DEL(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
@@ -1436,7 +1436,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                                   std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::PATCH,
-                                                              {"http://localhost:9877/multi_method_resource"}
+                                                              {"http://localhost:29887/multi_method_resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::PATCH(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
@@ -1475,7 +1475,7 @@ TEST_F(AdvancedHttpIntegrationTest, PathParamEncoding) {
                                                                   "): Sending GET /param_test/" << encoded_param <<
                                                                   " (decoded: " << tc.first << ")" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/param_test/" + encoded_param}
+                                                              {"http://localhost:29887/param_test/" + encoded_param}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1500,7 +1500,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /query_test?name=value" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/query_test?name=value"}
+                                                              {"http://localhost:29887/query_test?name=value"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1515,7 +1515,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/query_test?name1=value1&name2=value2"
+                                                                  "http://localhost:29887/query_test?name1=value1&name2=value2"
                                                               }
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1532,7 +1532,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                                                                   encoded_query_val << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/query_test?encoded_name=" +
+                                                                  "http://localhost:29887/query_test?encoded_name=" +
                                                                   encoded_query_val
                                                               }
                                                           };
@@ -1561,7 +1561,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                                                                   "): Sending GET /specific/resource (exact)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/specific/resource"}
+                                                              {"http://localhost:29887/specific/resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1574,7 +1574,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                                                                   "): Sending GET /specific/myid123 (param)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/specific/myid123"}
+                                                              {"http://localhost:29887/specific/myid123"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1587,7 +1587,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                                                                   "): Sending GET /specific/a/b/c (wildcard)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/specific/a/b/c"}
+                                                              {"http://localhost:29887/specific/a/b/c"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1614,7 +1614,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /status_at_root" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/status_at_root"}
+                                                              {"http://localhost:29887/status_at_root"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1628,7 +1628,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                                                                   "): Sending GET /mw_chain_test/passthrough" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/mw_chain_test/passthrough"}
+                                                              {"http://localhost:29887/mw_chain_test/passthrough"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1643,7 +1643,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                                                                   "): Sending GET /mw_short_circuit_test/resource" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/mw_short_circuit_test/resource"}
+                                                              {"http://localhost:29887/mw_short_circuit_test/resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1677,7 +1677,7 @@ TEST_F(AdvancedHttpIntegrationTest, NotFoundAndHeadRequests) {
                                                                   "): Sending GET /this/path/does/not/exist" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/this/path/does/not/exist"}
+                                                              {"http://localhost:29887/this/path/does/not/exist"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
@@ -1692,7 +1692,7 @@ TEST_F(AdvancedHttpIntegrationTest, NotFoundAndHeadRequests) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending HEAD /ping" << std::endl;
                                                           qb::http::Request request{
-                                                              qb::http::method::HEAD, {"http://localhost:9877/ping"}
+                                                              qb::http::method::HEAD, {"http://localhost:29887/ping"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::HEAD(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -1723,7 +1723,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                                   std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::PUT,
-                                                              {"http://localhost:9877/api/v1/data/item789"}
+                                                              {"http://localhost:29887/api/v1/data/item789"}
                                                           };
                                                           request.add_header("Authorization", "Bearer valid_token_v1");
                                                           request.body() = "{\"value\":\"updated_data\"}";
@@ -1743,7 +1743,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::DEL,
-                                                              {"http://localhost:9877/api/v1/data/item789"}
+                                                              {"http://localhost:29887/api/v1/data/item789"}
                                                           };
                                                           request.add_header("Authorization", "Bearer valid_token_v1");
                                                           auto response = qb::http::run_sync(qb::http::DEL(request)).response;
@@ -1761,7 +1761,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::PUT,
-                                                              {"http://localhost:9877/api/v1/data/item789"}
+                                                              {"http://localhost:29887/api/v1/data/item789"}
                                                           };
                                                           request.body() = "{\"value\":\"updated_data_unauth\"}";
                                                           auto response = qb::http::run_sync(qb::http::PUT(request)).response;
@@ -1781,7 +1781,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::DEL,
-                                                              {"http://localhost:9877/api/v1/data/item789"}
+                                                              {"http://localhost:29887/api/v1/data/item789"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::DEL(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_UNAUTHORIZED, response.status());
@@ -1810,7 +1810,7 @@ TEST_F(AdvancedHttpIntegrationTest, OptionsRequestTest) {
                                                                   std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::OPTIONS,
-                                                              {"http://localhost:9877/multi_method_resource"}
+                                                              {"http://localhost:29887/multi_method_resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::OPTIONS(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
@@ -1837,7 +1837,7 @@ TEST_F(AdvancedHttpIntegrationTest, MiddlewareInducedErrorTest) {
                                                                   "): Sending GET /mw_error_test_sg/route" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
-                                                              {"http://localhost:9877/mw_error_test_sg/route"}
+                                                              {"http://localhost:29887/mw_error_test_sg/route"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -1868,7 +1868,7 @@ TEST_F(AdvancedHttpIntegrationTest, GlobalErrorHandlerForMiddlewareErrorTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
-                                                              {"http://localhost:9877/mw_error_test_sg/route"}
+                                                              {"http://localhost:29887/mw_error_test_sg/route"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -1901,7 +1901,7 @@ TEST_F(AdvancedHttpIntegrationTest, MethodNotAllowedTest) {
                                                                   "): Sending PATCH /ping (method not allowed)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              qb::http::method::PATCH, {"http://localhost:9877/ping"}
+                                                              qb::http::method::PATCH, {"http://localhost:29887/ping"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::PATCH(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
@@ -1933,7 +1933,7 @@ TEST_F(AdvancedHttpIntegrationTest, ConditionalMiddlewareFlowTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
-                                                              {"http://localhost:9877/conditional_mw_route/action"}
+                                                              {"http://localhost:29887/conditional_mw_route/action"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -1955,7 +1955,7 @@ TEST_F(AdvancedHttpIntegrationTest, ConditionalMiddlewareFlowTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
-                                                              {"http://localhost:9877/conditional_mw_route/action"}
+                                                              {"http://localhost:29887/conditional_mw_route/action"}
                                                           };
                                                           request.add_header("X-Test-Condition", "pass");
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1986,7 +1986,7 @@ TEST_F(AdvancedHttpIntegrationTest, AsyncMiddlewareTest) {
                                                                   "): Sending GET /async_mw_test/resource" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
-                                                              {"http://localhost:9877/async_mw_test/resource"}
+                                                              {"http://localhost:29887/async_mw_test/resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request, 5.0)).response;
 
@@ -2018,7 +2018,7 @@ TEST_F(AdvancedHttpIntegrationTest, NestedMiddlewareOrderAndShortCircuitTest) {
                                                                   std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
-                                                              {"http://localhost:9877/nested_mw/outer/inner/resource"}
+                                                              {"http://localhost:29887/nested_mw/outer/inner/resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -2038,7 +2038,7 @@ TEST_F(AdvancedHttpIntegrationTest, NestedMiddlewareOrderAndShortCircuitTest) {
                                                                   std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
-                                                              {"http://localhost:9877/nested_sc/outer/inner/resource"}
+                                                              {"http://localhost:29887/nested_sc/outer/inner/resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -2070,7 +2070,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                                   "): Sending GET /specific_first/static_val" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/specific_first/static_val"}
+                                                              {"http://localhost:29887/specific_first/static_val"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -2086,7 +2086,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                                   "): Sending GET /specific_first/param_val" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/specific_first/param_val"}
+                                                              {"http://localhost:29887/specific_first/param_val"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -2102,7 +2102,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                                   "): Sending GET /specific_second/static_val" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/specific_second/static_val"}
+                                                              {"http://localhost:29887/specific_second/static_val"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -2117,7 +2117,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                           std::cout << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /overlap_test/foo/bar" << std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/overlap_test/foo/bar"}
+                                                              {"http://localhost:29887/overlap_test/foo/bar"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -2133,7 +2133,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                                   "): Sending GET /overlap_test/some/other/path" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/overlap_test/some/other/path"}
+                                                              {"http://localhost:29887/overlap_test/some/other/path"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -2149,7 +2149,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                                   "): Sending GET /precedence_group/route1" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/precedence_group/route1"}
+                                                              {"http://localhost:29887/precedence_group/route1"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -2165,7 +2165,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                                   "): Sending GET /precedence_group/nested/route1" <<
                                                                   std::endl;
                                                           qb::http::Request request{
-                                                              {"http://localhost:9877/precedence_group/nested/route1"}
+                                                              {"http://localhost:29887/precedence_group/nested/route1"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -2196,7 +2196,7 @@ TEST_F(AdvancedHttpIntegrationTest, NestedStructureMiddlewareTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/level1_group/level2_nested_group/level3_controller/endpoint"
+                                                                  "http://localhost:29887/level1_group/level2_nested_group/level3_controller/endpoint"
                                                               }
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -2230,7 +2230,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/wildcard_multi/static_prefix/foo/bar/baz"
+                                                                  "http://localhost:29887/wildcard_multi/static_prefix/foo/bar/baz"
                                                               }
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -2248,7 +2248,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/wildcard_multi/static_prefix/segment1/segment2"
+                                                                  "http://localhost:29887/wildcard_multi/static_prefix/segment1/segment2"
                                                               }
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -2266,7 +2266,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/wildcard_multi/another_static/other_segments/file.txt"
+                                                                  "http://localhost:29887/wildcard_multi/another_static/other_segments/file.txt"
                                                               }
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -2289,7 +2289,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                                   << std::endl;
                                                           qb::http::Request request{
                                                               {
-                                                                  "http://localhost:9877/wildcard_multi/static_prefix/onlyone"
+                                                                  "http://localhost:29887/wildcard_multi/static_prefix/onlyone"
                                                               }
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -2315,7 +2315,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                   /* cumulative_expected_server_handler_invocations */ 9,
                                                   [&]() {
                                                       const std::string base_url =
-                                                              "http://localhost:9877/comprehensive/items";
+                                                              "http://localhost:29887/comprehensive/items";
 
                                                       // 1. GET /items (List)
                                                       {

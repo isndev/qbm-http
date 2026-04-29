@@ -63,6 +63,12 @@ set(HTTP_TESTS
         coro-integration
 )
 
+if(QBM_HTTP_HAS_HTTP3)
+    list(APPEND HTTP_TESTS
+        http3-client
+    )
+endif()
+
 # Register each standard test
 foreach (TEST ${HTTP_TESTS})
     qb_register_module_test(
@@ -70,6 +76,9 @@ foreach (TEST ${HTTP_TESTS})
         TEST_NAME ${TEST}
         SOURCES test-${TEST}.cpp
     )
+    if(QBM_HTTP_HAS_HTTP3 AND "${TEST}" STREQUAL "http3-client")
+        target_compile_definitions(qbm-http-test-${TEST} PRIVATE QBM_HTTP_HAS_HTTP3=1)
+    endif()
 endforeach ()
 
 # SSL resources are automatically copied by qb_setup_test_resources()

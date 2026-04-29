@@ -37,6 +37,8 @@ This documentation is broken down into several sections to help you understand a
     *   [HTTP/2 Specifics](./17-http2-protocol.md) (Client, Server, HPACK, Streams)
 11. **HTTPS (SSL/TLS):**
     *   [Enabling HTTPS](./18-https-ssl-tls.md) (Client & Server, Certificates, ALPN)
+12. **HTTP/3 Protocol:**
+    *   [HTTP/3 Specifics](./19-http3-protocol.md) (QUIC transport, nghttp3, client/server API)
 
 ## 🚀 Minimal Usage Example
 
@@ -110,4 +112,4 @@ This example demonstrates setting up a basic HTTP server that listens on port 80
 
 ---
 
-We encourage you to explore the detailed sections linked above to gain a comprehensive understanding of the `qb::http` module's capabilities. 
+We encourage you to explore the detailed sections linked above to gain a comprehensive understanding of the `qb::http` module's capabilities.
