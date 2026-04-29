@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <qb/io/uri.h>
 #include "body.h"
 #include "headers.h"
@@ -52,13 +53,14 @@ namespace qb::http {
             bool upgrade{};
 
             /**
-             * @brief HTTP/2 stream identifier.
+             * @brief HTTP stream identifier.
              * 
              * For HTTP/2 requests/responses, this contains the stream ID (odd for client-initiated,
-             * even for server-initiated). For HTTP/1.1, this is 0.
+             * even for server-initiated). For HTTP/3, this contains the QUIC stream ID.
+             * For HTTP/1.1, this is 0.
              * This avoids the need for string conversions and provides type safety.
              */
-            uint32_t stream_id{0};
+            std::uint64_t stream_id{0};
 
             /**
              * @brief Default constructor.

@@ -243,7 +243,7 @@ class HttpBasicIntegrationTest : public ::testing::Test {
 protected:
     std::unique_ptr<BasicIntegrationServer> _server;
     std::thread _server_thread;
-    static const int SERVER_PORT = 9876;
+    static const int SERVER_PORT = 29876;
 
     // Per-test-case setup
     void SetUp() override {
@@ -352,7 +352,7 @@ TEST_F(HttpBasicIntegrationTest, GetRequest) {
     expected_server_assertions = 0; // No specific server-side data checks here, only request count
     MakeClientRequest([] {
         std::cout << "Client: Sending GET request to /test" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/test"}};
+        qb::http::Request request{{"http://localhost:29876/test"}};
         request.add_header("User-Agent", "Integration-Test/1.0");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         std::cout << "Client: Received GET response status: " << response.status() << std::endl;
@@ -366,7 +366,7 @@ TEST_F(HttpBasicIntegrationTest, PostRequest) {
     expected_server_assertions = 1; // For body content check
     MakeClientRequest([] {
         std::cout << "Client: Sending POST request to /test" << std::endl;
-        qb::http::Request request{qb::http::method::POST, {"http://localhost:9876/test"}};
+        qb::http::Request request{qb::http::method::POST, {"http://localhost:29876/test"}};
         request.add_header("Content-Type", "application/json");
         request.body() = "{\"test\": \"data\"}";
         auto response = qb::http::run_sync(qb::http::POST(request)).response;
@@ -381,7 +381,7 @@ TEST_F(HttpBasicIntegrationTest, PutRequestWithParam) {
     expected_server_assertions = 1; // For ID check
     MakeClientRequest([] {
         std::cout << "Client: Sending PUT request to /test/123" << std::endl;
-        qb::http::Request request{qb::http::method::PUT, {"http://localhost:9876/test/123"}};
+        qb::http::Request request{qb::http::method::PUT, {"http://localhost:29876/test/123"}};
         auto response = qb::http::run_sync(qb::http::PUT(request)).response;
         std::cout << "Client: Received PUT response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -393,7 +393,7 @@ TEST_F(HttpBasicIntegrationTest, DeleteRequestWithParam) {
     expected_server_assertions = 1; // For ID check
     MakeClientRequest([] {
         std::cout << "Client: Sending DELETE request to /test/456" << std::endl;
-        qb::http::Request request{qb::http::method::DEL, {"http://localhost:9876/test/456"}};
+        qb::http::Request request{qb::http::method::DEL, {"http://localhost:29876/test/456"}};
         auto response = qb::http::run_sync(qb::http::DEL(request)).response;
         std::cout << "Client: Received DELETE response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_NO_CONTENT, response.status());
@@ -405,7 +405,7 @@ TEST_F(HttpBasicIntegrationTest, GetWithQueryParameters) {
     expected_server_assertions = 1; // For query params check
     MakeClientRequest([] {
         std::cout << "Client: Sending GET request with query parameters" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/query?name=test&age=25&sort=asc"}};
+        qb::http::Request request{{"http://localhost:29876/query?name=test&age=25&sort=asc"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         std::cout << "Client: Received query params response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -418,7 +418,7 @@ TEST_F(HttpBasicIntegrationTest, GetErrorRoute) {
     expected_server_assertions = 0; // No specific data check on server side for this other than count
     MakeClientRequest([] {
         std::cout << "Client: Sending GET request to /error" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/error"}};
+        qb::http::Request request{{"http://localhost:29876/error"}};
         auto response = qb::http::run_sync(qb::http::GET(request, 5.0)).response;
         std::cout << "Client: Received ERROR response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_INTERNAL_SERVER_ERROR, response.status());
@@ -430,7 +430,7 @@ TEST_F(HttpBasicIntegrationTest, GetSyncRouteWithComplete) {
     expected_server_assertions = 0; // No specific data check
     MakeClientRequest([] {
         std::cout << "Client: Sending GET request to /sync-no-complete" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/sync-no-complete"}};
+        qb::http::Request request{{"http://localhost:29876/sync-no-complete"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         std::cout << "Client: Received SYNC-NO-COMPLETE response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -443,7 +443,7 @@ TEST_F(HttpBasicIntegrationTest, GetAsyncRoute) {
     expected_server_assertions = 0; // No specific data check
     MakeClientRequest([] {
         std::cout << "Client: Sending GET request to /async" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/async"}};
+        qb::http::Request request{{"http://localhost:29876/async"}};
         // Increased timeout for async response
         auto response = qb::http::run_sync(qb::http::GET(request, 5.0)).response;
         std::cout << "Client: Received ASYNC response status: " << response.status() << std::endl;
@@ -457,7 +457,7 @@ TEST_F(HttpBasicIntegrationTest, GetRouteGroup) {
     expected_server_assertions = 0; // No specific data check
     MakeClientRequest([] {
         std::cout << "Client: Testing route group - sending request to /api/v1/status" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/api/v1/status"}};
+        qb::http::Request request{{"http://localhost:29876/api/v1/status"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         std::cout << "Client: Received group route response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -470,7 +470,7 @@ TEST_F(HttpBasicIntegrationTest, CookieSetting) {
     expected_server_assertions = 1; // For server-side increment on cookie set path
     MakeClientRequest([] {
         std::cout << "Client: Testing cookie setting" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/cookie-set"}};
+        qb::http::Request request{{"http://localhost:29876/cookie-set"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         std::cout << "Client: Received cookie-set response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -489,7 +489,7 @@ TEST_F(HttpBasicIntegrationTest, CookieReading) {
     expected_server_assertions = 1; // For server-side validation of cookie value
     MakeClientRequest([] {
         std::cout << "Client: Testing cookie reading" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/cookie-read"}};
+        qb::http::Request request{{"http://localhost:29876/cookie-read"}};
         request.add_header("Cookie", "test_cookie=cookie_value");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         std::cout << "Client: Received cookie-read response status: " << response.status() << std::endl;
@@ -502,7 +502,7 @@ TEST_F(HttpBasicIntegrationTest, JsonContentType) {
     expected_server_assertions = 1; // For server-side increment on /json path
     MakeClientRequest([] {
         std::cout << "Client: Testing JSON response" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/json"}};
+        qb::http::Request request{{"http://localhost:29876/json"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         std::cout << "Client: Received JSON response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
@@ -518,7 +518,7 @@ TEST_F(HttpBasicIntegrationTest, RequestHeadersEcho) {
     expected_server_assertions = 1; // For server-side validation of custom header
     MakeClientRequest([] {
         std::cout << "Client: Testing headers echo" << std::endl;
-        qb::http::Request request{{"http://localhost:9876/echo-headers"}};
+        qb::http::Request request{{"http://localhost:29876/echo-headers"}};
         request.add_header("X-Custom-Header", "test-value");
         request.add_header("User-Agent", "Echo-Headers-Test/1.0");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;

@@ -34,6 +34,7 @@
  */
 #pragma once
 #include <filesystem>
+#include <limits>
 #include <utility>  // For std::to_underlying (C++23)
 #include <qb/io/protocol/handshake.h>
 // Re-using HTTP/1.1 Request/Response structures as a base
@@ -161,7 +162,11 @@ namespace qb::http2 {
              */
             auto &operator<<(qb::http::Response &res) {
                 if (_http2_protocol) {
-                    const uint32_t stream_id = res.stream_id;
+                    if (res.stream_id > std::numeric_limits<uint32_t>::max()) {
+                        LOG_HTTP_ERROR_PA(this->id(), "HTTP/2 response stream_id is too large: " << res.stream_id);
+                        return this->out();
+                    }
+                    const uint32_t stream_id = static_cast<uint32_t>(res.stream_id);
                     if (!is_valid_http2_stream_id(stream_id)) {
                         LOG_HTTP_ERROR_PA(this->id(), "HTTP/2 response with stream_id " << stream_id << " is invalid (stream_id 0 is reserved for HTTP/1.1)");
                         return this->out();

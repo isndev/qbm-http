@@ -189,18 +189,21 @@ class HostHeaderCaptureServer : public qb::http::use<HostHeaderCaptureServer>::s
 std::string HostHeaderCaptureClient::captured_host_header;
 
 TEST(Session, HTTP_CLIENT_SETS_HOST_HEADER_WITH_NON_DEFAULT_PORT) {
+    constexpr unsigned short kPort = 29889;
+
     async::init();
     HostHeaderCaptureClient::captured_host_header.clear();
 
     HostHeaderCaptureServer server;
-    server.transport().listen_v4(9987);
+    server.transport().listen_v4(kPort);
     server.start();
 
-    qb::http::Request req{{"http://localhost:9987/host-check"}};
+    qb::http::Request req{{"http://localhost:" + std::to_string(kPort) + "/host-check"}};
     auto reply = qb::http::run_sync(qb::http::GET(req, 3.0));
 
     EXPECT_EQ(reply.response.status(), HTTP_STATUS_OK);
-    EXPECT_EQ(HostHeaderCaptureClient::captured_host_header, "localhost:9987");
+    EXPECT_EQ(HostHeaderCaptureClient::captured_host_header,
+              "localhost:" + std::to_string(kPort));
 }
 
 TEST(Session, HTTP_HOST_HEADER_FORMATS_IPV6_WITH_BRACKETS) {
@@ -310,6 +313,8 @@ public:
 };
 
 TEST(Session, HTTP_OVER_TCP) {
+    constexpr unsigned short kPort = 29890;
+
     async::init();
 
     auto res = qb::http::run_sync(qb::http::GET(qb::http::Request{{"https://isndev.com"}})).response;
@@ -318,22 +323,22 @@ TEST(Session, HTTP_OVER_TCP) {
     msg_count_client_side = 0;
 
     TestServer server;
-    server.transport().listen_v4(9999);
+    server.transport().listen_v4(kPort);
     server.start();
 
-    std::thread t([]() {
+    std::thread t([kPort]() {
         async::init();
         TestClient client;
-        if (SocketStatus::Done != client.transport().connect_v4("127.0.0.1", 9999)) {
+        if (SocketStatus::Done != client.transport().connect_v4("127.0.0.1", kPort)) {
             throw std::runtime_error("could not connect");
         }
         client.start();
 
         qb::http::Request r{
             HTTP_GET,
-            {"http://www.isndev.test:9999/?happy=true"},
+            {"http://www.isndev.test:" + std::to_string(kPort) + "/?happy=true"},
             {
-                {"Host", {"www.isndev.test:9999"}},
+                {"Host", {"www.isndev.test:" + std::to_string(kPort)}},
                 {"Connection", {"keep-alive"}},
                 {"Transfer-Encoding", {"chunked"}}
             }
@@ -355,21 +360,23 @@ TEST(Session, HTTP_OVER_TCP) {
 }
 
 TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
+    constexpr unsigned short kPort = 29891;
+
     async::init();
     msg_count_server_side = 0;
     msg_count_client_side = 0;
 
     TestServer server;
-    server.transport().listen_v4(9999);
+    server.transport().listen_v4(kPort);
     server.start();
 
-    std::thread t([]() {
+    std::thread t([kPort]() {
         async::init();
 
         qb::http::Request r{
-            {"http://localhost:9999/?happy=true"},
+            {"http://localhost:" + std::to_string(kPort) + "/?happy=true"},
             {
-                {"Host", {"www.isndev.test:9999"}},
+                {"Host", {"www.isndev.test:" + std::to_string(kPort)}},
                 {"Connection", {"keep-alive"}},
                 {"Authorization", {"None"}}
             },
@@ -449,6 +456,8 @@ public:
 };
 
 TEST(Session, HTTP_OVER_SECURE_TCP) {
+    constexpr unsigned short kPort = 29892;
+
     async::init();
 
     const auto cert_path = ssl_test_resource("cert.pem");
@@ -468,24 +477,25 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
             SSLv23_server_method(),
             cert_path.string(),
             key_path.string()));
-    ASSERT_EQ(server.transport().listen_v6(9999), 0);
+    ASSERT_EQ(server.transport().listen_v6(kPort), 0);
     server.start();
 
     std::exception_ptr worker_error;
-    std::thread t([&worker_error, kSslSessionBudget]() {
+    std::thread t([&worker_error, kSslSessionBudget, kPort]() {
         try {
             async::init();
             TestSecureClient client;
             if (SocketStatus::Done !=
-                client.transport().connect(uri{"tcp://[::1]:9999", AF_INET6})) {
+                client.transport().connect(
+                    uri{"tcp://[::1]:" + std::to_string(kPort), AF_INET6})) {
                 throw std::runtime_error("could not connect");
             }
             client.start();
 
             qb::http::Request r{
                 HTTP_GET,
-                {"http://www.isndev.test:9999/?happy=true"},
-                {{"Host", {"www.isndev.test:9999"}}, {"Connection", {"keep-alive"}}},
+                {"http://www.isndev.test:" + std::to_string(kPort) + "/?happy=true"},
+                {{"Host", {"www.isndev.test:" + std::to_string(kPort)}}, {"Connection", {"keep-alive"}}},
                 {STRING_MESSAGE}
             };
 

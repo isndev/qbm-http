@@ -113,7 +113,7 @@ class Http2ClientIntegrationTest : public ::testing::Test {
 protected:
     std::unique_ptr<Http2IntegrationServer> _server;
     std::thread _server_thread;
-    static const int SERVER_PORT = 9877; // Different port from HTTP/1.1 tests
+    static const int SERVER_PORT = 29877; // Keep isolated from parallel HTTP/1.1 integration tests.
     const char* CERT_FILE = "cert.pem"; 
     const char* KEY_FILE  = "key.pem";
 
@@ -432,4 +432,4 @@ TEST_F(Http2ClientIntegrationTest, ErrorHandling) {
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
-} 
+}

@@ -78,10 +78,64 @@ public:
 TEST(Http2ClientConfigTest, RejectsPlainHttpBaseUri) {
     EXPECT_THROW(
         {
-            auto client = qb::http2::make_client("http://localhost:19877");
+            auto client = qb::http2::make_client("http://localhost:29881");
             (void)client;
         },
         std::invalid_argument);
+}
+
+TEST(Http2ClientConfigTest, RejectsPlainHttpAbsoluteRequestWithoutConnecting) {
+    auto client = qb::http2::make_client("https://localhost:1");
+    client->set_connect_timeout(0.01);
+
+    bool done = false;
+    qb::http::Response response;
+    qb::http::Request request{qb::io::uri("http://localhost:1/plain")};
+    ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
+        response = std::move(res);
+        done = true;
+    }));
+
+    EXPECT_TRUE(done);
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(response.body().template as<std::string>(), "HTTP/2 request URI must use https");
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 1u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 1u);
+}
+
+TEST(Http2ClientConfigTest, BatchRejectsInvalidSchemesWithoutConnecting) {
+    auto client = qb::http2::make_client("https://localhost:1");
+    client->set_connect_timeout(0.01);
+
+    std::vector<qb::http::Request> requests;
+    requests.emplace_back(qb::io::uri("http://localhost:1/plain"));
+    requests.emplace_back(qb::io::uri("ws://localhost:1/ws"));
+
+    bool done = false;
+    std::vector<qb::http::Response> responses;
+    ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
+        responses = std::move(res);
+        done = true;
+    }));
+
+    ASSERT_TRUE(done);
+    ASSERT_EQ(responses.size(), 2u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(responses[0].body().template as<std::string>(), "HTTP/2 request URI must use https");
+    EXPECT_EQ(responses[1].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(responses[1].body().template as<std::string>(), "HTTP/2 request URI must use https");
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 2u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 2u);
 }
 
 TEST(Http2ClientReentrancyTest, BatchCallbackMayQueueAnotherBatchAcrossFailurePasses) {
@@ -138,7 +192,7 @@ TEST(Http2ClientLifetimeTest, ConnectAwaiterReturnsErrorWhenClientExpiresBeforeA
 
 class CoroH2ClientTest : public ::testing::Test {
 protected:
-    static constexpr int kPort   = 19877;
+    static constexpr int kPort   = 29881;
     const char*          kCert   = "cert.pem";
     const char*          kKey    = "key.pem";
 
@@ -200,6 +254,40 @@ TEST_F(CoroH2ClientTest, ConnectAwaiterYieldsConnectResult) {
     auto result = qb::http::run_sync(client->connect());
     ASSERT_TRUE(result) << "expected successful connect, got: " << result.error_message;
     EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(client->is_connected());
+}
+
+TEST_F(CoroH2ClientTest, MultipleConnectCallbacksShareOneHandshake) {
+    if (IsSkipped()) return;
+    auto client = qb::http2::make_client(url());
+    client->set_connect_timeout(5.0);
+
+    std::atomic<int> callbacks{0};
+    std::atomic<int> successes{0};
+    std::vector<std::string> errors(2);
+
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string& error) {
+        ++callbacks;
+        if (ok) ++successes;
+        errors[0] = error;
+    }));
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string& error) {
+        ++callbacks;
+        if (ok) ++successes;
+        errors[1] = error;
+    }));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (callbacks.load(std::memory_order_acquire) != 2 &&
+           std::chrono::steady_clock::now() < deadline) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    EXPECT_EQ(callbacks.load(), 2);
+    EXPECT_EQ(successes.load(), 2);
+    EXPECT_TRUE(errors[0].empty());
+    EXPECT_TRUE(errors[1].empty());
     EXPECT_TRUE(client->is_connected());
 }
 

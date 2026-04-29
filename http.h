@@ -39,4 +39,9 @@
 #define QB_MODULE_HTTP_H_
 #include "./1.1/http.h"
 #include "./2/http2.h"
+#ifdef QBM_HTTP_HAS_HTTP3
+#include "./3/http3.h"
+#include "./3/client.h"
+#include "./3/dual_stack.h"
+#endif
 #endif // QB_MODULE_HTTP_H_
