@@ -46,6 +46,7 @@ set(HTTP_TESTS
         middleware-validator
         middleware-static-files
         http2-header-validator
+        http1-client
         session-http
         integration-basic
         integration-advanced

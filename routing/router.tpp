@@ -18,7 +18,13 @@ namespace qb::http {
               if (auto session_ptr = ctx.session()) {
                   // Ensure session is still valid
                   ctx.execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND); // Allow final header mods
-                  (*session_ptr) << ctx.response(); // Assumes SessionType has send_response()
+                  if constexpr (requires(SessionType &session, Context<SessionType> &context) {
+                      session.send_response(context);
+                  }) {
+                      session_ptr->send_response(ctx);
+                  } else {
+                      (*session_ptr) << ctx.response();
+                  }
                   // POST_RESPONSE_SEND hook would typically be called after this, by the session or IO layer upon write completion.
               } else {
                   // Log warning if session is null: session might have disconnected before response could be sent.
