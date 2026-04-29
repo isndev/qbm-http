@@ -35,6 +35,7 @@
 #include <cstring> // For memcpy
 #include <algorithm> // For std::min
 #include <optional>
+#include <limits>
 
 #include <qb/io/async/protocol.h> // For qb::io::async::AProtocol
 #include <qb/io/uri.h>   // For qb::io::uri
@@ -44,6 +45,7 @@
 
 #include "../../request.h" // For qb::http::Request
 #include "../../response.h" // For qb::http::Response
+#include "../../1.1/protocol/base.h" // For shared HTTP body/header security limits
 #include "./stream.h"
 
 /**
@@ -80,8 +82,11 @@ namespace qb::http2::protocol_limits {
     /** @brief Minimum frame size (16,384 octets) - allows 9-byte header + 1 payload */
     constexpr std::size_t MIN_FRAME_SIZE = 16384;
     
-    /** @brief Maximum header list size ( advisory only in HTTP/2) */
+    /** @brief Maximum header list size (advisory only in HTTP/2) */
     constexpr std::size_t MAX_HEADER_LIST_SIZE = 1024 * 1024; // 1MB
+
+    /** @brief Maximum encoded header block bytes across HEADERS + CONTINUATION */
+    constexpr std::size_t MAX_HEADER_BLOCK_SIZE = MAX_HEADER_LIST_SIZE;
     
     /** @brief Maximum HPack dynamic table size */
     constexpr std::size_t MAX_HEADER_TABLE_SIZE = 4 * 1024 * 1024; // 4MB
@@ -394,7 +399,7 @@ public:
      * @param headers List of header fields
      * @return true if order is valid
      */
-    static bool validate_pseudo_header_order(const std::vector<qb::protocol::hpack::HeaderField>& headers) {
+    [[nodiscard]] static bool validate_pseudo_header_order(const std::vector<qb::protocol::hpack::HeaderField>& headers) noexcept {
         bool regular_header_seen = false;
         
         for (const auto& header : headers) {
@@ -407,6 +412,28 @@ public:
             }
         }
         return true;
+    }
+
+    /**
+     * @brief Parse a strict HTTP content-length value.
+     */
+    [[nodiscard]] static std::optional<std::uint64_t> parse_content_length(std::string_view value) noexcept {
+        value = qb::http::utility::trim_http_whitespace(value);
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        std::uint64_t parsed = 0;
+        for (unsigned char c : value) {
+            if (c < '0' || c > '9') {
+                return std::nullopt;
+            }
+            const auto digit = static_cast<std::uint64_t>(c - '0');
+            if (parsed > (std::numeric_limits<std::uint64_t>::max() - digit) / 10) {
+                return std::nullopt;
+            }
+            parsed = parsed * 10 + digit;
+        }
+        return parsed;
     }
 
     /**
@@ -787,6 +814,8 @@ protected:
     std::optional<ErrorCode> _last_error_code;
     uint32_t _last_peer_initiated_stream_id_processed_in_goaway = 0;
     uint32_t _peer_max_frame_size = qb::protocol::http2::DEFAULT_MAX_FRAME_SIZE;
+    bool _continuation_required = false;
+    uint32_t _continuation_stream_id = 0;
 
 public:
     /**
@@ -926,6 +955,18 @@ public:
                 std::memcpy(&_current_frame_header, in_buffer.cbegin(), FRAME_HEADER_SIZE);
 
                 _expected_payload_bytes = _current_frame_header.get_payload_length();
+
+                if (_continuation_required) {
+                    if (_current_frame_header.get_type() != FrameType::CONTINUATION ||
+                        _current_frame_header.get_stream_id() != _continuation_stream_id) {
+                        this->not_ok(ErrorCode::PROTOCOL_ERROR);
+                        static_cast<SideProtocol*>(this)->handle_framer_detected_error(
+                            ErrorCode::PROTOCOL_ERROR,
+                            "Expected CONTINUATION frame for stream " + std::to_string(_continuation_stream_id),
+                            _continuation_stream_id);
+                        return;
+                    }
+                }
                 
                 // Validate SETTINGS frames on stream 0
                 if (_current_frame_header.get_type() == FrameType::SETTINGS && 
@@ -1000,9 +1041,58 @@ public:
         _preface_buffer.clear();
         _expected_payload_bytes = 0;
         _last_error_code.reset();
+        _continuation_required = false;
+        _continuation_stream_id = 0;
     }
 
-protected: 
+protected:
+    [[nodiscard]] bool send_headers_with_continuation(uint32_t stream_id,
+                                                       uint8_t first_frame_flags,
+                                                       std::vector<uint8_t>&& encoded_header_block) noexcept {
+        const auto max_fragment_size =
+            static_cast<std::size_t>(std::max<uint32_t>(1, this->get_peer_max_frame_size()));
+        std::size_t offset = 0;
+        bool first_frame = true;
+
+        do {
+            const std::size_t remaining = encoded_header_block.size() - offset;
+            const std::size_t fragment_size = std::min(max_fragment_size, remaining);
+            const bool last_fragment = (offset + fragment_size) == encoded_header_block.size();
+            const auto fragment_begin = encoded_header_block.begin() + offset;
+            const auto fragment_end = fragment_begin + fragment_size;
+
+            if (first_frame) {
+                Http2FrameData<HeadersFrame> headers_frame_data;
+                headers_frame_data.header.type = static_cast<uint8_t>(FrameType::HEADERS);
+                headers_frame_data.header.flags = first_frame_flags;
+                if (last_fragment) {
+                    headers_frame_data.header.flags |= FLAG_END_HEADERS;
+                } else {
+                    headers_frame_data.header.flags &= static_cast<uint8_t>(~FLAG_END_HEADERS);
+                }
+                headers_frame_data.header.set_stream_id(stream_id);
+                headers_frame_data.payload.header_block_fragment.assign(fragment_begin, fragment_end);
+                this->_io << headers_frame_data;
+            } else {
+                Http2FrameData<ContinuationFrame> continuation_frame_data;
+                continuation_frame_data.header.type = static_cast<uint8_t>(FrameType::CONTINUATION);
+                continuation_frame_data.header.flags = last_fragment ? FLAG_END_HEADERS : 0;
+                continuation_frame_data.header.set_stream_id(stream_id);
+                continuation_frame_data.payload.header_block_fragment.assign(fragment_begin, fragment_end);
+                this->_io << continuation_frame_data;
+            }
+
+            if (!this->ok()) {
+                return false;
+            }
+
+            offset += fragment_size;
+            first_frame = false;
+        } while (offset < encoded_header_block.size());
+
+        return true;
+    }
+
     /**
      * @brief Set protocol to error state without specific reason
      */
@@ -1418,6 +1508,10 @@ private:
         std::size_t header_block_size = p_len - pad_length;
         headers_f.payload.header_block_fragment.assign(p_data, p_data + header_block_size);
         static_cast<SideProtocol*>(this)->on(std::move(headers_f));
+        if (this->ok()) {
+            _continuation_required = (_current_frame_header.flags & FLAG_END_HEADERS) == 0;
+            _continuation_stream_id = _continuation_required ? _current_frame_header.get_stream_id() : 0;
+        }
         return true;
     }
 
@@ -1507,8 +1601,12 @@ private:
         p_data += 4;
         p_len -= 4;
         pp_f.payload.header_block_fragment.assign(p_data, p_data + (p_len - pad_length));
-        
+
         static_cast<SideProtocol*>(this)->on(std::move(pp_f));
+        if (this->ok()) {
+            _continuation_required = (_current_frame_header.flags & FLAG_END_HEADERS) == 0;
+            _continuation_stream_id = _continuation_required ? _current_frame_header.get_stream_id() : 0;
+        }
         return true;
     }
 
@@ -1581,8 +1679,12 @@ private:
         Http2FrameData<ContinuationFrame> cont_f;
         cont_f.header = _current_frame_header;
         cont_f.payload.header_block_fragment.assign(payload_data, payload_data + payload_size);
-        
+
         static_cast<SideProtocol*>(this)->on(std::move(cont_f));
+        if (this->ok() && (_current_frame_header.flags & FLAG_END_HEADERS)) {
+            _continuation_required = false;
+            _continuation_stream_id = 0;
+        }
         return true;
     }
 

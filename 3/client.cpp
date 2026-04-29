@@ -256,6 +256,7 @@ void Client::process_pending_requests() {
         ctx->stream_id = stream.id();
         const auto stream_id = ctx->stream_id;
         if (!_h3->submit_request(stream_id, ctx->request)) {
+            reset_stream(0, stream_id, 0x0105);
             ++_failed_requests;
             ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
                                                 "Failed to submit HTTP/3 request"));

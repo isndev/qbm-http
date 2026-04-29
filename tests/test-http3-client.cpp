@@ -683,6 +683,36 @@ TEST(Http3ClientIntegrationTest, HeadResponseKeepsHeadersButNoBody) {
     server->close();
 }
 
+TEST(Http3ClientIntegrationTest, NotModifiedResponseAllowsContentLengthMetadata) {
+    if (!certs_available()) {
+        GTEST_SKIP() << "test TLS certificates are unavailable";
+    }
+
+    qb::io::async::init();
+
+    auto server = qb::http3::make_server();
+    server->router().get("/metadata-304", [](auto ctx) {
+        ctx->response().status() = qb::http::status::NOT_MODIFIED;
+        ctx->response().set_header("content-length", "123");
+        ctx->complete();
+    });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31995"), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client("https://127.0.0.1:31995");
+    client->set_verify_peer(false);
+
+    auto response = qb::http::run_sync(client->push_request(qb::http::Request{qb::io::uri("/metadata-304")}));
+
+    EXPECT_EQ(response.status(), qb::http::status::NOT_MODIFIED);
+    EXPECT_EQ(response.header("content-length"), "123");
+    EXPECT_TRUE(response.body().empty());
+
+    client->disconnect();
+    server->close();
+}
+
 TEST(Http3ClientIntegrationTest, QueryAndRepeatedHeadersRoundTrip) {
     if (!certs_available()) {
         GTEST_SKIP() << "test TLS certificates are unavailable";
@@ -1689,6 +1719,75 @@ TEST(Http3ClientIntegrationTest, ServerRejectsRequestContentLengthMismatch) {
 
     ASSERT_TRUE(done.load());
     EXPECT_NE(response.status(), qb::http::status::OK);
+
+    client->disconnect();
+    server->close();
+}
+
+TEST(Http3ClientIntegrationTest, ClientRejectsOutgoingRequestContentLengthMismatchBeforeRouter) {
+    if (!certs_available()) {
+        GTEST_SKIP() << "test TLS certificates are unavailable";
+    }
+
+    qb::io::async::init();
+
+    auto server = qb::http3::make_server();
+    std::atomic<int> server_requests{0};
+    server->router().post("/length", [&server_requests](auto ctx) {
+        ++server_requests;
+        ctx->response().body() = "unexpected";
+        ctx->complete();
+    });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31996"), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client("https://127.0.0.1:31996");
+    client->set_verify_peer(false);
+
+    qb::http::Request request{qb::http::method::POST, qb::io::uri("/length")};
+    request.set_header("content-length", "1");
+    request.body() = "abc";
+
+    auto response = qb::http::run_sync(client->push_request(std::move(request)));
+
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(server_requests.load(), 0);
+
+    client->disconnect();
+    server->close();
+}
+
+TEST(Http3ClientIntegrationTest, ClientRejectsOutgoingRequestContentLengthWithOWSBeforeRouter) {
+    if (!certs_available()) {
+        GTEST_SKIP() << "test TLS certificates are unavailable";
+    }
+
+    qb::io::async::init();
+
+    auto server = qb::http3::make_server();
+    std::atomic<int> server_requests{0};
+    server->router().post("/length-ows", [&server_requests](auto ctx) {
+        ++server_requests;
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body() = ctx->request().body().template as<std::string>();
+        ctx->complete();
+    });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31997"), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client("https://127.0.0.1:31997");
+    client->set_verify_peer(false);
+
+    qb::http::Request request{qb::http::method::POST, qb::io::uri("/length-ows")};
+    request.set_header("content-length", " 3\t");
+    request.body() = "abc";
+
+    auto response = qb::http::run_sync(client->push_request(std::move(request)));
+
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(server_requests.load(), 0);
 
     client->disconnect();
     server->close();

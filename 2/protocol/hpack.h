@@ -845,11 +845,13 @@ public:
         out_headers.clear();
 
         _stats.bytes_decoded += encoded_block.size();
+        bool dynamic_table_size_updates_allowed = true;
 
         while (current_pos < end_pos) {
             uint8_t first_byte = *current_pos;
 
             if (first_byte >> 7 == 1) { // Indexed Header Field (1xxxxxxx)
+                dynamic_table_size_updates_allowed = false;
                 auto [index, index_len] = decode_integer(current_pos, end_pos, 7);
                 if (index_len < 0) { out_is_possibly_incomplete = true; return false; }
 
@@ -863,6 +865,7 @@ public:
                 current_header_list_size_check += out_headers.back().hpack_size();
 
             } else if (first_byte >> 6 == 0b01) { // Literal Header Field with Incremental Indexing (01xxxxxx)
+                dynamic_table_size_updates_allowed = false;
                 auto [index, index_len] = decode_integer(current_pos, end_pos, 6);
                 if (index_len < 0) { out_is_possibly_incomplete = true; return false; }
 
@@ -887,6 +890,7 @@ public:
                 add_to_dynamic_table(std::move(name), std::move(value));
 
             } else if (first_byte >> 4 == 0b0000) { // Literal Header Field without Indexing (0000xxxx)
+                dynamic_table_size_updates_allowed = false;
                 auto [index, index_len] = decode_integer(current_pos, end_pos, 4);
                 if (index_len < 0) { out_is_possibly_incomplete = true; return false; }
 
@@ -908,6 +912,7 @@ public:
                 out_headers.emplace_back(std::move(name), std::move(value));
 
             } else if (first_byte >> 4 == 0b0001) { // Literal Header Field never Indexed (0001xxxx)
+                dynamic_table_size_updates_allowed = false;
                 auto [index, index_len] = decode_integer(current_pos, end_pos, 4);
                 if (index_len < 0) { out_is_possibly_incomplete = true; return false; }
                 
@@ -931,6 +936,9 @@ public:
                 out_headers.push_back(std::move(field));
 
             } else if (first_byte >> 5 == 0b001) { // Dynamic Table Size Update (001xxxxx)
+                if (!dynamic_table_size_updates_allowed) {
+                    return false;
+                }
                 auto [new_max_size, size_len] = decode_integer(current_pos, end_pos, 5);
                 if (size_len < 0) { out_is_possibly_incomplete = true; return false; }
 

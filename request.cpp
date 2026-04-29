@@ -1,8 +1,13 @@
 #include "./request.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
+#include "./chunk.h"
 
+#include <charconv>
+#include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace qb::allocator {
     namespace {
@@ -11,13 +16,68 @@ namespace qb::allocator {
                 && value.size() <= qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH;
         }
 
-        [[nodiscard]] bool transfer_encoding_contains_chunked(const std::string &value) {
-            for (const auto &token: qb::http::utility::split_string<std::string>(value, ",")) {
-                if (qb::http::utility::iequals(qb::http::utility::trim_http_whitespace(token), "chunked")) {
-                    return true;
+        struct transfer_encoding_result {
+            bool ok = true;
+            bool chunked = false;
+        };
+
+        [[nodiscard]] std::optional<std::uint64_t> parse_content_length(std::string_view value) noexcept {
+            value = qb::http::utility::trim_http_whitespace(value);
+            if (value.empty()) {
+                return std::nullopt;
+            }
+            std::uint64_t parsed = 0;
+            const auto *begin = value.data();
+            const auto *end = value.data() + value.size();
+            const auto [ptr, ec] = std::from_chars(begin, end, parsed);
+            if (ec != std::errc{} || ptr != end) {
+                return std::nullopt;
+            }
+            return parsed;
+        }
+
+        template <typename Message>
+        [[nodiscard]] std::optional<std::uint64_t> declared_content_length(Message const& msg) {
+            auto it = msg.headers().find("Content-Length");
+            if (it == msg.headers().end()) {
+                return std::nullopt;
+            }
+            std::optional<std::uint64_t> parsed_length;
+            for (const auto& raw : it->second) {
+                const auto parsed = parse_content_length(raw);
+                if (!parsed || (parsed_length && *parsed_length != *parsed)) {
+                    throw std::length_error("qb::http::Request serialization: invalid or conflicting Content-Length header.");
+                }
+                parsed_length = *parsed;
+            }
+            return parsed_length;
+        }
+
+        template <typename Message>
+        [[nodiscard]] transfer_encoding_result transfer_encoding(Message const& msg) noexcept {
+            auto it = msg.headers().find("Transfer-Encoding");
+            if (it == msg.headers().end()) {
+                return {};
+            }
+
+            std::vector<std::string> tokens;
+            for (const auto& value : it->second) {
+                for (auto token : qb::http::utility::split_string<std::string>(value, ",")) {
+                    token = std::string(qb::http::utility::trim_http_whitespace(token));
+                    if (!token.empty()) {
+                        tokens.emplace_back(std::move(token));
+                    }
                 }
             }
-            return false;
+
+            if (tokens.empty()) {
+                return {false, false};
+            }
+
+            if (tokens.size() == 1 && qb::http::utility::iequals(tokens.front(), "chunked")) {
+                return {true, true};
+            }
+            return {false, false};
         }
     }
 
@@ -122,13 +182,33 @@ namespace qb::allocator {
         
         // Body
         const auto length = r.body().size();
-        const auto is_chunked = transfer_encoding_contains_chunked(r.header("Transfer-Encoding"));
-        if (length && !is_chunked) {
-            if (!r.has_header("Content-Length")) {
-                *this << "content-length: " << length << qb::http::endl;
+        const auto transfer = transfer_encoding(r);
+        if (!transfer.ok) {
+            this->clear();
+            throw std::length_error("qb::http::Request serialization: unsupported or malformed Transfer-Encoding.");
+        }
+        const auto content_length = declared_content_length(r);
+        if (transfer.chunked && content_length) {
+            this->clear();
+            throw std::length_error("qb::http::Request serialization: Content-Length is forbidden with Transfer-Encoding.");
+        }
+        if (!transfer.chunked && content_length && *content_length != length) {
+            this->clear();
+            throw std::length_error("qb::http::Request serialization: Content-Length does not match body size.");
+        }
+
+        if (length) {
+            if (transfer.chunked) {
+                *this << qb::http::endl
+                      << qb::http::Chunk(r.body().raw().begin(), length)
+                      << qb::http::Chunk();
+            } else {
+                if (!content_length) {
+                    *this << "content-length: " << length << qb::http::endl;
+                }
+                *this << qb::http::endl
+                        << r.body().raw();
             }
-            *this << qb::http::endl
-                    << r.body().raw();
         } else
             *this << qb::http::endl;
         return *this;

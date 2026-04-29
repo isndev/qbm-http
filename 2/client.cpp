@@ -117,6 +117,8 @@ void Client::disconnect() {
     _is_connected = false;
     _is_connecting = false;
     _handshake_completed = false;
+    _received_graceful_goaway = false;
+    _preserve_pending_on_next_disconnect = false;
     _h2_protocol = nullptr;
     
     // Fail all active requests
@@ -321,7 +323,7 @@ void Client::start_connection() {
 }
 
 void Client::process_pending_requests() {
-    if (!is_connected() || !_h2_protocol) {
+    if (!is_connected() || !_h2_protocol || _received_graceful_goaway) {
         return;
     }
 
@@ -340,6 +342,7 @@ void Client::process_pending_requests() {
         uint32_t app_request_id = next_request_id.fetch_add(1, std::memory_order_relaxed);
 
         if (_h2_protocol->send_request(std::move(context->request), app_request_id)) {
+            context->stream_id = _h2_protocol->last_initiated_stream_id();
             // Store context with app_request_id as key (will be mapped to stream_id)
             _active_requests[app_request_id] = std::move(context);
 
@@ -365,6 +368,8 @@ void Client::handle_connection_success() {
     _is_connected = true;
     _is_connecting = false;
     _handshake_completed = true;
+    _received_graceful_goaway = false;
+    _preserve_pending_on_next_disconnect = false;
     
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
@@ -384,6 +389,8 @@ void Client::handle_connection_failure(const std::string& error_message) {
     _is_connected = false;
     _is_connecting = false;
     _handshake_completed = false;
+    _received_graceful_goaway = false;
+    _preserve_pending_on_next_disconnect = false;
     _h2_protocol = nullptr;
     
     auto callbacks = std::move(_connection_callbacks);
@@ -418,13 +425,22 @@ void Client::complete_request(uint32_t stream_id, qb::http::Response response) {
     
     _successful_requests++;
     context->callback(std::move(response));
-    
-    // Process more pending requests if any
-    process_pending_requests();
+
+    if (_received_graceful_goaway) {
+        finish_graceful_goaway_if_drained();
+    } else {
+        process_pending_requests();
+    }
 }
 
 void Client::fail_request(uint32_t stream_id, const std::string& error_message) {
     auto it = _active_requests.find(stream_id);
+    if (it == _active_requests.end() || !it->second || it->second->stream_id != stream_id) {
+        it = std::find_if(_active_requests.begin(), _active_requests.end(),
+                          [stream_id](const auto& entry) {
+                              return entry.second && entry.second->stream_id == stream_id;
+                          });
+    }
     if (it == _active_requests.end()) {
         LOG_HTTP_WARN_PA(_client_id, "Tried to fail unknown stream " << stream_id);
         return;
@@ -443,6 +459,57 @@ void Client::fail_request(uint32_t stream_id, const std::string& error_message) 
     );
     
     context->callback(std::move(error_response));
+
+    finish_graceful_goaway_if_drained();
+}
+
+void Client::fail_active_requests_after_goaway(uint32_t last_stream_id,
+                                               const std::string& error_message) {
+    qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>> requests_to_fail;
+    for (auto it = _active_requests.begin(); it != _active_requests.end();) {
+        const auto& context = it->second;
+        if (context && context->stream_id > last_stream_id) {
+            requests_to_fail.emplace(it->first, std::move(it->second));
+            it = _active_requests.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto& [request_id, context] : requests_to_fail) {
+        (void) request_id;
+        ++_failed_requests;
+        auto error_response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                                    error_message);
+        context->callback(std::move(error_response));
+    }
+}
+
+void Client::finish_graceful_goaway_if_drained() {
+    if (!_received_graceful_goaway || !_active_requests.empty()) {
+        return;
+    }
+
+    LOG_HTTP_INFO_PA(_client_id, "Graceful GOAWAY drain complete");
+
+    _received_graceful_goaway = false;
+    _is_connected = false;
+    _is_connecting = false;
+    _handshake_completed = false;
+    _h2_protocol = nullptr;
+
+    if (!_pending_requests.empty() && _auto_reconnect) {
+        _preserve_pending_on_next_disconnect = true;
+        BaseTcpClient::disconnect();
+        return;
+    }
+
+    if (!_pending_requests.empty()) {
+        fail_all_requests("Server sent GOAWAY and automatic reconnection is disabled");
+    }
+
+    _preserve_pending_on_next_disconnect = true;
+    BaseTcpClient::disconnect();
 }
 
 void Client::fail_all_requests(const std::string& error_message) {
@@ -613,16 +680,17 @@ void Client::on(const qb::protocol::http2::Http2StreamErrorEvent& event) {
 
 void Client::on(const qb::protocol::http2::Http2GoAwayEvent& event) {
     LOG_HTTP_WARN_PA(_client_id, "Received GOAWAY frame: " << event.debug_data);
-    
+
     std::string error_msg = "Server sent GOAWAY: " + event.debug_data;
-    fail_all_requests(error_msg);
-    
-    // Disconnect and potentially reconnect
-    disconnect();
-    
-    if (_auto_reconnect && has_pending_or_active_work()) {
-        attempt_reconnection();
+    if (event.error_code == qb::protocol::http2::ErrorCode::NO_ERROR) {
+        _received_graceful_goaway = true;
+        fail_active_requests_after_goaway(event.last_stream_id, error_msg);
+        finish_graceful_goaway_if_drained();
+        return;
     }
+
+    fail_all_requests(error_msg);
+    disconnect();
 }
 
 void Client::on(const qb::protocol::http2::Http2PushPromiseEvent& event) {
@@ -680,8 +748,15 @@ void Client::on(qb::io::async::event::disconnected const& event) {
     _is_connecting = false;
     _handshake_completed = false;
     _h2_protocol = nullptr;
-    
-    fail_all_requests(error_msg);
+
+    if (_preserve_pending_on_next_disconnect) {
+        _preserve_pending_on_next_disconnect = false;
+        if (!_active_requests.empty()) {
+            fail_all_requests(error_msg);
+        }
+    } else {
+        fail_all_requests(error_msg);
+    }
     
     if (_auto_reconnect && has_pending_or_active_work()) {
         attempt_reconnection();
@@ -696,6 +771,8 @@ void Client::on(qb::io::async::event::dispose const&) {
     _is_connected = false;
     _is_connecting = false;
     _handshake_completed = false;
+    _received_graceful_goaway = false;
+    _preserve_pending_on_next_disconnect = false;
     _h2_protocol = nullptr;
 }
 

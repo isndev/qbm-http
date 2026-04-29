@@ -372,10 +372,6 @@ public:
                        qb::http::Response const& response) {
         auto& conn = ensure_connection(connection_id);
         if (conn.submit_response(stream_id, response)) {
-            stream_key key{connection_id, stream_id};
-            if (auto it = _sessions.find(key); it != _sessions.end()) {
-                it->second->mark_response_sent();
-            }
             maybe_finish_graceful_shutdown(connection_id);
             return true;
         }

@@ -154,6 +154,8 @@ private:
     bool _is_connected = false;
     bool _is_connecting = false;
     bool _handshake_completed = false;
+    bool _received_graceful_goaway = false;
+    bool _preserve_pending_on_next_disconnect = false;
     
     // Protocol handlers
     H2Protocol* _h2_protocol = nullptr;
@@ -409,6 +411,17 @@ private:
      * @param error_message Error description
      */
     void fail_request(uint32_t stream_id, const std::string& error_message);
+
+    /**
+     * @brief Fail active streams that the peer explicitly did not process in GOAWAY.
+     */
+    void fail_active_requests_after_goaway(uint32_t last_stream_id,
+                                           const std::string& error_message);
+
+    /**
+     * @brief Finish a graceful GOAWAY drain once accepted streams are complete.
+     */
+    void finish_graceful_goaway_if_drained();
     
     /**
      * @brief Fail all active requests

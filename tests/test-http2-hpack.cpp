@@ -76,22 +76,22 @@ TEST(HPACK_StaticTable, WellKnownEntries) {
     // Test some well-known static table entries
     EXPECT_EQ(STATIC_TABLE[0].first, ":authority");
     EXPECT_EQ(STATIC_TABLE[0].second, "");
-    
+
     EXPECT_EQ(STATIC_TABLE[1].first, ":method");
     EXPECT_EQ(STATIC_TABLE[1].second, "GET");
-    
+
     EXPECT_EQ(STATIC_TABLE[2].first, ":method");
     EXPECT_EQ(STATIC_TABLE[2].second, "POST");
-    
+
     EXPECT_EQ(STATIC_TABLE[3].first, ":path");
     EXPECT_EQ(STATIC_TABLE[3].second, "/");
-    
+
     EXPECT_EQ(STATIC_TABLE[6].first, ":scheme");
     EXPECT_EQ(STATIC_TABLE[6].second, "https");
-    
+
     EXPECT_EQ(STATIC_TABLE[37].first, "host");
     EXPECT_EQ(STATIC_TABLE[37].second, "");
-    
+
     EXPECT_EQ(STATIC_TABLE[57].first, "user-agent");
     EXPECT_EQ(STATIC_TABLE[57].second, "");
 }
@@ -102,6 +102,36 @@ TEST(HPACK_StaticTable, AllEntriesValid) {
         EXPECT_FALSE(STATIC_TABLE[i].first.empty()) << "Entry " << i << " has empty name";
         // Values can be empty (that's valid)
     }
+}
+
+TEST(HPACK_Decoder, DynamicTableSizeUpdateAllowedAtHeaderBlockStart) {
+    Decoder decoder;
+    std::vector<HeaderField> decoded;
+    bool incomplete = false;
+
+    const std::vector<uint8_t> block = {
+        0x20, // Dynamic table size update to 0
+        0x82  // Indexed static header: :method GET
+    };
+
+    ASSERT_TRUE(decoder.decode(block, decoded, incomplete));
+    EXPECT_FALSE(incomplete);
+    ASSERT_EQ(decoded.size(), 1u);
+    EXPECT_EQ(decoded[0].name, ":method");
+    EXPECT_EQ(decoded[0].value, "GET");
+}
+
+TEST(HPACK_Decoder, DynamicTableSizeUpdateRejectedAfterHeaderField) {
+    Decoder decoder;
+    std::vector<HeaderField> decoded;
+    bool incomplete = false;
+
+    const std::vector<uint8_t> block = {
+        0x82, // Indexed static header: :method GET
+        0x20  // Dynamic table size update after a header field is forbidden
+    };
+
+    EXPECT_FALSE(decoder.decode(block, decoded, incomplete));
 }
 
 // ====================================================================
@@ -167,7 +197,7 @@ TEST(HPACK_Huffman, MultiCharacterDecoding) {
 
 TEST(HPACK_Huffman, InvalidSequences) {
     std::string result;
-    
+
     // Test with invalid EOS placement (EOS not at end)
     uint8_t invalid_eos[] = {0xFF, 0xFF, 0xFF, 0xFF, 0x00}; // EOS followed by non-padding
     EXPECT_FALSE(huffman_decode(invalid_eos, 5, result));
@@ -182,15 +212,15 @@ TEST(HPACK_Huffman, EmptyInput) {
 TEST(HPACK_Huffman, ShouldUseHuffman) {
     // Test the heuristic function (now returns true for many cases due to real implementation)
     EXPECT_FALSE(should_use_huffman(""));  // Empty string should still be false
-    
+
     // These now return true because the real implementation can compress
     bool result1 = should_use_huffman("test");
     bool result2 = should_use_huffman("a very long string that might benefit from compression");
-    
+
     // Just verify they return boolean values (behavior depends on compression analysis)
     EXPECT_TRUE(result1 == true || result1 == false);
     EXPECT_TRUE(result2 == true || result2 == false);
-    
+
     std::cout << "should_use_huffman('test'): " << result1 << std::endl;
     std::cout << "should_use_huffman('long string'): " << result2 << std::endl;
 }
@@ -199,12 +229,12 @@ TEST(HPACK_Huffman, EncodingStub) {
     // Test the real encoding implementation (no longer a stub)
     std::vector<uint8_t> output;
     std::string input = "test string";
-    
+
     EXPECT_TRUE(huffman_encode(input, output));
-    
+
     // Real implementation should compress, so size will be different
     std::cout << "Original size: " << input.size() << ", Encoded size: " << output.size() << std::endl;
-    
+
     // Verify round-trip works
     std::string decoded;
     EXPECT_TRUE(huffman_decode(output.data(), output.size(), decoded));
@@ -240,7 +270,7 @@ TEST(HPACK_Huffman, HuffmanRoundTrip) {
     std::string original = "Hello World!";
     std::vector<uint8_t> encoded;
     std::string decoded;
-    
+
     EXPECT_TRUE(huffman_encode(original, encoded));
     EXPECT_TRUE(huffman_decode(encoded.data(), encoded.size(), decoded));
     EXPECT_EQ(original, decoded);
@@ -250,7 +280,7 @@ TEST(HPACK_Huffman, HuffmanRoundTripTest) {
     // Test the convenience round-trip function
     std::string input = "test string for round trip";
     std::string output;
-    
+
     EXPECT_TRUE(huffman_round_trip_test(input, output));
     EXPECT_EQ(input, output);
 }
@@ -259,11 +289,11 @@ TEST(HPACK_Huffman, ShouldUseHuffmanReal) {
     // Test the real implementation of should_use_huffman
     EXPECT_FALSE(should_use_huffman(""));  // Empty string
     EXPECT_FALSE(should_use_huffman("a"));  // Single char, no benefit
-    
+
     // Test with strings that should benefit from compression
     std::string long_text = "This is a long text with many repeated characters eeeeeeee";
     bool should_compress = should_use_huffman(long_text);
-    
+
     // The result depends on the actual compression ratio
     std::cout << "Should compress '" << long_text << "': " << should_compress << std::endl;
 }
@@ -272,11 +302,11 @@ TEST(HPACK_Huffman, CalculateEncodedSize) {
     // Test size calculation without actual encoding
     std::string input = "test";
     std::size_t calculated_size = calculate_huffman_encoded_size(input);
-    
+
     // Encode and verify the calculation is correct
     std::vector<uint8_t> encoded;
     huffman_encode(input, encoded);
-    
+
     EXPECT_EQ(calculated_size, encoded.size());
 }
 
@@ -284,10 +314,10 @@ TEST(HPACK_Huffman, CompressionRatio) {
     // Test compression ratio estimation
     std::string input = "aaaaaaaaaa"; // Repeated 'a' should compress well
     double ratio = estimate_compression_ratio(input);
-    
+
     EXPECT_GT(ratio, 0.0);
     EXPECT_LE(ratio, 1.0);
-    
+
     std::cout << "Compression ratio for '" << input << "': " << ratio << std::endl;
 }
 
@@ -301,26 +331,26 @@ TEST(HPACK_Huffman, HuffmanStats) {
     HuffmanStats stats;
     std::string input = "test string";
     std::vector<uint8_t> encoded;
-    
+
     EXPECT_TRUE(huffman_encode_with_stats(input, encoded, stats));
-    
+
     EXPECT_EQ(stats.encoding_operations, 1);
     EXPECT_EQ(stats.original_bytes, input.length());
     EXPECT_EQ(stats.encoded_bytes, encoded.size());
     EXPECT_GT(stats.total_bits_encoded, 0);
-    
+
     // Test decoding with stats
     std::string decoded;
     EXPECT_TRUE(huffman_decode_with_stats(encoded.data(), encoded.size(), decoded, stats));
-    
+
     EXPECT_EQ(stats.decoding_operations, 1);
     EXPECT_EQ(stats.decoded_bytes, decoded.length());
-    
+
     // Test compression ratio calculation
     double ratio = stats.compression_ratio();
     EXPECT_GE(ratio, 0.0);
     EXPECT_LE(ratio, 1.0);
-    
+
     double savings = stats.space_savings();
     EXPECT_GE(savings, 0.0);
     EXPECT_LE(savings, 1.0);
@@ -331,15 +361,15 @@ TEST(HPACK_Huffman, BatchEncoding) {
     // Test batch processing
     std::vector<std::string> inputs = {
         "first string",
-        "second string", 
+        "second string",
         "third string with more content"
     };
-    
+
     std::vector<std::vector<uint8_t>> outputs;
     EXPECT_TRUE(huffman_encode_batch(inputs, outputs));
-    
+
     EXPECT_EQ(outputs.size(), inputs.size());
-    
+
     // Verify each encoding
     for (size_t i = 0; i < inputs.size(); ++i) {
         std::string decoded;
@@ -352,7 +382,7 @@ TEST(HPACK_Huffman, CharacterFrequencyAnalysis) {
     // Test character frequency analysis
     std::string input = "aaabbbccc";
     auto frequencies = analyze_character_frequency(input);
-    
+
     EXPECT_EQ(frequencies['a'], 3);
     EXPECT_EQ(frequencies['b'], 3);
     EXPECT_EQ(frequencies['c'], 3);
@@ -363,10 +393,10 @@ TEST(HPACK_Huffman, HuffmanEfficiency) {
     // Test efficiency estimation
     std::string input = "test string with various characters";
     double efficiency = estimate_huffman_efficiency(input);
-    
+
     EXPECT_GT(efficiency, 0.0);
     EXPECT_LE(efficiency, 1.0);
-    
+
     std::cout << "Huffman efficiency for '" << input << "': " << efficiency << std::endl;
 }
 
@@ -374,15 +404,15 @@ TEST(HPACK_Huffman, ValidateEncodedData) {
     // Test encoded data validation
     std::string input_valid = "validation test";
     std::vector<uint8_t> encoded_valid;
-    
+
     EXPECT_TRUE(huffman_encode(input_valid, encoded_valid));
     EXPECT_TRUE(validate_huffman_encoded_data(encoded_valid)); // Check valid data decodes
-    
+
     // Test with corrupted data designed to fail padding rules
     std::string input_short = "a"; // Encodes to 00011 (5 bits)
     std::vector<uint8_t> encoded_short;
     EXPECT_TRUE(huffman_encode(input_short, encoded_short)); // Will be {0x1F} (00011111)
-    
+
     ASSERT_FALSE(encoded_short.empty()); // Ensure encoding produced something
 
     // Create corrupted data: valid encoding of "a" followed by 8 bits of 1s (invalid padding length)
@@ -405,7 +435,7 @@ TEST(HPACK_Huffman, ValidateEncodedData) {
         // bool possibly_valid_after_flip = validate_huffman_encoded_data(corrupted_flipped_bits);
         // std::cout << "Validate (flipped bits) result: " << possibly_valid_after_flip << std::endl;
     }
-    
+
     // Test with completely invalid data (all zeros)
     std::vector<uint8_t> invalid_data = {0x00, 0x00, 0x00}; // All zeros (likely invalid)
     // Depending on the tree, 00000... might decode to a symbol or be invalid.
@@ -418,11 +448,11 @@ TEST(HPACK_Huffman, PerformanceBenchmark) {
     // Test performance benchmark helper
     std::string input = "Performance test string with reasonable length";
     auto [encode_time, decode_time] = benchmark_huffman_performance(input, 100);
-    
+
     EXPECT_GT(encode_time, 0.0);
     EXPECT_GT(decode_time, 0.0);
-    
-    std::cout << "Huffman performance - Encode: " << encode_time 
+
+    std::cout << "Huffman performance - Encode: " << encode_time
               << "ms, Decode: " << decode_time << "ms (per operation)" << std::endl;
 }
 
@@ -430,10 +460,10 @@ TEST(HPACK_Huffman, GlobalStats) {
     // Test global statistics
     auto& global_stats = get_global_huffman_stats();
     global_stats.reset();
-    
+
     EXPECT_EQ(global_stats.encoding_operations, 0);
     EXPECT_EQ(global_stats.decoding_operations, 0);
-    
+
     // Perform some operations and check if stats are updated
     // (Note: This depends on whether the main functions use global stats)
 }
@@ -441,13 +471,13 @@ TEST(HPACK_Huffman, GlobalStats) {
 TEST(HPACK_Huffman, DebugFunctions) {
     // Test debug output functions (mainly for coverage)
     std::stringstream ss;
-    
+
     // Test single character code printing
     print_huffman_code('a', ss);
     std::string output = ss.str();
     EXPECT_FALSE(output.empty());
     EXPECT_NE(output.find("'a'"), std::string::npos);
-    
+
     // Test string codes printing
     ss.str("");
     ss.clear();
@@ -459,28 +489,28 @@ TEST(HPACK_Huffman, DebugFunctions) {
 
 TEST(HPACK_Huffman, EdgeCases) {
     // Test various edge cases
-    
+
     // Empty string
     std::vector<uint8_t> encoded;
     std::string decoded;
-    
+
     EXPECT_TRUE(huffman_encode("", encoded));
     EXPECT_TRUE(encoded.empty());
-    
+
     EXPECT_TRUE(huffman_decode(nullptr, 0, decoded));
     EXPECT_TRUE(decoded.empty());
-    
+
     // Single character
     EXPECT_TRUE(huffman_encode("a", encoded));
     EXPECT_TRUE(huffman_decode(encoded.data(), encoded.size(), decoded));
     EXPECT_EQ(decoded, "a");
-    
+
     // All ASCII characters
     std::string all_ascii;
     for (int i = 32; i < 127; ++i) {
         all_ascii += static_cast<char>(i);
     }
-    
+
     encoded.clear();
     decoded.clear();
     EXPECT_TRUE(huffman_encode(all_ascii, encoded));
@@ -493,7 +523,7 @@ TEST(HPACK_Huffman, SpecialCharacters) {
     std::string special = "\x00\x01\x02\xFF"; // Binary data
     std::vector<uint8_t> encoded;
     std::string decoded;
-    
+
     EXPECT_TRUE(huffman_encode(special, encoded));
     EXPECT_TRUE(huffman_decode(encoded.data(), encoded.size(), decoded));
     EXPECT_EQ(decoded, special);
@@ -504,13 +534,13 @@ TEST(HPACK_Huffman, LargeData) {
     std::string large_data(1000, 'x'); // 1000 'x' characters
     std::vector<uint8_t> encoded;
     std::string decoded;
-    
+
     EXPECT_TRUE(huffman_encode(large_data, encoded));
     EXPECT_TRUE(huffman_decode(encoded.data(), encoded.size(), decoded));
     EXPECT_EQ(decoded, large_data);
-    
+
     // Should achieve good compression for repeated characters
-    std::cout << "Large data compression: " << large_data.size() 
+    std::cout << "Large data compression: " << large_data.size()
               << " -> " << encoded.size() << " bytes ("
               << (100.0 * encoded.size() / large_data.size()) << "%)" << std::endl;
 }
@@ -521,7 +551,7 @@ TEST(HPACK_Huffman, CompressionComparison) {
         std::string name;
         std::string data;
     };
-    
+
     std::vector<TestCase> test_cases = {
         {"Random", "qwerty123!@#"},
         {"Repeated", "aaaaaaaaaa"},
@@ -532,22 +562,22 @@ TEST(HPACK_Huffman, CompressionComparison) {
         {"Numbers", "1234567890"},
         {"Symbols", "!@#$%^&*()_+-=[]{}|;:,.<>?"}
     };
-    
+
     std::cout << "\nCompression comparison:" << std::endl;
     std::cout << "Type\t\tOriginal\tEncoded\t\tRatio" << std::endl;
     std::cout << "----\t\t--------\t-------\t\t-----" << std::endl;
-    
+
     for (const auto& test_case : test_cases) {
         std::vector<uint8_t> encoded;
         huffman_encode(test_case.data, encoded);
-        
+
         double ratio = static_cast<double>(encoded.size()) / test_case.data.size();
-        
-        std::cout << test_case.name << "\t\t" 
+
+        std::cout << test_case.name << "\t\t"
                   << test_case.data.size() << "\t\t"
                   << encoded.size() << "\t\t"
                   << std::fixed << std::setprecision(2) << ratio << std::endl;
-        
+
         // Verify round-trip
         std::string decoded;
         EXPECT_TRUE(huffman_decode(encoded.data(), encoded.size(), decoded));
@@ -563,10 +593,10 @@ TEST(HPACK_Decoder, IndexedHeaderField) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Test indexed header field - index 2 (:method GET)
     std::vector<uint8_t> data = {0x82}; // 10000010
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 1);
@@ -578,7 +608,7 @@ TEST(HPACK_Decoder, LiteralHeaderWithIncrementalIndexing) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Literal header field with incremental indexing - new name
     // Pattern: 01000000 (0x40) + string length + name + string length + value
     std::vector<uint8_t> data = {
@@ -586,7 +616,7 @@ TEST(HPACK_Decoder, LiteralHeaderWithIncrementalIndexing) {
         0x04, 'n', 'a', 'm', 'e',      // Name: "name" (length 4)
         0x05, 'v', 'a', 'l', 'u', 'e'  // Value: "value" (length 5)
     };
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 1);
@@ -598,14 +628,14 @@ TEST(HPACK_Decoder, LiteralHeaderWithIndexedName) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Literal header field with incremental indexing - indexed name
     // Use static table index 1 (:authority) with custom value
     std::vector<uint8_t> data = {
         0x41,                                           // 01000001 - indexed name 1
         0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'  // Value: "example.com"
     };
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 1);
@@ -617,14 +647,14 @@ TEST(HPACK_Decoder, LiteralHeaderWithoutIndexing) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Literal header field without indexing
     std::vector<uint8_t> data = {
         0x00,                           // 00000000 - literal without indexing, new name
         0x04, 't', 'e', 's', 't',      // Name: "test"
         0x05, 'v', 'a', 'l', 'u', 'e'  // Value: "value"
     };
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 1);
@@ -636,14 +666,14 @@ TEST(HPACK_Decoder, LiteralHeaderNeverIndexed) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Literal header field never indexed
     std::vector<uint8_t> data = {
         0x10,                                    // 00010000 - never indexed, new name
         0x0D, 'a', 'u', 't', 'h', 'o', 'r', 'i', 'z', 'a', 't', 'i', 'o', 'n',  // Name: "authorization"
         0x05, 't', 'o', 'k', 'e', 'n'          // Value: "token"
     };
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 1);
@@ -655,12 +685,12 @@ TEST(HPACK_Decoder, DynamicTableSizeUpdate) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Dynamic table size update to 1024
     std::vector<uint8_t> data = {
         0x3F, 0xE1, 0x1F  // 001xxxxx pattern: 0x20 + (1024-31) encoded
     };
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 0); // Size update doesn't produce headers
@@ -670,7 +700,7 @@ TEST(HPACK_Decoder, MultipleHeaders) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Multiple headers: :method GET, :path /, custom header
     std::vector<uint8_t> data = {
         0x82,                           // :method GET (index 2)
@@ -679,17 +709,17 @@ TEST(HPACK_Decoder, MultipleHeaders) {
         0x04, 'h', 'o', 's', 't',      // Name: "host"
         0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'  // Value: "example.com"
     };
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 3);
-    
+
     EXPECT_EQ(headers[0].name, ":method");
     EXPECT_EQ(headers[0].value, "GET");
-    
+
     EXPECT_EQ(headers[1].name, ":path");
     EXPECT_EQ(headers[1].value, "/");
-    
+
     EXPECT_EQ(headers[2].name, "host");
     EXPECT_EQ(headers[2].value, "example.com");
 }
@@ -698,7 +728,7 @@ TEST(HPACK_Decoder, HuffmanEncodedString) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Literal header with Huffman-encoded value
     // Note: This test uses the actual Huffman implementation
     std::vector<uint8_t> data = {
@@ -706,10 +736,10 @@ TEST(HPACK_Decoder, HuffmanEncodedString) {
         0x04, 't', 'e', 's', 't',      // Name: "test" (not Huffman encoded)
         0x83, 0x1F, 0x2F, 0x5F          // Value: Huffman encoded "aeo" (example)
     };
-    
+
     // This should work with our Huffman decoder
     bool result = decoder.decode(data, headers, incomplete);
-    
+
     // The result depends on the Huffman implementation
     // We just verify it doesn't crash and handles the H bit correctly
     EXPECT_TRUE(result || incomplete); // Either succeeds or marks as incomplete
@@ -726,11 +756,11 @@ TEST(HPACK_Encoder, BasicEncoding) {
         {":path", "/"},
         {"host", "example.com"}
     };
-    
+
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(headers, encoded));
     EXPECT_FALSE(encoded.empty());
-    
+
     std::cout << "Encoded headers: " << bytes_to_hex(encoded) << std::endl;
 }
 
@@ -742,10 +772,10 @@ TEST(HPACK_Encoder, StaticTableMatching) {
         {":path", "/"},        // Should use static table index 4
         {":scheme", "https"}   // Should use static table index 7
     };
-    
+
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(headers, encoded));
-    
+
     // Verify it uses indexed header fields (starts with 1xxxxxxx)
     EXPECT_EQ(encoded[0], 0x82); // Index 2 (:method GET)
     EXPECT_EQ(encoded[1], 0x83); // Index 3 (:method POST)
@@ -760,10 +790,10 @@ TEST(HPACK_Encoder, SensitiveHeaders) {
         {"cookie", "session=abc123"},
         {"set-cookie", "id=xyz; HttpOnly"}
     };
-    
+
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(headers, encoded));
-    
+
     // Sensitive headers should use never-indexed pattern (0001xxxx)
     EXPECT_EQ(encoded[0] & 0xF0, 0x10); // Never indexed
 }
@@ -773,10 +803,10 @@ TEST(HPACK_Encoder, PseudoHeaders) {
     std::vector<HeaderField> headers = {
         {":custom-pseudo", "value"}
     };
-    
+
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(headers, encoded));
-    
+
     // Pseudo headers should use never-indexed pattern
     EXPECT_EQ(encoded[0] & 0xF0, 0x10); // Never indexed
 }
@@ -786,7 +816,7 @@ TEST(HPACK_Encoder, EmptyHeaderName) {
     std::vector<HeaderField> headers = {
         {"", "value"}  // Invalid empty name
     };
-    
+
     std::vector<uint8_t> encoded;
     EXPECT_FALSE(encoder.encode(headers, encoded)); // Should fail
 }
@@ -798,7 +828,7 @@ TEST(HPACK_Encoder, EmptyHeaderName) {
 TEST(HPACK_RoundTrip, BasicRoundTrip) {
     Encoder encoder;
     Decoder decoder;
-    
+
     std::vector<HeaderField> original_headers = {
         {":method", "GET"},
         {":path", "/api/v1/users"},
@@ -808,17 +838,17 @@ TEST(HPACK_RoundTrip, BasicRoundTrip) {
         {"accept", "application/json"},
         {"content-type", "application/json"}
     };
-    
+
     // Encode
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(original_headers, encoded));
-    
+
     // Decode
     std::vector<HeaderField> decoded_headers;
     bool incomplete = false;
     EXPECT_TRUE(decoder.decode(encoded, decoded_headers, incomplete));
     EXPECT_FALSE(incomplete);
-    
+
     // Compare
     EXPECT_EQ(decoded_headers.size(), original_headers.size());
     for (size_t i = 0; i < original_headers.size(); ++i) {
@@ -830,35 +860,35 @@ TEST(HPACK_RoundTrip, BasicRoundTrip) {
 TEST(HPACK_RoundTrip, DynamicTableRoundTrip) {
     Encoder encoder;
     Decoder decoder;
-    
+
     // First request - should populate dynamic table
     std::vector<HeaderField> headers1 = {
         {":method", "GET"},
         {":path", "/"},
         {"custom-header", "custom-value"}
     };
-    
+
     std::vector<uint8_t> encoded1;
     EXPECT_TRUE(encoder.encode(headers1, encoded1));
-    
+
     std::vector<HeaderField> decoded1;
     bool incomplete1 = false;
     EXPECT_TRUE(decoder.decode(encoded1, decoded1, incomplete1));
-    
+
     // Second request - should reuse dynamic table entries
     std::vector<HeaderField> headers2 = {
         {":method", "POST"},  // Different method
         {":path", "/"},       // Same path (should use dynamic table)
         {"custom-header", "custom-value"}  // Same custom header (should use dynamic table)
     };
-    
+
     std::vector<uint8_t> encoded2;
     EXPECT_TRUE(encoder.encode(headers2, encoded2));
-    
+
     std::vector<HeaderField> decoded2;
     bool incomplete2 = false;
     EXPECT_TRUE(decoder.decode(encoded2, decoded2, incomplete2));
-    
+
     // Verify second encoding is smaller (due to dynamic table reuse)
     // Note: This might not always be true depending on implementation details
     std::cout << "First encoding size: " << encoded1.size() << " bytes" << std::endl;
@@ -873,10 +903,10 @@ TEST(HPACK_ErrorHandling, InvalidIndex) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Invalid index 0
     std::vector<uint8_t> data = {0x80}; // Index 0 (invalid)
-    
+
     EXPECT_FALSE(decoder.decode(data, headers, incomplete));
 }
 
@@ -884,10 +914,10 @@ TEST(HPACK_ErrorHandling, IndexOutOfRange) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Index way beyond static table size
     std::vector<uint8_t> data = {0xFF, 0xFF}; // Very large index
-    
+
     EXPECT_FALSE(decoder.decode(data, headers, incomplete));
 }
 
@@ -895,13 +925,13 @@ TEST(HPACK_ErrorHandling, IntegerOverflow) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Malformed integer that could cause overflow
     std::vector<uint8_t> data = {
         0xFF,  // All bits set in prefix
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  // Many continuation bytes
     };
-    
+
     EXPECT_FALSE(decoder.decode(data, headers, incomplete));
 }
 
@@ -909,13 +939,13 @@ TEST(HPACK_ErrorHandling, IncompleteData) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Incomplete string literal
     std::vector<uint8_t> data = {
         0x40,           // Literal with incremental indexing
         0x04, 't', 'e'  // Incomplete name (says length 4 but only 2 bytes)
     };
-    
+
     EXPECT_FALSE(decoder.decode(data, headers, incomplete));
     EXPECT_TRUE(incomplete);
 }
@@ -924,10 +954,10 @@ TEST(HPACK_ErrorHandling, UnknownInstruction) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Invalid instruction pattern (reserved bits)
     std::vector<uint8_t> data = {0x18}; // 00011000 - invalid pattern
-    
+
     EXPECT_FALSE(decoder.decode(data, headers, incomplete));
 }
 
@@ -937,13 +967,13 @@ TEST(HPACK_ErrorHandling, UnknownInstruction) {
 
 TEST(HPACK_DynamicTable, TableSizeLimit) {
     Decoder decoder;
-    
+
     // Set a small table size
     decoder.set_max_dynamic_table_size(100);
-    
+
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Add a header that should fit
     std::vector<uint8_t> data = {
         0x40,                           // Literal with incremental indexing
@@ -951,44 +981,44 @@ TEST(HPACK_DynamicTable, TableSizeLimit) {
         0x05, 'v', 'a', 'l', 'u', 'e'  // Value: "value" (5 bytes)
         // Total size: 4 + 5 + 32 = 41 bytes (should fit in 100)
     };
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
 }
 
 TEST(HPACK_DynamicTable, TableEviction) {
     Encoder encoder;
-    
+
     // Set a very small table size to force eviction
     encoder.set_max_capacity(50);
-    
+
     std::vector<HeaderField> headers = {
         {"header1", "value1"},  // ~45 bytes
         {"header2", "value2"},  // ~45 bytes - should evict header1
     };
-    
+
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(headers, encoded));
-    
+
     // Should not crash and should handle eviction gracefully
 }
 
 TEST(HPACK_DynamicTable, HeaderListSizeLimit) {
     Decoder decoder;
-    
+
     // Set a small header list size limit
     decoder.set_max_header_list_size(50);
-    
+
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Try to decode headers that exceed the limit
     std::vector<uint8_t> data = {
         0x40,                                           // Literal with incremental indexing
         0x10, 'v', 'e', 'r', 'y', '-', 'l', 'o', 'n', 'g', '-', 'h', 'e', 'a', 'd', 'e', 'r',  // Long name
         0x10, 'v', 'e', 'r', 'y', '-', 'l', 'o', 'n', 'g', '-', 'v', 'a', 'l', 'u', 'e', '-'   // Long value
     };
-    
+
     EXPECT_FALSE(decoder.decode(data, headers, incomplete));
 }
 
@@ -998,7 +1028,7 @@ TEST(HPACK_DynamicTable, HeaderListSizeLimit) {
 
 TEST(HPACK_Performance, EncodingPerformance) {
     const int iterations = 1000;
-    
+
     Encoder encoder;
     std::vector<HeaderField> headers = {
         {":method", "GET"},
@@ -1012,17 +1042,17 @@ TEST(HPACK_Performance, EncodingPerformance) {
         {"cache-control", "no-cache"},
         {"content-type", "application/json; charset=utf-8"}
     };
-    
+
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     for (int i = 0; i < iterations; i++) {
         std::vector<uint8_t> encoded;
         EXPECT_TRUE(encoder.encode(headers, encoded));
     }
-    
+
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
-    
+
     std::cout << "HPACK encoding: " << iterations << " iterations in "
               << elapsed.count() << " ms ("
               << (elapsed.count() / iterations) << " ms per encode)" << std::endl;
@@ -1030,7 +1060,7 @@ TEST(HPACK_Performance, EncodingPerformance) {
 
 TEST(HPACK_Performance, DecodingPerformance) {
     const int iterations = 1000;
-    
+
     // Pre-encode some headers
     Encoder encoder;
     std::vector<HeaderField> headers = {
@@ -1045,22 +1075,22 @@ TEST(HPACK_Performance, DecodingPerformance) {
         {"cache-control", "no-cache"},
         {"content-type", "application/json; charset=utf-8"}
     };
-    
+
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(headers, encoded));
-    
+
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     for (int i = 0; i < iterations; i++) {
         Decoder decoder;
         std::vector<HeaderField> decoded_headers;
         bool incomplete = false;
         EXPECT_TRUE(decoder.decode(encoded, decoded_headers, incomplete));
     }
-    
+
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
-    
+
     std::cout << "HPACK decoding: " << iterations << " iterations in "
               << elapsed.count() << " ms ("
               << (elapsed.count() / iterations) << " ms per decode)" << std::endl;
@@ -1069,21 +1099,21 @@ TEST(HPACK_Performance, DecodingPerformance) {
 TEST(HPACK_Performance, HuffmanPerformance) {
     const int iterations = 1000;
     std::string test_string = "This is a test string for Huffman encoding performance measurement with various characters: !@#$%^&*()";
-    
+
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     for (int i = 0; i < iterations; i++) {
         std::vector<uint8_t> encoded;
         std::string decoded;
-        
+
         EXPECT_TRUE(huffman_encode(test_string, encoded));
         EXPECT_TRUE(huffman_decode(encoded.data(), encoded.size(), decoded));
         EXPECT_EQ(decoded, test_string);
     }
-    
+
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
-    
+
     std::cout << "Huffman encode/decode: " << iterations << " iterations in "
               << elapsed.count() << " ms ("
               << (elapsed.count() / iterations) << " ms per operation)" << std::endl;
@@ -1098,10 +1128,10 @@ TEST(HPACK_RFC7541, ExampleC2_1) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Example from RFC: custom-key: custom-header
     std::vector<uint8_t> data = hex_to_bytes("400a637573746f6d2d6b65790d637573746f6d2d686561646572");
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 1);
@@ -1114,10 +1144,10 @@ TEST(HPACK_RFC7541, ExampleC2_4) {
     Decoder decoder;
     std::vector<HeaderField> headers;
     bool incomplete = false;
-    
+
     // Example from RFC: :method: GET (index 2)
     std::vector<uint8_t> data = {0x82};
-    
+
     EXPECT_TRUE(decoder.decode(data, headers, incomplete));
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(headers.size(), 1);
@@ -1133,7 +1163,7 @@ TEST(HPACK_Integration, HTTPRequestHeaders) {
     // Simulate typical HTTP/2 request headers
     Encoder encoder;
     Decoder decoder;
-    
+
     std::vector<HeaderField> request_headers = {
         {":method", "GET"},
         {":path", "/search?q=test&category=books"},
@@ -1146,19 +1176,19 @@ TEST(HPACK_Integration, HTTPRequestHeaders) {
         {"connection", "keep-alive"},
         {"upgrade-insecure-requests", "1"}
     };
-    
+
     // Encode
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(request_headers, encoded));
-    
+
     std::cout << "HTTP request headers encoded to " << encoded.size() << " bytes" << std::endl;
-    
+
     // Decode
     std::vector<HeaderField> decoded_headers;
     bool incomplete = false;
     EXPECT_TRUE(decoder.decode(encoded, decoded_headers, incomplete));
     EXPECT_FALSE(incomplete);
-    
+
     // Verify
     EXPECT_EQ(decoded_headers.size(), request_headers.size());
     for (size_t i = 0; i < request_headers.size(); ++i) {
@@ -1171,7 +1201,7 @@ TEST(HPACK_Integration, HTTPResponseHeaders) {
     // Simulate typical HTTP/2 response headers
     Encoder encoder;
     Decoder decoder;
-    
+
     std::vector<HeaderField> response_headers = {
         {":status", "200"},
         {"content-type", "application/json; charset=utf-8"},
@@ -1184,19 +1214,19 @@ TEST(HPACK_Integration, HTTPResponseHeaders) {
         {"x-frame-options", "DENY"},
         {"x-content-type-options", "nosniff"}
     };
-    
+
     // Encode
     std::vector<uint8_t> encoded;
     EXPECT_TRUE(encoder.encode(response_headers, encoded));
-    
+
     std::cout << "HTTP response headers encoded to " << encoded.size() << " bytes" << std::endl;
-    
+
     // Decode
     std::vector<HeaderField> decoded_headers;
     bool incomplete = false;
     EXPECT_TRUE(decoder.decode(encoded, decoded_headers, incomplete));
     EXPECT_FALSE(incomplete);
-    
+
     // Verify
     EXPECT_EQ(decoded_headers.size(), response_headers.size());
     for (size_t i = 0; i < response_headers.size(); ++i) {
@@ -1391,4 +1421,4 @@ TEST(HPACK_DynamicTable, GrowsCapacityWhenCountExceedsInitial) {
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
-} 
+}
