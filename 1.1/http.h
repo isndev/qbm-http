@@ -531,6 +531,11 @@ namespace qb::http {
 
             ~session() = default;
 
+            [[nodiscard]] bool
+            http1_response_body_forbidden() const noexcept {
+                return _request.method() == qb::http::Method::HEAD;
+            }
+
             /**
              * @brief Connect to a remote server
              * @param remote URI to connect to

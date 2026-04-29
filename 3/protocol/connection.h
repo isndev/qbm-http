@@ -77,6 +77,30 @@ inline std::optional<std::uint64_t> parse_content_length(std::string_view value)
     return parsed;
 }
 
+template <typename Message>
+struct declared_content_length_result {
+    bool ok = true;
+    std::optional<std::uint64_t> value;
+};
+
+template <typename Message>
+declared_content_length_result<Message> declared_content_length(Message const& msg) {
+    declared_content_length_result<Message> result;
+    auto it = msg.headers().find("content-length");
+    if (it == msg.headers().end()) {
+        return result;
+    }
+    for (auto const& raw_value : it->second) {
+        auto parsed = parse_content_length(raw_value);
+        if (!parsed || (result.value && *result.value != *parsed)) {
+            result.ok = false;
+            return result;
+        }
+        result.value = *parsed;
+    }
+    return result;
+}
+
 struct header_block {
     std::deque<std::pair<std::string, std::string>> storage;
     std::vector<nghttp3_nv> nva;
@@ -206,6 +230,11 @@ inline std::optional<header_block> make_request_headers(qb::http::Request const&
     if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH) {
         return std::nullopt;
     }
+    const auto declared_length = declared_content_length(request);
+    if (!declared_length.ok ||
+        (declared_length.value && *declared_length.value != request.body().size())) {
+        return std::nullopt;
+    }
     block.add(":method", std::string(request.method()));
     block.add(":scheme", request.uri().scheme().empty() ? "https" : std::string(request.uri().scheme()));
     block.add(":authority", authority(request.uri()));
@@ -220,6 +249,17 @@ inline std::optional<header_block> make_request_headers(qb::http::Request const&
         block.add("content-length", std::to_string(request.body().size()));
     }
     return block;
+}
+
+inline bool response_body_length_must_match(qb::http::Response const& response,
+                                            qb::http::Method request_method) noexcept {
+    if (request_method == qb::http::method::HEAD) {
+        return false;
+    }
+    const auto status_code = response.status().code();
+    return !((status_code >= 100 && status_code < 200) ||
+             status_code == 204 ||
+             status_code == 304);
 }
 
 inline std::optional<header_block> make_response_headers(qb::http::Response const& response) {
@@ -365,8 +405,6 @@ private:
         } else if (st.request.method() != qb::http::method::HEAD) {
             st.response.body().raw().put(reinterpret_cast<const char *>(data), datalen);
         }
-        me->_owner.extend_http3_stream_credit(
-            me->_connection_id, static_cast<std::uint64_t>(stream_id), datalen);
         return 0;
     }
 
@@ -620,6 +658,14 @@ private:
         if (_role == role::client && st.request.method() == qb::http::method::HEAD) {
             return true;
         }
+        if (_role == role::client) {
+            const auto status_code = st.response.status().code();
+            if ((status_code >= 100 && status_code < 200) ||
+                status_code == 204 ||
+                status_code == 304) {
+                return true;
+            }
+        }
         const auto actual = _role == role::server
             ? st.request.body().size()
             : st.response.body().size();
@@ -742,6 +788,13 @@ public:
 
     bool submit_response(std::uint64_t stream_id, qb::http::Response const& response) {
         auto& st = state_for(stream_id);
+        const auto declared_length = detail::declared_content_length(response);
+        if (!declared_length.ok ||
+            (declared_length.value &&
+             detail::response_body_length_must_match(response, st.request.method()) &&
+             *declared_length.value != response.body().size())) {
+            return false;
+        }
         st.tx_body = response.body().template as<std::string>();
         st.tx_offset = 0;
         auto headers = detail::make_response_headers(response);

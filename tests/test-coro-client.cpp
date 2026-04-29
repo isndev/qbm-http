@@ -95,6 +95,13 @@ public:
             ctx->complete();
         });
 
+        router().head("/head-length", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Length", "4");
+            ctx->response().add_header("X-Source", "coro-test-server");
+            ctx->complete();
+        });
+
         router().options("/ping", [](auto ctx) {
             ctx->response().status() = qb::http::status::OK;
             ctx->response().add_header("Allow", "GET,HEAD,OPTIONS");
@@ -191,6 +198,15 @@ TEST_F(CoroClientTest, AllVerbsReachTheServer) {
               qb::http::status::OK);
     EXPECT_EQ(qb::http::run_sync(qb::http::OPTIONS(Request{qb::http::method::OPTIONS,{url("/ping")}})).response.status(),
               qb::http::status::OK);
+}
+
+TEST_F(CoroClientTest, HeadResponseWithContentLengthCompletesWithoutBody) {
+    qb::http::Request request{qb::http::method::HEAD, {url("/head-length")}};
+    auto reply = qb::http::run_sync(qb::http::HEAD(std::move(request), 2.0));
+
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.response.header("Content-Length"), "4");
+    EXPECT_TRUE(reply.response.body().empty());
 }
 
 TEST_F(CoroClientTest, CoAwaitFromInsideCoroutine) {

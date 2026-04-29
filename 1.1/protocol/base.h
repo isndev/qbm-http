@@ -25,6 +25,8 @@
 
 #include <algorithm>
 #include <climits>
+#include <string>
+#include <vector>
 
 /**
  * @brief Security limits for HTTP/1.1 protocol handling
@@ -60,6 +62,7 @@ namespace qb::http::protocol_limits {
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
 #include "../../types.h"
+#include "../../utility.h"
 
 /**
  * @brief HTTP module namespace for the QB C++ Actor Framework
@@ -112,6 +115,26 @@ namespace qb::http {
         static int fail_with_reason(http_t* parser, const char* reason) noexcept {
             http_set_error_reason(parser, reason);
             return HPE_USER;
+        }
+
+        static bool
+        is_supported_transfer_encoding(MessageType const& msg) {
+            auto it = msg.headers().find("Transfer-Encoding");
+            if (it == msg.headers().end()) {
+                return true;
+            }
+
+            std::vector<std::string> tokens;
+            for (const auto& value : it->second) {
+                for (auto token : utility::split_string<std::string>(value, ",")) {
+                    token = std::string(utility::trim_http_whitespace(token));
+                    if (!token.empty()) {
+                        tokens.emplace_back(std::move(token));
+                    }
+                }
+            }
+
+            return tokens.size() == 1 && utility::iequals(tokens.front(), "chunked");
         }
 
         /**
@@ -298,6 +321,14 @@ namespace qb::http {
             self->_last_header_token = HeaderToken::NONE;
             msg.major_version = parser->http_major;
             msg.minor_version = parser->http_minor;
+            if (msg.has_header("Transfer-Encoding")) {
+                if (msg.has_header("Content-Length")) {
+                    return fail_with_reason(parser, "HTTP Transfer-Encoding with Content-Length is forbidden");
+                }
+                if (!is_supported_transfer_encoding(msg)) {
+                    return fail_with_reason(parser, "Unsupported HTTP Transfer-Encoding");
+                }
+            }
             if constexpr (MessageType::type == HTTP_REQUEST) {
                 // llhttp uses ULLONG_MAX as "unknown length". For HTTP requests,
                 // absence of both Content-Length and Transfer-Encoding means an
@@ -306,6 +337,11 @@ namespace qb::http {
                 // waiting for an impossible body length.
                 if (parser->content_length == ULLONG_MAX &&
                     !msg.has_header("Transfer-Encoding")) {
+                    parser->content_length = 0;
+                }
+            } else if constexpr (MessageType::type == HTTP_RESPONSE) {
+                const auto status = parser->status_code;
+                if ((status >= 100 && status < 200) || status == 204 || status == 304) {
                     parser->content_length = 0;
                 }
             }
@@ -652,6 +688,16 @@ namespace qb::protocol::http {
             }
 
             auto &msg = _http_obj.get_parsed_message();
+
+            if constexpr (std::remove_const_t<Trait>::type == HTTP_RESPONSE) {
+                if constexpr (requires(IO_Handler& io) { io.http1_response_body_forbidden(); }) {
+                    if (this->_io.http1_response_body_forbidden()) {
+                        const auto header_size = body_offset;
+                        body_offset = 0;
+                        return header_size;
+                    }
+                }
+            }
 
             if (msg.has_header("Transfer-Encoding")) {
                 _http_obj.resume();

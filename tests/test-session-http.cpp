@@ -248,6 +248,134 @@ TEST(Session, HTTP_HOST_VALUE_DEFAULT_PORTS_SCHEMES_CASE_INSENSITIVE) {
     EXPECT_EQ(qb::http::host_header_value(b), std::string(b.host()));
 }
 
+TEST(Session, HTTP11_REQUEST_SERIALIZATION_REJECTS_CONTENT_LENGTH_MISMATCH) {
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/upload"}};
+    request.set_header("Content-Length", "1");
+    request.body() = "abc";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << request, std::length_error);
+    EXPECT_EQ(out.size(), 0u);
+}
+
+TEST(Session, HTTP11_RESPONSE_SERIALIZATION_REJECTS_CONTENT_LENGTH_MISMATCH) {
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Content-Length", "1");
+    response.body() = "abc";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << response, std::length_error);
+    EXPECT_EQ(out.size(), 0u);
+}
+
+TEST(Session, HTTP11_SERIALIZATION_REJECTS_CONTENT_LENGTH_WITH_TRANSFER_ENCODING) {
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/upload"}};
+    request.set_header("Transfer-Encoding", "chunked");
+    request.set_header("Content-Length", "3");
+    request.body() = "abc";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << request, std::length_error);
+    EXPECT_EQ(out.size(), 0u);
+}
+
+TEST(Session, HTTP11_SERIALIZATION_REJECTS_UNSUPPORTED_TRANSFER_ENCODING) {
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/upload"}};
+    request.set_header("Transfer-Encoding", "gzip, chunked");
+    request.body() = "abc";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << request, std::length_error);
+    EXPECT_EQ(out.size(), 0u);
+}
+
+TEST(Session, HTTP11_REQUEST_SERIALIZATION_CHUNKS_PRESENT_BODY) {
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/upload"}};
+    request.set_header("Transfer-Encoding", "chunked");
+    request.body() = "abc";
+
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << request);
+    const std::string wire{out.begin(), out.size()};
+
+    EXPECT_NE(wire.find("transfer-encoding: chunked\r\n"), std::string::npos);
+    EXPECT_NE(wire.find("\r\n\r\n3\r\nabc\r\n0\r\n\r\n"), std::string::npos);
+    EXPECT_EQ(wire.find("content-length:"), std::string::npos);
+}
+
+TEST(Session, HTTP11_RESPONSE_SERIALIZATION_CHUNKS_PRESENT_BODY) {
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Transfer-Encoding", "chunked");
+    response.body() = "abc";
+
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << response);
+    const std::string wire{out.begin(), out.size()};
+
+    EXPECT_NE(wire.find("transfer-encoding: chunked\r\n"), std::string::npos);
+    EXPECT_NE(wire.find("\r\n\r\n3\r\nabc\r\n0\r\n\r\n"), std::string::npos);
+    EXPECT_EQ(wire.find("content-length:"), std::string::npos);
+}
+
+TEST(Session, HTTP11_RESPONSE_SERIALIZATION_REJECTS_BODY_FOR_NO_BODY_STATUS) {
+    qb::http::Response response;
+    response.status() = qb::http::status::NO_CONTENT;
+    response.body() = "abc";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << response, std::length_error);
+    EXPECT_EQ(out.size(), 0u);
+}
+
+TEST(Session, HTTP11_RESPONSE_SERIALIZATION_ALLOWS_HEAD_STYLE_CONTENT_LENGTH) {
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Content-Length", "4");
+
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << response);
+    const std::string wire{out.begin(), out.size()};
+
+    EXPECT_NE(wire.find("content-length: 4\r\n"), std::string::npos);
+    EXPECT_TRUE(wire.ends_with("\r\n\r\n"));
+}
+
+TEST(Session, HTTP11_RESPONSE_SERIALIZATION_REJECTS_NON_ZERO_CONTENT_LENGTH_FOR_NO_BODY_STATUS) {
+    qb::http::Response response;
+    response.status() = qb::http::status::NO_CONTENT;
+    response.set_header("Content-Length", "4");
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << response, std::length_error);
+    EXPECT_EQ(out.size(), 0u);
+}
+
+TEST(Session, HTTP11_RESPONSE_SERIALIZATION_ALLOWS_NOT_MODIFIED_CONTENT_LENGTH) {
+    qb::http::Response response;
+    response.status() = qb::http::status::NOT_MODIFIED;
+    response.set_header("Content-Length", "4");
+
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << response);
+    const std::string wire{out.begin(), out.size()};
+
+    EXPECT_NE(wire.find("HTTP/1.1 304 "), std::string::npos);
+    EXPECT_NE(wire.find("content-length: 4\r\n"), std::string::npos);
+    EXPECT_TRUE(wire.ends_with("\r\n\r\n"));
+}
+
+TEST(Session, HTTP11_RESPONSE_SERIALIZATION_REJECTS_TRANSFER_ENCODING_FOR_NO_BODY_STATUS) {
+    qb::http::Response response;
+    response.status() = qb::http::status::NOT_MODIFIED;
+    response.set_header("Transfer-Encoding", "chunked");
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << response, std::length_error);
+    EXPECT_EQ(out.size(), 0u);
+}
+
 // OVER TCP
 
 class TestServer;

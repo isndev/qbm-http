@@ -6,7 +6,7 @@
  * sides of HTTP/2 connections. It includes:
  *
  * - Stream state machine implementation
- * - Flow control window management  
+ * - Flow control window management
  * - Request/response data assembly
  * - Stream lifecycle tracking
  * - Priority and dependency management
@@ -58,7 +58,7 @@ enum class Http2StreamConcreteState {
 
 /**
  * @brief Flow control management helper
- * 
+ *
  * Centralizes flow control logic to avoid duplication between client/server streams
  */
 class FlowControlManager {
@@ -103,7 +103,7 @@ public:
 
 /**
  * @brief Base class for HTTP/2 stream state management
- * 
+ *
  * Provides common functionality for both client and server streams including:
  * - Flow control window management
  * - Stream state tracking
@@ -114,7 +114,7 @@ class Http2StreamBase {
 public:
     uint32_t id = 0;                                              ///< Stream identifier
     Http2StreamConcreteState state = Http2StreamConcreteState::IDLE; ///< Current stream state
-    
+
     // Flow control windows
     int64_t local_window_size;  ///< How much data we can receive from peer
     int64_t peer_window_size;   ///< How much data peer can receive from us
@@ -134,6 +134,7 @@ public:
     bool trailers_expected = false;      ///< Expecting trailers from peer
     bool trailers_received = false;      ///< Trailers received and processed
     bool expecting_continuation = false; ///< Expecting CONTINUATION frame
+    std::optional<std::uint64_t> expected_content_length; ///< Declared content-length, if present
 
     std::optional<Http2PriorityData> priority_info; ///< Priority information for stream
 
@@ -181,7 +182,7 @@ public:
      * @return true if local endpoint can send data
      */
     [[nodiscard]] bool can_send_data() const noexcept {
-        return state == Http2StreamConcreteState::OPEN || 
+        return state == Http2StreamConcreteState::OPEN ||
                state == Http2StreamConcreteState::HALF_CLOSED_REMOTE;
     }
 
@@ -190,7 +191,7 @@ public:
      * @return true if local endpoint can receive data
      */
     [[nodiscard]] bool can_receive_data() const noexcept {
-        return state == Http2StreamConcreteState::OPEN || 
+        return state == Http2StreamConcreteState::OPEN ||
                state == Http2StreamConcreteState::HALF_CLOSED_LOCAL;
     }
 
@@ -228,7 +229,7 @@ public:
         touch();
         local_window_size -= static_cast<int64_t>(data_size);
         processed_bytes_for_window_update += data_size;
-        
+
         return FlowControlManager::should_send_window_update(
             processed_bytes_for_window_update, window_update_threshold);
     }
@@ -242,13 +243,13 @@ public:
     bool update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept {
         int64_t delta = static_cast<int64_t>(new_initial_size) - static_cast<int64_t>(old_initial_size);
         int64_t new_window = FlowControlManager::update_window_safe(
-            peer_window_size, static_cast<uint32_t>(std::abs(delta)), 
+            peer_window_size, static_cast<uint32_t>(std::abs(delta)),
             static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT));
-        
+
         if (new_window == -1) {
             return false; // Overflow
         }
-        
+
         peer_window_size = delta >= 0 ? new_window : peer_window_size + delta;
         return peer_window_size >= 0;
     }
@@ -308,7 +309,7 @@ public:
     void mark_reset(ErrorCode error_code_param, bool is_sending) noexcept {
         error_code = error_code_param;
         state = Http2StreamConcreteState::CLOSED;
-        
+
         if (is_sending) {
             rst_stream_sent = true;
         } else {
@@ -320,7 +321,7 @@ public:
 
 /**
  * @brief Client-side HTTP/2 stream state
- * 
+ *
  * Extends the base stream state with client-specific information such as
  * the assembled response, request metadata, and push promise handling.
  */
@@ -331,7 +332,7 @@ struct Http2ClientStream : public Http2StreamBase {
     std::string method;                         ///< HTTP method for this request (from original request)
     bool response_dispatched = false;           ///< Response has been dispatched
     bool client_will_send_trailers = false;     ///< Client intends to send trailers for the current request
-    
+
     // For sending request body
     bool has_pending_data_to_send = false;      ///< True if original_request_to_send.body() has data remaining.
     qb::http::Request original_request_to_send; ///< Stores the original request if its body needs to be sent progressively.
@@ -360,7 +361,7 @@ struct Http2ClientStream : public Http2StreamBase {
 
 /**
  * @brief Server-side HTTP/2 stream state
- * 
+ *
  * Extends the base stream state with server-specific information such as
  * the assembled request, response handling state, and push promise support.
  */
@@ -371,11 +372,11 @@ struct Http2ServerStream : public Http2StreamBase {
     bool response_sent = false;                 ///< Tracks if initial HEADERS frame for response was sent
     bool server_will_send_trailers = false;     ///< Server intends to send trailers - REVIEW if needed, might be covered by is_trailers
     std::string method;                         ///< HTTP method from request
-    
+
     // Response sending state for the current response_to_send
     size_t send_buffer_offset = 0;              ///< Current offset in response_to_send.body().raw()
     qb::unordered_set<std::string> headers_sent_in_initial_frame; ///< Headers already sent in the first HEADERS frame for this response
-    
+
     // Push promise support
     std::vector<uint32_t> associated_push_promises; ///< IDs of PUSH_PROMISE streams initiated *by this* server stream (if it's a client request stream)
     uint32_t parent_stream_id = 0;              ///< If *this* stream *is* a server-pushed stream, this is the ID of the client-initiated stream it's associated with.
@@ -486,7 +487,7 @@ struct Http2ConnectionErrorEvent {
 
 /**
  * @brief Stream management helper for HTTP/2 connections
- * 
+ *
  * Centralizes common stream management operations to reduce duplication
  * between client and server implementations.
  */
@@ -494,7 +495,7 @@ template<typename StreamType>
 class StreamManager {
 public:
     using StreamMap = qb::unordered_map<uint32_t, StreamType>;
-    
+
     /**
      * @brief Stream cleanup criteria
      */
@@ -537,22 +538,22 @@ public:
     std::size_t cleanup_streams(const CleanupCriteria& criteria) {
         std::size_t removed_count = 0;
         auto now = std::chrono::steady_clock::now();
-        
+
         for (auto it = _streams.begin(); it != _streams.end(); ) {
             const StreamType& stream = it->second;
             bool should_remove = false;
-            
+
             // Check if stream is closed and should be cleaned up
             if (criteria.cleanup_closed_streams && stream.is_closed()) {
                 should_remove = true;
             }
-            
+
             // Check if stream is reset and should be cleaned up
-            if (criteria.cleanup_reset_streams && 
+            if (criteria.cleanup_reset_streams &&
                 (stream.rst_stream_received || stream.rst_stream_sent)) {
                 should_remove = true;
             }
-            
+
             // Check idle time
             if (criteria.max_idle_time.count() > 0) {
                 auto idle_time = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -561,7 +562,7 @@ public:
                     should_remove = true;
                 }
             }
-            
+
             // Check age
             if (criteria.max_age.count() > 0) {
                 auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -570,7 +571,7 @@ public:
                     should_remove = true;
                 }
             }
-            
+
             if (should_remove) {
                 it = _streams.erase(it);
                 removed_count++;
@@ -578,7 +579,7 @@ public:
                 ++it;
             }
         }
-        
+
         // Check total stream limit
         if (criteria.max_total_streams > 0 && _streams.size() > criteria.max_total_streams) {
             // Remove oldest closed streams first
@@ -588,22 +589,22 @@ public:
                     candidates.push_back(it);
                 }
             }
-            
+
             // Sort by age (oldest first)
-            std::sort(candidates.begin(), candidates.end(), 
+            std::sort(candidates.begin(), candidates.end(),
                      [](const auto& a, const auto& b) {
                          return a->second.created_at < b->second.created_at;
                      });
-            
+
             std::size_t to_remove = _streams.size() - criteria.max_total_streams;
             std::size_t can_remove = std::min(to_remove, candidates.size());
-            
+
             for (std::size_t i = 0; i < can_remove; ++i) {
                 _streams.erase(candidates[i]);
                 removed_count++;
             }
         }
-        
+
         return removed_count;
     }
 
@@ -614,24 +615,24 @@ public:
     [[nodiscard]] StreamStats get_statistics() const {
         StreamStats stats;
         stats.total_streams = _streams.size();
-        
+
         if (_streams.empty()) {
             return stats;
         }
-        
+
         auto now = std::chrono::steady_clock::now();
         std::chrono::milliseconds total_age{0};
         std::chrono::milliseconds oldest_age{0};
-        
+
         for (const auto& [stream_id, stream] : _streams) {
             auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - stream.created_at);
             total_age += age;
-            
+
             if (age > oldest_age) {
                 oldest_age = age;
             }
-            
+
             if (stream.is_closed()) {
                 stats.closed_streams++;
             } else if (stream.rst_stream_received || stream.rst_stream_sent) {
@@ -642,10 +643,10 @@ public:
                 stats.active_streams++;
             }
         }
-        
+
         stats.oldest_stream_age = oldest_age;
         stats.average_stream_age = std::chrono::milliseconds(total_age.count() / _streams.size());
-        
+
         return stats;
     }
 
@@ -655,15 +656,15 @@ public:
      * @param is_server Whether this is server-side (affects stream ID parity check)
      * @return true if all relevant streams are closed
      */
-    [[nodiscard]] bool are_all_relevant_streams_closed(uint32_t last_processed_stream_id, 
+    [[nodiscard]] bool are_all_relevant_streams_closed(uint32_t last_processed_stream_id,
                                                        bool is_server) const {
         for (const auto& [stream_id, stream] : _streams) {
             // Skip streams that are beyond the GOAWAY boundary
             if (last_processed_stream_id > 0) {
                 // For server: only check client-initiated streams (odd IDs)
-                // For client: only check server-initiated streams (even IDs) 
+                // For client: only check server-initiated streams (even IDs)
                 bool is_relevant_stream = is_server ? (stream_id % 2 == 1) : (stream_id % 2 == 0);
-                
+
                 if (is_relevant_stream && stream_id <= last_processed_stream_id) {
                     if (!stream.is_closed()) {
                         return false;
@@ -686,18 +687,18 @@ public:
      */
     [[nodiscard]] std::size_t get_active_stream_count(bool server_initiated_only = false) const {
         std::size_t count = 0;
-        
+
         for (const auto& [stream_id, stream] : _streams) {
             if (server_initiated_only && (stream_id % 2 == 1)) {
                 continue; // Skip client-initiated streams
             }
-            
-            if (!stream.is_closed() && 
+
+            if (!stream.is_closed() &&
                 stream.state != Http2StreamConcreteState::IDLE) {
                 count++;
             }
         }
-        
+
         return count;
     }
 
@@ -709,7 +710,7 @@ public:
      */
     std::size_t update_all_stream_windows(uint32_t new_initial_size, uint32_t old_initial_size) {
         std::size_t error_count = 0;
-        
+
         for (auto& [stream_id, stream] : _streams) {
             if (!stream.update_peer_window_size(new_initial_size, old_initial_size)) {
                 error_count++;
@@ -717,7 +718,7 @@ public:
                 stream.mark_reset(ErrorCode::FLOW_CONTROL_ERROR, false);
             }
         }
-        
+
         return error_count;
     }
 
@@ -727,16 +728,16 @@ public:
      */
     [[nodiscard]] std::vector<uint32_t> find_streams_needing_window_update() const {
         std::vector<uint32_t> stream_ids;
-        
+
         for (const auto& [stream_id, stream] : _streams) {
             if (stream.processed_bytes_for_window_update >= stream.window_update_threshold &&
                 stream.can_receive_data()) {
                 stream_ids.push_back(stream_id);
             }
         }
-        
+
         return stream_ids;
     }
 };
 
-} // namespace qb::protocol::http2 
+} // namespace qb::protocol::http2

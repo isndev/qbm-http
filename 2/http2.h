@@ -155,6 +155,18 @@ namespace qb::http2 {
 
             using qb::io::async::io<session<Derived, Handler>>::operator<<;
 
+            [[nodiscard]] bool reset_stream(uint32_t stream_id,
+                                             qb::protocol::http2::ErrorCode error_code = qb::protocol::http2::ErrorCode::CANCEL,
+                                             const std::string& reason = {}) {
+                if (!_http2_protocol || !is_valid_http2_stream_id(stream_id)) {
+                    return false;
+                }
+                _http2_protocol->send_rst_stream(stream_id, error_code, reason);
+                this->ready_to_write();
+                this->updateTimeout();
+                return true;
+            }
+
             /**
              * @brief Send HTTP response
              * @param res HTTP response to send

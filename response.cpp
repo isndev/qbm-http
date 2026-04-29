@@ -1,8 +1,13 @@
 #include "./response.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
+#include "./chunk.h"
 
+#include <charconv>
+#include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace qb::allocator {
     namespace {
@@ -11,13 +16,81 @@ namespace qb::allocator {
                 && value.size() <= qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH;
         }
 
-        [[nodiscard]] bool transfer_encoding_contains_chunked(const std::string &value) {
-            for (const auto &token: qb::http::utility::split_string<std::string>(value, ",")) {
-                if (qb::http::utility::iequals(qb::http::utility::trim_http_whitespace(token), "chunked")) {
-                    return true;
+        struct transfer_encoding_result {
+            bool ok = true;
+            bool chunked = false;
+        };
+
+        [[nodiscard]] std::optional<std::uint64_t> parse_content_length(std::string_view value) noexcept {
+            value = qb::http::utility::trim_http_whitespace(value);
+            if (value.empty()) {
+                return std::nullopt;
+            }
+            std::uint64_t parsed = 0;
+            const auto *begin = value.data();
+            const auto *end = value.data() + value.size();
+            const auto [ptr, ec] = std::from_chars(begin, end, parsed);
+            if (ec != std::errc{} || ptr != end) {
+                return std::nullopt;
+            }
+            return parsed;
+        }
+
+        template <typename Message>
+        [[nodiscard]] std::optional<std::uint64_t> declared_content_length(Message const& msg) {
+            auto it = msg.headers().find("Content-Length");
+            if (it == msg.headers().end()) {
+                return std::nullopt;
+            }
+            std::optional<std::uint64_t> parsed_length;
+            for (const auto& raw : it->second) {
+                const auto parsed = parse_content_length(raw);
+                if (!parsed || (parsed_length && *parsed_length != *parsed)) {
+                    throw std::length_error("qb::http::Response serialization: invalid or conflicting Content-Length header.");
+                }
+                parsed_length = *parsed;
+            }
+            return parsed_length;
+        }
+
+        template <typename Message>
+        [[nodiscard]] transfer_encoding_result transfer_encoding(Message const& msg) noexcept {
+            auto it = msg.headers().find("Transfer-Encoding");
+            if (it == msg.headers().end()) {
+                return {};
+            }
+
+            std::vector<std::string> tokens;
+            for (const auto& value : it->second) {
+                for (auto token : qb::http::utility::split_string<std::string>(value, ",")) {
+                    token = std::string(qb::http::utility::trim_http_whitespace(token));
+                    if (!token.empty()) {
+                        tokens.emplace_back(std::move(token));
+                    }
                 }
             }
-            return false;
+
+            if (tokens.empty()) {
+                return {false, false};
+            }
+
+            if (tokens.size() == 1 && qb::http::utility::iequals(tokens.front(), "chunked")) {
+                return {true, true};
+            }
+            return {false, false};
+        }
+
+        [[nodiscard]] bool response_must_not_carry_body(qb::http::Response const& r) noexcept {
+            const auto status = r.status().code();
+            return (status >= 100 && status < 200) ||
+                   status == 204 ||
+                   status == 304;
+        }
+
+        [[nodiscard]] bool response_forbids_nonzero_content_length(qb::http::Response const& r) noexcept {
+            const auto status = r.status().code();
+            return (status >= 100 && status < 200) ||
+                   status == 204;
         }
     }
 
@@ -108,13 +181,45 @@ namespace qb::allocator {
         
         // Body
         const auto length = r.body().size();
-        const auto is_chunked = transfer_encoding_contains_chunked(r.header("Transfer-Encoding"));
-        if (length && !is_chunked) {
-            if (!r.has_header("Content-Length")) {
-                *this << "content-length: " << length << qb::http::endl;
+        if (length && response_must_not_carry_body(r)) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: this status code must not carry a body.");
+        }
+        const auto transfer = transfer_encoding(r);
+        if (!transfer.ok) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
+        }
+        if (transfer.chunked && response_must_not_carry_body(r)) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
+        }
+        const auto content_length = declared_content_length(r);
+        if (transfer.chunked && content_length) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
+        }
+        if (response_forbids_nonzero_content_length(r) && content_length && *content_length != 0u) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
+        }
+        if (length && !transfer.chunked && content_length && *content_length != length) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: Content-Length does not match body size.");
+        }
+
+        if (length) {
+            if (transfer.chunked) {
+                *this << qb::http::endl
+                      << qb::http::Chunk(r.body().raw().begin(), length)
+                      << qb::http::Chunk();
+            } else {
+                if (!content_length) {
+                    *this << "content-length: " << length << qb::http::endl;
+                }
+                *this << qb::http::endl
+                        << r.body().raw();
             }
-            *this << qb::http::endl
-                    << r.body().raw();
         } else
             *this << qb::http::endl;
         return *this;

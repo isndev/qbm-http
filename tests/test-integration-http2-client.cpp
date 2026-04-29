@@ -106,6 +106,33 @@ public:
             h2_request_count_server++;
             ctx->complete();
         });
+
+        router().get("/api/reset-stream", [](auto ctx) {
+            h2_request_count_server++;
+            auto session = ctx->session();
+            if (session && session->reset_stream(static_cast<uint32_t>(ctx->request().stream_id),
+                                                 qb::protocol::http2::ErrorCode::CANCEL,
+                                                 "test initiated stream reset")) {
+                h2_server_side_assertions++;
+            }
+        });
+
+        router().head("/api/head-metadata", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Length", "123");
+            ctx->response().add_header("X-Protocol", "HTTP/2");
+            h2_request_count_server++;
+            ctx->complete();
+        });
+
+        router().get("/api/trailers", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body() = "HTTP/2 response with trailers";
+            ctx->response().add_header("Trailer", "X-Checksum");
+            ctx->response().add_header("X-Checksum", "h2-trailer-ok");
+            h2_request_count_server++;
+            ctx->complete();
+        });
     }
 };
 
@@ -425,6 +452,127 @@ TEST_F(Http2ClientIntegrationTest, ErrorHandling) {
         }
 
         ASSERT_TRUE(response_received.load(std::memory_order_acquire)) << "Client did not receive response for ErrorHandling within timeout.";
+    }, 1, 0);
+}
+
+TEST_F(Http2ClientIntegrationTest, ResponseTrailersCompleteStream) {
+    MakeHttp2ClientRequest([&]() {
+        std::atomic<bool> response_received{false};
+        qb::http::Response received_response;
+
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_connect_timeout(15.0);
+
+        qb::http::Request request;
+        request.method() = qb::http::Method::GET;
+        request.uri() = qb::io::uri("/api/trailers");
+
+        client->push_request(request, [&](qb::http::Response response) {
+            received_response = response;
+            response_received = true;
+
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            EXPECT_EQ(response.body().template as<std::string>(), "HTTP/2 response with trailers");
+            EXPECT_TRUE(response.has_header("X-Checksum"));
+            EXPECT_EQ(response.header("X-Checksum"), "h2-trailer-ok");
+        });
+
+        client->connect(nullptr);
+
+        auto response_start_time = std::chrono::steady_clock::now();
+        while (!response_received.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() - response_start_time < std::chrono::seconds(10)) {
+            qb::io::async::run(EVRUN_NOWAIT);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ASSERT_TRUE(response_received.load(std::memory_order_acquire)) << "Client did not receive response trailers within timeout.";
+    }, 1, 0);
+}
+
+TEST_F(Http2ClientIntegrationTest, StreamResetIsMappedToTheCorrectConcurrentRequest) {
+    MakeHttp2ClientRequest([&]() {
+        std::atomic<int> responses_received{0};
+        qb::http::Response ok_response;
+        qb::http::Response reset_response;
+
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_connect_timeout(15.0);
+
+        qb::http::Request ok_request;
+        ok_request.method() = qb::http::Method::GET;
+        ok_request.uri() = qb::io::uri("/api/test");
+
+        qb::http::Request missing_request;
+        missing_request.method() = qb::http::Method::GET;
+        missing_request.uri() = qb::io::uri("/api/reset-stream");
+
+        client->push_request(ok_request, [&](qb::http::Response response) {
+            ok_response = response;
+            ++responses_received;
+
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            EXPECT_EQ(response.body().template as<std::string>(), "HTTP/2 GET Success");
+        });
+
+        client->push_request(missing_request, [&](qb::http::Response response) {
+            reset_response = response;
+            ++responses_received;
+
+            EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
+            EXPECT_NE(response.body().template as<std::string>().find("Stream error"), std::string::npos);
+        });
+
+        client->connect(nullptr);
+
+        auto response_start_time = std::chrono::steady_clock::now();
+        while (responses_received.load(std::memory_order_acquire) < 2 &&
+               std::chrono::steady_clock::now() - response_start_time < std::chrono::seconds(10)) {
+            qb::io::async::run(EVRUN_NOWAIT);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ASSERT_EQ(responses_received.load(std::memory_order_acquire), 2)
+            << "Client did not complete both concurrent callbacks after a stream reset.";
+        EXPECT_EQ(ok_response.status(), qb::http::status::OK);
+        EXPECT_EQ(reset_response.status(), qb::http::status::BAD_GATEWAY);
+    }, 2, 1);
+}
+
+TEST_F(Http2ClientIntegrationTest, HeadResponseAllowsMetadataContentLengthWithoutBody) {
+    MakeHttp2ClientRequest([&]() {
+        std::atomic<bool> response_received{false};
+        qb::http::Response received_response;
+
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_connect_timeout(15.0);
+
+        qb::http::Request request;
+        request.method() = qb::http::Method::HEAD;
+        request.uri() = qb::io::uri("/api/head-metadata");
+
+        client->push_request(request, [&](qb::http::Response response) {
+            received_response = response;
+            response_received = true;
+
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            EXPECT_EQ(response.header("content-length"), "123");
+            EXPECT_TRUE(response.body().empty());
+            EXPECT_EQ(response.header("x-protocol"), "HTTP/2");
+        });
+
+        client->connect(nullptr);
+
+        auto response_start_time = std::chrono::steady_clock::now();
+        while (!response_received.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() - response_start_time < std::chrono::seconds(10)) {
+            qb::io::async::run(EVRUN_NOWAIT);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        ASSERT_TRUE(response_received.load(std::memory_order_acquire))
+            << "Client did not receive response for HEAD metadata request within timeout.";
+        EXPECT_EQ(received_response.status(), qb::http::status::OK);
     }, 1, 0);
 }
 

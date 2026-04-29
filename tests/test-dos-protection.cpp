@@ -484,6 +484,55 @@ TEST_F(IncomingParserLimitsTest, HeaderOnlyRequestNormalizesUnknownLengthToZero)
     EXPECT_EQ(parser.content_length, 0u);
 }
 
+TEST_F(IncomingParserLimitsTest, ChunkedTransferEncodingIsAcceptedWhileParsing) {
+    qb::http::Parser<Request> parser;
+    std::string raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+}
+
+TEST_F(IncomingParserLimitsTest, UnsupportedTransferEncodingIsRejectedWhileParsing) {
+    qb::http::Parser<Request> parser;
+    std::string raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+
+    const auto err = parser.parse(raw.data(), raw.size());
+    EXPECT_NE(err, HPE_OK);
+    EXPECT_NE(err, HPE_PAUSED);
+}
+
+TEST_F(IncomingParserLimitsTest, TransferEncodingWithContentLengthIsRejectedWhileParsing) {
+    qb::http::Parser<Request> parser;
+    std::string raw =
+        "POST /upload HTTP/1.1\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Content-Length: 3\r\n\r\n";
+
+    EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+}
+
+TEST_F(IncomingParserLimitsTest, NoBodyResponseStatusIgnoresDeclaredContentLength) {
+    qb::http::Parser<Response> parser;
+    std::string raw =
+        "HTTP/1.1 304 Not Modified\r\n"
+        "Content-Length: 4\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+    EXPECT_EQ(parser.content_length, 0u);
+}
+
+TEST_F(IncomingParserLimitsTest, NoContentResponseIgnoresDeclaredContentLength) {
+    qb::http::Parser<Response> parser;
+    std::string raw =
+        "HTTP/1.1 204 No Content\r\n"
+        "Content-Length: 4\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+    EXPECT_EQ(parser.content_length, 0u);
+}
+
 TEST_F(IncomingParserLimitsTest, FragmentedHeaderFieldAndValueAreReassembledCorrectly) {
     qb::http::Parser<Request> parser;
 
