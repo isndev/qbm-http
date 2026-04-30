@@ -1076,6 +1076,10 @@ public:
             LOG_HTTP_INFO_PA(associated_stream_id, "Server: Client has disabled PUSH_PROMISE (SETTINGS_ENABLE_PUSH = 0). Cannot send push for promised_stream_id " << promised_stream_id);
             return PushPromiseFailureReason::PEER_PUSH_DISABLED;
         }
+        if (promised_stream_id == 0 || (promised_stream_id & 1u) != 0u) {
+            LOG_HTTP_WARN_PA(associated_stream_id, "Server: Invalid promised stream id " << promised_stream_id << " for PUSH_PROMISE.");
+            return PushPromiseFailureReason::INVALID_PROMISED_STREAM;
+        }
         if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
             LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE for promised_stream_id " << promised_stream_id << ". Would exceed client's MAX_CONCURRENT_STREAMS limit: " << _peer_max_concurrent_streams);
             return PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED;
@@ -1113,12 +1117,35 @@ public:
         // PUSH_PROMISE frames MUST include pseudo-header fields for :method, :scheme, :authority, and :path.
         // They MAY include other headers that are valid for requests.
 
-        hf_vector.push_back({std::string(qb::http::well_known::COLON_METHOD_SV), std::string(promised_request_pseudo_headers.method())});
-        hf_vector.push_back({std::string(qb::http::well_known::COLON_PATH_SV), std::string(promised_request_pseudo_headers.uri().path())});
-        hf_vector.push_back({std::string(qb::http::well_known::COLON_SCHEME_SV), std::string(promised_request_pseudo_headers.uri().scheme())});
-        if (!promised_request_pseudo_headers.uri().host().empty()) {
-             hf_vector.push_back({std::string(qb::http::well_known::COLON_AUTHORITY_SV), std::string(promised_request_pseudo_headers.uri().host())});
+        const auto& promised_uri = promised_request_pseudo_headers.uri();
+        std::string promised_authority(promised_uri.host());
+        const bool already_bracketed_ipv6 =
+            promised_authority.size() >= 2 && promised_authority.front() == '[' && promised_authority.back() == ']';
+        if (!already_bracketed_ipv6 && promised_authority.find(':') != std::string::npos) {
+            promised_authority = "[" + promised_authority + "]";
         }
+        if (!promised_uri.port().empty()) {
+            promised_authority += ":" + std::string(promised_uri.port());
+        }
+
+        std::string promised_path = promised_uri.path().empty()
+            ? std::string{"/"}
+            : std::string(promised_uri.path());
+        if (!promised_uri.encoded_queries().empty()) {
+            promised_path.push_back('?');
+            promised_path += promised_uri.encoded_queries();
+        }
+
+        if (promised_request_pseudo_headers.method() == qb::http::method::UNINITIALIZED ||
+            promised_uri.scheme().empty() || promised_authority.empty() || promised_path.empty()) {
+            _server_streams.erase(promised_stream_id);
+            return PushPromiseFailureReason::INVALID_PROMISED_REQUEST;
+        }
+
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_METHOD_SV), std::string(promised_request_pseudo_headers.method())});
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_SCHEME_SV), std::string(promised_uri.scheme())});
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_AUTHORITY_SV), std::move(promised_authority)});
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_PATH_SV), std::move(promised_path)});
 
         for (const auto& header_entry : promised_request_pseudo_headers.headers()) { // Iterate map from .headers()
             // Skip pseudo-headers already added, and ":content-length" which is forbidden in PUSH_PROMISE
@@ -1389,6 +1416,11 @@ private:
                     if (pseudo_headers_finished) {
                         this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header received after regular header."); return false;
                     }
+                    if (!HeaderValidator::is_valid_header_value(value)) {
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                              "Invalid pseudo-header value format.");
+                        return false;
+                    }
                     // Process pseudo-headers
                     if (name == ":method") {
                         if (method_sv) {
@@ -1459,8 +1491,11 @@ private:
             if (path_sv.value().empty()) {
                  this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty."); return false;
             }
-            // As per RFC 7540 Section 8.1.2.3, :authority is optional if the URI has an authority component.
-            // For QB, we'll reconstruct the URI. If authority_sv is present, it takes precedence for the host part.
+            if (!authority_sv || authority_sv.value().empty()) {
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                      "Missing or empty :authority pseudo-header.");
+                return false;
+            }
 
             qb::http::Method method_from_string_view(temp_method_str);
             if (method_from_string_view == qb::http::Method::Value::UNINITIALIZED) {
@@ -1469,15 +1504,7 @@ private:
             stream.assembled_request.method() = method_from_string_view;
 
             std::string uri_str = std::string(scheme_sv.value()) + "://";
-            if (authority_sv && !authority_sv.value().empty()) {
-                uri_str += std::string(authority_sv.value());
-            } else {
-                // Fallback: try to get host from Host header if :authority is missing or empty
-                // This logic needs to be robust as per RFC requirements
-                // For now, if :authority is empty, we might form an origin-form URI if path is absolute
-                // Or rely on the application to handle Host header later if needed.
-                // Let's assume for now if :authority is not there, it will be an origin-form request or app handles Host.
-            }
+            uri_str += std::string(authority_sv.value());
             uri_str += std::string(path_sv.value());
             stream.assembled_request.uri() = qb::io::uri::parse(uri_str);
 

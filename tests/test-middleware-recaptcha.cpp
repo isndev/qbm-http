@@ -158,6 +158,45 @@ TEST_F(RecaptchaMiddlewareTest, ValidTokenPassesWithInjectedVerifier) {
     EXPECT_GE(_session->_recaptcha_result_in_context->score, 0.5f);
 }
 
+TEST_F(RecaptchaMiddlewareTest, ScorelessV2SuccessPassesDefaultScoreThreshold) {
+    qb::http::RecaptchaOptions opts("fake_secret_for_mocked_v2_success");
+    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    recap_mw->verification_client([](qb::http::Request request,
+                                     qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body() = R"({"success":true,"hostname":"test.com"})";
+        cb(qb::http::async::Reply{std::move(request), std::move(response)});
+    });
+
+    configure_router_and_run(recap_mw, create_request("valid_mocked_v2_token"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
+    EXPECT_TRUE(_session->_recaptcha_result_in_context->success);
+    EXPECT_FALSE(_session->_recaptcha_result_in_context->has_score);
+}
+
+TEST_F(RecaptchaMiddlewareTest, ExplicitV3RejectsScorelessSuccess) {
+    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(
+        qb::http::RecaptchaOptions::v3("fake_secret_for_mocked_scoreless_v3"));
+    recap_mw->verification_client([](qb::http::Request request,
+                                     qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body() = R"({"success":true,"hostname":"test.com"})";
+        cb(qb::http::async::Reply{std::move(request), std::move(response)});
+    });
+
+    configure_router_and_run(recap_mw, create_request("scoreless_mocked_v3_token"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("Score is required"),
+              std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
 TEST_F(RecaptchaMiddlewareTest, TokenExtractionFromUrlEncodedFormBody) {
     qb::http::RecaptchaOptions opts("test_secret");
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);

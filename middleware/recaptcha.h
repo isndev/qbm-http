@@ -62,6 +62,12 @@ namespace qb::http {
             Query ///< Token is in a URL query parameter (e.g., "recaptcha_token").
         };
 
+        enum class ChallengeType {
+            Auto, ///< Accept v2 scoreless successes and apply score checks when Google returns a v3 score.
+            V2,   ///< Accept scoreless v2 successes and ignore score thresholds.
+            V3    ///< Require a score and enforce the configured score threshold.
+        };
+
         /** @brief Default constructor. Requires `secret_key` to be set before use. */
         RecaptchaOptions() = default;
 
@@ -91,6 +97,11 @@ namespace qb::http {
          */
         RecaptchaOptions &min_score(float score_val) noexcept {
             _min_score = score_val;
+            return *this;
+        }
+
+        RecaptchaOptions &challenge_type(ChallengeType type) noexcept {
+            _challenge_type = type;
             return *this;
         }
 
@@ -152,7 +163,14 @@ namespace qb::http {
         [[nodiscard]] static RecaptchaOptions v3(const std::string &secret_key_val, float min_score_val = 0.5f) {
             return RecaptchaOptions(secret_key_val)
                     .min_score(min_score_val)
+                    .challenge_type(ChallengeType::V3)
                     .from_body("g-recaptcha-response"); // Default field name for reCAPTCHA v3
+        }
+
+        [[nodiscard]] static RecaptchaOptions v2(const std::string &secret_key_val) {
+            return RecaptchaOptions(secret_key_val)
+                    .challenge_type(ChallengeType::V2)
+                    .from_body("g-recaptcha-response");
         }
 
         /** 
@@ -164,6 +182,7 @@ namespace qb::http {
         [[nodiscard]] static RecaptchaOptions strict(const std::string &secret_key_val) {
             return RecaptchaOptions(secret_key_val)
                     .min_score(0.7f) // Example of a stricter score
+                    .challenge_type(ChallengeType::V3)
                     .from_header("X-reCAPTCHA-Token");
         }
 
@@ -172,6 +191,7 @@ namespace qb::http {
         [[nodiscard]] float get_min_score() const noexcept { return _min_score; }
         [[nodiscard]] const std::string &get_api_url() const noexcept { return _api_url; }
         [[nodiscard]] TokenLocation get_token_location() const noexcept { return _token_location; }
+        [[nodiscard]] ChallengeType get_challenge_type() const noexcept { return _challenge_type; }
         [[nodiscard]] const std::string &get_token_field_name() const noexcept { return _token_field_name; }
 
     private:
@@ -179,6 +199,7 @@ namespace qb::http {
         float _min_score = 0.5f; ///< Minimum score for v3. Default is 0.5.
         std::string _api_url = "https://www.google.com/recaptcha/api/siteverify"; ///< Google API URL for verification.
         TokenLocation _token_location = TokenLocation::Body; ///< Default location for the token.
+        ChallengeType _challenge_type = ChallengeType::Auto; ///< Default supports v2 and v3 response shapes.
         std::string _token_field_name = "g-recaptcha-response"; ///< Default field/header/param name for the token.
     };
 
@@ -186,6 +207,7 @@ namespace qb::http {
     struct RecaptchaResult {
         bool success = false; ///< Whether Google considered the token valid overall.
         float score = 0.0f; ///< reCAPTCHA v3 score (0.0 to 1.0).
+        bool has_score = false; ///< Whether Google's response included a score. v2 responses commonly omit it.
         std::string action; ///< The action name associated with the token (for v3).
         std::string hostname; ///< The hostname that served the reCAPTCHA challenge.
         std::string error_codes;
@@ -330,11 +352,22 @@ namespace qb::http {
 
                 shared_ctx->template set<RecaptchaResult>("recaptcha_result", verification_result);
 
-                if (!verification_result.success || verification_result.score < options_snapshot->get_min_score()) {
+                const auto challenge_type = options_snapshot->get_challenge_type();
+                const bool score_required =
+                    challenge_type == RecaptchaOptions::ChallengeType::V3;
+                const bool score_enforced =
+                    challenge_type != RecaptchaOptions::ChallengeType::V2 &&
+                    verification_result.has_score;
+                const bool missing_required_score = score_required && !verification_result.has_score;
+                const bool score_below_threshold =
+                    score_enforced && verification_result.score < options_snapshot->get_min_score();
+                if (!verification_result.success || missing_required_score || score_below_threshold) {
                     std::string error_detail = "Verification failed.";
                     if (!verification_result.success && !verification_result.error_codes.empty()) {
                         error_detail += " Errors: " + verification_result.error_codes;
-                    } else if (verification_result.score < options_snapshot->get_min_score()) {
+                    } else if (missing_required_score) {
+                        error_detail += " Score is required for reCAPTCHA v3.";
+                    } else if (score_below_threshold) {
                         error_detail += " Score (" + std::to_string(verification_result.score) +
                                 ") is below threshold (" + std::to_string(options_snapshot->get_min_score()) +
                                 ").";
@@ -470,6 +503,7 @@ namespace qb::http {
                 if (json_body.contains("score") && json_body["score"].is_number()) {
                     // Score is for v3
                     result.score = json_body["score"].get<float>();
+                    result.has_score = true;
                 }
                 if (json_body.contains("action") && json_body["action"].is_string()) {
                     // Action is for v3

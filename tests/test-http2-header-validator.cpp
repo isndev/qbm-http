@@ -60,8 +60,21 @@ TEST(HTTP2HeaderValidator, RejectsUnknownRequestPseudoHeaders) {
     std::vector<qb::protocol::hpack::HeaderField> headers{
         {":method", "GET"},
         {":scheme", "https"},
+        {":authority", "example.test"},
         {":path", "/"},
         {":protocol", "websocket"}
+    };
+
+    const auto result = qb::protocol::http2::HeaderValidator::validate_request_pseudo_headers(headers);
+    EXPECT_FALSE(result.is_valid);
+    EXPECT_EQ(result.error_code, qb::protocol::http2::ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST(HTTP2HeaderValidator, RequiresAuthorityPseudoHeaderInRequests) {
+    std::vector<qb::protocol::hpack::HeaderField> headers{
+        {":method", "GET"},
+        {":scheme", "https"},
+        {":path", "/"}
     };
 
     const auto result = qb::protocol::http2::HeaderValidator::validate_request_pseudo_headers(headers);
@@ -101,6 +114,21 @@ TEST(HTTP2HeaderValidator, TeRequestValueValidationRejectsOtherTokens) {
     EXPECT_FALSE(qb::protocol::http2::HeaderValidator::is_valid_request_te_value("trailers, gzip"));
 }
 
+TEST(HTTP2SettingsValidator, EnableConnectProtocolIsBoolean) {
+    using qb::protocol::http2::Http2SettingIdentifier;
+    using qb::protocol::http2::SettingsHelper;
+
+    EXPECT_TRUE(SettingsHelper::validate_setting(
+        Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL, 0, true).is_valid);
+    EXPECT_TRUE(SettingsHelper::validate_setting(
+        Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL, 1, true).is_valid);
+
+    const auto invalid = SettingsHelper::validate_setting(
+        Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL, 2, true);
+    EXPECT_FALSE(invalid.is_valid);
+    EXPECT_EQ(invalid.error_code, qb::protocol::http2::ErrorCode::PROTOCOL_ERROR);
+}
+
 TEST(HTTP2HeaderValidator, AllowsContentLengthInResponseHeaders) {
     EXPECT_FALSE(qb::protocol::http2::HeaderValidator::is_forbidden_response_header("content-length"));
 }
@@ -128,6 +156,13 @@ TEST(HTTP2HeaderValidator, RequiresStatusPseudoHeaderInResponse) {
 
 TEST(HTTP2HeaderValidator, ValidHeaderFieldFormatAcceptsLowercaseToken) {
     EXPECT_TRUE(qb::protocol::http2::HeaderValidator::is_valid_header_field("content-type", "text/plain"));
+}
+
+TEST(HTTP2HeaderValidator, HeaderValueFormatRejectsControlBytes) {
+    EXPECT_TRUE(qb::protocol::http2::HeaderValidator::is_valid_header_value("/safe/path"));
+    EXPECT_FALSE(qb::protocol::http2::HeaderValidator::is_valid_header_value("/bad\rpath"));
+    EXPECT_FALSE(qb::protocol::http2::HeaderValidator::is_valid_header_value("/bad\npath"));
+    EXPECT_FALSE(qb::protocol::http2::HeaderValidator::is_valid_header_value(std::string_view{"bad\0path", 8}));
 }
 
 TEST(HTTP2HeaderValidator, RejectsUppercaseHeaderName) {
@@ -234,6 +269,7 @@ TEST(HTTP2ServerProtocol, RejectsRequestBodyShorterThanContentLengthOnDataEndStr
     headers.payload.header_block_fragment = encode_hpack_headers({
         {":method", "POST"},
         {":scheme", "https"},
+        {":authority", "example.test"},
         {":path", "/mismatch"},
         {"content-length", "5"}
     });
@@ -267,6 +303,7 @@ TEST(HTTP2ServerProtocol, RejectsOutgoingResponseContentLengthMismatch) {
     headers.payload.header_block_fragment = encode_hpack_headers({
         {":method", "GET"},
         {":scheme", "https"},
+        {":authority", "example.test"},
         {":path", "/mismatch"}
     });
 
@@ -294,6 +331,7 @@ TEST(HTTP2ServerProtocol, AllowsHeadResponseContentLengthMetadata) {
     headers.payload.header_block_fragment = encode_hpack_headers({
         {":method", "HEAD"},
         {":scheme", "https"},
+        {":authority", "example.test"},
         {":path", "/head"}
     });
 
@@ -306,6 +344,101 @@ TEST(HTTP2ServerProtocol, AllowsHeadResponseContentLengthMetadata) {
 
     EXPECT_TRUE(protocol.send_response(1, response));
     EXPECT_EQ(io.stream_error_count, 0);
+}
+
+TEST(HTTP2ServerProtocol, RejectsRequestMissingAuthorityPseudoHeader) {
+    Http2ProtocolHarness io;
+    qb::protocol::http2::ServerHttp2Protocol<Http2ProtocolHarness> protocol(io);
+
+    qb::protocol::http2::Http2FrameData<qb::protocol::http2::HeadersFrame> headers;
+    headers.header.type = static_cast<uint8_t>(qb::protocol::http2::FrameType::HEADERS);
+    headers.header.flags = qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM;
+    headers.header.set_stream_id(1);
+    headers.payload.header_block_fragment = encode_hpack_headers({
+        {":method", "GET"},
+        {":scheme", "https"},
+        {":path", "/missing-authority"}
+    });
+
+    protocol.on(std::move(headers));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, qb::protocol::http2::ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST(HTTP2ServerProtocol, RejectsRequestEmptyAuthorityPseudoHeader) {
+    Http2ProtocolHarness io;
+    qb::protocol::http2::ServerHttp2Protocol<Http2ProtocolHarness> protocol(io);
+
+    qb::protocol::http2::Http2FrameData<qb::protocol::http2::HeadersFrame> headers;
+    headers.header.type = static_cast<uint8_t>(qb::protocol::http2::FrameType::HEADERS);
+    headers.header.flags = qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM;
+    headers.header.set_stream_id(1);
+    headers.payload.header_block_fragment = encode_hpack_headers({
+        {":method", "GET"},
+        {":scheme", "https"},
+        {":authority", ""},
+        {":path", "/empty-authority"}
+    });
+
+    protocol.on(std::move(headers));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, qb::protocol::http2::ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST(HTTP2ServerProtocol, PushPromiseRejectsInvalidPromisedStreamId) {
+    Http2ProtocolHarness io;
+    qb::protocol::http2::ServerHttp2Protocol<Http2ProtocolHarness> protocol(io);
+
+    qb::protocol::http2::Http2FrameData<qb::protocol::http2::HeadersFrame> headers;
+    headers.header.type = static_cast<uint8_t>(qb::protocol::http2::FrameType::HEADERS);
+    headers.header.flags = qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM;
+    headers.header.set_stream_id(1);
+    headers.payload.header_block_fragment = encode_hpack_headers({
+        {":method", "GET"},
+        {":scheme", "https"},
+        {":authority", "example.test"},
+        {":path", "/parent"}
+    });
+    protocol.on(std::move(headers));
+    ASSERT_EQ(io.request_count, 1);
+
+    qb::http::Request promised{qb::io::uri{"https://example.test/asset"}};
+    promised.method() = qb::http::method::GET;
+
+    auto failure = protocol.send_push_promise(1, 3, std::move(promised));
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, qb::protocol::http2::PushPromiseFailureReason::INVALID_PROMISED_STREAM);
+}
+
+TEST(HTTP2ServerProtocol, PushPromiseRejectsMissingPromisedAuthority) {
+    Http2ProtocolHarness io;
+    qb::protocol::http2::ServerHttp2Protocol<Http2ProtocolHarness> protocol(io);
+
+    qb::protocol::http2::Http2FrameData<qb::protocol::http2::HeadersFrame> headers;
+    headers.header.type = static_cast<uint8_t>(qb::protocol::http2::FrameType::HEADERS);
+    headers.header.flags = qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM;
+    headers.header.set_stream_id(1);
+    headers.payload.header_block_fragment = encode_hpack_headers({
+        {":method", "GET"},
+        {":scheme", "https"},
+        {":authority", "example.test"},
+        {":path", "/parent"}
+    });
+    protocol.on(std::move(headers));
+    ASSERT_EQ(io.request_count, 1);
+
+    qb::http::Request promised{qb::io::uri{"/asset"}};
+    promised.method() = qb::http::method::GET;
+
+    auto failure = protocol.send_push_promise(1, 2, std::move(promised));
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, qb::protocol::http2::PushPromiseFailureReason::INVALID_PROMISED_REQUEST);
 }
 
 TEST(HTTP2ClientProtocol, GracefulGoawayKeepsAcceptedStreamsAlive) {

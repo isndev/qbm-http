@@ -319,6 +319,8 @@ enum class PushPromiseFailureReason {
     PEER_PUSH_DISABLED,               ///< Client has SETTINGS_ENABLE_PUSH set to 0.
     PEER_CONCURRENCY_LIMIT_REACHED,   ///< Sending would exceed client's MAX_CONCURRENT_STREAMS.
     INVALID_ASSOCIATED_STREAM,        ///< The client-initiated stream for association is invalid or in wrong state.
+    INVALID_PROMISED_STREAM,          ///< The promised stream id is invalid for server push.
+    INVALID_PROMISED_REQUEST,         ///< The promised request cannot form valid HTTP/2 request pseudo-headers.
     INTERNAL_HPACK_ERROR,             ///< HPACK encoding failed for push promise headers.
     CONNECTION_INACTIVE,              ///< Connection is not active or protocol is not ok.
     INTERNAL_ERROR                    ///< An internal server error prevented sending the push promise.
@@ -334,4 +336,4 @@ constexpr std::size_t WINDOW_UPDATE_FRAME_PAYLOAD_SIZE = 4;
 constexpr std::size_t GOAWAY_FRAME_MIN_PAYLOAD_SIZE = 8;
 constexpr std::size_t PUSH_PROMISE_MIN_PAYLOAD_SIZE = 4;
 
-} // namespace qb::protocol::http2 
+} // namespace qb::protocol::http2
