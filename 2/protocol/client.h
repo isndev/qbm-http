@@ -1405,7 +1405,7 @@ private:
             // Skip connection-specific headers
             std::string name_lower = name;
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                           [](char c) { return qb::http::utility::ascii_to_lower(c); });
 
             static const std::array<std::string_view, 8> forbidden_headers = {
                 "connection", "proxy-connection", "keep-alive", "transfer-encoding",

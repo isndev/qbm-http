@@ -13,12 +13,27 @@
  * @ingroup Validaton
  */
 #include "./sanitizer.h"
+#include "../utility.h"
 #include <algorithm>
-#include <cctype>
 #include <regex>
 
 namespace qb::http::validation {
     // Changed namespace
+    namespace {
+        [[nodiscard]] bool ascii_is_space(unsigned char c) noexcept {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+        }
+
+        [[nodiscard]] bool ascii_is_alnum(unsigned char c) noexcept {
+            return (c >= 'A' && c <= 'Z') ||
+                   (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9');
+        }
+
+        [[nodiscard]] char ascii_to_upper(char c) noexcept {
+            return (c >= 'a' && c <= 'z') ? static_cast<char>(c - ('a' - 'A')) : c;
+        }
+    } // namespace
 
     void Sanitizer::add_rule(const std::string &field_path, SanitizerFunction func) {
         if (func) {
@@ -113,7 +128,7 @@ namespace qb::http::validation {
             return [](const std::string &input) -> std::string {
                 // Find the first non-whitespace character
                 auto first_char = std::find_if_not(input.begin(), input.end(), [](unsigned char c) {
-                    return std::isspace(c);
+                    return ascii_is_space(c);
                 });
                 // If the string is all whitespace, return an empty string
                 if (first_char == input.end()) {
@@ -121,7 +136,7 @@ namespace qb::http::validation {
                 }
                 // Find the last non-whitespace character
                 auto last_char = std::find_if_not(input.rbegin(), input.rend(), [](unsigned char c) {
-                    return std::isspace(c);
+                    return ascii_is_space(c);
                 }).base();
                 return std::string(first_char, last_char);
             };
@@ -131,7 +146,7 @@ namespace qb::http::validation {
             return [](const std::string &input) -> std::string {
                 std::string output = input;
                 std::transform(output.begin(), output.end(), output.begin(),
-                               [](unsigned char c) { return std::tolower(c); });
+                               [](char c) { return qb::http::utility::ascii_to_lower(c); });
                 return output;
             };
         }
@@ -140,7 +155,7 @@ namespace qb::http::validation {
             return [](const std::string &input) -> std::string {
                 std::string output = input;
                 std::transform(output.begin(), output.end(), output.begin(),
-                               [](unsigned char c) { return std::toupper(c); });
+                               [](char c) { return ascii_to_upper(c); });
                 return output;
             };
         }
@@ -205,7 +220,7 @@ namespace qb::http::validation {
                                 } else {
                                     state = State::TAG_NAME; // DOCTYPE or other declaration
                                 }
-                            } else if (c == '/' || std::isalnum(static_cast<unsigned char>(c))) {
+                            } else if (c == '/' || ascii_is_alnum(static_cast<unsigned char>(c))) {
                                 state = State::TAG_NAME;
                             } else {
                                 // Not a valid tag start, treat as text
@@ -268,7 +283,7 @@ namespace qb::http::validation {
                 std::string output;
                 output.reserve(input.length());
                 for (char c: input) {
-                    if (std::isalnum(static_cast<unsigned char>(c))) {
+                    if (ascii_is_alnum(static_cast<unsigned char>(c))) {
                         output += c;
                     }
                 }
@@ -285,7 +300,7 @@ namespace qb::http::validation {
                 output.reserve(trimmed.length());
                 bool last_was_space = false;
                 for (char c: trimmed) {
-                    if (std::isspace(static_cast<unsigned char>(c))) {
+                    if (ascii_is_space(static_cast<unsigned char>(c))) {
                         if (!last_was_space) {
                             output += ' '; // Replace multiple spaces with a single space
                             last_was_space = true;

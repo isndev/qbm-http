@@ -1,7 +1,9 @@
 #include "./response.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
 #include "./chunk.h"
+#include "./utility.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <optional>
@@ -11,9 +13,35 @@
 
 namespace qb::allocator {
     namespace {
-        [[nodiscard]] bool header_is_within_limits(const std::string& name, const std::string& value) noexcept {
-            return name.size() <= qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
-                && value.size() <= qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH;
+        [[nodiscard]] bool is_header_name_char(const unsigned char c) noexcept {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') ||
+                   c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+                   c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
+                   c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+        }
+
+        [[nodiscard]] bool header_name_is_valid(const std::string& name) noexcept {
+            if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
+                return false;
+            }
+            return std::all_of(name.begin(), name.end(), [](const char c) {
+                return is_header_name_char(static_cast<unsigned char>(c));
+            });
+        }
+
+        [[nodiscard]] bool header_value_is_valid(const std::string& value) noexcept {
+            if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                return false;
+            }
+            return std::all_of(value.begin(), value.end(), [](const char c) {
+                const auto uc = static_cast<unsigned char>(c);
+                return c == '\t' || (uc >= 0x20 && uc != 0x7f);
+            });
+        }
+
+        [[nodiscard]] bool header_is_valid(const std::string& name, const std::string& value) noexcept {
+            return header_name_is_valid(name) && header_value_is_valid(value);
         }
 
         struct transfer_encoding_result {
@@ -129,6 +157,43 @@ namespace qb::allocator {
                 + "); refusing to emit a truncated or empty wire representation.");
         }
 
+        const auto length = r.body().size();
+        if (length && response_must_not_carry_body(r)) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: this status code must not carry a body.");
+        }
+
+        const auto transfer = transfer_encoding(r);
+        if (!transfer.ok) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
+        }
+        if (transfer.chunked && response_must_not_carry_body(r)) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
+        }
+
+        std::optional<std::uint64_t> content_length;
+        try {
+            content_length = declared_content_length(r);
+        } catch (...) {
+            this->clear();
+            throw;
+        }
+
+        if (transfer.chunked && content_length) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
+        }
+        if (response_forbids_nonzero_content_length(r) && content_length && *content_length != 0u) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
+        }
+        if (length && !transfer.chunked && content_length && *content_length != length) {
+            this->clear();
+            throw std::length_error("qb::http::Response serialization: Content-Length does not match body size.");
+        }
+
         // Performance: Pre-calculate approximate output size to minimize allocations
         std::size_t estimated_size = 32; // Base status line size
         estimated_size += std::to_string(r.status().code()).size();
@@ -136,12 +201,12 @@ namespace qb::allocator {
 
         // Add headers size
         for (const auto &it: r.headers()) {
-            if (it.first.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
+            if (!header_name_is_valid(it.first)) {
                 this->clear(); throw std::length_error("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
             }
             estimated_size += it.first.size() + 2; // ": "
             for (const auto &value: it.second) {
-                if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                if (!header_value_is_valid(value)) {
                     this->clear(); throw std::length_error(
                         "qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
                 }
@@ -171,43 +236,15 @@ namespace qb::allocator {
         // HTTP Headers
         for (const auto &it: r.headers()) {
             for (const auto &value: it.second) {
-                if (!header_is_within_limits(it.first, value)) {
+                if (!header_is_valid(it.first, value)) {
                     this->clear(); throw std::length_error(
-                        "qb::http::Response serialization: header name/value outside protocol_limits.");
+                        "qb::http::Response serialization: invalid header name/value.");
                 }
                 *this << it.first << ": " << value << qb::http::endl;
             }
         }
         
         // Body
-        const auto length = r.body().size();
-        if (length && response_must_not_carry_body(r)) {
-            this->clear();
-            throw std::length_error("qb::http::Response serialization: this status code must not carry a body.");
-        }
-        const auto transfer = transfer_encoding(r);
-        if (!transfer.ok) {
-            this->clear();
-            throw std::length_error("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
-        }
-        if (transfer.chunked && response_must_not_carry_body(r)) {
-            this->clear();
-            throw std::length_error("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
-        }
-        const auto content_length = declared_content_length(r);
-        if (transfer.chunked && content_length) {
-            this->clear();
-            throw std::length_error("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
-        }
-        if (response_forbids_nonzero_content_length(r) && content_length && *content_length != 0u) {
-            this->clear();
-            throw std::length_error("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
-        }
-        if (length && !transfer.chunked && content_length && *content_length != length) {
-            this->clear();
-            throw std::length_error("qb::http::Response serialization: Content-Length does not match body size.");
-        }
-
         if (length) {
             if (transfer.chunked) {
                 *this << qb::http::endl

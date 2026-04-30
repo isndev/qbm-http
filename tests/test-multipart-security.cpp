@@ -26,6 +26,8 @@
 #include <gtest/gtest.h>
 #include "../multipart.h"
 #include "../headers.h"
+#include "../body.h"
+#include <qb/system/allocator/pipe.h>
 
 using namespace qb::http;
 
@@ -49,8 +51,12 @@ TEST_F(MultipartSecurityTest, ValidBoundaryWithQuotes) {
     // RFC 2046 allows quoted boundaries
     std::string content_type = "multipart/form-data; boundary=\"boundary-with-dashes\"";
     std::string boundary = parse_boundary(content_type);
-    // Quotes may or may not be included depending on implementation
-    EXPECT_FALSE(boundary.empty());
+    EXPECT_EQ(boundary, "boundary-with-dashes");
+}
+
+TEST_F(MultipartSecurityTest, BoundaryParsingHandlesCaseAndAdditionalParameters) {
+    EXPECT_EQ(parse_boundary("Multipart/Form-Data; charset=utf-8; boundary=abc123"), "abc123");
+    EXPECT_EQ(parse_boundary("multipart/form-data; boundary=abc123; charset=utf-8"), "abc123");
 }
 
 TEST_F(MultipartSecurityTest, BoundaryAtMaxLength) {
@@ -65,6 +71,24 @@ TEST_F(MultipartSecurityTest, BoundaryAtMaxLength) {
     }
 }
 
+TEST_F(MultipartSecurityTest, BodyParsingAcceptsBoundaryAtMaxLength) {
+    const std::string boundary(multipart_limits::MAX_BOUNDARY_LENGTH, 'a');
+    const std::string raw =
+        "--" + boundary + "\r\n"
+        "Content-Disposition: form-data; name=\"field\"\r\n"
+        "\r\n"
+        "value\r\n"
+        "--" + boundary + "--";
+
+    Body body;
+    body = raw;
+
+    Multipart parsed;
+    ASSERT_NO_THROW(parsed = body.as<Multipart>());
+    ASSERT_EQ(parsed.parts().size(), 1u);
+    EXPECT_EQ(parsed.parts().front().body, "value");
+}
+
 TEST_F(MultipartSecurityTest, BoundaryOverMaxLengthIsRejected) {
     // Boundary exceeding 70 characters should be rejected
     std::string oversized_boundary(71, 'b');
@@ -73,6 +97,18 @@ TEST_F(MultipartSecurityTest, BoundaryOverMaxLengthIsRejected) {
     // Should throw due to security limit
     EXPECT_THROW({
         (void)parse_boundary(content_type);
+    }, std::runtime_error);
+}
+
+TEST_F(MultipartSecurityTest, BoundaryWithControlCharactersIsRejected) {
+    EXPECT_THROW({
+        (void)parse_boundary("multipart/form-data; boundary=\"safe\r\nInjected\"");
+    }, std::runtime_error);
+}
+
+TEST_F(MultipartSecurityTest, BoundaryWithTrailingSpaceIsRejected) {
+    EXPECT_THROW({
+        (void)parse_boundary("multipart/form-data; boundary=\"abc \"");
     }, std::runtime_error);
 }
 
@@ -244,6 +280,61 @@ TEST_F(MultipartSecurityTest, SpecialCharactersInBoundary) {
             (void)parse_boundary(ct);
         });
     }
+}
+
+TEST_F(MultipartSecurityTest, SerializationRejectsPartHeaderNameInjection) {
+    Multipart mp;
+    auto &part = mp.create_part();
+    part.set_header("Content-Disposition\r\nInjected", "form-data; name=\"field\"");
+    part.body = "payload";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out.put(mp), std::length_error);
+    EXPECT_TRUE(out.empty());
+}
+
+TEST_F(MultipartSecurityTest, SerializationRejectsPartHeaderValueInjection) {
+    Multipart mp;
+    auto &part = mp.create_part();
+    part.set_header("Content-Disposition", "form-data; name=\"field\"\r\nInjected: bad");
+    part.body = "payload";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out.put(mp), std::length_error);
+    EXPECT_TRUE(out.empty());
+}
+
+TEST_F(MultipartSecurityTest, SerializationRejectsOversizedPartHeaderValue) {
+    Multipart mp;
+    auto &part = mp.create_part();
+    part.set_header("X-Large", std::string(multipart_limits::MAX_HEADER_VALUE_LENGTH + 1, 'x'));
+    part.body = "payload";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out.put(mp), std::length_error);
+    EXPECT_TRUE(out.empty());
+}
+
+TEST_F(MultipartSecurityTest, SerializationRejectsBoundaryInjection) {
+    Multipart mp("safe\r\nInjected: bad");
+    auto &part = mp.create_part();
+    part.set_header("Content-Disposition", "form-data; name=\"field\"");
+    part.body = "payload";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out.put(mp), std::length_error);
+    EXPECT_TRUE(out.empty());
+}
+
+TEST_F(MultipartSecurityTest, SerializationRejectsInvalidBoundaryLength) {
+    Multipart mp(std::string(multipart_limits::MAX_BOUNDARY_LENGTH + 1, 'x'));
+    auto &part = mp.create_part();
+    part.set_header("Content-Disposition", "form-data; name=\"field\"");
+    part.body = "payload";
+
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out.put(mp), std::length_error);
+    EXPECT_TRUE(out.empty());
 }
 
 int main(int argc, char **argv) {

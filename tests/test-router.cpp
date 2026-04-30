@@ -8,6 +8,8 @@
 #include <utility> // For std::move
 #include <optional> // For std::optional, in case PathParameters::get() uses it and it's not in http.h
 #include <stdexcept> // For std::runtime_error
+#include <algorithm> // For std::find
+#include <vector>
 
 // Mock session for testing
 struct MockSession {
@@ -93,6 +95,27 @@ TEST_F(RouterTest, AddAndMatchSimpleGetRoute) {
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     ASSERT_EQ(mock_session->_response.body().as<std::string>(), "world");
     mock_session->verify_response_write_count();
+}
+
+TEST_F(RouterTest, RouterLifecycleHookSeesPreRouting) {
+    std::vector<qb::http::HookPoint> observed;
+    router.add_lifecycle_hook([&observed](auto &, qb::http::HookPoint point) {
+        observed.push_back(point);
+    });
+
+    router.get("/hooked", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->complete();
+    });
+    router.compile();
+
+    auto request = create_request(HTTP_GET, "/hooked");
+    router.route(mock_session, std::move(request));
+
+    ASSERT_FALSE(observed.empty());
+    EXPECT_EQ(observed.front(), qb::http::HookPoint::PRE_ROUTING);
+    EXPECT_NE(std::find(observed.begin(), observed.end(), qb::http::HookPoint::PRE_RESPONSE_SEND),
+              observed.end());
 }
 
 TEST_F(RouterTest, RouteNotFound) {

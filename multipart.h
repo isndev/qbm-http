@@ -13,7 +13,6 @@
 
 #include <cassert>
 #include <cstring>
-#include <regex>
 #include <stdexcept>
 #include <string>
 #include <sys/types.h>
@@ -549,17 +548,23 @@ namespace qb::http {
         void
         setBoundary(std::string l_boundary) {
             reset();
-            this->boundary = "\r\n--" + std::move(l_boundary);
-            boundaryData = this->boundary.c_str();
-            boundarySize = this->boundary.size();
-            
-            // SECURITY FIX: Validate boundary size to prevent buffer overflow
-            if (boundarySize > multipart_limits::MAX_BOUNDARY_LENGTH) {
+            if (l_boundary.empty() || l_boundary.size() > multipart_limits::MAX_BOUNDARY_LENGTH) {
                 errorReason = "Boundary exceeds maximum allowed length";
                 state = ERROR;
                 return;
             }
-            
+            for (const auto c : l_boundary) {
+                const auto uc = static_cast<unsigned char>(c);
+                if (uc < 0x20 || uc == 0x7f) {
+                    errorReason = "Boundary contains invalid control character";
+                    state = ERROR;
+                    return;
+                }
+            }
+            this->boundary = "\r\n--" + std::move(l_boundary);
+            boundaryData = this->boundary.c_str();
+            boundarySize = this->boundary.size();
+
             indexBoundary();
             lookbehindSize = boundarySize + 8;
             lookbehind.resize(lookbehindSize);

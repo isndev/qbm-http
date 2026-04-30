@@ -98,9 +98,27 @@ namespace qb::http {
 
             // Log the response at PRE_RESPONSE_SEND so integration/server tests do not
             // depend on transport teardown timing to observe the response log.
-            ctx->add_lifecycle_hook([this](Context<SessionType> &ctx_ref, HookPoint point) {
+            auto log_function = _log_function;
+            auto response_level = _response_level;
+            auto middleware_name = _name;
+
+            ctx->add_lifecycle_hook(
+                [log_function = std::move(log_function),
+                 response_level,
+                 middleware_name = std::move(middleware_name)](Context<SessionType> &ctx_ref, HookPoint point) {
                 if (point == HookPoint::PRE_RESPONSE_SEND) {
-                    log_response(ctx_ref.response());
+                    if (!log_function) return;
+
+                    const auto &response = ctx_ref.response();
+                    std::string message = "Response: " +
+                                          std::to_string(static_cast<int>(response.status())) + " " +
+                                          std::to_string(response.status());
+                    try {
+                        log_function(response_level, message);
+                    } catch (...) {
+                        LOG_HTTP_WARN("LoggingMiddleware [" << middleware_name
+                                      << "]: Exception in user log function suppressed");
+                    }
                 }
             });
 

@@ -370,10 +370,11 @@ public:
         }
 
         for (unsigned char c : name) {
-            if (c == 0x00 || c == 0x0D || c == 0x0A || std::isupper(c)) {
+            if (c == 0x00 || c == 0x0D || c == 0x0A || (c >= 'A' && c <= 'Z')) {
                 return false;
             }
-            const bool is_valid_char = std::isalnum(c) ||
+            const bool is_valid_char = (c >= 'a' && c <= 'z') ||
+                                       (c >= '0' && c <= '9') ||
                                        c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
                                        c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
                                        c == '^' || c == '_' || c == '`' || c == '|' || c == '~';

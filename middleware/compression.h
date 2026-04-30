@@ -209,11 +209,13 @@ namespace qb::http {
             if (_options.should_compress_responses()) {
                 // Add a PRE_RESPONSE_SEND hook for response compression.
                 // This ensures compression happens after all handlers have finalized the response body.
-                ctx->add_lifecycle_hook([this](Context<SessionType> &ctx_ref, HookPoint point) {
+                auto options_snapshot = _options;
+                ctx->add_lifecycle_hook([options_snapshot = std::move(options_snapshot)](
+                                            Context<SessionType> &ctx_ref, HookPoint point) {
                     if (point == HookPoint::PRE_RESPONSE_SEND) {
                         if (!ctx_ref.response().body().empty()) {
                             try {
-                                compress_response_body(ctx_ref); // Pass Context by reference as per Hook signature
+                                compress_response_body(ctx_ref, options_snapshot);
                             } catch (const std::runtime_error &) {
                                 // Log error, but don't modify response further at this critical stage.
                                 // Or, strip Content-Encoding if partially set before error?
@@ -306,24 +308,25 @@ namespace qb::http {
          * @param ctx_ref Reference to the `Context` object containing the response.
          * @throws std::runtime_error if compression fails (e.g., unsupported encoding within Body::compress).
          */
-        void compress_response_body(Context<SessionType> &ctx_ref) {
+        static void compress_response_body(Context<SessionType> &ctx_ref,
+                                           const CompressionOptions &options) {
 #ifdef QB_HAS_COMPRESSION
             ResponseType &response = ctx_ref.response(); // Get mutable reference
 
-            if (response.body().size() < _options.get_min_size_to_compress() ||
+            if (response.body().size() < options.get_min_size_to_compress() ||
                 response.has_header("Content-Encoding") ||
                 is_precompressed_content_type(std::string(response.content_type().type()))) {
                 // Use parsed ContentType
                 return;
             }
 
-            std::string selected_encoding = select_best_encoding(ctx_ref.request());
+            std::string selected_encoding = select_best_encoding(ctx_ref.request(), options);
             if (selected_encoding.empty()) {
                 return; // No suitable encoding accepted by client or supported by server
             }
 
             // Redundant check, already done above, but kept for safety.
-            if (response.body().size() < _options.get_min_size_to_compress()) {
+            if (response.body().size() < options.get_min_size_to_compress()) {
                 return;
             }
 
@@ -354,7 +357,8 @@ namespace qb::http {
          * @param request The HTTP request containing `Accept-Encoding` header.
          * @return The name of the best matching encoding (e.g., "gzip") or an empty string if no suitable match.
          */
-        [[nodiscard]] std::string select_best_encoding(const RequestType &request) const noexcept {
+        [[nodiscard]] static std::string select_best_encoding(const RequestType &request,
+                                                              const CompressionOptions &options) noexcept {
             // After the string_view purge, `request.header()` always returns `const std::string&`.
             const std::string &accept_encoding_header_str = request.header("Accept-Encoding");
 
@@ -362,28 +366,98 @@ namespace qb::http {
                 return ""; // Client did not specify Accept-Encoding
             }
 
-            // Parse `Accept-Encoding: value1;q=x, value2;q=y, ...` entirely over
-            // `string_view`s — no intermediate owning allocations (F43). A full
-            // q-value prioritisation is deferred; we simply honour the server's
-            // preferred-encoding order which mirrors the traditional qb behaviour.
+            // Parse `Accept-Encoding: value1;q=x, value2;q=y, ...` over
+            // string_views and honour q=0 exclusions. When several supported
+            // encodings are acceptable, pick the highest client q-value and use
+            // the server preference list as a deterministic tie-breaker.
+            struct AcceptedEncoding {
+                std::string_view name;
+                int q_milli = 1000;
+            };
+
+            auto parse_q_value_milli = [](std::string_view raw_q) noexcept -> int {
+                auto q = utility::trim_http_whitespace(raw_q);
+                if (q.empty()) {
+                    return -1;
+                }
+                if (q == "1" || q == "1.0" || q == "1.00" || q == "1.000") {
+                    return 1000;
+                }
+                if (q[0] != '0') {
+                    return -1;
+                }
+                if (q.size() == 1) {
+                    return 0;
+                }
+                if (q.size() < 3 || q[1] != '.') {
+                    return -1;
+                }
+
+                int milli = 0;
+                int place = 100;
+                for (std::size_t i = 2; i < q.size(); ++i) {
+                    const char c = q[i];
+                    if (c < '0' || c > '9' || place == 0) {
+                        return -1;
+                    }
+                    milli += (c - '0') * place;
+                    place /= 10;
+                }
+                return milli;
+            };
+
+            auto parse_q_value = [parse_q_value_milli](std::string_view token) noexcept -> int {
+                auto params = utility::split_string<std::string_view>(token, ";");
+                for (std::size_t i = 1; i < params.size(); ++i) {
+                    auto param = utility::trim_http_whitespace(params[i]);
+                    const auto eq_pos = param.find('=');
+                    if (eq_pos == std::string_view::npos) continue;
+                    auto key = utility::trim_http_whitespace(param.substr(0, eq_pos));
+                    if (!utility::iequals(key, "q")) continue;
+
+                    auto value = utility::trim_http_whitespace(param.substr(eq_pos + 1));
+                    const int q_milli = parse_q_value_milli(value);
+                    return q_milli >= 0 ? q_milli : 0;
+                }
+                return 1000;
+            };
+
+            std::vector<AcceptedEncoding> accepted_encodings;
             auto client_tokens = utility::split_string<std::string_view>(accept_encoding_header_str, ",");
             for (auto &token: client_tokens) {
-                token = utility::trim_http_whitespace(token);
-                if (const auto q_pos = token.find(';'); q_pos != std::string_view::npos) {
-                    token = utility::trim_http_whitespace(token.substr(0, q_pos));
+                const auto q = parse_q_value(token);
+                auto name = utility::trim_http_whitespace(token);
+                if (const auto q_pos = name.find(';'); q_pos != std::string_view::npos) {
+                    name = utility::trim_http_whitespace(name.substr(0, q_pos));
+                }
+                if (!name.empty()) {
+                    accepted_encodings.push_back({name, q});
                 }
             }
 
-            for (const auto &preferred_server_encoding: _options.get_preferred_encodings()) {
-                for (const auto &client_encoding: client_tokens) {
-                    if (client_encoding.empty()) continue;
-                    if (utility::iequals(client_encoding, preferred_server_encoding) ||
-                        client_encoding == "*") {
-                        return preferred_server_encoding;
+            std::string best_encoding;
+            int best_q = 0;
+            for (const auto &preferred_server_encoding: options.get_preferred_encodings()) {
+                int explicit_q = -1;
+                int wildcard_q = -1;
+
+                for (const auto &client_encoding: accepted_encodings) {
+                    if (utility::iequals(client_encoding.name, preferred_server_encoding)) {
+                        explicit_q = client_encoding.q_milli;
+                        break;
+                    }
+                    if (client_encoding.name == "*") {
+                        wildcard_q = client_encoding.q_milli;
                     }
                 }
+
+                const int candidate_q = explicit_q >= 0 ? explicit_q : wildcard_q;
+                if (candidate_q > best_q) {
+                    best_q = candidate_q;
+                    best_encoding = preferred_server_encoding;
+                }
             }
-            return ""; // No common supported encoding found
+            return best_q > 0 ? best_encoding : "";
         }
 
         /**
@@ -392,7 +466,7 @@ namespace qb::http {
          * @return `true` if the MIME type suggests pre-compressed content (e.g., "image/jpeg", "application/pdf"),
          *         `false` otherwise.
          */
-        [[nodiscard]] bool is_precompressed_content_type(const std::string &content_type_header) const noexcept {
+        [[nodiscard]] static bool is_precompressed_content_type(const std::string &content_type_header) noexcept {
             static const std::vector<std::string_view> compressed_mime_types = {
                 // Use string_view for efficiency
                 "image/jpeg", "image/png", "image/gif", "image/webp", "image/jp2", "image/jxr",

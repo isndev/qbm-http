@@ -1170,6 +1170,21 @@ TEST_F(ValidationLogicTest, RequestValidatorBodySanitizerExceptionIsCaptured) {
     EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.body");
 }
 
+TEST_F(ValidationLogicTest, RequestValidatorPathRulesRequirePathParameterContext) {
+    RequestValidator validator;
+    validator.for_path_param("userId", ParameterRuleSet("userId").set_type(DataType::INTEGER));
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/users/123");
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "path.userId");
+    EXPECT_EQ(out.errors().front().rule_violated, "required");
+}
+
 
 // --- Sanitizer Tests ---
 TEST_F(ValidationLogicTest, SanitizerTrim) {

@@ -169,6 +169,25 @@ TEST_F(LoggingMiddlewareTest, ErrorResponseLogging) {
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 500"), std::string::npos);
 }
 
+TEST_F(LoggingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
+    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
+    auto ctx = std::make_shared<qb::http::Context<MockLoggingSession> >(
+        create_request(qb::http::method::GET, "/log_test"),
+        qb::http::Response{},
+        _session,
+        [](qb::http::Context<MockLoggingSession> &) {},
+        std::weak_ptr<qb::http::RouterCore<MockLoggingSession> >{});
+
+    logging_mw->process(ctx);
+    logging_mw.reset();
+
+    ctx->response().status() = qb::http::status::CREATED;
+    ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
+
+    ASSERT_EQ(_session->_log_entries.size(), 2);
+    EXPECT_NE(_session->_log_entries[1].second.find("Response: 201"), std::string::npos);
+}
+
 TEST_F(LoggingMiddlewareTest, ConstructorThrowsOnNullLogFunction) {
     qb::http::LoggingMiddleware<MockLoggingSession>::LogFunction null_logger = nullptr;
     EXPECT_THROW(

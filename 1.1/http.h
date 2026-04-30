@@ -678,9 +678,7 @@ namespace qb::http {
                                 _request.body().compress(_request.header("Content-Encoding"));
                             }
 #else
-                    if (_request.header("Content-Encoding") != "chunked") {
-                        _request.remove_header("Content-Encoding");
-                    }
+                    _request.remove_header("Content-Encoding");
 #endif
                             LOG_HTTP_DEBUG("Sending HTTP/1.1 request: " << _request.method() << " " << _request.uri().source());
                             *this << _request;

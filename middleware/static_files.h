@@ -23,7 +23,6 @@
 #include <optional>
 #include <limits>
 
-#include <qb/io/uri.h>
 #include <qb/system/container/unordered_map.h>
 #include "../routing/middleware.h"
 #include "../date.h"
@@ -168,6 +167,57 @@ namespace qb::http {
     };
 
     namespace internal {
+        [[nodiscard]] inline unsigned char hex_value(char c) noexcept {
+            if (c >= '0' && c <= '9') return static_cast<unsigned char>(c - '0');
+            if (c >= 'a' && c <= 'f') return static_cast<unsigned char>(10 + c - 'a');
+            if (c >= 'A' && c <= 'F') return static_cast<unsigned char>(10 + c - 'A');
+            return 0;
+        }
+
+        [[nodiscard]] inline bool is_hex_digit(char c) noexcept {
+            return (c >= '0' && c <= '9') ||
+                   (c >= 'a' && c <= 'f') ||
+                   (c >= 'A' && c <= 'F');
+        }
+
+        /**
+         * @brief Decodes percent-encoded path bytes without applying
+         *        application/x-www-form-urlencoded semantics.
+         *
+         * In URI paths, '+' is a literal plus sign. Only query/form decoding
+         * maps '+' to a space.
+         */
+        [[nodiscard]] inline std::string decode_path_component(std::string_view input) {
+            std::string decoded;
+            decoded.reserve(input.size());
+            for (std::size_t i = 0; i < input.size(); ++i) {
+                const char c = input[i];
+                if (c == '%' && i + 2 < input.size() &&
+                    is_hex_digit(input[i + 1]) && is_hex_digit(input[i + 2])) {
+                    const unsigned char high = hex_value(input[i + 1]);
+                    const unsigned char low = hex_value(input[i + 2]);
+                    decoded.push_back(static_cast<char>((high << 4) | low));
+                    i += 2;
+                } else {
+                    decoded.push_back(c);
+                }
+            }
+            return decoded;
+        }
+
+        [[nodiscard]] inline bool path_prefix_matches(std::string_view path, std::string_view prefix) noexcept {
+            if (prefix.empty()) {
+                return true;
+            }
+            if (!path.starts_with(prefix)) {
+                return false;
+            }
+            if (path.size() == prefix.size()) {
+                return true;
+            }
+            return prefix.back() == '/' || path[prefix.size()] == '/';
+        }
+
         [[nodiscard]] inline std::string_view
         trim_optional_whitespace(std::string_view value) noexcept {
             const auto begin = value.find_first_not_of(" \t");
@@ -243,10 +293,9 @@ namespace qb::http {
             // base_path is assumed to be canonical already from StaticFilesMiddleware constructor
             const std::filesystem::path &canonical_base_path = base_path;
 
-            // (1) URL-decode. `qb::io::uri::decode` is tolerant of raw bytes and
-            // returns a std::string, which the filesystem library can consume
-            // without further conversion.
-            std::string decoded = qb::io::uri::decode(original_relative_path_sv);
+            // (1) URL-decode path bytes. A literal '+' is valid in a URI path
+            // and must not be interpreted as a space.
+            std::string decoded = decode_path_component(original_relative_path_sv);
 
             // (2) A NUL byte inside a path is never legitimate for static-file
             // serving. Reject immediately rather than relying on OS-specific
@@ -553,16 +602,23 @@ namespace qb::http {
         }
 
         void process(ContextPtr ctx) override {
+            const auto request_method = ctx->request().method();
+            if (request_method != qb::http::method::GET &&
+                request_method != qb::http::method::HEAD) {
+                ctx->complete(AsyncTaskResult::CONTINUE);
+                return;
+            }
+
             std::string_view request_path_sv = ctx->request().uri().path();
             std::filesystem::path target_file_abs;
 
             // Optimization: Handle HEAD requests early if possible, or ensure body is not sent.
-            bool is_head_request = ctx->request().method() == qb::http::method::HEAD;
+            bool is_head_request = request_method == qb::http::method::HEAD;
 
             std::string_view effective_request_path_sv = request_path_sv;
 
             if (!_options.path_prefix_to_strip.empty()) {
-                if (request_path_sv.starts_with(_options.path_prefix_to_strip)) {
+                if (internal::path_prefix_matches(request_path_sv, _options.path_prefix_to_strip)) {
                     effective_request_path_sv.remove_prefix(_options.path_prefix_to_strip.length());
                 } else {
                     ctx->complete(AsyncTaskResult::CONTINUE); // Let other handlers try
@@ -587,7 +643,7 @@ namespace qb::http {
             // walk the *requested* path against the real filesystem, stopping
             // at the first symlink we encounter.
             if (_options.reject_symlinks) {
-                const std::string decoded_req = qb::io::uri::decode(effective_request_path_sv);
+                const std::string decoded_req = internal::decode_path_component(effective_request_path_sv);
                 std::string_view rel_view{decoded_req};
                 if (const auto first = rel_view.find_first_not_of('/');
                     first != std::string_view::npos) {

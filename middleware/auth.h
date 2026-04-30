@@ -103,22 +103,35 @@ namespace qb::http {
         void process(ContextPtr ctx) override {
             std::optional<auth::User> user_opt;
 
-            // 1. Check context for pre-validated user data (e.g., from a preceding JWT parsing middleware)
+            // 1. Check context for a pre-authenticated typed user. This makes the
+            // role-only factory work with any upstream auth middleware that stores
+            // an auth::User directly.
+            if (auto context_user_opt = ctx->template get<auth::User>(_user_context_key)) {
+                if (!context_user_opt->id.empty() || !context_user_opt->username.empty()) {
+                    user_opt = std::move(*context_user_opt);
+                }
+            }
+
+            // 2. Check context for pre-validated user data (e.g., from a preceding JWT parsing middleware)
             if (ctx->has("jwt_payload")) {
                 // "jwt_payload" is a conventional key
                 if (auto payload_json_opt = ctx->template get<qb::json>("jwt_payload")) {
                     try {
-                        user_opt = user_from_jwt_payload(*payload_json_opt);
+                        if (!user_opt) {
+                            user_opt = user_from_jwt_payload(*payload_json_opt);
+                        }
                     } catch (const qb::json::exception & /*e*/) {
                         // Malformed payload in context; treat as if no payload was found.
-                        user_opt = std::nullopt;
+                        if (!user_opt) {
+                            user_opt = std::nullopt;
+                        }
                     }
                 } else {
                     // jwt_payload key exists but is not qb::json, or bad_any_cast from get<>
                 }
             }
 
-            // 2. If no user from context, try extracting and verifying token from header
+            // 3. If no user from context, try extracting and verifying token from header
             if (!user_opt) {
                 const std::string &auth_header_name = _auth_manager.get_options().get_auth_header_name();
                 const std::string &auth_header_str = ctx->request().header(auth_header_name);
@@ -137,13 +150,8 @@ namespace qb::http {
                 std::string token = _auth_manager.extract_token_from_header(auth_header_str);
                 if (token.empty()) {
                     // Header present but format incorrect or no token after scheme
-                    if (_require_auth) {
-                        handle_auth_error(ctx, qb::http::status::UNAUTHORIZED,
-                                          "Invalid authentication format in header.");
-                        return;
-                    }
-                    // Not required, but malformed header - could be an error or proceed. Let's proceed for now.
-                    ctx->complete(AsyncTaskResult::CONTINUE);
+                    handle_auth_error(ctx, qb::http::status::UNAUTHORIZED,
+                                      "Invalid authentication format in header.");
                     return;
                 }
                 // Token extracted, now verify it
@@ -153,13 +161,8 @@ namespace qb::http {
             // 3. Evaluate authentication result
             if (!user_opt) {
                 // Still no user after trying context and header+token
-                if (_require_auth) {
-                    handle_auth_error(ctx, qb::http::status::UNAUTHORIZED,
-                                      "Invalid or expired token; user authentication failed.");
-                    return;
-                }
-                // Not required and token verification failed (or no token initially), proceed without auth user
-                ctx->complete(AsyncTaskResult::CONTINUE);
+                handle_auth_error(ctx, qb::http::status::UNAUTHORIZED,
+                                  "Invalid or expired token; user authentication failed.");
                 return;
             }
 
@@ -299,7 +302,9 @@ namespace qb::http {
          * @param jwt_payload The `qb::json` object representing the JWT payload.
          * @return An `std::optional<auth::User>`. Returns `std::nullopt` if essential claims
          *         (like `sub` or `username` if considered mandatory) are missing or malformed.
-         *         Roles are expected to be a JSON array of strings.
+         *         Roles are accepted as a JSON array of strings, or as a string
+         *         containing that JSON array for compatibility with JWT helpers
+         *         that expose non-scalar claims as serialized strings.
          */
         [[nodiscard]] std::optional<auth::User> user_from_jwt_payload(const qb::json &jwt_payload) const {
             if (!jwt_payload.is_object()) return std::nullopt;
@@ -322,10 +327,23 @@ namespace qb::http {
                 return std::nullopt;
             }
 
-            if (jwt_payload.contains("roles") && jwt_payload["roles"].is_array()) {
-                for (const auto &role_item: jwt_payload["roles"]) {
+            const auto append_roles_from_array = [&user](const qb::json &roles_json) {
+                for (const auto &role_item: roles_json) {
                     if (role_item.is_string()) {
                         user.roles.push_back(role_item.get<std::string>());
+                    }
+                }
+            };
+
+            if (jwt_payload.contains("roles")) {
+                const auto &roles_claim = jwt_payload["roles"];
+                if (roles_claim.is_array()) {
+                    append_roles_from_array(roles_claim);
+                } else if (roles_claim.is_string()) {
+                    const auto &roles_str = roles_claim.get_ref<const std::string &>();
+                    const auto parsed_roles = qb::json::parse(roles_str, nullptr, false);
+                    if (!parsed_roles.is_discarded() && parsed_roles.is_array()) {
+                        append_roles_from_array(parsed_roles);
                     }
                 }
             }

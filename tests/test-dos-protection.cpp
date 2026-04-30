@@ -229,6 +229,26 @@ TEST_F(RequestDoSProtectionTest, OversizedHeaderValueIsRejected) {
     EXPECT_EQ(pipe.size(), 0);
 }
 
+TEST_F(RequestDoSProtectionTest, HeaderNameInjectionIsRejected) {
+    Request req;
+    req.method() = method::GET;
+    req.uri() = qb::io::uri("/test");
+    req.set_header("X-Test\r\nInjected", "value");
+
+    EXPECT_THROW(pipe.put(req), std::length_error);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(RequestDoSProtectionTest, HeaderValueInjectionIsRejected) {
+    Request req;
+    req.method() = method::GET;
+    req.uri() = qb::io::uri("/test");
+    req.set_header("X-Test", "safe\r\nInjected: bad");
+
+    EXPECT_THROW(pipe.put(req), std::length_error);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
 TEST_F(RequestDoSProtectionTest, RejectedSerializationClearsExistingBufferContent) {
     Request ok_req;
     ok_req.method() = method::GET;
@@ -248,8 +268,24 @@ TEST_F(RequestDoSProtectionTest, RejectedSerializationClearsExistingBufferConten
     EXPECT_EQ(pipe.size(), 0);
 }
 
-TEST_F(RequestDoSProtectionTest, FragmentExceedingLimitIsRejected) {
-    // Create a URL with an oversized fragment
+TEST_F(RequestDoSProtectionTest, FramingErrorClearsExistingBufferBeforeWriting) {
+    Request ok_req;
+    ok_req.method() = method::GET;
+    ok_req.uri() = qb::io::uri("/ok");
+    pipe.put(ok_req);
+    ASSERT_GT(pipe.size(), 0);
+
+    Request bad_req;
+    bad_req.method() = method::POST;
+    bad_req.uri() = qb::io::uri("/bad");
+    bad_req.body() = "payload";
+    bad_req.set_header("Content-Length", "1");
+
+    EXPECT_THROW(pipe.put(bad_req), std::length_error);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(RequestDoSProtectionTest, FragmentIsNotSerializedIntoHttpRequestTarget) {
     std::string oversized_fragment;
     oversized_fragment.append(protocol_limits::MAX_URL_LENGTH + 100, 'f');
 
@@ -257,8 +293,10 @@ TEST_F(RequestDoSProtectionTest, FragmentExceedingLimitIsRejected) {
     req.method() = method::GET;
     req.uri() = qb::io::uri("/page#" + oversized_fragment);
 
-    EXPECT_THROW(pipe.put(req), std::length_error);
-    EXPECT_EQ(pipe.size(), 0);
+    ASSERT_NO_THROW(pipe.put(req));
+    const std::string raw_request = pipe.str();
+    EXPECT_EQ(raw_request.find('#'), std::string::npos);
+    EXPECT_NE(raw_request.find("GET /page HTTP/1.1\r\n"), std::string::npos);
 }
 
 // ====================================================================
@@ -372,6 +410,33 @@ TEST_F(ResponseDoSProtectionTest, OversizedHeaderValueIsRejected) {
     EXPECT_EQ(pipe.size(), 0);
 }
 
+TEST_F(ResponseDoSProtectionTest, HeaderNameInjectionIsRejected) {
+    Response resp;
+    resp.status() = status::OK;
+    resp.set_header("X-Test\r\nInjected", "value");
+
+    EXPECT_THROW(pipe.put(resp), std::length_error);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(ResponseDoSProtectionTest, HeaderValueInjectionIsRejected) {
+    Response resp;
+    resp.status() = status::OK;
+    resp.set_header("X-Test", "safe\r\nInjected: bad");
+
+    EXPECT_THROW(pipe.put(resp), std::length_error);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(ResponseDoSProtectionTest, SetCookieHeaderInjectionIsRejected) {
+    Response resp;
+    resp.status() = status::OK;
+    resp.set_header("Set-Cookie", "session=safe\r\nInjected: bad");
+
+    EXPECT_THROW(pipe.put(resp), std::length_error);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
 TEST_F(ResponseDoSProtectionTest, RejectedSerializationClearsExistingBufferContent) {
     Response ok_resp;
     ok_resp.status() = status::OK;
@@ -385,6 +450,22 @@ TEST_F(ResponseDoSProtectionTest, RejectedSerializationClearsExistingBufferConte
     bad_resp.set_header(
         std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'),
         "value");
+
+    EXPECT_THROW(pipe.put(bad_resp), std::length_error);
+    EXPECT_EQ(pipe.size(), 0);
+}
+
+TEST_F(ResponseDoSProtectionTest, FramingErrorClearsExistingBufferBeforeWriting) {
+    Response ok_resp;
+    ok_resp.status() = status::OK;
+    ok_resp.body() = "ok";
+    pipe.put(ok_resp);
+    ASSERT_GT(pipe.size(), 0);
+
+    Response bad_resp;
+    bad_resp.status() = status::OK;
+    bad_resp.body() = "payload";
+    bad_resp.set_header("Content-Length", "1");
 
     EXPECT_THROW(pipe.put(bad_resp), std::length_error);
     EXPECT_EQ(pipe.size(), 0);

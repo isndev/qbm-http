@@ -1,7 +1,6 @@
 #include "./client.h"
 
 #include <algorithm>
-#include <cctype>
 #include <stdexcept>
 #include <utility>
 
@@ -11,6 +10,7 @@
 
 #include "./http.h"
 #include "../headers.h"
+#include "../utility.h"
 
 namespace qb::http1 {
 namespace {
@@ -20,7 +20,7 @@ namespace {
         return false;
     }
     for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if (static_cast<char>(std::tolower(static_cast<unsigned char>(lhs[i]))) != rhs[i]) {
+        if (qb::http::utility::ascii_to_lower(lhs[i]) != rhs[i]) {
             return false;
         }
     }
@@ -129,9 +129,7 @@ public:
             return;
         }
 #else
-        if (request.header("Content-Encoding") != "chunked") {
-            request.remove_header("Content-Encoding");
-        }
+        request.remove_header("Content-Encoding");
 #endif
         try {
             *this << request;
@@ -299,10 +297,6 @@ void Client::ensure_absolute_uri(qb::http::Request& request) {
     if (!request.uri().encoded_queries().empty()) {
         absolute.push_back('?');
         absolute += request.uri().encoded_queries();
-    }
-    if (!request.uri().fragment().empty()) {
-        absolute.push_back('#');
-        absolute += request.uri().fragment();
     }
     request.uri() = qb::io::uri(std::move(absolute));
 }

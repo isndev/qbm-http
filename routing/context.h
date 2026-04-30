@@ -74,6 +74,7 @@ namespace qb::http {
             INITIAL, ///< Context created, before any primary task chain (normal, not_found, error) has started.
             NORMAL_CHAIN, ///< Currently executing the main task chain for a matched route.
             NOT_FOUND_CHAIN, ///< Currently executing the task chain for "404 Not Found" responses.
+            METHOD_NOT_ALLOWED_CHAIN, ///< Currently executing the task chain for "405 Method Not Allowed" responses.
             ERROR_CHAIN ///< Currently executing a user-defined error handling task chain.
         };
 
@@ -119,6 +120,8 @@ namespace qb::http {
         std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _task_chain;
         ///< The current chain of tasks to be executed.
         size_t _current_task_index = 0; ///< Index of the next task to be executed in `_task_chain`.
+        std::size_t _finalization_deferral_depth = 0;
+        bool _finalization_pending = false;
 
         /** @brief Callback invoked when the context processing is fully finalized. Typically sends the response. */
         std::function<void(Context<SessionType> &)> _on_finalized_callback;
@@ -203,8 +206,13 @@ namespace qb::http {
             if (_lc.state == State::Finalised) {
                 return;
             }
+            if (_finalization_deferral_depth > 0) {
+                _finalization_pending = true;
+                return;
+            }
             _lc.state = State::Finalised;
             _lc.task_in_flight = false;
+            _finalization_pending = false;
 
             execute_hook_internal(HookPoint::POST_HANDLER_EXECUTION);
 
@@ -299,6 +307,66 @@ namespace qb::http {
         }
 
     public:
+        /**
+         * @brief Internal RAII guard used by functional middleware that supports
+         *        synchronous post-`next()` response mutation.
+         *
+         * While a guard is alive, terminal completion marks finalisation as
+         * pending instead of sending immediately. When the outermost guard leaves
+         * scope, pending finalisation is resumed. This keeps synchronous
+         * middleware post-processing observable without changing the public
+         * `next()` API or the normal async task contract.
+         */
+        class ScopedFinalizationDeferral {
+        private:
+            Context<SessionType> *_ctx = nullptr;
+
+            explicit ScopedFinalizationDeferral(Context<SessionType> &ctx) noexcept
+                : _ctx(&ctx) {
+                ++_ctx->_finalization_deferral_depth;
+            }
+
+            friend class Context<SessionType>;
+
+        public:
+            ScopedFinalizationDeferral(const ScopedFinalizationDeferral &) = delete;
+            ScopedFinalizationDeferral &operator=(const ScopedFinalizationDeferral &) = delete;
+
+            ScopedFinalizationDeferral(ScopedFinalizationDeferral &&other) noexcept
+                : _ctx(std::exchange(other._ctx, nullptr)) {
+            }
+
+            ScopedFinalizationDeferral &operator=(ScopedFinalizationDeferral &&other) noexcept {
+                if (this != &other) {
+                    release();
+                    _ctx = std::exchange(other._ctx, nullptr);
+                }
+                return *this;
+            }
+
+            ~ScopedFinalizationDeferral() noexcept {
+                release();
+            }
+
+        private:
+            void release() noexcept {
+                if (!_ctx) {
+                    return;
+                }
+                auto *ctx = std::exchange(_ctx, nullptr);
+                if (ctx->_finalization_deferral_depth > 0) {
+                    --ctx->_finalization_deferral_depth;
+                }
+                if (ctx->_finalization_deferral_depth == 0 && ctx->_finalization_pending) {
+                    ctx->finalize_processing_internal();
+                }
+            }
+        };
+
+        [[nodiscard]] ScopedFinalizationDeferral defer_finalization_scope() noexcept {
+            return ScopedFinalizationDeferral(*this);
+        }
+
         /**
          * @brief Constructs a `Context` object.
          * @param request The HTTP request object (moved into the context).

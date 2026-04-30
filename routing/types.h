@@ -91,8 +91,9 @@ namespace qb::http {
      *
      * The middleware receives a `ContextPtr` and a `next` callback.
      * - To pass control to the next middleware or route handler in the chain, it should call `next()`.
-     *   After `next()` returns (if it's synchronous, or after its async work is done if `next` initiated it),
-     *   the middleware can perform post-processing on the response.
+     *   For synchronous downstream chains, response sending is deferred until the middleware lambda returns,
+     *   so code after `next()` can post-process `ctx->response()`. For asynchronous downstream work,
+     *   use lifecycle hooks (typically `PRE_RESPONSE_SEND`) when a mutation must run at final send time.
      * - To terminate processing and send a response directly, the middleware should set the response
      *   on `ctx->response()` and then call `ctx->complete(AsyncTaskResult::COMPLETE)` instead of `next()`.
      * - If an error occurs, it can call `ctx->complete(AsyncTaskResult::ERROR)`.

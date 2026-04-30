@@ -77,6 +77,14 @@ protected:
         _session->reset();
         _router->route(_session, std::move(request));
     }
+
+    [[nodiscard]] bool has_vary_value(const std::string &value) const {
+        const auto it = _session->_response.headers().find("Vary");
+        if (it == _session->_response.headers().end()) {
+            return false;
+        }
+        return std::find(it->second.begin(), it->second.end(), value) != it->second.end();
+    }
 };
 
 // --- Test Cases ---
@@ -136,7 +144,46 @@ TEST_F(CorsMiddlewareTest, PreflightRequest) {
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Methods")), "GET, POST, OPTIONS");
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Headers")), "Content-Type, Authorization");
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Max-Age")), "3600");
+    EXPECT_TRUE(has_vary_value("Origin"));
+    EXPECT_TRUE(has_vary_value("Access-Control-Request-Method"));
+    EXPECT_TRUE(has_vary_value("Access-Control-Request-Headers"));
     EXPECT_FALSE(_session->_final_handler_called); // Preflight should be handled by CORS MW
+}
+
+TEST_F(CorsMiddlewareTest, PreflightRejectsMethodNotAllowed) {
+    qb::http::CorsOptions options;
+    options.origins({"http://localhost:3000"})
+            .methods({"GET", "POST", "OPTIONS"})
+            .headers({"Content-Type"});
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    auto req = create_request(qb::http::method::OPTIONS, "/cors_test", "http://localhost:3000");
+    req.set_header("Access-Control-Request-Method", "DELETE");
+
+    configure_router_and_run(cors_mw, std::move(req));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Methods").empty());
+    EXPECT_TRUE(has_vary_value("Origin"));
+    EXPECT_TRUE(has_vary_value("Access-Control-Request-Method"));
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(CorsMiddlewareTest, PreflightEmptyMethodAllowListFailsClosed) {
+    qb::http::CorsOptions options;
+    options.origins({"http://localhost:3000"})
+            .methods({});
+    auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
+
+    auto req = create_request(qb::http::method::OPTIONS, "/cors_test", "http://localhost:3000");
+    req.set_header("Access-Control-Request-Method", "POST");
+
+    configure_router_and_run(cors_mw, std::move(req));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Methods").empty());
+    EXPECT_TRUE(has_vary_value("Access-Control-Request-Method"));
+    EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(CorsMiddlewareTest, ActualRequestWithCorsHeaders) {

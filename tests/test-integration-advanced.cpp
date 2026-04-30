@@ -1369,8 +1369,8 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
     PerformTestExecution(
         /* cumulative_expected_client_requests */ 5,
                                                   /* cumulative_expected_server_assertions */
-                                                  (1 + 1 + 1) + (1 + 1 + 1) + (1 + 1 + 1) + (1 + 1 + 1) + (1 + 1 + 1),
-                                                  // Each: Global+L0+Handler, 404: Global+L0+Custom404
+                                                  (1 + 1 + 1) + (1 + 1 + 1) + (1 + 1 + 1) + (1 + 1 + 1) + (1 + 1),
+                                                  // Each handled route: Global+L0+Handler, 405: Global+L0+Default405
                                                   /* cumulative_expected_server_handler_invocations */
                                                   1 + 1 + 1 + 1 + 0,
                                                   [&]() {
@@ -1439,10 +1439,11 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                               {"http://localhost:29887/multi_method_resource"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::PATCH(request)).response;
-                                                          EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
+                                                          EXPECT_EQ(HTTP_STATUS_METHOD_NOT_ALLOWED, response.status());
                                                           EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
-                                                          // L0 still runs before 404 chain
+                                                          EXPECT_EQ("DELETE, GET, POST, PUT, OPTIONS", response.header("Allow"));
+                                                          // L0 still runs before 405 chain
                                                           adv_request_count_client++;
                                                       }
                                                   }
@@ -1890,10 +1891,10 @@ TEST_F(AdvancedHttpIntegrationTest, GlobalErrorHandlerForMiddlewareErrorTest) {
 // --- New Test Cases ---
 
 TEST_F(AdvancedHttpIntegrationTest, MethodNotAllowedTest) {
-    // GlobalMW + L0MW + Custom404Handler = 3
+    // GlobalMW + L0MW + Default405Handler = 2 middleware assertions
     PerformTestExecution(
         /* cumulative_expected_client_requests */ 1,
-                                                  /* cumulative_expected_server_assertions */ 1 + 1 + 1,
+                                                  /* cumulative_expected_server_assertions */ 1 + 1,
                                                   /* cumulative_expected_server_handler_invocations */ 0,
                                                   [&]() {
                                                       {
@@ -1904,13 +1905,11 @@ TEST_F(AdvancedHttpIntegrationTest, MethodNotAllowedTest) {
                                                               qb::http::method::PATCH, {"http://localhost:29887/ping"}
                                                           };
                                                           auto response = qb::http::run_sync(qb::http::PATCH(request)).response;
-                                                          EXPECT_EQ(HTTP_STATUS_NOT_FOUND, response.status());
+                                                          EXPECT_EQ(HTTP_STATUS_METHOD_NOT_ALLOWED, response.status());
                                                           EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
-                                                          EXPECT_EQ("Applied", response.header("X-Custom-404"));
-                                                          EXPECT_EQ(
-                                                              "Oops! The page you\'re looking for doesn\'t exist here (Custom 404).",
-                                                              response.body().as<std::string>());
+                                                          EXPECT_EQ("GET, HEAD", response.header("Allow"));
+                                                          EXPECT_EQ("405 Method Not Allowed", response.body().as<std::string>());
                                                           adv_request_count_client++;
                                                       }
                                                   }

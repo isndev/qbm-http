@@ -171,6 +171,34 @@ TEST_F(RouterMatchTest, ParameterSimpleMatch) {
     ASSERT_EQ(param_val.value(), "123");
 }
 
+TEST_F(RouterMatchTest, ParameterPathDecodePreservesPlus) {
+    router.get("/users/:id", make_verifying_handler("user_id_handler"));
+    router.compile();
+
+    auto literal_plus = create_request(HTTP_GET, "/users/a+b");
+    router.route(mock_session, std::move(literal_plus));
+    ASSERT_TRUE(mock_session->_handler_executed);
+    auto param_literal_plus = mock_session->_captured_params.get("id");
+    ASSERT_TRUE(param_literal_plus.has_value());
+    ASSERT_EQ(param_literal_plus.value(), "a+b");
+
+    mock_session->reset();
+    auto encoded_plus = create_request(HTTP_GET, "/users/a%2Bb");
+    router.route(mock_session, std::move(encoded_plus));
+    ASSERT_TRUE(mock_session->_handler_executed);
+    auto param_encoded_plus = mock_session->_captured_params.get("id");
+    ASSERT_TRUE(param_encoded_plus.has_value());
+    ASSERT_EQ(param_encoded_plus.value(), "a+b");
+
+    mock_session->reset();
+    auto encoded_space = create_request(HTTP_GET, "/users/a%20b");
+    router.route(mock_session, std::move(encoded_space));
+    ASSERT_TRUE(mock_session->_handler_executed);
+    auto param_encoded_space = mock_session->_captured_params.get("id");
+    ASSERT_TRUE(param_encoded_space.has_value());
+    ASSERT_EQ(param_encoded_space.value(), "a b");
+}
+
 TEST_F(RouterMatchTest, ParameterMultipleParams) {
     router.get("/articles/:category/posts/:postId", make_verifying_handler("article_post_handler"));
     router.compile();
@@ -452,13 +480,59 @@ TEST_F(RouterMatchTest, DifferentMethodsSamePath) {
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "post_resource");
 
-    // Test PUT (should be 404 or 405 if router does method checking)
-    // Current simple router core gives 404 if no handler for method.
+    // Test PUT: path exists but method is not allowed, so the router returns
+    // RFC-style 405 with an Allow header instead of falling through to 404.
     mock_session->reset();
     auto req_put = create_request(HTTP_PUT, "/resource");
     router.route(mock_session, std::move(req_put));
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_METHOD_NOT_ALLOWED);
+    ASSERT_EQ(mock_session->_response.header("Allow"), "GET, POST");
+}
+
+TEST_F(RouterMatchTest, MethodNotAllowedKeepsDecodedPathParamsForMiddleware) {
+    router.use([](auto ctx, auto next) {
+        if (ctx->session()) {
+            ctx->session()->_captured_params = ctx->path_parameters();
+        }
+        next();
+    });
+    router.get("/resource/:id", make_verifying_handler("get_resource_id"));
+    router.compile();
+
+    auto request = create_request(HTTP_PATCH, "/resource/a+b");
+    router.route(mock_session, std::move(request));
+
+    ASSERT_FALSE(mock_session->_handler_executed);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_METHOD_NOT_ALLOWED);
+    auto captured_id = mock_session->_captured_params.get("id");
+    ASSERT_TRUE(captured_id.has_value());
+    ASSERT_EQ(captured_id.value(), "a+b");
+}
+
+TEST_F(RouterMatchTest, MethodNotAllowedAllowIncludesFallbackParamBranchMethods) {
+    router.get("/resource/:id", make_verifying_handler("get_resource_id"));
+    router.post("/resource/static", make_verifying_handler("post_resource_static"));
+    router.compile();
+
+    mock_session->reset();
+    auto get_static = create_request(HTTP_GET, "/resource/static");
+    router.route(mock_session, std::move(get_static));
+    ASSERT_TRUE(mock_session->_handler_executed);
+    ASSERT_EQ(mock_session->_handler_id, "get_resource_id");
+
+    mock_session->reset();
+    auto post_static = create_request(HTTP_POST, "/resource/static");
+    router.route(mock_session, std::move(post_static));
+    ASSERT_TRUE(mock_session->_handler_executed);
+    ASSERT_EQ(mock_session->_handler_id, "post_resource_static");
+
+    mock_session->reset();
+    auto put_static = create_request(HTTP_PUT, "/resource/static");
+    router.route(mock_session, std::move(put_static));
+    ASSERT_FALSE(mock_session->_handler_executed);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_METHOD_NOT_ALLOWED);
+    ASSERT_EQ(mock_session->_response.header("Allow"), "GET, POST");
 }
 
 // --- More "Twisted" / Edge Cases for Matching ---
@@ -729,12 +803,13 @@ TEST_F(RouterMatchTest, IdenticalStructureDifferentMethodsParameterized) {
     ASSERT_TRUE(param_put.has_value());
     ASSERT_EQ(param_put.value(), "456");
 
-    // Test DELETE (should be 404 or 405, current is 404)
+    // Test DELETE: same path shape exists for GET/PUT, but DELETE is not allowed.
     mock_session->reset();
     auto req_delete = create_request(HTTP_DELETE, "/resource/789");
     router.route(mock_session, std::move(req_delete));
     ASSERT_FALSE(mock_session->_handler_executed);
-    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
+    ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_METHOD_NOT_ALLOWED);
+    ASSERT_EQ(mock_session->_response.header("Allow"), "GET, PUT");
 }
 
 TEST_F(RouterMatchTest, IdenticalStructureDifferentMethodsWildcard) {

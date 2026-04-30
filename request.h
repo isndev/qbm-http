@@ -232,17 +232,16 @@ namespace qb::http {
          * - Sets the HTTP method to `GET`.
          * - Clears the URI (to an empty/default state).
          * - Clears all parsed cookies from the internal `CookieJar`.
+         * - Clears the body content.
          * - Calls the `reset()` method of the `MessageBase` base class, which
-         *   clears all headers and resets the Content-Type to its default.
-         * The body content is not cleared by `MessageBase::reset()` itself but would be
-         * by `Body::clear()` if called directly on the body.
-         * The HTTP version and upgrade flag in `MessageBase` are not modified by this reset.
+         *   clears all headers, resets Content-Type, and clears transport metadata.
          */
         void
         reset() noexcept {
             _method = Method::GET;
             _uri = qb::io::uri{};
             _cookies.clear();
+            this->body().clear();
             this->internal::MessageBase::reset();
         }
 
@@ -289,6 +288,7 @@ namespace qb::http {
          */
         Request &with_headers(qb::icase_unordered_map<std::vector<std::string> > h) {
             this->headers() = std::move(h);
+            this->refresh_content_type();
             return *this;
         }
 

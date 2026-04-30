@@ -944,7 +944,7 @@ public:
         for (const auto& header_item : http_response.headers()) { // Assuming http_response.headers() gives iterable key-value pairs
             std::string name_lower = header_item.first;
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                           [](char c) { return qb::http::utility::ascii_to_lower(c); });
             if (name_lower.empty() || name_lower[0] == ':' ||
                 HeaderValidator::is_forbidden_response_header(name_lower)) {
                 this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,

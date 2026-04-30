@@ -304,6 +304,17 @@ TEST(Session, HTTP11_REQUEST_SERIALIZATION_CHUNKS_PRESENT_BODY) {
     EXPECT_EQ(wire.find("content-length:"), std::string::npos);
 }
 
+TEST(Session, HTTP11_REQUEST_SERIALIZATION_OMITS_URI_FRAGMENT) {
+    qb::http::Request request{qb::http::method::GET, {"http://example.test/search?q=qb#client-only"}};
+
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << request);
+    const std::string wire{out.begin(), out.size()};
+
+    EXPECT_TRUE(wire.starts_with("GET /search?q=qb HTTP/1.1\r\n"));
+    EXPECT_EQ(wire.find("#client-only"), std::string::npos);
+}
+
 TEST(Session, HTTP11_RESPONSE_SERIALIZATION_CHUNKS_PRESENT_BODY) {
     qb::http::Response response;
     response.status() = qb::http::status::OK;

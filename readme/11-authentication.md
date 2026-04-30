@@ -133,7 +133,8 @@ This is a general-purpose authentication middleware (see `http/middleware/auth.h
     ```
 4.  **Authorization**: It can perform role-based authorization checks using `auth::User::has_role()`, `has_any_role()`, or `has_all_roles()` if configured via its `with_roles()` method.
 5.  **Flow Control**: If authentication is required (`with_auth_required(true)`) and fails, it sends an appropriate error response (e.g., 401 Unauthorized or 403 Forbidden) and short-circuits the request chain (`ctx->complete(AsyncTaskResult::COMPLETE)`).
-   If authentication is optional (`with_auth_required(false)`) and a token is not provided or is invalid, it may allow the request to proceed without an authenticated user in the context.
+   If authentication is optional (`with_auth_required(false)`) and no token is provided, the request proceeds without an authenticated user in the context. If the client does provide malformed, expired, or invalid credentials, the request is rejected.
+6.  **Pre-authenticated Users**: Before parsing a token, `AuthMiddleware` checks the configured user context key (default: `"user"`) for an existing `auth::User`. This lets `create_role_auth_middleware()` act as a pure role gate after another middleware has authenticated the request.
 
 **Usage:**
 ```cpp
@@ -232,4 +233,4 @@ Previous: [The Request Context](./10-request-context.md)
 Next: [Validation System](./12-validation.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

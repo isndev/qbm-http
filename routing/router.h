@@ -231,6 +231,16 @@ namespace qb::http {
         void set_error_task_chain(std::vector<std::shared_ptr<IAsyncTask<SessionType> > > error_chain);
 
         /**
+         * @brief Registers a router-level lifecycle hook copied into every
+         *        newly-created request context before PRE_ROUTING fires.
+         *
+         * Context-local hooks can only be added once middleware or handlers are
+         * already running; this API is the intended place for cross-cutting
+         * hooks that need to observe PRE_ROUTING.
+         */
+        Router<SessionType> &add_lifecycle_hook(typename Context<SessionType>::LifecycleHook hook_fn);
+
+        /**
          * @brief Finalizes all route definitions and compiles them into an efficient structure for matching.
          * This method **must** be called after all routes, groups, controllers, and middleware
          * have been defined and before the router is used to process any requests.

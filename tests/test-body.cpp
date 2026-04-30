@@ -56,9 +56,72 @@ TEST_F(BodyTest, Clear) {
     EXPECT_EQ(0, body.size());
 }
 
+TEST(HttpMessageReset, RequestResetClearsBodyAndMessageState) {
+    Request request{method::POST, qb::io::uri{"/submit"}};
+    request.set_header("Content-Type", "text/plain");
+    request.body() = "stale request body";
+    request.cookies().add("sid", "abc");
+    request.major_version = 3;
+    request.minor_version = 0;
+    request.upgrade = true;
+    request.stream_id = 123;
+    request.keep_alive = true;
+
+    request.reset();
+
+    EXPECT_EQ(request.method(), method::GET);
+    EXPECT_NE(request.uri().path(), "/submit");
+    EXPECT_TRUE(request.body().empty());
+    EXPECT_FALSE(request.has_header("Content-Type"));
+    EXPECT_EQ(request.content_type().type(), Headers::default_content_type);
+    EXPECT_FALSE(request.has_cookie("sid"));
+    EXPECT_EQ(request.major_version, 1);
+    EXPECT_EQ(request.minor_version, 1);
+    EXPECT_FALSE(request.upgrade);
+    EXPECT_EQ(request.stream_id, 0u);
+    EXPECT_FALSE(request.keep_alive);
+}
+
+TEST(HttpMessageReset, ResponseResetClearsBodyAndMessageState) {
+    Response response{status::CREATED};
+    response.set_header("Content-Type", "application/json");
+    response.body() = R"({"stale":true})";
+    response.add_cookie("sid", "abc");
+    response.major_version = 3;
+    response.minor_version = 0;
+    response.upgrade = true;
+    response.stream_id = 123;
+    response.keep_alive = true;
+
+    response.reset();
+
+    EXPECT_EQ(response.status(), status::OK);
+    EXPECT_TRUE(response.body().empty());
+    EXPECT_FALSE(response.has_header("Content-Type"));
+    EXPECT_FALSE(response.has_header("Set-Cookie"));
+    EXPECT_EQ(response.content_type().type(), Headers::default_content_type);
+    EXPECT_FALSE(response.has_cookie("sid"));
+    EXPECT_EQ(response.major_version, 1);
+    EXPECT_EQ(response.minor_version, 1);
+    EXPECT_FALSE(response.upgrade);
+    EXPECT_EQ(response.stream_id, 0u);
+    EXPECT_FALSE(response.keep_alive);
+}
+
 TEST_F(BodyTest, AppendOperator) {
     body << "Hello, " << "World!" << 123;
     EXPECT_EQ("Hello, World!123", body.as<std::string>());
+}
+
+TEST_F(BodyTest, ChunkSerializationPreservesInternalZeroHexDigits) {
+    const std::string payload(16, 'x');
+
+    qb::allocator::pipe<char> out;
+    out << Chunk(payload.data(), payload.size());
+
+    const std::string wire{out.begin(), out.size()};
+    EXPECT_EQ(wire.substr(0, 4), "10\r\n");
+    EXPECT_TRUE(wire.ends_with("\r\n"));
 }
 
 TEST_F(BodyTest, AssignString) {

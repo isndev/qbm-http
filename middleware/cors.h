@@ -449,24 +449,23 @@ namespace qb::http {
                     ctx->request().header("Access-Control-Request-Method"));
                 if (!request_method_header.empty()) {
                     // This signifies a preflight request
+                    ctx->response().add_header("Vary", "Access-Control-Request-Method");
+
                     const auto &allowed_methods_list = _options->get_allowed_methods();
-                    if (!allowed_methods_list.empty()) {
-                        ctx->response().set_header("Access-Control-Allow-Methods",
-                                                   utility::join(allowed_methods_list, ", "));
-                    } else {
-                        // If no methods are explicitly configured in CorsOptions, it implies all methods requested
-                        // by Access-Control-Request-Method might be allowed, or a default set.
-                        // However, for a preflight, we should respond based on what *is* allowed.
-                        // If _options->get_allowed_methods() is empty, it might mean no methods are allowed, 
-                        // or it means rely on what the client requested if it's a simple request.
-                        // For preflight, it's safer to list common methods or rely on the requested method if it's simple.
-                        // For now, let's assume if empty, we echo back the requested method if it's a common one, or a default set.
-                        // A more robust approach: if allowed_methods_list is empty, maybe only allow simple methods, or be more restrictive.
-                        // Reflecting only the requested method might be too permissive if the config is empty.
-                        // The current test uses a populated methods list, so this branch is less critical for this specific failure.
-                        ctx->response().set_header("Access-Control-Allow-Methods", request_method_header);
-                        // Default to requested or a safe set
+                    const bool method_allowed =
+                        std::find_if(allowed_methods_list.begin(),
+                                     allowed_methods_list.end(),
+                                     [&](const std::string &configured_method) {
+                                         return utility::iequals(configured_method, request_method_header);
+                                     }) != allowed_methods_list.end();
+                    if (!method_allowed) {
+                        ctx->response().status() = qb::http::status::FORBIDDEN;
+                        ctx->response().body().clear();
+                        ctx->complete(AsyncTaskResult::COMPLETE);
+                        return;
                     }
+                    ctx->response().set_header("Access-Control-Allow-Methods",
+                                               utility::join(allowed_methods_list, ", "));
 
                     std::string requested_headers_str = std::string(
                         ctx->request().header("Access-Control-Request-Headers"));

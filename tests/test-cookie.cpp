@@ -291,6 +291,20 @@ TEST_F(CookieTest, ParseMultipleCookies) {
         EXPECT_EQ("quoted value", cookies["name"]);
         EXPECT_EQ("123", cookies["another"]);
     }
+
+    // Quoted-pair escapes inside quoted values
+    {
+        auto cookies = parse_cookies(std::string(R"(name="a\"b\\c"; another=123)"), false);
+        ASSERT_EQ(2, cookies.size());
+        EXPECT_EQ("a\"b\\c", cookies["name"]);
+        EXPECT_EQ("123", cookies["another"]);
+    }
+}
+
+TEST_F(CookieTest, ParseCookiesRejectMalformedQuotedValues) {
+    EXPECT_THROW((void)parse_cookies(std::string(R"(name="unterminated)"), false), std::runtime_error);
+    EXPECT_THROW((void)parse_cookies(std::string(R"(name="value"junk; another=123)"), false), std::runtime_error);
+    EXPECT_THROW((void)parse_cookies(std::string("name=\"bad\nvalue\""), false), std::runtime_error);
 }
 
 //////////////////////////////////////////////////
@@ -344,6 +358,16 @@ TEST_F(CookieJarTest, AddByNameAndValuePreservesCookieName) {
     ASSERT_NE(nullptr, stored_cookie);
     EXPECT_EQ(stored_cookie->name(), "session_id");
     EXPECT_EQ(stored_cookie->value(), "abc123");
+}
+
+TEST_F(CookieJarTest, AddByNameAndValueReplacesExistingCookie) {
+    Cookie &cookie = jar.add("test1", "replacement");
+
+    EXPECT_EQ(jar.size(), 2u);
+    EXPECT_EQ(cookie.name(), "test1");
+    EXPECT_EQ(cookie.value(), "replacement");
+    ASSERT_NE(jar.get("test1"), nullptr);
+    EXPECT_EQ(jar.get("test1")->value(), "replacement");
 }
 
 TEST_F(CookieJarTest, ModifyCookies) {
@@ -451,6 +475,21 @@ TEST(CookieIntegration, ResponseCookies) {
         }
     }
     EXPECT_TRUE(found_header);
+}
+
+TEST(CookieIntegration, ResponseReplacingCookieKeepsSetCookieHeadersInSync) {
+    Response response;
+
+    response.add_cookie("sid", "old");
+    response.add_cookie("sid", "new");
+
+    ASSERT_TRUE(response.has_header("Set-Cookie"));
+    const auto &headers = response.headers().at("Set-Cookie");
+    ASSERT_EQ(headers.size(), 1u);
+    EXPECT_NE(headers.front().find("sid=new"), std::string::npos);
+    EXPECT_EQ(headers.front().find("sid=old"), std::string::npos);
+    ASSERT_NE(response.cookie("sid"), nullptr);
+    EXPECT_EQ(response.cookie("sid")->value(), "new");
 }
 
 TEST(CookieIntegration, ResponseRemoveCookie) {
@@ -816,6 +855,19 @@ TEST_F(CookieTest, ToHeaderOptimizationSpecialCharactersInValue) {
     // Verify basic structure is maintained
     EXPECT_EQ(header.substr(0, 8), "special=");
     EXPECT_NE(header.find("Path=/"), std::string::npos);
+}
+
+TEST_F(CookieTest, ToHeaderRejectsSetCookieAttributeInjection) {
+    EXPECT_THROW((void)Cookie("bad;name", "value").to_header(), std::runtime_error);
+    EXPECT_THROW((void)Cookie("name", "value; HttpOnly").to_header(), std::runtime_error);
+
+    Cookie bad_domain("name", "value");
+    bad_domain.domain("example.com; Secure");
+    EXPECT_THROW((void)bad_domain.to_header(), std::runtime_error);
+
+    Cookie bad_path("name", "value");
+    bad_path.path("/; Secure");
+    EXPECT_THROW((void)bad_path.to_header(), std::runtime_error);
 }
 
 //////////////////////////////////////////////////

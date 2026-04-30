@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
-#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -41,8 +40,8 @@ namespace detail {
 
 inline std::string lower_header_name(std::string_view value) {
     std::string out(value);
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
+    std::transform(out.begin(), out.end(), out.begin(), [](char c) {
+        return qb::http::utility::ascii_to_lower(c);
     });
     return out;
 }
@@ -118,10 +117,66 @@ struct header_block {
     }
 };
 
-inline bool header_within_limits(std::string_view name, std::string_view value) noexcept {
-    return !name.empty() &&
-           name.size() <= qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH &&
-           value.size() <= qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH;
+inline bool is_header_name_char(unsigned char c) noexcept {
+    return (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') ||
+           c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+           c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
+           c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+}
+
+inline bool is_valid_header_field(std::string_view name, std::string_view value) noexcept {
+    if (name.empty() ||
+        name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH ||
+        value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+        return false;
+    }
+
+    for (unsigned char c : name) {
+        if (!is_header_name_char(c)) {
+            return false;
+        }
+    }
+
+    for (unsigned char c : value) {
+        if (c == 0x00 || c == 0x0d || c == 0x0a) {
+            return false;
+        }
+        if ((c < 0x20 && c != 0x09) || c == 0x7f) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+inline bool is_valid_incoming_header_field(std::string_view name, std::string_view value) noexcept {
+    if (name.empty() ||
+        name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH ||
+        value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+        return false;
+    }
+
+    const bool pseudo = name.front() == ':';
+    for (std::size_t i = pseudo ? 1u : 0u; i < name.size(); ++i) {
+        if (!is_header_name_char(static_cast<unsigned char>(name[i]))) {
+            return false;
+        }
+    }
+    if (pseudo && name.size() == 1u) {
+        return false;
+    }
+
+    for (unsigned char c : value) {
+        if (c == 0x00 || c == 0x0d || c == 0x0a) {
+            return false;
+        }
+        if ((c < 0x20 && c != 0x09) || c == 0x7f) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 template <typename Message>
@@ -187,7 +242,7 @@ bool add_regular_headers(header_block& block, Message const& msg, std::size_t& f
         }
         for (auto const& value : values) {
             if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT ||
-                !header_within_limits(lower, value)) {
+                !is_valid_header_field(lower, value)) {
                 return false;
             }
             block.add(lower, value);
@@ -214,7 +269,7 @@ std::optional<header_block> make_trailers(Message const& msg) {
         }
         for (auto const& value : values) {
             if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT ||
-                !header_within_limits(lower, value)) {
+                !is_valid_header_field(lower, value)) {
                 return std::nullopt;
             }
             block.add(lower, value);
@@ -431,7 +486,7 @@ private:
         auto header_name = detail::rcbuf_to_string(name);
         auto header_value = detail::rcbuf_to_string(value);
         if (++st.incoming_header_fields > qb::http::protocol_limits::MAX_HEADERS_COUNT ||
-            !detail::header_within_limits(header_name, header_value)) {
+            !detail::is_valid_incoming_header_field(header_name, header_value)) {
             return NGHTTP3_ERR_CALLBACK_FAILURE;
         }
         st.incoming_headers.add(std::move(header_name), std::move(header_value));

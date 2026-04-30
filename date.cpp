@@ -15,6 +15,7 @@
 #include "./date.h"
 #include <array>
 #include <charconv>  // For std::from_chars - faster than std::stoi, no exceptions
+#include <cctype>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -70,6 +71,61 @@ namespace qb::http::date {
      */
     std::string two_digits(int num) {
         return (num < 10 ? "0" : "") + std::to_string(num);
+    }
+
+    std::optional<std::chrono::system_clock::time_point>
+    make_time_point_utc(int year, int month, int day, int hour, int minute, int second) noexcept {
+        if (month < 0 || month > 11 || day < 1 || day > 31 ||
+            hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+            second < 0 || second > 59) {
+            return std::nullopt;
+        }
+
+        const int expected_year = year - 1900;
+        const int expected_month = month;
+        const int expected_day = day;
+        const int expected_hour = hour;
+        const int expected_minute = minute;
+        const int expected_second = second;
+
+        tm tm_value{};
+        tm_value.tm_year = expected_year;
+        tm_value.tm_mon = expected_month;
+        tm_value.tm_mday = expected_day;
+        tm_value.tm_hour = expected_hour;
+        tm_value.tm_min = expected_minute;
+        tm_value.tm_sec = expected_second;
+
+#if defined(_MSC_VER) || defined(__MINGW32__)
+        time_t time_value = _mkgmtime(&tm_value);
+#else
+        time_t time_value = timegm(&tm_value);
+#endif
+        if (time_value == static_cast<time_t>(-1)) {
+            return std::nullopt;
+        }
+
+        tm normalized{};
+#if defined(_MSC_VER) || defined(__MINGW32__)
+        if (gmtime_s(&normalized, &time_value) != 0) {
+            return std::nullopt;
+        }
+#else
+        if (gmtime_r(&time_value, &normalized) == nullptr) {
+            return std::nullopt;
+        }
+#endif
+
+        if (normalized.tm_year != expected_year ||
+            normalized.tm_mon != expected_month ||
+            normalized.tm_mday != expected_day ||
+            normalized.tm_hour != expected_hour ||
+            normalized.tm_min != expected_minute ||
+            normalized.tm_sec != expected_second) {
+            return std::nullopt;
+        }
+
+        return std::chrono::system_clock::from_time_t(time_value);
     }
 
     /**
@@ -181,11 +237,11 @@ namespace qb::http::date {
      */
     std::optional<std::chrono::system_clock::time_point> parse_rfc1123_date(std::string_view str) {
         // Format: "Sun, 06 Nov 1994 08:49:37 GMT"
-        if (str.size() < 29) return std::nullopt;
+        if (str.size() != 29) return std::nullopt;
 
         // Skip weekday and comma
         auto pos = str.find(',');
-        if (pos == std::string_view::npos) return std::nullopt;
+        if (pos != 3 || pos + 1 >= str.size() || str[pos + 1] != ' ') return std::nullopt;
 
         // Move past the comma and space
         pos += 2;
@@ -195,6 +251,7 @@ namespace qb::http::date {
         if (pos + 2 > str.size()) return std::nullopt;
         int day = 0;
         if (std::from_chars(str.data() + pos, str.data() + pos + 2, day).ec != std::errc{}) return std::nullopt;
+        if (pos + 2 >= str.size() || str[pos + 2] != ' ') return std::nullopt;
         pos += 3; // Move past day and space
 
         // Extract month (3 chars)
@@ -202,12 +259,14 @@ namespace qb::http::date {
         std::string_view month_str = str.substr(pos, 3);
         int month = month_to_num(month_str);
         if (month < 0) return std::nullopt;
+        if (pos + 3 >= str.size() || str[pos + 3] != ' ') return std::nullopt;
         pos += 4; // Move past month and space
 
         // Extract year (4 digits) - Using from_chars for better performance
         if (pos + 4 > str.size()) return std::nullopt;
         int year = 0;
         if (std::from_chars(str.data() + pos, str.data() + pos + 4, year).ec != std::errc{}) return std::nullopt;
+        if (pos + 4 >= str.size() || str[pos + 4] != ' ') return std::nullopt;
         pos += 5; // Move past year and space
 
         // Extract time - Using from_chars for better performance
@@ -219,30 +278,10 @@ namespace qb::http::date {
         if (str[pos + 5] != ':') return std::nullopt;
         if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{}) return std::nullopt;
 
-        // Validate time components
-        if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
-            return std::nullopt;
-        }
+        pos += 8;
+        if (pos + 4 != str.size() || str.substr(pos, 4) != " GMT") return std::nullopt;
 
-        // Create a tm structure and convert to time_point
-        tm tm_value{};
-        tm_value.tm_year = year - 1900;
-        tm_value.tm_mon = month;
-        tm_value.tm_mday = day;
-        tm_value.tm_hour = hour;
-        tm_value.tm_min = minute;
-        tm_value.tm_sec = second;
-
-        // Convert to time_t (seconds since epoch)
-#if defined(_MSC_VER) || defined(__MINGW32__)
-    time_t time_value = _mkgmtime(&tm_value);
-#else
-        time_t time_value = timegm(&tm_value);
-#endif
-
-        if (time_value == -1) return std::nullopt;
-
-        return std::chrono::system_clock::from_time_t(time_value);
+        return make_time_point_utc(year, month, day, hour, minute, second);
     }
 
     /**
@@ -253,7 +292,7 @@ namespace qb::http::date {
     std::optional<std::chrono::system_clock::time_point> parse_rfc850_date(std::string_view str) {
         // Format: "Sunday, 06-Nov-94 08:49:37 GMT"
         auto pos = str.find(',');
-        if (pos == std::string_view::npos) return std::nullopt;
+        if (pos == std::string_view::npos || pos + 1 >= str.size() || str[pos + 1] != ' ') return std::nullopt;
 
         // Move past the comma and space
         pos += 2;
@@ -263,6 +302,7 @@ namespace qb::http::date {
         if (pos + 2 > str.size()) return std::nullopt;
         int day = 0;
         if (std::from_chars(str.data() + pos, str.data() + pos + 2, day).ec != std::errc{}) return std::nullopt;
+        if (pos + 2 >= str.size() || str[pos + 2] != '-') return std::nullopt;
         pos += 3; // Move past day and hyphen
 
         // Extract month (3 chars)
@@ -270,6 +310,7 @@ namespace qb::http::date {
         std::string_view month_str = str.substr(pos, 3);
         int month = month_to_num(month_str);
         if (month < 0) return std::nullopt;
+        if (pos + 3 >= str.size() || str[pos + 3] != '-') return std::nullopt;
         pos += 4; // Move past month and hyphen
 
         // Extract year (2 digits) - Using from_chars for better performance
@@ -281,6 +322,7 @@ namespace qb::http::date {
         } else {
             year += 1900;
         }
+        if (pos + 2 >= str.size() || str[pos + 2] != ' ') return std::nullopt;
         pos += 3; // Move past year and space
 
         // Extract time - Using from_chars for better performance
@@ -292,30 +334,10 @@ namespace qb::http::date {
         if (str[pos + 5] != ':') return std::nullopt;
         if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{}) return std::nullopt;
 
-        // Validate time components
-        if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
-            return std::nullopt;
-        }
+        pos += 8;
+        if (pos + 4 != str.size() || str.substr(pos, 4) != " GMT") return std::nullopt;
 
-        // Create a tm structure and convert to time_point
-        tm tm_value{};
-        tm_value.tm_year = year - 1900;
-        tm_value.tm_mon = month;
-        tm_value.tm_mday = day;
-        tm_value.tm_hour = hour;
-        tm_value.tm_min = minute;
-        tm_value.tm_sec = second;
-
-        // Convert to time_t (seconds since epoch)
-#if defined(_MSC_VER) || defined(__MINGW32__)
-    time_t time_value = _mkgmtime(&tm_value);
-#else
-        time_t time_value = timegm(&tm_value);
-#endif
-
-        if (time_value == -1) return std::nullopt;
-
-        return std::chrono::system_clock::from_time_t(time_value);
+        return make_time_point_utc(year, month, day, hour, minute, second);
     }
 
     /**
@@ -325,7 +347,7 @@ namespace qb::http::date {
      */
     std::optional<std::chrono::system_clock::time_point> parse_asctime_date(std::string_view str) {
         // Format: "Sun Nov  6 08:49:37 1994"
-        if (str.size() < 24) return std::nullopt;
+        if (str.size() != 24 || str[3] != ' ' || str[7] != ' ') return std::nullopt;
 
         // Skip weekday
         size_t pos = 4;
@@ -342,14 +364,16 @@ namespace qb::http::date {
         if (str[pos] == ' ') pos++;
 
         size_t day_len = 0;
-        while (pos + day_len < str.size() && std::isdigit(str[pos + day_len])) {
+        while (pos + day_len < str.size() &&
+               std::isdigit(static_cast<unsigned char>(str[pos + day_len]))) {
             day_len++;
         }
-        if (day_len == 0) return std::nullopt;
+        if (day_len == 0 || day_len > 2) return std::nullopt;
 
         // Extract day (1-2 digits) - Using from_chars for better performance
         int day = 0;
         if (std::from_chars(str.data() + pos, str.data() + pos + day_len, day).ec != std::errc{}) return std::nullopt;
+        if (pos + day_len >= str.size() || str[pos + day_len] != ' ') return std::nullopt;
         pos += day_len + 1; // Move past day and space
 
         // Extract time - Using from_chars for better performance
@@ -361,36 +385,14 @@ namespace qb::http::date {
         if (str[pos + 5] != ':') return std::nullopt;
         if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{}) return std::nullopt;
 
-        // Validate time components
-        if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
-            return std::nullopt;
-        }
         pos += 9; // Move past time and space
 
         // Extract year (4 digits) - Using from_chars for better performance
-        if (pos + 4 > str.size()) return std::nullopt;
+        if (pos + 4 != str.size()) return std::nullopt;
         int year = 0;
         if (std::from_chars(str.data() + pos, str.data() + pos + 4, year).ec != std::errc{}) return std::nullopt;
 
-        // Create a tm structure and convert to time_point
-        tm tm_value{};
-        tm_value.tm_year = year - 1900;
-        tm_value.tm_mon = month;
-        tm_value.tm_mday = day;
-        tm_value.tm_hour = hour;
-        tm_value.tm_min = minute;
-        tm_value.tm_sec = second;
-
-        // Convert to time_t (seconds since epoch)
-#if defined(_MSC_VER) || defined(__MINGW32__)
-    time_t time_value = _mkgmtime(&tm_value);
-#else
-        time_t time_value = timegm(&tm_value);
-#endif
-
-        if (time_value == -1) return std::nullopt;
-
-        return std::chrono::system_clock::from_time_t(time_value);
+        return make_time_point_utc(year, month, day, hour, minute, second);
     }
 
     /**

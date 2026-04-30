@@ -14,7 +14,6 @@
 #pragma once
 
 #include <algorithm>     // For std::equal, std::find_first_of, std::find_if, std::mismatch, std::next, std::distance
-#include <cctype>        // For std::tolower, std::isalnum
 #include <cstddef>       // For std::size_t
 #include <iterator>      // For std::forward_iterator_tag
 #include <string>        // For std::string
@@ -642,7 +641,10 @@ namespace qb::http {
             
             for (unsigned char c : component) {
                 // Keep alphanumeric and other unreserved characters as defined in RFC 3986, Section 2.3
-                if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                if ((c >= 'A' && c <= 'Z') ||
+                    (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '-' || c == '_' || c == '.' || c == '~') {
                     result += static_cast<char>(c);
                 } else {
                     // Any other characters are percent-encoded

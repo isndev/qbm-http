@@ -83,13 +83,15 @@ namespace qb::http {
          * - Sets the `status_code` to `200 OK`.
          * - Clears the `status` (reason phrase) string.
          * - Clears all cookies from the internal `CookieJar`.
+         * - Clears the body content.
          * - Calls `MessageBase::reset()`, which clears all headers and resets Content-Type.
-         * The HTTP version and upgrade flag in `MessageBase` are not modified.
+         *   It also clears transport metadata such as stream id, upgrade and keep-alive flags.
          */
         void
         reset() noexcept {
             _status = Status::OK;
             _cookies.clear();
+            this->body().clear();
             this->internal::MessageBase::reset();
         }
 
@@ -123,8 +125,7 @@ namespace qb::http {
          */
         void add_cookie(const Cookie &cookie) {
             _cookies.add(cookie); // Adds or replaces in jar
-            // Add the serialized cookie to the actual headers
-            this->add_header("Set-Cookie", cookie.to_header());
+            update_cookie_header(cookie.name());
         }
 
         /**
@@ -132,9 +133,9 @@ namespace qb::http {
          * @param cookie The `Cookie` object to add (moved).
          */
         void add_cookie(Cookie &&cookie) {
-            std::string header_value = cookie.to_header(); // Generate header before moving name/value from cookie
+            std::string cookie_name = cookie.name();
             _cookies.add(std::move(cookie)); // Add to jar
-            this->add_header("Set-Cookie", std::move(header_value)); // Add to headers
+            update_cookie_header(cookie_name);
         }
 
         /**
@@ -148,7 +149,7 @@ namespace qb::http {
         Cookie &add_cookie(const std::string &name, const std::string &value) {
             // Add to jar first to get a stable reference to the Cookie object
             Cookie &new_cookie_in_jar = _cookies.add(name, value);
-            this->add_header("Set-Cookie", new_cookie_in_jar.to_header());
+            update_cookie_header(new_cookie_in_jar.name());
             return new_cookie_in_jar;
         }
 
@@ -226,11 +227,15 @@ namespace qb::http {
                 return;
             }
             auto &set_cookie_headers = this->_headers["Set-Cookie"];
-            const std::string prefix_to_find = name + "=";
             set_cookie_headers.erase(
                 std::remove_if(set_cookie_headers.begin(), set_cookie_headers.end(),
                                [&](const std::string &header_val) {
-                                   return std::string_view(header_val).starts_with(prefix_to_find);
+                                   const auto eq_pos = header_val.find('=');
+                                   if (eq_pos == std::string::npos) {
+                                       return false;
+                                   }
+                                   return utility::iequals(std::string_view(header_val.data(), eq_pos),
+                                                           modified_cookie->name());
                                }),
                 set_cookie_headers.end()
             );
@@ -338,6 +343,7 @@ namespace qb::http {
          */
         Response &with_headers(qb::icase_unordered_map<std::vector<std::string> > h) {
             this->headers() = std::move(h);
+            this->refresh_content_type();
             return *this;
         }
 

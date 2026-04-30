@@ -147,19 +147,51 @@ namespace qb::http {
         }
 
         void process(std::shared_ptr<Context<SessionType> > ctx) override {
+            auto finalization_deferral = ctx->defer_finalization_scope();
             auto next_called = std::make_shared<std::atomic_bool>(false);
-            _handler_fn(ctx, [ctx_capture = ctx, middleware_name = _name, next_called]() {
-                // Pass the 'next' callback
-                // If 'next' is called by the MiddlewareHandlerFn, it means this middleware
-                // has finished its part and wants the chain to continue.
-                if (next_called->exchange(true, std::memory_order_acq_rel)) {
-                    LOG_HTTP_WARN("FunctionalMiddleware [" << middleware_name << "]: next() called more than once; ignoring duplicate call.");
-                    return;
+            try {
+                _handler_fn(ctx, [ctx_capture = ctx, middleware_name = _name, next_called]() {
+                    // Pass the 'next' callback
+                    // If 'next' is called by the MiddlewareHandlerFn, it means this middleware
+                    // has finished its part and wants the chain to continue.
+                    if (next_called->exchange(true, std::memory_order_acq_rel)) {
+                        LOG_HTTP_WARN("FunctionalMiddleware [" << middleware_name << "]: next() called more than once; ignoring duplicate call.");
+                        return;
+                    }
+                    if (!ctx_capture->is_completed() && !ctx_capture->is_cancelled()) {
+                        ctx_capture->complete(qb::http::AsyncTaskResult::CONTINUE);
+                    }
+                });
+            } catch (const std::exception &e) {
+                if (ctx) {
+                    LOG_HTTP_ERROR("FunctionalMiddleware [" << _name << "]: Exception during process() - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path() << ", "
+                        << "Error: " << e.what());
+                } else {
+                    LOG_HTTP_ERROR("FunctionalMiddleware [" << _name << "]: Exception during process() - " << e.what());
                 }
-                if (!ctx_capture->is_completed() && !ctx_capture->is_cancelled()) {
-                    ctx_capture->complete(qb::http::AsyncTaskResult::CONTINUE);
+                if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                    ctx->response().body() = "Internal Server Error";
+                    ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                    ctx->complete(qb::http::AsyncTaskResult::ERROR);
                 }
-            });
+            } catch (...) {
+                if (ctx) {
+                    LOG_HTTP_ERROR("FunctionalMiddleware [" << _name << "]: Unknown exception during process() - "
+                        << "Method: " << std::to_string(ctx->request().method()) << ", "
+                        << "Path: " << ctx->request().uri().path());
+                } else {
+                    LOG_HTTP_ERROR("FunctionalMiddleware [" << _name << "]: Unknown exception during process()");
+                }
+                if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                    ctx->response().body() = "Internal Server Error";
+                    ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                    ctx->complete(qb::http::AsyncTaskResult::ERROR);
+                }
+            }
             // If the MiddlewareHandlerFn does not call its 'next' callback, 
             // it is responsible for calling ctx->complete() itself with an appropriate result
             // (e.g., COMPLETE or ERROR).
