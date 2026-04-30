@@ -5,7 +5,7 @@ Secure communication is paramount for modern web applications. The `qb::http` mo
 ## Prerequisites
 
 -   **OpenSSL**: Ensure OpenSSL development libraries are installed on your system.
--   **`QB_IO_WITH_SSL=ON`**: The `qb-io` library (and consequently `qb-core` and `qbm-http`) must be compiled with the `QB_IO_WITH_SSL` CMake option enabled. This links against OpenSSL and enables the secure transport components.
+-   **`QB_WITH_SSL=ON`**: The `qb-io` library (and consequently `qb-core` and `qbm-http`) must be configured with the `QB_WITH_SSL` CMake option enabled. This links against OpenSSL, exposes `QB_HAS_SSL` to code, and enables the secure transport components.
 -   **SSL Certificates**: You will need an SSL certificate and a corresponding private key for your server.
     -   **For production**: Obtain certificates from a trusted Certificate Authority (CA) (e.g., Let's Encrypt, DigiCert, Comodo).
     -   **For development/testing**: You can generate self-signed certificates. Browsers will show warnings for self-signed certificates, but they are suitable for local testing. Common tools like OpenSSL can be used for this purpose. For example, a simple command to generate a self-signed certificate and private key pair using OpenSSL might look like:
@@ -84,6 +84,10 @@ Key steps for `qb::http::ssl::Server`:
 3.  **Set ALPN (Optional for HTTP/1.1)**: Call `server_instance.transport().set_supported_alpn_protocols({"http/1.1"})` if you want to explicitly state ALPN support, though it's primarily for HTTP/2 negotiation.
 4.  **Listen**: Call `server_instance.transport().listen_v4(port)` or `listen_v6(port)`.
 
+The same TLS transport foundation is used for secure WebSocket (`wss://`).
+Application code still performs a normal HTTP/1.1 WebSocket upgrade, then
+switches to `qb::http::ws::protocol`. See [WebSocket](./20-websocket.md).
+
 ### HTTP/2 Server (`qb::http2::Server`)
 
 The `qb::http2::Server` (from `http/2/http2.h`) inherently requires TLS and uses ALPN to negotiate the "h2" protocol.
@@ -119,7 +123,7 @@ int main(int argc, char* argv[]) {
     qb::io::uri listen_uri("https://0.0.0.0:9443"); // Example URI
 
     if (!server_instance->listen(listen_uri, cert_file, key_file)) {
-        std::cerr << "Error: Failed to listen on " << listen_uri.to_string() 
+        std::cerr << "Error: Failed to listen on " << listen_uri.to_string()
                   << " for HTTP/2 server." << std::endl;
         return 1;
     }
@@ -208,7 +212,7 @@ Refer to `qb-io` documentation and OpenSSL documentation for details on `SSL_CTX
 Secure communication with HTTPS is a fundamental part of modern web applications. `qb-http` provides the necessary tools to integrate SSL/TLS seamlessly into both your HTTP/1.1 and HTTP/2 services.
 
 Previous: [HTTP/2 Protocol Specifics](./17-http2-protocol.md)
-Next: [Index](./README.md) (or new section)
+Next: [HTTP/3 Protocol](./19-http3-protocol.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

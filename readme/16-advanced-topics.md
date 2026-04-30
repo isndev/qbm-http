@@ -44,6 +44,14 @@ For outgoing responses, if `Transfer-Encoding: chunked` is set and `Content-Leng
 
 HTTP/2 does not use chunked transfer encoding in the same way as HTTP/1.1. Its own framing mechanism (DATA frames with END_STREAM flag) achieves similar streaming capabilities.
 
+## WebSocket Upgrade Boundaries
+
+WebSocket uses HTTP/1.1 only for the opening `GET` upgrade. Once
+`switch_protocol<qb::http::ws::protocol>` succeeds, the connection belongs to
+the WebSocket protocol and no longer returns to HTTP request/response parsing.
+Use `close_after_deliver()` when sending an HTTP rejection response before
+closing a failed upgrade. See [WebSocket](./20-websocket.md).
+
 ## Custom `ICustomRoute` vs. Lambdas
 
 -   **Lambdas**: Excellent for concise, often stateless handlers. Ideal for simple endpoints.
@@ -67,7 +75,7 @@ When a handler or middleware initiates an asynchronous operation (e.g., using `q
         // Check if context is still valid/not cancelled before proceeding
         if (shared_ctx->is_cancelled()) {
             // Potentially log that work was done but context cancelled
-            return; 
+            return;
         }
         // ... process result ...
         shared_ctx->response().body() = process_result(result);
@@ -83,7 +91,7 @@ When a handler or middleware initiates an asynchronous operation (e.g., using `q
 ## Advanced SSL/TLS and HTTP/2 Considerations
 
 -   **ALPN (Application-Layer Protocol Negotiation)**: When using HTTPS, ALPN is essential for HTTP/2. The `qb::http2::Server` and `qb::http2::Client` are designed to use ALPN to negotiate "h2". Ensure your SSL/TLS setup (certificates, server configuration) supports ALPN if HTTP/2 is desired. Refer to the [HTTPS/SSL/TLS documentation](./18-https-ssl-tls.md) for more details.
--   **HTTP/2 Server Push**: While the HTTP/2 protocol supports server push, direct, high-level application control for initiating server pushes from within `qb::http2::Server` handlers might require specific patterns or may be a feature for future enhancement. The underlying `qb::protocol::http2::ServerHttp2Protocol` has methods like `send_push_promise` for protocol-level interaction.
+-   **HTTP/2 PUSH_PROMISE**: HTTP/2 push mechanics exist at protocol level. The high-level client rejects pushes by default, and server-side push should be treated as a low-level `qb::protocol::http2::ServerHttp2Protocol` capability unless a route-handler API is added explicitly.
 -   **HTTP/2 Flow Control**: HTTP/2 has its own flow control mechanisms (WINDOW_UPDATE frames) at both the connection and stream levels. The `qb::http2::Client` and the underlying `qb::protocol::http2::*` protocol handlers manage this automatically. Default window sizes are usually sufficient, but can be tuned via SETTINGS frames if needed.
 -   **HPACK Context Synchronization**: Header compression in HTTP/2 (HPACK) is stateful. Both client and server maintain dynamic tables. The `qb-http` HPACK implementation (`qb::protocol::hpack`) handles this. Issues with HPACK (e.g., compression errors, desynchronization) can lead to connection errors (`COMPRESSION_ERROR`).
 
@@ -97,6 +105,7 @@ When a handler or middleware initiates an asynchronous operation (e.g., using `q
 This concludes the initial documentation set for the `qb::http` module. Further deep dives into specific standard middleware or advanced `qb-io` integration patterns could expand upon this foundation.
 
 Previous: [HTTP Message Parsing](./15-http-parsing.md)
+Next: [HTTP/2 Protocol Specifics](./17-http2-protocol.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

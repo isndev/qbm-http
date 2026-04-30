@@ -41,6 +41,11 @@ The `qb::protocol::http_server` and `qb::protocol::http_client` classes (which a
 5.  The `getMessageSize()` method in the protocol handler often uses information from the parser (like `content_length` or chunked encoding state) to determine if a full HTTP message has been received in the input buffer.
 6.  Once `on_message_complete` is triggered (and `parser.parse()` returns a specific code indicating completion), the protocol handler retrieves the fully formed `Request` or `Response` object using `parser.get_parsed_message()` and dispatches it (e.g., to the router or the client callback).
 
+For WebSocket, this HTTP parser is used only for the opening HTTP/1.1 upgrade
+request/response. After `switch_protocol<qb::http::ws::protocol>` succeeds, the
+same connection is parsed as RFC 6455 WebSocket frames rather than HTTP
+messages. See [WebSocket](./20-websocket.md).
+
 ### Serialization
 
 While parsing is about converting bytes to objects, the reverse process (serialization) is handled by `qb::allocator::pipe<char>::put<MessageType>()` specializations (see `http/http.cpp`). These format `Request` and `Response` objects back into the HTTP wire format.
@@ -58,4 +63,4 @@ Previous: [Asynchronous HTTP Client](./14-async-http-client.md)
 Next: [Advanced Usage & Performance](./16-advanced-topics.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

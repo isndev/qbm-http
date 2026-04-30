@@ -6,8 +6,9 @@
  * built on top of the qb-io asynchronous framework. It includes:
  *
  * - Complete HTTP/1.1 and HTTP/2 protocol support
+ * - Optional HTTP/3 support when QUIC and nghttp3 are available
  * - RFC 6455 WebSocket support via `qb::http::ws`
- * - Unified interface for both HTTP versions
+ * - Unified request/response foundations across supported protocols
  * - Request and response handling classes
  * - Asynchronous client and server implementations
  * - High-performance message parsing and processing
@@ -18,16 +19,16 @@
  *
  * The module is designed for high performance and seamless integration with
  * the qb-io asynchronous I/O layer, supporting both HTTP/1.1 and HTTP/2
- * protocols with a unified API.
+ * protocols with a coherent API.
  *
  * @code
- * // Include both HTTP/1.1 and HTTP/2 support
- * #include <qbm/http/http.h>
- * 
+ * // Include HTTP/1.1, HTTP/2, optional HTTP/3, and WebSocket basics
+ * #include <http/http.h>
+ *
  * // Use HTTP/1.1 server
  * auto http1_server = qb::http::make_server();
- * 
- * // Use HTTP/2 server  
+ *
+ * // Use HTTP/2 server
  * auto http2_server = qb::http2::make_server();
  * @endcode
  *

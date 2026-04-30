@@ -141,7 +141,7 @@ ctx->add_lifecycle_hook([](qb::http::Context<MySession>& current_ctx, qb::http::
         current_ctx.response().set_header("X-Request-Processed-At", qb::http::date::now());
     } else if (point == qb::http::HookPoint::REQUEST_COMPLETE) {
         // Log final request status, perhaps to an audit trail
-        // std::cout << "Request to " << current_ctx.request().uri().path() 
+        // std::cout << "Request to " << current_ctx.request().uri().path()
         //           << " completed with status " << current_ctx.response().status().code() << std::endl;
     }
 });

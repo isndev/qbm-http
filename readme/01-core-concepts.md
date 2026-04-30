@@ -80,7 +80,7 @@ The `qb::http::Body` class represents the payload of an HTTP message. It is desi
 -   **Versatile Content**: Can hold text, JSON, binary data, multipart forms, etc.
 -   **Fluent API**: Supports appending data using the `<<` operator and assignment from various types (`std::string`, `std::string_view`, `std::vector<char>`, `qb::json`, `qb::http::Multipart`, `qb::http::Form`).
 -   **Type Conversion**: The `as<T>()` method allows converting the body content to common types like `std::string`, `std::string_view`, `qb::json`, `qb::http::Multipart`, or `qb::http::Form`. Parsing is performed during conversion.
--   **Compression**: If compiled with Zlib support (`QB_IO_WITH_ZLIB`), the body can be compressed (`body.compress("gzip")`) or decompressed (`body.uncompress("gzip")`).
+-   **Compression**: If compiled with compression support (`QB_WITH_COMPRESSION=ON`, exposed to code as `QB_HAS_COMPRESSION`), the body can be compressed (`body.compress("gzip")`) or decompressed (`body.uncompress("gzip")`).
 
 ```cpp
 #include <http/http.h>
@@ -204,4 +204,4 @@ Understanding these core components is essential for working with the `qb::http`
 Next: [HTTP Message Body: Deep Dive](./02-body-deep-dive.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

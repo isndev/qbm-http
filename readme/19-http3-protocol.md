@@ -152,4 +152,9 @@ These tests are skipped when the tools are absent and each external command is b
 
 HTTP/3 v1 intentionally does not expose server push. The transport keeps QUIC endpoint affinity: HTTP/3 contexts should perform CPU/business fanout through actors or application queues and post responses back to the owning listener rather than moving QUIC streams between listeners.
 
+Previous: [HTTPS & SSL/TLS](./18-https-ssl-tls.md)
+Next: [WebSocket](./20-websocket.md)
+
+---
+
 Return to [Index](./README.md)

@@ -1,14 +1,14 @@
 # QB HTTP Module Documentation
 
-Welcome to the documentation for the `qb::http` module, a high-performance C++17 library for building asynchronous HTTP clients and servers, integrated with the QB Actor Framework.
+Welcome to the documentation for the `qb::http` module, a high-performance C++23 library for building asynchronous HTTP clients, servers, WebSocket endpoints, and protocol integrations with the QB Actor Framework.
 
-This module provides a comprehensive suite for HTTP/1.1 communication, featuring a powerful routing system, middleware support, and robust request/response handling. It is designed for efficiency, type safety, and ease of use for developers familiar with modern C++ and asynchronous programming paradigms.
+This module provides a comprehensive suite for HTTP/1.1, HTTP/2, optional HTTP/3, RFC 6455 WebSocket, routing, middleware, validation, authentication, and robust request/response handling. It is designed for efficiency, type safety, and ease of use for developers familiar with modern C++ and asynchronous programming paradigms.
 
 ## 📚 Documentation Index
 
 This documentation is broken down into several sections to help you understand and effectively use the `qb::http` module:
 
-1.  **Core Concepts:** 
+1.  **Core Concepts:**
     *   [Request, Response, and Message Handling](./01-core-concepts.md)
     *   [HTTP Message Body Deep Dive](./02-body-deep-dive.md)
 2.  **Routing System:**
@@ -39,6 +39,9 @@ This documentation is broken down into several sections to help you understand a
     *   [Enabling HTTPS](./18-https-ssl-tls.md) (Client & Server, Certificates, ALPN)
 12. **HTTP/3 Protocol:**
     *   [HTTP/3 Specifics](./19-http3-protocol.md) (QUIC transport, nghttp3, client/server API)
+13. **Realtime / Upgrade:**
+    *   [WebSocket](./20-websocket.md) (HTTP/1.1 upgrade, RFC 6455 framing, clients, WSS)
+    *   [WebSocket Coroutines](./21-websocket-coroutines.md) (`coro_client`, `coro_session`, awaiters, lifecycle)
 
 ## 🚀 Minimal Usage Example
 

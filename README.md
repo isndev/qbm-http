@@ -4,7 +4,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/HTTP-1.1%20%7C%202.0-blue.svg" alt="HTTP Versions"/>
-  <img src="https://img.shields.io/badge/C%2B%2B-17-blue.svg" alt="C++17"/>
+  <img src="https://img.shields.io/badge/C%2B%2B-23-blue.svg" alt="C++23"/>
   <img src="https://img.shields.io/badge/Cross--Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg" alt="Cross Platform"/>
   <img src="https://img.shields.io/badge/Arch-x86__64%20%7C%20ARM64-lightgrey.svg" alt="Architecture"/>
   <img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License"/>
@@ -16,7 +16,9 @@ high-performance web services and clients with minimal code complexity. Built on
 QB's asynchronous I/O foundation, it provides exceptional throughput while
 maintaining clean, expressive APIs.
 
-Whether you're building REST APIs, serving static content, or performing concurrent HTTP requests, `qbm-http` eliminates the traditional complexity of web development without sacrificing performance.
+Whether you're building REST APIs, serving static content, performing concurrent
+HTTP requests, or upgrading connections to WebSocket, `qbm-http` eliminates the
+traditional complexity of web development without sacrificing performance.
 
 ## Quick Integration with QB
 
@@ -45,6 +47,7 @@ target_link_libraries(your_target PRIVATE qbm::http)
 
 ```cpp
 #include <http/http.h>                    // Core HTTP and WebSocket components
+#include <http/ws.h>                      // WebSocket umbrella include
 #include <http/middleware/all.h>          // For middleware (optional)
 ```
 
@@ -60,6 +63,65 @@ target_link_libraries(your_target PRIVATE qbm::http)
 
 **Modern Protocols**: HTTP/1.1, HTTP/2, optional HTTP/3, and WebSocket support live in one coherent module and share the same request/response foundations.
 
+## WebSocket Support
+
+WebSocket is a native `qbm-http` capability under `qb::http::ws`. It starts from
+an HTTP/1.1 `GET` upgrade request, validates the RFC 6455 handshake, then
+switches that connection from HTTP parsing to WebSocket framing with
+`switch_protocol<qb::http::ws::protocol>`.
+
+```cpp
+#include <http/http.h>
+#include <http/ws.h>
+
+class WsServer;
+
+class WsSession : public qb::http::use<WsSession>::session<WsServer> {
+public:
+    using base        = qb::http::use<WsSession>::session<WsServer>;
+    using Protocol    = qb::http::protocol<WsSession>;
+    using ws_protocol = qb::http::ws::protocol<WsSession>;
+
+    explicit WsSession(WsServer& server) : base(server) {}
+
+    void on(Protocol::request&& event) {
+        if (!this->template switch_protocol<ws_protocol>(*this, event.http)) {
+            qb::http::Response response(qb::http::status::BAD_REQUEST,
+                                        "Expected WebSocket upgrade");
+            *this << response;
+            this->close_after_deliver();
+        }
+    }
+
+    void on(ws_protocol::message&& event) {
+        *this << event.ws; // echo
+    }
+};
+```
+
+Clients can use the callback API (`qb::http::ws::client`,
+`qb::http::ws::WebSocket<T>`) or the coroutine API:
+
+```cpp
+#include <http/ws.h>
+
+qb::io::async::task<void> talk() {
+    qb::http::ws::coro_client ws;
+    auto connected = co_await ws.connect("ws://localhost:20197/");
+    if (!connected.ok) co_return;
+
+    qb::http::ws::MessageText msg;
+    msg << "hello";
+    ws << msg;
+
+    auto reply = co_await ws.receive();
+    (void) reply;
+}
+```
+
+WSS uses the same secure transport foundations as HTTPS. Link only
+`qbm::http`; there is no separate WebSocket module.
+
 ## Your First HTTP Server in 60 Seconds
 
 ```cpp
@@ -74,12 +136,12 @@ public:
             ctx->response().body() = "Hello from QB!";
             ctx->complete();
         });
-        
+
         router().get("/api/status", [](auto ctx) {
             ctx->response().body() = R"({"status": "ok", "framework": "qb-http"})";
             ctx->complete();
         });
-        
+
         // Start listening
         router().compile();
         if (listen({"tcp://0.0.0.0:8080"})) {
@@ -117,10 +179,10 @@ Here's a more complete example showing routing, middleware, and controllers:
 class RequestLogger : public qb::http::IMiddleware<qb::http::DefaultSession> {
 public:
     std::string name() const override { return "RequestLogger"; }
-    
+
     void process(std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) override {
         auto& req = ctx->request();
-        qb::io::cout() << "[" << qb::time::now() << "] " 
+        qb::io::cout() << "[" << qb::time::now() << "] "
                        << req.method_string() << " " << req.uri().path() << std::endl;
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
@@ -130,7 +192,7 @@ public:
 class UserController : public qb::http::Controller<qb::http::DefaultSession> {
 private:
     qb::json _users = qb::json::array();
-    
+
 public:
     void initialize_routes() override {
         // GET /users
@@ -138,7 +200,7 @@ public:
             ctx->response().body() = _users.dump();
             ctx->complete();
         });
-        
+
         // GET /users/:id
         get("/:id", [this](auto ctx) {
             int user_id = std::stoi(ctx->path_param("id"));
@@ -150,19 +212,19 @@ public:
             }
             ctx->complete();
         });
-        
+
         // POST /users
         post("/", [this](auto ctx) {
             auto user_data = qb::json::parse(ctx->request().body().as<std::string>());
             user_data["id"] = _users.size();
             _users.push_back(user_data);
-            
+
             ctx->response().status() = qb::http::Status::CREATED;
             ctx->response().body() = user_data.dump();
             ctx->complete();
         });
     }
-    
+
     std::string get_node_name() const override { return "UserController"; }
 };
 
@@ -171,20 +233,20 @@ public:
     bool onInit() override {
         // Global middleware
         router().use(std::make_shared<RequestLogger>());
-        
+
         // API routes group
         auto api = router().group("/api/v1");
         api->controller<UserController>("/users");
-        
+
         // Static route
         router().get("/health", [](auto ctx) {
-            ctx->response().body() = R"({"status": "healthy", "timestamp": ")" + 
+            ctx->response().body() = R"({"status": "healthy", "timestamp": ")" +
                                     qb::time::now().to_string() + "\"}";
             ctx->complete();
         });
-        
+
         router().compile();
-        
+
         if (listen({"tcp://0.0.0.0:8080"})) {
             start();
             qb::io::cout() << "API Server running on http://localhost:8080" << std::endl;
@@ -214,22 +276,22 @@ class Http2Server : public qb::Actor {
     std::unique_ptr<qb::http2::Server<>> _server;
     std::filesystem::path _cert_path;
     std::filesystem::path _key_path;
-    
+
 public:
-    Http2Server(const std::filesystem::path& cert_path, const std::filesystem::path& key_path) 
+    Http2Server(const std::filesystem::path& cert_path, const std::filesystem::path& key_path)
         : _cert_path(cert_path), _key_path(key_path) {
         _server = qb::http2::make_server();
-        
+
         // Configure routes
         _server->router().get("/", [](auto ctx) {
             ctx->response().body() = "HTTP/2 Server powered by QB!";
             ctx->complete();
         });
-        
+
         _server->router().get("/api/data", [](auto ctx) {
             // Demonstrate query parameters
             auto format = ctx->request().query("format", 0, "json");
-            
+
             if (format == "json") {
                 ctx->response().body() = R"({"message": "Hello HTTP/2", "protocol": "h2"})";
             } else {
@@ -237,10 +299,10 @@ public:
             }
             ctx->complete();
         });
-        
+
         _server->router().compile();
     }
-    
+
     bool onInit() override {
         // Start HTTPS server (HTTP/2 requires TLS)
         if (_server->listen({"https://0.0.0.0:8443"}, _cert_path.string(), _key_path.string())) {
@@ -257,7 +319,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0] << " <cert.pem> <key.pem>" << std::endl;
         return 1;
     }
-    
+
     qb::Main engine;
     engine.addActor<Http2Server>(0, argv[1], argv[2]);
     engine.start();
@@ -277,7 +339,7 @@ public:
         // Create HTTP/2 client
         auto client = qb::http2::make_client("https://localhost:8443");
         client->set_connect_timeout(10.0);
-        
+
         // Connect to the server
         client->connect([this, client](bool connected, const std::string& error) {
             if (connected) {
@@ -288,42 +350,42 @@ public:
                 kill();
             }
         });
-        
+
         return true;
     }
-    
+
 private:
     void make_requests(std::shared_ptr<qb::http2::Client> client) {
         // Simple GET request
         qb::http::Request get_request;
         get_request.method() = qb::http::Method::GET;
         get_request.uri() = qb::io::uri("/");
-        
+
         client->push_request(get_request, [this, client](qb::http::Response response) {
-            qb::io::cout() << "GET Response: " << response.status().code() 
+            qb::io::cout() << "GET Response: " << response.status().code()
                            << " - " << response.body().as<std::string>() << std::endl;
-            
+
             // Make a POST request after GET completes
             make_post_request(client);
         });
     }
-    
+
     void make_post_request(std::shared_ptr<qb::http2::Client> client) {
         qb::http::Request post_request;
         post_request.method() = qb::http::Method::POST;
         post_request.uri() = qb::io::uri("/api/data");
         post_request.add_header("Content-Type", "application/json");
         post_request.body() = R"({"message": "Hello HTTP/2", "version": 2})";
-        
+
         client->push_request(post_request, [this, client](qb::http::Response response) {
-            qb::io::cout() << "POST Response: " << response.status().code() 
+            qb::io::cout() << "POST Response: " << response.status().code()
                            << " - " << response.body().as<std::string>() << std::endl;
-            
+
             // Make concurrent requests
             make_concurrent_requests(client);
         });
     }
-    
+
     void make_concurrent_requests(std::shared_ptr<qb::http2::Client> client) {
         // Prepare multiple requests
         std::vector<qb::http::Request> requests;
@@ -333,16 +395,16 @@ private:
             request.uri() = qb::io::uri("/api/data?id=" + std::to_string(i));
             requests.push_back(std::move(request));
         }
-        
+
         // Send batch requests (HTTP/2 multiplexing)
         client->push_requests(requests, [this](std::vector<qb::http::Response> responses) {
             qb::io::cout() << "Received " << responses.size() << " concurrent responses:" << std::endl;
-            
+
             for (size_t i = 0; i < responses.size(); ++i) {
-                qb::io::cout() << "  Request " << (i+1) << ": " 
+                qb::io::cout() << "  Request " << (i+1) << ": "
                                << responses[i].status().code() << std::endl;
             }
-            
+
             qb::io::cout() << "All HTTP/2 requests completed!" << std::endl;
             kill(); // Done
         });
@@ -371,7 +433,7 @@ public:
         // Asynchronous GET request
         qb::http::Request req(qb::io::uri("https://api.github.com/repos/isndev/qb"));
         req.add_header("User-Agent", "QB-HTTP-Client/1.0");
-        
+
         qb::http::GET(std::move(req), [this](qb::http::async::Reply&& reply) {
             if (reply.response.status() == qb::http::status::OK) {
                 auto data = qb::json::parse(reply.response.body().as<std::string>());
@@ -381,7 +443,7 @@ public:
             }
             kill(); // Done with request
         });
-        
+
         return true;
     }
 };
@@ -401,15 +463,15 @@ int main() {
 
 int main() {
     qb::io::async::init(); // Required for sync usage
-    
+
     // Simple synchronous GET
     qb::http::Request req(qb::io::uri("https://httpbin.org/json"));
     auto response = qb::http::GET(std::move(req), 5.0 /* timeout */);
-    
+
     if (response.status() == qb::http::status::OK) {
         std::cout << "Response: " << response.body().as<std::string>() << std::endl;
     }
-    
+
     return 0;
 }
 ```
@@ -447,19 +509,19 @@ int main() {
 **Performance:**
 - Zero-copy where possible
 - Connection pooling for clients
-- HTTP/2 server push
+- HTTP/2 multiplexing, flow-control, and low-level PUSH_PROMISE handling
 - Configurable buffer sizes
 
 ## Build Information
 
 ### Requirements
 - **QB Framework**: This module requires the QB Actor Framework as its foundation
-- **C++17** compatible compiler
+- **C++23** compatible compiler
 - **CMake 3.14+**
 
 ### Optional Dependencies
-- **OpenSSL**: For HTTPS & JWT support. Enable with `QB_IO_WITH_SSL=ON` when building QB
-- **Zlib**: For content compression. Enable with `QB_IO_WITH_ZLIB=ON` when building QB
+- **OpenSSL**: For HTTPS, WSS, HTTP/2 ALPN, HTTP/3 TLS, and JWT support. Enable with `QB_WITH_SSL=ON` when building QB; code can check `QB_HAS_SSL`.
+- **Zlib**: For content compression. Enable with `QB_WITH_COMPRESSION=ON` when building QB; code can check `QB_HAS_COMPRESSION`.
 
 ### Building with QB
 When using the QB project template, simply add this module as shown in the integration section above. The `qb_load_modules()` function will automatically handle the configuration.
@@ -494,9 +556,11 @@ This detailed documentation covers:
 - **[Async HTTP Client](./readme/14-async-http-client.md)** - Making HTTP requests with the async client
 - **[HTTP Parsing](./readme/15-http-parsing.md)** - Low-level HTTP parsing and protocol details
 - **[Advanced Topics](./readme/16-advanced-topics.md)** - Performance tuning, security, and best practices
-- **[HTTP/2 Protocol](./readme/17-http2-protocol.md)** - HTTP/2 features, server push, and optimization
+- **[HTTP/2 Protocol](./readme/17-http2-protocol.md)** - HTTP/2 multiplexing, HPACK, flow-control, and protocol-level push details
 - **[HTTPS & SSL/TLS](./readme/18-https-ssl-tls.md)** - Secure connections, certificates, and encryption
 - **[HTTP/3 Protocol](./readme/19-http3-protocol.md)** - Native HTTP/3 over QB-IO QUIC
+- **[WebSocket](./readme/20-websocket.md)** - RFC 6455 upgrade, framing, clients, WSS, and lifecycle
+- **[WebSocket Coroutines](./readme/21-websocket-coroutines.md)** - Coroutine client/session APIs and awaiters
 
 ## Documentation & Examples
 
@@ -511,6 +575,7 @@ For comprehensive examples and detailed usage patterns, explore:
 - Controller patterns and REST APIs
 - JWT authentication and validation
 - HTTPS and HTTP/2 configuration
+- WebSocket and WSS upgrade flows
 - Static file serving
 - Performance optimization
 

@@ -30,7 +30,7 @@
 #include <string>
 #include <thread>
 
-#include "../ws/coro.h"
+#include "../ws.h"
 
 namespace {
 

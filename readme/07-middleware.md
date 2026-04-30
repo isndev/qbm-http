@@ -108,7 +108,7 @@ Middleware can be synchronous or asynchronous:
                     // Context might have been cancelled while async op was pending
                     // The complete(CANCELLED) would have already been called by ctx->cancel().
                     // Or, if not, the middleware could decide to complete with CANCELLED here.
-                    return; 
+                    return;
                 }
                 shared_ctx->response().set_header("X-Async-Op-Completed", "true");
                 shared_ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
@@ -146,4 +146,4 @@ Previous: [Controllers](./06-controllers.md)
 Next: [Standard Middleware](./08-standard-middleware.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

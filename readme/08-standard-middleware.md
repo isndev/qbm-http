@@ -305,7 +305,7 @@ Here's a summary of the available standard middleware components:
 ### 11. Compression Middleware (`qb::http::CompressionMiddleware`)
 
 -   **Header**: `http/middleware/compression.h`
--   **Purpose**: Handles automatic decompression of request bodies and compression of response bodies (e.g., gzip, deflate). Requires `QB_IO_WITH_ZLIB`.
+-   **Purpose**: Handles automatic decompression of request bodies and compression of response bodies (e.g., gzip, deflate). Requires `QB_WITH_COMPRESSION=ON` at configure time and `QB_HAS_COMPRESSION` in code.
 -   **Features**:
     -   Configurable via `qb::http::CompressionOptions` (enable request/response processing, min size to compress, preferred encodings).
     -   Inspects `Content-Encoding` for requests and `Accept-Encoding` for responses.
@@ -320,8 +320,8 @@ Here's a summary of the available standard middleware components:
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
 
-    // Requires QB_IO_WITH_ZLIB to be defined during compilation
-    #ifdef QB_IO_WITH_ZLIB
+    // Requires compression support to be available.
+    #ifdef QB_HAS_COMPRESSION
     qb::http::CompressionOptions comp_opts;
     comp_opts.min_size_to_compress(512); // Compress bodies larger than 512 bytes
     auto compression_mw = qb::http::compression_middleware<MySession>(comp_opts);
