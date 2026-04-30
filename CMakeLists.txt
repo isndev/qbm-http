@@ -74,6 +74,7 @@ qb_register_module(
         request.cpp
         response.cpp
         body.cpp
+        ws/ws.cpp
         1.1/http.cpp
         1.1/client.cpp
         # Validation
