@@ -1,6 +1,6 @@
 # QB HTTP Module (`qbm-http`)
 
-**High-Performance HTTP/1.1 & HTTP/2 Client/Server for the QB Actor Framework**
+**High-Performance HTTP/1.1, HTTP/2, HTTP/3 and WebSocket Client/Server for the QB Actor Framework**
 
 <p align="center">
   <img src="https://img.shields.io/badge/HTTP-1.1%20%7C%202.0-blue.svg" alt="HTTP Versions"/>
@@ -10,7 +10,11 @@
   <img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License"/>
 </p>
 
-`qbm-http` delivers production-ready HTTP/1.1 and HTTP/2 capabilities to the QB Actor Framework, enabling you to build high-performance web services and clients with minimal code complexity. Built on QB's asynchronous I/O foundation, it provides exceptional throughput while maintaining clean, expressive APIs.
+`qbm-http` delivers production-ready HTTP/1.1, HTTP/2, optional HTTP/3, and
+RFC 6455 WebSocket capabilities to the QB Actor Framework, enabling you to build
+high-performance web services and clients with minimal code complexity. Built on
+QB's asynchronous I/O foundation, it provides exceptional throughput while
+maintaining clean, expressive APIs.
 
 Whether you're building REST APIs, serving static content, or performing concurrent HTTP requests, `qbm-http` eliminates the traditional complexity of web development without sacrificing performance.
 
@@ -40,7 +44,7 @@ target_link_libraries(your_target PRIVATE qbm::http)
 ### Include and Use
 
 ```cpp
-#include <http/http.h>                    // Core HTTP components
+#include <http/http.h>                    // Core HTTP and WebSocket components
 #include <http/middleware/all.h>          // For middleware (optional)
 ```
 
@@ -54,7 +58,7 @@ target_link_libraries(your_target PRIVATE qbm::http)
 
 **Cross-Platform**: Same code runs on Linux, macOS, Windows (x86_64, ARM64) with identical performance characteristics.
 
-**HTTP/2 Ready**: Full HTTP/2 support with automatic negotiation, while maintaining HTTP/1.1 compatibility.
+**Modern Protocols**: HTTP/1.1, HTTP/2, optional HTTP/3, and WebSocket support live in one coherent module and share the same request/response foundations.
 
 ## Your First HTTP Server in 60 Seconds
 

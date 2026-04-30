@@ -62,6 +62,17 @@ set(HTTP_TESTS
         coro-http2-client
         coro-server
         coro-integration
+        ws-session
+        ws-client
+        ws-robustness
+        ws-stress
+        ws-security
+        ws-coro-client
+        ws-coro-server
+        ws-coro-integration
+        ws-coro-negative
+        ws-framing-edge
+        ws-api-hardening
 )
 
 if(QBM_HTTP_HAS_HTTP3)

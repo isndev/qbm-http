@@ -6,6 +6,7 @@
  * built on top of the qb-io asynchronous framework. It includes:
  *
  * - Complete HTTP/1.1 and HTTP/2 protocol support
+ * - RFC 6455 WebSocket support via `qb::http::ws`
  * - Unified interface for both HTTP versions
  * - Request and response handling classes
  * - Asynchronous client and server implementations
@@ -40,6 +41,7 @@
 #include "./1.1/http.h"
 #include "./1.1/client.h"
 #include "./2/http2.h"
+#include "./ws/ws.h"
 #ifdef QBM_HTTP_HAS_HTTP3
 #include "./3/http3.h"
 #include "./3/client.h"
