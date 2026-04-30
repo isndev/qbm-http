@@ -8,7 +8,7 @@ HTTP/2 introduces several key improvements over HTTP/1.1, all of which are suppo
 
 -   **Multiplexing**: Multiple requests and responses can be sent and received concurrently over a single TCP connection, eliminating head-of-line blocking.
 -   **Header Compression (HPACK)**: Reduces header overhead using HPACK compression (RFC 7541). The `qb::protocol::hpack` namespace provides the concrete `Encoder` and `Decoder` classes (de-virtualised since F35 &mdash; no base interface, owned by value in the HTTP/2 sessions).
--   **Server Push**: Allows the server to proactively send resources to the client that it anticipates will be needed (though direct application-level control of push might be evolving or require specific patterns).
+-   **PUSH_PROMISE support**: The protocol layer understands HTTP/2 push mechanics. The high-level client rejects pushes by default, and server-side push is exposed at protocol level rather than as a primary router handler API.
 -   **Binary Framing Layer**: HTTP/2 messages are broken down into binary frames (DATA, HEADERS, SETTINGS, etc.), simplifying parsing and reducing ambiguity compared to HTTP/1.1's text-based format.
 -   **Stream Prioritization**: Allows clients to indicate preference for how streams are allocated resources (though server-side implementation of prioritization can vary).
 
@@ -61,7 +61,7 @@ int main() {
             req1.add_header("X-Custom-Header", "Test1");
 
     h2_client->push_request(std::move(req1), [&](qb::http::Response res1) {
-                std::cout << "Response 1 (GET /get):\n" 
+                std::cout << "Response 1 (GET /get):\n"
                           << "Status: " << res1.status().code() << std::endl
                           << "Body (first 100 chars): " << res1.body().as<std::string_view>().substr(0, 100) << "..." << std::endl;
                 responses_received++;
@@ -221,12 +221,12 @@ A sender must not send DATA frames that would exceed the receiver's advertised w
 -   `qb::http2::Client` and the underlying protocol classes manage sending and processing `WINDOW_UPDATE` frames automatically. The initial window size is defined by `SETTINGS_INITIAL_WINDOW_SIZE` (default 65,535 octets), and can be changed during the connection.
 -   When sending large request or response bodies, these components will segment the data into DATA frames respecting the current flow control windows.
 
-### Server Push
+### PUSH_PROMISE / Server Push
 
 HTTP/2 allows a server to proactively send responses (pushes) to a client for resources it anticipates the client will request. This is initiated with a `PUSH_PROMISE` frame from the server, which includes the request headers the server *would have received* for the pushed resource.
 
--   **Client-Side**: `qb::http2::Client` can receive `PUSH_PROMISE` frames. By default, it might reject pushes. The `Http2PushPromiseEvent` allows an application using the `qb::http2::Client` to be notified of a push and potentially accept or reject it (e.g., via `ClientHttp2Protocol::application_reject_push(promised_stream_id)`).
--   **Server-Side**: The `qb::protocol::http2::ServerHttp2Protocol` has a `send_push_promise` method that can be used to initiate a server push. Integrating this into high-level application handlers in `qb::http2::Server` might require a specific API pattern, which could be an area for future framework enhancement if not already fully exposed at the application handler level.
+-   **Client-Side**: `qb::http2::Client` receives `PUSH_PROMISE` frames at protocol level and auto-rejects pushes by default, matching the conservative behavior of modern clients.
+-   **Server-Side**: `qb::protocol::http2::ServerHttp2Protocol` exposes `send_push_promise` for low-level protocol integrations. `qb::http2::Server` route handlers should not assume a first-class high-level push API unless one is added explicitly.
     -   The server must respect the client's `SETTINGS_ENABLE_PUSH` setting (defaults to allowed, but client can disable it).
     -   Pushed streams consume a stream ID and count towards the client's `SETTINGS_MAX_CONCURRENT_STREAMS` limit for server-initiated streams.
 
@@ -242,4 +242,4 @@ Previous: [Advanced Usage & Performance](./16-advanced-topics.md)
 Next: [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

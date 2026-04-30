@@ -95,7 +95,7 @@ Key aspects of a functional middleware lambda:
 ```cpp
 // Example: A simple request logging functional middleware
 router.use([](std::shared_ptr<qb::http::Context<MySession>> ctx, std::function<void()> next) {
-    std::cout << "[Functional MW] Incoming request: " << std::to_string(ctx->request().method()) 
+    std::cout << "[Functional MW] Incoming request: " << std::to_string(ctx->request().method())
               << " " << ctx->request().uri().path() << std::endl;
 
     next(); // Pass control to the next middleware/handler
@@ -161,7 +161,7 @@ If the body calls `ctx->complete(...)` explicitly, the wrapper **does not** over
 **Usage example &mdash; handler + middleware with `co_await`:**
 
 ```cpp
-#include <qbm/http/http.h>
+#include <http/http.h>
 #include <qbm/http/coro.h>
 
 using Session = MySession;
@@ -207,7 +207,7 @@ If your custom middleware needs to perform non-blocking asynchronous operations 
         void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
             auto shared_ctx = ctx; // Capture for async callback
             // Assume _my_async_service->fetchData takes a callback
-            _my_async_service->fetchData(shared_ctx->request().query("some_id"), 
+            _my_async_service->fetchData(shared_ctx->request().query("some_id"),
                 [shared_ctx](std::optional<std::string> data, bool success) {
                     if (shared_ctx->is_cancelled()) return;
 
@@ -242,7 +242,7 @@ If your custom middleware needs to perform non-blocking asynchronous operations 
                 std::cout << "[Async Functional MW] Context was cancelled. Aborting." << std::endl;
                 // If context is cancelled, it might have already called complete(CANCELLED).
                 // If not, and we want to ensure it, we could call it here, but usually cancel() on context handles this.
-                return; 
+                return;
             }
 
             if (key == "valid_key_for_next") {
@@ -280,7 +280,7 @@ Custom middleware, whether class-based (as `std::shared_ptr<IMiddleware<SessionT
 #include <http/http.h> // For Router, RouteGroup, Controller, IMiddleware
 #include <memory>      // For std::make_shared
 
-// Assuming MySession, MyCustomHeaderMiddleware, my_functional_logging_mw, 
+// Assuming MySession, MyCustomHeaderMiddleware, my_functional_logging_mw,
 // MyApiV1AuthMiddleware, MyControllerSpecificCacheMiddleware are defined.
 // And router, api_v1 are initialized qb::http::Router<MySession> or RouteGroup<MySession> instances.
 

@@ -57,7 +57,7 @@ router.get("/books/:genre/page/:pageNumber", [](auto ctx) {
     // Using ctx->path_param() for convenient access with a default
     std::string genre = ctx->path_param("genre", "unknown");
     std::string page_str = ctx->path_param("pageNumber", "1");
-    
+
     // Alternatively, access the PathParameters object directly:
     // const qb::http::PathParameters& params = ctx->path_parameters();
     // std::optional<std::string_view> genre_sv_opt = params.get("genre");
@@ -111,4 +111,4 @@ Previous: [HTTP Message Body: Deep Dive](./02-body-deep-dive.md)
 Next: [Defining Routes](./04-defining-routes.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

@@ -151,7 +151,7 @@ part1.body = "Simple text";
 http_body = multipart_data;
 // The body now contains the full representation of the multipart message,
 // including boundaries, part headers, and part bodies.
-std::cout << "Multipart body string contains boundary: " 
+std::cout << "Multipart body string contains boundary: "
           << (http_body.as<std::string>().find(multipart_data.boundary()) != std::string::npos)
           << std::endl;
 ```
@@ -208,7 +208,9 @@ std::cout << "Streamed body: " << stream_body.as<std::string>() << std::endl;
 
 ## Compression and Decompression
 
-If the library is compiled with Zlib support (`QB_IO_WITH_ZLIB` defined), the `Body` class offers methods for compressing and decompressing its content:
+If the library is compiled with compression support (`QB_WITH_COMPRESSION=ON`,
+exposed to code as `QB_HAS_COMPRESSION`), the `Body` class offers methods for
+compressing and decompressing its content:
 
 -   **`std::size_t compress(std::string const& encoding)`**: Compresses the body content using the specified encoding (e.g., `"gzip"`, `"deflate"`). The body content is replaced with the compressed data. Returns the size of the compressed data.
 -   **`std::size_t uncompress(const std::string& encoding)`**: Decompresses the body content. The content is replaced with the decompressed data. Returns the size of the decompressed data.
@@ -218,9 +220,9 @@ These methods throw `std::runtime_error` if the encoding is unsupported or if an
 ```cpp
 #include <http/http.h> // For qb::http::Body
 #include <iostream>    // For std::cout
-// QB_IO_WITH_ZLIB should be handled by the build system for conditional compilation of Body::compress/uncompress
+// QB_HAS_COMPRESSION is defined by the build system when compression is available.
 
-#ifdef QB_IO_WITH_ZLIB
+#ifdef QB_HAS_COMPRESSION
 qb::http::Body data_body = "A long text that will benefit from compression. A long text that will benefit from compression.";
 size_t original_size = data_body.size();
 
@@ -241,4 +243,4 @@ Previous: [01: Core HTTP Concepts](./01-core-concepts.md)
 Next: [03: Routing Overview](./03-routing-overview.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

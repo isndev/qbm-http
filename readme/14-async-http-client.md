@@ -3,12 +3,17 @@
 The `qb::http` module includes a powerful asynchronous HTTP client, located in the `qb::http::async` namespace, designed for making non-blocking HTTP/1.1 requests. This client is built on top of the `qb-io` asynchronous I/O layer, making it efficient for applications that need to perform many concurrent outbound HTTP calls without dedicating a thread per request.
 
 It supports:
--   HTTP and HTTPS (if `QB_IO_WITH_SSL` is enabled).
+-   HTTP and HTTPS (if `QB_WITH_SSL=ON`, exposed to code as `QB_HAS_SSL`).
 -   Standard HTTP methods (GET, POST, PUT, DELETE, etc.).
 -   Custom headers, request bodies.
--   Automatic `Accept-Encoding` header for supported compressions (e.g., gzip, deflate if `QB_IO_WITH_ZLIB` is enabled).
+-   Automatic `Accept-Encoding` header for supported compressions (e.g., gzip, deflate if `QB_WITH_COMPRESSION=ON`, exposed to code as `QB_HAS_COMPRESSION`).
 -   Automatic decompression of response bodies if `Content-Encoding` is present and supported.
 -   Connection timeouts.
+
+For persistent WebSocket conversations, use `qb::http::ws` instead of the
+one-request HTTP client helpers. The WebSocket callback and coroutine APIs are
+documented in [WebSocket](./20-websocket.md) and
+[WebSocket Coroutines](./21-websocket-coroutines.md).
 
 ## Core Client Usage
 
@@ -43,7 +48,7 @@ post_req.set_header("User-Agent", "My QB App/1.0");
 
 -   **Host Header**: The `Host` header is automatically set based on the `request.uri().host()`.
 -   **User-Agent**: It's good practice to set a `User-Agent` header. If not set, the client may use a default like `"qb/1.0.0"`.
--   **Accept-Encoding**: The client automatically adds an `Accept-Encoding` header listing supported compression algorithms (e.g., `"gzip, deflate, chunked"`) if `QB_IO_WITH_ZLIB` is enabled. The server's response will be decompressed automatically if it uses one of these encodings.
+-   **Accept-Encoding**: The client automatically adds an `Accept-Encoding` header listing supported compression algorithms (e.g., `"gzip, deflate"`) if `QB_HAS_COMPRESSION` is available. The server's response will be decompressed automatically if it uses one of these encodings.
 -   **Content-Length**: For requests with a body (POST, PUT, PATCH), if you don't set the `Content-Length` header explicitly, it will be automatically calculated and added based on `request.body().size()` before the request is sent.
 -   **Body Compression**: If you need to send a *compressed* request body, you must compress it yourself using `request.body().compress("gzip")` (or another encoding) and set the `Content-Encoding` header accordingly *before* passing the request to the client functions.
 
@@ -153,7 +158,7 @@ namespace qb::http {
 **Usage from inside a coroutine:**
 
 ```cpp
-#include <qbm/http/http.h>
+#include <http/http.h>
 #include <qbm/http/coro.h>
 
 qb::io::async::task<void> fetch_time() {
@@ -173,7 +178,7 @@ qb::io::async::task<void> fetch_time() {
 **Driving a single call from non-coroutine code (tests, bootstrap, CLIs):**
 
 ```cpp
-#include <qbm/http/http.h>
+#include <http/http.h>
 #include <qbm/http/coro.h>
 
 int main() {
@@ -227,7 +232,11 @@ qb::io::async::task<void> run() {
 
 ## HTTPS Support
 
-If the `qb-io` library was compiled with SSL support (`QB_IO_WITH_SSL=ON`), the HTTP client can make HTTPS requests simply by specifying `https` as the scheme in the URI. This applies to both HTTP/1.1 and HTTP/2 requests made through their respective client interfaces (`qb::http::GET` etc. for HTTP/1.1, and `qb::http2::Client` for HTTP/2).
+If the `qb-io` library was compiled with SSL support (`QB_WITH_SSL=ON`,
+available to code as `QB_HAS_SSL`), the HTTP client can make HTTPS requests
+simply by specifying `https` as the scheme in the URI. This applies to both
+HTTP/1.1 and HTTP/2 requests made through their respective client interfaces
+(`qb::http::GET` etc. for HTTP/1.1, and `qb::http2::Client` for HTTP/2).
 
 ```cpp
 // For HTTP/1.1 client (qb::http::GET, etc.)
@@ -250,4 +259,20 @@ For more advanced TLS configurations (e.g., client certificates, custom CA bundl
 
 ## Underlying Mechanism (`qb::http::async::session` for HTTP/1.1)
 
-The high-level functions (`qb::http::GET`, `
+The high-level functions (`qb::http::GET`, `qb::http::POST`, and friends)
+are convenience wrappers over the HTTP/1.1 async client session. For repeated
+requests to the same origin, prefer the persistent `qb::http1::Client` API
+described in the main README and tests: it keeps one TCP/TLS connection per
+origin, sends one active HTTP/1.1 request at a time, preserves batch order, and
+reconnects only when doing so is safe.
+
+The one-shot helpers remain useful for simple calls and backwards-compatible
+examples. They create the request, drive the async session, and report the final
+`Reply` through the callback or coroutine awaiter.
+
+Previous: [Error Handling Strategies](./13-error-handling.md)
+Next: [HTTP Message Parsing](./15-http-parsing.md)
+
+---
+
+Return to [Index](./README.md)

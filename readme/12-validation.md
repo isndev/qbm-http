@@ -114,7 +114,7 @@ struct ParameterRuleSet {
     std::optional<std::string> default_value; // Default if not provided (as string)
     std::vector<std::shared_ptr<IRule>> rules; // Rules to apply *after* type conversion
     // Custom function to parse string value to qb::json, bool& success
-    std::function<qb::json(const std::string&, bool&)> custom_parser; 
+    std::function<qb::json(const std::string&, bool&)> custom_parser;
 
     // Fluent setters: set_type, set_required, set_default, add_rule, set_custom_parser
 };
@@ -213,7 +213,7 @@ request_validator->for_body({
 });
 
 // Query parameter rule
-request_validator->for_query_param("id", 
+request_validator->for_query_param("id",
     ParameterRuleSet("id").set_type(DataType::INTEGER).set_required()
 );
 
@@ -247,4 +247,4 @@ Previous: [Authentication System](./11-authentication.md)
 Next: [Error Handling Strategies](./13-error-handling.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

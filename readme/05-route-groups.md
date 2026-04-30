@@ -63,21 +63,21 @@ class ApiAuthMiddleware : public qb::http::IMiddleware<MySession> {
 public:
     ApiAuthMiddleware(std::string name) : _name(name) {}
     std::string name() const override { return _name; }
-    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override { 
+    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
         // Minimal implementation for example
         std::cout << "ApiAuthMiddleware: " << ctx->request().uri().path() << std::endl;
-        ctx->complete(qb::http::AsyncTaskResult::CONTINUE); 
+        ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
     void cancel() override {}
 private: std::string _name;
 };
-class V1LoggingMiddleware : public qb::http::IMiddleware<MySession> { 
+class V1LoggingMiddleware : public qb::http::IMiddleware<MySession> {
 public:
     V1LoggingMiddleware(std::string name) : _name(name) {}
     std::string name() const override { return _name; }
-    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override { 
+    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
         std::cout << "V1LoggingMiddleware: " << ctx->request().uri().path() << std::endl;
-        ctx->complete(qb::http::AsyncTaskResult::CONTINUE); 
+        ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
     void cancel() override {}
 private: std::string _name;
@@ -188,4 +188,4 @@ Previous: [Defining Routes](./04-defining-routes.md)
 Next: [Controllers](./06-controllers.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)
