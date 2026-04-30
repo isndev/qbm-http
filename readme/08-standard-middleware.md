@@ -336,6 +336,7 @@ Here's a summary of the available standard middleware components:
 -   **Features**:
     -   Configurable via `qb::http::SecurityHeadersOptions`.
     -   Can set headers like `Strict-Transport-Security`, `X-Content-Type-Options`, `X-Frame-Options`, `Content-Security-Policy` (with nonce support), `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-*` policies.
+    -   CSP nonce generation requires `QB_HAS_SSL`; the middleware itself remains available in plain HTTP builds when nonce support is disabled.
     -   Provides `secure_defaults()` for a strong baseline configuration.
 -   **Factory**: `qb::http::security_headers_middleware<SessionType>(SecurityHeadersOptions opts = ..., ...)`
 -   **Usage Example**:

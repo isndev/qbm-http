@@ -31,18 +31,21 @@
 
 #include <utility>
 
-#include "./auth.h"
 #include "./compression.h"
 #include "./conditional.h"
 #include "./cors.h"
 #include "./error_handling.h"
-#include "./jwt.h"
 #include "./logging.h"
 #include "./rate_limit.h"
 #include "./security_headers.h"
 #include "./static_files.h"
 #include "./timing.h"
 #include "./transform.h"
+
+#ifdef QB_HAS_SSL
+#include "./auth.h"
+#include "./jwt.h"
+#endif
 
 #ifdef QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE
 #include "./recaptcha.h"
@@ -57,11 +60,13 @@ namespace qb::http::middleware {
      * discriminators and never carry runtime state.
      */
     namespace tags {
+#ifdef QB_HAS_SSL
         // --- Authentication / Authorisation -----------------------------------
         struct auth {};             ///< Full-featured auth middleware (token + roles).
         struct jwt_auth {};         ///< Convenience JWT auth (secret or public key + algorithm).
         struct role_auth {};        ///< Role-based access check assuming user already in context.
         struct optional_auth {};    ///< Auth accepted but not required.
+#endif
 
         // --- CORS -------------------------------------------------------------
         struct cors {};             ///< Configurable CORS middleware.
@@ -91,8 +96,10 @@ namespace qb::http::middleware {
         struct conditional {};      ///< Branching middleware (if/else on predicate).
         struct error_handling {};   ///< Centralised error-to-response translation.
 
+#ifdef QB_HAS_SSL
         // --- JWT (raw) --------------------------------------------------------
         struct jwt {};              ///< Low-level JWT verification middleware.
+#endif
 
 #ifdef QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE
         struct recaptcha {};        ///< Google reCAPTCHA v2/v3 verification.
@@ -105,6 +112,7 @@ namespace qb::http::middleware {
     /// Overloads are provided per-tag; `make<Tag, Session>(args...)` forwards
     /// through this dispatcher so every middleware shares a single call shape.
     namespace detail {
+#ifdef QB_HAS_SSL
         // --- Auth family ------------------------------------------------------
         template<typename SessionType, typename... Args>
         [[nodiscard]] auto make_dispatch(tags::auth, Args &&... args) {
@@ -125,6 +133,7 @@ namespace qb::http::middleware {
         [[nodiscard]] auto make_dispatch(tags::optional_auth, Args &&... args) {
             return qb::http::create_optional_auth_middleware<SessionType>(std::forward<Args>(args)...);
         }
+#endif
 
         // --- CORS -------------------------------------------------------------
         template<typename SessionType, typename... Args>
@@ -212,11 +221,13 @@ namespace qb::http::middleware {
             return qb::http::error_handling_middleware<SessionType>(std::forward<Args>(args)...);
         }
 
+#ifdef QB_HAS_SSL
         // --- JWT (raw) --------------------------------------------------------
         template<typename SessionType, typename... Args>
         [[nodiscard]] auto make_dispatch(tags::jwt, Args &&... args) {
             return qb::http::jwt_middleware<SessionType>(std::forward<Args>(args)...);
         }
+#endif
 
 #ifdef QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE
         template<typename SessionType, typename... Args>

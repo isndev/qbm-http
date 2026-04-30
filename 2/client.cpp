@@ -26,7 +26,10 @@
 #include "client.h"
 #include <algorithm>
 #include <charconv>  // For std::from_chars - faster than std::stoi, no exceptions
+#include <limits>
 #include <sstream>
+
+#include "../origin.h"
 
 namespace qb::http2 {
 
@@ -63,7 +66,7 @@ void Client::initialize_from_uri(const qb::io::uri& uri) {
     _host = std::string(uri.host());
 
     // This implementation is TLS+ALPN only; plaintext h2c is not supported.
-    if (uri.scheme() != "https") {
+    if (!qb::http::origin::scheme_eq(uri.scheme(), "https")) {
         throw std::invalid_argument("HTTP/2 client only supports https scheme");
     }
     
@@ -154,9 +157,13 @@ std::optional<qb::http::Response> Client::prepare_request(qb::http::Request& req
         return create_error_response(qb::http::status::BAD_REQUEST,
                                      "HTTP/2 request URI is missing a host");
     }
-    if (request.uri().scheme() != "https") {
+    if (!qb::http::origin::scheme_eq(request.uri().scheme(), "https")) {
         return create_error_response(qb::http::status::BAD_REQUEST,
                                      "HTTP/2 request URI must use https");
+    }
+    if (!qb::http::origin::same(request.uri(), _base_uri)) {
+        return create_error_response(qb::http::status::BAD_REQUEST,
+                                     "HTTP/2 persistent client only accepts same-origin requests");
     }
     return std::nullopt;
 }
@@ -185,7 +192,8 @@ bool Client::push_request(qb::http::Request request, ResponseCallback callback) 
                       << " " << context->request.uri().path());
     
     // Queue the request
-    _pending_requests.push(std::move(context));
+    _pending_requests.push_back(std::move(context));
+    arm_request_timeout();
     
     // If connected, process immediately
     if (is_connected()) {
@@ -269,7 +277,8 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
             }
         };
         
-        _pending_requests.push(std::move(context));
+        _pending_requests.push_back(std::move(context));
+        arm_request_timeout();
     }
 
     if (batch_context->completed_count == batch_context->requests.size()) {
@@ -293,7 +302,8 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
 }
 
 void Client::start_connection() {
-    this->setTimeout(_connect_timeout);
+    _connect_started_at = std::chrono::steady_clock::now();
+    arm_request_timeout();
     
     // Switch to handshake protocol first
     this->template switch_protocol<HandshakeProtocol>(*this);
@@ -332,7 +342,7 @@ void Client::process_pending_requests() {
            _active_requests.size() < _max_concurrent_streams) {
 
         auto context = std::move(_pending_requests.front());
-        _pending_requests.pop();
+        _pending_requests.pop_front();
 
         // Send request via HTTP/2 protocol
         // SECURITY FIX: Use atomic counter instead of pointer casting for portable code
@@ -360,6 +370,7 @@ void Client::process_pending_requests() {
             _failed_requests++;
         }
     }
+    arm_request_timeout();
 }
 
 void Client::handle_connection_success() {
@@ -370,6 +381,7 @@ void Client::handle_connection_success() {
     _handshake_completed = true;
     _received_graceful_goaway = false;
     _preserve_pending_on_next_disconnect = false;
+    this->setTimeout(0);
     
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
@@ -431,9 +443,11 @@ void Client::complete_request(uint32_t stream_id, qb::http::Response response) {
     } else {
         process_pending_requests();
     }
+    arm_request_timeout();
 }
 
-void Client::fail_request(uint32_t stream_id, const std::string& error_message) {
+void Client::fail_request(uint32_t stream_id, const std::string& error_message,
+                          qb::http::status status) {
     auto it = _active_requests.find(stream_id);
     if (it == _active_requests.end() || !it->second || it->second->stream_id != stream_id) {
         it = std::find_if(_active_requests.begin(), _active_requests.end(),
@@ -453,14 +467,12 @@ void Client::fail_request(uint32_t stream_id, const std::string& error_message) 
     
     _failed_requests++;
     
-    auto error_response = create_error_response(
-        qb::http::status::BAD_GATEWAY, 
-        error_message
-    );
+    auto error_response = create_error_response(status, error_message);
     
     context->callback(std::move(error_response));
 
     finish_graceful_goaway_if_drained();
+    arm_request_timeout();
 }
 
 void Client::fail_active_requests_after_goaway(uint32_t last_stream_id,
@@ -483,6 +495,7 @@ void Client::fail_active_requests_after_goaway(uint32_t last_stream_id,
                                                     error_message);
         context->callback(std::move(error_response));
     }
+    arm_request_timeout();
 }
 
 void Client::finish_graceful_goaway_if_drained() {
@@ -519,7 +532,7 @@ void Client::fail_all_requests(const std::string& error_message) {
     // We move current work out before invoking any callback so newly queued work
     // is not lost or invalidated by this failure pass.
     qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>> active_requests_to_fail;
-    std::queue<std::unique_ptr<RequestContext>> pending_requests_to_fail;
+    std::deque<std::unique_ptr<RequestContext>> pending_requests_to_fail;
     qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> active_batches_to_fail;
     active_requests_to_fail.swap(_active_requests);
     pending_requests_to_fail.swap(_pending_requests);
@@ -540,7 +553,7 @@ void Client::fail_all_requests(const std::string& error_message) {
     // Fail pending requests
     while (!pending_requests_to_fail.empty()) {
         auto context = std::move(pending_requests_to_fail.front());
-        pending_requests_to_fail.pop();
+        pending_requests_to_fail.pop_front();
         
         _failed_requests++;
         
@@ -570,9 +583,14 @@ void Client::fail_all_requests(const std::string& error_message) {
             batch_context->callback(std::move(batch_context->responses));
         }
     }
+    arm_request_timeout();
 }
 
 void Client::check_request_timeouts() {
+    if (_request_timeout <= 0.) {
+        arm_request_timeout();
+        return;
+    }
     auto now = std::chrono::steady_clock::now();
     auto timeout_duration = std::chrono::duration<double>(_request_timeout);
     
@@ -580,23 +598,23 @@ void Client::check_request_timeouts() {
     std::vector<uint32_t> timed_out_streams;
     
     for (const auto& [stream_id, context] : _active_requests) {
-        if (now - context->created_at > timeout_duration) {
+        if (now - context->created_at >= timeout_duration) {
             timed_out_streams.push_back(stream_id);
         }
     }
     
     for (uint32_t stream_id : timed_out_streams) {
-        fail_request(stream_id, "Request timeout");
+        fail_request(stream_id, "Request timeout", qb::http::status::REQUEST_TIMEOUT);
     }
     
     // Check pending requests for timeouts
-    std::queue<std::unique_ptr<RequestContext>> non_timed_out_requests;
+    std::deque<std::unique_ptr<RequestContext>> non_timed_out_requests;
     
     while (!_pending_requests.empty()) {
         auto context = std::move(_pending_requests.front());
-        _pending_requests.pop();
+        _pending_requests.pop_front();
         
-        if (now - context->created_at > timeout_duration) {
+        if (now - context->created_at >= timeout_duration) {
             LOG_HTTP_WARN_PA(_client_id, "Pending request timed out");
             _failed_requests++;
             
@@ -607,15 +625,64 @@ void Client::check_request_timeouts() {
             
             context->callback(std::move(error_response));
         } else {
-            non_timed_out_requests.push(std::move(context));
+            non_timed_out_requests.push_back(std::move(context));
         }
     }
     
     _pending_requests = std::move(non_timed_out_requests);
+    arm_request_timeout();
 }
 
 bool Client::has_pending_or_active_work() const noexcept {
     return !_pending_requests.empty() || !_active_requests.empty();
+}
+
+void Client::arm_request_timeout() {
+    const auto now = std::chrono::steady_clock::now();
+    bool has_deadline = false;
+    auto delay = std::numeric_limits<double>::max();
+
+    const auto update_delay = [&](std::chrono::steady_clock::time_point started_at,
+                                  double timeout) {
+        if (timeout <= 0.) {
+            return;
+        }
+        const auto elapsed = std::chrono::duration<double>(now - started_at).count();
+        delay = std::min(delay, std::max(0.000001, timeout - elapsed));
+        has_deadline = true;
+    };
+
+    if (_is_connecting && !_handshake_completed) {
+        update_delay(_connect_started_at, _connect_timeout);
+    }
+
+    if (_request_timeout > 0.) {
+        for (const auto& context : _pending_requests) {
+            if (context) {
+                update_delay(context->created_at, _request_timeout);
+            }
+        }
+        for (const auto& [stream_id, context] : _active_requests) {
+            (void)stream_id;
+            if (context) {
+                update_delay(context->created_at, _request_timeout);
+            }
+        }
+    }
+
+    if (!has_deadline) {
+        this->setTimeout(0);
+        return;
+    }
+
+    this->setTimeout(delay);
+}
+
+bool Client::connect_deadline_expired(std::chrono::steady_clock::time_point now) const noexcept {
+    return _is_connecting &&
+           !_handshake_completed &&
+           _connect_timeout > 0. &&
+           now - _connect_started_at >= std::chrono::duration<double>(_connect_timeout);
 }
 
 void Client::attempt_reconnection() {
@@ -716,14 +783,17 @@ void Client::on(const qb::protocol::http2::Http2ConnectionErrorEvent& event) {
 }
 
 void Client::on(qb::io::async::event::timeout const&) {
-    LOG_HTTP_WARN_PA(_client_id, "Connection timeout");
-    
-    if (!_handshake_completed) {
+    const auto now = std::chrono::steady_clock::now();
+
+    check_request_timeouts();
+
+    if (connect_deadline_expired(now)) {
+        LOG_HTTP_WARN_PA(_client_id, "Connection timeout");
         handle_connection_failure("Connection timeout");
-    } else {
-        // Check for request timeouts
-        check_request_timeouts();
+        return;
     }
+
+    arm_request_timeout();
 }
 
 void Client::on(qb::io::async::event::disconnected const& event) {

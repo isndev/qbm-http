@@ -39,29 +39,33 @@ set(HTTP_TESTS
         middleware-security-headers
         middleware-compression
         middleware-cors
-        middleware-auth
         middleware-recaptcha
         middleware-error-handling
-        middleware-jwt
         middleware-validator
         middleware-static-files
-        http2-header-validator
         http1-client
         session-http
         integration-basic
         integration-advanced
-        integration-middleware
-        http2-hpack
-        integration-make-server
-        integration-http2-client
         dos-protection
         multipart-security
         date-parsing
         context-slots
         coro-client
-        coro-http2-client
         coro-server
         coro-integration
+)
+
+if(QB_HAS_SSL)
+    list(APPEND HTTP_TESTS
+        middleware-auth
+        middleware-jwt
+        integration-middleware
+        integration-make-server
+        http2-header-validator
+        http2-hpack
+        integration-http2-client
+        coro-http2-client
         ws-session
         ws-client
         ws-robustness
@@ -73,7 +77,8 @@ set(HTTP_TESTS
         ws-coro-negative
         ws-framing-edge
         ws-api-hardening
-)
+    )
+endif()
 
 if(QBM_HTTP_HAS_HTTP3)
     list(APPEND HTTP_TESTS

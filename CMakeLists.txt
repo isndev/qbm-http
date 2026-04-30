@@ -23,10 +23,10 @@ if(NOT QB_FOUND)
     return()
 endif()
 
-# Check if SSL support is available
-if(NOT QB_HAS_SSL)
-    qb_status_message("HTTP module requires SSL support - skipping")
-    return()
+if(QB_HAS_SSL)
+    qb_status_message("HTTP SSL-backed features enabled")
+else()
+    qb_status_message("HTTP SSL-backed features disabled: HTTPS/WSS/JWT/HTTP2/HTTP3 will not be built")
 endif()
 
 # Add the internal llhttp dependency
@@ -36,12 +36,22 @@ set(QBM_HTTP_EXTRA_SOURCES)
 set(QBM_HTTP_EXTRA_DEPENDS)
 set(QBM_HTTP_EXTRA_DEFINES)
 
+if(QB_HAS_SSL)
+    list(APPEND QBM_HTTP_EXTRA_SOURCES
+        auth/manager.cpp
+        ws/ws.cpp
+        2/http2.cpp
+        2/client.cpp
+    )
+    list(APPEND QBM_HTTP_EXTRA_DEFINES QBM_HTTP_HAS_SSL=1)
+endif()
+
 find_package(PkgConfig QUIET)
 if(QB_HAS_QUIC AND PKG_CONFIG_FOUND)
     pkg_check_modules(PC_NGHTTP3 QUIET libnghttp3)
 endif()
 
-if(QB_HAS_QUIC AND PC_NGHTTP3_FOUND)
+if(QB_HAS_SSL AND QB_HAS_QUIC AND PC_NGHTTP3_FOUND)
     set(QBM_HTTP_HAS_HTTP3 TRUE)
     add_library(Nghttp3::nghttp3 INTERFACE IMPORTED)
     target_include_directories(Nghttp3::nghttp3 INTERFACE ${PC_NGHTTP3_INCLUDE_DIRS})
@@ -55,7 +65,7 @@ if(QB_HAS_QUIC AND PC_NGHTTP3_FOUND)
     qb_status_message("HTTP/3 support enabled (nghttp3)")
 else()
     set(QBM_HTTP_HAS_HTTP3 FALSE)
-    qb_status_message("HTTP/3 support disabled (requires QB_HAS_QUIC and libnghttp3)")
+    qb_status_message("HTTP/3 support disabled (requires QB_HAS_SSL, QB_HAS_QUIC and libnghttp3)")
 endif()
 
 # Register the HTTP module using the new framework functions
@@ -69,12 +79,10 @@ qb_register_module(
         date.cpp
         cookie.cpp
         multipart.cpp
-        auth/manager.cpp
         # Body
         request.cpp
         response.cpp
         body.cpp
-        ws/ws.cpp
         1.1/http.cpp
         1.1/client.cpp
         # Validation
@@ -83,9 +91,6 @@ qb_register_module(
         validation/rule.cpp
         validation/sanitizer.cpp
         validation/schema_validator.cpp
-        # HTTP/2
-        2/http2.cpp
-        2/client.cpp
         ${QBM_HTTP_EXTRA_SOURCES}
     DEFINES
         QBM_HTTP_VERSION=1.0.0

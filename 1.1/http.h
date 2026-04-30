@@ -541,6 +541,7 @@ namespace qb::http {
              */
             bool listen(qb::io::uri uri, std::filesystem::path cert_file = {}, std::filesystem::path key_file = {}) {
                 using tpt = std::decay_t<decltype(this->transport())>;
+#ifdef QB_HAS_SSL
                 if constexpr (tpt::is_secure()) {
                     this->transport().init(qb::io::ssl::create_server_context(TLS_server_method(), cert_file, key_file));
                     if (!this->transport().ssl_handle()) {
@@ -549,6 +550,10 @@ namespace qb::http {
                     }
                     this->transport().set_supported_alpn_protocols({"http/1.1"});
                 }
+#else
+                static_cast<void>(cert_file);
+                static_cast<void>(key_file);
+#endif
                 return !this->transport().listen(std::move(uri));
             }
         };
@@ -1092,6 +1097,7 @@ namespace qb::http {
         template<typename Session>
         using server = internal::server<Derived, Session, qb::io::transport::accept>;
 
+#if QB_HAS_SSL
         /**
          * @brief SSL/TLS transport types for secure HTTP
          */
@@ -1118,6 +1124,7 @@ namespace qb::http {
             template<typename Session>
             using server = internal::server<Derived, Session, qb::io::transport::saccept>;
         };
+#endif // QB_HAS_SSL
     };
 } // namespace qb::http
 

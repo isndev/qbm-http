@@ -38,7 +38,7 @@
 #include <memory>
 #include <functional>
 #include <vector>
-#include <queue>
+#include <deque>
 #include <string>
 #include <chrono>
 #include <optional>
@@ -156,12 +156,13 @@ private:
     bool _handshake_completed = false;
     bool _received_graceful_goaway = false;
     bool _preserve_pending_on_next_disconnect = false;
+    std::chrono::steady_clock::time_point _connect_started_at{};
     
     // Protocol handlers
     H2Protocol* _h2_protocol = nullptr;
     
     // Request management
-    std::queue<std::unique_ptr<RequestContext>> _pending_requests;
+    std::deque<std::unique_ptr<RequestContext>> _pending_requests;
     qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>> _active_requests;
     qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> _active_batches;
     uint64_t _next_batch_id = 1;
@@ -410,7 +411,8 @@ private:
      * @param stream_id Stream ID of the request
      * @param error_message Error description
      */
-    void fail_request(uint32_t stream_id, const std::string& error_message);
+    void fail_request(uint32_t stream_id, const std::string& error_message,
+                      qb::http::status status = qb::http::status::BAD_GATEWAY);
 
     /**
      * @brief Fail active streams that the peer explicitly did not process in GOAWAY.
@@ -433,6 +435,16 @@ private:
      * @brief Check and handle request timeouts
      */
     void check_request_timeouts();
+
+    /**
+     * @brief Arm a one-shot timeout for the earliest connect, pending, or active request deadline.
+     */
+    void arm_request_timeout();
+
+    /**
+     * @brief Returns true when the current connection attempt exceeded its deadline.
+     */
+    [[nodiscard]] bool connect_deadline_expired(std::chrono::steady_clock::time_point now) const noexcept;
     
     /**
      * @brief Returns true when there is outstanding client work tied to the current connection.

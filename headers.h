@@ -90,7 +90,7 @@ namespace qb::http {
      *
      * This string lists compression algorithms supported by the server for decompressing request bodies
      * (if `QB_HAS_COMPRESSION` is defined), usually with quality values (q-values) indicating preference.
-     * For example: `"gzip;q=1.0, deflate;q=0.9"`. The string "chunked" (a transfer encoding) is also typically appended.
+     * For example: `"gzip;q=1.0, deflate;q=0.9"`. Transfer codings such as `chunked` are intentionally not included.
      * This function is useful for a client to indicate to a server what encodings it can accept in a response.
      *
      * @return A string suitable for use as an `Accept-Encoding` header value.

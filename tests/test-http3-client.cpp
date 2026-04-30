@@ -556,6 +556,28 @@ TEST(Http3ClientIntegrationTest, RejectsPlainHttpAbsoluteRequestWithoutConnectin
     EXPECT_EQ(failed, 1u);
 }
 
+TEST(Http3ClientIntegrationTest, RejectsCrossOriginAbsoluteRequestWithoutConnecting) {
+    qb::io::async::init();
+
+    auto client = qb::http3::make_client("https://127.0.0.1:443");
+
+    std::atomic<bool> done{false};
+    qb::http::Response response;
+    ASSERT_TRUE(client->push_request(
+        qb::http::Request{qb::io::uri("https://localhost:443/cross-origin")},
+        [&](qb::http::Response res) {
+            response = std::move(res);
+            done = true;
+        }));
+
+    EXPECT_TRUE(done.load());
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(response.body().as<std::string>(),
+              "HTTP/3 persistent client only accepts same-origin requests");
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+}
+
 TEST(Http3ClientIntegrationTest, BatchRejectsInvalidSchemesAndPreservesOrder) {
     if (!certs_available()) {
         GTEST_SKIP() << "test TLS certificates are unavailable";
@@ -579,6 +601,7 @@ TEST(Http3ClientIntegrationTest, BatchRejectsInvalidSchemesAndPreservesOrder) {
     std::vector<qb::http::Request> requests;
     requests.emplace_back(qb::io::uri("http://127.0.0.1:31979/plain"));
     requests.emplace_back(qb::io::uri("/valid"));
+    requests.emplace_back(qb::io::uri("https://localhost:31979/cross-origin"));
     requests.emplace_back(qb::io::uri("ws://127.0.0.1:31979/ws"));
 
     std::atomic<bool> done{false};
@@ -591,18 +614,21 @@ TEST(Http3ClientIntegrationTest, BatchRejectsInvalidSchemesAndPreservesOrder) {
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
 
     ASSERT_TRUE(done.load());
-    ASSERT_EQ(responses.size(), 3u);
+    ASSERT_EQ(responses.size(), 4u);
     EXPECT_EQ(responses[0].status(), qb::http::status::BAD_REQUEST);
     EXPECT_EQ(responses[0].body().as<std::string>(), "HTTP/3 request URI must use https");
     EXPECT_EQ(responses[1].status(), qb::http::status::OK);
     EXPECT_EQ(responses[1].body().as<std::string>(), "valid-h3");
     EXPECT_EQ(responses[2].status(), qb::http::status::BAD_REQUEST);
-    EXPECT_EQ(responses[2].body().as<std::string>(), "HTTP/3 request URI must use https");
+    EXPECT_EQ(responses[2].body().as<std::string>(),
+              "HTTP/3 persistent client only accepts same-origin requests");
+    EXPECT_EQ(responses[3].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(responses[3].body().as<std::string>(), "HTTP/3 request URI must use https");
 
     auto [total, successful, failed] = client->get_stats();
-    EXPECT_EQ(total, 3u);
+    EXPECT_EQ(total, 4u);
     EXPECT_EQ(successful, 1u);
-    EXPECT_EQ(failed, 2u);
+    EXPECT_EQ(failed, 3u);
 
     client->disconnect();
     server->close();

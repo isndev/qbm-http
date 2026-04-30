@@ -5,46 +5,18 @@
 #include <utility>
 
 #include <qb/io/async/tcp/connector.h>
-#include <qb/io/transport/stcp.h>
 #include <qb/io/transport/tcp.h>
+#ifdef QB_HAS_SSL
+#include <qb/io/transport/stcp.h>
+#endif
 
 #include "./http.h"
 #include "../headers.h"
+#include "../origin.h"
 #include "../utility.h"
 
 namespace qb::http1 {
 namespace {
-
-[[nodiscard]] bool scheme_eq(std::string_view lhs, std::string_view rhs) noexcept {
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if (qb::http::utility::ascii_to_lower(lhs[i]) != rhs[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-[[nodiscard]] bool same_origin(qb::io::uri const& lhs, qb::io::uri const& rhs) noexcept {
-    const auto effective_port = [](qb::io::uri const& uri) -> std::string_view {
-        if (!uri.port().empty()) {
-            return uri.port();
-        }
-        if (scheme_eq(uri.scheme(), "http")) {
-            return "80";
-        }
-        if (scheme_eq(uri.scheme(), "https")) {
-            return "443";
-        }
-        return {};
-    };
-
-    return scheme_eq(lhs.scheme(), rhs.scheme()) &&
-           lhs.host() == rhs.host() &&
-           effective_port(lhs) == effective_port(rhs);
-}
 
 [[nodiscard]] bool has_connection_close(qb::http::Response const& response) {
     auto it = response.headers().find("Connection");
@@ -198,9 +170,16 @@ Client::~Client() {
 }
 
 void Client::initialize_from_uri(qb::io::uri const& uri) {
-    if (!scheme_eq(uri.scheme(), "http") && !scheme_eq(uri.scheme(), "https")) {
+#ifdef QB_HAS_SSL
+    if (!qb::http::origin::scheme_eq(uri.scheme(), "http") &&
+        !qb::http::origin::scheme_eq(uri.scheme(), "https")) {
         throw std::invalid_argument("HTTP/1.1 client base URI must use http or https");
     }
+#else
+    if (!qb::http::origin::scheme_eq(uri.scheme(), "http")) {
+        throw std::invalid_argument("HTTP/1.1 client base URI must use http when QB_HAS_SSL is disabled");
+    }
+#endif
     if (uri.host().empty()) {
         throw std::invalid_argument("HTTP/1.1 client base URI is missing a host");
     }
@@ -210,11 +189,15 @@ void Client::initialize_from_uri(qb::io::uri const& uri) {
 }
 
 void Client::create_connection() {
-    if (scheme_eq(_base_uri.scheme(), "https")) {
+#ifdef QB_HAS_SSL
+    if (qb::http::origin::scheme_eq(_base_uri.scheme(), "https")) {
         _connection = std::make_unique<connection<qb::io::transport::stcp>>(*this);
     } else {
         _connection = std::make_unique<connection<qb::io::transport::tcp>>(*this);
     }
+#else
+    _connection = std::make_unique<connection<qb::io::transport::tcp>>(*this);
+#endif
 }
 
 bool Client::connect(ConnectionCallback callback) {
@@ -307,7 +290,7 @@ std::optional<qb::http::Response> Client::prepare_request(qb::http::Request& req
         return create_error_response(qb::http::status::BAD_REQUEST,
                                      "HTTP/1.1 request URI is missing a host");
     }
-    if (!same_origin(request.uri(), _base_uri)) {
+    if (!qb::http::origin::same(request.uri(), _base_uri)) {
         return create_error_response(qb::http::status::BAD_REQUEST,
                                      "HTTP/1.1 persistent client only accepts same-origin requests");
     }

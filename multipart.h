@@ -12,15 +12,20 @@
 #pragma once
 
 #include <cassert>
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 #include <sys/types.h>
 #include <vector>
 
-#include <qb/io/crypto.h>
-#include <qb/system/allocator/pipe.h>
 #include <qb/utility/build_macros.h>
+#ifdef QB_HAS_SSL
+#include <qb/io/crypto.h>
+#else
+#include <qb/uuid.h>
+#endif
+#include <qb/system/allocator/pipe.h>
 
 #include "./headers.h"
 
@@ -830,10 +835,11 @@ namespace qb::http {
         std::vector<Part> _parts;
 
         /**
-         * @brief Generate a cryptographically secure random boundary string (F49/F50).
+         * @brief Generate a random boundary string.
          *
-         * Uses `qb::crypto::generate_secure_random_string` (OpenSSL RAND_bytes)
-         * to avoid the `std::mt19937` fallback. Respects RFC 2046 boundary
+         * Uses OpenSSL-backed secure random bytes when SSL support is available.
+         * Plain HTTP builds use a UUID fallback so multipart stays available
+         * without linking crypto-only features. Respects RFC 2046 boundary
          * length recommendations (<= 70 chars).
          */
         [[nodiscard]] static std::string
@@ -847,8 +853,14 @@ namespace qb::http {
 
             std::string result = "----------------------------qb";
             result.reserve(TOTAL_BOUNDARY_LENGTH);
+#ifdef QB_HAS_SSL
             result += qb::crypto::generate_secure_random_string(
                 BOUNDARY_RANDOM_LENGTH, qb::crypto::range_alpha_numeric);
+#else
+            auto uuid = uuids::to_string(qb::generate_random_uuid());
+            uuid.erase(std::remove(uuid.begin(), uuid.end(), '-'), uuid.end());
+            result += uuid.substr(0, BOUNDARY_RANDOM_LENGTH);
+#endif
             return result;
         }
 

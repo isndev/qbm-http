@@ -290,8 +290,7 @@ namespace qb::http {
      *
      * This string lists compression algorithms supported by the server (if `QB_HAS_COMPRESSION` is defined),
      * typically with quality values (q-values) indicating preference. For example: "gzip;q=1.0, deflate;q=0.9".
-     * The string "chunked" is always appended; while `chunked` is a Transfer-Encoding, its presence in
-     * `Accept-Encoding` has historical context or might be used by some clients.
+     * Transfer codings such as `chunked` are intentionally not advertised in `Accept-Encoding`.
      *
      * @return A string suitable for use as an `Accept-Encoding` header value, typically sent by a client.
      */
