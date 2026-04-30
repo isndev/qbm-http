@@ -129,6 +129,14 @@ TEST_F(DateParsingTest, ParseHttpDateInvalidFormats) {
     // Invalid time (out of range)
     EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 25:00:00 GMT")).has_value());
     EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:70:00 GMT")).has_value());
+
+    // Invalid calendar dates must not be normalized by timegm.
+    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 31 Feb 1994 08:49:37 GMT")).has_value());
+    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 00 Nov 1994 08:49:37 GMT")).has_value());
+
+    // RFC 1123/RFC 850 forms require the GMT zone and no trailing bytes.
+    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 UTC")).has_value());
+    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT extra")).has_value());
 }
 
 // ====================================================================
@@ -278,9 +286,11 @@ TEST_F(DateParsingTest, NullOptForInvalidDates) {
         "Sun, 06 Nov 1994 08:49",
         "Sun, 06 Nov 1994 08:49:",
         "Sun, 06 Nov 1994 08:49:37",
-        // Out of range values (implementation may or may not catch these)
-        // "Sun, 32 Nov 1994 08:49:37 GMT",
-        // "Sun, 06 Nov 1994 25:00:00 GMT",
+        // Out of range values
+        "Sun, 32 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1994 25:00:00 GMT",
+        "Sunday, 31-Feb-94 08:49:37 GMT",
+        "Sun Feb 31 08:49:37 1994",
     };
 
     for (const auto& date : invalid_dates) {

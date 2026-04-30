@@ -24,8 +24,7 @@
 #include <ctime>       // For std::time_t, std::time, std::gmtime (if timestamp_to_iso8601 were used)
 #include <iomanip>     // For std::put_time, std::get_time (if ISO8601 helpers were used)
 #include <sstream>     // For std::ostringstream, std::istringstream (if ISO8601 helpers were used)
-#include <algorithm>   // For std::transform, std::isspace, std::find_if_not
-#include <cctype>      // For std::tolower, std::isspace
+#include <algorithm>   // For std::transform, std::find_if_not
 #include <limits>
 
 namespace qb {
@@ -238,7 +237,7 @@ namespace qb {
                 }
 
                 // Reject "SchemeToken": a whitespace character must follow the scheme.
-                if (!std::isspace(static_cast<unsigned char>(view[scheme.length()]))) {
+                if (std::string_view{" \t\n\r\f\v"}.find(view[scheme.length()]) == std::string_view::npos) {
                     return {};
                 }
 
@@ -408,6 +407,11 @@ namespace qb {
 
                 if (payload_json.contains("username") && payload_json["username"].is_string()) {
                     user.username = payload_json["username"].get<std::string>();
+                }
+
+                if (user.id.empty() && user.username.empty()) {
+                    LOG_HTTP_WARN("AuthManager: Token payload does not contain a usable subject or username");
+                    return std::nullopt;
                 }
 
                 if (payload_json.contains("roles")) {

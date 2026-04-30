@@ -88,7 +88,7 @@ Key aspects of a functional middleware lambda:
 -   It receives the `Context` and a `next` callback.
 -   **To pass control to the next task in the chain**: Call `next()`.
     -   You can perform actions *before* calling `next()` (pre-processing on `ctx->request()`).
-    -   You can perform actions *after* `next()` returns (post-processing on `ctx->response()`). This creates an "around" middleware effect.
+    -   You can perform actions *after* `next()` returns (post-processing on `ctx->response()`) for synchronous downstream chains. For asynchronous downstream work, register a `PRE_RESPONSE_SEND` lifecycle hook when the mutation must run at final send time.
 -   **To short-circuit and finalize the response**: Do *not* call `next()`. Instead, populate `ctx->response()` and call `ctx->complete(AsyncTaskResult::COMPLETE)`.
 -   **To signal an error**: Do *not* call `next()`. Call `ctx->complete(AsyncTaskResult::ERROR)`.
 
@@ -100,7 +100,8 @@ router.use([](std::shared_ptr<qb::http::Context<MySession>> ctx, std::function<v
 
     next(); // Pass control to the next middleware/handler
 
-    // This code executes after downstream middleware and the route handler have finished
+    // For synchronous downstream chains, this runs before the response is sent.
+    // For async downstream work, prefer a PRE_RESPONSE_SEND lifecycle hook.
     std::cout << "[Functional MW] Outgoing response status: " << ctx->response().status().code() << std::endl;
 }, "RequestLoggerMiddleware");
 
@@ -122,7 +123,7 @@ When you provide a lambda to `use()`, the router internally wraps it in a `qb::h
 Specifically, when `next()` is called by your functional middleware:
 1. The `FunctionalMiddleware` adapter calls `ctx->complete(AsyncTaskResult::CONTINUE)` internally to suspend its own execution and let the chain proceed.
 2. Once the rest of the chain (subsequent middleware and the final route handler) completes and control unwinds back to the `FunctionalMiddleware` adapter, the code in your lambda *after* the `next()` call is executed.
-3. After your lambda finishes its post-`next()` logic, the `FunctionalMiddleware` adapter ensures the context is properly completed again, typically by calling `ctx->complete(AsyncTaskResult::CONTINUE)` if your lambda doesn't make a different terminal `complete` call.
+3. During that synchronous unwind, final response publication is deferred until your lambda returns, so post-`next()` response mutations are visible before the response is sent. The adapter does not call `complete()` a second time; the downstream task's terminal result remains authoritative.
 
 ## Coroutine Middleware &amp; Handlers (`qb::http::coro_*`)
 
@@ -308,4 +309,4 @@ Previous: [Standard Middleware](./08-standard-middleware.md)
 Next: [The Request Context](./10-request-context.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

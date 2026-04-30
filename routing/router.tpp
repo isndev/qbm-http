@@ -293,6 +293,15 @@ namespace qb::http {
         }
     }
 
+    template<typename SessionType>
+    Router<SessionType> &Router<SessionType>::add_lifecycle_hook(
+        typename Context<SessionType>::LifecycleHook hook_fn) {
+        if (_router_core) {
+            _router_core->add_lifecycle_hook(std::move(hook_fn));
+        }
+        return *this;
+    }
+
     // --- Compilation and Routing ---
     template<typename SessionType>
     void Router<SessionType>::compile() {

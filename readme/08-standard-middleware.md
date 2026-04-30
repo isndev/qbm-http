@@ -70,11 +70,11 @@ Here's a summary of the available standard middleware components:
 -   **Factory**: `qb::http::timing_middleware<SessionType>(TimingCallback callback, std::string name = ...)`
 -   **Usage Example**:
     ```cpp
-    #include <http/http.h> 
-    #include <http/middleware/timing.h> 
-    #include <chrono>      
-    #include <iostream>    
-    #include <memory>      
+    #include <http/http.h>
+    #include <http/middleware/timing.h>
+    #include <chrono>
+    #include <iostream>
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -106,8 +106,8 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/transform.h> 
-    #include <memory> 
+    #include <http/middleware/transform.h>
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -131,15 +131,15 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/conditional.h> 
+    #include <http/middleware/conditional.h>
     #include <http/middleware/logging.h>   // Example: use LoggingMiddleware as a child
-    #include <memory> 
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
-    // auto some_if_middleware = qb::http::logging_middleware<MySession>(/*...*/); 
+    // auto some_if_middleware = qb::http::logging_middleware<MySession>(/*...*/);
     // auto some_else_middleware = qb::http::logging_middleware<MySession>(/*...*/);
-    
+
     auto predicate = [](auto ctx) { return ctx->request().has_header("X-Condition"); };
     auto conditional_mw = qb::http::conditional_middleware<MySession>(predicate, some_if_middleware, some_else_middleware);
     // router.use(conditional_mw);
@@ -158,9 +158,9 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/error_handling.h> 
-    #include <memory> 
-    #include <list>   
+    #include <http/middleware/error_handling.h>
+    #include <memory>
+    #include <list>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -186,8 +186,8 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/cors.h> 
-    #include <memory> 
+    #include <http/middleware/cors.h>
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -209,9 +209,9 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/validation.h> 
+    #include <http/middleware/validation.h>
     #include <http/validation.h>          // For qb::http::validation::RequestValidator
-    #include <memory> 
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -235,9 +235,9 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/rate_limit.h> 
-    #include <memory> 
-    #include <chrono> 
+    #include <http/middleware/rate_limit.h>
+    #include <memory>
+    #include <chrono>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -261,12 +261,12 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/jwt.h> 
-    #include <memory> 
+    #include <http/middleware/jwt.h>
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
-    
+
     qb::http::JwtOptions jwt_opts;
     jwt_opts.secret = "your-jwt-secret-key"; // Replace with your actual secret
     jwt_opts.algorithm = "HS256";
@@ -283,19 +283,19 @@ Here's a summary of the available standard middleware components:
     -   Extracts tokens (typically JWTs) using `auth::Manager` based on `auth::Options`.
     -   Verifies tokens and constructs an `auth::User` object.
     -   Stores the `auth::User` in the context (default key: `"user"`).
-    -   Can perform role-based authorization checks.
-    -   Configurable to require authentication or allow optional authentication.
+    -   Can perform role-based authorization checks, including against a pre-authenticated `auth::User` already stored in the context.
+    -   Configurable to require authentication or allow optional authentication. Optional mode allows missing credentials, but rejects malformed, expired, or invalid credentials if the client provides them.
 -   **Factories**: `qb::http::create_auth_middleware<SessionType>(auth::Options opts, ...)` , `create_jwt_auth_middleware(...)`, `create_role_auth_middleware(...)`, `create_optional_auth_middleware(...)`.
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/auth.h> 
+    #include <http/middleware/auth.h>
     #include <http/auth.h>          // For qb::http::auth::Options
-    #include <memory> 
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
-    
+
     qb::http::auth::Options auth_opts;
     auth_opts.secret_key("your-application-secret-key").token_issuer("my-app-name");
     auto auth_mw = qb::http::create_auth_middleware<MySession>(auth_opts);
@@ -314,8 +314,8 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/compression.h> 
-    #include <memory> 
+    #include <http/middleware/compression.h>
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -341,8 +341,8 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/security_headers.h> 
-    #include <memory> 
+    #include <http/middleware/security_headers.h>
+    #include <memory>
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
@@ -365,13 +365,13 @@ Here's a summary of the available standard middleware components:
 -   **Usage Example**:
     ```cpp
     #include <http/http.h>
-    #include <http/middleware/static_files.h> 
-    #include <memory> 
+    #include <http/middleware/static_files.h>
+    #include <memory>
     #include <filesystem> // For std::filesystem::path
 
     // using MySession = qb::http::DefaultSession;
     // qb::http::Router<MySession> router;
-    
+
     qb::http::StaticFilesOptions static_opts("./public_html"); // Serve from ./public_html directory
     static_opts.with_serve_index_file(true).with_index_file_name("default.html");
     auto static_files_mw = qb::http::static_files_middleware<MySession>(static_opts);
@@ -384,4 +384,4 @@ Previous: [Middleware Overview](./07-middleware.md)
 Next: [Custom Middleware](./09-custom-middleware.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

@@ -152,8 +152,8 @@ namespace qb::http {
              * If parsing fails or components are missing, defaults are used:
              * - MIME type defaults to `Headers::default_content_type` (`application/octet-stream`).
              * - Charset defaults to `Headers::default_charset` (`utf-8`).
-             * The parsing logic attempts to handle formats like `type/subtype` and `type/subtype; charset=value`,
-             * including trimming whitespace and handling quoted charset values (though full unquoting of quoted-pairs is not implemented here).
+             * The parsing logic handles formats like `type/subtype` and `type/subtype; charset=value`,
+             * including optional whitespace, case-insensitive parameter names, quoted values and quoted-pair escapes.
              *
              * @param content_type_str The full `Content-Type` header string, as a `std::string_view`.
              * @return A `std::pair` containing the MIME type (as `std::string`) as the first element
@@ -163,17 +163,28 @@ namespace qb::http {
             parse(std::string_view content_type_str) {
                 std::pair<std::string, std::string> ret{std::string(default_content_type), std::string(default_charset)};
 
-                auto words = utility::split_string<std::string>(content_type_str, " \t;=");
-                if (!words.size())
+                const auto semicolon_pos = content_type_str.find(';');
+                const auto media_type = utility::trim_http_whitespace(
+                    semicolon_pos == std::string_view::npos
+                        ? content_type_str
+                        : content_type_str.substr(0, semicolon_pos));
+                if (media_type.empty()) {
                     return ret;
-                ret.first = std::move(words.front());
-                if (words.size() == 3 && words[1] == "charset") {
-                    auto &charset = words[2];
-                    ret.second = charset.substr(charset.front() == '"' ? 1 : 0,
-                                                charset.back() == '"'
-                                                    ? charset.size() - 2
-                                                    : std::string::npos);
                 }
+                ret.first = std::string(media_type);
+
+                if (semicolon_pos != std::string_view::npos) {
+                    try {
+                        auto attrs = parse_header_attributes(content_type_str.substr(semicolon_pos + 1));
+                        auto charset_it = attrs.find("charset");
+                        if (charset_it != attrs.end() && !charset_it->second.empty()) {
+                            ret.second = charset_it->second;
+                        }
+                    } catch (...) {
+                        ret.second = std::string(default_charset);
+                    }
+                }
+
                 return ret;
             }
 
@@ -222,6 +233,16 @@ namespace qb::http {
         /** @brief Parsed `Content-Type` header object, providing easy access to MIME type and charset. */
         ContentType _content_type;
 
+        template<typename HeaderNameType>
+        [[nodiscard]] static bool
+        is_content_type_header(const HeaderNameType &name) noexcept {
+            if constexpr (std::is_convertible_v<HeaderNameType, std::string_view>) {
+                return utility::iequals(std::string_view{name}, "Content-Type");
+            } else {
+                return false;
+            }
+        }
+
     public:
         /** @brief Default constructor. Initializes an empty set of headers and a default `ContentType`. */
         Headers() noexcept : _content_type(default_content_type) {
@@ -235,7 +256,8 @@ namespace qb::http {
          */
         explicit Headers(headers_map_type initial_headers)
             : _headers(std::move(initial_headers))
-              , _content_type(header("Content-Type", 0, std::string(default_content_type))) {
+              , _content_type(default_content_type) {
+            refresh_content_type();
         }
 
         Headers(const Headers &) = default;
@@ -264,6 +286,23 @@ namespace qb::http {
         }
 
         /**
+         * @brief Re-parses the cached Content-Type helper from the raw header map.
+         *
+         * Call this after direct mutation through `headers()`. The typed mutators
+         * (`set_content_type`, `set_header`, `add_header`, `remove_header`) keep it
+         * synchronized automatically.
+         */
+        void
+        refresh_content_type() noexcept {
+            const auto it = _headers.find("Content-Type");
+            if (it != _headers.end() && !it->second.empty()) {
+                _content_type = ContentType{it->second.front()};
+            } else {
+                _content_type = ContentType{default_content_type};
+            }
+        }
+
+        /**
          * @brief Retrieves the value of a specific header.
          *
          * If multiple headers with the same name exist (e.g., `Set-Cookie`), `index` specifies which one to retrieve (0-based).
@@ -275,7 +314,7 @@ namespace qb::http {
          * @param not_found_value The value to return (as a `std::string` reference) if the header is not found or the index is out of bounds.
          *                        Defaults to a static empty `std::string`.
          * @return A constant reference to the header value string if found. If not found or index is invalid,
-         *         returns a reference to `not_found_value` (or a static empty `std::string` if `not_found_value` was the default empty string).
+         *         returns a stable fallback string containing `not_found_value`.
          */
         template<typename HeaderNameType>
         [[nodiscard]] const std::string &
@@ -283,6 +322,7 @@ namespace qb::http {
             // Use a static empty string to return a reference to for the default case
             // (avoids dangling references to the temporary default argument).
             static const std::string static_empty_string_value{};
+            static thread_local std::string static_not_found_value;
 
             const auto it = _headers.find(std::forward<HeaderNameType>(name));
             if (it != _headers.cend() && index < it->second.size()) {
@@ -291,7 +331,8 @@ namespace qb::http {
             if (not_found_value.empty()) {
                 return static_empty_string_value;
             }
-            return not_found_value;
+            static_not_found_value = not_found_value;
+            return static_not_found_value;
         }
 
         /**
@@ -359,8 +400,13 @@ namespace qb::http {
         template<typename HeaderNameType, typename HeaderValueType>
         void
         add_header(HeaderNameType &&name, HeaderValueType &&value) {
+            const bool is_content_type = is_content_type_header(name);
             // Map/vector operations can allocate
-            _headers[std::forward<HeaderNameType>(name)].emplace_back(std::forward<HeaderValueType>(value));
+            auto &values_vec = _headers[std::forward<HeaderNameType>(name)];
+            values_vec.emplace_back(std::forward<HeaderValueType>(value));
+            if (is_content_type && values_vec.size() == 1) {
+                _content_type = ContentType{values_vec.front()};
+            }
         }
 
         /**
@@ -371,8 +417,12 @@ namespace qb::http {
         template<typename HeaderNameType>
         void
         remove_header(HeaderNameType &&name) noexcept {
+            const bool is_content_type = is_content_type_header(name);
             // Assuming icase_unordered_map::erase(key) is noexcept
             _headers.erase(std::forward<HeaderNameType>(name));
+            if (is_content_type) {
+                _content_type = ContentType{default_content_type};
+            }
         }
 
         /**
@@ -387,10 +437,14 @@ namespace qb::http {
         template<typename HeaderNameType, typename HeaderValueType>
         void
         set_header(HeaderNameType &&name, HeaderValueType &&value) {
+            const bool is_content_type = is_content_type_header(name);
             // Map/vector operations can allocate
             auto &values_vec = _headers[std::forward<HeaderNameType>(name)];
             values_vec.clear();
             values_vec.emplace_back(std::forward<HeaderValueType>(value));
+            if (is_content_type) {
+                _content_type = ContentType{values_vec.front()};
+            }
         }
 
         /**

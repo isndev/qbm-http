@@ -43,7 +43,7 @@ namespace qb::http {
         /** @brief Convenience alias for a shared pointer to the request `Context`. */
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
         /** @brief The clock type used for timing; `std::chrono::high_resolution_clock` is typically used for performance measurements. */
-        using Clock = std::chrono::high_resolution_clock;
+        using Clock = std::chrono::steady_clock;
         /** @brief Represents a specific point in time captured by the `Clock`. */
         using TimePoint = typename Clock::time_point;
         /** @brief Represents the duration type reported to the user callback, typically `std::chrono::milliseconds`. */
@@ -85,8 +85,13 @@ namespace qb::http {
             const std::string start_time_context_key = "__TimingMiddleware_StartTime_" + _name;
             ctx->set(start_time_context_key, Clock::now());
 
+            auto callback = _callback;
+            auto middleware_name = _name;
+
             ctx->add_lifecycle_hook(
-                [this, key = start_time_context_key](Context<SessionType> &ctx_ref, HookPoint point) {
+                [callback = std::move(callback),
+                 middleware_name = std::move(middleware_name),
+                 key = start_time_context_key](Context<SessionType> &ctx_ref, HookPoint point) {
                     if (point == HookPoint::PRE_RESPONSE_SEND) {
                         if (auto start_time_opt = ctx_ref.template get<TimePoint>(key)) {
                             TimePoint start_time = *start_time_opt;
@@ -101,12 +106,12 @@ namespace qb::http {
                                                           std::to_string(duration_for_header.count()) + "ms");
 
                             try {
-                                _callback(duration_for_callback); // Invoke user callback.
+                                callback(duration_for_callback); // Invoke user callback.
                             } catch (...) {
                                 // SECURITY FIX: Add logging for suppressed exceptions
                                 // Suppress exceptions from user-provided callback to avoid disrupting response sending,
                                 // but log for debugging purposes.
-                                LOG_HTTP_WARN("TimingMiddleware [" << _name << "]: Exception in user callback suppressed");
+                                LOG_HTTP_WARN("TimingMiddleware [" << middleware_name << "]: Exception in user callback suppressed");
                             }
                             // Optionally remove the start time from the context, though usually not critical here.
                             // ctx_ref.remove(key);

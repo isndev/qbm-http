@@ -13,6 +13,7 @@
  */
 #include "./parameter_validator.h"
 #include "./rule.h" // For TypeRule::data_type_to_string
+#include "../utility.h"
 #include <charconv>
 #include <algorithm>
 #include <cmath>
@@ -76,7 +77,7 @@ namespace qb::http::validation {
             case DataType::BOOLEAN: {
                 std::string lower_val = input_value;
                 std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                               [](char c) { return qb::http::utility::ascii_to_lower(c); });
                 if (lower_val == "true" || lower_val == "1") return true;
                 if (lower_val == "false" || lower_val == "0") return false;
                 result.add_error(field_path, "type", "Must be a valid boolean (true, false, 1, 0).", input_value);

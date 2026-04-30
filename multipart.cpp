@@ -11,7 +11,28 @@
  */
 #include "./multipart.h"
 
+#include <algorithm>
+
 namespace qb::http {
+    namespace {
+        [[nodiscard]] bool
+        is_multipart_boundary_char(char c) noexcept {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '\'' || c == '(' ||
+                   c == ')' || c == '+' || c == '_' || c == ',' ||
+                   c == '-' || c == '.' || c == '/' || c == ':' ||
+                   c == '=' || c == '?' || c == ' ';
+        }
+
+        [[nodiscard]] bool
+        is_valid_multipart_boundary(const std::string &boundary) noexcept {
+            return !boundary.empty() &&
+                   boundary.size() <= multipart_limits::MAX_BOUNDARY_LENGTH &&
+                   boundary.back() != ' ' &&
+                   std::all_of(boundary.begin(), boundary.end(), is_multipart_boundary_char);
+        }
+    } // namespace
+
     /**
      * @brief Find the boundary in multipart content
      * @param str Content to search
@@ -47,23 +68,84 @@ namespace qb::http {
      */
     [[nodiscard]] std::string
     parse_boundary(std::string const &content_type) {
-        static const std::regex boundary_regex("^multipart/form-data;\\s{0,}boundary=(.+)$");
-        std::smatch what;
-        std::string to_find(content_type.data(), content_type.size());
-        if (std::regex_match(to_find, what, boundary_regex)) {
-            std::string boundary = what[1].str();
-            // Security: Validate boundary length per RFC 2046 (max 70 characters)
-            if (boundary.length() > multipart_limits::MAX_BOUNDARY_LENGTH) {
-                throw std::runtime_error("Multipart boundary exceeds maximum allowed length of 70 characters");
-            }
-            return boundary;
+        const auto semicolon_pos = content_type.find(';');
+        const auto media_type = utility::trim_http_whitespace(
+            semicolon_pos == std::string::npos
+                ? std::string_view(content_type)
+                : std::string_view(content_type.data(), semicolon_pos));
+        if (!utility::iequals(media_type, "multipart/form-data")) {
+            return "";
         }
-        return "";
+
+        auto attrs = parse_header_attributes(content_type);
+        auto it = attrs.find("boundary");
+        if (it == attrs.end() || it->second.empty()) {
+            return "";
+        }
+
+        if (!is_valid_multipart_boundary(it->second)) {
+            throw std::runtime_error("Invalid multipart boundary");
+        }
+        return it->second;
     }
 
 } // namespace qb::http
 
 namespace qb::allocator {
+    namespace {
+        [[nodiscard]] bool
+        is_multipart_header_name_char(char c) noexcept {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '!' || c == '#' ||
+                   c == '$' || c == '%' || c == '&' || c == '\'' ||
+                   c == '*' || c == '+' || c == '-' || c == '.' ||
+                   c == '^' || c == '_' || c == '`' || c == '|' ||
+                   c == '~';
+        }
+
+        [[nodiscard]] bool
+        is_valid_multipart_header_name(const std::string &name) noexcept {
+            return !name.empty() &&
+                   name.size() <= qb::http::multipart_limits::MAX_HEADER_NAME_LENGTH &&
+                   std::all_of(name.begin(), name.end(), is_multipart_header_name_char);
+        }
+
+        [[nodiscard]] bool
+        is_valid_multipart_header_value(const std::string &value) noexcept {
+            if (value.size() > qb::http::multipart_limits::MAX_HEADER_VALUE_LENGTH) {
+                return false;
+            }
+
+            return std::all_of(value.begin(), value.end(), [](char c) {
+                const auto uc = static_cast<unsigned char>(c);
+                return c == '\t' || (uc >= 0x20 && uc != 0x7f);
+            });
+        }
+
+        void
+        validate_multipart_for_serialization(const qb::http::Multipart &mp) {
+            if (!qb::http::is_valid_multipart_boundary(mp.boundary())) {
+                throw std::length_error(
+                    "qb::http::Multipart serialization: invalid multipart boundary.");
+            }
+
+            for (const auto &part : mp.parts()) {
+                for (const auto &[key, values] : part.headers()) {
+                    if (!is_valid_multipart_header_name(key)) {
+                        throw std::length_error(
+                            "qb::http::Multipart serialization: invalid part header name.");
+                    }
+                    for (const auto &value : values) {
+                        if (!is_valid_multipart_header_value(value)) {
+                            throw std::length_error(
+                                "qb::http::Multipart serialization: invalid part header value.");
+                        }
+                    }
+                }
+            }
+        }
+    } // namespace
+
     /**
      * @brief Serialize a Multipart form-data content into a byte stream
      * @param mp Multipart object to serialize
@@ -85,6 +167,7 @@ namespace qb::allocator {
     template<>
     pipe<char> &
     pipe<char>::put<qb::http::Multipart>(const qb::http::Multipart &mp) {
+        validate_multipart_for_serialization(mp);
         this->reserve(mp.content_length());
         for (const auto &part : mp.parts()) {
             *this << "--" << mp.boundary() << qb::http::endl;

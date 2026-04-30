@@ -20,7 +20,6 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
-#include <cctype>
 #include <limits>
 #include <charconv>  // For std::from_chars (C++17) - PERFORMANCE FIX
 #include <cstdlib>   // For std::strtod - PERFORMANCE FIX (exception-free parsing)
@@ -289,8 +288,8 @@ namespace qb::http {
                     std::equal(_options.auth_scheme.begin(), _options.auth_scheme.end(),
                                header_value.begin(),
                                [](char a, char b) {
-                                   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(
-                                              static_cast<unsigned char>(b));
+                                   return qb::http::utility::ascii_to_lower(a) ==
+                                          qb::http::utility::ascii_to_lower(b);
                                })) {
                     if (header_value[_options.auth_scheme.length()] != ' ') {
                         return std::nullopt;

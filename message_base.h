@@ -142,16 +142,18 @@ namespace qb::http {
              * @brief Resets the message headers to an empty state.
              *
              * Clears all headers managed by the `Headers` base part of this message.
-             * The HTTP version, upgrade flag, and body content are not affected by this method.
+             * Resets transport/protocol metadata to the default HTTP/1.1 message state.
              * Derived classes may override or extend this to reset their specific fields.
              */
             void
             reset() noexcept {
                 this->Headers::_headers.clear();
                 this->Headers::_content_type = typename Headers::ContentType{};
-                // Note: Body is not cleared here by design, typically managed separately or by derived reset().
-                // HTTP version and upgrade flag are also not reset here, typically set at construction or explicitly.
-                // stream_id is not reset here - it should be explicitly set by the protocol layer
+                major_version = 1;
+                minor_version = 1;
+                upgrade = false;
+                stream_id = 0;
+                keep_alive = false;
             }
 
         public:

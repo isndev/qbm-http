@@ -164,6 +164,30 @@ TEST_F(AuthMiddlewareTest, InvalidToken) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+TEST_F(AuthMiddlewareTest, TokenWithoutSubjectOrUsernameIsRejected) {
+    _auth_mw->with_auth_required(true);
+    configure_router_with_auth_mw(_auth_mw);
+
+    qb::jwt::CreateOptions jwt_create_opts;
+    jwt_create_opts.algorithm = qb::jwt::Algorithm::HS256;
+    jwt_create_opts.key = _test_secret;
+
+    std::map<std::string, std::string> payload{
+        {"roles", qb::json::array({"user"}).dump()},
+        {"iat", std::to_string(current_epoch_time())},
+        {"exp", std::to_string(current_epoch_time() + 3600)}
+    };
+    const std::string identity_less_token = qb::jwt::create(payload, jwt_create_opts);
+
+    auto req = create_request();
+    req.set_header(_auth_options.get_auth_header_name(),
+                   _auth_options.get_auth_scheme() + " " + identity_less_token);
+    make_request(std::move(req));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
 TEST_F(AuthMiddlewareTest, SignatureVerificationCanBeDisabledWithoutBypassingClaimChecks) {
     qb::http::auth::User test_user{"user_sigless", "sigless", {"user"}};
     std::string token = generate_test_token(test_user);
@@ -266,6 +290,60 @@ TEST_F(AuthMiddlewareTest, InvalidRoleAuthorization) {
     EXPECT_NE(_session->_response.body().template as<std::string>().find("Insufficient permissions"),
               std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(AuthMiddlewareTest, RoleMiddlewareUsesPreAuthenticatedContextUser) {
+    auto role_mw = qb::http::create_role_auth_middleware<MockAuthSession>({"admin"});
+
+    _router = std::make_unique<qb::http::Router<MockAuthSession> >();
+    _router->use(std::make_shared<qb::http::FunctionalMiddleware<MockAuthSession> >(
+        [](auto ctx, auto next_fn) {
+            ctx->template set<qb::http::auth::User>("user",
+                                                    qb::http::auth::User{"ctx-user", "contextuser", {"admin"}});
+            next_fn();
+        },
+        "PreAuthenticatedUserSetter"
+    ));
+    _router->use(role_mw);
+    _router->get("/role-from-context", success_handler());
+    _router->compile();
+
+    _session->reset();
+    _router->route(_session, create_request(qb::http::method::GET, "/role-from-context"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "ctx-user");
+}
+
+TEST_F(AuthMiddlewareTest, JwtPayloadStringRolesAuthorizeRoleChecks) {
+    _auth_mw->with_auth_required(true).with_roles({"admin"});
+
+    _router = std::make_unique<qb::http::Router<MockAuthSession> >();
+    _router->use(std::make_shared<qb::http::FunctionalMiddleware<MockAuthSession> >(
+        [](auto ctx, auto next_fn) {
+            qb::json payload;
+            payload["sub"] = "jwt-context-user";
+            payload["username"] = "jwtcontext";
+            payload["roles"] = qb::json::array({"admin", "user"}).dump();
+            ctx->template set<qb::json>("jwt_payload", std::move(payload));
+            next_fn();
+        },
+        "JwtPayloadSetter"
+    ));
+    _router->use(_auth_mw);
+    _router->get("/role-from-jwt-payload", success_handler());
+    _router->compile();
+
+    _session->reset();
+    _router->route(_session, create_request(qb::http::method::GET, "/role-from-jwt-payload"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+    ASSERT_TRUE(_session->_user_in_context.has_value());
+    EXPECT_EQ(_session->_user_in_context->id, "jwt-context-user");
+    EXPECT_TRUE(_session->_user_in_context->has_role("admin"));
 }
 
 TEST_F(AuthMiddlewareTest, OptionalAuthentication) {
@@ -1139,7 +1217,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
+TEST_F(AuthMiddlewareTest, OptionalAuthRejectsProvidedInvalidToken) {
     // Configure middleware for optional authentication
     auto optional_auth_mw = qb::http::create_optional_auth_middleware<MockAuthSession>(_auth_options);
     // Use default roles (none specified), default user context key ("user")
@@ -1152,8 +1230,8 @@ TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
                              _auth_options.get_auth_scheme() + " this_is_not_a_valid_jwt");
     make_request(std::move(req_malformed));
 
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Malformed token with optional auth";
-    EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with malformed token and optional auth";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "Malformed token with optional auth";
+    EXPECT_FALSE(_session->_final_handler_called) << "Handler should not be called with malformed token";
     EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with malformed token";
 
     // Scenario 2: Expired token (but auth is optional)
@@ -1174,8 +1252,8 @@ TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
                            _auth_options.get_auth_scheme() + " " + expired_token);
     make_request(std::move(req_expired));
 
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Expired token with optional auth";
-    EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with expired token and optional auth";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "Expired token with optional auth";
+    EXPECT_FALSE(_session->_final_handler_called) << "Handler should not be called with expired token";
     EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with expired token";
 
     // Scenario 3: Token with wrong signature (but auth is optional)
@@ -1191,8 +1269,8 @@ TEST_F(AuthMiddlewareTest, OptionalAuthWithInvalidToken) {
                              _auth_options.get_auth_scheme() + " " + token_wrong_sig);
     make_request(std::move(req_wrong_sig));
 
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Wrong signature token with optional auth";
-    EXPECT_TRUE(_session->_final_handler_called) << "Handler should be called with wrong signature and optional auth";
+    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED) << "Wrong signature token with optional auth";
+    EXPECT_FALSE(_session->_final_handler_called) << "Handler should not be called with wrong signature token";
     EXPECT_FALSE(_session->_user_in_context.has_value()) << "User should not be in context with wrong signature token";
 }
 

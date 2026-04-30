@@ -24,6 +24,47 @@
 // <chrono>, <string>, <vector> are included via cookie.h or other headers above
 
 namespace qb::http {
+    namespace {
+        [[nodiscard]] bool
+        is_cookie_name_char(unsigned char c) noexcept {
+            return (c >= 'A' && c <= 'Z') ||
+                   (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') ||
+                   c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+                   c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
+                   c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+        }
+
+        [[nodiscard]] bool
+        is_set_cookie_value_char(char c) noexcept {
+            return c != ';' && !utility::is_control(c);
+        }
+
+        [[nodiscard]] bool
+        is_set_cookie_attr_value_char(char c) noexcept {
+            return c != ';' && !utility::is_control(c);
+        }
+
+        void
+        validate_cookie_for_serialization(const Cookie &cookie) {
+            if (cookie.name().empty() ||
+                !std::all_of(cookie.name().begin(), cookie.name().end(), [](char c) {
+                    return is_cookie_name_char(static_cast<unsigned char>(c));
+                })) {
+                throw std::runtime_error("Invalid Set-Cookie name.");
+            }
+            if (!std::all_of(cookie.value().begin(), cookie.value().end(), is_set_cookie_value_char)) {
+                throw std::runtime_error("Invalid Set-Cookie value.");
+            }
+            if (!std::all_of(cookie.domain().begin(), cookie.domain().end(), is_set_cookie_attr_value_char)) {
+                throw std::runtime_error("Invalid Set-Cookie Domain attribute.");
+            }
+            if (!std::all_of(cookie.path().begin(), cookie.path().end(), is_set_cookie_attr_value_char)) {
+                throw std::runtime_error("Invalid Set-Cookie Path attribute.");
+            }
+        }
+    } // namespace
+
     /**
      * @brief (Internal) Checks if a given name string corresponds to a known cookie attribute name.
      *
@@ -96,13 +137,14 @@ namespace qb::http {
         enum class CookieParseState {
             COOKIE_PARSE_NAME,
             COOKIE_PARSE_VALUE,
-            COOKIE_PARSE_IGNORE // After a quoted value, ignore until next separator
+            COOKIE_PARSE_AFTER_QUOTED_VALUE
         } parse_state = CookieParseState::COOKIE_PARSE_NAME;
 
         const char *const end = ptr + len;
         std::string cookie_name;
         std::string cookie_value;
         char value_quote_character = '\0'; // '\'' or '"' if parsing a quoted value, else '\0'
+        bool value_escape = false;
 
         while (ptr < end) {
             const char current_char = *ptr;
@@ -157,7 +199,15 @@ namespace qb::http {
                         }
                     } else {
                         // Value is quoted
-                        if (current_char == value_quote_character) {
+                        if (value_escape) {
+                            if (cookie_value.length() >= COOKIE_VALUE_MAX) {
+                                throw std::runtime_error("Max length exceeded for quoted cookie value.");
+                            }
+                            cookie_value.push_back(current_char);
+                            value_escape = false;
+                        } else if (current_char == '\\') {
+                            value_escape = true;
+                        } else if (current_char == value_quote_character) {
                             // End of quoted value
                             if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
                                 dict.emplace(cookie_name, cookie_value);
@@ -165,23 +215,26 @@ namespace qb::http {
                             cookie_name.clear();
                             cookie_value.clear();
                             value_quote_character = '\0'; // Reset quote char
-                            parse_state = CookieParseState::COOKIE_PARSE_IGNORE; // Ignore until next separator
+                            parse_state = CookieParseState::COOKIE_PARSE_AFTER_QUOTED_VALUE;
                         } else {
+                            if (utility::is_control(current_char)) {
+                                throw std::runtime_error("Invalid control character in quoted cookie value.");
+                            }
                             if (cookie_value.length() >= COOKIE_VALUE_MAX) {
                                 // Max length check within quoted value
                                 throw std::runtime_error("Max length exceeded for quoted cookie value.");
                             }
-                            // Allow CTLs within quoted strings as per RFC 6265 (though some older RFCs restricted)
-                            // For simplicity and modern behavior, not checking is_control here.
                             cookie_value.push_back(current_char);
                         }
                     }
                     break;
 
-                case CookieParseState::COOKIE_PARSE_IGNORE:
-                    // Ignore everything until a separator is found, then switch to parsing next name.
+                case CookieParseState::COOKIE_PARSE_AFTER_QUOTED_VALUE:
+                    // After a quoted value, only optional whitespace may appear before a separator.
                     if (current_char == ';' || current_char == ',') {
                         parse_state = CookieParseState::COOKIE_PARSE_NAME;
+                    } else if (!utility::is_http_whitespace(current_char)) {
+                        throw std::runtime_error("Invalid character after quoted cookie value.");
                     }
                     break;
             }
@@ -189,6 +242,10 @@ namespace qb::http {
         }
 
         // Handle the last cookie in the string (if any name was parsed)
+        if (parse_state == CookieParseState::COOKIE_PARSE_VALUE &&
+            (value_quote_character != '\0' || value_escape)) {
+            throw std::runtime_error("Unterminated quoted cookie value.");
+        }
         if (!cookie_name.empty()) {
             if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
                 dict.emplace(std::move(cookie_name), std::move(cookie_value));
@@ -340,6 +397,8 @@ namespace qb::http {
      *       Uses reserve() to pre-allocate capacity and minimize reallocations.
      */
     std::string Cookie::to_header() const {
+        validate_cookie_for_serialization(*this);
+
         // Pre-calculate approximate size to minimize reallocations
         // Base: name=value (name + 1 + value)
         std::size_t estimated_size = _name.size() + 1 + _value.size();

@@ -67,6 +67,18 @@ namespace qb::http {
         MatchedRouteInfo() = default;
     };
 
+    template<typename SessionType>
+    struct PathAllowedMethodsInfo {
+        PathParameters path_parameters;
+        std::vector<qb::http::method> methods;
+
+        PathAllowedMethodsInfo(PathParameters params, std::vector<qb::http::method> allowed_methods)
+            : path_parameters(std::move(params)), methods(std::move(allowed_methods)) {
+        }
+
+        PathAllowedMethodsInfo() = default;
+    };
+
     /**
      * @brief A Radix Tree implementation for storing and efficiently matching HTTP routes.
      *
@@ -117,6 +129,10 @@ namespace qb::http {
                 return METHOD_SLOT_COUNT; // invalid / uninitialised
             }
             return static_cast<std::size_t>(raw);
+        }
+
+        [[nodiscard]] static constexpr qb::http::method slot_method(std::size_t slot) noexcept {
+            return qb::http::method(static_cast<::http_method>(slot));
         }
 
         /**
@@ -171,6 +187,37 @@ namespace qb::http {
                 : type(t), segment_match(seg) {
             }
         };
+
+        [[nodiscard]] static bool has_any_handler(const Node &node) noexcept {
+            for (const auto &handler: node.handlers) {
+                if (handler) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        [[nodiscard]] static std::vector<qb::http::method> collect_allowed_methods(const Node &node) {
+            std::vector<qb::http::method> methods;
+            methods.reserve(8);
+            for (std::size_t slot = 0; slot < METHOD_SLOT_COUNT; ++slot) {
+                if (node.handlers[slot]) {
+                    methods.emplace_back(slot_method(slot));
+                }
+            }
+            return methods;
+        }
+
+        static void merge_allowed_methods(std::vector<qb::http::method> &dst,
+                                          const std::vector<qb::http::method> &src) {
+            dst.insert(dst.end(), src.begin(), src.end());
+            std::sort(dst.begin(), dst.end(), [](qb::http::method lhs, qb::http::method rhs) {
+                return method_slot(lhs) < method_slot(rhs);
+            });
+            dst.erase(std::unique(dst.begin(), dst.end(), [](qb::http::method lhs, qb::http::method rhs) {
+                return method_slot(lhs) == method_slot(rhs);
+            }), dst.end());
+        }
 
         std::unique_ptr<Node> _root; ///< The root node of the Radix Tree.
 
@@ -473,6 +520,107 @@ namespace qb::http {
                     };
 
             return find_match_recursive(_root.get(), 0, params);
+        }
+
+        /**
+         * @brief Matches only the request path and returns methods registered
+         *        at the resolved route node.
+         *
+         * This is used by RouterCore to distinguish a missing resource (404)
+         * from an existing resource reached with an unsupported method (405).
+         * It follows the same static > parameter > wildcard priority as
+         * `match()` and returns no value when the path shape does not resolve
+         * to a terminal route node with at least one handler.
+         */
+        [[nodiscard]] std::optional<PathAllowedMethodsInfo<SessionType> > allowed_methods(
+            std::string_view path_sv) const {
+            PathParameters params;
+            std::vector<std::string_view> segments = split_path_to_segments(path_sv);
+
+            std::function<std::optional<PathAllowedMethodsInfo<SessionType> >(const Node *, size_t, PathParameters)>
+                    find_path_recursive =
+                            [&](const Node *current_node_ptr, size_t segment_idx,
+                                PathParameters current_params)
+                        -> std::optional<PathAllowedMethodsInfo<SessionType> > {
+                        if (!current_node_ptr) {
+                            return std::nullopt;
+                        }
+
+                        std::optional<PathAllowedMethodsInfo<SessionType> > result;
+                        const auto merge_result =
+                                [&](std::optional<PathAllowedMethodsInfo<SessionType> > candidate) {
+                            if (!candidate || candidate->methods.empty()) {
+                                return;
+                            }
+                            if (!result) {
+                                result = std::move(candidate);
+                                std::sort(result->methods.begin(), result->methods.end(),
+                                          [](qb::http::method lhs, qb::http::method rhs) {
+                                              return method_slot(lhs) < method_slot(rhs);
+                                          });
+                                result->methods.erase(
+                                    std::unique(result->methods.begin(), result->methods.end(),
+                                                [](qb::http::method lhs, qb::http::method rhs) {
+                                                    return method_slot(lhs) == method_slot(rhs);
+                                                }),
+                                    result->methods.end());
+                            } else {
+                                merge_allowed_methods(result->methods, candidate->methods);
+                            }
+                        };
+
+                        if (segment_idx == segments.size()) {
+                            if (has_any_handler(*current_node_ptr)) {
+                                merge_result(PathAllowedMethodsInfo<SessionType>(
+                                    current_params, collect_allowed_methods(*current_node_ptr)));
+                            }
+                            if (current_node_ptr->wildcard_child &&
+                                has_any_handler(*current_node_ptr->wildcard_child)) {
+                                PathParameters final_params_for_wc = current_params;
+                                final_params_for_wc.set(current_node_ptr->wildcard_child->segment_match, "");
+                                merge_result(PathAllowedMethodsInfo<SessionType>(
+                                    std::move(final_params_for_wc),
+                                    collect_allowed_methods(*current_node_ptr->wildcard_child)));
+                            }
+                            return result;
+                        }
+
+                        const std::string_view &current_path_segment_view = segments[segment_idx];
+
+                        auto static_child_it = current_node_ptr->static_children.find(current_path_segment_view);
+                        if (static_child_it != current_node_ptr->static_children.end()) {
+                            merge_result(find_path_recursive(static_child_it->second.get(), segment_idx + 1,
+                                                             current_params));
+                        }
+
+                        if (current_node_ptr->param_child) {
+                            PathParameters params_for_param_branch = current_params;
+                            params_for_param_branch.set(current_node_ptr->param_name, current_path_segment_view);
+                            merge_result(find_path_recursive(current_node_ptr->param_child.get(), segment_idx + 1,
+                                                             std::move(params_for_param_branch)));
+                        }
+
+                        if (current_node_ptr->wildcard_child &&
+                            has_any_handler(*current_node_ptr->wildcard_child)) {
+                            const auto &first_seg = segments[segment_idx];
+                            const auto &last_seg = segments.back();
+                            const char *slice_begin = first_seg.data();
+                            const char *slice_end = last_seg.data() + last_seg.size();
+                            std::string_view wildcard_captured_view{
+                                slice_begin, static_cast<std::size_t>(slice_end - slice_begin)};
+
+                            PathParameters params_for_wildcard_branch = current_params;
+                            params_for_wildcard_branch.set(current_node_ptr->wildcard_child->segment_match,
+                                                           wildcard_captured_view);
+                            merge_result(PathAllowedMethodsInfo<SessionType>(
+                                std::move(params_for_wildcard_branch),
+                                collect_allowed_methods(*current_node_ptr->wildcard_child)));
+                        }
+
+                        return result;
+                    };
+
+            return find_path_recursive(_root.get(), 0, params);
         }
 
         /**

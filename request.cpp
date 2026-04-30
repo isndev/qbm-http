@@ -1,7 +1,9 @@
 #include "./request.h"
 #include "./1.1/protocol/base.h"  // For protocol_limits - SECURITY FIX: DoS protection
 #include "./chunk.h"
+#include "./utility.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <optional>
@@ -11,9 +13,35 @@
 
 namespace qb::allocator {
     namespace {
-        [[nodiscard]] bool header_is_within_limits(const std::string& name, const std::string& value) noexcept {
-            return name.size() <= qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
-                && value.size() <= qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH;
+        [[nodiscard]] bool is_header_name_char(const unsigned char c) noexcept {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') ||
+                   c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+                   c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
+                   c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+        }
+
+        [[nodiscard]] bool header_name_is_valid(const std::string& name) noexcept {
+            if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
+                return false;
+            }
+            return std::all_of(name.begin(), name.end(), [](const char c) {
+                return is_header_name_char(static_cast<unsigned char>(c));
+            });
+        }
+
+        [[nodiscard]] bool header_value_is_valid(const std::string& value) noexcept {
+            if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                return false;
+            }
+            return std::all_of(value.begin(), value.end(), [](const char c) {
+                const auto uc = static_cast<unsigned char>(c);
+                return c == '\t' || (uc >= 0x20 && uc != 0x7f);
+            });
+        }
+
+        [[nodiscard]] bool header_is_valid(const std::string& name, const std::string& value) noexcept {
+            return header_name_is_valid(name) && header_value_is_valid(value);
         }
 
         struct transfer_encoding_result {
@@ -107,8 +135,7 @@ namespace qb::allocator {
         // SECURITY FIX: Validate URL size to prevent DoS
         const std::size_t path_size = r.uri().path().size();
         const std::size_t query_size = r.uri().encoded_queries().size();
-        const std::size_t fragment_size = r.uri().fragment().size();
-        const std::size_t total_url_size = path_size + query_size + fragment_size;
+        const std::size_t total_url_size = path_size + query_size;
 
         if (total_url_size > qb::http::protocol_limits::MAX_URL_LENGTH) {
             this->clear(); throw std::length_error(
@@ -126,20 +153,43 @@ namespace qb::allocator {
                 + ").");
         }
 
+        const auto length = r.body().size();
+        const auto transfer = transfer_encoding(r);
+        if (!transfer.ok) {
+            this->clear();
+            throw std::length_error("qb::http::Request serialization: unsupported or malformed Transfer-Encoding.");
+        }
+
+        std::optional<std::uint64_t> content_length;
+        try {
+            content_length = declared_content_length(r);
+        } catch (...) {
+            this->clear();
+            throw;
+        }
+
+        if (transfer.chunked && content_length) {
+            this->clear();
+            throw std::length_error("qb::http::Request serialization: Content-Length is forbidden with Transfer-Encoding.");
+        }
+        if (!transfer.chunked && content_length && *content_length != length) {
+            this->clear();
+            throw std::length_error("qb::http::Request serialization: Content-Length does not match body size.");
+        }
+
         // Performance: Pre-calculate approximate output size to minimize allocations
         std::size_t estimated_size = 64; // Base request line size
         estimated_size += path_size;
         estimated_size += query_size + 1; // ?query
-        estimated_size += fragment_size + 1; // #fragment
 
         // Add headers size
         for (const auto &it: r.headers()) {
-            if (it.first.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
+            if (!header_name_is_valid(it.first)) {
                 this->clear(); throw std::length_error("qb::http::Request serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
             }
             estimated_size += it.first.size() + 2; // ": "
             for (const auto &value: it.second) {
-                if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                if (!header_value_is_valid(value)) {
                     this->clear(); throw std::length_error(
                         "qb::http::Request serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
                 }
@@ -159,44 +209,27 @@ namespace qb::allocator {
         // Reserve space in pipe to reduce allocations
         this->reserve(estimated_size);
         
-        // HTTP Request Line: METHOD PATH[?query][#fragment] HTTP/VERSION
+        // HTTP Request Line: METHOD PATH[?query] HTTP/VERSION.
+        // URI fragments are client-side identifiers and are never sent in an HTTP request-target.
         *this << ::http_method_name(r.method()) << qb::http::sep
                 << r.uri().path();
         if (!r.uri().encoded_queries().empty())
             *this << "?" << r.uri().encoded_queries();
-        if (!r.uri().fragment().empty())
-            *this << "#" << r.uri().fragment();
         *this << qb::http::sep << "HTTP/" << r.major_version << "." << r.minor_version
                 << qb::http::endl;
         
         // HTTP Headers
         for (const auto &it: r.headers()) {
             for (const auto &value: it.second) {
-                if (!header_is_within_limits(it.first, value)) {
+                if (!header_is_valid(it.first, value)) {
                     this->clear(); throw std::length_error(
-                        "qb::http::Request serialization: header name/value outside protocol_limits.");
+                        "qb::http::Request serialization: invalid header name/value.");
                 }
                 *this << it.first << ": " << value << qb::http::endl;
             }
         }
         
         // Body
-        const auto length = r.body().size();
-        const auto transfer = transfer_encoding(r);
-        if (!transfer.ok) {
-            this->clear();
-            throw std::length_error("qb::http::Request serialization: unsupported or malformed Transfer-Encoding.");
-        }
-        const auto content_length = declared_content_length(r);
-        if (transfer.chunked && content_length) {
-            this->clear();
-            throw std::length_error("qb::http::Request serialization: Content-Length is forbidden with Transfer-Encoding.");
-        }
-        if (!transfer.chunked && content_length && *content_length != length) {
-            this->clear();
-            throw std::length_error("qb::http::Request serialization: Content-Length does not match body size.");
-        }
-
         if (length) {
             if (transfer.chunked) {
                 *this << qb::http::endl

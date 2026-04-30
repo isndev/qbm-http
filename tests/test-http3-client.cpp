@@ -1869,6 +1869,39 @@ TEST(Http3ClientIntegrationTest, ClientRejectsOversizedOutgoingHeader) {
     server->close();
 }
 
+TEST(Http3ClientIntegrationTest, ClientRejectsInvalidOutgoingHeaderField) {
+    if (!certs_available()) {
+        GTEST_SKIP() << "test TLS certificates are unavailable";
+    }
+
+    qb::io::async::init();
+
+    auto server = qb::http3::make_server();
+    std::atomic<int> server_requests{0};
+    server->router().get("/guarded-invalid", [&server_requests](auto ctx) {
+        ++server_requests;
+        ctx->response().body() = "unexpected";
+        ctx->complete();
+    });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:32010"), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client("https://127.0.0.1:32010");
+    client->set_verify_peer(false);
+
+    qb::http::Request request{qb::io::uri("/guarded-invalid")};
+    request.set_header("x-injected", "safe\r\nInjected: bad");
+
+    auto response = qb::http::run_sync(client->push_request(std::move(request)));
+
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(server_requests.load(), 0);
+
+    client->disconnect();
+    server->close();
+}
+
 TEST(Http3ClientIntegrationTest, ServerResetsStreamForOversizedOutgoingHeader) {
     if (!certs_available()) {
         GTEST_SKIP() << "test TLS certificates are unavailable";
@@ -1893,6 +1926,36 @@ TEST(Http3ClientIntegrationTest, ServerResetsStreamForOversizedOutgoingHeader) {
 
     qb::http::Request request{qb::io::uri("/bad-response")};
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
+
+    EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
+    EXPECT_TRUE(server->is_open());
+
+    client->disconnect();
+    server->close();
+}
+
+TEST(Http3ClientIntegrationTest, ServerRejectsInvalidOutgoingHeaderField) {
+    if (!certs_available()) {
+        GTEST_SKIP() << "test TLS certificates are unavailable";
+    }
+
+    qb::io::async::init();
+
+    auto server = qb::http3::make_server();
+    server->router().get("/bad-response-field", [](auto ctx) {
+        ctx->response().set_header("x-injected", "safe\r\nInjected: bad");
+        ctx->response().body() = "not sent";
+        ctx->complete();
+    });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:32011"), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client("https://127.0.0.1:32011");
+    client->set_verify_peer(false);
+
+    auto response = qb::http::run_sync(
+        client->push_request(qb::http::Request{qb::io::uri("/bad-response-field")}));
 
     EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
     EXPECT_TRUE(server->is_open());

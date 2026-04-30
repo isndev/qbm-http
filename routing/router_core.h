@@ -22,6 +22,7 @@
 #include <optional>    // For std::optional (used in MatchedRouteInfo)
 #include <algorithm>   // For std::copy, std::reverse (though reverse not used here currently)
 #include <utility>     // For std::move
+#include <cctype>      // For std::isxdigit
 
 #include "./radix_tree.h"     // For RadixTree
 #include "./context.h"        // For Context
@@ -34,8 +35,6 @@
 #include "../response.h"      // For qb::http::Response
 #include "../types.h"         // For qb::http::method, http_status constants, HookPoint
 #include "../logger.h"        // For LOG_HTTP_DEBUG, LOG_HTTP_ERROR, LOG_HTTP_TRACE
-#include <qb/io/uri.h>        // For qb::io::uri::decode
-
 namespace qb::http {
     /**
      * @brief Core engine for the HTTP routing system.
@@ -46,7 +45,7 @@ namespace qb::http {
      * - During compilation, it resolves middleware chains for each route.
      * - Handling incoming requests by matching them against the `RadixTree`.
      * - Creating a `Context` for each request.
-     * - Dispatching matched requests (or 404/error scenarios) to the appropriate compiled task chain.
+     * - Dispatching matched requests, 405, 404, or error scenarios to the appropriate compiled task chain.
      * - Managing default and custom handlers for "404 Not Found" and general errors.
      *
      * This class is not intended for direct instantiation by users; it serves as the internal logic
@@ -64,9 +63,11 @@ namespace qb::http {
         RouteHandlerFn<SessionType> _default_not_found_handler; ///< User-defined or default handler for 404 Not Found.
         std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _compiled_not_found_tasks;
         ///< Compiled task chain for 404 responses.
+        std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _compiled_method_not_allowed_tasks;
+        ///< Compiled task chain for 405 Method Not Allowed responses.
         bool _custom_not_found_handler_set = false; ///< Flag indicating if a custom 404 handler was set.
 
-        // Cache of global middleware tasks (from the root group) to prepend to special handlers like 404.
+        // Cache of global middleware tasks (from the root group) to prepend to special handlers like 404/405.
         std::vector<std::shared_ptr<IAsyncTask<SessionType> > > _global_prefix_tasks_for_special_handlers;
 
         // Stores the user-defined task chain for handling errors signaled by AsyncTaskResult::ERROR.
@@ -75,6 +76,50 @@ namespace qb::http {
 
         /** @brief Callback invoked by the `Context` when request processing is fully finalized (after response is sent or context cancelled). */
         std::function<void(Context<SessionType> &)> _on_request_finalized_callback;
+        std::vector<typename Context<SessionType>::LifecycleHook> _router_lifecycle_hooks;
+
+        [[nodiscard]] static unsigned char hex_value(char c) noexcept {
+            if (c >= '0' && c <= '9') return static_cast<unsigned char>(c - '0');
+            if (c >= 'a' && c <= 'f') return static_cast<unsigned char>(10 + c - 'a');
+            if (c >= 'A' && c <= 'F') return static_cast<unsigned char>(10 + c - 'A');
+            return 0;
+        }
+
+        [[nodiscard]] static std::string decode_path_component(std::string_view input) {
+            std::string result;
+            result.reserve(input.size());
+            for (std::size_t i = 0; i < input.size(); ++i) {
+                const char c = input[i];
+                if (c == '%' && i + 2 < input.size() &&
+                    std::isxdigit(static_cast<unsigned char>(input[i + 1])) &&
+                    std::isxdigit(static_cast<unsigned char>(input[i + 2]))) {
+                    const unsigned char high = hex_value(input[i + 1]);
+                    const unsigned char low = hex_value(input[i + 2]);
+                    result.push_back(static_cast<char>((high << 4) | low));
+                    i += 2;
+                } else {
+                    result.push_back(c);
+                }
+            }
+            return result;
+        }
+
+        [[nodiscard]] static std::string allowed_header_value(const std::vector<qb::http::method> &methods) {
+            std::string allow;
+            for (const auto method: methods) {
+                if (!allow.empty()) {
+                    allow += ", ";
+                }
+                allow += std::to_string(method);
+            }
+            return allow;
+        }
+
+        static void decode_path_parameters(PathParameters &params) {
+            for (auto &param_pair: params) {
+                param_pair.second = decode_path_component(param_pair.second);
+            }
+        }
 
         /**
          * @brief (Private) Compiles the task chain for the "404 Not Found" handler.
@@ -103,6 +148,25 @@ namespace qb::http {
             );
         }
 
+        void compile_default_method_not_allowed_handler(
+            const std::vector<std::shared_ptr<IAsyncTask<SessionType> > > &global_prefix_tasks) {
+            _compiled_method_not_allowed_tasks.clear();
+            _compiled_method_not_allowed_tasks.reserve(global_prefix_tasks.size() + 1);
+            _compiled_method_not_allowed_tasks.insert(_compiled_method_not_allowed_tasks.end(),
+                                                      global_prefix_tasks.begin(),
+                                                      global_prefix_tasks.end());
+            _compiled_method_not_allowed_tasks.push_back(
+                std::make_shared<RouteLambdaTask<SessionType> >(
+                    [](std::shared_ptr<Context<SessionType> > ctx) {
+                        ctx->response().status() = qb::http::status::METHOD_NOT_ALLOWED;
+                        ctx->response().set_content_type("text/plain; charset=utf-8");
+                        ctx->response().body() = "405 Method Not Allowed";
+                        ctx->complete(AsyncTaskResult::COMPLETE);
+                    },
+                    "DefaultMethodNotAllowedHandler")
+            );
+        }
+
     public:
         /**
          * @brief Constructs the `RouterCore`.
@@ -113,6 +177,7 @@ namespace qb::http {
         explicit RouterCore(std::function<void(Context<SessionType> &)> on_request_finalized_cb)
             : _on_request_finalized_callback(std::move(on_request_finalized_cb)) {
             compile_default_not_found_handler({}); // Initial compilation with no global tasks yet.
+            compile_default_method_not_allowed_handler({});
         }
 
         /**
@@ -133,7 +198,7 @@ namespace qb::http {
          * starts processing requests. It recursively traverses the handler node hierarchy, builds full
          * paths, combines middleware, and registers the final task chains for each endpoint.
          * It also determines global middleware (from the root group, if any) to apply to special handlers
-         * like the 404 handler.
+         * like the 404 and 405 handlers.
          */
         void compile_all_routes() {
             _radix_tree.clear();
@@ -166,8 +231,9 @@ namespace qb::http {
                 }
             }
 
-            // Re-compile the default 404 handler with any global prefix tasks found.
+            // Re-compile the default special handlers with any global prefix tasks found.
             compile_default_not_found_handler(_global_prefix_tasks_for_special_handlers);
+            compile_default_method_not_allowed_handler(_global_prefix_tasks_for_special_handlers);
         }
 
         /**
@@ -209,6 +275,12 @@ namespace qb::http {
             _user_error_chain_explicitly_set = true;
         }
 
+        void add_lifecycle_hook(typename Context<SessionType>::LifecycleHook hook_fn) {
+            if (hook_fn) {
+                _router_lifecycle_hooks.push_back(std::move(hook_fn));
+            }
+        }
+
         /**
          * @brief Retrieves the compiled, user-defined error handling task chain.
          * @return A vector of `IAsyncTask` shared pointers. Returns an empty vector if no user-defined error chain was set.
@@ -242,13 +314,17 @@ namespace qb::http {
          *    a. Decodes extracted path parameters and sets them in the context.
          *    b. Sets the context's processing phase to `NORMAL_CHAIN`.
          *    c. Retrieves the compiled task chain for the matched route.
-         * 5. If no match is found:
+         * 5. If the path exists but not for the request method:
+         *    a. Sets the context's processing phase to `METHOD_NOT_ALLOWED_CHAIN`.
+         *    b. Sets the RFC `Allow` response header.
+         *    c. Uses the compiled "405 Method Not Allowed" task chain.
+         * 6. If no match is found:
          *    a. Sets the context's processing phase to `NOT_FOUND_CHAIN`.
          *    b. Uses the compiled "404 Not Found" task chain.
-         * 6. If the selected task chain is empty (which should be a critical error if defaults are working),
+         * 7. If the selected task chain is empty (which should be a critical error if defaults are working),
          *    it sets a 500 error and completes the context.
-         * 7. Executes `PRE_HANDLER_EXECUTION` lifecycle hooks.
-         * 8. Starts the execution of the selected task chain on the context.
+         * 8. Executes `PRE_HANDLER_EXECUTION` lifecycle hooks.
+         * 9. Starts the execution of the selected task chain on the context.
          *
          * @param session_ptr A `std::shared_ptr` to the client session handling this request.
          * @param request_obj The incoming `qb::http::Request` object (moved into the context).
@@ -269,6 +345,9 @@ namespace qb::http {
                 _on_request_finalized_callback,
                 this->weak_from_this() // Pass weak_ptr of RouterCore to Context
             );
+            for (const auto &hook: _router_lifecycle_hooks) {
+                ctx->add_lifecycle_hook(hook);
+            }
 
             ctx->execute_hook(qb::http::HookPoint::PRE_ROUTING);
 
@@ -305,13 +384,11 @@ namespace qb::http {
                 // Decode URI-encoded path parameters in place.
                 // `RadixTree::match()` stores raw (non-decoded) segments in `PathParameters`;
                 // we decode them here once so middleware / handlers see %20 -> space, etc.
-                // `uri::decode()` is idempotent so double-decoding is harmless but avoided.
+                // Path components keep '+' literal; only query/form decoding maps '+' to space.
                 // NOTE: Decoding only happens when a parameterised route matches – static
                 // routes never allocate decoded strings.
                 if (!decoded_params.empty()) {
-                    for (auto &param_pair: decoded_params) {
-                        param_pair.second = qb::io::uri::decode(param_pair.second);
-                    }
+                    decode_path_parameters(decoded_params);
                 }
                 ctx->set_path_parameters(std::move(decoded_params));
 
@@ -324,6 +401,23 @@ namespace qb::http {
                 LOG_HTTP_TRACE("Route matched with " << decoded_params.size() << " path parameters");
                 
                 ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::NORMAL_CHAIN);
+            } else if (auto allowed_info = _radix_tree.allowed_methods(request_path_sv);
+                       allowed_info && !allowed_info->methods.empty()) {
+                PathParameters decoded_params = std::move(allowed_info->path_parameters);
+                if (!decoded_params.empty()) {
+                    decode_path_parameters(decoded_params);
+                }
+                ctx->set_path_parameters(std::move(decoded_params));
+
+                const auto allow = allowed_header_value(allowed_info->methods);
+                ctx->response().status() = qb::http::status::METHOD_NOT_ALLOWED;
+                ctx->response().set_header("Allow", allow);
+                tasks_to_execute_vec = _compiled_method_not_allowed_tasks;
+
+                LOG_HTTP_DEBUG("Route path matched but method is not allowed for: "
+                    << std::to_string(request_method) << " " << request_path_sv << " (405; Allow: " << allow << ")");
+
+                ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::METHOD_NOT_ALLOWED_CHAIN);
             } else {
                 // No route matched, use the compiled 404 tasks
                 tasks_to_execute_vec = _compiled_not_found_tasks;
@@ -363,9 +457,12 @@ namespace qb::http {
             _custom_not_found_handler_set = false;
             _default_not_found_handler = nullptr; // Will cause re-creation of default handler
             _global_prefix_tasks_for_special_handlers.clear();
+            _compiled_method_not_allowed_tasks.clear();
             _user_defined_error_chain.clear();
             _user_error_chain_explicitly_set = false;
+            _router_lifecycle_hooks.clear();
             compile_default_not_found_handler({}); // Re-compile 404 with no global tasks for now.
+            compile_default_method_not_allowed_handler({});
         }
     }; // End RouterCore
 } // namespace qb::http 

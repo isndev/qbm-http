@@ -121,7 +121,8 @@ Asynchronous tasks (e.g., those using `qb::io::async::callback` or interacting w
 
 The `Context` allows registering custom functions (`LifecycleHook`) to be executed at specific points in its lifecycle. This is useful for cross-cutting concerns that need to tap into different stages of request processing without being a full middleware in the main chain.
 
--   **`add_lifecycle_hook(LifecycleHook hook_fn)`**: Registers a hook function. The function signature is `void(Context<SessionType>& context, HookPoint point)`.
+-   **`add_lifecycle_hook(LifecycleHook hook_fn)`**: Registers a hook function on an existing context. The function signature is `void(Context<SessionType>& context, HookPoint point)`.
+-   **`Router<SessionType>::add_lifecycle_hook(LifecycleHook hook_fn)`**: Registers a router-level hook copied into every new context before `PRE_ROUTING` fires.
 -   **`execute_hook(HookPoint point)`**: Called internally by the `Context` or `RouterCore` to trigger all registered hooks for a given `HookPoint`.
 
 `HookPoint` enum values include:
@@ -129,7 +130,7 @@ The `Context` allows registering custom functions (`LifecycleHook`) to be execut
 -   `PRE_ROUTING`: Before the router attempts to match the request to a route. Useful for early request modifications or logging raw requests.
 -   `PRE_HANDLER_EXECUTION`: Just before the main task chain (middleware + route handler) for the matched route begins. Good for setup tasks that depend on the matched route (though route info isn't directly in context yet, path params are).
 -   `POST_HANDLER_EXECUTION`: After the main task chain (or an error chain derived from it) finishes its logical processing, but before the response is sent. Useful for final modifications based on the outcome or for metrics gathering.
--   `PRE_RESPONSE_SEND`: Immediately before the `_on_finalized_callback` (which typically sends the response) is invoked. Ideal for adding final headers like `Date` or `Server`, or for `TimingMiddleware` to record the end time.
+-   `PRE_RESPONSE_SEND`: Immediately before the response is serialized/sent by the router finalization callback. Ideal for adding final headers like `Date` or `Server`, or for `TimingMiddleware` to record the end time.
 -   `POST_RESPONSE_SEND`: (Conceptual) Would be called after the response data has been successfully written to the transport. `qb-http`'s `Context` itself doesn't directly manage this; it would be part of the `SessionType` or I/O layer's responsibility.
 -   `REQUEST_COMPLETE`: When all processing for the request is finished and the `Context` shared_ptr is about to be destroyed. Ideal for final logging (like `LoggingMiddleware` does for responses) or releasing request-scoped resources.
 
@@ -159,7 +160,7 @@ ctx->add_lifecycle_hook([](qb::http::Context<MySession>& current_ctx, qb::http::
     -   `COMPLETE` or `ERROR` (if no error chain or error chain completes) or `CANCELLED` leads to finalization.
 7.  `POST_HANDLER_EXECUTION` hooks execute after the main chain (or error chain derived from it) finishes its logical processing but before the final response callback.
 8.  **Finalization Callback**: The `_on_finalized_callback` (provided to `Context` by `RouterCore` during construction) is invoked. This callback is typically responsible for sending the `ctx->response()` back to the client via the `SessionType` object.
-9.  `PRE_RESPONSE_SEND` hooks execute just before this callback sends the data.
+9.  `PRE_RESPONSE_SEND` hooks execute inside the default router finalization callback, immediately before it sends the data.
 10. `POST_RESPONSE_SEND` hooks (if implemented by session/transport layer, not directly by context) might execute after data is written.
 11. **Destruction**: `REQUEST_COMPLETE` hooks execute when the `Context` shared_ptr is about to be destroyed.
 
@@ -169,4 +170,4 @@ Previous: [Custom Middleware](./09-custom-middleware.md)
 Next: [Authentication System](./11-authentication.md)
 
 ---
-Return to [Index](./README.md) 
+Return to [Index](./README.md)

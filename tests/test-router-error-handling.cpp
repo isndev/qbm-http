@@ -566,8 +566,8 @@ TEST_F(RouterErrorHandlingTest, ExceptionInMiddlewareTriggersErrorChain) {
             [this](std::shared_ptr<qb::http::Context<MockErrorHandlingSession> > ctx,
                    std::function<void()> /*next_fn*/) {
         _session_ptr->record_task_execution("ThrowingMiddlewareLambda");
-        // No need to add to _task_executor, FunctionalMiddleware's handle calls this directly.
-        // The MiddlewareTask wrapper around FunctionalMiddleware will catch the exception.
+        // No need to add to _task_executor; FunctionalMiddleware catches user exceptions
+        // before deferred finalization can publish a downstream response.
         throw std::runtime_error("Exception from middleware lambda");
     };
     auto throwing_functional_middleware = std::make_shared<qb::http::FunctionalMiddleware<MockErrorHandlingSession> >(

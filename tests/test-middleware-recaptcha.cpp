@@ -8,7 +8,6 @@
 #include <vector>
 #include <functional>
 #include <sstream>
-#include <atomic> // For std::atomic_bool to signal async completion
 
 // --- Mock Session for RecaptchaMiddleware Tests ---
 struct MockRecaptchaSession {
@@ -43,24 +42,18 @@ class RecaptchaMiddlewareTest : public ::testing::Test {
 protected:
     std::shared_ptr<MockRecaptchaSession> _session;
     std::unique_ptr<qb::http::Router<MockRecaptchaSession> > _router;
-    // For reCAPTCHA, the middleware itself makes an async HTTP call.
-    // We need a way to wait for this internal call to complete in tests.
-    // A simple TaskExecutor isn't sufficient if qb::http::REQUEST is truly async.
-    // For now, tests might be more conceptual or rely on external server mocks for full validation.
-    // Let's use a simple flag for basic async completion indication.
-    std::atomic<bool> _async_recap_http_call_completed{false};
 
 
     void SetUp() override {
         _session = std::make_shared<MockRecaptchaSession>();
         _router = std::make_unique<qb::http::Router<MockRecaptchaSession> >();
-        _async_recap_http_call_completed = false;
     }
 
     qb::http::Request create_request(const std::string &token_value = "",
                                      qb::http::RecaptchaOptions::TokenLocation location =
                                              qb::http::RecaptchaOptions::TokenLocation::Body,
-                                     const std::string &field_name = "g-recaptcha-response") {
+                                     const std::string &field_name = "g-recaptcha-response",
+                                     bool body_as_form = false) {
         qb::http::Request req;
         req.method() = qb::http::method::POST; // Often used with forms needing reCAPTCHA
         req.uri() = qb::io::uri("/submit_form");
@@ -71,14 +64,17 @@ protected:
                     req.set_header(field_name, token_value);
                     break;
                 case qb::http::RecaptchaOptions::TokenLocation::Body:
-                    // For simplicity, assuming JSON body for testing. Real forms are x-www-form-urlencoded.
-                    // The adapted RecaptchaMiddleware expects to parse JSON body if location is Body.
-                {
-                    qb::json body_json;
-                    body_json[field_name] = token_value;
-                    req.body() = body_json.dump();
-                    req.set_header("Content-Type", "application/json");
-                }
+                    if (body_as_form) {
+                        qb::http::Form form;
+                        form.add(field_name, token_value);
+                        req.body() = std::move(form);
+                        req.set_header("Content-Type", "application/x-www-form-urlencoded");
+                    } else {
+                        qb::json body_json;
+                        body_json[field_name] = token_value;
+                        req.body() = body_json.dump();
+                        req.set_header("Content-Type", "application/json");
+                    }
                 break;
                 case qb::http::RecaptchaOptions::TokenLocation::Query:
                     req.uri() = qb::io::uri("/submit_form?" + field_name + "=" + token_value);
@@ -110,38 +106,12 @@ protected:
         _router->compile();
 
         _session->reset();
-        _async_recap_http_call_completed = false;
 
-        // The route call will trigger RecaptchaMiddleware, which makes an async HTTP call.
-        // The lambda inside RecaptchaMiddleware will eventually call ctx->complete().
-        // In a real async environment, we'd await this. In test, it's harder without hooks into qb::http::REQUEST.
+        // Tests inject a deterministic verification client, so the async callback
+        // completes synchronously without contacting Google.
         _router->route(_session, std::move(request));
-
-        // HACKY WAIT: This is not ideal for unit tests. 
-        // A better approach involves a mock HTTP client injectable into RecaptchaMiddleware
-        // or a promise/future mechanism tied to the qb::http::REQUEST call.
-        // For now, we assume the internal HTTP client call is fast enough for this example or runs on same thread for test.
-        // If qb::http::REQUEST is truly async and uses a different thread/event loop, this test will be flaky.
-        int max_wait_cycles = 100; // Approx 1 second if 10ms sleep
-        while (!_session->_response.has_header("Content-Type") && --max_wait_cycles > 0) {
-            // Wait for response to be populated
-            if (_session->_response.status() != 0 && _session->_response.status() != qb::http::status::CONTINUE)
-                break; // Early exit if status set
-            // std::this_thread::sleep_for(std::chrono::milliseconds(10)); 
-            // Due to potential issues with sleep in single-threaded test runners or GTest, 
-            // this active wait is problematic. Test will rely on qb::http::REQUEST being synchronous for now for simplicity.
-            // If it's truly async, this test structure for Recaptcha needs a mock HTTP client.
-        }
-        if (max_wait_cycles == 0) {
-            // std::cerr << "Warning: RecaptchaMiddlewareTest timed out waiting for response population." << std::endl;
-        }
     }
 };
-
-// --- Test Cases ---
-// NOTE: These tests are conceptual. Actual execution against Google's API is not performed.
-// They test the middleware's logic assuming certain responses from a mocked qb::http::REQUEST.
-// To make these tests robust, qb::http::REQUEST would need to be mockable.
 
 TEST_F(RecaptchaMiddlewareTest, MissingToken) {
     qb::http::RecaptchaOptions opts("test_secret");
@@ -162,74 +132,107 @@ TEST(RecaptchaRequestEncoding, VerificationBodyEscapesFormReservedCharacters) {
               "secret=secret%26with%3Dreserved%2Bchars%25&response=token%2Bwith%26separators%3Dand%25percent");
 }
 
-// For the following tests (ValidToken, InvalidTokenScore, etc.), 
-// we would need to mock the qb::http::POST call made by RecaptchaMiddleware.
-// Without a mocking framework for qb::http::POST, these tests will make real HTTP calls
-// or fail if network is unavailable / secret is invalid for Google.
-
-// Placeholder for a test that would need mocking:
-TEST_F(RecaptchaMiddlewareTest, ValidTokenPasses_Conceptual) {
-    // This test requires qb::http::POST to be mocked to return a successful reCAPTCHA verification.
-    // Example of what would be asserted if mocking was in place:
-    /*
+TEST_F(RecaptchaMiddlewareTest, ValidTokenPassesWithInjectedVerifier) {
     qb::http::RecaptchaOptions opts("fake_secret_for_mocked_success");
     opts.min_score(0.5f);
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
-    
-    // Setup mock for qb::http::POST to return:
-    // {"success": true, "score": 0.9, "action": "submit", "hostname": "test.com"}
-    
+    bool verifier_called = false;
+    recap_mw->verification_client([&](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        verifier_called = true;
+        EXPECT_EQ(request.method(), qb::http::method::POST);
+        EXPECT_NE(request.body().as<std::string>().find("response=valid_mocked_token"), std::string::npos);
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body() = R"({"success":true,"score":0.9,"action":"submit","hostname":"test.com"})";
+        cb(qb::http::async::Reply{std::move(request), std::move(response)});
+    });
+
     configure_router_and_run(recap_mw, create_request("valid_mocked_token"));
 
+    EXPECT_TRUE(verifier_called);
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
     EXPECT_TRUE(_session->_recaptcha_result_in_context->success);
     EXPECT_GE(_session->_recaptcha_result_in_context->score, 0.5f);
-    */
-    GTEST_SKIP() << "Skipping ValidTokenPasses_Conceptual as it requires mocking qb::http::POST";
 }
 
-TEST_F(RecaptchaMiddlewareTest, TokenScoreTooLow_Conceptual) {
-    // This test requires qb::http::POST to be mocked.
-    // Mock would return: {"success": true, "score": 0.3}
-    /*
+TEST_F(RecaptchaMiddlewareTest, TokenExtractionFromUrlEncodedFormBody) {
+    qb::http::RecaptchaOptions opts("test_secret");
+    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    recap_mw->verification_client([](qb::http::Request request,
+                                     qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        EXPECT_NE(request.body().as<std::string>().find("response=form%2Btoken%26reserved"),
+                  std::string::npos);
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body() = R"({"success":true,"score":0.9})";
+        cb(qb::http::async::Reply{std::move(request), std::move(response)});
+    });
+
+    configure_router_and_run(recap_mw,
+                             create_request("form+token&reserved",
+                                            qb::http::RecaptchaOptions::TokenLocation::Body,
+                                            "g-recaptcha-response",
+                                            true));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
+TEST_F(RecaptchaMiddlewareTest, TokenScoreTooLowRejectsWithInjectedVerifier) {
     qb::http::RecaptchaOptions opts("fake_secret_for_mocked_low_score");
     opts.min_score(0.7f);
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body() = R"({"success":true,"score":0.3})";
+        cb(qb::http::async::Reply{std::move(request), std::move(response)});
+    });
 
     configure_router_and_run(recap_mw, create_request("mocked_token_low_score"));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("reCAPTCHA verification failed"), std::string::npos);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("below threshold"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
-    EXPECT_TRUE(_session->_recaptcha_result_in_context->success); // Google said success
-    EXPECT_LT(_session->_recaptcha_result_in_context->score, 0.7f);
-    */
-    GTEST_SKIP() << "Skipping TokenScoreTooLow_Conceptual as it requires mocking qb::http::POST";
 }
 
-TEST_F(RecaptchaMiddlewareTest, GoogleApiError_Conceptual) {
-    // This test requires qb::http::POST to be mocked.
-    // Mock would return: {"success": false, "error-codes": ["invalid-input-secret"]}
-    /*
+TEST_F(RecaptchaMiddlewareTest, GoogleApiErrorRejectsWithInjectedVerifier) {
     qb::http::RecaptchaOptions opts("invalid_secret_for_google_error");
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body() = R"({"success":false,"error-codes":["invalid-input-secret"]})";
+        cb(qb::http::async::Reply{std::move(request), std::move(response)});
+    });
 
     configure_router_and_run(recap_mw, create_request("mocked_token_google_error"));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_NE(_session->_response.body().as<std::string>().find("invalid-input-secret"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_recaptcha_result_in_context.has_value());
-    EXPECT_FALSE(_session->_recaptcha_result_in_context->success);
-    */
-    GTEST_SKIP() << "Skipping GoogleApiError_Conceptual as it requires mocking qb::http::POST";
 }
 
 TEST_F(RecaptchaMiddlewareTest, TokenExtractionFromHeader) {
-    GTEST_SKIP() << "Skipping TokenExtractionFromHeader because it requires a mockable HTTP client";
-}
+    qb::http::RecaptchaOptions opts("test_secret");
+    opts.from_header("X-reCAPTCHA-Token");
+    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        EXPECT_NE(request.body().as<std::string>().find("response=header_token"), std::string::npos);
 
-// Similar conceptual tests for TokenFromQuery and TokenFromBody (if JSON body parsing is robust) 
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body() = R"({"success":true,"score":1.0})";
+        cb(qb::http::async::Reply{std::move(request), std::move(response)});
+    });
+
+    configure_router_and_run(recap_mw, create_request("header_token", qb::http::RecaptchaOptions::TokenLocation::Header,
+                                                      "X-reCAPTCHA-Token"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_final_handler_called);
+}

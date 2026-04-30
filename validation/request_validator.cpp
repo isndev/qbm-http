@@ -343,8 +343,16 @@ namespace qb::http::validation {
                 }
             }
             result.merge(path_param_val_result);
-        } else {
-            // PathParam section SKIPPED (logging removed)
+        } else if (_path_param_validator) {
+            Result path_param_val_result = result.make_child();
+            for (const auto &[param_name_defined, rules]: _path_param_validator->get_param_definitions()) {
+                (void)param_name_defined;
+                path_param_val_result.add_error("path." + rules.name, "required",
+                                                "Path parameter context is required for validation.",
+                                                nullptr);
+            }
+            result.merge(path_param_val_result);
+            overall_valid = false;
         }
         return overall_valid;
     }

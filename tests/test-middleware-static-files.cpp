@@ -76,6 +76,8 @@ protected:
         create_test_file(_test_root_dir / "empty.txt", "");
         // Files for special character tests in directory listing
         create_test_file(_test_root_dir / "file with spaces.txt", "File with spaces in name");
+        create_test_file(_test_root_dir / "file plus.txt", "File with literal space");
+        create_test_file(_test_root_dir / "file+plus.txt", "File with literal plus");
         create_test_file(_test_root_dir / "file&name.html", "File with ampersand");
         create_test_file(_test_root_dir / "file'quote.txt", "File with single quote");
 #ifndef _WIN32
@@ -206,6 +208,23 @@ TEST_F(StaticFilesMiddlewareTest, ServeTextFile) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+TEST_F(StaticFilesMiddlewareTest, PathDecodePreservesLiteralPlus) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file+plus.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "File with literal plus");
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file%2Bplus.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "File with literal plus");
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file%20plus.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "File with literal space");
+}
+
 TEST_F(StaticFilesMiddlewareTest, ServeImageFile) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
@@ -264,6 +283,18 @@ TEST_F(StaticFilesMiddlewareTest, PathPrefixNotMatchingContinue) {
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
+TEST_F(StaticFilesMiddlewareTest, PathPrefixRequiresSegmentBoundary) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_path_prefix_to_strip("/static");
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/static_assets/file1.txt"), false);
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Passthrough handler reached.");
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
 
 TEST_F(StaticFilesMiddlewareTest, FileNotFound) {
     qb::http::StaticFilesOptions options(_test_root_dir);
@@ -296,6 +327,23 @@ TEST_F(StaticFilesMiddlewareTest, HeadRequest) {
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")),
               std::to_string(std::string("Contents of file1.txt").length()));
     EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, NonGetHeadMethodsPassThrough) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    auto sf_mw = qb::http::static_files_middleware<MockStaticFilesSession>(options);
+
+    _router = std::make_unique<qb::http::Router<MockStaticFilesSession> >();
+    _router->use(sf_mw);
+    _router->post("/file1.txt", passthrough_expectant_handler());
+    _router->compile();
+
+    _session->reset();
+    _router->route(_session, create_request(qb::http::method::POST, "/file1.txt"));
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Passthrough handler reached.");
+    EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(StaticFilesMiddlewareTest, ETagAndIfNoneMatch) {

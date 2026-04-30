@@ -906,13 +906,49 @@ TEST_F(RouterMiddlewareTest, FunctionalMiddlewareAroundBehavior) {
     // Verify the execution trace to show the pre and post processing code ran in the middleware lambda
     EXPECT_EQ(_mock_session->get_trace(), "around_mw_pre_next_fn;inner_mw;final_around_handler;around_mw_post_next_fn");
 
-    // Explicitly check that X-Post-Process-On-Ctx is NOT on the session's final response,
-    // confirming current behavior where late modifications to ctx->response() are not reflected
-    // in _mock_session->_response after finalize_processing.
-    EXPECT_TRUE(_mock_session->_response.header("X-Post-Process-On-Ctx").empty());
+    // Synchronous downstream completion is deferred until the functional middleware
+    // returns, so post-next response mutations are visible in the final response.
+    EXPECT_EQ(_mock_session->_response.header("X-Post-Process-On-Ctx"), "handled_by_around_mw_on_ctx");
 
     // Also check that the original X-Post-Process (if it was ever set on session response) is not there
     EXPECT_TRUE(_mock_session->_response.header("X-Post-Process").empty());
+}
+
+TEST_F(RouterMiddlewareTest, FunctionalMiddlewarePostNextExceptionBecomesErrorBeforeFinalization) {
+    _router.use(
+        std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession> >(
+            [](auto ctx, auto next_fn) {
+                if (ctx && ctx->session()) {
+                    ctx->session()->trace("post_next_throw_pre");
+                }
+                next_fn();
+                if (ctx && ctx->session()) {
+                    ctx->session()->trace("post_next_throw_post");
+                }
+                throw std::runtime_error("post-next failure");
+            },
+            "PostNextThrowingFunctionalMiddleware"
+        )
+    );
+
+    _router.get("/post-next-throws", [](std::shared_ptr<qb::http::Context<MockMiddlewareSession> > ctx) {
+        if (ctx && ctx->session()) {
+            ctx->session()->trace("post_next_throw_handler");
+            ctx->session()->_final_handler_called = true;
+        }
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body() = "ok before post-next throw";
+        ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+    });
+
+    _router.compile();
+    _router.route(_mock_session, create_request(qb::http::method::GET, "/post-next-throws"));
+
+    EXPECT_TRUE(_mock_session->_final_handler_called);
+    EXPECT_EQ(_mock_session->get_trace(),
+              "post_next_throw_pre;post_next_throw_handler;post_next_throw_post");
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Internal Server Error");
 }
 
 // Test for FunctionalMiddleware conditionally exiting early

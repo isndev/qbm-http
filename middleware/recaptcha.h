@@ -29,6 +29,7 @@
 
 #include "../routing/middleware.h" // For IMiddleware, Context, AsyncTaskResult
 #include "../http.h"               // For qb::http::REQUEST (async client call), Request, Response, qb::http::status
+#include "../form.h"               // For x-www-form-urlencoded body token extraction
 
 
 namespace qb::http {
@@ -215,6 +216,8 @@ namespace qb::http {
     public:
         /** @brief Convenience alias for a shared pointer to the request `Context`. */
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
+        using VerificationCallback = std::function<void(qb::http::async::Reply &&)>;
+        using VerificationClient = std::function<void(qb::http::Request, VerificationCallback)>;
 
         /**
          * @brief Constructs `RecaptchaMiddleware` with specified `RecaptchaOptions`.
@@ -315,36 +318,39 @@ namespace qb::http {
             api_req.body() = request_body_str;
 
             auto shared_ctx = ctx; // Capture context by shared_ptr for async callback
-            // Using qb::http::request for the async call (assuming it's the correct alias from http.h)
-            qb::http::REQUEST(std::move(api_req),
-                              [shared_ctx, this](qb::http::async::Reply &&api_reply) mutable {
-                                  // The request may have been cancelled while the outbound verification
-                                  // call was in flight. In that case, do not mutate the response/context.
-                                  if (!shared_ctx || shared_ctx->is_cancelled() || shared_ctx->is_completed()) {
-                                      return;
-                                  }
+            auto options_snapshot = _options;
+            auto completion = [shared_ctx, options_snapshot](qb::http::async::Reply &&api_reply) mutable {
+                // The request may have been cancelled while the outbound verification
+                // call was in flight. In that case, do not mutate the response/context.
+                if (!shared_ctx || shared_ctx->is_cancelled() || shared_ctx->is_completed()) {
+                    return;
+                }
 
-                                  RecaptchaResult verification_result = parse_google_recaptcha_response(
-                                      api_reply.response);
+                RecaptchaResult verification_result = parse_google_recaptcha_response(api_reply.response);
 
-                                  shared_ctx->template set<RecaptchaResult>("recaptcha_result", verification_result);
+                shared_ctx->template set<RecaptchaResult>("recaptcha_result", verification_result);
 
-                                  if (!verification_result.success || verification_result.score < _options->
-                                      get_min_score()) {
-                                      std::string error_detail = "Verification failed.";
-                                      if (!verification_result.success && !verification_result.error_codes.empty()) {
-                                          error_detail += " Errors: " + verification_result.error_codes;
-                                      } else if (verification_result.score < _options->get_min_score()) {
-                                          error_detail += " Score (" + std::to_string(verification_result.score) +
-                                                  ") is below threshold (" + std::to_string(_options->get_min_score()) +
-                                                  ").";
-                                      }
-                                      set_error_response(shared_ctx, qb::http::status::FORBIDDEN,
-                                                         "reCAPTCHA challenge failed", error_detail);
-                                  } else {
-                                      shared_ctx->complete(AsyncTaskResult::CONTINUE);
-                                  }
-                              }); // Timeout for this external call can be configured if qb::http::request supports it.
+                if (!verification_result.success || verification_result.score < options_snapshot->get_min_score()) {
+                    std::string error_detail = "Verification failed.";
+                    if (!verification_result.success && !verification_result.error_codes.empty()) {
+                        error_detail += " Errors: " + verification_result.error_codes;
+                    } else if (verification_result.score < options_snapshot->get_min_score()) {
+                        error_detail += " Score (" + std::to_string(verification_result.score) +
+                                ") is below threshold (" + std::to_string(options_snapshot->get_min_score()) +
+                                ").";
+                    }
+                    set_error_response(shared_ctx, qb::http::status::FORBIDDEN,
+                                       "reCAPTCHA challenge failed", error_detail);
+                } else {
+                    shared_ctx->complete(AsyncTaskResult::CONTINUE);
+                }
+            };
+
+            if (_verification_client) {
+                _verification_client(std::move(api_req), std::move(completion));
+            } else {
+                qb::http::REQUEST(std::move(api_req), std::move(completion));
+            }
         }
 
         /** @brief Gets the configured name of this middleware instance. */
@@ -352,14 +358,22 @@ namespace qb::http {
             return _name;
         }
 
-        /** 
-         * @brief Handles cancellation of the request processing.
-         * @note TODO: Implement cancellation of the in-flight HTTP request to Google if the 
-         *        underlying `qb::http::request` mechanism supports cancellation tokens or handles.
+        /**
+         * @brief Overrides the outbound verification client.
+         *
+         * This is primarily useful for deterministic tests or for applications that route
+         * outbound HTTP through their own service client. If unset, the middleware uses
+         * `qb::http::REQUEST`.
          */
+        RecaptchaMiddleware &verification_client(VerificationClient client) {
+            _verification_client = std::move(client);
+            return *this;
+        }
+
+        /** @brief Handles cancellation of the request processing. */
         void cancel() noexcept override {
-            // If _http_request_handle (a hypothetical handle to the async qb::http::request call)
-            // is stored, attempt to cancel it here. Currently, this is a no-op.
+            // The default qb::http::REQUEST helper is fire-and-callback based and does not
+            // expose a cancellation handle. The callback guards `Context::is_cancelled()`.
         }
 
         /** @brief Gets a constant reference to the current `RecaptchaOptions` used by this middleware. */
@@ -386,7 +400,7 @@ namespace qb::http {
     private:
         std::shared_ptr<RecaptchaOptions> _options; ///< Shared pointer to the reCAPTCHA configuration options.
         std::string _name; ///< Name of this middleware instance.
-        // std::shared_ptr<SomeCancellableHttpRequestHandle> _http_request_handle; // Example for future cancellation support
+        VerificationClient _verification_client;
 
         /** 
          * @brief (Internal) Extracts the reCAPTCHA token string from the HTTP request based on configured options.
@@ -405,7 +419,7 @@ namespace qb::http {
                 case RecaptchaOptions::TokenLocation::Body:
                     try {
                         if (!request.body().empty()) {
-                            // Assuming body is JSON. For form-urlencoded, specific parsing would be needed.
+                            // JSON APIs commonly send {"g-recaptcha-response":"..."}.
                             auto body_json = qb::json::parse(request.body().template as<std::string_view>());
                             if (body_json.is_object() && body_json.contains(field_name) && body_json[field_name].
                                 is_string()) {
@@ -413,7 +427,18 @@ namespace qb::http {
                             }
                         }
                     } catch (const qb::json::exception & /*e*/) {
-                        // JSON parsing failed or field not found/not string. Return nullopt.
+                        // Fall through to HTML form parsing below.
+                    }
+                    try {
+                        if (!request.body().empty()) {
+                            // Browser form submissions usually send application/x-www-form-urlencoded.
+                            auto form_body = request.body().template as<Form>();
+                            if (auto value = form_body.get_first(field_name); value && !value->empty()) {
+                                return value;
+                            }
+                        }
+                    } catch (...) {
+                        // Malformed/unsupported body format: treat as missing token.
                     }
                     break;
                 case RecaptchaOptions::TokenLocation::Query: {
@@ -431,7 +456,7 @@ namespace qb::http {
          * @param google_response The `qb::http::Response` received from the Google API.
          * @return A `RecaptchaResult` structure populated with data from the API response.
          */
-        [[nodiscard]] RecaptchaResult parse_google_recaptcha_response(const qb::http::Response &google_response) const {
+        [[nodiscard]] static RecaptchaResult parse_google_recaptcha_response(const qb::http::Response &google_response) {
             RecaptchaResult result;
             if (google_response.status() != qb::http::status::OK) {
                 result.success = false;
@@ -484,8 +509,8 @@ namespace qb::http {
          * @param error_message The main error message.
          * @param details Optional additional details for the error response body.
          */
-        void set_error_response(ContextPtr ctx, qb::http::status status, const std::string &error_message,
-                                const std::string &details = "") const {
+        static void set_error_response(ContextPtr ctx, qb::http::status status, const std::string &error_message,
+                                       const std::string &details = "") {
             ctx->response().status() = status;
             ctx->response().set_content_type("application/json; charset=utf-8");
             qb::json err_body;

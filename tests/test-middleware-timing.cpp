@@ -141,6 +141,30 @@ TEST_F(TimingMiddlewareTest, CallbackIsActuallyCalled) {
     EXPECT_TRUE(callback_was_invoked);
 }
 
+TEST_F(TimingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
+    bool callback_was_invoked = false;
+    auto timing_mw = qb::http::timing_middleware<MockTimingSession>(
+        [&callback_was_invoked](const std::chrono::milliseconds &duration) {
+            callback_was_invoked = true;
+            EXPECT_GE(duration.count(), 0);
+        },
+        "DetachedTimer");
+    auto ctx = std::make_shared<qb::http::Context<MockTimingSession> >(
+        create_request(),
+        qb::http::Response{},
+        _session,
+        [](qb::http::Context<MockTimingSession> &) {},
+        std::weak_ptr<qb::http::RouterCore<MockTimingSession> >{});
+
+    timing_mw->process(ctx);
+    timing_mw.reset();
+
+    ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
+
+    EXPECT_TRUE(callback_was_invoked);
+    EXPECT_FALSE(ctx->response().header("X-Response-Time").empty());
+}
+
 TEST_F(TimingMiddlewareTest, TimingCallbackReceivesCorrectDuration) {
     std::optional<std::chrono::milliseconds> secondary_callback_duration;
     bool secondary_callback_invoked = false;

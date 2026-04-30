@@ -141,19 +141,23 @@ namespace qb::http {
             // Using enum class for better type safety
             NAME,
             VALUE,
-            IGNORE
+            AFTER_QUOTED_VALUE
         } parse_state = AttributeParseState::NAME;
 
         const char *const end_ptr = ptr + len;
         std::string current_attribute_name;
         std::string current_attribute_value;
         char value_quote_char = '\0'; // '\0' indicates not currently parsing a quoted value
+        bool value_escape = false;
 
         while (ptr < end_ptr) {
             const char c = *ptr;
             switch (parse_state) {
                 case AttributeParseState::NAME:
                     if (c == '=') {
+                        if (utility::trim_http_whitespace(current_attribute_name).empty()) {
+                            throw std::runtime_error("Attribute value is missing a name.");
+                        }
                         value_quote_char = '\0'; // Reset for the new value
                         current_attribute_value.clear();
                         parse_state = AttributeParseState::VALUE;
@@ -164,7 +168,7 @@ namespace qb::http {
                             current_attribute_name.clear();
                         }
                         // Stay in NAME state for the next attribute.
-                    } else if (!std::isspace(static_cast<unsigned char>(c))) {
+                    } else if (!utility::is_http_whitespace(c)) {
                         // Ignore whitespace
                         if (utility::is_control(c) || current_attribute_name.size() >= ATTRIBUTE_NAME_MAX) {
                             throw std::runtime_error(
@@ -203,27 +207,36 @@ namespace qb::http {
                         }
                     } else {
                         // Value is currently inside quotes
-                        if (c == value_quote_char) {
+                        if (value_escape) {
+                            if (current_attribute_value.size() >= ATTRIBUTE_VALUE_MAX) {
+                                throw std::runtime_error("Quoted attribute value size exceeds maximum allowed length.");
+                            }
+                            current_attribute_value.push_back(c);
+                            value_escape = false;
+                        } else if (c == '\\') {
+                            value_escape = true;
+                        } else if (c == value_quote_char) {
                             // End of quoted value
                             dict.emplace(std::string(utility::trim_http_whitespace(current_attribute_name)),
                                          current_attribute_value); // Quoted value is not trimmed here
                             current_attribute_name.clear();
                             current_attribute_value.clear();
                             value_quote_char = '\0';
-                            parse_state = AttributeParseState::IGNORE; // Ignore chars until next delimiter
+                            parse_state = AttributeParseState::AFTER_QUOTED_VALUE;
                         } else if (current_attribute_value.size() >= ATTRIBUTE_VALUE_MAX) {
                             throw std::runtime_error("Quoted attribute value size exceeds maximum allowed length.");
                         } else {
-                            // Note: HTTP quoted-string can have quoted-pair escapes (e.g., \\"). This parser doesn't handle them.
                             current_attribute_value.push_back(c);
                         }
                     }
                     break;
 
-                case AttributeParseState::IGNORE:
-                    // After a quoted value, ignore characters until a delimiter is found
+                case AttributeParseState::AFTER_QUOTED_VALUE:
+                    // After a quoted value, only optional whitespace may appear before the next delimiter.
                     if (c == ';' || c == ',') {
                         parse_state = AttributeParseState::NAME;
+                    } else if (c != ' ' && c != '\t') {
+                        throw std::runtime_error("Invalid character after quoted attribute value.");
                     }
                     break;
             }
@@ -232,19 +245,16 @@ namespace qb::http {
 
         // After the loop, handle any remaining attribute that was being parsed
         if (!current_attribute_name.empty()) {
-            if (parse_state == AttributeParseState::VALUE && value_quote_char != '\0') {
+            if (parse_state == AttributeParseState::VALUE && (value_quote_char != '\0' || value_escape)) {
                 throw std::runtime_error("Unterminated quoted attribute value at end of header string.");
             }
-            // If ended in IGNORE state, value was quoted and already emplaced. Name/Value buffers are clear.
+            // If ended in AFTER_QUOTED_VALUE state, value was quoted and already emplaced.
             // If ended in NAME state, it's an attribute without a value.
             // If ended in VALUE state (unquoted), emplace it.
             if (parse_state == AttributeParseState::NAME || parse_state == AttributeParseState::VALUE) {
                 dict.emplace(std::string(utility::trim_http_whitespace(current_attribute_name)),
                              std::string(utility::trim_http_whitespace(current_attribute_value)));
             }
-        } else if (parse_state == AttributeParseState::VALUE && !current_attribute_value.empty()) {
-            // This means we have a value but no preceding name (e.g., an initial "=value"). This is malformed.
-            // Depending on strictness, could throw or ignore. Silently ignoring for now.
         }
 
         return dict;

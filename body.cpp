@@ -16,6 +16,7 @@
 #ifdef QB_HAS_COMPRESSION
 #include "./1.1/protocol/base.h" // protocol_limits::MAX_BODY_SIZE — decompressed output cap
 #endif
+#include <charconv>
 #include <stdexcept>
 #include <string>
 
@@ -40,18 +41,14 @@ namespace qb::allocator {
     template<>
     pipe<char> &
     pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
-        constexpr static const std::size_t hex_len = sizeof(std::size_t) << 1u;
-        static const char digits[] = "0123456789ABCDEF";
         if (c.size()) {
-            std::string rc(hex_len, '0');
-            auto f_pos = 0u;
-            for (size_t i = 0u, j = (hex_len - 1u) * 4u; i < hex_len; ++i, j -= 4u) {
-                const auto offset = (c.size() >> j) & 0x0fu;
-                rc[i] = digits[offset];
-                if (!offset)
-                    ++f_pos;
+            constexpr std::size_t hex_len = sizeof(std::size_t) << 1u;
+            char hex[hex_len]{};
+            const auto [ptr, ec] = std::to_chars(hex, hex + hex_len, c.size(), 16);
+            if (ec != std::errc{}) {
+                throw std::length_error("qb::http::Chunk serialization: chunk size conversion failed.");
             }
-            std::string_view hex_view(rc.c_str() + f_pos, rc.size() - f_pos);
+            std::string_view hex_view(hex, static_cast<std::size_t>(ptr - hex));
             *this << hex_view << qb::http::endl;
             put(c.data(), c.size());
         } else {
