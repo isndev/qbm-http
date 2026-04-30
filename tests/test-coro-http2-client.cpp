@@ -30,6 +30,7 @@
 #include "../2/client.h"
 #include "../2/http2.h"
 #include "../coro.h"
+#include "../origin.h"
 
 namespace {
 
@@ -71,6 +72,11 @@ public:
             ctx->complete();
         });
 
+        router().get("/never-complete", [](auto) {
+            // Intentionally keep the context unresolved so the client request
+            // timeout is the only completion path.
+        });
+
         router().compile();
     }
 };
@@ -82,6 +88,17 @@ TEST(Http2ClientConfigTest, RejectsPlainHttpBaseUri) {
             (void)client;
         },
         std::invalid_argument);
+}
+
+TEST(HttpClientOriginTest, ComparesHostCaseInsensitivelyAndDefaultPorts) {
+    EXPECT_TRUE(qb::http::origin::same(qb::io::uri("https://LOCALHOST/resource"),
+                                       qb::io::uri("https://localhost:443/")));
+    EXPECT_TRUE(qb::http::origin::same(qb::io::uri("http://Example.com:80/path"),
+                                       qb::io::uri("http://example.COM/")));
+    EXPECT_FALSE(qb::http::origin::same(qb::io::uri("https://localhost:444/path"),
+                                        qb::io::uri("https://localhost/")));
+    EXPECT_FALSE(qb::http::origin::same(qb::io::uri("http://localhost/path"),
+                                        qb::io::uri("https://localhost/")));
 }
 
 TEST(Http2ClientConfigTest, RejectsPlainHttpAbsoluteRequestWithoutConnecting) {
@@ -106,6 +123,25 @@ TEST(Http2ClientConfigTest, RejectsPlainHttpAbsoluteRequestWithoutConnecting) {
     EXPECT_EQ(total, 1u);
     EXPECT_EQ(successful, 0u);
     EXPECT_EQ(failed, 1u);
+}
+
+TEST(Http2ClientConfigTest, RejectsCrossOriginAbsoluteRequestWithoutConnecting) {
+    auto client = qb::http2::make_client("https://localhost:443");
+
+    bool done = false;
+    qb::http::Response response;
+    qb::http::Request request{qb::io::uri("https://example.com:443/other")};
+    ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
+        response = std::move(res);
+        done = true;
+    }));
+
+    EXPECT_TRUE(done);
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(response.body().template as<std::string>(),
+              "HTTP/2 persistent client only accepts same-origin requests");
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
 }
 
 TEST(Http2ClientConfigTest, BatchRejectsInvalidSchemesWithoutConnecting) {
@@ -136,6 +172,47 @@ TEST(Http2ClientConfigTest, BatchRejectsInvalidSchemesWithoutConnecting) {
     EXPECT_EQ(total, 2u);
     EXPECT_EQ(successful, 0u);
     EXPECT_EQ(failed, 2u);
+}
+
+TEST(Http2ClientConfigTest, BatchRejectsCrossOriginRequestsAndPreservesOrder) {
+    auto client = qb::http2::make_client("https://localhost:443");
+
+    std::vector<qb::http::Request> requests;
+    requests.emplace_back(qb::io::uri("https://example.com/first"));
+    requests.emplace_back(qb::io::uri("http://localhost/plain"));
+    requests.emplace_back(qb::io::uri("https://localhost:444/wrong-port"));
+
+    bool done = false;
+    std::vector<qb::http::Response> responses;
+    ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
+        responses = std::move(res);
+        done = true;
+    }));
+
+    ASSERT_TRUE(done);
+    ASSERT_EQ(responses.size(), 3u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(responses[0].body().template as<std::string>(),
+              "HTTP/2 persistent client only accepts same-origin requests");
+    EXPECT_EQ(responses[1].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(responses[1].body().template as<std::string>(), "HTTP/2 request URI must use https");
+    EXPECT_EQ(responses[2].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(responses[2].body().template as<std::string>(),
+              "HTTP/2 persistent client only accepts same-origin requests");
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+}
+
+TEST(Http2ClientConfigTest, CoroPushRequestRejectsCrossOriginWithoutConnecting) {
+    auto response = qb::http::run_sync([]() -> qb::io::async::task<qb::http::Response> {
+        auto client = qb::http2::make_client("https://localhost:443");
+        qb::http::Request request{qb::io::uri("https://example.com:443/coro")};
+        co_return co_await client->push_request(std::move(request));
+    }());
+
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(response.body().template as<std::string>(),
+              "HTTP/2 persistent client only accepts same-origin requests");
 }
 
 TEST(Http2ClientReentrancyTest, BatchCallbackMayQueueAnotherBatchAcrossFailurePasses) {
@@ -192,10 +269,10 @@ TEST(Http2ClientLifetimeTest, ConnectAwaiterReturnsErrorWhenClientExpiresBeforeA
 
 class CoroH2ClientTest : public ::testing::Test {
 protected:
-    static constexpr int kPort   = 29881;
     const char*          kCert   = "cert.pem";
     const char*          kKey    = "key.pem";
 
+    int                            _port{0};
     std::unique_ptr<CoroH2Server> _server;
     std::thread                   _server_thread;
     std::atomic<bool>             _server_ready{false};
@@ -212,6 +289,8 @@ protected:
         }
 
         qb::io::async::init();
+        static std::atomic<int> next_port{29910};
+        _port = next_port.fetch_add(1, std::memory_order_relaxed);
         _server = std::make_unique<CoroH2Server>();
 
         _server_thread = std::thread([this] {
@@ -219,7 +298,7 @@ protected:
             _server->transport().init(
                 qb::io::ssl::create_server_context(SSLv23_server_method(), "cert.pem", "key.pem"));
             _server->transport().set_supported_alpn_protocols({"h2", "http/1.1"});
-            _server->transport().listen_v4(kPort);
+            _server->transport().listen_v4(_port);
             _server->start();
             _server_ready.store(true, std::memory_order_release);
             while (_keep_alive.load(std::memory_order_acquire)) {
@@ -242,9 +321,49 @@ protected:
     }
 
     [[nodiscard]] std::string url() const {
-        return "https://localhost:" + std::to_string(kPort);
+        return "https://localhost:" + std::to_string(_port);
     }
 };
+
+TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackOnce) {
+    if (IsSkipped()) return;
+    auto client = qb::http2::make_client(url());
+    client->set_connect_timeout(5.0);
+    client->set_request_timeout(0.05);
+
+    std::atomic<int> callbacks{0};
+    qb::http::Response response;
+
+    qb::http::Request req;
+    req.method() = qb::http::Method::GET;
+    req.uri() = qb::io::uri("/never-complete");
+
+    ASSERT_TRUE(client->push_request(std::move(req), [&](qb::http::Response r) {
+        response = std::move(r);
+        callbacks.fetch_add(1, std::memory_order_acq_rel);
+    }));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (callbacks.load(std::memory_order_acquire) == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        qb::io::async::run(EVRUN_ONCE);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    ASSERT_EQ(callbacks.load(std::memory_order_acquire), 1)
+        << "connected=" << client->is_connected()
+        << " active=" << client->get_active_request_count();
+    EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+    EXPECT_EQ(response.body().template as<std::string>(), "Request timeout");
+
+    const auto quiet_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+    while (std::chrono::steady_clock::now() < quiet_until) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(callbacks.load(std::memory_order_acquire), 1);
+    client->disconnect();
+}
 
 TEST_F(CoroH2ClientTest, ConnectAwaiterYieldsConnectResult) {
     if (IsSkipped()) return;

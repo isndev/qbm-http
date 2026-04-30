@@ -13,12 +13,16 @@
 #pragma once
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <optional>
 #include <vector>
 #include <algorithm>
 
+#include <qb/utility/build_macros.h>
+#ifdef QB_HAS_SSL
 #include <qb/io/crypto.h>
+#endif
 
 #include "../routing/middleware.h"
 #include "../response.h"
@@ -47,8 +51,12 @@ namespace qb::http {
             } else if (length > MAX_NONCE_LENGTH) {
                 length = MAX_NONCE_LENGTH;
             }
+#ifdef QB_HAS_SSL
             return qb::crypto::generate_secure_random_string(
                 length, qb::crypto::range_hex_lower);
+#else
+            throw std::logic_error("CSP nonce generation requires QB_HAS_SSL");
+#endif
         }
     } // namespace internal
 
@@ -257,6 +265,11 @@ namespace qb::http {
             std::string name = "SecurityHeadersMiddleware"
         ) : _options(std::make_shared<SecurityHeadersOptions>(std::move(options))),
             _name(std::move(name)) {
+#ifndef QB_HAS_SSL
+            if (_options->get_csp_nonce_enabled()) {
+                throw std::logic_error("CSP nonce generation requires QB_HAS_SSL");
+            }
+#endif
         }
 
         void process(ContextPtr ctx) override {

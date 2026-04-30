@@ -1,6 +1,9 @@
 #include "client.h"
 
 #include <algorithm>
+
+#include "../origin.h"
+
 namespace qb::http3 {
 
 Client::Client(std::string const& base_uri)
@@ -19,7 +22,7 @@ Client::~Client() {
 }
 
 void Client::initialize_from_uri(qb::io::uri const& uri) {
-    if (uri.scheme() != "https") {
+    if (!qb::http::origin::scheme_eq(uri.scheme(), "https")) {
         throw std::invalid_argument("HTTP/3 client only supports https scheme");
     }
     _base_uri = uri;
@@ -90,9 +93,13 @@ std::optional<qb::http::Response> Client::prepare_request(qb::http::Request& req
         return create_error_response(qb::http::status::BAD_REQUEST,
                                      "HTTP/3 request URI is missing a host");
     }
-    if (request.uri().scheme() != "https") {
+    if (!qb::http::origin::scheme_eq(request.uri().scheme(), "https")) {
         return create_error_response(qb::http::status::BAD_REQUEST,
                                      "HTTP/3 request URI must use https");
+    }
+    if (!qb::http::origin::same(request.uri(), _base_uri)) {
+        return create_error_response(qb::http::status::BAD_REQUEST,
+                                     "HTTP/3 persistent client only accepts same-origin requests");
     }
     return std::nullopt;
 }

@@ -24,8 +24,10 @@
 #include "./validation.h"
 #include "./rate_limit.h"
 // #include "./recaptcha.h" // Uncomment if reCAPTCHA middleware is to be included by default
+#ifdef QB_HAS_SSL
 #include "./jwt.h"
 #include "./auth.h"
+#endif
 #include "./compression.h"
 #include "./security_headers.h"
 #include "./static_files.h"

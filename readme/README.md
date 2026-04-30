@@ -2,7 +2,7 @@
 
 Welcome to the documentation for the `qb::http` module, a high-performance C++23 library for building asynchronous HTTP clients, servers, WebSocket endpoints, and protocol integrations with the QB Actor Framework.
 
-This module provides a comprehensive suite for HTTP/1.1, HTTP/2, optional HTTP/3, RFC 6455 WebSocket, routing, middleware, validation, authentication, and robust request/response handling. It is designed for efficiency, type safety, and ease of use for developers familiar with modern C++ and asynchronous programming paradigms.
+This module provides a comprehensive suite for HTTP/1.1, SSL-backed HTTP/2, optional HTTP/3, RFC 6455 WebSocket, routing, middleware, validation, authentication, and robust request/response handling. Plain HTTP/1.1 and non-crypto features build without SSL; HTTPS, WebSocket/JWT crypto, HTTP/2 and HTTP/3 require `QB_HAS_SSL`.
 
 ## 📚 Documentation Index
 

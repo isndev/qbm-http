@@ -6,7 +6,7 @@
 
 HTTP/3 is optional. It is enabled only when:
 
-- QB was configured with QUIC support (`QB_WITH_QUIC=ON`) and the QUIC backend is available.
+- QB was configured with SSL and QUIC support (`QB_WITH_SSL=ON`, `QB_WITH_QUIC=ON`) and the QUIC backend is available.
 - `libnghttp3` is discoverable through `pkg-config`.
 
 When those requirements are not met, `qbm/http` still builds normally without defining `QBM_HTTP_HAS_HTTP3`.

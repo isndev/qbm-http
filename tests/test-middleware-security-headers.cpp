@@ -377,6 +377,7 @@ TEST_F(SecurityHeadersMiddlewareTest, ConditionalHSTSOnlyOnHTTPS) {
     expect_header_value("Strict-Transport-Security", "max-age=31536000");
 }
 
+#ifdef QB_HAS_SSL
 TEST_F(SecurityHeadersMiddlewareTest, CSPNonceGeneratedAndInContext) {
     qb::http::SecurityHeadersOptions opts;
     opts.with_csp_nonce(true);
@@ -440,6 +441,14 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceWithUserProvidedCSP) {
     // Middleware should use the user-provided CSP, not the default nonce-based one
     expect_header_value("Content-Security-Policy", "custom-csp 'self'; script-src 'unsafe-inline'");
 }
+#else
+TEST_F(SecurityHeadersMiddlewareTest, CSPNonceRequiresSSL) {
+    qb::http::SecurityHeadersOptions opts;
+    opts.with_csp_nonce(true);
+    EXPECT_THROW((void)qb::http::security_headers_middleware<MockSecuritySession>(opts),
+                 std::logic_error);
+}
+#endif
 
 TEST_F(SecurityHeadersMiddlewareTest, CSPNonceDisabledNoNonceInContextOrDefaultCSP) {
     qb::http::SecurityHeadersOptions opts = qb::http::SecurityHeadersOptions::secure_defaults();

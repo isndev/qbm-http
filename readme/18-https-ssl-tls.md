@@ -5,7 +5,7 @@ Secure communication is paramount for modern web applications. The `qb::http` mo
 ## Prerequisites
 
 -   **OpenSSL**: Ensure OpenSSL development libraries are installed on your system.
--   **`QB_WITH_SSL=ON`**: The `qb-io` library (and consequently `qb-core` and `qbm-http`) must be configured with the `QB_WITH_SSL` CMake option enabled. This links against OpenSSL, exposes `QB_HAS_SSL` to code, and enables the secure transport components.
+-   **`QB_WITH_SSL=ON`**: The `qb-io` library must be configured with this CMake option to enable secure transports. It links against OpenSSL, exposes `QB_HAS_SSL` to code, and enables HTTPS, WSS, HTTP/2, HTTP/3 TLS, and JWT/WebSocket crypto support in `qbm-http`. Plain HTTP/1.1 and non-crypto middleware can still build without SSL.
 -   **SSL Certificates**: You will need an SSL certificate and a corresponding private key for your server.
     -   **For production**: Obtain certificates from a trusted Certificate Authority (CA) (e.g., Let's Encrypt, DigiCert, Comodo).
     -   **For development/testing**: You can generate self-signed certificates. Browsers will show warnings for self-signed certificates, but they are suitable for local testing. Common tools like OpenSSL can be used for this purpose. For example, a simple command to generate a self-signed certificate and private key pair using OpenSSL might look like:

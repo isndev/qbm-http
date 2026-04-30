@@ -1,6 +1,6 @@
 # QB HTTP Module (`qbm-http`)
 
-**High-Performance HTTP/1.1, HTTP/2, HTTP/3 and WebSocket Client/Server for the QB Actor Framework**
+**High-Performance HTTP/1.1, optional HTTP/2, optional HTTP/3 and WebSocket Client/Server for the QB Actor Framework**
 
 <p align="center">
   <img src="https://img.shields.io/badge/HTTP-1.1%20%7C%202.0-blue.svg" alt="HTTP Versions"/>
@@ -10,8 +10,8 @@
   <img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License"/>
 </p>
 
-`qbm-http` delivers production-ready HTTP/1.1, HTTP/2, optional HTTP/3, and
-RFC 6455 WebSocket capabilities to the QB Actor Framework, enabling you to build
+`qbm-http` delivers production-ready HTTP/1.1 plus SSL-backed HTTP/2,
+optional HTTP/3, JWT, and RFC 6455 WebSocket capabilities to the QB Actor Framework, enabling you to build
 high-performance web services and clients with minimal code complexity. Built on
 QB's asynchronous I/O foundation, it provides exceptional throughput while
 maintaining clean, expressive APIs.
@@ -46,8 +46,8 @@ target_link_libraries(your_target PRIVATE qbm::http)
 ### Include and Use
 
 ```cpp
-#include <http/http.h>                    // Core HTTP and WebSocket components
-#include <http/ws.h>                      // WebSocket umbrella include
+#include <http/http.h>                    // Core HTTP components
+#include <http/ws.h>                      // WebSocket umbrella include (requires QB_HAS_SSL)
 #include <http/middleware/all.h>          // For middleware (optional)
 ```
 
@@ -61,11 +61,11 @@ target_link_libraries(your_target PRIVATE qbm::http)
 
 **Cross-Platform**: Same code runs on Linux, macOS, Windows (x86_64, ARM64) with identical performance characteristics.
 
-**Modern Protocols**: HTTP/1.1, HTTP/2, optional HTTP/3, and WebSocket support live in one coherent module and share the same request/response foundations.
+**Modern Protocols**: HTTP/1.1 is always available. SSL-enabled builds add HTTP/2, WebSocket/JWT crypto support, and optional HTTP/3 when QUIC and nghttp3 are present.
 
 ## WebSocket Support
 
-WebSocket is a native `qbm-http` capability under `qb::http::ws`. It starts from
+WebSocket is a native SSL-enabled `qbm-http` capability under `qb::http::ws`. It starts from
 an HTTP/1.1 `GET` upgrade request, validates the RFC 6455 handshake, then
 switches that connection from HTTP parsing to WebSocket framing with
 `switch_protocol<qb::http::ws::protocol>`.
@@ -520,7 +520,7 @@ int main() {
 - **CMake 3.14+**
 
 ### Optional Dependencies
-- **OpenSSL**: For HTTPS, WSS, HTTP/2 ALPN, HTTP/3 TLS, and JWT support. Enable with `QB_WITH_SSL=ON` when building QB; code can check `QB_HAS_SSL`.
+- **OpenSSL**: Optional for HTTPS, WebSocket handshake crypto/WSS, HTTP/2 ALPN, HTTP/3 TLS, and JWT support. Enable with `QB_WITH_SSL=ON` when building QB; code can check `QB_HAS_SSL`. Plain HTTP/1.1, routing, body handling, validation, static files, and non-crypto middleware still build without SSL.
 - **Zlib**: For content compression. Enable with `QB_WITH_COMPRESSION=ON` when building QB; code can check `QB_HAS_COMPRESSION`.
 
 ### Building with QB
