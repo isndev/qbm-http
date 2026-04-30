@@ -597,9 +597,10 @@ void Client::check_request_timeouts() {
     // Check active requests for timeouts
     std::vector<uint32_t> timed_out_streams;
     
-    for (const auto& [stream_id, context] : _active_requests) {
+    for (const auto& entry : _active_requests) {
+        auto const& context = entry.second;
         if (now - context->created_at >= timeout_duration) {
-            timed_out_streams.push_back(stream_id);
+            timed_out_streams.push_back(context->stream_id);
         }
     }
     

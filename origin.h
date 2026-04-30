@@ -4,6 +4,9 @@
  */
 #pragma once
 
+#include <charconv>
+#include <cstdint>
+#include <optional>
 #include <string_view>
 
 #include <qb/io/uri.h>
@@ -54,11 +57,33 @@ effective_port(qb::io::uri const& uri) noexcept {
     return {};
 }
 
+[[nodiscard]] inline std::optional<std::uint32_t>
+effective_port_number(qb::io::uri const& uri) noexcept {
+    auto const port = effective_port(uri);
+    if (port.empty()) {
+        return std::nullopt;
+    }
+
+    std::uint32_t value = 0;
+    auto const* const begin = port.data();
+    auto const* const end = begin + port.size();
+    auto result = std::from_chars(begin, end, value);
+    if (result.ec != std::errc{} || result.ptr != end || value > 65535u) {
+        return std::nullopt;
+    }
+    return value;
+}
+
 [[nodiscard]] inline bool
 same(qb::io::uri const& lhs, qb::io::uri const& rhs) noexcept {
+    auto const lhs_port = effective_port_number(lhs);
+    auto const rhs_port = effective_port_number(rhs);
+
     return scheme_eq(lhs.scheme(), rhs.scheme()) &&
            host_eq(lhs.host(), rhs.host()) &&
-           effective_port(lhs) == effective_port(rhs);
+           lhs_port.has_value() &&
+           rhs_port.has_value() &&
+           *lhs_port == *rhs_port;
 }
 
 } // namespace qb::http::origin

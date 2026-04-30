@@ -93,10 +93,16 @@ TEST(Http2ClientConfigTest, RejectsPlainHttpBaseUri) {
 TEST(HttpClientOriginTest, ComparesHostCaseInsensitivelyAndDefaultPorts) {
     EXPECT_TRUE(qb::http::origin::same(qb::io::uri("https://LOCALHOST/resource"),
                                        qb::io::uri("https://localhost:443/")));
+    EXPECT_TRUE(qb::http::origin::same(qb::io::uri("https://localhost:0443/resource"),
+                                       qb::io::uri("https://localhost:443/")));
     EXPECT_TRUE(qb::http::origin::same(qb::io::uri("http://Example.com:80/path"),
                                        qb::io::uri("http://example.COM/")));
+    EXPECT_TRUE(qb::http::origin::same(qb::io::uri("http://example.com:00080/path"),
+                                       qb::io::uri("http://EXAMPLE.com/")));
     EXPECT_FALSE(qb::http::origin::same(qb::io::uri("https://localhost:444/path"),
                                         qb::io::uri("https://localhost/")));
+    EXPECT_FALSE(qb::http::origin::same(qb::io::uri("https://localhost:65536/path"),
+                                        qb::io::uri("https://localhost:443/")));
     EXPECT_FALSE(qb::http::origin::same(qb::io::uri("http://localhost/path"),
                                         qb::io::uri("https://localhost/")));
 }
@@ -362,6 +368,44 @@ TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackOnce) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     EXPECT_EQ(callbacks.load(std::memory_order_acquire), 1);
+    client->disconnect();
+}
+
+TEST_F(CoroH2ClientTest, MultipleActiveRequestTimeoutsUseTransportStreamIds) {
+    if (IsSkipped()) return;
+    auto client = qb::http2::make_client(url());
+    client->set_connect_timeout(5.0);
+    client->set_request_timeout(0.05);
+
+    std::atomic<int> callbacks{0};
+    std::vector<qb::http::Response> responses(2);
+
+    for (std::size_t i = 0; i < responses.size(); ++i) {
+        qb::http::Request req;
+        req.method() = qb::http::Method::GET;
+        req.uri() = qb::io::uri("/never-complete");
+
+        ASSERT_TRUE(client->push_request(std::move(req), [&, i](qb::http::Response r) {
+            responses[i] = std::move(r);
+            callbacks.fetch_add(1, std::memory_order_acq_rel);
+        }));
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (callbacks.load(std::memory_order_acquire) != 2 &&
+           std::chrono::steady_clock::now() < deadline) {
+        qb::io::async::run(EVRUN_ONCE);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    ASSERT_EQ(callbacks.load(std::memory_order_acquire), 2)
+        << "connected=" << client->is_connected()
+        << " active=" << client->get_active_request_count();
+    for (auto const& response : responses) {
+        EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+        EXPECT_EQ(response.body().template as<std::string>(), "Request timeout");
+    }
+    EXPECT_EQ(client->get_active_request_count(), 0u);
     client->disconnect();
 }
 
