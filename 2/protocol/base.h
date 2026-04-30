@@ -228,7 +228,10 @@ public:
                 return ValidationResult::valid();
                 
             case Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL:
-                // Implementation specific - for now just accept any value
+                if (value > 1) {
+                    return ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR,
+                        "SETTINGS_ENABLE_CONNECT_PROTOCOL must be 0 or 1, got: " + std::to_string(value));
+                }
                 return ValidationResult::valid();
                 
             default:
@@ -383,6 +386,10 @@ public:
             }
         }
 
+        return is_valid_header_value(value);
+    }
+
+    [[nodiscard]] static bool is_valid_header_value(std::string_view value) noexcept {
         for (unsigned char c : value) {
             if (c == 0x00 || c == 0x0D || c == 0x0A) {
                 return false;
@@ -444,7 +451,7 @@ public:
      */
     static SettingsHelper::ValidationResult validate_request_pseudo_headers(
             const std::vector<qb::protocol::hpack::HeaderField>& headers) {
-        bool has_method = false, has_path = false, has_scheme = false;
+        bool has_method = false, has_path = false, has_scheme = false, has_authority = false;
         
         for (const auto& header : headers) {
             if (!is_pseudo_header(header.name)) continue;
@@ -480,7 +487,11 @@ public:
                         "Empty :scheme value");
                 }
             } else if (header.name == ":authority") {
-                // Optional, but if present must not be empty
+                if (has_authority) {
+                    return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR,
+                        "Duplicate :authority pseudo-header");
+                }
+                has_authority = true;
                 if (header.value.empty()) {
                     return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
                         "Empty :authority value");
@@ -491,9 +502,9 @@ public:
             }
         }
         
-        if (!has_method || !has_path || !has_scheme) {
+        if (!has_method || !has_path || !has_scheme || !has_authority) {
             return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, 
-                "Missing required pseudo-headers (:method, :path, :scheme)");
+                "Missing required pseudo-headers (:method, :path, :scheme, :authority)");
         }
         
         return SettingsHelper::ValidationResult::valid();

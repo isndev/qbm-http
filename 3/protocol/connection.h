@@ -117,6 +117,31 @@ struct header_block {
     }
 };
 
+inline bool pseudo_headers_before_regular_headers(header_block const& block) noexcept {
+    bool regular_headers_started = false;
+    for (auto const& [name, value] : block.storage) {
+        (void)value;
+        if (!name.empty() && name.front() == ':') {
+            if (regular_headers_started) {
+                return false;
+            }
+        } else {
+            regular_headers_started = true;
+        }
+    }
+    return true;
+}
+
+inline bool has_required_request_pseudo_headers(std::optional<std::string> const& method,
+                                                std::optional<std::string> const& scheme,
+                                                std::optional<std::string> const& authority,
+                                                std::optional<std::string> const& path) noexcept {
+    return method && !method->empty() &&
+           scheme && !scheme->empty() &&
+           authority && !authority->empty() &&
+           path && !path->empty();
+}
+
 inline bool is_header_name_char(unsigned char c) noexcept {
     return (c >= 'a' && c <= 'z') ||
            (c >= '0' && c <= '9') ||
@@ -586,6 +611,10 @@ private:
     }
 
     bool materialize_headers(std::uint64_t stream_id, stream_state& st) {
+        if (!detail::pseudo_headers_before_regular_headers(st.incoming_headers)) {
+            return false;
+        }
+
         std::optional<std::string> method;
         std::optional<std::string> scheme;
         std::optional<std::string> authority;
@@ -661,7 +690,7 @@ private:
         st.expected_content_length = content_length;
 
         if (_role == role::server) {
-            if (!method || !scheme || !path) {
+            if (!detail::has_required_request_pseudo_headers(method, scheme, authority, path)) {
                 return false;
             }
             auto parsed_method = qb::http::Method(method.value_or("GET"));
@@ -669,10 +698,7 @@ private:
                 return false;
             }
             st.request.method() = parsed_method;
-            const auto h = authority.value_or(std::string{});
-            const auto p = path.value_or("/");
-            st.request.uri() = qb::io::uri(
-                scheme.value_or("https") + "://" + (h.empty() ? "localhost" : h) + p);
+            st.request.uri() = qb::io::uri(*scheme + "://" + *authority + *path);
             st.request.major_version = 3;
             st.request.minor_version = 0;
             st.request.stream_id = stream_id;

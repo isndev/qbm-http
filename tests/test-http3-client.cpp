@@ -105,6 +105,50 @@ std::string read_file(std::filesystem::path const& path) {
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
+TEST(Http3ProtocolValidationTest, AcceptsPseudoHeadersBeforeRegularHeaders) {
+    qb::protocol::http3::detail::header_block block;
+    block.add(":method", "GET");
+    block.add(":scheme", "https");
+    block.add(":authority", "example.test");
+    block.add(":path", "/");
+    block.add("x-test", "1");
+
+    EXPECT_TRUE(qb::protocol::http3::detail::pseudo_headers_before_regular_headers(block));
+}
+
+TEST(Http3ProtocolValidationTest, RejectsPseudoHeadersAfterRegularHeaders) {
+    qb::protocol::http3::detail::header_block block;
+    block.add(":method", "GET");
+    block.add(":scheme", "https");
+    block.add("x-test", "1");
+    block.add(":path", "/");
+
+    EXPECT_FALSE(qb::protocol::http3::detail::pseudo_headers_before_regular_headers(block));
+}
+
+TEST(Http3ProtocolValidationTest, RequiresNonEmptyAuthorityAndPathForRequests) {
+    std::optional<std::string> method = "GET";
+    std::optional<std::string> scheme = "https";
+    std::optional<std::string> authority = "example.test";
+    std::optional<std::string> path = "/";
+
+    EXPECT_TRUE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
+        method, scheme, authority, path));
+
+    authority = "";
+    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
+        method, scheme, authority, path));
+
+    authority = std::nullopt;
+    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
+        method, scheme, authority, path));
+
+    authority = "example.test";
+    path = "";
+    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
+        method, scheme, authority, path));
+}
+
 struct CommandResult {
     int exit_code = -1;
     bool timed_out = false;

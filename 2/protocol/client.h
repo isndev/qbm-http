@@ -1592,6 +1592,10 @@ private:
                     if (status_str_opt) {
                         send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :status pseudo-header"); return false;
                     }
+                    if (!HeaderValidator::is_valid_header_value(value)) {
+                        send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid :status value format");
+                        return false;
+                    }
                     status_str_opt = value;
                 } else if (name.length() > 0 && name[0] == ':') {
                     send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid pseudo-header in response: " + name); return false;
