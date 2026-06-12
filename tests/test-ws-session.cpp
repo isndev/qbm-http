@@ -472,6 +472,9 @@ TEST(Session, WEBSOCKET_OVER_SECURE_TCP) {
     std::thread t([]() {
         async::init();
         TestSecureClient client;
+        // Self-signed test certificate: opt out of qb-io's secure-by-default
+        // peer verification for this local fixture.
+        client.transport().set_insecure();
         if (SocketStatus::Done != client.transport().connect_v4("127.0.0.1", 20101)) {
             throw std::runtime_error("could not connect");
         }

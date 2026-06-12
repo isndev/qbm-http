@@ -660,7 +660,7 @@ namespace qb::http {
              * @param timeout Connection timeout
              */
             void
-            connect(double timeout = 0) {
+            connect(double timeout = 0, bool verify_peer = true) {
                 LOG_HTTP_INFO("HTTP/1.1 client connecting to " << _request.uri().source() << " with timeout " << timeout << "s");
 
                 qb::io::async::tcp::connect<typename Transport::transport_io_type>(
@@ -690,7 +690,8 @@ namespace qb::http {
                             this->setTimeout(timeout);
                         }
                     },
-                    timeout);
+                    timeout,
+                    verify_peer);
             }
 
             /**
@@ -807,7 +808,7 @@ namespace qb::http {
 
     namespace detail {
         template <typename _Func>
-        void _execute_async_request_internal(Request request, _Func &&func, double timeout, const char* method_name_for_log) {
+        void _execute_async_request_internal(Request request, _Func &&func, double timeout, const char* method_name_for_log, bool verify_peer = true) {
             if (!request.has_header("host")) {
                 request.set_header("host", host_header_value(request.uri()));
             }
@@ -815,14 +816,14 @@ namespace qb::http {
 #if QB_HAS_SSL
             if (request.uri().scheme() == "https") {
                 (new async::HTTPS<_Func>(std::forward<_Func>(func), request))
-                    ->connect(timeout);
+                    ->connect(timeout, verify_peer);
             } else {
                 (new async::HTTP<_Func>(std::forward<_Func>(func), request))
-                    ->connect(timeout);
+                    ->connect(timeout, verify_peer);
             }
 #else
             (new async::HTTP<_Func>(std::forward<_Func>(func), request))
-                ->connect(timeout);
+                ->connect(timeout, verify_peer);
 #endif
         }
     } // namespace detail
@@ -839,8 +840,8 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    REQUEST(Request request, _Func &&func, double timeout = 0.) {
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "Generic");
+    REQUEST(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "Generic", verify_peer);
     }
 
     /**
@@ -852,9 +853,9 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    GET(Request request, _Func &&func, double timeout = 0.) {
+    GET(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
         request.method() = qb::http::Method::GET;
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "GET");
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "GET", verify_peer);
     }
 
     /**
@@ -866,9 +867,9 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    POST(Request request, _Func &&func, double timeout = 0.) {
+    POST(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
         request.method() = qb::http::Method::POST;
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "POST");
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "POST", verify_peer);
     }
 
     /**
@@ -880,9 +881,9 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    PUT(Request request, _Func &&func, double timeout = 0.) {
+    PUT(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
         request.method() = qb::http::Method::PUT;
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "PUT");
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "PUT", verify_peer);
     }
 
     /**
@@ -894,9 +895,9 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    DEL(Request request, _Func &&func, double timeout = 0.) {
+    DEL(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
         request.method() = qb::http::Method::DEL;
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "DELETE");
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "DELETE", verify_peer);
     }
 
     /**
@@ -908,9 +909,9 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    HEAD(Request request, _Func &&func, double timeout = 0.) {
+    HEAD(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
         request.method() = qb::http::Method::HEAD;
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "HEAD");
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "HEAD", verify_peer);
     }
 
     /**
@@ -922,9 +923,9 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    OPTIONS(Request request, _Func &&func, double timeout = 0.) {
+    OPTIONS(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
         request.method() = qb::http::Method::OPTIONS;
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "OPTIONS");
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "OPTIONS", verify_peer);
     }
 
     /**
@@ -936,9 +937,9 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    PATCH(Request request, _Func &&func, double timeout = 0.) {
+    PATCH(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
         request.method() = qb::http::Method::PATCH;
-        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "PATCH");
+        detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "PATCH", verify_peer);
     }
 
     // --- Coroutine HTTP/1.1 Client Functions ----------------------------------
@@ -984,80 +985,80 @@ namespace qb::http {
      * @return An awaitable that yields `async::Reply` (original request + response).
      */
     [[nodiscard]] inline async::awaiter<async::Reply>
-    REQUEST(Request request, double timeout = 0.) {
+    REQUEST(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                REQUEST(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                REQUEST(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
 
     /// @brief Coroutine-style HTTP GET. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    GET(Request request, double timeout = 0.) {
+    GET(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                GET(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                GET(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
 
     /// @brief Coroutine-style HTTP POST. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    POST(Request request, double timeout = 0.) {
+    POST(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                POST(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                POST(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
 
     /// @brief Coroutine-style HTTP PUT. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    PUT(Request request, double timeout = 0.) {
+    PUT(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                PUT(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                PUT(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
 
     /// @brief Coroutine-style HTTP DELETE. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    DEL(Request request, double timeout = 0.) {
+    DEL(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                DEL(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                DEL(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
 
     /// @brief Coroutine-style HTTP HEAD. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    HEAD(Request request, double timeout = 0.) {
+    HEAD(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                HEAD(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                HEAD(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
 
     /// @brief Coroutine-style HTTP OPTIONS. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    OPTIONS(Request request, double timeout = 0.) {
+    OPTIONS(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                OPTIONS(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                OPTIONS(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
 
     /// @brief Coroutine-style HTTP PATCH. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    PATCH(Request request, double timeout = 0.) {
+    PATCH(Request request, double timeout = 0., bool verify_peer = true) {
         return detail::_co_invoke(
-            [](Request r, auto cb, double t) {
-                PATCH(std::move(r), std::move(cb), t);
+            [verify_peer](Request r, auto cb, double t) {
+                PATCH(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
     }
