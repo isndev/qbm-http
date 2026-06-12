@@ -170,6 +170,7 @@ private:
     // Configuration
     double _connect_timeout = 30.0;
     double _request_timeout = 60.0;
+    bool   _verify_peer = true; /**< Verify the server TLS certificate (h2 is TLS-only). */
     size_t _max_concurrent_streams = 100;
     bool _auto_reconnect = true;
     
@@ -308,7 +309,15 @@ public:
      * @param timeout_seconds Timeout in seconds
      */
     void set_connect_timeout(double timeout_seconds) { _connect_timeout = timeout_seconds; }
-    
+
+    /**
+     * @brief Enable/disable TLS server certificate verification.
+     * @param value `true` (default) verifies chain + hostname; `false` disables it
+     *              (trusted/self-signed endpoints only). Set before connecting.
+     */
+    void set_verify_peer(bool value) noexcept { _verify_peer = value; }
+    [[nodiscard]] bool verify_peer() const noexcept { return _verify_peer; }
+
     /**
      * @brief Set request timeout
      * @param timeout_seconds Timeout in seconds

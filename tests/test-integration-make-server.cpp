@@ -184,8 +184,9 @@ TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
     if (IsSkipped()) return;
     std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_ssl to HTTPS server (default session) on port " << TEST_PORT_SSL << std::endl;
     qb::http::Request request{{"https://localhost:" + std::to_string(TEST_PORT_SSL) + "/ping_ssl"}};
-    
-    auto response = qb::http::run_sync(qb::http::GET(request)).response; 
+
+    // Self-signed test certificate: opt out of secure-by-default verification.
+    auto response = qb::http::run_sync(qb::http::GET(request, 0., /*verify_peer=*/false)).response;
 
     EXPECT_EQ(HTTP_STATUS_OK, response.status());
     EXPECT_EQ("pong_https_default", response.body().as<std::string>());
@@ -282,6 +283,7 @@ TEST_F(Http2MakeServerTest, PingHttp2Server) {
     
     std::string target_uri = "https://localhost:" + std::to_string(TEST_PORT_HTTP2);
     auto h2_client = std::make_shared<qb::http2::Client>(target_uri);
+    h2_client->set_verify_peer(false); // self-signed test cert
 
     std::atomic<bool> connect_successful{false};
     std::atomic<bool> connect_attempted{false}; // To know if callback was even called

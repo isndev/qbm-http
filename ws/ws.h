@@ -1354,7 +1354,7 @@ public:
      * performing the WebSocket handshake.
      */
     void
-    connect(::qb::io::uri const &remote, int timeout = 0) {
+    connect(::qb::io::uri const &remote, int timeout = 0, bool verify_peer = true) {
         this->clear_protocols();
         this->setTimeout(0);
         _remote                 = remote;
@@ -1394,7 +1394,8 @@ public:
                     *this << request;
                 }
             },
-            timeout);
+            timeout,
+            verify_peer);
     }
 
     /**
@@ -1407,10 +1408,11 @@ public:
     template <typename Rep, typename Period>
     void
     connect(::qb::io::uri const                  &remote,
-            std::chrono::duration<Rep, Period>   timeout) {
+            std::chrono::duration<Rep, Period>   timeout,
+            bool                                 verify_peer = true) {
         const auto ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count();
-        connect(remote, ms <= 0 ? 0 : static_cast<int>(ms));
+        connect(remote, ms <= 0 ? 0 : static_cast<int>(ms), verify_peer);
     }
 
     /**

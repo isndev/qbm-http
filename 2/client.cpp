@@ -328,7 +328,8 @@ void Client::start_connection() {
             self->transport() = std::move(transport_socket);
             self->start(); // Start handshake protocol
         },
-        _connect_timeout
+        _connect_timeout,
+        _verify_peer
     );
 }
 

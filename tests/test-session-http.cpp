@@ -624,6 +624,9 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
         try {
             async::init();
             TestSecureClient client;
+            // Self-signed test certificate: opt out of qb-io's secure-by-default
+            // peer verification for this local fixture.
+            client.transport().set_insecure();
             if (SocketStatus::Done !=
                 client.transport().connect(
                     uri{"tcp://[::1]:" + std::to_string(kPort), AF_INET6})) {

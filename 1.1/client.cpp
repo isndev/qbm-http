@@ -63,7 +63,7 @@ public:
         return _active_method == qb::http::Method::HEAD;
     }
 
-    void connect(qb::io::uri const& uri, double timeout) override {
+    void connect(qb::io::uri const& uri, double timeout, bool verify_peer) override {
         auto alive = std::weak_ptr<bool>(_alive);
         qb::io::async::tcp::connect<typename Transport::transport_io_type>(
             uri,
@@ -82,7 +82,8 @@ public:
                 this->setTimeout(timeout);
                 _owner.handle_connection_success();
             },
-            timeout);
+            timeout,
+            verify_peer);
     }
 
     void disconnect() override {
@@ -223,7 +224,7 @@ bool Client::connect(ConnectionCallback callback) {
     if (!_connection || !_connection->is_open()) {
         create_connection();
     }
-    _connection->connect(_base_uri, _connect_timeout);
+    _connection->connect(_base_uri, _connect_timeout, _verify_peer);
     return true;
 }
 

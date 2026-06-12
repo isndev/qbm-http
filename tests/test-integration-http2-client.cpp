@@ -248,6 +248,7 @@ TEST_F(Http2ClientIntegrationTest, SimpleGetRequest) {
         int h2_request_count_client_local = 0;
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         std::atomic<bool> connect_cb_called{false};
@@ -309,6 +310,7 @@ TEST_F(Http2ClientIntegrationTest, PostRequestWithData) {
         qb::http::Response received_response;
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         qb::http::Request request;
@@ -346,6 +348,7 @@ TEST_F(Http2ClientIntegrationTest, ConcurrentRequests) {
         std::vector<qb::http::Response> received_responses(3);
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         // Send 3 concurrent requests
@@ -384,6 +387,7 @@ TEST_F(Http2ClientIntegrationTest, BatchRequests) {
         std::vector<qb::http::Response> batch_responses;
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         std::vector<qb::http::Request> requests;
@@ -426,6 +430,7 @@ TEST_F(Http2ClientIntegrationTest, ErrorHandling) {
         qb::http::Response received_response;
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         qb::http::Request request;
@@ -461,6 +466,7 @@ TEST_F(Http2ClientIntegrationTest, ResponseTrailersCompleteStream) {
         qb::http::Response received_response;
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         qb::http::Request request;
@@ -497,6 +503,7 @@ TEST_F(Http2ClientIntegrationTest, StreamResetIsMappedToTheCorrectConcurrentRequ
         qb::http::Response reset_response;
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         qb::http::Request ok_request;
@@ -545,6 +552,7 @@ TEST_F(Http2ClientIntegrationTest, HeadResponseAllowsMetadataContentLengthWithou
         qb::http::Response received_response;
 
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(SERVER_PORT));
+        client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(15.0);
 
         qb::http::Request request;
