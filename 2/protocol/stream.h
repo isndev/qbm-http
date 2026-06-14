@@ -378,7 +378,6 @@ struct Http2ServerStream : public Http2StreamBase {
     qb::unordered_set<std::string> headers_sent_in_initial_frame; ///< Headers already sent in the first HEADERS frame for this response
 
     // Push promise support
-    std::vector<uint32_t> associated_push_promises; ///< IDs of PUSH_PROMISE streams initiated *by this* server stream (if it's a client request stream)
     uint32_t parent_stream_id = 0;              ///< If *this* stream *is* a server-pushed stream, this is the ID of the client-initiated stream it's associated with.
     // uint32_t associated_stream_id = 0;       ///< REMOVED - Consolidate to parent_stream_id for clarity when this stream IS a pushed stream.
 

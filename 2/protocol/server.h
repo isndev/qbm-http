@@ -1113,13 +1113,6 @@ public:
             // QB_LOG_ERROR_PA(this->getName(), "Server: Failed to emplace promised stream " << promised_stream_id << " context.");
              return PushPromiseFailureReason::INTERNAL_ERROR;
         }
-        // The emplace above may have rehashed _server_streams, invalidating
-        // it_assoc_stream (obtained before it). Re-look up the associated stream
-        // before dereferencing it.
-        it_assoc_stream = _server_streams.find(associated_stream_id);
-        if (it_assoc_stream != _server_streams.end()) {
-            it_assoc_stream->second.associated_push_promises.push_back(promised_stream_id);
-        }
 
         Http2FrameData<PushPromiseFrame> pp_frame_data;
         pp_frame_data.payload.promised_stream_id = promised_stream_id;
