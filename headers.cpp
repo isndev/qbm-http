@@ -208,6 +208,13 @@ namespace qb::http {
                     } else {
                         // Value is currently inside quotes
                         if (value_escape) {
+                            // RFC 7230 quoted-pair: only HTAB / SP / VCHAR / obs-text
+                            // may follow a backslash. Reject other control characters
+                            // (NUL, CR, LF, ...) so they cannot be smuggled into the
+                            // parsed attribute value.
+                            if (utility::is_control(c) && c != '\t') {
+                                throw std::runtime_error("Invalid escaped control character in quoted attribute value.");
+                            }
                             if (current_attribute_value.size() >= ATTRIBUTE_VALUE_MAX) {
                                 throw std::runtime_error("Quoted attribute value size exceeds maximum allowed length.");
                             }
@@ -225,6 +232,9 @@ namespace qb::http {
                             parse_state = AttributeParseState::AFTER_QUOTED_VALUE;
                         } else if (current_attribute_value.size() >= ATTRIBUTE_VALUE_MAX) {
                             throw std::runtime_error("Quoted attribute value size exceeds maximum allowed length.");
+                        } else if (utility::is_control(c) && c != '\t') {
+                            // RFC 7230 qdtext excludes control characters (except HTAB).
+                            throw std::runtime_error("Control character in quoted attribute value.");
                         } else {
                             current_attribute_value.push_back(c);
                         }

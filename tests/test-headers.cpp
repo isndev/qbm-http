@@ -125,3 +125,38 @@ TEST(HeadersUtility, HeaderAttributesAllowWhitespaceAfterQuotedValue) {
     ASSERT_NE(parsed.find("name"), parsed.end());
     EXPECT_EQ(parsed.at("name"), "file");
 }
+
+// RFC 7230 quoted-pair forbids escaping a control character other than HTAB; a
+// backslash-CR must not smuggle a CR into the parsed value.
+TEST(HeadersUtility, HeaderAttributesRejectEscapedControlChar) {
+    std::string attrs = "filename=\"a\\";
+    attrs.push_back('\r');
+    attrs += "b\"";
+
+    EXPECT_THROW((void)qb::http::parse_header_attributes(attrs), std::runtime_error);
+}
+
+// RFC 7230 qdtext excludes control characters (except HTAB); a literal LF inside
+// the quoted value must be rejected.
+TEST(HeadersUtility, HeaderAttributesRejectLiteralControlCharInQuotes) {
+    std::string attrs = "filename=\"a";
+    attrs.push_back('\n');
+    attrs += "b\"";
+
+    EXPECT_THROW((void)qb::http::parse_header_attributes(attrs), std::runtime_error);
+}
+
+// HTAB is a valid quoted-pair character and must be preserved.
+TEST(HeadersUtility, HeaderAttributesAllowEscapedTab) {
+    std::string attrs = "filename=\"a\\";
+    attrs.push_back('\t');
+    attrs += "b\"";
+
+    const auto parsed = qb::http::parse_header_attributes(attrs);
+
+    ASSERT_NE(parsed.find("filename"), parsed.end());
+    std::string expected = "a";
+    expected.push_back('\t');
+    expected += "b";
+    EXPECT_EQ(parsed.at("filename"), expected);
+}
