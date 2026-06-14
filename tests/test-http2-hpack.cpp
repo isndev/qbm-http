@@ -185,6 +185,15 @@ TEST(HPACK_Huffman, SimpleDecoding) {
     EXPECT_EQ(result, "H");
 }
 
+TEST(HPACK_Huffman, OverlongPaddingRejected) {
+    // 'H' (1100011) + one padding bit fills byte 0 (0xC7); an extra all-ones byte
+    // (0xFF) makes 9 trailing 1-bits — padding strictly longer than 7 bits, which
+    // RFC 7541 §5.2 requires to be a decoding error.
+    std::string result;
+    std::vector<uint8_t> data = {0xC7, 0xFF};
+    EXPECT_FALSE(huffman_decode(data.data(), data.size(), result));
+}
+
 TEST(HPACK_Huffman, MultiCharacterDecoding) {
     // Test decoding of multiple characters
     // This test originally expected "www" from 0xAA, 0xAA, 0xBF

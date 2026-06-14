@@ -229,41 +229,53 @@ inline bool huffman_decode(const uint8_t* input_data, size_t input_len, std::str
     output_str.reserve(input_len * 2);  // Reasonable estimate
     
     auto* current_node = decode_tree.get();
-    
+    // Bits consumed since the last complete symbol — i.e. the length of the
+    // trailing partial path. RFC 7541 §5.2 caps valid padding at 7 bits.
+    int bits_since_leaf = 0;
+
     for (size_t byte_idx = 0; byte_idx < input_len; ++byte_idx) {
         uint8_t byte = input_data[byte_idx];
-        
+
         for (int bit_idx = 7; bit_idx >= 0; --bit_idx) {
             bool bit = (byte >> bit_idx) & 1;
-            
+
             current_node = bit ? current_node->right.get() : current_node->left.get();
-            
+            ++bits_since_leaf;
+
             if (!current_node) {
                 return false;  // Invalid encoding
             }
-            
+
             if (current_node->is_leaf) {
                 if (current_node->symbol == 256) {  // EOS
                     return false;  // EOS in middle of string
                 }
                 output_str.push_back(static_cast<char>(current_node->symbol));
                 current_node = decode_tree.get();
+                bits_since_leaf = 0;
             }
         }
     }
-    
+
     // Check for incomplete symbol at end
     if (current_node != decode_tree.get()) {
-        // Verify remaining bits are all 1s (valid padding)
+        // RFC 7541 §5.2: a padding strictly longer than 7 bits MUST be treated
+        // as a decoding error (it would mean a truncated symbol, not padding).
+        // RFC 7541 §5.2: a padding strictly longer than 7 bits MUST be treated
+        // as a decoding error (it would mean a truncated symbol, not padding).
+        if (bits_since_leaf > 7) {
+            return false;
+        }
+        // Verify remaining bits are all 1s (the EOS prefix = valid padding).
         while (current_node && !current_node->is_leaf) {
             current_node = current_node->right.get();
         }
-        
+
         if (!current_node || current_node->symbol != 256) {
             return false;  // Invalid padding
         }
     }
-    
+
     return true;
 }
 
