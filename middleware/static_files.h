@@ -167,44 +167,6 @@ namespace qb::http {
     };
 
     namespace internal {
-        [[nodiscard]] inline unsigned char hex_value(char c) noexcept {
-            if (c >= '0' && c <= '9') return static_cast<unsigned char>(c - '0');
-            if (c >= 'a' && c <= 'f') return static_cast<unsigned char>(10 + c - 'a');
-            if (c >= 'A' && c <= 'F') return static_cast<unsigned char>(10 + c - 'A');
-            return 0;
-        }
-
-        [[nodiscard]] inline bool is_hex_digit(char c) noexcept {
-            return (c >= '0' && c <= '9') ||
-                   (c >= 'a' && c <= 'f') ||
-                   (c >= 'A' && c <= 'F');
-        }
-
-        /**
-         * @brief Decodes percent-encoded path bytes without applying
-         *        application/x-www-form-urlencoded semantics.
-         *
-         * In URI paths, '+' is a literal plus sign. Only query/form decoding
-         * maps '+' to a space.
-         */
-        [[nodiscard]] inline std::string decode_path_component(std::string_view input) {
-            std::string decoded;
-            decoded.reserve(input.size());
-            for (std::size_t i = 0; i < input.size(); ++i) {
-                const char c = input[i];
-                if (c == '%' && i + 2 < input.size() &&
-                    is_hex_digit(input[i + 1]) && is_hex_digit(input[i + 2])) {
-                    const unsigned char high = hex_value(input[i + 1]);
-                    const unsigned char low = hex_value(input[i + 2]);
-                    decoded.push_back(static_cast<char>((high << 4) | low));
-                    i += 2;
-                } else {
-                    decoded.push_back(c);
-                }
-            }
-            return decoded;
-        }
-
         [[nodiscard]] inline bool path_prefix_matches(std::string_view path, std::string_view prefix) noexcept {
             if (prefix.empty()) {
                 return true;
@@ -295,7 +257,7 @@ namespace qb::http {
 
             // (1) URL-decode path bytes. A literal '+' is valid in a URI path
             // and must not be interpreted as a space.
-            std::string decoded = decode_path_component(original_relative_path_sv);
+            std::string decoded = qb::http::utility::decode_path_component(original_relative_path_sv);
 
             // (2) A NUL byte inside a path is never legitimate for static-file
             // serving. Reject immediately rather than relying on OS-specific
@@ -643,7 +605,7 @@ namespace qb::http {
             // walk the *requested* path against the real filesystem, stopping
             // at the first symlink we encounter.
             if (_options.reject_symlinks) {
-                const std::string decoded_req = internal::decode_path_component(effective_request_path_sv);
+                const std::string decoded_req = qb::http::utility::decode_path_component(effective_request_path_sv);
                 std::string_view rel_view{decoded_req};
                 if (const auto first = rel_view.find_first_not_of('/');
                     first != std::string_view::npos) {

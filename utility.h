@@ -116,6 +116,52 @@ namespace qb::http {
         }
 
         /**
+         * @brief Convert a single hex digit to its numeric value.
+         * @param c Hex digit (caller is expected to have validated it via is_hex_digit).
+         * @return The value 0-15, or 0 if `c` is not a hex digit.
+         */
+        [[nodiscard]] inline unsigned char
+        hex_value(char c) noexcept {
+            if (c >= '0' && c <= '9') return static_cast<unsigned char>(c - '0');
+            if (c >= 'a' && c <= 'f') return static_cast<unsigned char>(10 + c - 'a');
+            if (c >= 'A' && c <= 'F') return static_cast<unsigned char>(10 + c - 'A');
+            return 0;
+        }
+
+        /**
+         * @brief Percent-decode a URI path component.
+         *
+         * Decodes `%XX` escapes only when both following bytes are hex digits;
+         * every other byte — including a literal `+`, which is a valid path
+         * character and must NOT become a space — is preserved verbatim. An
+         * incomplete or invalid escape (e.g. a trailing `%` or `%4`) is left
+         * literal. Shared by the router (path parameters) and the static-file
+         * middleware so both decode identically.
+         *
+         * @param input The raw, possibly percent-encoded, component.
+         * @return The decoded component.
+         */
+        [[nodiscard]] inline std::string
+        decode_path_component(std::string_view input) {
+            std::string result;
+            result.reserve(input.size());
+            for (std::size_t i = 0; i < input.size(); ++i) {
+                const char c = input[i];
+                if (c == '%' && i + 2 < input.size() &&
+                    is_hex_digit(static_cast<unsigned char>(input[i + 1])) &&
+                    is_hex_digit(static_cast<unsigned char>(input[i + 2]))) {
+                    const unsigned char high = hex_value(input[i + 1]);
+                    const unsigned char low  = hex_value(input[i + 2]);
+                    result.push_back(static_cast<char>((high << 4) | low));
+                    i += 2;
+                } else {
+                    result.push_back(c);
+                }
+            }
+            return result;
+        }
+
+        /**
          * @brief Branchless ASCII case-folding: returns `c` with the 0x20 bit set iff `c`
          *        is an upper-case ASCII letter.
          * HTTP grammar is ASCII-only (RFC 7230 §3); this avoids the locale dependency
