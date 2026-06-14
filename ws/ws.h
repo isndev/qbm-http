@@ -472,7 +472,10 @@ class base : public qb::io::async::AProtocol<IO_> {
     unsigned char _fin_rsv_opcode = 0; /**< Current frame's FIN, RSV, and opcode bits */
     unsigned char _data_opcode    = 0; /**< Opcode for the current fragmented data message */
     ::qb::http::ws::Message _message;   /**< Current message being assembled */
-    size_t _max_payload_size = 0;       /**< Max allowed payload size, 0 for unlimited */
+    // Secure default: bound the reassembled message size so a peer streaming
+    // unbounded continuation fragments cannot exhaust server memory. Apps may
+    // raise it or set 0 (unlimited) explicitly via set_max_payload_size().
+    size_t _max_payload_size = qb::http::protocol_limits::MAX_BODY_SIZE;
 
     /**
      * @brief Fails the WebSocket connection by queuing a Close frame.
