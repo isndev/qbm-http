@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <cstring>
+
 #include "../2/protocol/base.h"
 #include "../2/protocol/client.h"
 #include "../2/protocol/server.h"
@@ -526,4 +529,124 @@ TEST(HTTP2ClientProtocol, RejectsWindowUpdateOnIdleClientStreamAsConnectionError
     EXPECT_EQ(*protocol.get_last_error_code(), qb::protocol::http2::ErrorCode::PROTOCOL_ERROR);
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, qb::protocol::http2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// Regression: a HEADERS frame with FLAG_PADDED|FLAG_PRIORITY whose declared
+// length is exactly the prefix size (1 pad-length byte + 5 priority bytes) made
+// the header-block size, computed as p_len - pad_length, underflow to SIZE_MAX
+// and drive an out-of-bounds read in assign(). The framer must reject the frame
+// as a FRAME_SIZE_ERROR. Drives raw wire bytes through the framer because the
+// bug lives in handle_headers_frame_payload, not in on(HeadersFrame).
+TEST(HTTP2ServerProtocol, PaddedPriorityHeadersLengthUnderflowIsRejected) {
+    Http2ProtocolHarness io;
+    qb::protocol::http2::ServerHttp2Protocol<Http2ProtocolHarness> protocol(io);
+
+    auto push = [&](const void* p, std::size_t n) {
+        std::memcpy(io.input.allocate_back(n), p, n);
+    };
+
+    // Connection preface.
+    push(::HTTP2_CONNECTION_PREFACE.data(), ::HTTP2_CONNECTION_PREFACE.size());
+
+    // Malicious HEADERS frame header: length = 6 (1 pad-length + 5 priority),
+    // PADDED | PRIORITY, stream 1.
+    qb::protocol::http2::FrameHeader fh{};
+    fh.set_payload_length(6);
+    fh.type  = static_cast<uint8_t>(qb::protocol::http2::FrameType::HEADERS);
+    fh.flags = qb::protocol::http2::FLAG_PADDED | qb::protocol::http2::FLAG_PRIORITY;
+    fh.set_stream_id(1);
+    push(&fh, sizeof(fh));
+
+    // Payload: pad_length = 1, then the 5 priority bytes; nothing left for the
+    // declared padding byte or any header block — the malformed part.
+    const std::uint8_t payload[6] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+    push(payload, sizeof(payload));
+
+    std::size_t sz = 0;
+    while ((sz = protocol.getMessageSize()) > 0) {
+        protocol.onMessage(sz);
+        io.input.free_front(sz);
+        if (!protocol.ok()) {
+            break;
+        }
+    }
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(),
+              qb::protocol::http2::ErrorCode::FRAME_SIZE_ERROR);
+    EXPECT_EQ(io.request_count, 0);
+}
+
+namespace {
+struct ThrowingRequestHarness {
+    using base_io_t = ThrowingRequestHarness;
+
+    qb::allocator::pipe<char> input;
+    qb::allocator::pipe<char> output;
+    bool handler_invoked = false;
+    int  stream_error_count = 0;
+    int  goaway_count = 0;
+
+    qb::allocator::pipe<char>& in() noexcept { return input; }
+    qb::allocator::pipe<char>& out() noexcept { return output; }
+
+    template <typename Frame>
+    ThrowingRequestHarness& operator<<(const Frame& frame) {
+        output.put(frame);
+        return *this;
+    }
+
+    void on(qb::http::Request&&, uint32_t) {
+        handler_invoked = true;
+        throw std::runtime_error("request handler boom");
+    }
+    void on(const qb::protocol::http2::Http2StreamErrorEvent&) { ++stream_error_count; }
+    void on(const qb::protocol::http2::Http2GoAwayEvent&) { ++goaway_count; }
+};
+} // namespace
+
+// Regression: an HTTP/2 request handler runs synchronously from the noexcept
+// frame-dispatch chain (on(HeadersFrame) -> dispatch_complete_request ->
+// _io.on(request)). Before the dispatch-boundary try/catch, a throwing handler
+// escaped that noexcept boundary and called std::terminate. The protocol must
+// instead reset the offending stream and keep the connection alive.
+TEST(HTTP2ServerProtocol, ThrowingRequestHandlerIsContainedAndConnectionSurvives) {
+    ThrowingRequestHarness io;
+    qb::protocol::http2::ServerHttp2Protocol<ThrowingRequestHarness> protocol(io);
+
+    auto push = [&](const void* p, std::size_t n) {
+        std::memcpy(io.input.allocate_back(n), p, n);
+    };
+
+    push(::HTTP2_CONNECTION_PREFACE.data(), ::HTTP2_CONNECTION_PREFACE.size());
+
+    const auto encoded = encode_hpack_headers({
+        {":method", "GET"},
+        {":path", "/"},
+        {":scheme", "https"},
+        {":authority", "example.com"},
+    });
+
+    qb::protocol::http2::FrameHeader fh{};
+    fh.set_payload_length(static_cast<uint32_t>(encoded.size()));
+    fh.type  = static_cast<uint8_t>(qb::protocol::http2::FrameType::HEADERS);
+    fh.flags = qb::protocol::http2::FLAG_END_STREAM | qb::protocol::http2::FLAG_END_HEADERS;
+    fh.set_stream_id(1);
+    push(&fh, sizeof(fh));
+    push(encoded.data(), encoded.size());
+
+    std::size_t sz = 0;
+    while ((sz = protocol.getMessageSize()) > 0) {
+        protocol.onMessage(sz);
+        io.input.free_front(sz);
+        if (!protocol.ok()) {
+            break;
+        }
+    }
+
+    // The handler was reached and threw; the dispatch-boundary catch reset the
+    // stream instead of terminating, and the connection is still alive.
+    EXPECT_TRUE(io.handler_invoked);
+    EXPECT_TRUE(protocol.ok());
 }

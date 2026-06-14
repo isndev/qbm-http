@@ -1721,7 +1721,21 @@ private:
             // and close the stream, making the 'stream' reference invalid
             stream.request_dispatched = true;
 
-            this->_io.on(std::move(stream.assembled_request), stream_id); // Pass stream_id as context/correlation
+            // _io.on() runs the application layer (router, middleware, sync
+            // handlers) synchronously. It is reached from the noexcept frame
+            // handlers, so an exception escaping it would call std::terminate.
+            // Contain it: reset the offending stream and keep the connection.
+            try {
+                this->_io.on(std::move(stream.assembled_request), stream_id); // Pass stream_id as context/correlation
+            } catch (const std::exception& e) {
+                LOG_HTTP_ERROR_PA(stream_id, "HTTP/2 request handler threw: " << e.what());
+                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Request handler threw an exception");
+                return;
+            } catch (...) {
+                LOG_HTTP_ERROR_PA(stream_id, "HTTP/2 request handler threw an unknown exception");
+                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Request handler threw an exception");
+                return;
+            }
 
             // After _io.on(), the stream might have been closed and erased. We need to check if it still exists.
             auto it = _server_streams.find(stream_id);

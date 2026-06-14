@@ -922,6 +922,12 @@ public:
     void onMessage(std::size_t received_size) noexcept override {
         auto& in_buffer = this->_io.in();
 
+        // onMessage is noexcept (AProtocol contract). Frame dispatch below
+        // reaches HPACK decode, header validation and the side protocol's frame
+        // handlers, any of which can throw (std::bad_alloc, validation errors).
+        // Contain it so a throw fails the connection instead of escaping the
+        // noexcept boundary and calling std::terminate.
+        try {
         switch (_current_state) {
             case ParserState::EXPECTING_PREFACE: {
                 const auto bytes_to_copy = received_size;
@@ -1042,6 +1048,13 @@ public:
             default:
                 this->not_ok(ErrorCode::INTERNAL_ERROR);
                 return;
+        }
+        } catch (const std::exception& e) {
+            LOG_HTTP_ERROR("HTTP/2 frame processing threw: " << e.what());
+            this->not_ok(ErrorCode::INTERNAL_ERROR);
+        } catch (...) {
+            LOG_HTTP_ERROR("HTTP/2 frame processing threw an unknown exception");
+            this->not_ok(ErrorCode::INTERNAL_ERROR);
         }
     }
 
@@ -1503,7 +1516,12 @@ private:
         }
 
         if (_current_frame_header.flags & FLAG_PRIORITY) {
-            if (!validate_min_payload_size(5 + pad_length, payload_size, "HEADERS with PRIORITY flag", _current_frame_header.get_stream_id())) {
+            // Validate against p_len (the pad-length byte already consumed by
+            // validate_padded_frame), not the original payload_size. Using
+            // payload_size was off by one: with FLAG_PADDED, payload_size ==
+            // 5 + pad_length passed this check yet left p_len - pad_length to
+            // underflow below (SIZE_MAX header_block_size -> OOB read).
+            if (!validate_min_payload_size(5 + pad_length, p_len, "HEADERS with PRIORITY flag", _current_frame_header.get_stream_id())) {
                 return false;
             }
             
@@ -1605,7 +1623,10 @@ private:
             pad_length = pad_len;
         }
         
-        if (!validate_min_payload_size(4 + pad_length, payload_size, "PUSH_PROMISE", _current_frame_header.get_stream_id())) {
+        // Validate against p_len (pad-length byte already consumed), not the
+        // original payload_size: the latter was off by one and let
+        // p_len - pad_length underflow below (SIZE_MAX -> OOB read).
+        if (!validate_min_payload_size(4 + pad_length, p_len, "PUSH_PROMISE", _current_frame_header.get_stream_id())) {
             return false;
         }
         
