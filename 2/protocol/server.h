@@ -973,6 +973,12 @@ public:
                 }
                 hf_vector.emplace_back(name_lower, value);
             }
+            // Record headers sent in this initial HEADERS frame so the trailer
+            // pass (which iterates the same response headers and skips those
+            // present here, keyed by original name) does not re-send them as
+            // trailers. Previously this set was never populated, so every
+            // response header was duplicated into the trailers.
+            stream.headers_sent_in_initial_frame.insert(header_item.first);
         }
 
         const auto& body_pipe = http_response.body().raw();
