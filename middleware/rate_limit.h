@@ -29,6 +29,7 @@
 #include <memory>      // For std::shared_ptr, std::make_shared
 #include <string>      // For std::string, std::to_string
 #include <vector>      // For std::vector (used in RateLimitOptions setters indirectly)
+#include <typeindex>   // For std::type_index (type-safe client-id extractor)
 #include <utility>     // For std::move
 
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
@@ -138,9 +139,12 @@ namespace qb::http {
         RateLimitOptions &client_id_extractor(
             std::function<std::string(const Context<SessionType> &)> extractor) {
             // std::function assignment can allocate
+            _client_id_extractor_type = std::type_index(typeid(SessionType));
             _client_id_extractor_fn =
                     [extractor_cb = std::move(extractor)](const void *ctx_ptr) -> std::string {
-                        // This type erasure requires the caller of extract_client_id to pass the correct Context type.
+                        // Safe: extract_client_id verifies SessionType matches the
+                        // type recorded above before invoking this, so ctx_ptr is
+                        // always a Context<SessionType>.
                         const auto *typed_ctx = static_cast<const Context<SessionType> *>(ctx_ptr);
                         return extractor_cb(*typed_ctx);
                     };
@@ -199,7 +203,12 @@ namespace qb::http {
          */
         template<typename SessionType>
         [[nodiscard]] std::string extract_client_id(const Context<SessionType> &ctx) const {
-            if (_client_id_extractor_fn) {
+            // Only invoke the type-erased extractor when the Context type matches
+            // the SessionType it was configured with; otherwise the static_cast
+            // inside it would be undefined behaviour. On mismatch, fall through to
+            // the built-in extractor.
+            if (_client_id_extractor_fn &&
+                _client_id_extractor_type == std::type_index(typeid(SessionType))) {
                 try {
                     return _client_id_extractor_fn(static_cast<const void *>(&ctx));
                 } catch (const std::bad_function_call & /*e*/) {
@@ -278,6 +287,7 @@ namespace qb::http {
         qb::http::status _status_code;
         std::string _message;
         std::function<std::string(const void *)> _client_id_extractor_fn; // Type-erased client ID extractor
+        std::type_index _client_id_extractor_type{typeid(void)}; // SessionType the extractor was configured for
     };
 
     /**

@@ -593,3 +593,57 @@ TEST_F(RateLimitMiddlewareTest, OpportunisticPeriodicCleanupRecoversCapacity) {
     EXPECT_EQ(evicted, 20U);
     EXPECT_EQ(rate_limit_mw->tracked_client_count(), 0U);
 }
+
+// A second, distinct session type used to exercise the type-erased client-id
+// extractor with a mismatched SessionType.
+struct OtherRateLimitSession {
+    qb::http::Response _response;
+    qb::http::Response &get_response_ref() { return _response; }
+    OtherRateLimitSession &operator<<(const qb::http::Response &resp) {
+        _response = resp;
+        return *this;
+    }
+    void reset() { _response = qb::http::Response(); }
+};
+
+// Regression: a RateLimitOptions configured with client_id_extractor<A> but used
+// by a RateLimitMiddleware<B> must NOT invoke the type-erased extractor — its
+// static_cast<const Context<A>*> applied to a Context<B>* is undefined
+// behaviour. The recorded type tag makes extract_client_id fall through to the
+// built-in (X-Forwarded-For) extractor, so two distinct client IPs are tracked
+// independently.
+TEST(RateLimitMiddlewareTypeSafety, MismatchedExtractorSessionTypeFallsBackToDefault) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(std::chrono::seconds(60));
+    // Extractor is configured for MockRateLimitSession, but the middleware below
+    // is instantiated for OtherRateLimitSession.
+    options.client_id_extractor<MockRateLimitSession>(
+        [](const qb::http::Context<MockRateLimitSession> &) -> std::string { return "FIXED"; });
+
+    auto mw = qb::http::rate_limit_middleware<OtherRateLimitSession>(options);
+
+    auto run = [&](const std::string &ip) {
+        auto session = std::make_shared<OtherRateLimitSession>();
+        qb::http::Router<OtherRateLimitSession> router;
+        router.use(mw);
+        router.get("/r", [](std::shared_ptr<qb::http::Context<OtherRateLimitSession> > ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router.compile();
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("/r");
+        req.set_header("X-Forwarded-For", ip);
+        router.route(session, std::move(req));
+        return session->_response.status();
+    };
+
+    // First client IP: allowed (its own counter, limit 1).
+    EXPECT_EQ(run("10.0.0.1"), qb::http::status::OK);
+    // A different IP keyed by the default extractor is an independent client and
+    // is also allowed. Had the mismatched extractor been (mis)used, both IPs
+    // would share the "FIXED" key and this would be 429 — or, without the type
+    // tag, undefined behaviour.
+    EXPECT_EQ(run("10.0.0.2"), qb::http::status::OK);
+}
