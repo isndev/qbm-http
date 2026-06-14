@@ -146,6 +146,13 @@ private:
     void hold_through_current_tick();
     void enter_user_callback();
     void leave_user_callback() noexcept;
+    // Invoke a user-supplied callback under a callback_scope, containing any
+    // exception it throws. User callbacks are reached from qb-io's noexcept
+    // dispatch (protocol onMessage / timeout / disconnect events), where an
+    // escaping exception would call std::terminate; this is the single
+    // chokepoint that prevents it.
+    template <typename Fn>
+    void invoke_user_callback(Fn&& fn) noexcept;
     void reset_deferred_connection_if_ready();
     void process_pending_requests();
     void arm_pending_timeout(std::uint64_t request_id);
