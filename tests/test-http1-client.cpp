@@ -563,3 +563,31 @@ TEST(Http1ClientTest, DestroyingClientDuringConnectDoesNotLeaveDanglingCallback)
     }
     SUCCEED();
 }
+
+// Regression: a user response callback is invoked from the protocol's noexcept
+// onMessage dispatch. Before the invoke_user_callback chokepoint, an exception
+// thrown by the callback escaped that noexcept boundary and called
+// std::terminate (aborting the whole test binary). The throw must now be
+// contained and the client must remain usable.
+TEST(Http1ClientTest, ThrowingUserCallbackIsContainedAndClientSurvives) {
+    RunningHttp1Server server{33120};
+    auto client = qb::http1::make_client(server.url("/"));
+
+    bool first_called = false;
+    client->push_request(request(qb::http::method::GET, "/ping"),
+        [&](qb::http::Response response) {
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            first_called = true;
+            throw std::runtime_error("user callback boom");
+        });
+    for (int i = 0; i < 300 && !first_called; ++i) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    EXPECT_TRUE(first_called);
+
+    // Process survived the throw; the keep-alive connection is intact and the
+    // client still serves a subsequent request.
+    auto after = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+    EXPECT_EQ(after.status(), qb::http::status::OK);
+}

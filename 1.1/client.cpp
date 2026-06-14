@@ -159,6 +159,18 @@ public:
     }
 };
 
+template <typename Fn>
+void Client::invoke_user_callback(Fn&& fn) noexcept {
+    callback_scope scope(*this);
+    try {
+        fn();
+    } catch (std::exception const& e) {
+        LOG_HTTP_WARN("HTTP/1.1 client user callback threw: " << e.what());
+    } catch (...) {
+        LOG_HTTP_WARN("HTTP/1.1 client user callback threw an unknown exception");
+    }
+}
+
 Client::Client(std::string const& base_uri)
     : Client(qb::io::uri(base_uri)) {}
 
@@ -314,15 +326,15 @@ bool Client::push_request(qb::http::Request request, ResponseCallback callback) 
     ++_total_requests;
     if (auto error = prepare_request(request)) {
         ++_failed_requests;
-        callback_scope scope(*this);
-        callback(std::move(*error));
+        invoke_user_callback([&] { callback(std::move(*error)); });
         return true;
     }
     if (_pending_requests.size() + (_active_request ? 1u : 0u) >= _max_pending_requests) {
         ++_failed_requests;
-        callback_scope scope(*this);
-        callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
-                                       "HTTP/1.1 client pending request limit reached"));
+        invoke_user_callback([&] {
+            callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                           "HTTP/1.1 client pending request limit reached"));
+        });
         return false;
     }
     auto ctx = std::make_unique<RequestContext>();
@@ -362,8 +374,7 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
         return false;
     }
     if (requests.empty()) {
-        callback_scope scope(*this);
-        callback({});
+        invoke_user_callback([&] { callback({}); });
         return true;
     }
     const auto batch_id = _next_batch_id++;
@@ -387,8 +398,7 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
                     auto cb = std::move(batch_ref.callback);
                     _active_batches.erase(it);
                     if (cb) {
-                        callback_scope scope(*this);
-                        cb(std::move(done));
+                        invoke_user_callback([&] { cb(std::move(done)); });
                     }
                 }
             }) && queued_all;
@@ -423,9 +433,10 @@ void Client::process_pending_requests() {
             auto ctx = std::move(_pending_requests.front());
             _pending_requests.pop_front();
             ++_failed_requests;
-            callback_scope scope(*this);
-            ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
-                                                "HTTP/1.1 client is not connected"));
+            invoke_user_callback([&] {
+                ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                                    "HTTP/1.1 client is not connected"));
+            });
             process_pending_requests();
             return;
         }
@@ -505,8 +516,7 @@ bool Client::fail_pending_request(std::uint64_t request_id,
         auto ctx = std::move(*it);
         _pending_requests.erase(it);
         ++_failed_requests;
-        callback_scope scope(*this);
-        ctx->callback(create_error_response(status, error));
+        invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
         return true;
     }
     return false;
@@ -521,8 +531,7 @@ void Client::handle_connection_success() {
     _connection_callbacks.clear();
     for (auto& cb : callbacks) {
         if (cb) {
-            callback_scope scope(*this);
-            cb(true, "");
+            invoke_user_callback([&] { cb(true, ""); });
         }
     }
     if (_intentional_disconnect) {
@@ -539,8 +548,7 @@ void Client::handle_connection_failure(std::string const& error) {
     _connection_callbacks.clear();
     for (auto& cb : callbacks) {
         if (cb) {
-            callback_scope scope(*this);
-            cb(false, error);
+            invoke_user_callback([&] { cb(false, error); });
         }
     }
     if (_active_request) {
@@ -557,8 +565,7 @@ void Client::handle_response(qb::http::Response response) {
     auto ctx = std::move(_active_request);
     const bool keep_alive = response.keep_alive && !has_connection_close(response);
     ++_successful_requests;
-    callback_scope scope(*this);
-    ctx->callback(std::move(response));
+    invoke_user_callback([&] { ctx->callback(std::move(response)); });
     if (_intentional_disconnect) {
         return;
     }
@@ -627,8 +634,7 @@ void Client::fail_active_request(std::string const& error, qb::http::status stat
     }
     auto ctx = std::move(_active_request);
     ++_failed_requests;
-    callback_scope scope(*this);
-    ctx->callback(create_error_response(status, error));
+    invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
 }
 
 void Client::fail_all_requests(std::string const& error, qb::http::status status) {
@@ -637,8 +643,7 @@ void Client::fail_all_requests(std::string const& error, qb::http::status status
         auto ctx = std::move(_pending_requests.front());
         _pending_requests.pop_front();
         ++_failed_requests;
-        callback_scope scope(*this);
-        ctx->callback(create_error_response(status, error));
+        invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
     }
 }
 
