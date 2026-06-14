@@ -1257,7 +1257,8 @@ public:
      * @param error_code Error code for the reset
      * @param context_msg Debug context message
      */
-    void send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string& context_msg = "") noexcept {
+    void send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string& context_msg = "",
+                         bool close_context = true) noexcept {
 
         if (!_connection_active && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Tried to send RST_STREAM but connection is not active");
@@ -1290,7 +1291,12 @@ public:
                     this->get_io_handler().on(stream_error_event);
                 }
             }
-            this->try_close_stream_context(stream_id); // Attempt to clean up if conditions met
+            // close_context is false when RST is sent from deep inside a frame
+            // handler that still holds a reference to this stream: erasing the
+            // context now would dangle that reference. The caller reclaims it.
+            if (close_context) {
+                this->try_close_stream_context(stream_id); // Attempt to clean up if conditions met
+            }
         }
         LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: RST_STREAM sent successfully");
     }
@@ -1729,11 +1735,17 @@ private:
                 this->_io.on(std::move(stream.assembled_request), stream_id); // Pass stream_id as context/correlation
             } catch (const std::exception& e) {
                 LOG_HTTP_ERROR_PA(stream_id, "HTTP/2 request handler threw: " << e.what());
-                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Request handler threw an exception");
+                // Do NOT erase the stream context here: this runs deep inside
+                // on(HeadersFrame/DataFrame/ContinuationFrame), which still hold a
+                // reference to the stream. Mark it reset + send RST_STREAM; the
+                // caller's normal cleanup reclaims the context once it is done.
+                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR,
+                                      "Request handler threw an exception", /*close_context=*/false);
                 return;
             } catch (...) {
                 LOG_HTTP_ERROR_PA(stream_id, "HTTP/2 request handler threw an unknown exception");
-                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Request handler threw an exception");
+                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR,
+                                      "Request handler threw an exception", /*close_context=*/false);
                 return;
             }
 
