@@ -100,6 +100,24 @@ TEST_F(MultipartSecurityTest, BoundaryOverMaxLengthIsRejected) {
     }, std::runtime_error);
 }
 
+TEST_F(MultipartSecurityTest, ExcessivePartCountIsRejected) {
+    // A body with more than MAX_PARTS_COUNT parts must be rejected so a peer
+    // cannot exhaust memory with millions of tiny parts.
+    const std::string boundary = "bnd";
+    std::string raw;
+    for (std::size_t i = 0; i <= multipart_limits::MAX_PARTS_COUNT; ++i) {
+        raw += "--" + boundary + "\r\n"
+               "Content-Disposition: form-data; name=\"f\"\r\n"
+               "\r\n"
+               "v\r\n";
+    }
+    raw += "--" + boundary + "--";
+
+    Body body;
+    body = raw;
+    EXPECT_THROW({ (void)body.as<Multipart>(); }, std::runtime_error);
+}
+
 TEST_F(MultipartSecurityTest, BoundaryWithControlCharactersIsRejected) {
     EXPECT_THROW({
         (void)parse_boundary("multipart/form-data; boundary=\"safe\r\nInjected\"");

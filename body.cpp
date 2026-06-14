@@ -113,6 +113,8 @@ namespace qb::http {
             bool headersProcessed;
             Headers currentHeaders;
             std::string currentHeaderName, currentHeaderValue;
+            std::size_t partCount = 0;     ///< Parts seen so far (vs multipart_limits::MAX_PARTS_COUNT)
+            std::size_t totalDataSize = 0; ///< Cumulative part data bytes (vs multipart_limits::MAX_TOTAL_SIZE)
 
             /**
              * @brief Reset all reader callbacks to NULL
@@ -155,6 +157,9 @@ namespace qb::http {
             static void
             cbPartBegin(const char *, size_t, size_t, void *userData) {
                 MultipartReader *self = static_cast<MultipartReader *>(userData);
+                if (++self->partCount > multipart_limits::MAX_PARTS_COUNT) {
+                    throw std::runtime_error("Multipart part count exceeds maximum allowed");
+                }
                 self->headersProcessed = false;
                 self->currentHeaders.headers().clear();
                 self->currentHeaderName.clear();
@@ -234,6 +239,10 @@ namespace qb::http {
             static void
             cbPartData(const char *buffer, size_t start, size_t end, void *userData) {
                 MultipartReader *self = static_cast<MultipartReader *>(userData);
+                self->totalDataSize += (end - start);
+                if (self->totalDataSize > multipart_limits::MAX_TOTAL_SIZE) {
+                    throw std::runtime_error("Multipart total size exceeds maximum allowed");
+                }
                 if (self->onPartData != nullptr) {
                     self->onPartData(buffer + start, end - start, self->userData);
                 }
@@ -306,6 +315,8 @@ namespace qb::http {
             void
             reset() {
                 parser.reset();
+                partCount = 0;
+                totalDataSize = 0;
             }
 
             /**
