@@ -1672,7 +1672,15 @@ private:
             // The qb::http::Response itself should handle body constraints for HEAD if it was set.
             // Here, we just dispatch what we assembled.
             stream.assembled_response.parse_set_cookie_headers();
-            this->_io.on(std::move(stream.assembled_response), stream.application_request_id);
+            // The response callback is user code reached from the noexcept frame
+            // handlers; contain a throw so it cannot call std::terminate.
+            try {
+                this->_io.on(std::move(stream.assembled_response), stream.application_request_id);
+            } catch (const std::exception& e) {
+                LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw: " << e.what());
+            } catch (...) {
+                LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw an unknown exception");
+            }
             stream.response_dispatched = true;
         }
 
@@ -2011,6 +2019,9 @@ private:
         // Response is complete - dispatch it
         stream.response_dispatched = true;
         stream.assembled_response.parse_set_cookie_headers();
+        // The response handlers below run user code reached from the noexcept
+        // frame handlers; contain a throw so it cannot call std::terminate.
+        try {
         if (stream.rst_stream_received) {
             // Dispatch error response
             if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t, ErrorCode>) {
@@ -2029,6 +2040,11 @@ private:
                 this->get_io_handler().on(std::move(stream.assembled_response),
                                         stream.application_request_id);
             }
+        }
+        } catch (const std::exception& e) {
+            LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw: " << e.what());
+        } catch (...) {
+            LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw an unknown exception");
         }
 
         // Update stream state
