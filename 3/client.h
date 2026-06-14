@@ -78,6 +78,7 @@ private:
     std::uint64_t _next_batch_id = 1;
 
     std::size_t _max_concurrent_streams = 100;
+    std::size_t _max_pending_requests = 10000; ///< Cap on queued+active requests (bounds _pending_requests)
     std::size_t _max_body_size = 64 * 1024 * 1024;
     double _connect_timeout = 30.0;
     double _request_timeout = 60.0;

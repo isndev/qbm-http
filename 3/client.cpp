@@ -128,6 +128,12 @@ request_id Client::push_request_with_id(qb::http::Request request, ResponseCallb
                                        "HTTP/3 server is shutting down"));
         return 0;
     }
+    if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
+        ++_failed_requests;
+        callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                       "HTTP/3 client pending request limit reached"));
+        return 0;
+    }
     auto ctx = std::make_unique<RequestContext>();
     ctx->request = std::move(request);
     ctx->callback = std::move(callback);
