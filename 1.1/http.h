@@ -188,28 +188,55 @@ namespace qb::http {
                 if (!_context || !_ready_response) {
                     return;
                 }
-                auto response = std::move(*_ready_response);
-                _ready_response.reset();
-                prepare_response_for_active_request(response);
-                *this << response;
-                this->updateTimeout();
+                // Serializing the response (*this << response) can throw (oversized
+                // response, invalid header). This is reached synchronously from
+                // start_request AND asynchronously from send_response (a coroutine/
+                // callback completion) — both noexcept contexts. Contain a throw so
+                // it cannot escape the noexcept boundary and call std::terminate.
+                try {
+                    auto response = std::move(*_ready_response);
+                    _ready_response.reset();
+                    prepare_response_for_active_request(response);
+                    *this << response;
+                    this->updateTimeout();
+                } catch (const std::exception &e) {
+                    LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 response send threw: " << e.what());
+                    this->disconnect(DisconnectedReason::ServerError);
+                } catch (...) {
+                    LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 response send threw an unknown exception");
+                    this->disconnect(DisconnectedReason::ServerError);
+                }
             }
 
             void
             start_request(Request&& request) {
-                _active_request_method = request.method();
-                _active_should_keep_alive = request.keep_alive || _keep_alive;
-                _ready_response.reset();
+                // This runs synchronously from the protocol's noexcept onMessage
+                // (and from the noexcept eos event). Routing builds a Context,
+                // decodes path parameters, runs lifecycle hooks and the handler
+                // chain, and serializes the response — any of which can throw.
+                // Contain it here so a throw fails the connection instead of
+                // escaping the noexcept boundary and calling std::terminate.
+                try {
+                    _active_request_method = request.method();
+                    _active_should_keep_alive = request.keep_alive || _keep_alive;
+                    _ready_response.reset();
 
-                auto context = this->server().router().route(this->shared_from_this(), std::move(request));
-                if (!context) {
-                    LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 request not routed, disconnecting.");
+                    auto context = this->server().router().route(this->shared_from_this(), std::move(request));
+                    if (!context) {
+                        LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 request not routed, disconnecting.");
+                        this->disconnect(DisconnectedReason::Undefined);
+                        return;
+                    }
+
+                    _context = std::move(context);
+                    drain_ready_response();
+                } catch (const std::exception &e) {
+                    LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 request handling threw: " << e.what());
                     this->disconnect(DisconnectedReason::Undefined);
-                    return;
+                } catch (...) {
+                    LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 request handling threw an unknown exception");
+                    this->disconnect(DisconnectedReason::Undefined);
                 }
-
-                _context = std::move(context);
-                drain_ready_response();
             }
 
             void
@@ -265,7 +292,17 @@ namespace qb::http {
                 // disconnect session on timeout
                 // add reason for timeout
                 if constexpr (qb::has_on<Derived, event::timeout const &>) {
-                    static_cast<Derived &>(*this).on(event::timeout{});
+                    // User timeout handler runs from a noexcept event dispatch;
+                    // contain a throw so it cannot call std::terminate.
+                    try {
+                        static_cast<Derived &>(*this).on(event::timeout{});
+                    } catch (const std::exception &e) {
+                        LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 user timeout handler threw: " << e.what());
+                        this->disconnect(DisconnectedReason::ByTimeout);
+                    } catch (...) {
+                        LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 user timeout handler threw an unknown exception");
+                        this->disconnect(DisconnectedReason::ByTimeout);
+                    }
                 } else
                     this->disconnect(DisconnectedReason::ByTimeout);
             }
@@ -295,8 +332,20 @@ namespace qb::http {
             on([[maybe_unused]] qb::io::async::event::eos &&) {
                 LOG_HTTP_DEBUG_PA(this->id(), "End of stream (eos) event - response fully transmitted.");
 
-                if (_context) {
-                    _context->execute_hook(HookPoint::POST_RESPONSE_SEND);
+                // Reached from the noexcept eos event. The POST_RESPONSE_SEND
+                // hooks run user code; contain a throw. start_next_request_if_-
+                // possible() routes the next pipelined request and is already
+                // protected inside start_request().
+                try {
+                    if (_context) {
+                        _context->execute_hook(HookPoint::POST_RESPONSE_SEND);
+                        _context.reset();
+                    }
+                } catch (const std::exception &e) {
+                    LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 POST_RESPONSE_SEND hook threw: " << e.what());
+                    _context.reset();
+                } catch (...) {
+                    LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 POST_RESPONSE_SEND hook threw an unknown exception");
                     _context.reset();
                 }
                 if (!_active_should_keep_alive) {
