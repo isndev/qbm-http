@@ -229,6 +229,21 @@ public:
             ctx->complete();
         });
 
+        // A handler whose response fails serialization (malformed
+        // Transfer-Encoding), completed ASYNCHRONOUSLY. Completing from the
+        // deferred (noexcept) callback makes send_response run OUTSIDE the
+        // Context's task try/catch, so the serialization throw reaches the
+        // session's noexcept boundary — which must contain it rather than
+        // terminate the process.
+        router().get("/throw-serialize", [](std::shared_ptr<SessionContext> ctx) {
+            qb::io::async::callback([ctx_capture = ctx]() {
+                ctx_capture->response().status() = qb::http::status::OK;
+                ctx_capture->response().set_header("Transfer-Encoding", "bogus-not-chunked");
+                ctx_capture->response().body() = "x";
+                ctx_capture->complete();
+            }, 0.05);
+        });
+
         expected_server_assertions = 8;
 
         std::cout << "All routes configured successfully with new API" << std::endl;
@@ -360,6 +375,31 @@ TEST_F(HttpBasicIntegrationTest, GetRequest) {
         EXPECT_EQ("GET Success", response.body().template as<std::string>());
         EXPECT_EQ("test-value", response.header("X-Test-Header"));
     });
+}
+
+TEST_F(HttpBasicIntegrationTest, MalformedAsyncResponseDoesNotWedgeServer) {
+    expected_server_assertions = 0;
+    // The /throw-serialize handler produces, from an async completion, a response
+    // that throws during serialization. Without the drain_ready_response
+    // containment the throw left the connection wedged with no response (a slow
+    // DoS); the server now disconnects cleanly and keeps serving. (On the
+    // synchronous route-setup and on(timeout) paths the same class of throw
+    // terminates rather than wedges — see the HTTP/1.1 server commit.)
+    MakeClientRequest([] {
+        std::cout << "Client: Sending GET request to /throw-serialize" << std::endl;
+        qb::http::Request request{{"http://localhost:29876/throw-serialize"}};
+        auto reply = qb::http::run_sync(qb::http::GET(request));
+        (void)reply; // The server closes the connection; we only require survival.
+    }, 0);
+
+    // The server must still be alive and serving a subsequent request.
+    MakeClientRequest([] {
+        std::cout << "Client: Sending GET request to /test after malformed response" << std::endl;
+        qb::http::Request request{{"http://localhost:29876/test"}};
+        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        EXPECT_EQ(HTTP_STATUS_OK, response.status());
+        EXPECT_EQ("GET Success", response.body().template as<std::string>());
+    }, 1);
 }
 
 TEST_F(HttpBasicIntegrationTest, PostRequest) {
