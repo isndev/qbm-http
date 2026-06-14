@@ -43,6 +43,7 @@
 #include <string_view>
 #include <vector>
 #include "../http.h"
+#include "../logger.h"
 
 // Forward declarations (must be outside qb::http::ws to avoid creating phantom namespaces)
 namespace qb {
@@ -803,34 +804,48 @@ public:
         if (!this->ok())
             return;
 
-        auto      &buffer      = this->_io.in();
-        const auto frame_opcode      = _fin_rsv_opcode & rfc::OPCODE_MASK;
-        const bool is_final_frame = (_fin_rsv_opcode & rfc::FIN_BIT_MASK) != 0;
+        // onMessage is noexcept (AProtocol contract). The work below allocates
+        // (allocate_back / pipe append) and dispatches to user frame handlers
+        // (processControlFrame / processDataFrame -> _io.on(...)), any of which
+        // can throw (std::bad_alloc, or an exception from a user handler).
+        // Contain it here so a throw fails the connection instead of escaping
+        // the noexcept boundary and calling std::terminate.
+        try {
+            auto      &buffer      = this->_io.in();
+            const auto frame_opcode      = _fin_rsv_opcode & rfc::OPCODE_MASK;
+            const bool is_final_frame = (_fin_rsv_opcode & rfc::FIN_BIT_MASK) != 0;
 
-        // Create a temporary message to hold the current frame's payload
-        // This avoids corrupting the main reassembly buffer (_message) with control frames.
-        ::qb::http::ws::Message current_frame_message;
-        current_frame_message.masked = _message.masked;
+            // Create a temporary message to hold the current frame's payload
+            // This avoids corrupting the main reassembly buffer (_message) with control frames.
+            ::qb::http::ws::Message current_frame_message;
+            current_frame_message.masked = _message.masked;
 
-        if (current_frame_message.masked) {
-            auto mask = reinterpret_cast<const unsigned char *>(buffer.cbegin() + _parsed);
-            auto begin_buffer_data = buffer.begin() + _parsed + 4;
-            auto begin_data = current_frame_message._data.allocate_back(_expected_size);
-            for (auto i = 0u; i < _expected_size; ++i)
-                begin_data[i] = begin_buffer_data[i] ^ mask[i % 4];
-        } else {
-            std::memcpy(current_frame_message._data.allocate_back(_expected_size),
-                        buffer.begin() + _parsed, _expected_size);
+            if (current_frame_message.masked) {
+                auto mask = reinterpret_cast<const unsigned char *>(buffer.cbegin() + _parsed);
+                auto begin_buffer_data = buffer.begin() + _parsed + 4;
+                auto begin_data = current_frame_message._data.allocate_back(_expected_size);
+                for (auto i = 0u; i < _expected_size; ++i)
+                    begin_data[i] = begin_buffer_data[i] ^ mask[i % 4];
+            } else {
+                std::memcpy(current_frame_message._data.allocate_back(_expected_size),
+                            buffer.begin() + _parsed, _expected_size);
+            }
+
+            const bool is_control_frame = frame_opcode >= ::qb::http::ws::opcode::_Close;
+            if (is_control_frame) {
+                processControlFrame(frame_opcode, current_frame_message);
+            } else {
+                processDataFrame(frame_opcode, is_final_frame, current_frame_message);
+            }
+        } catch (const std::exception &e) {
+            LOG_HTTP_WARN("WebSocket frame handling threw: " << e.what());
+            this->not_ok();
+        } catch (...) {
+            LOG_HTTP_WARN("WebSocket frame handling threw an unknown exception");
+            this->not_ok();
         }
 
-        const bool is_control_frame = frame_opcode >= ::qb::http::ws::opcode::_Close;
-        if (is_control_frame) {
-            processControlFrame(frame_opcode, current_frame_message);
-        } else {
-            processDataFrame(frame_opcode, is_final_frame, current_frame_message);
-        }
-
-        // Reset per-frame state
+        // Reset per-frame state (also on the exception path).
         _expected_size = _parsed = _fin_rsv_opcode = 0;
     }
 
