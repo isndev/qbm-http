@@ -22,7 +22,6 @@
 #include <optional>    // For std::optional (used in MatchedRouteInfo)
 #include <algorithm>   // For std::copy, std::reverse (though reverse not used here currently)
 #include <utility>     // For std::move
-#include <cctype>      // For std::isxdigit
 
 #include "./radix_tree.h"     // For RadixTree
 #include "./context.h"        // For Context
@@ -35,6 +34,7 @@
 #include "../response.h"      // For qb::http::Response
 #include "../types.h"         // For qb::http::method, http_status constants, HookPoint
 #include "../logger.h"        // For LOG_HTTP_DEBUG, LOG_HTTP_ERROR, LOG_HTTP_TRACE
+#include "../utility.h"       // For qb::http::utility::decode_path_component
 namespace qb::http {
     /**
      * @brief Core engine for the HTTP routing system.
@@ -78,32 +78,6 @@ namespace qb::http {
         std::function<void(Context<SessionType> &)> _on_request_finalized_callback;
         std::vector<typename Context<SessionType>::LifecycleHook> _router_lifecycle_hooks;
 
-        [[nodiscard]] static unsigned char hex_value(char c) noexcept {
-            if (c >= '0' && c <= '9') return static_cast<unsigned char>(c - '0');
-            if (c >= 'a' && c <= 'f') return static_cast<unsigned char>(10 + c - 'a');
-            if (c >= 'A' && c <= 'F') return static_cast<unsigned char>(10 + c - 'A');
-            return 0;
-        }
-
-        [[nodiscard]] static std::string decode_path_component(std::string_view input) {
-            std::string result;
-            result.reserve(input.size());
-            for (std::size_t i = 0; i < input.size(); ++i) {
-                const char c = input[i];
-                if (c == '%' && i + 2 < input.size() &&
-                    std::isxdigit(static_cast<unsigned char>(input[i + 1])) &&
-                    std::isxdigit(static_cast<unsigned char>(input[i + 2]))) {
-                    const unsigned char high = hex_value(input[i + 1]);
-                    const unsigned char low = hex_value(input[i + 2]);
-                    result.push_back(static_cast<char>((high << 4) | low));
-                    i += 2;
-                } else {
-                    result.push_back(c);
-                }
-            }
-            return result;
-        }
-
         [[nodiscard]] static std::string allowed_header_value(const std::vector<qb::http::method> &methods) {
             std::string allow;
             for (const auto method: methods) {
@@ -117,7 +91,7 @@ namespace qb::http {
 
         static void decode_path_parameters(PathParameters &params) {
             for (auto &param_pair: params) {
-                param_pair.second = decode_path_component(param_pair.second);
+                param_pair.second = utility::decode_path_component(param_pair.second);
             }
         }
 
