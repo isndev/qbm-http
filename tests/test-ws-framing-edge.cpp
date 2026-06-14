@@ -40,6 +40,7 @@
 #include <cstring>
 #include <optional>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -653,6 +654,70 @@ TEST_F(FramingEdgeTest, InvalidUtf8TextFrameIsRejectedWith1007) {
               static_cast<std::uint16_t>(qb::http::ws::CloseStatus::DataNotConsistent));
 
     sock.close();
+}
+
+// ===========================================================================
+//  Throwing frame handler must not terminate (noexcept onMessage backstop)
+// ===========================================================================
+
+class ThrowServer;
+
+// Callback-style session: on(WS_Protocol::message&&) runs synchronously from
+// the protocol's noexcept onMessage dispatch, so a throw here exercises exactly
+// the boundary the backstop protects.
+class ThrowSession : public qb::io::use<ThrowSession>::tcp::client<ThrowServer> {
+public:
+    using Protocol    = qb::http::protocol<ThrowSession>;
+    using WS_Protocol = qb::http::ws::protocol<ThrowSession>;
+
+    explicit ThrowSession(IOServer &server)
+        : client(server) {}
+
+    void
+    on(Protocol::request &&request) {
+        if (!this->switch_protocol<WS_Protocol>(*this, request)) {
+            disconnect();
+        }
+    }
+
+    void
+    on(WS_Protocol::message &&) {
+        throw std::runtime_error("ws message handler boom");
+    }
+};
+
+class ThrowServer : public qb::io::use<ThrowServer>::tcp::server<ThrowSession> {
+public:
+    void on(IOSession &) {}
+};
+
+TEST_F(FramingEdgeTest, ThrowingMessageHandlerDoesNotTerminate) {
+    ServerThread<ThrowServer> server{19984};
+
+    auto scenario =
+        [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
+        qb::http::ws::coro_client ws;
+        auto                      c = co_await ws.connect("ws://localhost:19984/");
+        EXPECT_TRUE(c.ok);
+        if (!c.ok) {
+            co_return qb::http::ws::IncomingFrame{};
+        }
+
+        qb::http::ws::MessageText msg;
+        msg << std::string("hello");
+        ws << msg;
+
+        // The server handler throws; the onMessage backstop must fail the
+        // connection rather than terminate, so the client observes a
+        // close/disconnect and — crucially — the process is still alive.
+        auto frame = co_await ws.receive();
+        co_return frame;
+    };
+
+    const auto frame = qb::http::ws::run_sync(scenario());
+    EXPECT_TRUE(frame.kind == qb::http::ws::IncomingFrame::Kind::Close ||
+                frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected)
+        << "unexpected frame kind " << static_cast<int>(frame.kind);
 }
 
 } // namespace
