@@ -264,11 +264,11 @@ TEST(Session, WEBSOCKET_OVER_TCP) {
         client.start();
         client.sendWSHandshake();
 
-        for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
+        for (std::size_t i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
             async::run(EVRUN_ONCE);
     });
 
-    for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
+    for (std::size_t i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
         async::run(EVRUN_ONCE);
     t.join();
 }
@@ -481,11 +481,11 @@ TEST(Session, WEBSOCKET_OVER_SECURE_TCP) {
         client.start();
         client.sendWSHandshake();
 
-        for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
+        for (std::size_t i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
             async::run(EVRUN_ONCE);
     });
 
-    for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
+    for (std::size_t i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
         async::run(EVRUN_ONCE);
     t.join();
 }

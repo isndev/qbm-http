@@ -40,7 +40,7 @@ namespace qb {
                 /** @brief A list of roles assigned to the user, used for authorization checks. */
                 std::vector<std::string> roles;
                 /** @brief A map for storing additional, application-specific metadata about the user. */
-                qb::unordered_map<std::string, std::string> metadata;
+                qb::unordered_map<std::string, std::string> metadata{};
 
                 /**
                  * @brief Checks if the user possesses a specific role.

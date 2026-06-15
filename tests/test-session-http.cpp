@@ -465,7 +465,7 @@ TEST(Session, HTTP_OVER_TCP) {
     server.transport().listen_v4(kPort);
     server.start();
 
-    std::thread t([kPort]() {
+    std::thread t([]() {
         async::init();
         TestClient client;
         if (SocketStatus::Done != client.transport().connect_v4("127.0.0.1", kPort)) {
@@ -489,11 +489,11 @@ TEST(Session, HTTP_OVER_TCP) {
                     << qb::http::Chunk();
         }
 
-        for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
+        for (std::size_t i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
             async::run(EVRUN_ONCE);
     });
 
-    for (auto i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
+    for (std::size_t i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
         async::run(EVRUN_ONCE);
     t.join();
 }
@@ -509,7 +509,7 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
     server.transport().listen_v4(kPort);
     server.start();
 
-    std::thread t([kPort]() {
+    std::thread t([]() {
         async::init();
 
         qb::http::Request r{
@@ -620,7 +620,7 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
     server.start();
 
     std::exception_ptr worker_error;
-    std::thread t([&worker_error, kSslSessionBudget, kPort]() {
+    std::thread t([&worker_error, kSslSessionBudget]() {
         try {
             async::init();
             TestSecureClient client;
