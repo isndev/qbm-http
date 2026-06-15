@@ -321,6 +321,7 @@ TEST(Http3DualStackIntegrationTest, SameRouteServesHttp2AndHttp3OnSeparateSocket
 
     auto http2_client = qb::http2::make_client("https://127.0.0.1:31987");
     http2_client->set_connect_timeout(5.0);
+    http2_client->set_verify_peer(false); // self-signed test cert
     auto http3_client = qb::http3::make_client("https://127.0.0.1:31988");
     http3_client->set_verify_peer(false);
 
@@ -382,6 +383,7 @@ TEST(Http3DualStackIntegrationTest, ClosingHttp3SideKeepsHttp2SideServing) {
 
     auto http2_client = qb::http2::make_client("https://127.0.0.1:31989");
     http2_client->set_connect_timeout(5.0);
+    http2_client->set_verify_peer(false); // self-signed test cert
 
     std::atomic<bool> done{false};
     qb::http::Response response;
