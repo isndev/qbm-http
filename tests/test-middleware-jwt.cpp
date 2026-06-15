@@ -642,7 +642,7 @@ TEST_F(JwtMiddlewareTest, SubjectVerification) {
 
 
 TEST_F(JwtMiddlewareTest, ClockSkewTolerance) {
-    _jwt_options.leeway_seconds = 60;
+    _jwt_options.leeway = std::chrono::seconds(60);
     _jwt_mw->with_options(_jwt_options);
     qb::json payload = {{"sub", "skew_user"}};
 

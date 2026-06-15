@@ -209,7 +209,7 @@ public:
         qb::http::ws::MessageClose msg(
             qb::http::ws::CloseStatus::GoingAway, "server-closing");
         *this << msg;
-        this->setTimeout(200);
+        this->setTimeout(200s);
     }
 
     void on(WS_Protocol::close &&) {

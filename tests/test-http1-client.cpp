@@ -15,6 +15,8 @@
 
 #include "../http.h"
 
+using namespace std::chrono_literals;
+
 namespace {
 
 class Http1ClientTestServer;
@@ -65,7 +67,7 @@ public:
                 ctx->response().status() = qb::http::status::OK;
                 ctx->response().body() = id;
                 ctx->complete();
-            }, 0.05);
+            }, 50ms);
         });
 
         router().get("/never", [this](auto ctx) {
@@ -393,7 +395,7 @@ TEST(Http1ClientTest, BatchRequestsAreSequentialAndOrderPreserved) {
 
 TEST(Http1ClientTest, AbsoluteRequestWithExplicitDefaultPortMatchesBaseOrigin) {
     auto client = qb::http1::make_client("http://127.0.0.1");
-    client->set_connect_timeout(0.2);
+    client->set_connect_timeout(200ms);
 
     auto response = qb::http::run_sync(client->push_request(
         request(qb::http::method::GET, "http://127.0.0.1:80/ping")));
@@ -424,7 +426,7 @@ TEST(Http1ClientTest, SerializationFailureDoesNotBlockQueuedRequests) {
 TEST(Http1ClientTest, PendingRequestTimesOutBehindBlockedActiveRequest) {
     RunningHttp1Server server{33111};
     auto client = qb::http1::make_client(server.url("/"));
-    client->set_request_timeout(0.05);
+    client->set_request_timeout(50ms);
 
     std::vector<qb::http::Request> requests;
     requests.emplace_back(request(qb::http::method::GET, "/never"));
@@ -543,7 +545,7 @@ TEST(Http1ClientTest, ConnectAwaiterReturnsErrorWhenClientExpiresBeforeAwait) {
 
 TEST(Http1ClientTest, ImplicitConnectFailureCompletesQueuedRequest) {
     auto client = qb::http1::make_client("http://127.0.0.1:1");
-    client->set_connect_timeout(0.2);
+    client->set_connect_timeout(200ms);
 
     auto response = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
     EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);

@@ -42,7 +42,7 @@ namespace qb::http {
     public:
         /** @brief Convenience alias for a shared pointer to the request `Context`. */
         using ContextPtr = std::shared_ptr<Context<SessionType> >;
-        /** @brief The clock type used for timing; `std::chrono::high_resolution_clock` is typically used for performance measurements. */
+        /** @brief The clock type used for timing (monotonic `std::chrono::steady_clock`). */
         using Clock = std::chrono::steady_clock;
         /** @brief Represents a specific point in time captured by the `Clock`. */
         using TimePoint = typename Clock::time_point;

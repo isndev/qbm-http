@@ -6,6 +6,7 @@
 #include <thread>
 
 using namespace qb::io;
+using namespace std::chrono_literals;
 
 namespace {
     std::filesystem::path find_ssl_test_resource(const char *file_name) {
@@ -199,7 +200,7 @@ TEST(Session, HTTP_CLIENT_SETS_HOST_HEADER_WITH_NON_DEFAULT_PORT) {
     server.start();
 
     qb::http::Request req{{"http://localhost:" + std::to_string(kPort) + "/host-check"}};
-    auto reply = qb::http::run_sync(qb::http::GET(req, 3.0));
+    auto reply = qb::http::run_sync(qb::http::GET(req, 3s));
 
     EXPECT_EQ(reply.response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(HostHeaderCaptureClient::captured_host_header,

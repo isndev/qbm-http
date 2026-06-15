@@ -17,6 +17,8 @@
 
 #include "../ws/ws.h"
 
+using namespace std::chrono_literals;
+
 namespace {
 
 class MaskingProbeClient final : public qb::http::ws::WebSocket<MaskingProbeClient> {};
@@ -327,7 +329,7 @@ public:
         qb::http::ws::MessageClose close_msg(
             qb::http::ws::CloseStatus::GoingAway, "server-closing");
         *this << close_msg;
-        this->setTimeout(200);
+        this->setTimeout(200s);
     }
 
     void on(WS_Protocol::close &&) {
@@ -378,7 +380,7 @@ TEST(WebSocketApiHardening, ClientControlFramesAreAcceptedAsMaskedByServerParser
         client << ping; // Must be masked by client operator<<.
     });
     client.on_disconnected([&](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://localhost:20123/path"), 1000);
+    client.connect(qb::io::uri("ws://localhost:20123/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() {
         return g_control_ping_received > 0 || disconnected;
@@ -488,7 +490,7 @@ TEST(WebSocketApiHardening, HandshakeHostHeaderIncludesNonDefaultPortAndIpv6Brac
         captured_host = std::string(event.request.header("host"));
     });
 
-    client.connect(qb::io::uri("ws://[::1]:20127/path"), 1000);
+    client.connect(qb::io::uri("ws://[::1]:20127/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&captured_host]() { return !captured_host.empty(); }))
         << "WebSocket client did not reach request emission phase";
@@ -513,7 +515,7 @@ TEST(WebSocketApiHardening, ClientRejectsServerSubprotocolNotOfferedByClient) {
     client.on_connected([&connected](auto &) { connected = true; });
     client.on_error([&errored](auto &) { errored = true; });
     client.on_disconnected([&disconnected](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://[::1]:20125/path"), 1000);
+    client.connect(qb::io::uri("ws://[::1]:20125/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() { return errored || connected || disconnected; }))
         << "WebSocket client produced no terminal signal";
@@ -538,7 +540,7 @@ TEST(WebSocketApiHardening, ClientRejectsMalformedConnectionTokenInHandshakeResp
     client.on_connected([&connected](auto &) { connected = true; });
     client.on_error([&errored](auto &) { errored = true; });
     client.on_disconnected([&disconnected](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://localhost:20122/path"), 1000);
+    client.connect(qb::io::uri("ws://localhost:20122/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() { return errored || connected || disconnected; }))
         << "WebSocket client produced no terminal signal";
@@ -565,7 +567,7 @@ TEST(WebSocketApiHardening, ClientRejectsMaskedFrameFromServer) {
     client.on_error([&errored](auto &) { errored = true; });
     client.on_message([&messages](auto &) { ++messages; });
     client.on_disconnected([&disconnected](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://localhost:20124/path"), 1000);
+    client.connect(qb::io::uri("ws://localhost:20124/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() { return errored || disconnected || messages > 0; }))
         << "Client did not surface any terminal reaction to masked server frame";
@@ -592,7 +594,7 @@ TEST(WebSocketApiHardening, ClientRejectsReservedOpcodeFromServer) {
     client.on_error([&errored](auto &) { errored = true; });
     client.on_message([&messages](auto &) { ++messages; });
     client.on_disconnected([&disconnected](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://localhost:20128/path"), 1000);
+    client.connect(qb::io::uri("ws://localhost:20128/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() { return errored || disconnected || messages > 0; }))
         << "Client did not react to reserved opcode frame";
@@ -619,7 +621,7 @@ TEST(WebSocketApiHardening, ClientRejectsInvalidClosePayloadLengthOne) {
     client.on_error([&errored](auto &) { errored = true; });
     client.on_closed([&closes](auto &) { ++closes; });
     client.on_disconnected([&disconnected](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://localhost:20129/path"), 1000);
+    client.connect(qb::io::uri("ws://localhost:20129/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() { return errored || disconnected || closes > 0; }))
         << "Client did not react to invalid close payload";
@@ -644,7 +646,7 @@ TEST(WebSocketApiHardening, ClientRejectsInvalidUtf8InCloseReason) {
     client.on_error([&errored](auto &) { errored = true; });
     client.on_closed([&closes](auto &) { ++closes; });
     client.on_disconnected([&disconnected](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://localhost:20130/path"), 1000);
+    client.connect(qb::io::uri("ws://localhost:20130/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() { return errored || disconnected || closes > 0; }))
         << "Client did not react to invalid UTF-8 close reason";
@@ -715,7 +717,7 @@ TEST(WebSocketApiHardening, ClientEchoesPeerCloseFrame) {
     bool disconnected = false;
     qb::http::ws::client client;
     client.on_disconnected([&disconnected](auto &) { disconnected = true; });
-    client.connect(qb::io::uri("ws://localhost:20120/path"), 1000);
+    client.connect(qb::io::uri("ws://localhost:20120/path"), 1000ms);
 
     ASSERT_TRUE(run_until([&]() {
         return disconnected || g_close_echo_received > 0;

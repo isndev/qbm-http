@@ -35,6 +35,8 @@
 #include "../http.h"
 #include "../coro.h"
 
+using namespace std::chrono_literals;
+
 namespace {
 
 using SessionCtx = qb::http::Context<class CoroTestSession>;
@@ -202,7 +204,7 @@ TEST_F(CoroClientTest, AllVerbsReachTheServer) {
 
 TEST_F(CoroClientTest, HeadResponseWithContentLengthCompletesWithoutBody) {
     qb::http::Request request{qb::http::method::HEAD, {url("/head-length")}};
-    auto reply = qb::http::run_sync(qb::http::HEAD(std::move(request), 2.0));
+    auto reply = qb::http::run_sync(qb::http::HEAD(std::move(request), 2s));
 
     EXPECT_EQ(reply.response.status(), qb::http::status::OK);
     EXPECT_EQ(reply.response.header("Content-Length"), "4");
@@ -250,7 +252,7 @@ TEST_F(CoroClientTest, TimeoutYieldsGatewayTimeout) {
     // Send a request to a closed port with a tight timeout; the awaitable
     // must resolve (not hang) with the framework's "connection failure" mapping.
     qb::http::Request req{{"http://127.0.0.1:1/unused"}};
-    auto reply = qb::http::run_sync(qb::http::GET(std::move(req), 0.25));
+    auto reply = qb::http::run_sync(qb::http::GET(std::move(req), 250ms));
     // The exact failure status depends on the platform (connection refused
     // vs timeout), but it must never be 200 OK.
     EXPECT_NE(reply.response.status(), qb::http::status::OK);

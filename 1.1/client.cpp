@@ -52,7 +52,7 @@ public:
     explicit connection(Client& owner)
         : _owner(owner) {
         this->template switch_protocol<http_protocol>(*this);
-        this->setTimeout(0);
+        this->setTimeout(qb::duration::zero());
     }
 
     ~connection() override {
@@ -63,7 +63,7 @@ public:
         return _active_method == qb::http::Method::HEAD;
     }
 
-    void connect(qb::io::uri const& uri, double timeout, bool verify_peer) override {
+    void connect(qb::io::uri const& uri, qb::duration timeout, bool verify_peer) override {
         auto alive = std::weak_ptr<bool>(_alive);
         qb::io::async::tcp::connect<typename Transport::transport_io_type>(
             uri,
@@ -90,7 +90,7 @@ public:
         this->base_t::disconnect(1);
     }
 
-    void send(qb::http::Request request, double timeout) override {
+    void send(qb::http::Request request, qb::duration timeout) override {
         _active_method = request.method();
 #ifdef QB_HAS_COMPRESSION
         try {
@@ -118,7 +118,7 @@ public:
 
     void on(typename http_protocol::response response) {
         auto owner_guard = _owner.weak_from_this().lock();
-        this->setTimeout(0);
+        this->setTimeout(qb::duration::zero());
 #ifdef QB_HAS_COMPRESSION
         try {
             if (response.has_header("Content-Encoding")) {
@@ -465,7 +465,7 @@ void Client::hold_through_current_tick() {
             self->reset_deferred_connection_if_ready();
             self->_callback_self_guard.reset();
         }
-    }, 0.000001);
+    }, std::chrono::microseconds(1));
 }
 
 void Client::enter_user_callback() {
@@ -488,7 +488,7 @@ void Client::reset_deferred_connection_if_ready() {
 }
 
 void Client::arm_pending_timeout(std::uint64_t request_id) {
-    if (_request_timeout <= 0.) {
+    if (_request_timeout <= qb::duration::zero()) {
         return;
     }
     auto weak_self = weak_from_this();

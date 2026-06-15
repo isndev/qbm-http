@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+using namespace std::chrono_literals;
+
 // --- Test Counters & Flags ---
 static std::atomic<bool> g_make_server_test_server_ready{false};
 static std::atomic<int> g_make_server_test_req_count_server{0};
@@ -186,7 +188,7 @@ TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
     qb::http::Request request{{"https://localhost:" + std::to_string(TEST_PORT_SSL) + "/ping_ssl"}};
 
     // Self-signed test certificate: opt out of secure-by-default verification.
-    auto response = qb::http::run_sync(qb::http::GET(request, 0., /*verify_peer=*/false)).response;
+    auto response = qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
 
     EXPECT_EQ(HTTP_STATUS_OK, response.status());
     EXPECT_EQ("pong_https_default", response.body().as<std::string>());

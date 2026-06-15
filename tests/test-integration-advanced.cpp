@@ -15,6 +15,8 @@
 #include <sstream> // For std::ostringstream in query param tests
 #include <iomanip> // For std::setfill, std::setw, std::hex
 
+using namespace std::chrono_literals;
+
 // --- Test Counters ---
 std::atomic<int> adv_request_count_server{0};
 std::atomic<int> adv_request_count_client{0};
@@ -190,7 +192,7 @@ public:
             adv_server_side_assertions++; // Assertion for async part completion
             captured_ctx->response().set_header("X-Async-MW-Status", "Completed");
             captured_ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
-        }, 0.01); // Short delay for the async operation
+        }, 10ms); // Short delay for the async operation
     }
 };
 
@@ -442,7 +444,7 @@ public:
                 captured_ctx->response().body() = "Async operation completed in LegacyController";
                 captured_ctx->response().set_header("X-Legacy-Async", "Done");
                 captured_ctx->complete();
-            }, 0.0);
+            }, qb::duration::zero());
         });
 
         this->get("/error_test", [](std::shared_ptr<AdvCtx> ctx) {
@@ -1268,7 +1270,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/legacy/async_op"}
                                                           };
-                                                          auto response = qb::http::run_sync(qb::http::GET(request, 7.0)).response;
+                                                          auto response = qb::http::run_sync(qb::http::GET(request, 7s)).response;
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
                                                           EXPECT_EQ("Async operation completed in LegacyController",
                                                                     response.body().as<std::string>());
@@ -1987,7 +1989,7 @@ TEST_F(AdvancedHttpIntegrationTest, AsyncMiddlewareTest) {
                                                               qb::http::method::GET,
                                                               {"http://localhost:29887/async_mw_test/resource"}
                                                           };
-                                                          auto response = qb::http::run_sync(qb::http::GET(request, 5.0)).response;
+                                                          auto response = qb::http::run_sync(qb::http::GET(request, 5s)).response;
 
                                                           EXPECT_EQ(HTTP_STATUS_OK, response.status());
                                                           EXPECT_EQ("Applied", response.header("X-Global-Middleware"));

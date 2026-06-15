@@ -383,7 +383,7 @@ bool Client::has_pending_or_active_work() const noexcept {
 }
 
 void Client::arm_connect_timeout() {
-    if (_connect_timeout <= 0.) {
+    if (_connect_timeout <= qb::duration::zero()) {
         return;
     }
     auto weak_self = weak_from_this();
@@ -399,7 +399,7 @@ void Client::arm_connect_timeout() {
 }
 
 void Client::arm_request_timeout(std::uint64_t request_id) {
-    if (_request_timeout <= 0.) {
+    if (_request_timeout <= qb::duration::zero()) {
         return;
     }
     auto weak_self = weak_from_this();
@@ -412,8 +412,8 @@ void Client::arm_request_timeout(std::uint64_t request_id) {
             if (!ctx || ctx->request_id != request_id) {
                 continue;
             }
-            auto const elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - ctx->created_at).count();
+            auto const elapsed = std::chrono::duration_cast<qb::duration>(
+                std::chrono::steady_clock::now() - ctx->created_at);
             if (elapsed >= self->_request_timeout) {
                 self->fail_pending_request(request_id, "HTTP/3 request timeout while pending",
                                            qb::http::status::REQUEST_TIMEOUT);
@@ -428,8 +428,8 @@ void Client::arm_request_timeout(std::uint64_t request_id) {
         if (it == self->_active_requests.end()) {
             return;
         }
-        auto const elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - it->second->created_at).count();
+        auto const elapsed = std::chrono::duration_cast<qb::duration>(
+            std::chrono::steady_clock::now() - it->second->created_at);
         if (elapsed < self->_request_timeout) {
             return;
         }

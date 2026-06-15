@@ -7,6 +7,8 @@
 #include <chrono>
 #include <iostream> // For std::cout
 
+using namespace std::chrono_literals;
+
 // Counters to track request processing
 std::atomic<int> request_count_server{0};
 std::atomic<int> request_count_client{0};
@@ -140,7 +142,7 @@ public:
                 ctx_capture->response().body() = "Async response";
                 ctx_capture->response().add_header("X-Async", "true");
                 ctx_capture->complete();
-            }, 0.1); // 100ms delay
+            }, 100ms); // 100ms delay
         });
 
         // 9. Route Group Test
@@ -162,7 +164,7 @@ public:
             ctx->response().add_cookie(qb::http::Cookie{"test_cookie_with_attrs", "value_with_attrs"}
                 .path("/")
                 .http_only(true)
-                .max_age(3600));
+                .max_age(std::chrono::seconds(3600)));
 
             request_count_server++;
             server_side_assertions++;
@@ -241,7 +243,7 @@ public:
                 ctx_capture->response().set_header("Transfer-Encoding", "bogus-not-chunked");
                 ctx_capture->response().body() = "x";
                 ctx_capture->complete();
-            }, 0.05);
+            }, 50ms);
         });
 
         expected_server_assertions = 8;
@@ -459,7 +461,7 @@ TEST_F(HttpBasicIntegrationTest, GetErrorRoute) {
     MakeClientRequest([] {
         std::cout << "Client: Sending GET request to /error" << std::endl;
         qb::http::Request request{{"http://localhost:29876/error"}};
-        auto response = qb::http::run_sync(qb::http::GET(request, 5.0)).response;
+        auto response = qb::http::run_sync(qb::http::GET(request, 5s)).response;
         std::cout << "Client: Received ERROR response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_INTERNAL_SERVER_ERROR, response.status());
         EXPECT_EQ("Intentional error", response.body().template as<std::string>());
@@ -485,7 +487,7 @@ TEST_F(HttpBasicIntegrationTest, GetAsyncRoute) {
         std::cout << "Client: Sending GET request to /async" << std::endl;
         qb::http::Request request{{"http://localhost:29876/async"}};
         // Increased timeout for async response
-        auto response = qb::http::run_sync(qb::http::GET(request, 5.0)).response;
+        auto response = qb::http::run_sync(qb::http::GET(request, 5s)).response;
         std::cout << "Client: Received ASYNC response status: " << response.status() << std::endl;
         EXPECT_EQ(HTTP_STATUS_OK, response.status());
         EXPECT_EQ("Async response", response.body().template as<std::string>());

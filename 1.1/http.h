@@ -433,7 +433,7 @@ namespace qb::http {
                 : qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>,
                     Transport, Handler>(server) {
                 LOG_HTTP_DEBUG_PA(this->id(), "HTTP/1.1 session created with 60s timeout.");
-                this->setTimeout(60);
+                this->setTimeout(std::chrono::seconds(60));
             }
 
             /**
@@ -693,7 +693,7 @@ namespace qb::http {
                   }(request))) {
                 LOG_HTTP_DEBUG("HTTP/1.1 client session created for " << _request.method() << " " << _request.uri().source());
                 this->template switch_protocol<http_protocol>(*this);
-                this->setTimeout(0);
+                this->setTimeout(qb::duration::zero());
             }
 
             ~session() = default;
@@ -709,8 +709,8 @@ namespace qb::http {
              * @param timeout Connection timeout
              */
             void
-            connect(double timeout = 0, bool verify_peer = true) {
-                LOG_HTTP_INFO("HTTP/1.1 client connecting to " << _request.uri().source() << " with timeout " << timeout << "s");
+            connect(qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
+                LOG_HTTP_INFO("HTTP/1.1 client connecting to " << _request.uri().source() << " with timeout " << qb::detail::to_ev_seconds(timeout) << "s");
 
                 qb::io::async::tcp::connect<typename Transport::transport_io_type>(
                     _request.uri(),
@@ -857,7 +857,7 @@ namespace qb::http {
 
     namespace detail {
         template <typename _Func>
-        void _execute_async_request_internal(Request request, _Func &&func, double timeout, const char* method_name_for_log, bool verify_peer = true) {
+        void _execute_async_request_internal(Request request, _Func &&func, qb::duration timeout, const char* method_name_for_log, bool verify_peer = true) {
             if (!request.has_header("host")) {
                 request.set_header("host", host_header_value(request.uri()));
             }
@@ -889,7 +889,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    REQUEST(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    REQUEST(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "Generic", verify_peer);
     }
 
@@ -902,7 +902,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    GET(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    GET(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         request.method() = qb::http::Method::GET;
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "GET", verify_peer);
     }
@@ -916,7 +916,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    POST(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    POST(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         request.method() = qb::http::Method::POST;
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "POST", verify_peer);
     }
@@ -930,7 +930,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    PUT(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    PUT(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         request.method() = qb::http::Method::PUT;
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "PUT", verify_peer);
     }
@@ -944,7 +944,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    DEL(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    DEL(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         request.method() = qb::http::Method::DEL;
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "DELETE", verify_peer);
     }
@@ -958,7 +958,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    HEAD(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    HEAD(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         request.method() = qb::http::Method::HEAD;
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "HEAD", verify_peer);
     }
@@ -972,7 +972,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    OPTIONS(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    OPTIONS(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         request.method() = qb::http::Method::OPTIONS;
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "OPTIONS", verify_peer);
     }
@@ -986,7 +986,7 @@ namespace qb::http {
      */
     template <typename _Func>
     std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
-    PATCH(Request request, _Func &&func, double timeout = 0., bool verify_peer = true) {
+    PATCH(Request request, _Func &&func, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         request.method() = qb::http::Method::PATCH;
         detail::_execute_async_request_internal(std::move(request), std::forward<_Func>(func), timeout, "PATCH", verify_peer);
     }
@@ -1011,7 +1011,7 @@ namespace qb::http {
         /// simply forwards to the appropriate method.
         template <typename AsyncOp>
         [[nodiscard]] inline async::awaiter<async::Reply>
-        _co_invoke(AsyncOp op, Request request, double timeout) {
+        _co_invoke(AsyncOp op, Request request, qb::duration timeout) {
             return async::make_awaiter<async::Reply>(
                 [op = std::move(op), req = std::move(request), timeout]
                 (std::function<void(async::Reply&&)> complete) mutable {
@@ -1034,9 +1034,9 @@ namespace qb::http {
      * @return An awaitable that yields `async::Reply` (original request + response).
      */
     [[nodiscard]] inline async::awaiter<async::Reply>
-    REQUEST(Request request, double timeout = 0., bool verify_peer = true) {
+    REQUEST(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 REQUEST(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
@@ -1044,9 +1044,9 @@ namespace qb::http {
 
     /// @brief Coroutine-style HTTP GET. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    GET(Request request, double timeout = 0., bool verify_peer = true) {
+    GET(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 GET(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
@@ -1054,9 +1054,9 @@ namespace qb::http {
 
     /// @brief Coroutine-style HTTP POST. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    POST(Request request, double timeout = 0., bool verify_peer = true) {
+    POST(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 POST(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
@@ -1064,9 +1064,9 @@ namespace qb::http {
 
     /// @brief Coroutine-style HTTP PUT. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    PUT(Request request, double timeout = 0., bool verify_peer = true) {
+    PUT(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 PUT(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
@@ -1074,9 +1074,9 @@ namespace qb::http {
 
     /// @brief Coroutine-style HTTP DELETE. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    DEL(Request request, double timeout = 0., bool verify_peer = true) {
+    DEL(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 DEL(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
@@ -1084,9 +1084,9 @@ namespace qb::http {
 
     /// @brief Coroutine-style HTTP HEAD. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    HEAD(Request request, double timeout = 0., bool verify_peer = true) {
+    HEAD(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 HEAD(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
@@ -1094,9 +1094,9 @@ namespace qb::http {
 
     /// @brief Coroutine-style HTTP OPTIONS. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    OPTIONS(Request request, double timeout = 0., bool verify_peer = true) {
+    OPTIONS(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 OPTIONS(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);
@@ -1104,9 +1104,9 @@ namespace qb::http {
 
     /// @brief Coroutine-style HTTP PATCH. See `REQUEST` for the contract.
     [[nodiscard]] inline async::awaiter<async::Reply>
-    PATCH(Request request, double timeout = 0., bool verify_peer = true) {
+    PATCH(Request request, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         return detail::_co_invoke(
-            [verify_peer](Request r, auto cb, double t) {
+            [verify_peer](Request r, auto cb, qb::duration t) {
                 PATCH(std::move(r), std::move(cb), t, verify_peer);
             },
             std::move(request), timeout);

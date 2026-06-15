@@ -167,8 +167,8 @@ namespace qb::http {
 
         void remove_cookie(const std::string &name) {
             Cookie removal_cookie(name, "");
-            removal_cookie.expires_in(EXPIRED_COOKIE_OFFSET_SECONDS);
-            removal_cookie.max_age(EXPIRED_COOKIE_MAX_AGE);
+            removal_cookie.expires_in(std::chrono::seconds(EXPIRED_COOKIE_OFFSET_SECONDS));
+            removal_cookie.max_age(qb::duration::zero());
             add_cookie(std::move(removal_cookie));
         }
 
@@ -182,8 +182,8 @@ namespace qb::http {
          */
         void remove_cookie(const std::string &name, const std::string &domain, const std::string &path = "/") {
             Cookie removal_cookie(name, "");
-            removal_cookie.expires_in(EXPIRED_COOKIE_OFFSET_SECONDS);
-            removal_cookie.max_age(EXPIRED_COOKIE_MAX_AGE);
+            removal_cookie.expires_in(std::chrono::seconds(EXPIRED_COOKIE_OFFSET_SECONDS));
+            removal_cookie.max_age(qb::duration::zero());
             removal_cookie.domain(domain);
             removal_cookie.path(path);
             add_cookie(std::move(removal_cookie));

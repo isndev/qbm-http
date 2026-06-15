@@ -48,6 +48,7 @@
 
 // Use the proper namespace to avoid qualification issues
 using namespace qb::io;
+using namespace std::chrono_literals;
 
 /**
  * @brief Constants for robustness testing parameters
@@ -183,7 +184,7 @@ public:
     void
     set_ping_interval(int interval_ms) {
         _ping_interval_ms = interval_ms;
-        this->setTimeout(interval_ms);
+        this->setTimeout(std::chrono::milliseconds(interval_ms));
     }
 
     /**
@@ -313,7 +314,7 @@ public:
             ++ping_count;
             std::cout << "Server sent PING on timeout, ping_count=" << ping_count
                       << std::endl;
-            this->setTimeout(_ping_interval_ms);
+            this->setTimeout(std::chrono::milliseconds(_ping_interval_ms));
         }
     }
 };
