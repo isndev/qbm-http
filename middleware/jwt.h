@@ -54,9 +54,9 @@ namespace qb::http {
         bool verify_iss = false; ///< If true, verifies 'iss' (issuer) claim against `issuer`.
         bool verify_aud = false; ///< If true, verifies 'aud' (audience) claim against `audience`.
         bool verify_sub = false; ///< If true, verifies 'sub' (subject) claim against `subject`.
-        std::string issuer; ///< Expected 'iss' claim value if `verify_iss` is true.
-        std::string audience; ///< Expected 'aud' claim value if `verify_aud` is true.
-        std::string subject; ///< Expected 'sub' claim value if `verify_sub` is true.
+        std::string issuer{}; ///< Expected 'iss' claim value if `verify_iss` is true.
+        std::string audience{}; ///< Expected 'aud' claim value if `verify_aud` is true.
+        std::string subject{}; ///< Expected 'sub' claim value if `verify_sub` is true.
         int leeway_seconds = 0; ///< Clock skew tolerance for time-based claims (exp, nbf).
         JwtTokenLocation token_location = JwtTokenLocation::HEADER; ///< Where to find the token.
         std::string token_name = "Authorization"; ///< Name of the header, cookie, or query parameter.
