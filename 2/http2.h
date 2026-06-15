@@ -96,9 +96,9 @@ namespace qb::http2 {
 
         private:
             friend qb::io::async::io<session<Derived, Handler>>;
-            friend class has_method_on<session, void, qb::io::async::event::pending_write>;
-            friend class has_method_on<session, void, qb::io::async::event::eos>;
-            friend class has_method_on<session, void, qb::io::async::event::disconnected>;
+            friend struct has_method_on<session, void, qb::io::async::event::pending_write>;
+            friend struct has_method_on<session, void, qb::io::async::event::eos>;
+            friend struct has_method_on<session, void, qb::io::async::event::disconnected>;
             friend Http2Protocol;
             friend qb::io::async::with_timeout<session<Derived, Handler>>;
 
