@@ -61,7 +61,8 @@ if(QB_HAS_SSL AND QB_HAS_QUIC AND PC_NGHTTP3_FOUND)
         3/client.cpp
     )
     list(APPEND QBM_HTTP_EXTRA_DEPENDS Nghttp3::nghttp3)
-    list(APPEND QBM_HTTP_EXTRA_DEFINES QBM_HTTP_HAS_HTTP3=1)
+    # QBM_HTTP_HAS_HTTP3 is defined PUBLIC below (after the target exists) so it
+    # reaches both the module sources and consumers; no PRIVATE duplicate here.
     qb_status_message("HTTP/3 support enabled (nghttp3)")
 else()
     set(QBM_HTTP_HAS_HTTP3 FALSE)
@@ -93,7 +94,7 @@ qb_register_module(
         validation/schema_validator.cpp
         ${QBM_HTTP_EXTRA_SOURCES}
     DEFINES
-        QBM_HTTP_VERSION=1.0.0
+        QBM_HTTP_VERSION="1.0.0"
         ${QBM_HTTP_EXTRA_DEFINES}
 )
 
