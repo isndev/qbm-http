@@ -125,10 +125,10 @@ namespace qb::http {
         private:
             friend qb::io::async::io<session>;
             friend class qb::io::async::io_handler<Handler, Derived>;
-            friend class has_method_on<session, void, qb::io::async::event::pending_write>;
-            friend class has_method_on<session, void, qb::io::async::event::eos>;
-            friend class has_method_on<session, void, qb::io::async::event::extracted>;
-            friend class has_method_on<session, void, qb::io::async::event::disconnected>;
+            friend struct has_method_on<session, void, qb::io::async::event::pending_write>;
+            friend struct has_method_on<session, void, qb::io::async::event::eos>;
+            friend struct has_method_on<session, void, qb::io::async::event::extracted>;
+            friend struct has_method_on<session, void, qb::io::async::event::disconnected>;
             friend Protocol;
             friend qb::io::async::with_timeout<session>;
 

@@ -1204,7 +1204,6 @@ public:
      */
     uint32_t cleanup_idle_streams(uint32_t max_idle_seconds = 30, uint32_t max_incomplete_seconds = 10) noexcept {
         uint32_t cleaned_count = 0;
-        auto now = std::chrono::steady_clock::now();
 
         for (auto it = _server_streams.begin(); it != _server_streams.end();) {
             auto& stream = it->second;

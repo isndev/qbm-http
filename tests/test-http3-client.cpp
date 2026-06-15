@@ -154,8 +154,8 @@ struct CommandResult {
     bool timed_out = false;
 };
 
-CommandResult run_command_with_timeout(std::string const& command,
-                                       std::chrono::milliseconds timeout) {
+[[maybe_unused]] CommandResult run_command_with_timeout(std::string const& command,
+                                                        std::chrono::milliseconds timeout) {
 #ifdef _WIN32
     (void)timeout;
     return {std::system(command.c_str()), false};
