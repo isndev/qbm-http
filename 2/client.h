@@ -168,8 +168,8 @@ private:
     uint64_t _next_batch_id = 1;
     
     // Configuration
-    double _connect_timeout = 30.0;
-    double _request_timeout = 60.0;
+    qb::duration _connect_timeout = std::chrono::seconds(30);
+    qb::duration _request_timeout = std::chrono::seconds(60);
     bool   _verify_peer = true; /**< Verify the server TLS certificate (h2 is TLS-only). */
     size_t _max_concurrent_streams = 100;
     bool _auto_reconnect = true;
@@ -308,7 +308,7 @@ public:
      * @brief Set connection timeout
      * @param timeout_seconds Timeout in seconds
      */
-    void set_connect_timeout(double timeout_seconds) { _connect_timeout = timeout_seconds; }
+    void set_connect_timeout(qb::duration timeout) { _connect_timeout = timeout; }
 
     /**
      * @brief Enable/disable TLS server certificate verification.
@@ -322,7 +322,7 @@ public:
      * @brief Set request timeout
      * @param timeout_seconds Timeout in seconds
      */
-    void set_request_timeout(double timeout_seconds) { _request_timeout = timeout_seconds; }
+    void set_request_timeout(qb::duration timeout) { _request_timeout = timeout; }
     
     /**
      * @brief Set maximum concurrent streams

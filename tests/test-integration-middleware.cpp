@@ -546,7 +546,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
             .headers({"X-Custom-Header", "Content-Type"})
             .expose_headers({"X-Response-Info"})
             .credentials(qb::http::CorsOptions::AllowCredentials::Yes)
-            .max_age(3600);
+            .max_age(std::chrono::seconds(3600));
 
     _server->router().use<qb::http::CorsMiddleware<MiddlewareIntegrationSession> >(cors_opts);
 
@@ -922,7 +922,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
     jwt_options.algorithm = JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST;
     jwt_options.verify_exp = true;
     jwt_options.verify_nbf = true;
-    jwt_options.leeway_seconds = 2;
+    jwt_options.leeway = std::chrono::seconds(2);
     jwt_options.token_location = qb::http::JwtTokenLocation::HEADER;
     jwt_options.token_name = "Authorization";
     jwt_options.auth_scheme = "Bearer";

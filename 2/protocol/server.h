@@ -1198,11 +1198,12 @@ public:
      * Removes streams that have been idle for too long or incomplete for too long.
      * This prevents resource exhaustion from malicious clients opening many streams.
      *
-     * @param max_idle_seconds Maximum idle time before cleanup (default: 30)
-     * @param max_incomplete_seconds Maximum time for incomplete streams (default: 10)
+     * @param max_idle Maximum idle time before cleanup (default: 30s)
+     * @param max_incomplete Maximum time for incomplete streams (default: 10s)
      * @return Number of streams cleaned up
      */
-    uint32_t cleanup_idle_streams(uint32_t max_idle_seconds = 30, uint32_t max_incomplete_seconds = 10) noexcept {
+    uint32_t cleanup_idle_streams(qb::duration max_idle       = std::chrono::seconds(30),
+                                  qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
         uint32_t cleaned_count = 0;
 
         for (auto it = _server_streams.begin(); it != _server_streams.end();) {
@@ -1215,8 +1216,8 @@ public:
                 continue;
             }
 
-            auto idle_time_ms = stream.get_idle_time();
-            auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time_ms).count();
+            auto idle_time = stream.get_idle_time();
+            auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
 
             // Check for incomplete streams (not dispatched yet)
             bool is_incomplete = !stream.request_dispatched &&
@@ -1225,10 +1226,10 @@ public:
 
             // Check for idle timeout
             bool should_cleanup = false;
-            if (is_incomplete && idle_time_seconds > max_incomplete_seconds) {
+            if (is_incomplete && idle_time > max_incomplete) {
                 LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << idle_time_seconds << "s)");
                 should_cleanup = true;
-            } else if (idle_time_seconds > max_idle_seconds) {
+            } else if (idle_time > max_idle) {
                 LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up idle stream (idle for " << idle_time_seconds << "s)");
                 should_cleanup = true;
             }

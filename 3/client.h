@@ -80,8 +80,8 @@ private:
     std::size_t _max_concurrent_streams = 100;
     std::size_t _max_pending_requests = 10000; ///< Cap on queued+active requests (bounds _pending_requests)
     std::size_t _max_body_size = 64 * 1024 * 1024;
-    double _connect_timeout = 30.0;
-    double _request_timeout = 60.0;
+    qb::duration _connect_timeout = std::chrono::seconds(30);
+    qb::duration _request_timeout = std::chrono::seconds(60);
     bool _auto_reconnect = true;
     bool _verify_peer = true;
     std::vector<ConnectionCallback> _connection_callbacks;
@@ -117,8 +117,8 @@ public:
 
     void set_max_concurrent_streams(std::size_t value) noexcept { _max_concurrent_streams = value; }
     void set_max_body_size(std::size_t value) noexcept { _max_body_size = value; }
-    void set_connect_timeout(double value) noexcept { _connect_timeout = value; }
-    void set_request_timeout(double value) noexcept { _request_timeout = value; }
+    void set_connect_timeout(qb::duration value) noexcept { _connect_timeout = value; }
+    void set_request_timeout(qb::duration value) noexcept { _request_timeout = value; }
     void set_auto_reconnect(bool value) noexcept { _auto_reconnect = value; }
     void set_verify_peer(bool value) noexcept { _verify_peer = value; }
 

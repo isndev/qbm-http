@@ -382,7 +382,7 @@ void Client::handle_connection_success() {
     _handshake_completed = true;
     _received_graceful_goaway = false;
     _preserve_pending_on_next_disconnect = false;
-    this->setTimeout(0);
+    this->setTimeout(qb::duration::zero());
     
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
@@ -588,12 +588,12 @@ void Client::fail_all_requests(const std::string& error_message) {
 }
 
 void Client::check_request_timeouts() {
-    if (_request_timeout <= 0.) {
+    if (_request_timeout <= qb::duration::zero()) {
         arm_request_timeout();
         return;
     }
     auto now = std::chrono::steady_clock::now();
-    auto timeout_duration = std::chrono::duration<double>(_request_timeout);
+    const auto timeout_duration = _request_timeout;
     
     // Check active requests for timeouts
     std::vector<uint32_t> timed_out_streams;
@@ -642,15 +642,16 @@ bool Client::has_pending_or_active_work() const noexcept {
 void Client::arm_request_timeout() {
     const auto now = std::chrono::steady_clock::now();
     bool has_deadline = false;
-    auto delay = std::numeric_limits<double>::max();
+    qb::duration delay = qb::duration::max();
 
     const auto update_delay = [&](std::chrono::steady_clock::time_point started_at,
-                                  double timeout) {
-        if (timeout <= 0.) {
+                                  qb::duration timeout) {
+        if (timeout <= qb::duration::zero()) {
             return;
         }
-        const auto elapsed = std::chrono::duration<double>(now - started_at).count();
-        delay = std::min(delay, std::max(0.000001, timeout - elapsed));
+        const auto         elapsed   = std::chrono::duration_cast<qb::duration>(now - started_at);
+        const qb::duration remaining = timeout - elapsed;
+        delay = std::min(delay, std::max(qb::duration(std::chrono::microseconds(1)), remaining));
         has_deadline = true;
     };
 
@@ -658,7 +659,7 @@ void Client::arm_request_timeout() {
         update_delay(_connect_started_at, _connect_timeout);
     }
 
-    if (_request_timeout > 0.) {
+    if (_request_timeout > qb::duration::zero()) {
         for (const auto& context : _pending_requests) {
             if (context) {
                 update_delay(context->created_at, _request_timeout);
@@ -673,7 +674,7 @@ void Client::arm_request_timeout() {
     }
 
     if (!has_deadline) {
-        this->setTimeout(0);
+        this->setTimeout(qb::duration::zero());
         return;
     }
 
@@ -683,8 +684,8 @@ void Client::arm_request_timeout() {
 bool Client::connect_deadline_expired(std::chrono::steady_clock::time_point now) const noexcept {
     return _is_connecting &&
            !_handshake_completed &&
-           _connect_timeout > 0. &&
-           now - _connect_started_at >= std::chrono::duration<double>(_connect_timeout);
+           _connect_timeout > qb::duration::zero() &&
+           now - _connect_started_at >= _connect_timeout;
 }
 
 void Client::attempt_reconnection() {

@@ -353,7 +353,7 @@ namespace qb::http {
                         auto [ptr, ec] = std::from_chars(begin, end, max_age_value);
                         if (ec == std::errc() && ptr == end) {
                             // Successful parse, consumed entire value
-                            result_cookie.max_age(max_age_value);
+                            result_cookie.max_age(std::chrono::seconds(max_age_value));
                         }
                         // If parsing failed or didn't consume all input, ignore silently
                         // (same behavior as previous std::stoi version with catch blocks)

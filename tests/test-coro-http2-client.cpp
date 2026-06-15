@@ -32,6 +32,8 @@
 #include "../coro.h"
 #include "../origin.h"
 
+using namespace std::chrono_literals;
+
 namespace {
 
 class CoroH2Server;
@@ -109,7 +111,7 @@ TEST(HttpClientOriginTest, ComparesHostCaseInsensitivelyAndDefaultPorts) {
 
 TEST(Http2ClientConfigTest, RejectsPlainHttpAbsoluteRequestWithoutConnecting) {
     auto client = qb::http2::make_client("https://localhost:1");
-    client->set_connect_timeout(0.01);
+    client->set_connect_timeout(10ms);
 
     bool done = false;
     qb::http::Response response;
@@ -152,7 +154,7 @@ TEST(Http2ClientConfigTest, RejectsCrossOriginAbsoluteRequestWithoutConnecting) 
 
 TEST(Http2ClientConfigTest, BatchRejectsInvalidSchemesWithoutConnecting) {
     auto client = qb::http2::make_client("https://localhost:1");
-    client->set_connect_timeout(0.01);
+    client->set_connect_timeout(10ms);
 
     std::vector<qb::http::Request> requests;
     requests.emplace_back(qb::io::uri("http://localhost:1/plain"));
@@ -335,8 +337,8 @@ TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackOnce) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
-    client->set_request_timeout(0.05);
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(50ms);
 
     std::atomic<int> callbacks{0};
     qb::http::Response response;
@@ -376,8 +378,8 @@ TEST_F(CoroH2ClientTest, MultipleActiveRequestTimeoutsUseTransportStreamIds) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
-    client->set_request_timeout(0.05);
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(50ms);
 
     std::atomic<int> callbacks{0};
     std::vector<qb::http::Response> responses(2);
@@ -415,7 +417,7 @@ TEST_F(CoroH2ClientTest, ConnectAwaiterYieldsConnectResult) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
+    client->set_connect_timeout(5s);
 
     auto result = qb::http::run_sync(client->connect());
     ASSERT_TRUE(result) << "expected successful connect, got: " << result.error_message;
@@ -427,7 +429,7 @@ TEST_F(CoroH2ClientTest, MultipleConnectCallbacksShareOneHandshake) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
+    client->set_connect_timeout(5s);
 
     std::atomic<int> callbacks{0};
     std::atomic<int> successes{0};
@@ -462,7 +464,7 @@ TEST_F(CoroH2ClientTest, PushRequestAwaiterYieldsResponse) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
+    client->set_connect_timeout(5s);
 
     // push_request triggers an implicit connect if needed.
     qb::http::Request req;
@@ -479,7 +481,7 @@ TEST_F(CoroH2ClientTest, PushRequestNormalizesCustomHeaderNamesToHttp2Lowercase)
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
+    client->set_connect_timeout(5s);
 
     qb::http::Request req;
     req.method() = qb::http::Method::GET;
@@ -495,7 +497,7 @@ TEST_F(CoroH2ClientTest, CoAwaitPushRequestInsideCoroutine) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
+    client->set_connect_timeout(5s);
 
     qb::http::Response captured;
     bool               connected = false;
@@ -522,7 +524,7 @@ TEST_F(CoroH2ClientTest, PushRequestsBatchAwaiter) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
+    client->set_connect_timeout(5s);
 
     std::vector<qb::http::Request> reqs;
     for (int i = 0; i < 4; ++i) {
@@ -544,7 +546,7 @@ TEST_F(CoroH2ClientTest, InteropWithCallbackApiUnchanged) {
     if (IsSkipped()) return;
     auto client = qb::http2::make_client(url());
     client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5.0);
+    client->set_connect_timeout(5s);
 
     std::atomic<bool>   done{false};
     qb::http::Response  response;

@@ -3,7 +3,7 @@
  * @brief HTTP-compliant date and time formatting and parsing utilities.
  *
  * This file provides functions within the `qb::http::date` namespace for converting
- * between various time representations (like `qb::Timestamp`, `std::chrono::system_clock::time_point`)
+ * between various time representations (like `qb::wall_time`, `std::chrono::system_clock::time_point`)
  * and HTTP-formatted date strings (RFC 7231, RFC 6265). It supports parsing multiple
  * standard date formats found in HTTP headers.
  *
@@ -126,68 +126,6 @@ namespace qb::http::date {
         }
 
         return std::chrono::system_clock::from_time_t(time_value);
-    }
-
-    /**
-     * @brief Format a timestamp as an HTTP date string
-     * @param ts Timestamp to format
-     * @return Formatted date string conforming to RFC 7231
-     */
-    std::string format_http_date(qb::Timestamp const ts) noexcept {
-        std::string result;
-        result.reserve(29); // "Sun, 06 Nov 1994 08:49:37 GMT" = 29 chars
-
-        const auto time = static_cast<int64_t>(ts.seconds());
-        tm tm{};
-#if defined(_MSC_VER) || defined(__MINGW32__)
-    if (gmtime_s(&tm, &time) != 0)
-        return {};
-    auto gmtime = &tm;
-#else
-        const auto crt_time = static_cast<time_t>(time);
-        const auto gmtime = gmtime_r(&crt_time, &tm);
-        if (!gmtime)
-            return {};
-#endif
-
-        // Day of week
-        result += DAY_NAMES[gmtime->tm_wday];
-        result += ", ";
-
-        // Day of month (2 digits)
-        result += gmtime->tm_mday < 10 ? '0' : static_cast<char>(gmtime->tm_mday / 10 + 48);
-        result += static_cast<char>(gmtime->tm_mday % 10 + 48);
-        result += ' ';
-
-        // Month name
-        result += MONTH_NAMES[gmtime->tm_mon];
-        result += ' ';
-
-        // Year (4 digits)
-        const auto year = gmtime->tm_year + 1900;
-        result += static_cast<char>(year / 1000 + 48);
-        result += static_cast<char>((year / 100) % 10 + 48);
-        result += static_cast<char>((year / 10) % 10 + 48);
-        result += static_cast<char>(year % 10 + 48);
-        result += ' ';
-
-        // Hour (2 digits)
-        result += gmtime->tm_hour < 10 ? '0' : static_cast<char>(gmtime->tm_hour / 10 + 48);
-        result += static_cast<char>(gmtime->tm_hour % 10 + 48);
-        result += ':';
-
-        // Minute (2 digits)
-        result += gmtime->tm_min < 10 ? '0' : static_cast<char>(gmtime->tm_min / 10 + 48);
-        result += static_cast<char>(gmtime->tm_min % 10 + 48);
-        result += ':';
-
-        // Second (2 digits)
-        result += gmtime->tm_sec < 10 ? '0' : static_cast<char>(gmtime->tm_sec / 10 + 48);
-        result += static_cast<char>(gmtime->tm_sec % 10 + 48);
-
-        result += " GMT";
-
-        return result;
     }
 
     /**
@@ -464,26 +402,6 @@ namespace qb::http::date {
         return format_http_date(std::chrono::system_clock::now());
     }
 
-    /**
-     * @brief Convert a Timestamp to a system_clock::time_point
-     * @param ts Timestamp to convert
-     * @return Equivalent system_clock::time_point
-     */
-    std::chrono::system_clock::time_point to_time_point(qb::Timestamp const ts) noexcept {
-        return std::chrono::system_clock::from_time_t(static_cast<time_t>(ts.seconds()));
-    }
-
-    /**
-     * @brief Convert a system_clock::time_point to a Timestamp
-     * @param tp Time point to convert
-     * @return Equivalent Timestamp
-     */
-    qb::Timestamp to_timestamp(std::chrono::system_clock::time_point const tp) noexcept {
-        auto time_since_epoch = tp.time_since_epoch();
-        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(time_since_epoch);
-        return qb::Timestamp(static_cast<double>(seconds.count()));
-    }
-
     std::string
     format_timestamp(const std::chrono::system_clock::time_point &tp) {
         auto time = std::chrono::system_clock::to_time_t(tp);
@@ -497,22 +415,16 @@ namespace qb::http::date {
 namespace qb::http {
     class Date {
     public:
-        static std::string to_string(qb::Timestamp const ts) noexcept {
-            return date::format_http_date(ts);
-        }
-
         static std::string to_string(std::chrono::system_clock::time_point const tp) noexcept {
             return date::format_http_date(tp);
         }
 
-        static qb::Timestamp parse(std::string_view const str) noexcept {
-            auto tp = date::parse_http_date(str);
-            return tp ? date::to_timestamp(*tp) : qb::Timestamp{};
+        static qb::wall_time parse(std::string_view const str) noexcept {
+            return date::parse_http_date(str).value_or(qb::wall_time{});
         }
 
-        static qb::Timestamp parse(std::string const &str) noexcept {
-            auto tp = date::parse_http_date(str);
-            return tp ? date::to_timestamp(*tp) : qb::Timestamp{};
+        static qb::wall_time parse(std::string const &str) noexcept {
+            return date::parse_http_date(str).value_or(qb::wall_time{});
         }
     };
 } // namespace qb::http

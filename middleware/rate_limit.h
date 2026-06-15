@@ -48,7 +48,7 @@ namespace qb::http::rate_limit_security {
     constexpr std::size_t MAX_CLIENT_ID_LENGTH = 256;
 
     /** @brief Default interval at which the opportunistic stale-entry sweep fires. */
-    constexpr std::chrono::milliseconds STALE_ENTRY_CLEANUP_INTERVAL{60000}; // 1 minute
+    constexpr qb::duration STALE_ENTRY_CLEANUP_INTERVAL = std::chrono::minutes{1};
 
     /** @brief Fraction (numerator / denominator) of `MAX_TRACKED_CLIENTS` above which an
      *         emergency sweep is triggered on every incoming request. */
@@ -100,9 +100,8 @@ namespace qb::http {
          * @param window_val The duration of the time window (e.g., `std::chrono::seconds(60)`).
          * @return Reference to this `RateLimitOptions` instance for chaining.
          */
-        template<typename DurationRep, typename DurationPeriod>
-        RateLimitOptions &window(const std::chrono::duration<DurationRep, DurationPeriod> &window_val) noexcept {
-            _window = std::chrono::duration_cast<std::chrono::milliseconds>(window_val);
+        RateLimitOptions &window(qb::duration window_val) noexcept {
+            _window = window_val;
             return *this;
         }
 
@@ -179,7 +178,7 @@ namespace qb::http {
 
         // --- Getters ---
         [[nodiscard]] size_t get_max_requests() const noexcept { return _max_requests; }
-        [[nodiscard]] std::chrono::milliseconds get_window() const noexcept { return _window; }
+        [[nodiscard]] qb::duration get_window() const noexcept { return _window; }
         [[nodiscard]] qb::http::status get_status_code() const noexcept { return _status_code; }
         [[nodiscard]] const std::string &get_message() const noexcept { return _message; }
 
@@ -283,7 +282,7 @@ namespace qb::http {
 
     private:
         size_t _max_requests;
-        std::chrono::milliseconds _window;
+        qb::duration _window;
         qb::http::status _status_code;
         std::string _message;
         std::function<std::string(const void *)> _client_id_extractor_fn; // Type-erased client ID extractor
@@ -556,13 +555,13 @@ namespace qb::http {
             auto now = std::chrono::steady_clock::now();
             auto elapsed_in_window = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - client_record.last_reset_time);
-            auto time_until_reset_ms = _options->get_window() - elapsed_in_window;
-            if (time_until_reset_ms.count() < 0) {
-                time_until_reset_ms = std::chrono::milliseconds(0);
+            auto time_until_reset = _options->get_window() - elapsed_in_window;
+            if (time_until_reset.count() < 0) {
+                time_until_reset = qb::duration::zero();
             }
             response.set_header("X-RateLimit-Reset",
                                 std::to_string(
-                                    std::chrono::duration_cast<std::chrono::seconds>(time_until_reset_ms).count()));
+                                    std::chrono::duration_cast<std::chrono::seconds>(time_until_reset).count()));
         }
     };
 

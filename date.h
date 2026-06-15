@@ -3,7 +3,7 @@
  * @brief HTTP-compliant date and time formatting and parsing utilities.
  *
  * This file provides functions within the `qb::http::date` namespace for converting
- * between various time representations (like `qb::Timestamp`, `std::chrono::system_clock::time_point`)
+ * between various time representations (like `qb::wall_time`, `std::chrono::system_clock::time_point`)
  * and HTTP-formatted date strings (RFC 7231, RFC 6265). It supports parsing multiple
  * standard date formats found in HTTP headers.
  *
@@ -20,7 +20,7 @@
 #include <string_view>  // For std::string_view
 #include <utility>      // For std::pair (though not directly used in this header, often related)
 
-#include <qb/system/timestamp.h> // For qb::Timestamp
+#include <qb/system/timestamp.h> // For qb::wall_time
 #include "./utility.h"
 
 namespace qb::http {
@@ -40,15 +40,6 @@ namespace qb::http {
      * - ANSI C asctime() (obsolete): `Sun Nov  6 08:49:37 1994`
      */
     namespace date {
-        /**
-         * @brief Formats a `qb::Timestamp` as an HTTP-compliant date string (RFC 1123).
-         * @param ts The `qb::Timestamp` to format.
-         * @return A string representing the timestamp in the format "Wdy, DD Mon YYYY HH:MM:SS GMT".
-         *         Returns an empty string if the timestamp is invalid or formatting fails.
-         * @note This function is `noexcept` and handles internal errors by returning an empty string.
-         */
-        [[nodiscard]] std::string format_http_date(qb::Timestamp ts) noexcept;
-
         /**
          * @brief Formats a `std::chrono::system_clock::time_point` as an HTTP-compliant date string (RFC 1123).
          * @param tp The `time_point` to format.
@@ -127,34 +118,6 @@ namespace qb::http {
         [[nodiscard]] std::string now() noexcept;
 
         /**
-         * @brief Converts a `qb::Timestamp` to a `std::chrono::system_clock::time_point`.
-         * @param ts The `qb::Timestamp` to convert (assumed to represent seconds since epoch).
-         * @return The equivalent `std::chrono::system_clock::time_point`.
-         * @note This function is `noexcept`.
-         */
-        [[nodiscard]] std::chrono::system_clock::time_point to_time_point(qb::Timestamp ts) noexcept;
-
-        /**
-         * @brief Converts a `std::chrono::system_clock::time_point` to a `qb::Timestamp`.
-         * @param tp The `time_point` to convert.
-         * @return The equivalent `qb::Timestamp` (representing seconds since epoch as a double).
-         * @note This function is `noexcept`.
-         */
-        [[nodiscard]] qb::Timestamp to_timestamp(std::chrono::system_clock::time_point tp) noexcept;
-
-        /**
-         * @brief Convenience function to format a `qb::Timestamp` to an HTTP date string.
-         * Equivalent to `date::format_http_date(ts)`.
-         * @param ts The `qb::Timestamp` to format.
-         * @return HTTP date string.
-         * @note This function is `noexcept`.
-         */
-        [[nodiscard]] inline std::string
-        to_string(qb::Timestamp ts) noexcept {
-            return date::format_http_date(ts);
-        }
-
-        /**
          * @brief Convenience function to format a `std::chrono::system_clock::time_point` to an HTTP date string.
          * Equivalent to `date::format_http_date(tp)`.
          * @param tp The `time_point` to format.
@@ -167,27 +130,25 @@ namespace qb::http {
         }
 
         /**
-         * @brief Convenience function to parse an HTTP date string_view into a `qb::Timestamp`.
+         * @brief Convenience function to parse an HTTP date string_view into a `qb::wall_time`.
          * @param str The date string_view to parse.
-         * @return A `qb::Timestamp`. If parsing fails, returns a default-constructed `qb::Timestamp` (often representing epoch or an invalid state).
+         * @return A `qb::wall_time`. If parsing fails, returns the epoch (`qb::wall_time{}`).
          * @note This function is `noexcept`.
          */
-        [[nodiscard]] inline qb::Timestamp
+        [[nodiscard]] inline qb::wall_time
         parse(std::string_view str) noexcept {
-            auto tp = date::parse_http_date(str);
-            return tp ? date::to_timestamp(*tp) : qb::Timestamp{}; // Default Timestamp on parse failure
+            return date::parse_http_date(str).value_or(qb::wall_time{});
         }
 
         /**
-         * @brief Convenience function to parse an HTTP date string into a `qb::Timestamp`.
+         * @brief Convenience function to parse an HTTP date string into a `qb::wall_time`.
          * @param str The date string to parse.
-         * @return A `qb::Timestamp`. If parsing fails, returns a default-constructed `qb::Timestamp`.
+         * @return A `qb::wall_time`. If parsing fails, returns the epoch (`qb::wall_time{}`).
          * @note This function is `noexcept`.
          */
-        [[nodiscard]] inline qb::Timestamp
+        [[nodiscard]] inline qb::wall_time
         parse(const std::string &str) noexcept {
-            auto tp = date::parse_http_date(str);
-            return tp ? date::to_timestamp(*tp) : qb::Timestamp{}; // Default Timestamp on parse failure
+            return date::parse_http_date(str).value_or(qb::wall_time{});
         }
 
         /**

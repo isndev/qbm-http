@@ -1167,7 +1167,7 @@ class WebSocket
     : public ::qb::io::async::tcp::client<WebSocket<T, Transport>, Transport>
     , public ::qb::io::use<WebSocket<T, Transport>>::timeout {
     const std::string _ws_key;        /**< WebSocket handshake key */
-    int               _ping_interval; /**< Interval for sending ping frames (in ms) */
+    qb::duration      _ping_interval; /**< Interval for sending ping frames (0 = disabled). */
     ::qb::io::uri     _remote;        /**< Remote server URI */
 
     /// Ordered list of subprotocols the client wishes to negotiate
@@ -1265,34 +1265,21 @@ public:
      */
     explicit WebSocket()
         : _ws_key(http::ws::generateKey())
-        , _ping_interval(0)
+        , _ping_interval{}
         {}
 
     /**
      * @brief Sets the ping interval for keepalive.
-     * @param ping_interval Interval in milliseconds (0 to disable pings).
+     * @param interval Ping interval as a `qb::duration` (zero disables pings).
      *
-     * Configures automatic ping/pong keepalive mechanism.
-     * A value of 0 disables automatic pings.
+     * Configures the automatic ping/pong keepalive mechanism. Accepts any
+     * `std::chrono` duration (e.g. `30s`, `500ms`); a zero or negative value
+     * disables automatic pings.
      */
     void
-    set_ping_interval(int ping_interval = 0) {
-        _ping_interval = ping_interval;
-        this->setTimeout(ping_interval);
-    }
-
-    /**
-     * @brief Chrono-friendly overload of `set_ping_interval`.
-     *
-     * Accepts any duration; values under one millisecond disable keepalive.
-     */
-    template <typename Rep, typename Period>
-    void
-    set_ping_interval(std::chrono::duration<Rep, Period> ping_interval) {
-        const auto ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(ping_interval)
-                .count();
-        set_ping_interval(ms <= 0 ? 0 : static_cast<int>(ms));
+    set_ping_interval(qb::duration interval = qb::duration::zero()) {
+        _ping_interval = interval;
+        this->setTimeout(interval);
     }
 
     /**
@@ -1372,9 +1359,10 @@ public:
      * performing the WebSocket handshake.
      */
     void
-    connect(::qb::io::uri const &remote, int timeout = 0, bool verify_peer = true) {
+    connect(::qb::io::uri const &remote, qb::duration timeout = qb::duration::zero(),
+            bool verify_peer = true) {
         this->clear_protocols();
-        this->setTimeout(0);
+        this->setTimeout(qb::duration::zero());
         _remote                 = remote;
         _negotiated_subprotocol.clear();
         _close_sent             = false;
@@ -1414,23 +1402,6 @@ public:
             },
             timeout,
             verify_peer);
-    }
-
-    /**
-     * @brief Chrono-friendly overload of `connect()`.
-     *
-     * Accepts any `std::chrono::duration`; values under one millisecond
-     * disable the connection timeout (same convention as
-     * `set_ping_interval`).
-     */
-    template <typename Rep, typename Period>
-    void
-    connect(::qb::io::uri const                  &remote,
-            std::chrono::duration<Rep, Period>   timeout,
-            bool                                 verify_peer = true) {
-        const auto ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count();
-        connect(remote, ms <= 0 ? 0 : static_cast<int>(ms), verify_peer);
     }
 
     /**

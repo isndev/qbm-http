@@ -26,6 +26,7 @@
 #include <regex>
 #include <stdexcept>
 #include <chrono>  // For regex timeout protection
+#include <qb/system/timestamp.h>
 #include <thread>  // For regex timeout
 
 #include "../routing/middleware.h"
@@ -61,7 +62,7 @@ namespace qb::http {
          * @brief Maximum time allowed for a single regex match operation (milliseconds)
          * @details Prevents ReDoS attacks by limiting regex execution time
          */
-        constexpr std::chrono::milliseconds MAX_REGEX_EXECUTION_TIME{100}; // 100ms max per match
+        constexpr qb::duration MAX_REGEX_EXECUTION_TIME = std::chrono::milliseconds{100}; // 100ms max per match
     }
     
     /**
@@ -82,7 +83,7 @@ namespace qb::http {
     [[nodiscard]] inline bool regex_match_with_timeout(
         const std::string& origin,
         const std::regex& pattern,
-        std::chrono::milliseconds /*timeout*/
+        qb::duration /*timeout*/
             = cors_security_limits::MAX_REGEX_EXECUTION_TIME) noexcept {
         try {
             if (origin.length() > cors_security_limits::MAX_ORIGIN_LENGTH) {
@@ -228,14 +229,14 @@ namespace qb::http {
         }
 
         /**
-         * @brief Sets the maximum duration (in seconds) the results of a preflight request can be cached.
-         * Used in the `Access-Control-Max-Age` header.
-         * @param age_val Max age in seconds.
+         * @brief Sets the maximum duration the results of a preflight request can be cached.
+         * Used in the `Access-Control-Max-Age` header (serialized as RFC 7231 integer seconds).
+         * @param age Max age as a `qb::duration`.
          * @return Reference to this CorsOptions instance for chaining.
          */
-        CorsOptions &max_age(int age_val) {
-            // Renamed from age
-            _max_age = age_val;
+        CorsOptions &max_age(qb::duration age) {
+            _max_age =
+                static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(age).count());
             return *this;
         }
 
@@ -260,7 +261,7 @@ namespace qb::http {
                     .methods({"GET", "POST", "OPTIONS"}) // Common safe methods
                     .headers({"Content-Type", "Authorization"}) // Common necessary headers
                     .credentials(AllowCredentials::No) // More secure default
-                    .max_age(3600); // 1 hour cache for preflight
+                    .max_age(std::chrono::seconds(3600)); // 1 hour cache for preflight
         }
 
         /**

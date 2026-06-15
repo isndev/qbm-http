@@ -51,14 +51,14 @@ namespace qb::http2 {
     // Constants for HTTP/2 session configuration
     namespace constants {
         constexpr uint32_t HTTP11_STREAM_ID = 0;        ///< Stream ID used for HTTP/1.1 requests (not a valid HTTP/2 stream ID)
-        constexpr uint32_t DEFAULT_SESSION_TIMEOUT = 60; ///< Default session timeout in seconds
+        constexpr qb::duration DEFAULT_SESSION_TIMEOUT = std::chrono::seconds(60); ///< Default session timeout
         constexpr uint32_t MIN_VALID_STREAM_ID = 1;     ///< Minimum valid HTTP/2 stream ID (0 is reserved for HTTP/1.1)
-        
+
         // DDoS Protection constants
         constexpr uint32_t DEFAULT_MAX_CONCURRENT_STREAMS = 50;  ///< Default max concurrent streams per connection (reduced from 100 for security)
-        constexpr uint32_t STREAM_IDLE_TIMEOUT_SECONDS = 30;      ///< Timeout for idle streams (seconds)
-        constexpr uint32_t STREAM_INCOMPLETE_TIMEOUT_SECONDS = 10; ///< Timeout for incomplete streams (seconds)
-        constexpr uint32_t CLEANUP_INTERVAL_SECONDS = 5;          ///< Interval for periodic stream cleanup (seconds)
+        constexpr qb::duration STREAM_IDLE_TIMEOUT = std::chrono::seconds(30);      ///< Timeout for idle streams
+        constexpr qb::duration STREAM_INCOMPLETE_TIMEOUT = std::chrono::seconds(10); ///< Timeout for incomplete streams
+        constexpr qb::duration CLEANUP_INTERVAL = std::chrono::seconds(5);          ///< Interval for periodic stream cleanup
     }
 
     // Protocol type aliases for cleaner code
@@ -295,11 +295,10 @@ namespace qb::http2 {
                         }
                     }
                     auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - _last_stream_cleanup).count();
-                    if (elapsed >= constants::CLEANUP_INTERVAL_SECONDS) {
+                    if (now - _last_stream_cleanup >= constants::CLEANUP_INTERVAL) {
                         _http2_protocol->cleanup_idle_streams(
-                            constants::STREAM_IDLE_TIMEOUT_SECONDS,
-                            constants::STREAM_INCOMPLETE_TIMEOUT_SECONDS);
+                            constants::STREAM_IDLE_TIMEOUT,
+                            constants::STREAM_INCOMPLETE_TIMEOUT);
                         _last_stream_cleanup = now;
                     }
                 }

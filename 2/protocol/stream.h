@@ -26,6 +26,7 @@
 #include <vector> // Required by qb::http::Headers if it uses std::vector for multi-value headers
 #include <unordered_set>
 #include <chrono>
+#include <qb/system/timestamp.h> // for qb::duration (canonical time-span type)
 #include <qb/system/container/unordered_set.h> // for qb::unordered_set (previously picked up transitively via listener.h)
 
 #include "../../request.h"
@@ -499,8 +500,8 @@ public:
      * @brief Stream cleanup criteria
      */
     struct CleanupCriteria {
-        std::chrono::milliseconds max_idle_time{0};    ///< Maximum idle time (0 = no limit)
-        std::chrono::milliseconds max_age{0};          ///< Maximum stream age (0 = no limit)
+        qb::duration max_idle_time{};    ///< Maximum idle time (0 = no limit)
+        qb::duration max_age{};          ///< Maximum stream age (0 = no limit)
         bool cleanup_closed_streams = true;            ///< Remove closed streams
         bool cleanup_reset_streams = true;             ///< Remove reset streams
         uint32_t max_total_streams = 0;                ///< Maximum total streams (0 = no limit)

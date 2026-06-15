@@ -34,7 +34,7 @@
  * @code
  * // Bridging a callback API into a coroutine:
  * qb::http::async::awaiter<qb::http::async::Reply>
- * get_async(qb::http::Request r, double timeout = 0.) {
+ * get_async(qb::http::Request r, qb::duration timeout = qb::duration::zero()) {
  *     return qb::http::async::make_awaiter<qb::http::async::Reply>(
  *         [req = std::move(r), timeout](auto complete) mutable {
  *             qb::http::async::GET(std::move(req),

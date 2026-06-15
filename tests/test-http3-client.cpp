@@ -16,6 +16,8 @@
 #include <thread>
 #include <vector>
 
+using namespace std::chrono_literals;
+
 #ifndef _WIN32
 #include <csignal>
 #include <sys/wait.h>
@@ -320,7 +322,7 @@ TEST(Http3DualStackIntegrationTest, SameRouteServesHttp2AndHttp3OnSeparateSocket
                                cert_path(), key_path()));
 
     auto http2_client = qb::http2::make_client("https://127.0.0.1:31987");
-    http2_client->set_connect_timeout(5.0);
+    http2_client->set_connect_timeout(5s);
     http2_client->set_verify_peer(false); // self-signed test cert
     auto http3_client = qb::http3::make_client("https://127.0.0.1:31988");
     http3_client->set_verify_peer(false);
@@ -382,7 +384,7 @@ TEST(Http3DualStackIntegrationTest, ClosingHttp3SideKeepsHttp2SideServing) {
     server->close_http3();
 
     auto http2_client = qb::http2::make_client("https://127.0.0.1:31989");
-    http2_client->set_connect_timeout(5.0);
+    http2_client->set_connect_timeout(5s);
     http2_client->set_verify_peer(false); // self-signed test cert
 
     std::atomic<bool> done{false};
@@ -507,7 +509,7 @@ TEST(Http3ClientIntegrationTest, BatchKeepsEmptySuccessWhenAnotherRequestTimesOu
 
     auto client = qb::http3::make_client("https://127.0.0.1:31954");
     client->set_verify_peer(false);
-    client->set_request_timeout(0.03);
+    client->set_request_timeout(30ms);
 
     std::vector<qb::http::Request> requests;
     requests.emplace_back(qb::io::uri("/empty"));
@@ -579,7 +581,7 @@ TEST(Http3ClientIntegrationTest, RejectsPlainHttpAbsoluteRequestWithoutConnectin
     qb::io::async::init();
 
     auto client = qb::http3::make_client("https://127.0.0.1:32997");
-    client->set_connect_timeout(0.01);
+    client->set_connect_timeout(10ms);
 
     std::atomic<bool> done{false};
     qb::http::Response response;
@@ -1000,7 +1002,7 @@ TEST(Http3ClientIntegrationTest, RequestTimeoutReturnsTimeoutResponse) {
 
     auto client = qb::http3::make_client("https://127.0.0.1:31947");
     client->set_verify_peer(false);
-    client->set_request_timeout(0.03);
+    client->set_request_timeout(30ms);
 
     std::atomic<bool> done{false};
     qb::http::Response response;
@@ -1037,7 +1039,7 @@ TEST(Http3ClientIntegrationTest, ManualDisconnectFailsActiveRequestImmediately) 
 
     auto client = qb::http3::make_client("https://127.0.0.1:31963");
     client->set_verify_peer(false);
-    client->set_request_timeout(10.0);
+    client->set_request_timeout(10s);
 
     std::atomic<bool> done{false};
     qb::http::Response response;
@@ -1082,7 +1084,7 @@ TEST(Http3ClientIntegrationTest, ManualDisconnectFailsBatchOncePerRequest) {
 
     auto client = qb::http3::make_client("https://127.0.0.1:31965");
     client->set_verify_peer(false);
-    client->set_request_timeout(10.0);
+    client->set_request_timeout(10s);
 
     std::vector<qb::http::Request> requests;
     requests.emplace_back(qb::io::uri("/stall/0"));
@@ -1130,7 +1132,7 @@ TEST(Http3ClientIntegrationTest, RemoteConnectionCloseFailsActiveRequestWithoutG
 
     auto client = qb::http3::make_client("https://127.0.0.1:31984");
     client->set_verify_peer(false);
-    client->set_request_timeout(10.0);
+    client->set_request_timeout(10s);
 
     std::atomic<bool> done{false};
     qb::http::Response response;
@@ -1179,7 +1181,7 @@ TEST(Http3ClientIntegrationTest, MaxConcurrentStreamsQueuesPendingRequests) {
     auto client = qb::http3::make_client("https://127.0.0.1:31964");
     client->set_verify_peer(false);
     client->set_max_concurrent_streams(1);
-    client->set_request_timeout(10.0);
+    client->set_request_timeout(10s);
 
     std::atomic<int> done{0};
     std::vector<qb::http::Response> responses(2);
@@ -1242,7 +1244,7 @@ TEST(Http3ClientIntegrationTest, RequestTimeoutIncludesPendingBehindConcurrencyL
     auto client = qb::http3::make_client("https://127.0.0.1:31966");
     client->set_verify_peer(false);
     client->set_max_concurrent_streams(1);
-    client->set_request_timeout(0.03);
+    client->set_request_timeout(30ms);
 
     std::atomic<int> done{0};
     std::vector<qb::http::Response> responses(2);
@@ -1277,7 +1279,7 @@ TEST(Http3ClientIntegrationTest, ConnectTimeoutFailsQueuedRequest) {
 
     auto client = qb::http3::make_client("https://127.0.0.1:32999");
     client->set_verify_peer(false);
-    client->set_connect_timeout(0.03);
+    client->set_connect_timeout(30ms);
 
     std::atomic<bool> connected_callback{false};
     bool connected = true;
@@ -1301,7 +1303,7 @@ TEST(Http3ClientIntegrationTest, ConnectTimeoutFailsImplicitQueuedRequest) {
 
     auto client = qb::http3::make_client("https://127.0.0.1:32998");
     client->set_verify_peer(false);
-    client->set_connect_timeout(0.03);
+    client->set_connect_timeout(30ms);
 
     std::atomic<bool> done{false};
     qb::http::Response response;
@@ -2150,7 +2152,7 @@ TEST(Http3ClientIntegrationTest, CancelActiveRequestResetsStreamAndCompletesCall
 
     auto client = qb::http3::make_client("https://127.0.0.1:31972");
     client->set_verify_peer(false);
-    client->set_request_timeout(10.0);
+    client->set_request_timeout(10s);
 
     std::atomic<bool> done{false};
     qb::http::Response response;
@@ -2197,7 +2199,7 @@ TEST(Http3ClientIntegrationTest, CancelPendingRequestCompletesWithoutOpeningStre
     auto client = qb::http3::make_client("https://127.0.0.1:31973");
     client->set_verify_peer(false);
     client->set_max_concurrent_streams(1);
-    client->set_request_timeout(10.0);
+    client->set_request_timeout(10s);
 
     std::atomic<bool> first_done{false};
     auto first = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")},
@@ -2644,8 +2646,8 @@ TEST(Http3InteropTest, QbHttp3ClientCanCallConfiguredExternalServer) {
     }
 
     auto client = qb::http3::make_client(base);
-    client->set_connect_timeout(5.0);
-    client->set_request_timeout(5.0);
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(5s);
     if (configured_env_value("QB_HTTP3_EXTERNAL_INSECURE") == "1") {
         client->set_verify_peer(false);
     }

@@ -57,7 +57,7 @@ namespace qb::http {
         std::string issuer{}; ///< Expected 'iss' claim value if `verify_iss` is true.
         std::string audience{}; ///< Expected 'aud' claim value if `verify_aud` is true.
         std::string subject{}; ///< Expected 'sub' claim value if `verify_sub` is true.
-        int leeway_seconds = 0; ///< Clock skew tolerance for time-based claims (exp, nbf).
+        std::chrono::seconds leeway{0}; ///< Clock skew tolerance for time-based claims (exp, nbf).
         JwtTokenLocation token_location = JwtTokenLocation::HEADER; ///< Where to find the token.
         std::string token_name = "Authorization"; ///< Name of the header, cookie, or query parameter.
         std::string auth_scheme = "Bearer"; ///< Authentication scheme prefix (e.g., "Bearer") for header tokens.
@@ -357,7 +357,7 @@ namespace qb::http {
             jwt_verify_options.key = _options.secret;
             jwt_verify_options.verify_expiration = _options.verify_exp;
             jwt_verify_options.verify_not_before = _options.verify_nbf;
-            jwt_verify_options.clock_skew = std::chrono::seconds(_options.leeway_seconds);
+            jwt_verify_options.clock_skew = _options.leeway;
 
             if (_options.verify_iss) {
                 jwt_verify_options.verify_issuer = true;
@@ -424,7 +424,7 @@ namespace qb::http {
                     }
                     const int64_t now = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count());
-                    const int64_t leeway = static_cast<int64_t>(_options.leeway_seconds);
+                    const int64_t leeway = _options.leeway.count();
                     if (*iat_opt > now + leeway) {
                         error_info = {JwtError::TOKEN_NOT_ACTIVE, "Token issued in the future (invalid 'iat')."};
                         return std::nullopt;

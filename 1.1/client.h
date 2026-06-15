@@ -56,9 +56,9 @@ class Client : public std::enable_shared_from_this<Client> {
     class connection_base {
     public:
         virtual ~connection_base() = default;
-        virtual void connect(qb::io::uri const& uri, double timeout, bool verify_peer) = 0;
+        virtual void connect(qb::io::uri const& uri, qb::duration timeout, bool verify_peer) = 0;
         virtual void disconnect() = 0;
-        virtual void send(qb::http::Request request, double timeout) = 0;
+        virtual void send(qb::http::Request request, qb::duration timeout) = 0;
         [[nodiscard]] virtual bool is_open() const noexcept = 0;
     };
 
@@ -82,8 +82,8 @@ class Client : public std::enable_shared_from_this<Client> {
     std::uint64_t _next_request_id = 1;
     std::uint64_t _next_batch_id = 1;
 
-    double _connect_timeout = 30.0;
-    double _request_timeout = 60.0;
+    qb::duration _connect_timeout = std::chrono::seconds(30);
+    qb::duration _request_timeout = std::chrono::seconds(60);
     std::size_t _max_pending_requests = 1024;
     bool _auto_reconnect = true;
     bool _verify_peer = true; /**< Verify the server TLS certificate (https). */
@@ -114,8 +114,8 @@ public:
     [[nodiscard]] qb::http::async::awaiter<std::vector<qb::http::Response>>
     push_requests(std::vector<qb::http::Request> requests);
 
-    void set_connect_timeout(double value) noexcept { _connect_timeout = value; }
-    void set_request_timeout(double value) noexcept { _request_timeout = value; }
+    void set_connect_timeout(qb::duration value) noexcept { _connect_timeout = value; }
+    void set_request_timeout(qb::duration value) noexcept { _request_timeout = value; }
     void set_auto_reconnect(bool value) noexcept { _auto_reconnect = value; }
     void set_max_pending_requests(std::size_t value) noexcept { _max_pending_requests = value; }
     /**

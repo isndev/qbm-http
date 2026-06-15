@@ -130,7 +130,7 @@ TEST_F(CorsMiddlewareTest, PreflightRequest) {
     options.origins({"http://localhost:3000"})
             .methods({"GET", "POST", "OPTIONS"})
             .headers({"Content-Type", "Authorization"})
-            .max_age(3600);
+            .max_age(std::chrono::seconds(3600));
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     auto req = create_request(qb::http::method::OPTIONS, "/cors_test", "http://localhost:3000");
@@ -228,7 +228,7 @@ TEST_F(CorsMiddlewareTest, PreflightRequestExposedHeaders) {
     options.origins({"http://example.com"})
             .methods({"GET", "POST", "OPTIONS"})
             .headers({"X-My-Custom-Header", "Content-Length"})
-            .max_age(3600)
+            .max_age(std::chrono::seconds(3600))
             .expose_headers({"X-My-Custom-Header", "Content-Length"});
 
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
@@ -364,7 +364,7 @@ TEST_F(CorsMiddlewareTest, PreflightAllowHeadersDetailed) {
     options.origins({"http://example.com"})
             .methods({"GET", "POST", "OPTIONS"})
             .headers({"Content-Type", "Authorization", "X-Custom-Header", "X-Another-Header"})
-            .max_age(3600);
+            .max_age(std::chrono::seconds(3600));
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     // Scenario 1: Request asks for a subset of allowed headers
@@ -414,7 +414,7 @@ TEST_F(CorsMiddlewareTest, PreflightAllowHeadersDetailed) {
     qb::http::CorsOptions options_no_allowed_headers;
     options_no_allowed_headers.origins({"http://example.com"})
             .methods({"GET", "POST", "OPTIONS"})
-            .max_age(3600);
+            .max_age(std::chrono::seconds(3600));
     // .headers({}) is default empty
     auto cors_mw_no_headers = qb::http::cors_middleware<MockCorsSession>(options_no_allowed_headers);
 
@@ -651,6 +651,6 @@ TEST_F(CorsMiddlewareTest, MaxOriginLengthBoundary) {
 TEST_F(CorsMiddlewareTest, CorsSecurityLimitsConstants) {
     // Verify security limit constants
     EXPECT_EQ(qb::http::cors_security_limits::MAX_ORIGIN_LENGTH, 2048);
-    EXPECT_EQ(qb::http::cors_security_limits::MAX_REGEX_EXECUTION_TIME.count(), 100); // 100ms
+    EXPECT_EQ(qb::http::cors_security_limits::MAX_REGEX_EXECUTION_TIME, std::chrono::milliseconds(100));
     EXPECT_EQ(qb::http::cors_security_limits::MAX_REGEX_PATTERNS, 100);
 }

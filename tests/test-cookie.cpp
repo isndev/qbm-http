@@ -63,13 +63,13 @@ TEST_F(CookieTest, Expiration) {
     EXPECT_TRUE(cookie.expires().has_value());
 
     // Set max-age
-    cookie.max_age(1800); // 30 minutes
+    cookie.max_age(std::chrono::seconds(1800)); // 30 minutes
     EXPECT_TRUE(cookie.max_age().has_value());
     EXPECT_EQ(1800, cookie.max_age().value());
 
     // Test expires_in helper
     Cookie another_cookie("test2", "value2");
-    another_cookie.expires_in(7200); // 2 hours
+    another_cookie.expires_in(std::chrono::seconds(7200)); // 2 hours
     EXPECT_TRUE(another_cookie.expires().has_value());
 }
 
@@ -94,7 +94,7 @@ TEST_F(CookieTest, ToHeader) {
               cookie.to_header());
 
     // Add Max-Age
-    cookie.max_age(3600);
+    cookie.max_age(std::chrono::seconds(3600));
     EXPECT_EQ("test=value; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Strict",
               cookie.to_header());
 
@@ -145,7 +145,7 @@ TEST_F(CookieTest, MaxAgeAndExpires) {
     cookie.expires(past);
 
     // Mais définir max-age dans le futur
-    cookie.max_age(3600);
+    cookie.max_age(std::chrono::seconds(3600));
 
     // Les deux attributs doivent apparaître dans l'en-tête
     std::string header = cookie.to_header();
@@ -709,7 +709,7 @@ TEST_F(CookieTest, ToHeaderOptimizationWithAllAttributes) {
     Cookie cookie("session", "abc123");
     cookie.domain(".example.com")
           .path("/api")
-          .max_age(7200)
+          .max_age(std::chrono::seconds(7200))
           .secure(true)
           .http_only(true)
           .same_site(SameSite::Strict);
@@ -738,7 +738,7 @@ TEST_F(CookieTest, ToHeaderOptimizationLargeCookie) {
     Cookie cookie(large_name, large_value);
     cookie.domain(".subdomain.example.com")
           .path("/very/long/path/segment")
-          .max_age(86400);
+          .max_age(std::chrono::seconds(86400));
 
     std::string header = cookie.to_header();
 
@@ -776,7 +776,7 @@ TEST_F(CookieTest, ToHeaderOptimizationOnlyExpires) {
 
 TEST_F(CookieTest, ToHeaderOptimizationOnlyMaxAge) {
     Cookie cookie("temp", "data");
-    cookie.max_age(1800); // 30 minutes
+    cookie.max_age(std::chrono::seconds(1800)); // 30 minutes
 
     std::string header = cookie.to_header();
 
@@ -809,7 +809,7 @@ TEST_F(CookieTest, ToHeaderOptimizationSameSiteVariations) {
 TEST_F(CookieTest, ToHeaderOptimizationAttributeOrdering) {
     // Verify consistent attribute ordering
     Cookie cookie("ordered", "test");
-    cookie.max_age(3600)
+    cookie.max_age(std::chrono::seconds(3600))
           .domain("example.com")
           .path("/secure")
           .secure(true)

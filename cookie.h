@@ -16,6 +16,7 @@
 
 #include <qb/system/container/unordered_map.h>
 #include <chrono>
+#include <qb/system/timestamp.h>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -140,11 +141,12 @@ namespace qb::http {
         }
 
         /**
-         * @brief Set the expires attribute from a delta in seconds
-         * @param seconds Seconds from now
+         * @brief Set the expires attribute from a delta from now
+         * @param ttl Lifetime from now as a `qb::duration`
          */
-        Cookie &expires_in(int seconds) {
-            _expires = std::chrono::system_clock::now() + std::chrono::seconds(seconds);
+        Cookie &expires_in(qb::duration ttl) {
+            _expires = std::chrono::system_clock::now() +
+                       std::chrono::duration_cast<std::chrono::system_clock::duration>(ttl);
             return *this;
         }
 
@@ -156,11 +158,12 @@ namespace qb::http {
         }
 
         /**
-         * @brief Set the max-age attribute
-         * @param seconds Max age in seconds
+         * @brief Set the max-age attribute (serialized as RFC 6265 integer seconds)
+         * @param ttl Max age as a `qb::duration`
          */
-        Cookie &max_age(int seconds) {
-            _max_age = seconds;
+        Cookie &max_age(qb::duration ttl) {
+            _max_age =
+                static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(ttl).count());
             return *this;
         }
 

@@ -80,6 +80,7 @@
 #include <utility>
 
 #include <qb/io/async/coroutine/scheduler.h>
+#include <qb/system/timestamp.h>
 
 #include "../coro.h"
 #include "ws.h"
@@ -382,7 +383,7 @@ public:
      */
     [[nodiscard]] auto
     connect(::qb::io::uri const &remote,
-            std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+            qb::duration timeout = qb::duration::zero()) {
         return qb::http::async::make_awaiter<ConnectResult>(
             [this, remote, timeout](auto complete) {
                 if (_frame_complete) {
@@ -399,7 +400,7 @@ public:
                 _disconnected = false;
                 _close_sent = false;
                 install_connect_complete(std::move(complete));
-                base::connect(remote, static_cast<int>(timeout.count()));
+                base::connect(remote, timeout);
             });
     }
 
@@ -408,7 +409,7 @@ public:
      */
     [[nodiscard]] auto
     connect(std::string_view remote_uri,
-            std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+            qb::duration timeout = qb::duration::zero()) {
         return connect(::qb::io::uri(std::string(remote_uri)), timeout);
     }
 
