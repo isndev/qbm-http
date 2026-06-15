@@ -93,9 +93,8 @@ foreach (TEST ${HTTP_TESTS})
         TEST_NAME ${TEST}
         SOURCES test-${TEST}.cpp
     )
-    if(QBM_HTTP_HAS_HTTP3 AND "${TEST}" STREQUAL "http3-client")
-        target_compile_definitions(qbm-http-test-${TEST} PRIVATE QBM_HTTP_HAS_HTTP3=1)
-    endif()
+    # QBM_HTTP_HAS_HTTP3 is inherited transitively from qbm-http (defined PUBLIC),
+    # so tests linking the module already see it — no per-test define needed.
 endforeach ()
 
 # SSL resources are automatically copied by qb_setup_test_resources()
