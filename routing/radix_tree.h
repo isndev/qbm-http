@@ -124,7 +124,7 @@ namespace qb::http {
          *         out-of-range methods (which never receive a handler).
          */
         [[nodiscard]] static constexpr std::size_t method_slot(qb::http::method m) noexcept {
-            const auto raw = std::to_underlying(static_cast<qb::http::method::Value>(m));
+            const auto raw = qb::to_underlying(static_cast<qb::http::method::Value>(m));
             if (raw < 0 || static_cast<std::size_t>(raw) >= METHOD_SLOT_COUNT) {
                 return METHOD_SLOT_COUNT; // invalid / uninitialised
             }

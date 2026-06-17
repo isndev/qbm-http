@@ -18,8 +18,8 @@
 #include <string>        // For std::string, std::to_string
 #include <string_view>   // For std::string_view
 #include <ostream>       // For std::ostream
-#include <utility>       // For std::to_underlying (C++23)
 #include <qb/system/container/unordered_map.h> // For qb::icase_unordered_map
+#include <qb/utility/compat.h>
 #include "./logger.h"
 
 namespace qb::http {
@@ -136,7 +136,7 @@ namespace qb::http {
 
         /// Less-than comparison (for sorting, maps, sets, etc.).
         constexpr bool operator<(const Method &other) const {
-            return std::to_underlying(_value) < std::to_underlying(other._value);
+            return qb::to_underlying(_value) < qb::to_underlying(other._value);
         }
 
         /// Equality comparison with qb::http::Method::Value enum.
@@ -484,7 +484,7 @@ namespace qb::http {
 
         /// Less-than comparison (for sorting, maps, sets, etc.).
         constexpr bool operator<(const Status &other) const {
-            return std::to_underlying(_value) < std::to_underlying(other._value);
+            return qb::to_underlying(_value) < qb::to_underlying(other._value);
         }
 
         /// Equality comparison with qb::http::Status::Value enum.
@@ -493,7 +493,7 @@ namespace qb::http {
         constexpr bool operator!=(Value v) const { return !(*this == v); }
 
         /// Less-than comparison with qb::http::Status::Value enum.
-        constexpr bool operator<(Value v) const { return std::to_underlying(_value) < std::to_underlying(v); }
+        constexpr bool operator<(Value v) const { return qb::to_underlying(_value) < qb::to_underlying(v); }
 
         /// Equality comparison with raw ::http_status.
         constexpr bool operator==(::http_status s) const { return static_cast<::http_status>(*this) == s; }
@@ -501,7 +501,7 @@ namespace qb::http {
         constexpr bool operator!=(::http_status s) const { return !(*this == s); }
 
         /// Equality comparison with an integer status code.
-        constexpr bool operator==(int i) const { return std::to_underlying(_value) == i; }
+        constexpr bool operator==(int i) const { return qb::to_underlying(_value) == i; }
         /// Inequality comparison with an integer status code.
         constexpr bool operator!=(int i) const { return !(*this == i); }
 
@@ -524,7 +524,7 @@ namespace qb::http {
         }
 
         /// Convert to int (e.g., 200, 404).
-        [[nodiscard]] constexpr int code() const { return std::to_underlying(_value); }
+        [[nodiscard]] constexpr int code() const { return qb::to_underlying(_value); }
         /// Convert to std::string_view (e.g., "OK", "Not Found").
         [[nodiscard]] std::string_view str() const { return std::string_view(*this); }
 
