@@ -35,7 +35,6 @@
 #pragma once
 #include <filesystem>
 #include <limits>
-#include <utility>  // For std::to_underlying (C++23)
 #include <qb/io/protocol/handshake.h>
 // Re-using HTTP/1.1 Request/Response structures as a base
 #include "../1.1/http.h"
