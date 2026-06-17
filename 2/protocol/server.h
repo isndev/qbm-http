@@ -311,6 +311,16 @@ public:
 
         if (header.flags & FLAG_END_STREAM) {
             stream.end_stream_received = true;
+
+            stream.processed_bytes_for_window_update += data_payload_size;
+            if (stream.processed_bytes_for_window_update >= stream.window_update_threshold && stream.window_update_threshold > 0) {
+                uint32_t increment = stream.processed_bytes_for_window_update;
+                send_window_update(stream_id, increment);
+                stream.local_window_size += increment;
+                stream.processed_bytes_for_window_update = 0;
+            }
+            this->conditionally_send_connection_window_update();
+
             if (stream.headers_received_main) {
                 if (stream.expected_content_length &&
                     stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
@@ -319,13 +329,20 @@ public:
                 }
                 this->dispatch_complete_request(stream_id, stream);
             }
-             // If END_STREAM also means end of connection for this stream, update state.
-            if (stream.end_stream_sent) { // If we also sent END_STREAM
-                stream.state = Http2StreamConcreteState::CLOSED;
-                this->try_close_stream_context(stream_id);
-            } else {
-                stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+            // dispatch_complete_request() can synchronously send a response and
+            // erase the stream. Reacquire before updating lifecycle state.
+            auto after_dispatch = _server_streams.find(stream_id);
+            if (after_dispatch != _server_streams.end()) {
+                Http2ServerStream& current_stream = after_dispatch->second;
+                // If END_STREAM also means end of connection for this stream, update state.
+                if (current_stream.end_stream_sent) { // If we also sent END_STREAM
+                    current_stream.state = Http2StreamConcreteState::CLOSED;
+                    this->try_close_stream_context(stream_id);
+                } else {
+                    current_stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+                }
             }
+            return;
         }
 
         // Send WINDOW_UPDATE for stream if necessary
@@ -441,12 +458,14 @@ public:
             stream.state = Http2StreamConcreteState::OPEN;
         }
 
-        if (end_headers && end_stream) { // Uses the correctly initialized local const booleans
+        if (end_stream) {
             stream.end_stream_received = true;
-            if (stream.state == Http2StreamConcreteState::OPEN) {
-                stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
-            } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
-                stream.state = Http2StreamConcreteState::CLOSED;
+            if (end_headers) {
+                if (stream.state == Http2StreamConcreteState::OPEN) {
+                    stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+                } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
+                    stream.state = Http2StreamConcreteState::CLOSED;
+                }
             }
         }
 
@@ -455,7 +474,12 @@ public:
             if (!this->process_complete_header_block(stream, is_current_block_trailers)) {
                 // Error handled
             } else {
-                if (stream.state == Http2StreamConcreteState::CLOSED) {
+                // process_complete_header_block() may synchronously dispatch to
+                // the application, which may send a response and erase the
+                // stream. Never touch the old reference after that call.
+                auto after_process = _server_streams.find(stream_id);
+                if (after_process != _server_streams.end() &&
+                    after_process->second.state == Http2StreamConcreteState::CLOSED) {
                     this->try_close_stream_context(stream_id);
                 }
             }
@@ -512,24 +536,32 @@ public:
             if (!this->process_complete_header_block(stream, is_current_block_trailers)) {
                 // Error handled by process_complete_header_block
             } else {
-                if (is_current_block_trailers) {
-                    stream.trailers_received = true;
-                    stream.trailers_expected = false;
-                }
-                // stream.headers_received_main would have been set by initial HEADERS.
+                // process_complete_header_block() can dispatch synchronously and
+                // the application can close/erase this stream while we are still
+                // in the frame handler. Reacquire before touching stream state.
+                auto after_process = _server_streams.find(stream_id);
+                if (after_process != _server_streams.end()) {
+                    Http2ServerStream& current_stream = after_process->second;
 
-                // State change depends on END_STREAM from *original* HEADERS frame
-                if (stream.end_stream_received) { // True if original HEADERS had END_STREAM
-                    if (stream.state == Http2StreamConcreteState::OPEN) {
-                stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
-            } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
-                stream.state = Http2StreamConcreteState::CLOSED;
+                    if (is_current_block_trailers) {
+                        current_stream.trailers_received = true;
+                        current_stream.trailers_expected = false;
                     }
-                }
+                    // current_stream.headers_received_main would have been set by initial HEADERS.
 
-                if (stream.state == Http2StreamConcreteState::CLOSED) {
-                    this->dispatch_complete_request(stream_id, stream);
-                    this->try_close_stream_context(stream_id);
+                    // State change depends on END_STREAM from the original HEADERS frame.
+                    if (current_stream.end_stream_received) {
+                        if (current_stream.state == Http2StreamConcreteState::OPEN) {
+                            current_stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+                        } else if (current_stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
+                            current_stream.state = Http2StreamConcreteState::CLOSED;
+                        }
+                    }
+
+                    if (current_stream.state == Http2StreamConcreteState::CLOSED) {
+                        this->dispatch_complete_request(stream_id, current_stream);
+                        this->try_close_stream_context(stream_id);
+                    }
                 }
             }
             this->clear_header_assembly_state();
@@ -1048,7 +1080,13 @@ public:
                 LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Failed to send response body");
                 return false;
             }
-            if (stream.state == Http2StreamConcreteState::CLOSED) {
+            auto after_body = _server_streams.find(stream_id);
+            if (after_body == _server_streams.end()) {
+                LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Response sent successfully");
+                return this->ok();
+            }
+            Http2ServerStream& current_stream = after_body->second;
+            if (current_stream.state == Http2StreamConcreteState::CLOSED) {
                 this->try_close_stream_context(stream_id); // Corrected call
             }
         } else { // No body
@@ -1586,6 +1624,7 @@ private:
         // This function is called after initial HEADERS are sent.
         // stream.response_to_send should already be populated by the calling send_response function.
         // stream.send_buffer_offset should be 0 if this is the first attempt for this body.
+        const uint32_t stream_id = stream.id;
 
         const auto& body_pipe = http_response.body().raw(); // Use http_response passed in, which should be same as stream.response_to_send
         std::size_t body_size = body_pipe.size();
@@ -1682,7 +1721,16 @@ private:
         if (stream.send_buffer_offset == body_size && stream.is_trailers && !stream.end_stream_sent) {
             // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Body fully processed in send_response_body, trailers are pending.");
             // At this point, try_send_pending_data_for_stream will pick up trailer sending.
-            try_send_pending_data_for_stream(stream.id, stream);
+            try_send_pending_data_for_stream(stream_id, stream);
+            auto after_trailers = _server_streams.find(stream_id);
+            if (after_trailers == _server_streams.end()) {
+                return true;
+            }
+            Http2ServerStream& current_stream = after_trailers->second;
+            if (current_stream.end_stream_sent && current_stream.end_stream_received) {
+                current_stream.state = Http2StreamConcreteState::CLOSED;
+            }
+            return true;
         }
 
         if (stream.end_stream_sent && stream.end_stream_received) {

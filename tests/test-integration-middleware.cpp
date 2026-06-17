@@ -90,7 +90,7 @@ public:
     MiddlewareIntegrationServer(MiddlewareHttpIntegrationTest *fixture_ptr)
         : qb::http::use<MiddlewareIntegrationServer>::server<MiddlewareIntegrationSession>(),
           _fixture_ptr(fixture_ptr) {
-        std::cout << "Setting up middleware test routes for server instance for test: "
+        qb::io::cout() << "Setting up middleware test routes for server instance for test: "
                 << GetCurrentTestNameMid() << "\n";
 
         this->router().set_not_found_handler([](std::shared_ptr<MidCtx> ctx) {
@@ -104,7 +104,7 @@ public:
         qb::http::RouteHandlerFn<MiddlewareIntegrationSession> custom_global_server_error_handler_fn =
                 [](std::shared_ptr<MidCtx> ctx) {
             mid_server_side_assertions++;
-            std::cout << "[TestGlobalServerErrorHandler] Path: " << ctx->request().uri().path() << "\n";
+            qb::io::cout() << "[TestGlobalServerErrorHandler] Path: " << ctx->request().uri().path() << "\n";
             if (ctx->response().status() < qb::http::status::BAD_REQUEST) {
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             }
@@ -160,7 +160,7 @@ protected:
             _server->transport().listen_v4(29888);
             _server->start();
             mid_server_ready = true;
-            std::cout << "MiddlewareIntegrationServer is ready on port 29888 for test: "
+            qb::io::cout() << "MiddlewareIntegrationServer is ready on port 29888 for test: "
                     << GetCurrentTestNameMid()
                     << "\n";
 
@@ -168,7 +168,7 @@ protected:
                 qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            std::cout << "MiddlewareIntegrationServer thread finishing for test: "
+            qb::io::cout() << "MiddlewareIntegrationServer thread finishing for test: "
                     << GetCurrentTestNameMid()
                     << "\n";
         });
@@ -190,7 +190,7 @@ protected:
         }
         _server.reset();
 
-        std::cout << "Finished test: "
+        qb::io::cout() << "Finished test: "
                 << GetCurrentTestNameMid()
                 << " Client-Requests: " << mid_request_count_client.load()
                 << ", Server-Requests: " << mid_request_count_server.load()
@@ -221,7 +221,7 @@ protected:
 TEST_F(MiddlewareHttpIntegrationTest, InitialPing) {
     mid_expected_server_assertions = 1; // Ping handler increments mid_server_side_assertions once.
 
-    std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /ping\n";
+    qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /ping\n";
     qb::http::Request request{{"http://localhost:29888/ping"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
     EXPECT_EQ(qb::http::status::OK, response.status());
@@ -257,7 +257,7 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
     });
     _server->router().compile();
 
-    std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /logged_route\n";
+    qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /logged_route\n";
     qb::http::Request request{{"http://localhost:29888/logged_route"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -315,7 +315,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
     });
     _server->router().compile();
 
-    std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /timed_route\n";
+    qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /timed_route\n";
     qb::http::Request request{{"http://localhost:29888/timed_route"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -383,7 +383,7 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
     });
     _server->router().compile();
 
-    std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /secure_route (HTTPS)\n";
+    qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /secure_route (HTTPS)\n";
     qb::http::Request request{{"https://localhost:29888/secure_route"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -466,7 +466,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
 
     // Test Response Compression
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /compressible_route with Accept-Encoding: gzip\n";
         qb::http::Request request{{"http://localhost:29888/compressible_route"}};
         request.add_header("Accept-Encoding", "gzip, deflate");
@@ -493,7 +493,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
 
     // Test Request Decompression
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending POST /decompress_test_route with pseudo-compressed data\n";
         qb::http::Request request{qb::http::method::POST, {"http://localhost:29888/decompress_test_route"}};
         std::string data_sent_in_post_request = "invalid gzipped data";
@@ -583,7 +583,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
 
     // 1. Simple GET from allowed origin
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /cors_test_route from allowed origin\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /cors_test_route from allowed origin\n";
         qb::http::Request request{{"http://localhost:29888/cors_test_route"}};
         request.add_header("Origin", "http://allowed.example.com");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -599,7 +599,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
 
     // 2. Simple GET from disallowed origin
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /cors_test_route from disallowed origin\n";
         qb::http::Request request{{"http://localhost:29888/cors_test_route"}};
         request.add_header("Origin", "http://disallowed.example.com");
@@ -613,7 +613,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
 
     // 3. Preflight OPTIONS request from allowed origin
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending OPTIONS /cors_test_route (preflight)\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending OPTIONS /cors_test_route (preflight)\n";
         qb::http::Request request{qb::http::method::OPTIONS, {"http://localhost:29888/cors_test_route"}};
         request.add_header("Origin", "http://allowed.example.com");
         request.add_header("Access-Control-Request-Method", "POST");
@@ -634,7 +634,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
 
     // 4. GET request with credentials from allowed origin
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /cors_test_route_credentials with Origin and credentials\n";
         qb::http::Request request{{"http://localhost:29888/cors_test_route_credentials"}};
         request.add_header("Origin", "http://allowed.example.com");
@@ -688,7 +688,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
 
     // 1. Send requests within the limit
     for (int i = 0; i < 3; ++i) {
-        std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt " << (i + 1)
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt " << (i + 1)
                 << ")\n";
         auto response = qb::http::run_sync(qb::http::GET(base_request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status()) << "Request " << (i + 1) << " should succeed.";
@@ -701,7 +701,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
 
     // 2. Send request that exceeds the limit
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /rate_limited_route (Attempt 4 - expecting rate limit)\n";
         auto response = qb::http::run_sync(qb::http::GET(base_request)).response;
         EXPECT_EQ(qb::http::status::TOO_MANY_REQUESTS, response.status());
@@ -719,12 +719,12 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
     }
 
     // 3. Wait for the window to pass
-    std::cout << "Client (" << GetCurrentTestNameMid() << "): Waiting for rate limit window to reset..." << std::endl;
+    qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Waiting for rate limit window to reset..." << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(3)); // Window is 2s, wait 3s to be safe
 
     // 4. Send request after window reset - should succeed
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
                 "): Sending GET /rate_limited_route (Attempt 5 - after reset)" << std::endl;
         auto response = qb::http::run_sync(qb::http::GET(base_request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status());
@@ -817,7 +817,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
 
     // 1. Test generic error (no specific status set by handler)
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_generic_error" <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_generic_error" <<
                 std::endl;
         qb::http::Request request{{"http://localhost:29888/route_triggering_generic_error"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -830,7 +830,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
 
     // 2. Test specific error (403 Forbidden)
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_specific_error" <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_specific_error" <<
                 std::endl;
         qb::http::Request request{{"http://localhost:29888/route_triggering_specific_error"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -842,7 +842,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
 
     // 3. Test error in range (500 Internal Server Error, handled by 500-502 range rule)
     {
-        std::cout << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_500_for_range" <<
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_500_for_range" <<
                 std::endl;
         qb::http::Request request{{"http://localhost:29888/route_triggering_500_for_range"}};
         auto response = qb::http::run_sync(qb::http::GET(request)).response;

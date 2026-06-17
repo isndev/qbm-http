@@ -82,7 +82,7 @@ public:
     }
 
     void process(std::shared_ptr<AdvCtx> ctx) override {
-        std::cout << "[GlobalLoggingMiddleware] Request: " << std::to_string(ctx->request().method()) << " " << ctx->
+        qb::io::cout() << "[GlobalLoggingMiddleware] Request: " << std::to_string(ctx->request().method()) << " " << ctx->
                 request().uri().path() << std::endl;
         adv_server_side_assertions++; // Count middleware execution
         ctx->response().set_header("X-Global-Middleware", "Applied");
@@ -165,7 +165,7 @@ public:
     void process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
         ctx->response().set_header("X-Error-Inducer", "Applied");
-        std::cout << "[ErrorInducingMiddleware] Intentionally causing an error for path: " << ctx->request().uri().
+        qb::io::cout() << "[ErrorInducingMiddleware] Intentionally causing an error for path: " << ctx->request().uri().
                 path() << std::endl;
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     }
@@ -183,11 +183,11 @@ public:
     void process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
         ctx->response().set_header("X-Async-MW-Status", "Pending");
-        std::cout << "[AsyncProcessingMiddleware] Started for path: " << ctx->request().uri().path() << std::endl;
+        qb::io::cout() << "[AsyncProcessingMiddleware] Started for path: " << ctx->request().uri().path() << std::endl;
 
         auto captured_ctx = ctx;
         qb::io::async::callback([captured_ctx]() {
-            std::cout << "[AsyncProcessingMiddleware] Async part executing for path: " << captured_ctx->request().uri().
+            qb::io::cout() << "[AsyncProcessingMiddleware] Async part executing for path: " << captured_ctx->request().uri().
                     path() << std::endl;
             adv_server_side_assertions++; // Assertion for async part completion
             captured_ctx->response().set_header("X-Async-MW-Status", "Completed");
@@ -208,11 +208,11 @@ public:
         std::string condition = ctx->request().header("X-Test-Condition");
 
         if (condition == "pass") {
-            std::cout << "[ConditionalContinueMiddleware] Condition met. Continuing chain." << std::endl;
+            qb::io::cout() << "[ConditionalContinueMiddleware] Condition met. Continuing chain." << std::endl;
             ctx->response().set_header("X-Conditional-Result", "continued");
             ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
         } else {
-            std::cout << "[ConditionalContinueMiddleware] Condition NOT met or header missing. Completing early." <<
+            qb::io::cout() << "[ConditionalContinueMiddleware] Condition NOT met or header missing. Completing early." <<
                     std::endl;
             ctx->response().set_header("X-Conditional-Result", "completed_by_mw");
             ctx->response().status() = qb::http::status::MISCELLANEOUS_PERSISTENT_WARNING; // Custom status for testing
@@ -424,7 +424,7 @@ public:
             }
 
             void process(std::shared_ptr<AdvCtx> ctx) override {
-                std::cout << "[LegacyController Middleware] Path: " << ctx->request().uri().path() << std::endl;
+                qb::io::cout() << "[LegacyController Middleware] Path: " << ctx->request().uri().path() << std::endl;
                 adv_server_side_assertions++;
                 ctx->response().set_header("X-Legacy-Ctrl-Middleware", "Applied");
                 ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
@@ -569,13 +569,13 @@ class AdvancedIntegrationServer : public qb::http::use<AdvancedIntegrationServer
 public:
     AdvancedIntegrationServer()
         : qb::http::use<AdvancedIntegrationServer>::server<AdvancedIntegrationSession>() {
-        std::cout << "Setting up advanced routes for server instance..." << std::endl;
+        qb::io::cout() << "Setting up advanced routes for server instance..." << std::endl;
 
         // Define a custom 404 handler
         qb::http::RouteHandlerFn<AdvancedIntegrationSession> custom_not_found_handler =
                 [](std::shared_ptr<AdvCtx> ctx) {
             adv_server_side_assertions++; // For the 404 handler itself
-            std::cout << "[CustomNotFoundHandler] Path not found: " << ctx->request().uri().path() << std::endl;
+            qb::io::cout() << "[CustomNotFoundHandler] Path not found: " << ctx->request().uri().path() << std::endl;
             ctx->response().status() = qb::http::status::NOT_FOUND;
             ctx->response().body() = "Oops! The page you\'re looking for doesn\'t exist here (Custom 404).";
             ctx->response().set_header("X-Custom-404", "Applied");
@@ -587,7 +587,7 @@ public:
         qb::http::RouteHandlerFn<AdvancedIntegrationSession> custom_global_server_error_handler_fn =
                 [](std::shared_ptr<AdvCtx> ctx) {
             adv_server_side_assertions++; // For the global error handler itself
-            std::cout << "[CustomGlobalServerErrorHandler] An error was caught. Path: " << ctx->request().uri().path()
+            qb::io::cout() << "[CustomGlobalServerErrorHandler] An error was caught. Path: " << ctx->request().uri().path()
                     << std::endl;
             ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE; // e.g., 503
             ctx->response().body() = "A global server error occurred and was handled by our custom global handler.";
@@ -1051,7 +1051,7 @@ public:
             throw std::runtime_error("Failed to mount ComprehensiveVerbController");
         }
 
-        std::cout << "Advanced routes configured for server instance." << std::endl;
+        qb::io::cout() << "Advanced routes configured for server instance." << std::endl;
         this->router().compile();
     }
 };
@@ -1080,7 +1080,7 @@ protected:
             _server->transport().listen_v4(29887);
             _server->start();
             adv_server_ready = true;
-            std::cout << "AdvancedIntegrationServer is ready and listening at port 29887 for test: "
+            qb::io::cout() << "AdvancedIntegrationServer is ready and listening at port 29887 for test: "
                     << GetCurrentTestName()
                     << std::endl;
 
@@ -1089,7 +1089,7 @@ protected:
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
-            std::cout << "AdvancedIntegrationServer thread finishing for test: "
+            qb::io::cout() << "AdvancedIntegrationServer thread finishing for test: "
                     << GetCurrentTestName()
                     << std::endl;
         });
@@ -1107,7 +1107,7 @@ protected:
         }
         _server.reset();
 
-        std::cout << "Finished test: "
+        qb::io::cout() << "Finished test: "
                 << GetCurrentTestName()
                 << " Client-Requests: " << adv_request_count_client.load()
                 << ", Server-Requests: " << adv_request_count_server.load()
@@ -1149,7 +1149,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                                                   /* cumulative_expected_server_handler_invocations */ 1 + 0 + 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /ping" << std::endl;
                                                           qb::http::Request request{{"http://localhost:29887/ping"}};
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1159,7 +1159,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /api/v1/status (unauthorized)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1175,7 +1175,7 @@ TEST_F(AdvancedHttpIntegrationTest, PingAndApiV1Auth) {
                                                                     response.header("X-ApiV1-Auth"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /api/v1/status (authorized)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1204,7 +1204,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerOperations) {
                                                   /* cumulative_expected_server_handler_invocations */ 1 + 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /api/v1/data/item123" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/api/v1/data/item123"}
@@ -1217,7 +1217,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerOperations) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending POST /api/v1/data" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::POST,
@@ -1247,7 +1247,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                                                   /* cumulative_expected_server_handler_invocations */ 1 + 1 + 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /legacy/custom" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/legacy/custom"}
@@ -1265,7 +1265,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                                                                     response.header("X-Custom-Route-Type"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /legacy/async_op" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/legacy/async_op"}
@@ -1281,7 +1281,7 @@ TEST_F(AdvancedHttpIntegrationTest, LegacyControllerRoutes) {
                                                           EXPECT_EQ("Done", response.header("X-Legacy-Async"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /legacy/error_test" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/legacy/error_test"}
@@ -1313,7 +1313,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                                                   /* cumulative_expected_server_handler_invocations */ 1 + 0 + 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /files/some/long/path/to/file.txt" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1327,7 +1327,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /short_circuit_test/admin_only/resource (forbidden)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1344,7 +1344,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardAndShortCircuit) {
                                                           EXPECT_EQ("Failed", response.header("X-Admin-Check"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /short_circuit_test/admin_only/resource (allowed)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1377,7 +1377,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                   1 + 1 + 1 + 1 + 0,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /multi_method_resource" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/multi_method_resource"}
@@ -1390,7 +1390,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending POST /multi_method_resource" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::POST,
@@ -1405,7 +1405,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending PUT /multi_method_resource" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::PUT,
@@ -1420,7 +1420,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending DELETE /multi_method_resource" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1433,7 +1433,7 @@ TEST_F(AdvancedHttpIntegrationTest, MultiMethodResource) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending PATCH /multi_method_resource" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1474,7 +1474,7 @@ TEST_F(AdvancedHttpIntegrationTest, PathParamEncoding) {
                                                   [&]() {
                                                       for (const auto &tc: param_test_cases) {
                                                           std::string encoded_param = url_encode(tc.first);
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /param_test/" << encoded_param <<
                                                                   " (decoded: " << tc.first << ")" << std::endl;
                                                           qb::http::Request request{
@@ -1500,7 +1500,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                                                   /* cumulative_expected_server_handler_invocations */ 3,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /query_test?name=value" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/query_test?name=value"}
@@ -1513,7 +1513,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /query_test?name1=value1&name2=value2"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1530,7 +1530,7 @@ TEST_F(AdvancedHttpIntegrationTest, QueryParamHandling) {
                                                           adv_request_count_client++;
                                                       } {
                                                           std::string encoded_query_val = url_encode("encoded value");
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /query_test?encoded_name=" <<
                                                                   encoded_query_val << std::endl;
                                                           qb::http::Request request{
@@ -1560,7 +1560,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                                                   /* cumulative_expected_server_handler_invocations */ 3,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /specific/resource (exact)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1573,7 +1573,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /specific/myid123 (param)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1586,7 +1586,7 @@ TEST_F(AdvancedHttpIntegrationTest, RoutePrecedence) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /specific/a/b/c (wildcard)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1614,7 +1614,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                                                   /* cumulative_expected_server_handler_invocations */ 1 + 1 + 0,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /status_at_root" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/status_at_root"}
@@ -1627,7 +1627,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                                                           EXPECT_EQ("L0;", response.header("X-MW-Trace"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /mw_chain_test/passthrough" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1642,7 +1642,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                                                           EXPECT_EQ("MW1;MW2;Handler;", response.header("X-MW-Order"));
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /mw_short_circuit_test/resource" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1676,7 +1676,7 @@ TEST_F(AdvancedHttpIntegrationTest, NotFoundAndHeadRequests) {
                                                   /* cumulative_expected_server_handler_invocations */ 0 + 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /this/path/does/not/exist" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1692,7 +1692,7 @@ TEST_F(AdvancedHttpIntegrationTest, NotFoundAndHeadRequests) {
                                                               response.body().as<std::string>());
                                                           adv_request_count_client++;
                                                       } {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending HEAD /ping" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::HEAD, {"http://localhost:29887/ping"}
@@ -1721,7 +1721,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                   [&]() {
                                                       // PUT Successful
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending PUT /api/v1/data/item789 (authorized)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1741,7 +1741,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                       }
                                                       // DELETE Successful
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending DELETE /api/v1/data/item789 (authorized)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1759,7 +1759,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                       }
                                                       // PUT Unauthorized
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending PUT /api/v1/data/item789 (unauthorized)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1779,7 +1779,7 @@ TEST_F(AdvancedHttpIntegrationTest, DataControllerUpdateDeleteOperations) {
                                                       }
                                                       // DELETE Unauthorized
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending DELETE /api/v1/data/item789 (unauthorized)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1808,7 +1808,7 @@ TEST_F(AdvancedHttpIntegrationTest, OptionsRequestTest) {
                                                   /* cumulative_expected_server_handler_invocations */ 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending OPTIONS /multi_method_resource" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1836,7 +1836,7 @@ TEST_F(AdvancedHttpIntegrationTest, MiddlewareInducedErrorTest) {
                                                   /* cumulative_expected_server_handler_invocations */ 0,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /mw_error_test_sg/route" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
@@ -1866,7 +1866,7 @@ TEST_F(AdvancedHttpIntegrationTest, GlobalErrorHandlerForMiddlewareErrorTest) {
                                                   /* cumulative_expected_server_handler_invocations */ 0,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /mw_error_test_sg/route (expecting global error handler)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1900,7 +1900,7 @@ TEST_F(AdvancedHttpIntegrationTest, MethodNotAllowedTest) {
                                                   /* cumulative_expected_server_handler_invocations */ 0,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending PATCH /ping (method not allowed)" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -1929,7 +1929,7 @@ TEST_F(AdvancedHttpIntegrationTest, ConditionalMiddlewareFlowTest) {
                                                   [&]() {
                                                       // Case 1: Middleware completes the request (condition not met)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /conditional_mw_route/action (MW completes)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1951,7 +1951,7 @@ TEST_F(AdvancedHttpIntegrationTest, ConditionalMiddlewareFlowTest) {
 
                                                       // Case 2: Middleware continues to handler (condition met)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /conditional_mw_route/action (MW continues)"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -1983,7 +1983,7 @@ TEST_F(AdvancedHttpIntegrationTest, AsyncMiddlewareTest) {
                                                   /* cumulative_expected_server_handler_invocations */ 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /async_mw_test/resource" << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::GET,
@@ -2014,7 +2014,7 @@ TEST_F(AdvancedHttpIntegrationTest, NestedMiddlewareOrderAndShortCircuitTest) {
                                                   [&]() {
                                                       // Test passthrough
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /nested_mw/outer/inner/resource" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2034,7 +2034,7 @@ TEST_F(AdvancedHttpIntegrationTest, NestedMiddlewareOrderAndShortCircuitTest) {
                                                       }
                                                       // Test short-circuit in nested group
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /nested_sc/outer/inner/resource" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2067,7 +2067,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                   [&]() {
                                                       // 1. Static vs. Parameter: Static should be preferred
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /specific_first/static_val" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2083,7 +2083,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                       }
                                                       // 2. Parameter fallback
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /specific_first/param_val" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2099,7 +2099,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                       }
                                                       // 3. Static preferred even if defined after parameter sibling
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /specific_second/static_val" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2115,7 +2115,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                       }
                                                       // 4. Static vs. Wildcard: Static (more specific) should be preferred
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /overlap_test/foo/bar" << std::endl;
                                                           qb::http::Request request{
                                                               {"http://localhost:29887/overlap_test/foo/bar"}
@@ -2130,7 +2130,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                       }
                                                       // 5. Wildcard fallback
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /overlap_test/some/other/path" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2146,7 +2146,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                       }
                                                       // 6. Route in Parent Group
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /precedence_group/route1" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2162,7 +2162,7 @@ TEST_F(AdvancedHttpIntegrationTest, RouteSpecificityTest) {
                                                       }
                                                       // 7. Route in Nested Group
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /precedence_group/nested/route1" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2192,7 +2192,7 @@ TEST_F(AdvancedHttpIntegrationTest, NestedStructureMiddlewareTest) {
                                                   /* cumulative_expected_server_handler_invocations */ 1,
                                                   [&]() {
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /level1_group/level2_nested_group/level3_controller/endpoint"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -2226,7 +2226,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                   [&]() {
                                                       // 1. Exact match to the most specific static route
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /wildcard_multi/static_prefix/foo/bar/baz"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -2244,7 +2244,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                       }
                                                       // 2. Match wildcard after static prefix (capturing multiple segments)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /wildcard_multi/static_prefix/segment1/segment2"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -2262,7 +2262,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                       }
                                                       // 3. Match higher-level wildcard (capturing static prefix + segments)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /wildcard_multi/another_static/other_segments/file.txt"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -2285,7 +2285,7 @@ TEST_F(AdvancedHttpIntegrationTest, WildcardMultiSegmentTest) {
                                                       // Let's test a path that would match `/wildcard_multi/*path_param_high` if `/wildcard_multi/static_prefix/*path_param` did not exist or was less specific.
                                                       // The path `/wildcard_multi/static_prefix/onlyone` should match `/wildcard_multi/static_prefix/*path_param`
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET /wildcard_multi/static_prefix/onlyone"
                                                                   << std::endl;
                                                           qb::http::Request request{
@@ -2320,7 +2320,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
 
                                                       // 1. GET /items (List)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET " << base_url << std::endl;
                                                           qb::http::Request request{{base_url}};
                                                           auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -2333,7 +2333,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 2. POST /items (Create)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending POST " << base_url << std::endl;
                                                           qb::http::Request request{qb::http::method::POST, {base_url}};
                                                           request.body() = "new_item_data";
@@ -2346,7 +2346,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 3. GET /items/item123 (Read)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending GET " << base_url << "/item123" <<
                                                                   std::endl;
                                                           qb::http::Request request{{base_url + "/item123"}};
@@ -2359,7 +2359,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 4. PUT /items/item123 (Update)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending PUT " << base_url << "/item123" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2375,7 +2375,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 5. PATCH /items/item123 (Partial Update)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending PATCH " << base_url << "/item123" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2391,7 +2391,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 6. DELETE /items/item123 (Delete)
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending DELETE " << base_url << "/item123" <<
                                                                   std::endl;
                                                           qb::http::Request request{
@@ -2405,7 +2405,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 7. HEAD /items
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending HEAD " << base_url << std::endl;
                                                           qb::http::Request request{qb::http::method::HEAD, {base_url}};
                                                           auto response = qb::http::run_sync(qb::http::HEAD(request)).response;
@@ -2418,7 +2418,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 8. OPTIONS /items
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending OPTIONS " << base_url << std::endl;
                                                           qb::http::Request request{
                                                               qb::http::method::OPTIONS, {base_url}
@@ -2432,7 +2432,7 @@ TEST_F(AdvancedHttpIntegrationTest, ComprehensiveVerbControllerTest) {
                                                       }
                                                       // 9. OPTIONS /items/item123
                                                       {
-                                                          std::cout << "Client (" << GetCurrentTestName() <<
+                                                          qb::io::cout() << "Client (" << GetCurrentTestName() <<
                                                                   "): Sending OPTIONS " << base_url << "/item123" <<
                                                                   std::endl;
                                                           qb::http::Request request{

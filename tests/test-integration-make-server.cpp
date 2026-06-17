@@ -63,13 +63,13 @@ protected:
             server_instance->transport().listen_v4(TEST_PORT);
             server_instance->start();
             g_make_server_test_server_ready = true;
-            std::cout << "[" << GetCurrentTestNameForMakeServer() << "] HTTP Server (default session) ready on port " << TEST_PORT << std::endl;
+            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP Server (default session) ready on port " << TEST_PORT << std::endl;
             while (g_make_server_test_server_ready.load(std::memory_order_acquire)) {
                 if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
-            std::cout << "[" << GetCurrentTestNameForMakeServer() << "] HTTP Server (default session) thread finishing." << std::endl;
+            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP Server (default session) thread finishing." << std::endl;
         });
 
         while (!g_make_server_test_server_ready.load(std::memory_order_acquire)) {
@@ -84,13 +84,13 @@ protected:
             server_thread.join();
         }
         server_instance.reset(); 
-        std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Test Finished. Client Reqs: " << g_make_server_test_req_count_client << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
+        qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Test Finished. Client Reqs: " << g_make_server_test_req_count_client << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
 
     }
 };
 
 TEST_F(HttpMakeServerTest, PingDefaultSessionHttpServer) {
-    std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping to HTTP server (default session) on port " << TEST_PORT << std::endl;
+    qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping to HTTP server (default session) on port " << TEST_PORT << std::endl;
     qb::http::Request request{{"http://localhost:" + std::to_string(TEST_PORT) + "/ping"}};
     auto response = qb::http::run_sync(qb::http::GET(request)).response;
 
@@ -156,13 +156,13 @@ protected:
             server_instance->transport().listen_v4(TEST_PORT_SSL);
             server_instance->start();
             g_make_server_test_server_ready = true;
-            std::cout << "[" << GetCurrentTestNameForMakeServer() << "] HTTPS Server (default session) ready on port " << TEST_PORT_SSL << std::endl;
+            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTPS Server (default session) ready on port " << TEST_PORT_SSL << std::endl;
             while (g_make_server_test_server_ready.load(std::memory_order_acquire)) {
                  if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
-            std::cout << "[" << GetCurrentTestNameForMakeServer() << "] HTTPS Server (default session) thread finishing." << std::endl;
+            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTPS Server (default session) thread finishing." << std::endl;
         });
 
         while (!g_make_server_test_server_ready.load(std::memory_order_acquire)) {
@@ -178,13 +178,13 @@ protected:
             server_thread.join();
         }
         server_instance.reset();
-         std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Test Finished. Client Reqs: " << g_make_server_test_req_count_client << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
+         qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Test Finished. Client Reqs: " << g_make_server_test_req_count_client << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
     }
 };
 
 TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
     if (IsSkipped()) return;
-    std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_ssl to HTTPS server (default session) on port " << TEST_PORT_SSL << std::endl;
+    qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_ssl to HTTPS server (default session) on port " << TEST_PORT_SSL << std::endl;
     qb::http::Request request{{"https://localhost:" + std::to_string(TEST_PORT_SSL) + "/ping_ssl"}};
 
     // Self-signed test certificate: opt out of secure-by-default verification.
@@ -253,13 +253,13 @@ protected:
             server_instance_h2->transport().listen_v4(TEST_PORT_HTTP2);
             server_instance_h2->start();
             g_make_server_test_server_ready = true;
-            std::cout << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Server ready on port " << TEST_PORT_HTTP2 << std::endl;
+            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Server ready on port " << TEST_PORT_HTTP2 << std::endl;
             while (g_make_server_test_server_ready.load(std::memory_order_acquire)) {
                 if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
-            std::cout << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Server thread finishing." << std::endl;
+            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Server thread finishing." << std::endl;
         });
 
         while (!g_make_server_test_server_ready.load(std::memory_order_acquire)) {
@@ -275,13 +275,13 @@ protected:
             server_thread_h2.join();
         }
         server_instance_h2.reset(); 
-        std::cout << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Test Finished. Client Reqs: " << g_make_server_test_req_count_client << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
+        qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Test Finished. Client Reqs: " << g_make_server_test_req_count_client << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
     }
 };
 
 TEST_F(Http2MakeServerTest, PingHttp2Server) {
     if (IsSkipped()) return;
-    std::cout << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_http2 to HTTP/2 server on port " << TEST_PORT_HTTP2 << std::endl;
+    qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_http2 to HTTP/2 server on port " << TEST_PORT_HTTP2 << std::endl;
     
     std::string target_uri = "https://localhost:" + std::to_string(TEST_PORT_HTTP2);
     auto h2_client = std::make_shared<qb::http2::Client>(target_uri);
@@ -297,7 +297,7 @@ TEST_F(Http2MakeServerTest, PingHttp2Server) {
     h2_client->connect([&](bool connected, const std::string& err_msg) {
         connect_attempted = true;
         if (connected) {
-            std::cout << "[Http2MakeServerTest.PingHttp2Server] Client connected to " << target_uri << std::endl;
+            qb::io::cout() << "[Http2MakeServerTest.PingHttp2Server] Client connected to " << target_uri << std::endl;
             connect_successful = true;
         } else {
             std::cerr << "[Http2MakeServerTest.PingHttp2Server] Client connection failed: " << err_msg << std::endl;
@@ -321,7 +321,7 @@ TEST_F(Http2MakeServerTest, PingHttp2Server) {
 
     bool pushed = h2_client->push_request(std::move(request), 
         [&](qb::http::Response resp) {
-            std::cout << "[Http2MakeServerTest.PingHttp2Server] Client received response. Status: " << resp.status() << std::endl;
+            qb::io::cout() << "[Http2MakeServerTest.PingHttp2Server] Client received response. Status: " << resp.status() << std::endl;
             actual_response = std::move(resp);
             response_received = true;
         }

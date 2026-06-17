@@ -360,6 +360,15 @@ public:
             } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
                 stream.state = Http2StreamConcreteState::CLOSED;
             }
+
+            if (stream.processed_bytes_for_window_update >= stream.window_update_threshold && stream.window_update_threshold > 0) {
+                uint32_t increment = stream.processed_bytes_for_window_update;
+                send_window_update(stream_id, increment);
+                stream.local_window_size += increment;
+                stream.processed_bytes_for_window_update = 0;
+            }
+            conditionally_send_connection_window_update();
+
             if (!stream.trailers_expected) { // Only process if not expecting trailers
                 if (should_enforce_response_content_length(stream) &&
                     stream.expected_content_length &&
@@ -371,6 +380,16 @@ public:
                 }
                 process_complete_response_if_ready(stream);
             }
+
+            auto after_complete = _client_streams.find(stream_id);
+            if (after_complete == _client_streams.end()) {
+                return;
+            }
+            Http2ClientStream& current_stream = after_complete->second;
+            if (current_stream.state == Http2StreamConcreteState::CLOSED) {
+                try_close_stream_context_by_id(current_stream.id, ErrorCode::NO_ERROR);
+            }
+            return;
         }
 
         if (stream.processed_bytes_for_window_update >= stream.window_update_threshold && stream.window_update_threshold > 0) {
