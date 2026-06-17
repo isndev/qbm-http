@@ -26,6 +26,15 @@
 
 using namespace qb::http::date;
 
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || \
+    defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define QB_TEST_UNDER_SANITIZER 1
+#endif
+
 // ====================================================================
 // HTTP Date Parsing Tests (std::from_chars optimization)
 // ====================================================================
@@ -224,6 +233,9 @@ TEST_F(DateParsingTest, RoundTripCookieDate) {
 // ====================================================================
 
 TEST_F(DateParsingTest, PerformanceParseManyDates) {
+#if defined(QB_TEST_UNDER_SANITIZER)
+    GTEST_SKIP() << "micro-benchmark threshold is not meaningful under sanitizer instrumentation";
+#endif
     // Performance test: parse many dates to verify std::from_chars efficiency
     const int iterations = 1000;
 
