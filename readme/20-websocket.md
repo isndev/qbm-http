@@ -120,12 +120,16 @@ A common pattern (see `examples/qbm/ws/01_chat_server.cpp`) keeps the HTTP liste
 
 ```cpp
 void on(TransferToWebSocketEvent &event) {
-    auto &session = registerSession(std::move(event.data->transport));
-    if (session.switch_protocol<WsSession::ws_protocol>(
-            session, event.data->request, event.data->response)) {
-        session << event.data->response;   // finalize with the 101
+    // registerSession returns nullptr (and closes the transport) when the
+    // io_handler session limit is reached — null-check before use.
+    auto *session = registerSession(std::move(event.data->transport));
+    if (!session)
+        return;
+    if (session->switch_protocol<WsSession::ws_protocol>(
+            *session, event.data->request, event.data->response)) {
+        *session << event.data->response;  // finalize with the 101
     } else {
-        session.disconnect();              // not a valid upgrade
+        session->disconnect();             // not a valid upgrade
     }
 }
 ```
