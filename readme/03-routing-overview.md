@@ -1,114 +1,228 @@
-# 03: Routing Overview
+# Routing overview
 
-Effective HTTP routing is crucial for any web service or API. The `qb::http` module provides a powerful and flexible routing system built around the `qb::http::Router` class. This system allows you to define how incoming HTTP requests are directed to specific handler logic based on their URI path and HTTP method.
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
 
-At its core, the routing mechanism relies on `qb::http::RouterCore`, which manages a specialized data structure called a `qb::http::RadixTree`. This tree is optimized for extremely fast path matching by breaking down URL paths into segments and storing routes in a prefix-based manner. When you define routes using the `Router` API, you are constructing a hierarchy of `IHandlerNode` objects (routes, groups, controllers). During the `router.compile()` step, `RouterCore` traverses this hierarchy, resolves middleware chains, and populates the `RadixTree` with the final, executable task chains for each endpoint.
+How `qb::http::Router` turns a tree of route, group, and controller definitions into a compiled radix tree, and how an incoming request is matched and dispatched to a chain of tasks.
 
-## The `qb::http::Router`
+**Prerequisites:** [Core HTTP concepts](./01-core-concepts.md) — **See also:** [Defining routes](./04-defining-routes.md) · [Route groups](./05-route-groups.md) · [Controllers](./06-controllers.md) · [Middleware](./07-middleware.md) · [Request context](./10-request-context.md)
 
-The `qb::http::Router<SessionType>` is the central component for defining your application's routes. It internally uses a `qb::http::RadixTree` for efficient path matching.
+## Summary
 
-Key responsibilities of the Router include:
+`qb::http::Router<Session>` is the public facade you use to declare routes. Internally it owns a `RouterCore<Session>` (the engine) and a `RadixTree<Session>` (the compiled match structure). You build a hierarchy of handler nodes — direct routes, `RouteGroup`s, and `Controller`s — call `compile()` once, and then every request flows through `route()`, which matches a path and method against the radix tree and runs the resulting task chain on a per-request `Context`.
 
-1.  **Route Definition**: Provides a fluent API (e.g., `router.get("/path", handler)`) to associate HTTP methods and path patterns with specific handler logic.
-2.  **Middleware Management**: Allows application of middleware at global, group, or controller levels.
-3.  **Compilation**: Before processing requests, the router compiles all defined routes, groups, and controllers into an optimized internal structure (the `RadixTree` managed by `RouterCore`). This step resolves middleware chains and prepares handlers for execution.
-4.  **Request Dispatching**: For each incoming request, `RouterCore` attempts to match its path and method against the compiled `RadixTree`. If a match is found, it creates a `qb::http::Context` for the request and dispatches it to the appropriate handler chain.
-5.  **Error Handling**: Manages default and custom handlers for "404 Not Found" and general processing errors.
+The router lives behind your server: an HTTP/1.1, HTTP/2, or HTTP/3 server exposes it through `server->router()`, and the session's request handler calls `router().route(session, std::move(request))` for you. You rarely call `route()` by hand; you call the definition API (`get`, `post`, `group`, `controller`, `use`) and `compile()`.
 
-## Path Matching
+`Router`, `RouteGroup`, `Controller`, `Context`, and the routing types are all reachable through the umbrella header `<http/http.h>`; `routing.h` is the narrower include if you only need the routing layer. `RouterCore` and `RadixTree` are internal — you never include or instantiate them directly.
 
-The router matches incoming request paths against defined route patterns. It supports three main types of path segments:
+## Concepts
 
-1.  **Static Segments**: These are literal strings that must match exactly. For example, in a route `/users/list`, `users` and `list` are static segments.
+### The router and the route table
 
-2.  **Parameterized Segments**: These segments start with a colon (`:`) followed by a parameter name (e.g., `/:id`, `/:category`). They capture the actual value from the corresponding segment in the request URI and make it available to the handler via `ctx->path_param("name")`.
-    -   Example: A route `GET /products/:productId` will match `GET /products/123`, and `productId` will be `"123"`.
+A `Router<Session>` holds three things:
 
-3.  **Wildcard Segments**: These segments start with an asterisk (`*`) followed by a parameter name (e.g., `/*filepath`). They match any sequence of characters for the rest of the path, including multiple segments containing slashes. Wildcard segments **must be the last segment** in a route pattern.
-    -   Example: A route `GET /files/*path` will match `GET /files/documents/report.pdf`, and `path` will be `"documents/report.pdf"`.
-    -   It can also match an empty path part, e.g., `/files/*path` matching `/files/` would result in `path` being an empty string.
+| Member | Role |
+| --- | --- |
+| `RouterCore<Session>` (shared) | The engine: owns the radix tree, the compiled 404/405 chains, the optional user error chain, and router-level lifecycle hooks. |
+| Root `RouteGroup<Session>` (shared) | A group with an empty path prefix. Routes and middleware added directly on the `Router` attach here, which is why `router.use(...)` is effectively global middleware. |
+| `_is_compiled` flag | Tracks whether `compile()` has run. Any definition mutation resets it to `false`. |
 
-### Matching Precedence
+The *route table* is the set of top-level handler nodes registered with the core, plus everything nested under them. Each node is an `IHandlerNode<Session>`:
 
-When multiple route patterns could potentially match a request path, the router follows a specific precedence:
+- **`Route`** — a terminal node binding one HTTP method and one path segment to a handler (a `RouteHandlerFn` lambda or an `ICustomRoute`).
+- **`RouteGroup`** — a prefix container. Its middleware is inherited by every descendant route, group, and controller.
+- **`Controller`** — a class-based group; you subclass `Controller<Session>`, override `initialize_routes()`, and bind member functions with `MEMBER_HANDLER`.
 
-1.  **Static segments** have the highest priority. If a static segment matches, it's chosen over a parameterized or wildcard segment at the same position.
-    -   `/users/active` will be chosen over `/users/:status` for a request to `/users/active`.
-2.  **Parameterized segments** have the next priority, over wildcard segments.
-    -   `/api/:version/data` will be chosen over `/api/*path` for a request to `/api/v1/data`.
-3.  **Wildcard segments** have the lowest priority and act as a catch-all for the remainder of the path.
+These are described in [Defining routes](./04-defining-routes.md), [Route groups](./05-route-groups.md), and [Controllers](./06-controllers.md). This page covers the model that holds them together.
 
-### Path Normalization
+### Path pattern syntax
 
--   **Trailing Slashes**: The router generally treats paths with and without a trailing slash as equivalent for matching static or parameterized routes (e.g., `/users` and `/users/` might match the same route definition for `/users`). This is due to how path segments are typically split and normalized before radix tree insertion.
--   **Consecutive Slashes**: Multiple consecutive slashes in a path (e.g., `/foo///bar`) are usually collapsed into a single slash (`/foo/bar`) during path processing.
+A path pattern is split into `/`-delimited segments. Each segment is one of three kinds:
 
-## Path Parameters
+1. **Static** — a literal that must match exactly: `users`, `list`.
+2. **Parameter** — a segment beginning with `:`, capturing exactly one segment under the given name: `/users/:id` captures `id`. The name must be non-empty.
+3. **Wildcard** — a segment beginning with `*`, capturing the entire remainder of the path (including embedded slashes): `/files/*path`. A wildcard **must be the last segment** in the pattern, and the name must be non-empty.
 
-When a route with parameterized segments (e.g., `/:id`) or wildcard segments (e.g., `/*filepath`) is matched by the `RadixTree`, the values extracted from the request URI path are automatically URL-decoded and stored in a `qb::http::PathParameters` object. This object is then made available within the `qb::http::Context` passed to your handlers and middleware.
+Capture names must be unique within a single pattern. A `:` or `*` with no name, an empty segment, a misplaced wildcard, or two conflicting captures at the same tree level all throw `std::invalid_argument` — raised from `add_route`, which surfaces during `compile()`.
 
--   **Access via `Context`**: You can retrieve a specific path parameter by its name using `ctx->path_param("name", "default_value_if_not_found")` or access the entire `PathParameters` object via `ctx->path_parameters()`.
--   **Parameter Names**: The names are derived from your route definition (e.g., `id` from `/:id`, `filepath` from `/*filepath`).
+<!-- src: qbm/http/routing/radix_tree.h:293-392 -->
+
+### Match precedence and path handling
+
+When more than one branch could match a segment, the radix tree applies a fixed priority: **static > parameter > wildcard**. A wildcard is the lowest priority and is terminal-only. So for a request to `/users/active`, a registered `/users/active` wins over `/users/:status`, which wins over `/users/*rest`.
+
+<!-- src: qbm/http/routing/radix_tree.h:401-403,478-517 -->
+
+Path segmentation handles slashes for you:
+
+- **Leading/trailing slashes** are normalized: `/users` and `/users/` segment identically, so they reach the same node.
+- **Consecutive slashes** produce no empty segments — `/foo//bar` segments to `{"foo", "bar"}`.
+- The root `/` segments to the empty list, so a handler registered at `/` attaches to the tree root.
+
+<!-- src: qbm/http/routing/radix_tree.h:239-271 -->
+
+### The `compile()` step
+
+`compile()` flattens the node tree into the radix tree. It delegates to `RouterCore::compile_all_routes()`, which:
+
+1. Clears the radix tree.
+2. Finds the root group and extracts its middleware as the *global prefix tasks* applied to the special 404 and 405 chains.
+3. Walks every top-level node, calling `compile_tasks_and_register()` recursively. Each node combines inherited middleware with its own, and each terminal `Route` appends its handler task, producing one ordered task chain per `(path, method)` endpoint. That chain is registered into the radix tree.
+4. Re-compiles the default 404 and 405 handlers with the global prefix tasks in front.
+
+The assembled order for any endpoint is **parent middleware → this node's middleware → route handler**. Inherited tasks always run before a node's own, and a node's own before the final handler.
+
+<!-- src: qbm/http/routing/router_core.h:177-211; route.h:309-334; handler_node.h:262-274 -->
+
+`compile()` **must** be called after all routes, groups, controllers, and middleware are defined and before serving requests. Two safety nets back this up:
+
+- Any definition mutation (`add_route`, `group`, `controller`, `use`, …) sets `_is_compiled = false`.
+- `route()` auto-compiles on first use if you forgot. Relying on this is fine for tests, but compile explicitly at startup in production so a malformed pattern fails fast rather than on the first request.
+
+Calling `compile()` again recompiles from scratch — it is idempotent and safe to re-run after adding routes.
+
+<!-- src: qbm/http/routing/router.h:243-249; router.tpp:306-328 -->
+
+### Request dispatch
+
+`route(session, request)` hands off to `RouterCore::route_request()`, which performs the full per-request flow:
+
+1. Builds a `std::shared_ptr<Context<Session>>` carrying the request, a response prototype (with `stream_id` copied from the request for HTTP/2 and HTTP/3), and a `weak_ptr` to the session.
+2. Copies any router-level lifecycle hooks into the context, then fires the `PRE_ROUTING` hook.
+3. Rejects paths longer than 4096 bytes with a `400 Bad Request` before any matching (a DoS guard).
+4. Matches the path and method against the radix tree:
+   - **Match found** → decodes path parameters, sets processing phase `NORMAL_CHAIN`, and selects the route's compiled task chain.
+   - **Path exists, method does not** → sets phase `METHOD_NOT_ALLOWED_CHAIN`, sets the RFC `Allow` header from the registered methods, and selects the 405 chain.
+   - **No match** → sets phase `NOT_FOUND_CHAIN` and selects the 404 chain.
+5. Fires the `PRE_HANDLER_EXECUTION` hook and starts the selected chain on the context.
+
+Path parameters are URI-decoded exactly once, at match time, and only when a parameterized route matches — static routes never allocate decoded strings. In path components `+` stays literal (only query/form decoding maps `+` to a space).
+
+<!-- src: qbm/http/routing/router_core.h:309-421 -->
+
+The `Context` returned by `route()` manages its own asynchronous lifecycle. When the chain finishes, the context invokes the router's finalization callback, which (if the session is still alive) fires `PRE_RESPONSE_SEND` and writes the response back over the session. See [Request context](./10-request-context.md) for the full lifecycle.
+
+### Compiled chains are shared and immutable
+
+After `compile()`, the task objects (`IAsyncTask`, middleware, route handlers) are **shared across every concurrent request** for that endpoint — HTTP/1.1 pipelining and HTTP/2/3 multiplexing reuse the same chain. Therefore:
+
+- A task implementation **must not** store per-request state on itself. All per-request bookkeeping (the current-task cursor, cancellation, custom data) lives on the `Context`.
+- The routing layer is single-threaded per listener: `execute()` and `cancel()` always run on the same I/O thread, and coroutine handlers resume on that thread via `qb::io::async::coro_scheduler()`. Tasks need no internal locking.
+
+<!-- src: qbm/http/routing/async_task.h:37-41,66-72 -->
+
+## Steps and examples
+
+### Define, compile, serve
+
+On a server the router is already wired to the session handler — you only declare routes and compile. This is the HTTP/1.1 path; the HTTP/2 and HTTP/3 servers expose the same `router()` facade (both SSL-gated, and HTTP/3 additionally `QBM_HTTP_HAS_HTTP3`-gated).
 
 ```cpp
-// Example: Accessing path parameters in a handler
-router.get("/books/:genre/page/:pageNumber", [](auto ctx) {
-    // Using ctx->path_param() for convenient access with a default
-    std::string genre = ctx->path_param("genre", "unknown");
-    std::string page_str = ctx->path_param("pageNumber", "1");
+// src: qbm/http/1.1/http.h:18-26 (server->router() pattern)
+#include <http/http.h>
 
-    // Alternatively, access the PathParameters object directly:
-    // const qb::http::PathParameters& params = ctx->path_parameters();
-    // std::optional<std::string_view> genre_sv_opt = params.get("genre");
-    // std::optional<std::string_view> page_sv_opt = params.get("pageNumber");
+auto server = qb::http::make_server(); // std::unique_ptr<Server<DefaultSession>>
 
-    // Potentially convert page_str to an integer
-    int page_num = 1;
-    try {
-        if (!page_str.empty()) page_num = std::stoi(page_str);
-    } catch (const std::exception& e) { /* handle conversion error */ }
+server->router()
+    .get("/health", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body() = "ok";
+        ctx->complete(); // terminal: AsyncTaskResult::COMPLETE
+    })
+    .get("/users/:id", [](auto ctx) {
+        const std::string id = ctx->path_param("id");
+        ctx->json(qb::json{{"id", id}}); // terminal helper
+    });
 
-    ctx->response().body() = "Genre: " + genre + ", Page: " + std::to_string(page_num);
-    ctx->complete();
+server->router().compile();                                 // build the radix tree once
+server->listen(qb::io::uri("http://0.0.0.0:8080"));         // begin accepting connections
+```
+
+Every handler **must** eventually call a terminal: `ctx->complete(AsyncTaskResult)` (default `AsyncTaskResult::COMPLETE`) or one of the terminal response helpers (`json`, `text`, `html`, `redirect`, `no_content`, `bad_request`, …) — each of those ends in `complete(AsyncTaskResult::COMPLETE)` for you. Forget it and the request hangs. The `Context::status(code)` setter is the exception: it sets the status, returns `Context&`, and does **not** terminate, so you can chain it ahead of a terminal call.
+
+<!-- src: qbm/http/routing/async_task.h:62-76; context.h:734-866 -->
+
+### Read captured parameters
+
+Parameter and wildcard captures are exposed through the `Context`:
+
+```cpp
+#include <http/http.h>
+
+server->router().get("/files/:bucket/*path", [](auto ctx) {
+    // :bucket captures one segment; *path captures the rest, slashes included.
+    const std::string bucket = ctx->path_param("bucket");           // e.g. "images"
+    const std::string rel    = ctx->path_param("path", "");         // e.g. "2024/cover.png"
+
+    // Or take the whole set:
+    const qb::http::PathParameters& params = ctx->path_parameters();
+    if (auto v = params.get("bucket")) { /* std::optional<std::string_view> */ }
+
+    ctx->text("bucket=" + bucket + " path=" + rel);
+});
+```
+
+Values arrive URI-decoded: a request to `/notes/My%20Note` matched by `/notes/:title` yields `title == "My Note"`. The parameter keys are `string_view`s into the route pattern held by the router, so the router must outlive the context — which it does by construction.
+
+<!-- src: qbm/http/routing/router_core.h:357-367; path_parameters.h:36-39,77-83 -->
+
+### Customize the not-found and error behavior
+
+```cpp
+#include <http/http.h>
+
+auto& router = server->router();
+
+// Replace the default 404. Global (root-group) middleware still runs before it.
+router.set_not_found_handler([](auto ctx) {
+    ctx->response().status() = qb::http::status::NOT_FOUND;
+    ctx->json(qb::json{{"error", "not found"}});
 });
 
-// Request to /books/fiction/page/2
-// genre will be "fiction"
-// page_str will be "2"
+// Install an error chain, invoked when a task calls complete(AsyncTaskResult::ERROR).
+router.set_error_task_chain({ /* std::shared_ptr<IAsyncTask<Session>>... */ });
+
+router.compile();
 ```
 
-Path parameters are automatically URL-decoded. For instance, if a request path is `/notes/My%20Document` and the route is `/notes/:title`, `ctx->path_param("title")` will yield `"My Document"`.
+Global middleware **is** prepended to the default and custom 404 and 405 chains, but it is **not** auto-prepended to the user error chain set via `set_error_task_chain` — include any cross-cutting behavior (logging, CORS) explicitly in that chain. See [Error handling](./13-error-handling.md).
 
-## ASCII Diagram: Route Matching Logic (Conceptual Radix Tree)
+<!-- src: qbm/http/routing/router_core.h:104-142,232-250 -->
+
+### Conceptual radix tree
 
 ```
-        /
-       |
-    (static)
-    users --:id -- (static) -- profile  (Handler for GET /users/:id/profile)
-       |
-    (static)
-    posts --:postId                 (Handler for GET /posts/:postId)
-       |
-    (wildcard)
-    *filepath                       (Handler for GET /*filepath)
+(root)
+ ├─ users (static) ── :id (param) ── profile (static)   GET → handler
+ ├─ posts (static) ── :postId (param)                   GET → handler
+ └─ *filepath (wildcard, terminal)                      GET → handler
 
-Incoming Request: GET /users/alice/profile
-
-1. Match "/" (root)
-2. Next segment "users": Found static child "users". Current node = "users".
-3. Next segment "alice": No static child "alice". Check for param child ":id". Found.
-   - Store param: id = "alice". Current node = ":id" node.
-4. Next segment "profile": Found static child "profile". Current node = "profile" node.
-5. Path exhausted. Check for GET handler at "profile" node. Found.
-6. Execute handler with params {"id": "alice"}.
+Request: GET /users/alice/profile
+  1. root → static child "users"            ✓
+  2. "users" → no static "alice" → param :id, capture id="alice"
+  3. ":id" → static child "profile"          ✓
+  4. segments exhausted → GET handler present → run chain {middleware..., handler}
+     with path params { id: "alice" }
 ```
 
-This overview introduces the basic mechanics of how the `qb::http::Router` handles incoming requests. The following sections will delve deeper into defining various types of routes, structuring them with groups and controllers, and applying middleware.
+## Pitfalls
 
-Previous: [HTTP Message Body: Deep Dive](./02-body-deep-dive.md)
-Next: [Defining Routes](./04-defining-routes.md)
+- **Spell the method type `qb::http::method`, and `DELETE` as `DEL`.** The canonical name `qb::http::method` is a type alias for `class Method`, so both names resolve to the same type. Values are static members: `qb::http::method::GET`, `::POST`, `::PUT`, `::PATCH`, `::OPTIONS`, `::HEAD`. `DELETE` is exposed as `qb::http::method::DEL` because `DELETE` is a reserved identifier on some platforms (`DELETE_METHOD` is a longer alias).
+- **Compile after the last mutation.** Adding any route or middleware resets `_is_compiled`. If you add routes after a manual `compile()`, compile again. The auto-compile in `route()` masks the mistake only until something fails to compile.
+- **Wildcards are terminal.** `/*rest/more` is rejected. Put the wildcard last, or use a parameter for an interior segment.
+- **Every handler must terminate the context.** A handler or `ICustomRoute::process` that never calls `ctx->complete(...)` (or a terminal helper) leaves the request hanging. Functional middleware may instead call `next()`. A `cancel()` implementation must **not** call `complete()` — the context owns cancellation.
+- **Never store per-request state on a task.** Compiled tasks are shared across concurrent requests. Keep state on the `Context` (string-keyed `set/get` or typed `Slot<T>`), never on the task object.
+- **Don't include or instantiate `RouterCore`/`RadixTree`.** They are internal and intentionally excluded from `routing.h` and `<http/http.h>`. Use `Router` and, only if you must reach the engine, `Router::get_router_core_weak_ptr()`.
+- **`session()` may be null.** The context holds the session by `weak_ptr`; a client can disconnect mid-flight. Code reachable in lifecycle hooks or late callbacks must null-check before sending.
+
+## See also
+
+- [Defining routes](./04-defining-routes.md) — the `get`/`post`/`add_route`/custom-route API.
+- [Route groups](./05-route-groups.md) — prefixes and inherited middleware.
+- [Controllers](./06-controllers.md) — class-based route organization.
+- [Middleware](./07-middleware.md) — how chains are built and ordered.
+- [Request context](./10-request-context.md) — the per-request lifecycle, hooks, and response helpers.
+- [Error handling](./13-error-handling.md) — 404/405 customization and the error chain.
 
 ---
-Return to [Index](./README.md)
+
+Previous: [HTTP message body: deep dive](./02-body-deep-dive.md) · Next: [Defining routes](./04-defining-routes.md) · Return to [Index](./README.md)
