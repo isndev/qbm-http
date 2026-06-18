@@ -1,245 +1,333 @@
-# 17: HTTP/2 Protocol Specifics
+# HTTP/2 protocol specifics
 
-The `qb::http` module provides comprehensive support for HTTP/2, enabling high-performance, multiplexed communication for both client and server implementations. This section details how to leverage HTTP/2 features within your QB applications.
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
 
-## Overview of HTTP/2 Support
+Run multiplexed HTTP/2 over TLS — `qb::http2::Server` and `qb::http2::Client` reuse the HTTP/1.1 router and message types while the protocol layer handles HPACK, streams, flow control, and per-stream cleanup.
 
-HTTP/2 introduces several key improvements over HTTP/1.1, all of which are supported by `qb-http` when using the `qb::http2` namespace components:
+**Prerequisites:** [Core concepts](./01-core-concepts.md), [Routing overview](./03-routing-overview.md), [Asynchronous HTTP client](./14-async-http-client.md) — **See also:** [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), [HTTP/3 protocol](./19-http3-protocol.md), [Advanced topics](./16-advanced-topics.md)
 
--   **Multiplexing**: Multiple requests and responses can be sent and received concurrently over a single TCP connection, eliminating head-of-line blocking.
--   **Header Compression (HPACK)**: Reduces header overhead using HPACK compression (RFC 7541). The `qb::protocol::hpack` namespace provides the concrete `Encoder` and `Decoder` classes (de-virtualised since F35 &mdash; no base interface, owned by value in the HTTP/2 sessions).
--   **PUSH_PROMISE support**: The protocol layer understands HTTP/2 push mechanics. The high-level client rejects pushes by default, and server-side push is exposed at protocol level rather than as a primary router handler API.
--   **Binary Framing Layer**: HTTP/2 messages are broken down into binary frames (DATA, HEADERS, SETTINGS, etc.), simplifying parsing and reducing ambiguity compared to HTTP/1.1's text-based format.
--   **Stream Prioritization**: Allows clients to indicate preference for how streams are allocated resources (though server-side implementation of prioritization can vary).
+HTTP/2 is a binary, multiplexed protocol: many concurrent request/response exchanges share one TCP connection, headers are compressed with HPACK, and per-stream flow control keeps a fast peer from overrunning a slow one. In qbm-http you get all of this without dropping down to frames — you write routes and handlers exactly as you do for HTTP/1.1, and the `qb::protocol::http2` layer does the framing. This page explains what that layer guarantees, how streams are created and torn down, and which knobs (concurrency limits, session timeout, cleanup interval) you can tune.
 
-**Important**: HTTP/2 in `qb-http` (specifically `qb::http2::Server` and `qb::http2::Client`) is typically used over TLS (HTTPS) and relies on ALPN (Application-Layer Protocol Negotiation) to select the "h2" protocol.
+> **SSL is mandatory.** HTTP/2 in qbm-http is TLS-only. `<http/http.h>` includes `2/http2.h` only under `#ifdef QB_HAS_SSL`, and the build compiles `2/http2.cpp` and `2/client.cpp` into the library only when `QB_HAS_SSL` is set. There is no plaintext h2c path. If your build lacks OpenSSL, `qb::http2::*` does not exist. See [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) for how `QB_HAS_SSL` is derived.
+<!-- src: qbm/http/http.h:45-48; qbm/http/CMakeLists.txt:39-47 -->
 
-## `qb::http2::Client`
+## Concepts
 
-The `qb::http2::Client` class (in `http/2/client.h`) provides a modern, asynchronous interface for making HTTP/2 requests.
+### ALPN selects the protocol
 
-### Key Features of `qb::http2::Client`
+There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
+<!-- src: qbm/http/2/http2.h:213-223, 480; qbm/http/2/client.cpp:68,312 -->
 
--   **Automatic Connection Management**: Handles connection establishment, including ALPN negotiation for "h2".
--   **Stream Management**: Internally manages HTTP/2 stream IDs for concurrent requests.
--   **Concurrent Requests**: Supports sending multiple requests simultaneously over a single connection.
--   **Batch Requests**: Can group multiple requests into a logical batch with a single callback for all responses.
--   **Timeout Handling**: Built-in connection and request timeouts.
--   **Elegant API**: Uses callbacks for asynchronous response handling.
--   **Flow Control**: Adheres to HTTP/2 flow control mechanisms (`WINDOW_UPDATE`) for sending request bodies.
--   **HPACK**: Uses HPACK for request header compression.
+### Streams and multiplexing
 
-### Creating and Using the HTTP/2 Client
+A stream is an independent, bidirectional sequence of frames identified by a stream ID. Each request/response exchange owns one stream, so many exchanges run concurrently over one connection with no head-of-line blocking at the HTTP layer. The lifecycle is the RFC 9113 §5.1 state machine, modeled by `qb::protocol::http2::Http2StreamConcreteState`:
 
-```cpp
-#include <http/2/client.h> // For qb::http2::Client
-#include <http/request.h>  // For qb::http::Request
-#include <http/response.h> // For qb::http::Response
-#include <qb/io/uri.h>
-#include <qb/io/async.h>   // For event loop (qb::io::async::run)
-
-int main() {
-    qb::io::async::init(); // Initialize async system for the current thread
-
-    // Create a client for a specific base URI (must be HTTPS for typical HTTP/2)
-    auto h2_client = qb::http2::make_client("https://httpbin.org");
-
-    // Configure timeouts (optional)
-    h2_client->set_connect_timeout(10.0); // 10 seconds
-    h2_client->set_request_timeout(30.0); // 30 seconds
-
-    std::atomic<int> responses_received{0};
-
-    // Connection callback (optional)
-    h2_client->connect([&](bool connected, const std::string& err_msg) {
-        if (connected) {
-            std::cout << "HTTP/2 client connected successfully!" << std::endl;
-
-            // Send a single GET request
-            qb::http::Request req1;
-            req1.uri() = qb::io::uri("/get"); // Path relative to base URI
-            req1.add_header("X-Custom-Header", "Test1");
-
-    h2_client->push_request(std::move(req1), [&](qb::http::Response res1) {
-                std::cout << "Response 1 (GET /get):\n"
-                          << "Status: " << res1.status().code() << std::endl
-                          << "Body (first 100 chars): " << res1.body().as<std::string_view>().substr(0, 100) << "..." << std::endl;
-                responses_received++;
-            });
-
-            // Send a POST request
-            qb::http::Request req2;
-            req2.method() = qb::http::method::POST;
-            req2.uri() = qb::io::uri("/post");
-            req2.set_content_type("application/json");
-            req2.body() = R"({"message": "Hello HTTP/2"})";
-
-    h2_client->push_request(std::move(req2), [&](qb::http::Response res2) {
-                std::cout << "Response 2 (POST /post):\n"
-                          << "Status: " << res2.status().code() << std::endl
-                          << "Body (first 100 chars): " << res2.body().as<std::string_view>().substr(0, 100) << "..." << std::endl;
-                responses_received++;
-            });
-
-        } else {
-            std::cerr << "HTTP/2 client connection failed: " << err_msg << std::endl;
-            responses_received = 2; // Ensure loop terminates
-        }
-    });
-
-    // Event loop to process async operations
-    while (responses_received < 2) {
-        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    h2_client->disconnect();
-    std::cout << "Client finished." << std::endl;
-    return 0;
-}
 ```
+IDLE → OPEN → HALF_CLOSED_LOCAL / HALF_CLOSED_REMOTE → CLOSED
+                              (RESERVED_LOCAL / RESERVED_REMOTE for pushed streams)
+```
+<!-- src: qbm/http/2/protocol/stream.h:47-55 -->
 
-Key methods:
--   `qb::http2::make_client(base_uri)`: Factory function to create a `std::shared_ptr<Client>`.
--   `client->connect(ConnectionCallback cb)`: Initiates connection (asynchronous).
--   `client->push_request(Request req, ResponseCallback cb)`: Sends a single request.
--   `client->push_requests(std::vector<Request> reqs, BatchResponseCallback cb)`: Sends multiple requests as a batch.
--   `client->disconnect()`: Closes the connection.
--   Various `set_*` methods for configuration (timeouts, max concurrent streams).
+Stream IDs are not arbitrary:
 
-The client handles the underlying HTTP/2 protocol details (frames, streams, flow control, HPACK) via `qb::protocol::http2::ClientHttp2Protocol`.
+- **Stream 0** is reserved. In this module `constants::HTTP11_STREAM_ID == 0` doubles as the sentinel for an HTTP/1.1 message; a valid HTTP/2 stream ID is `>= 1`. A response written with `stream_id == 0` (or larger than `uint32_t` max) is rejected by `session::operator<<`.
+- **Client-initiated streams use odd IDs**; **server-pushed streams use even IDs** (the server's next pushed ID starts at 2). The server rejects a client `HEADERS` frame on an even stream ID with `GOAWAY(PROTOCOL_ERROR)`.
+<!-- src: qbm/http/2/http2.h:53,55,117,177-185; qbm/http/2/protocol/server.h:84,363-366 -->
 
-## `qb::http2::Server`
+Each request and response carries its stream ID on `MessageBase::stream_id` (0 for HTTP/1.1). Your handler reads it through `ctx->request().stream_id`; the session sets the matching ID on the outgoing response automatically when you call `ctx->complete()`.
+<!-- src: qbm/http/message_base.h:55-72; qbm/http/2/http2.h:251-254 -->
 
-The `qb::http2::Server` class (in `http/2/http2.h`) enables you to build HTTP/2 capable servers.
+### HPACK header compression
 
-### Key Features of `qb::http2::Server`
+HTTP/2 compresses header blocks with HPACK (RFC 7541), implemented in `qb::protocol::hpack`. The encoder and decoder are owned by value inside each protocol handler (the former abstract interfaces were removed — annotated F35), so there is nothing for you to wire up. What you should know about its behavior:
 
--   **Built on `qb::http::Router`**: Utilizes the same powerful routing engine as the HTTP/1.1 server, allowing you to define routes, groups, and controllers.
--   **TLS Requirement**: HTTP/2 server implementation in `qb-http` is designed for secure connections (HTTPS). Plaintext HTTP/2 (h2c) is not the primary focus for this server component.
--   **ALPN for Protocol Negotiation**: Relies on ALPN during the TLS handshake to negotiate "h2" (for HTTP/2) or "http/1.1". If "h2" is negotiated, the connection uses `qb::protocol::http2::ServerHttp2Protocol`.
--   **Flow Control**: Manages HTTP/2 flow control for sending response bodies.
--   **HPACK**: Uses HPACK for response header compression.
+- A **61-entry static table** holds common fields (`:method: GET`, `accept-encoding: gzip`, …); lookup uses a compile-time open-addressing index (F33).
+- A per-connection **dynamic table**, a ring buffer (F34), stores recently sent fields. Its size is bounded by `SETTINGS_HEADER_TABLE_SIZE`, which each peer advertises for its own decoder. Per RFC 7541 §4.4, an entry larger than the whole table budget clears the table and is *not* inserted.
+- The encoder **never indexes sensitive headers** (`authorization`, `cookie`, `proxy-authorization`, `set-cookie`) or pseudo-headers; they are emitted as *Literal Never Indexed* so intermediaries cannot cache them. Only non-sensitive, non-pseudo fields that fit the table are added with incremental indexing.
+- String literals may be Huffman-coded for further size reduction.
+<!-- src: qbm/http/2/protocol/hpack.h:346-373,501-507,1118-1145; FACTBOOK F33/F34/F35 -->
 
-### Creating and Using the HTTP/2 Server
+### Flow control
 
-Setting up an HTTP/2 server is very similar to the HTTP/1.1 server, with the primary difference being the server class used and the ALPN configuration.
+HTTP/2 has two flow-control windows, both replenished by `WINDOW_UPDATE` frames:
+
+- **Stream-level** — each stream tracks how much DATA it may still send/receive. The initial size is `SETTINGS_INITIAL_WINDOW_SIZE` (default 65,535 octets).
+- **Connection-level** — a single global window for the whole connection (stream ID 0).
+
+A sender must not emit DATA that would exceed *either* window. The protocol layer (`FlowControlManager`, `Http2StreamBase`) segments large bodies into DATA frames respecting the current windows, sends `WINDOW_UPDATE` once consumed bytes cross a threshold (half the initial window by default), and treats any window growing past `MAX_WINDOW_SIZE_LIMIT` (2³¹−1) as a `FLOW_CONTROL_ERROR`. None of this needs application code.
+<!-- src: qbm/http/2/protocol/stream.h:65-103,156-163,229-256; qbm/http/2/protocol/frames.h:105,110 -->
+
+### Connection shutdown: GOAWAY and RST_STREAM
+
+- **`RST_STREAM`** abruptly terminates a single stream with an error code, moving it straight to `CLOSED`. The server sends it for refused, malformed, oversized, or idle streams; your handler can trigger one through `session::reset_stream(...)`.
+- **`GOAWAY`** announces connection shutdown and the last peer-initiated stream the sender will process, enabling a graceful drain. On a `NO_ERROR` GOAWAY the server keeps the connection until all in-range client-initiated streams close; a non-`NO_ERROR` GOAWAY deactivates immediately. The client fails any streams beyond `last_stream_id` and finishes its drain once active requests complete.
+<!-- src: qbm/http/2/protocol/server.h:763-772,1265-1304; qbm/http/2/client.cpp:503-513,756-757 -->
+
+## Running an HTTP/2 server
+
+The server is the same shape as the HTTP/1.1 server (acceptor + sessions + router); the only differences are the class you instantiate and the ALPN/TLS setup, which `listen` handles for you.
+
+### Quick start with `make_server`
+
+`qb::http2::make_server()` returns a `std::unique_ptr<qb::http2::Server<>>` using the built-in `DefaultSession`. Define routes on its `router()`, call `compile()`, then `listen` with your certificate and key, `start()`, and drive the qb-io reactor.
 
 ```cpp
-#include <http/2/http2.h>  // For qb::http2::Server, qb::http2::DefaultSession
-#include <http/routing.h> // For qb::http::Router and related types
+// src: qbm/http/2/http2.h:540-582 (Server/make_server), :474-482 (listen)
+#include <http/http.h>          // umbrella; pulls <http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
+#include <filesystem>
+#include <iostream>
 
-// Using the make_server factory for convenience (uses qb::http2::DefaultSession internally)
-// For custom session types, you would derive from qb::http2::Server as shown previously
-// or create a make_server equivalent for your custom session server.
-
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <cert_file.pem> <key_file.pem>" << std::endl;
+        std::cerr << "usage: " << argv[0] << " <cert.pem> <key.pem>\n";
         return 1;
     }
     std::filesystem::path cert_file = argv[1];
-    std::filesystem::path key_file = argv[2];
+    std::filesystem::path key_file  = argv[2];
 
-    qb::io::async::init();
+    qb::io::async::init();                       // one reactor per thread
 
-    auto server_instance = qb::http2::make_server();
+    auto server = qb::http2::make_server();      // std::unique_ptr<Server<DefaultSession>>
 
-    server_instance->router().get("/hello-h2", [](auto ctx) {
+    server->router().get("/hello", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Hello from HTTP/2 Server (make_server)!";
-        ctx->response().add_header("X-Protocol-Version", "HTTP/2");
+        ctx->response().body()   = "Hello over HTTP/2";
         ctx->complete();
     });
-    server_instance->router().get("/", [](auto ctx) { // Serve a simple HTML page
-        ctx->response().status() = qb::http::status::OK;
-        ctx->response().set_content_type("text/html; charset=utf-8");
-        ctx->response().body() = "<html><body><h1>HTTP/2 Works! (make_server)</h1></body></html>";
-        ctx->complete();
-    });
-    server_instance->router().compile();
+    server->router().compile();                  // build the route trie once
 
-    // Listen for HTTPS connections, enabling HTTP/2 via ALPN
-    if (!server_instance->listen({"https://0.0.0.0:8443"}, cert_file, key_file)) {
-        std::cerr << "Error: Failed to listen on port 8443 for HTTP/2 server." << std::endl;
+    // listen() initializes the server TLS context and sets ALPN to {"h2","http/1.1"}.
+    if (!server->listen({"https://0.0.0.0:8443"}, cert_file, key_file)) {
+        std::cerr << "failed to listen on https://0.0.0.0:8443\n";
         return 1;
     }
-    std::cout << "HTTP/2 server listening on https://0.0.0.0:8443" << std::endl;
-
-    server_instance->start();
-    qb::io::async::run();
-
+    server->start();
+    qb::io::async::run();                         // run the event loop
     return 0;
 }
 ```
 
-Key steps:
-1.  Derive your session from `qb::http2::use<YourSession>::session<YourServer>`.
-2.  Derive your server from `qb::http2::use<YourServer>::server<YourSession>`.
-3.  Use `router()` to define routes as usual.
-4.  Call `server_instance->listen({"https://0.0.0.0:8443"}, cert_file, key_file)`. The `listen` method correctly initializes the SSL context and sets ALPN to negotiate "h2" (for HTTP/2) and often "http/1.1" as a fallback.
+`listen` does three things for you: it creates the server SSL context from your cert/key, sets the ALPN list to `{"h2", "http/1.1"}`, and binds the listening socket. Routing is identical to HTTP/1.1 — groups, controllers, middleware, path parameters, and validation all work unchanged because the HTTP/2 session feeds the same `qb::http::Router`.
+<!-- src: qbm/http/2/http2.h:474-482,392-394 -->
 
-The server uses `qb::protocol::http2::ServerHttp2Protocol` internally to manage HTTP/2 streams, frame parsing/serialization, and HPACK.
+### Custom sessions with the CRTP `use<>` template
 
-## HTTP/2 Frames and Streams (Internal)
+When you need per-connection state or custom event handling, define your own session and server through the `qb::http2::use<Derived>` template. The session derives from the internal HTTP/2 session machinery; the server derives from the internal acceptor and owns the router.
 
-While application developers primarily interact with `Request` and `Response` objects, the underlying HTTP/2 protocol operates on frames and streams:
+```cpp
+// src: qbm/http/tests/test-integration-http2-client.cpp:37-39 (server pattern)
+#include <http/http.h>
 
--   **Frames (`http/2/protocol/frames.h`)**: Smallest unit of communication in HTTP/2, each with a specific type (DATA, HEADERS, SETTINGS, PING, GOAWAY, WINDOW_UPDATE, RST_STREAM, PRIORITY, PUSH_PROMISE, CONTINUATION).
-    -   `FrameHeader`: Common 9-octet header for all frames.
-    -   Specific structs for each frame type (e.g., `DataFrame`, `HeadersFrame`).
--   **Streams (`http/2/protocol/stream.h`)**: Independent, bidirectional sequences of frames exchanged between client and server. Each stream has a unique ID.
-    -   `Http2StreamConcreteState`: Manages the lifecycle of a stream (IDLE, OPEN, HALF_CLOSED, CLOSED, etc.).
-    -   Flow control is managed per-stream and per-connection using `WINDOW_UPDATE` frames.
+class MyServer;   // forward declaration
 
-### Header Compression: HPACK (`http/2/protocol/hpack.h`)
+class MySession
+    : public qb::http2::use<MySession>::session<MyServer> {
+public:
+    using Base = qb::http2::use<MySession>::session<MyServer>;
+    explicit MySession(MyServer &server) : Base(server) {}
+    // ... per-connection state ...
+};
 
-HTTP/2 uses HPACK (Header Compression for HTTP/2, RFC 7541) to compress request and response headers, reducing latency and bandwidth usage. Key aspects:
+class MyServer
+    : public qb::http2::use<MyServer>::server<MySession> {
+public:
+    MyServer() {
+        router().get("/api/users/:id", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "User " + ctx->path_param("id");
+            ctx->complete();
+        });
+        router().compile();
+    }
+};
+```
 
--   **Static Table**: A predefined table of common header fields (e.g., `:method: GET`, `accept-encoding: gzip`).
--   **Dynamic Table**: Maintained by both encoder and decoder. It stores frequently sent header fields that are not in the static table. This table is updated with new entries from header blocks.
--   **Encoding Strategies**:
-    -   **Indexed Header Field**: References an entry in the static or dynamic table.
-    -   **Literal Header Field with Incremental Indexing**: Sends a header field literally and adds it to the dynamic table.
-    -   **Literal Header Field without Indexing**: Sends a header field literally but does not add it to the dynamic table (e.g., for sensitive headers or one-time headers).
-    -   **Literal Header Field Never Indexed**: Similar to "without indexing," but also instructs intermediaries never to index it.
--   **Huffman Coding**: String literals (names and values) can be optionally Huffman coded for further size reduction.
--   **SETTINGS_HEADER_TABLE_SIZE**: An HTTP/2 setting allows endpoints to declare the maximum size (in octets) of the dynamic table their decoder can handle. Encoders must respect this limit. The `qb::protocol::hpack::Encoder` and `Decoder` classes manage these table sizes through a shared `DynamicTable` ring buffer (F34).
+`qb::http2::use<Derived>` exposes three CRTP aliases — `session<ServerHandler>`, `io_handler<SessionType>`, and `server<SessionType>` — and `make_server<MySession>()` constructs the matching server. The `DefaultSession` / `Server<>` pair used by `make_server()` is exactly this template instantiated for you.
+<!-- src: qbm/http/2/http2.h:492-502,517-528,540-582 -->
 
-`qb-http` handles HPACK encoding and decoding transparently within `ClientHttp2Protocol` and `ServerHttp2Protocol`.
+### Sending responses and resetting streams
 
-### Flow Control
+Inside a handler you set the response and call `ctx->complete()` as usual; the session writes it on the request's stream. To abort a single stream — for example to enforce an application policy — call `reset_stream` on the session, which sends `RST_STREAM` with the error code you choose:
 
-HTTP/2 provides flow control mechanisms to prevent a sender from overwhelming a receiver with data. This operates at two levels:
+```cpp
+// src: qbm/http/tests/test-integration-http2-client.cpp:112-120 (reset pattern)
+router().get("/api/cancel", [](auto ctx) {
+    auto session = ctx->session();
+    if (session) {
+        session->reset_stream(
+            static_cast<uint32_t>(ctx->request().stream_id),
+            qb::protocol::http2::ErrorCode::CANCEL,
+            "application requested cancellation");
+    }
+});
+```
 
--   **Stream-Level Flow Control**: Each stream has its own flow control window. The receiver advertises how much data it is prepared to receive on a specific stream using `WINDOW_UPDATE` frames for that stream ID.
--   **Connection-Level Flow Control**: There is also a global flow control window for the entire connection, also managed by `WINDOW_UPDATE` frames (with stream ID 0).
+`session::operator<<(qb::http::Response&)` validates the response before framing it: it rejects `stream_id == 0`, an out-of-range stream ID, or a status code outside `[100, 600)`, and it sets `content-length` automatically when the body is non-empty and no length was provided.
+<!-- src: qbm/http/2/http2.h:158-207 -->
 
-A sender must not send DATA frames that would exceed the receiver's advertised window for either the stream or the connection.
+## Server stream management
 
--   `qb::http2::Client` and the underlying protocol classes manage sending and processing `WINDOW_UPDATE` frames automatically. The initial window size is defined by `SETTINGS_INITIAL_WINDOW_SIZE` (default 65,535 octets), and can be changed during the connection.
--   When sending large request or response bodies, these components will segment the data into DATA frames respecting the current flow control windows.
+The server session and protocol handler enforce limits that protect against resource exhaustion. The defaults are conservative; tune them only with a clear reason.
 
-### PUSH_PROMISE / Server Push
+### Concurrency limit
 
-HTTP/2 allows a server to proactively send responses (pushes) to a client for resources it anticipates the client will request. This is initiated with a `PUSH_PROMISE` frame from the server, which includes the request headers the server *would have received* for the pushed resource.
+The server advertises `SETTINGS_MAX_CONCURRENT_STREAMS = 50` to clients (reduced from 100 for DDoS resistance) and refuses new client streams with `RST_STREAM(REFUSED_STREAM)` once active client streams reach that cap. The persistent client caps its own outbound concurrency at 100 by default; configure it with `set_max_concurrent_streams`.
+<!-- src: qbm/http/2/protocol/server.h:392-397,1318; qbm/http/2/http2.h:58; qbm/http/2/client.h:174,331 -->
 
--   **Client-Side**: `qb::http2::Client` receives `PUSH_PROMISE` frames at protocol level and auto-rejects pushes by default, matching the conservative behavior of modern clients.
--   **Server-Side**: `qb::protocol::http2::ServerHttp2Protocol` exposes `send_push_promise` for low-level protocol integrations. `qb::http2::Server` route handlers should not assume a first-class high-level push API unless one is added explicitly.
-    -   The server must respect the client's `SETTINGS_ENABLE_PUSH` setting (defaults to allowed, but client can disable it).
-    -   Pushed streams consume a stream ID and count towards the client's `SETTINGS_MAX_CONCURRENT_STREAMS` limit for server-initiated streams.
+### Session timeout and stream cleanup
 
-These details are largely abstracted by the `qb::http2::Client` and `qb::http2::Server` layers, but understanding their existence is useful for debugging or advanced protocol interaction.
+Connection and stream lifetimes are governed by four `qb::duration` constants in `qb::http2::constants`:
 
-## Logging
+| Constant | Default | Role |
+| --- | --- | --- |
+| `DEFAULT_SESSION_TIMEOUT` | 60 s | Connection inactivity deadline; the session disconnects with `ByTimeout` when it elapses. |
+| `STREAM_IDLE_TIMEOUT` | 30 s | Per-stream idle deadline used by the cleanup sweep. |
+| `STREAM_INCOMPLETE_TIMEOUT` | 10 s | Tighter deadline for streams that opened but never dispatched a request. |
+| `CLEANUP_INTERVAL` | 5 s | Minimum gap between cleanup sweeps. |
 
-HTTP/2 specific logging can be found in the code using macros like `LOG_HTTP_DEBUG_PA(stream_id, ...)` or `LOG_HTTP_ERROR_PA(stream_id, ...)` (from `http/logger.h`), which include the stream ID for better context in multiplexed environments.
+<!-- src: qbm/http/2/http2.h:52-62 -->
 
-By leveraging the `qb::http2` components, you can build efficient and modern web services that take full advantage of the HTTP/2 protocol's capabilities.
+These are real `qb::duration` values (`std::chrono::seconds`) — the protocol layer takes `qb::duration` throughout (`cleanup_idle_streams`, `StreamManager::CleanupCriteria`).
+<!-- src: qbm/http/2/protocol/server.h:1205-1206; qbm/http/2/protocol/stream.h:502-508 -->
 
-Previous: [Advanced Usage & Performance](./16-advanced-topics.md)
-Next: [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md)
+The cleanup mechanism has two parts, both run from the session's `pending_write` handler:
+
+1. **Closed-context reaping** — on every write tick, contexts whose stream the protocol reports as closed (`is_stream_closed`) fire their `POST_RESPONSE_SEND` hook and are erased.
+2. **Idle-stream sweep** — no more often than `CLEANUP_INTERVAL`, the session calls `protocol.cleanup_idle_streams(STREAM_IDLE_TIMEOUT, STREAM_INCOMPLETE_TIMEOUT)`, which sends `RST_STREAM(CANCEL)` to streams past their idle or incomplete deadline and removes them.
+
+```cpp
+// src: qbm/http/2/http2.h:284-304 (session pending_write handler, condensed)
+void on(qb::io::async::event::pending_write &&) {
+    this->updateTimeout();
+    if (_http2_protocol) {
+        // 1. reap contexts for streams the protocol already closed
+        for (auto it = _contexts.begin(); it != _contexts.end();) {
+            if (it->second && _http2_protocol->is_stream_closed(it->first)) {
+                it->second->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
+                it = _contexts.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        // 2. rate-limited idle-stream sweep
+        auto now = std::chrono::steady_clock::now();
+        if (now - _last_stream_cleanup >= qb::http2::constants::CLEANUP_INTERVAL) {
+            _http2_protocol->cleanup_idle_streams(
+                qb::http2::constants::STREAM_IDLE_TIMEOUT,
+                qb::http2::constants::STREAM_INCOMPLETE_TIMEOUT);
+            _last_stream_cleanup = now;
+        }
+    }
+}
+```
+
+The sweep is **opportunistic**: it runs only when there is write activity. A purely idle connection with no writes never triggers the stream-level sweep — it is reclaimed instead by the 60 s `DEFAULT_SESSION_TIMEOUT`. Per-stream timestamps (`created_at`, `last_activity`) and `_last_stream_cleanup` use `std::chrono::steady_clock::time_point` directly, even though the durations they are compared against are `qb::duration`; this is a deliberate mixed time model in this slice.
+<!-- src: qbm/http/2/http2.h:110,146,284-304; qbm/http/2/protocol/stream.h:143-144 -->
+
+## Using the HTTP/2 client
+
+The persistent client is `qb::http2::Client`, created through `qb::http2::make_client(base_uri)`, which returns a `std::shared_ptr<Client>`. The client is **non-copyable and non-movable** and uses `enable_shared_from_this` internally, so always own it through the shared pointer the factory hands you. It multiplexes many requests over one connection, manages stream IDs, and offers both callback and coroutine APIs. For the full client narrative — one-shot vs. persistent, batching, reconnection — see [Asynchronous HTTP client](./14-async-http-client.md); this section covers the HTTP/2-specific surface.
+<!-- src: qbm/http/2/client.h:140-141,201-204,483 -->
+
+### Callback API
+
+```cpp
+// src: qbm/http/tests/test-integration-http2-client.cpp:252-289 (client pattern)
+#include <http/http.h>
+#include <qb/io/async.h>
+
+qb::io::async::init();
+
+auto client = qb::http2::make_client("https://api.example.com");
+client->set_verify_peer(true);              // default; verifies chain + hostname
+
+qb::http::Request req;
+req.uri() = qb::io::uri("/v1/items");        // resolved against the base URI
+client->push_request(std::move(req), [](qb::http::Response res) {
+    // delivered once, on this thread, when the stream completes
+    handle(res.status(), res.body().as<std::string_view>());
+});
+```
+
+`push_request` triggers an implicit connect when needed, so you do not have to call `connect()` first; queued requests flush once the handshake completes. To run several requests as one batch with a single callback that fires when all responses are in (order preserved), use `push_requests(std::vector<Request>, BatchResponseCallback)` — each request travels on its own stream concurrently.
+<!-- src: qbm/http/2/client.h:266,290; qbm/http/tests/test-coro-http2-client.cpp:469 -->
+
+### Coroutine API
+
+Each entry point has a `co_await`-able overload. `connect()` yields a `ConnectResult` (boolean-convertible), `push_request(Request)` yields a `Response`, and `push_requests(...)` yields a `std::vector<Response>`.
+
+```cpp
+// src: qbm/http/tests/test-coro-http2-client.cpp:215-218,422
+#include <http/http.h>
+
+qb::io::async::task<void> fetch() {
+    auto client = qb::http2::make_client("https://api.example.com");
+    if (!co_await client->connect()) co_return;       // ConnectResult is bool-convertible
+    auto res = co_await client->push_request(
+        qb::http::Request{qb::io::uri("/v1/items")});
+    use(res);
+}
+
+// Blocking bridge for tests/main:
+auto res = qb::http::run_sync(client->push_request(std::move(req)));
+```
+
+The coroutine `connect()` overload has **no default-argument callback overload**: a fire-and-forget caller must write `connect(nullptr)` so the call stays unambiguous. Call `set_verify_peer(false)` (before connecting) only for trusted self-signed endpoints; certificate verification is on by default because h2 is TLS-only.
+<!-- src: qbm/http/2/client.h:214-219,241,281-282,304-305,314-318 -->
+
+### Server push
+
+The client receives `PUSH_PROMISE` frames at the protocol level and **auto-rejects** pushes by default, matching modern browser behavior. On the server, push is **disabled by default** (`SETTINGS_ENABLE_PUSH = 0`) and there is no first-class router API for it; `ServerHttp2Protocol::send_push_promise` exists for low-level integration and additionally requires the peer to have enabled push and a valid even, non-zero promised stream ID, returning a `PushPromiseFailureReason` otherwise. Treat server push as advanced/optional rather than a primary feature.
+<!-- src: qbm/http/2/protocol/server.h:1075-1092,1316; qbm/http/2/protocol/frames.h:317-330 -->
+
+## Protocol-layer reference
+
+You rarely touch these directly, but they are the public types behind the convenience API.
+
+| Component | Header | Role |
+| --- | --- | --- |
+| `qb::protocol::http2::ServerHttp2Protocol` / `ClientHttp2Protocol` | `2/protocol/server.h`, `2/protocol/client.h` | Frame dispatch, HPACK, flow control, stream lifecycle. |
+| `qb::protocol::http2::Http2StreamConcreteState` | `2/protocol/stream.h` | RFC 9113 §5.1 stream state machine. |
+| `qb::protocol::http2::Http2StreamBase` / `Http2ServerStream` / `Http2ClientStream` | `2/protocol/stream.h` | Per-stream window, timing, and assembly state. |
+| `qb::protocol::http2::FlowControlManager` / `StreamManager` | `2/protocol/stream.h` | Window math and bulk stream cleanup/statistics. |
+| `qb::protocol::hpack::Encoder` / `Decoder` / `DynamicTable` | `2/protocol/hpack.h` | RFC 7541 header compression, owned by value. |
+| `qb::protocol::http2::ErrorCode` | `2/protocol/frames.h` | RFC error codes (`NO_ERROR`, `PROTOCOL_ERROR`, `REFUSED_STREAM`, `CANCEL`, `ENHANCE_YOUR_CALM`, …). |
+| Events: `Http2StreamErrorEvent`, `Http2GoAwayEvent`, `Http2ConnectionErrorEvent`, `Http2PushPromiseEvent` | `2/protocol/stream.h` | Surfaced to the session/client via `on(...)` handlers. |
+
+<!-- src: qbm/http/2/protocol/stream.h:47-55,114,329,369,419-486; qbm/http/2/protocol/frames.h:66-83 -->
+
+The protocol enforces RFC 9113 validation you get for free: header names must be lowercase tokens with no NUL/CR/LF; requests require non-empty `:method`/`:scheme`/`:path` and `:authority` pseudo-headers ahead of regular headers; trailers may not carry pseudo-headers or hop-by-hop headers. A request body over `qb::http::protocol_limits::MAX_BODY_SIZE` is reset with `RST_STREAM(ENHANCE_YOUR_CALM)`, and an assembled header block over `qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE` (1 MB) closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`.
+<!-- src: qbm/http/2/protocol/server.h:134-136,302-309,435-438,1426-1509; qbm/http/2/protocol/base.h:86,89 -->
+
+## Pitfalls
+
+- **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
+  <!-- src: qbm/http/http.h:45-48; qbm/http/2/http2.h:474-482 -->
+- **The module is a compiled library, not header-only.** `2/http2.cpp` and `2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<http/http.h>`; do not `find_package` the headers alone.
+  <!-- src: qbm/http/CMakeLists.txt:39-47,77-95 -->
+- **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).
+  <!-- src: qbm/http/2/http2.h:177-185 -->
+- **The idle-stream sweep is opportunistic.** It runs only on write activity and no more than once per `CLEANUP_INTERVAL` (5 s). A fully idle connection relies on the 60 s session timeout instead — do not assume `STREAM_IDLE_TIMEOUT` fires on a silent connection.
+  <!-- src: qbm/http/2/http2.h:284-304 -->
+- **Server concurrency defaults to 50, client to 100.** They are independent: the server's `SETTINGS_MAX_CONCURRENT_STREAMS = 50` bounds inbound client streams (excess gets `REFUSED_STREAM`); `client->set_max_concurrent_streams(...)` bounds the client's outbound streams. Raise the server limit only if you have measured headroom.
+  <!-- src: qbm/http/2/protocol/server.h:1318; qbm/http/2/client.h:174 -->
+- **The client is non-movable; keep the `shared_ptr`.** Constructing one on the stack or trying to move it will not compile. Use `make_client(...)` and store the returned `std::shared_ptr`.
+  <!-- src: qbm/http/2/client.h:201-204,483 -->
+- **`set_verify_peer` must precede `connect`.** Changing it after the handshake has no effect. Leave it `true` in production; flip to `false` only for trusted self-signed test endpoints.
+  <!-- src: qbm/http/2/client.h:314-318 -->
+- **Coroutine `connect()` has no default callback.** For fire-and-forget, write `connect(nullptr)`; bare `connect()` is the coroutine awaiter overload.
+  <!-- src: qbm/http/2/client.h:214-219 -->
+- **Server push is off by default and not a router feature.** Do not design around server-initiated pushes; the client auto-rejects them and the server disables `SETTINGS_ENABLE_PUSH`.
+  <!-- src: qbm/http/2/protocol/server.h:1316 -->
+
+## See also
+
+- [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) — certificates, server context, and ALPN setup that HTTP/2 depends on.
+- [Asynchronous HTTP client](./14-async-http-client.md) — full client model (one-shot, coroutine, persistent), batching, and reconnection.
+- [HTTP/3 protocol](./19-http3-protocol.md) — the QUIC successor and the dual-stack server that runs h2 and h3 on one route table.
+- [Routing overview](./03-routing-overview.md), [Controllers](./06-controllers.md), [Middleware](./07-middleware.md) — the router surface shared with HTTP/1.1 and reused unchanged here.
+- [Advanced topics](./16-advanced-topics.md) — performance guidance and `string_view`/body handling that apply across protocols.
 
 ---
-Return to [Index](./README.md)
+Previous: [Advanced topics and best practices](./16-advanced-topics.md) · Next: [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) · Return to [Index](./README.md)

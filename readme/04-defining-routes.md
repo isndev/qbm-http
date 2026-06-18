@@ -1,192 +1,289 @@
-# 04: Defining Routes
+# Defining routes
 
-Routes are the core of your HTTP application, mapping specific URL paths and HTTP methods to your handler logic. The `qb::http::Router` provides a fluent and flexible API for defining these routes.
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
 
-## Basic Route Definition
+Bind an HTTP method and a path pattern to a handler, extract path parameters from the URL, and drive each request through the `Context` it receives.
 
-The primary way to define routes is using the HTTP method-specific functions on a `Router` instance or a `RouteGroup` instance (see [Route Groups](./05-route-groups.md) and [Controllers](./06-controllers.md)).
+**Prerequisites:** [Routing overview](./03-routing-overview.md), [Core HTTP concepts](./01-core-concepts.md) — **See also:** [Route groups](./05-route-groups.md), [Controllers](./06-controllers.md), [The request context](./10-request-context.md)
 
-Common methods include:
+## What a route is
 
--   `router.get(path, handler)`
--   `router.post(path, handler)`
--   `router.put(path, handler)`
--   `router.del(path, handler)` (or `router.delete_()`, check API for exact naming if `delete` is a keyword issue)
--   `router.patch(path, handler)`
--   `router.options(path, handler)`
--   `router.head(path, handler)`
+A route is the terminal binding in the routing tree: one HTTP method plus one path pattern, pointing at a handler. You register routes on a `qb::http::Router<SessionType>` (or on a [`RouteGroup`](./05-route-groups.md) or [`Controller`](./06-controllers.md), which share the same API). After every route, group, controller, and middleware is declared, you call `router.compile()` once — that flattens the tree into the `RadixTree` task chains the dispatcher actually runs. See [Routing overview](./03-routing-overview.md) for the match algorithm and the compile step.
 
-Each of these methods takes:
+Inside a `qb::http::Server<>`, the router is reached through the inherited `router()` accessor; the session type defaults to `qb::http::DefaultSession`, so handlers receive a `std::shared_ptr<qb::http::Context<qb::http::DefaultSession>>`. Every sample on this page lives in a server actor's `onInit()`, registered against `router()`.
 
-1.  `path`: A `std::string` representing the path pattern. This can include static segments, [parameterized segments](./03-routing-overview.md#path-matching) (e.g., `/:id`), and [wildcard segments](./03-routing-overview.md#path-matching) (e.g., `/*filepath`).
-2.  `handler`: The logic to execute when the route is matched. This can be a lambda function or an instance of a class implementing `ICustomRoute`.
+## Method handlers
 
-### Using Lambda Functions as Handlers
+`Router` (and `RouteGroup` and `Controller`) expose one method per HTTP verb. Each returns a reference to the router so calls chain, and each takes a path pattern followed by a handler:
 
-For straightforward route logic, lambda functions are often the most concise way to define handlers. The lambda must conform to the `qb::http::RouteHandlerFn<SessionType>` signature:
-
+<!-- src: qbm/http/routing/router.h:82-101 -->
 ```cpp
-// Defined in http/routing/types.h (or similar)
-// Included via <http/http.h> or <http/routing.h>
+Router<SessionType> &get    (std::string path, RouteHandlerFn<SessionType> handler_fn);
+Router<SessionType> &post   (std::string path, RouteHandlerFn<SessionType> handler_fn);
+Router<SessionType> &put    (std::string path, RouteHandlerFn<SessionType> handler_fn);
+Router<SessionType> &del    (std::string path, RouteHandlerFn<SessionType> handler_fn);  // DELETE
+Router<SessionType> &patch  (std::string path, RouteHandlerFn<SessionType> handler_fn);
+Router<SessionType> &options(std::string path, RouteHandlerFn<SessionType> handler_fn);
+Router<SessionType> &head   (std::string path, RouteHandlerFn<SessionType> handler_fn);
+```
+
+The verb is `del`, not `delete` — `delete` is a C++ keyword, so the framework names the DELETE handler `del` (the underlying enumerator is `qb::http::method::DEL`).
+
+When the verb is computed rather than literal, use the general form, which takes a `qb::http::method` value:
+
+<!-- src: qbm/http/routing/router.h:79-80 -->
+```cpp
+Router<SessionType> &add_route(std::string path, qb::http::method method,
+                               RouteHandlerFn<SessionType> handler_fn);
+```
+
+`router.get("/x", h)` is shorthand for `router.add_route("/x", qb::http::method::GET, h)`.
+
+## The handler signature
+
+A handler is a `qb::http::RouteHandlerFn<SessionType>` — a `std::function` taking a shared pointer to the request context and returning `void`:
+
+<!-- src: qbm/http/routing/types.h:82-83 -->
+```cpp
 template<typename SessionType>
-using RouteHandlerFn = std::function<void(std::shared_ptr<qb::http::Context<SessionType>> ctx)>;
+using RouteHandlerFn = std::function<void(std::shared_ptr<Context<SessionType>> ctx)>;
 ```
 
-The lambda receives a `std::shared_ptr<qb::http::Context<SessionType>>` which provides access to the request, response, path parameters, and other contextual information. **Crucially, the handler lambda is responsible for eventually calling `ctx->complete()`** to signal that its processing is finished and the router can proceed (e.g., send the response or move to an error state).
+The handler receives everything it needs through `ctx`: the request, the response to populate, the session, and the extracted path parameters. There is no return value — the handler signals its outcome by calling `ctx->complete(...)`.
 
+**Every handler must eventually call `ctx->complete(...)`.** Until it does, the request is parked and no response is sent. The argument is a `qb::http::AsyncTaskResult`; for a route handler that produced the response, that is `AsyncTaskResult::COMPLETE` (the default), so `ctx->complete()` with no argument is the common case. The response-builder helpers on `Context` (`ctx->json(...)`, `ctx->text(...)`, `ctx->html(...)`, `ctx->no_content()`, `ctx->redirect(...)`, `ctx->bad_request(...)`, and so on) each finalize the response *and* call `complete()` for you, so they are the terminal statement of a handler — see [The request context](./10-request-context.md).
+
+If a handler kicks off asynchronous work (a `qb::io::async::callback`, an actor message round-trip, a database query), it must capture `ctx` (it is already a `shared_ptr`, so it keeps the context alive) and call `complete()` from inside that continuation, not before it returns. See [Asynchronous routes](#asynchronous-routes) below.
+
+### Lambda handlers
+
+The fastest way to define a route is a lambda. It conforms to `RouteHandlerFn` automatically:
+
+<!-- src: derived from examples/qbm/http/03_basic_routing.cpp (setup_routes) -->
 ```cpp
-#include <http/http.h> // Main include for Router, Context, status, method, etc.
-#include <iostream>    // For std::cout in more complex examples (not strictly needed for this one)
+#include <http/http.h>  // Router, Context, status, method, Server — the whole qbm-http surface
 
-// Assuming MySession is defined elsewhere or is a type alias like qb::http::DefaultSession
-// using MySession = qb::http::DefaultSession; // Example alias
+class ApiServer : public qb::Actor, public qb::http::Server<> {
+public:
+    bool onInit() override {
+        // GET /health — no body, just a status helper.
+        router().get("/health", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+            ctx->no_content();  // 204; finalizes the context for you
+        });
 
-// In your server setup code, assuming 'router' is an instance of qb::http::Router<MySession>
-// qb::http::Router<MySession> router;
+        // POST /users — read the JSON body, echo a created resource.
+        router().post("/users", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+            auto payload = ctx->request().body().as<qb::json>();
+            qb::json created = {{"id", 42}, {"name", payload.value("name", "")}};
+            ctx->json(created, qb::http::status::CREATED);  // 201, sets Content-Type, completes
+        });
 
-// GET /simple
-router.get("/simple", [](std::shared_ptr<qb::http::Context<MySession>> ctx) {
-    ctx->response().status() = qb::http::status::OK;
-    ctx->response().body() = "Simple GET response";
+        router().compile();  // mandatory before serving — see Routing overview
+        return listen({"tcp://0.0.0.0:8080"}) && (start(), true);
+    }
+};
+```
+
+When the handler delegates to a member function, `[this](auto ctx) { ... }` keeps the registration terse while letting the body name the concrete `Context` type:
+
+<!-- src: examples/qbm/http/03_basic_routing.cpp:88-90 (registration) + derived member -->
+```cpp
+router().get("/users/:id", [this](auto ctx) { handle_get_user(ctx); });
+
+// ...
+void handle_get_user(std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+    int id = std::stoi(ctx->path_param("id"));
+    // look up id, populate ctx->response(), then complete
     ctx->complete();
+}
+```
+
+### Class-based handlers (`ICustomRoute`)
+
+For a stateful, reusable, or unit-testable handler, implement `qb::http::ICustomRoute<SessionType>`. It is a three-method interface:
+
+<!-- src: qbm/http/routing/custom_route.h:42-86 -->
+```cpp
+template<typename SessionType>
+class ICustomRoute {
+public:
+    virtual ~ICustomRoute() = default;
+    virtual void process(std::shared_ptr<Context<SessionType>> ctx) = 0;  // your logic; must complete()
+    [[nodiscard]] virtual std::string name() const = 0;                   // for logs and diagnostics
+    virtual void cancel() = 0;                                            // on disconnect/timeout
+};
+```
+
+`process()` carries the same contract as a lambda handler: it must call `ctx->complete(...)`. `cancel()` is the inverse — it is invoked when the request is torn down (client disconnect, timeout) while this handler is the in-flight task, and it **must not** call `ctx->complete()`; the `Context` owns the cancellation and finalization sequence. Use `cancel()` only to release resources or abort in-flight async work.
+
+<!-- src: derived from qbm/http/tests/test-router-api.cpp:28-44 (SimpleApiCustomRoute) -->
+```cpp
+#include <http/http.h>
+
+class UserProfileRoute : public qb::http::ICustomRoute<qb::http::DefaultSession> {
+public:
+    explicit UserProfileRoute(UserStore &store) : _store(store) {}
+
+    void process(std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) override {
+        const std::string id = ctx->path_param("id");
+        if (auto user = _store.find(id))
+            ctx->json(*user);                              // 200 + completes
+        else
+            ctx->not_found("no such user");                // 404 + completes
+    }
+
+    [[nodiscard]] std::string name() const override { return "UserProfileRoute"; }
+    void cancel() override { /* nothing async in flight to abort */ }
+
+private:
+    UserStore &_store;
+};
+```
+
+You register an `ICustomRoute` two ways. Pass a pre-built instance as a `std::shared_ptr` to the verb method:
+
+<!-- src: qbm/http/routing/router.h:104-105 -->
+```cpp
+auto route = std::make_shared<UserProfileRoute>(user_store);
+router().get("/users/:id", route);
+```
+
+Or let the router construct it in place with the typed overload, forwarding the constructor arguments after the path. The type is constrained to derive from `ICustomRoute<SessionType>`:
+
+<!-- src: qbm/http/routing/router.h:139-142 -->
+```cpp
+router().get<UserProfileRoute>("/users/:id", user_store);  // forwards user_store to the ctor
+```
+
+There is also a typed general form, mirroring `add_route`:
+
+<!-- src: qbm/http/routing/router.h:135-137 -->
+```cpp
+router().add_custom_route<UserProfileRoute>("/users/:id", qb::http::method::GET, user_store);
+```
+
+> One handler instance, many requests. After `compile()`, the task wrapping a route handler is **shared across concurrent requests** (HTTP/1.1 pipelining, HTTP/2 multiplexing). Do not store per-request state on an `ICustomRoute`; keep all request-scoped data on the `Context`. Member fields are fine for immutable dependencies like the `UserStore &` above.
+
+## Path patterns and parameters
+
+A path pattern is a `/`-separated sequence of three segment kinds (full grammar in [Routing overview](./03-routing-overview.md#path-pattern-syntax)):
+
+| Segment | Syntax | Captures | Example match |
+|---|---|---|---|
+| Static | `users` | nothing | `/users` |
+| Parameter | `:id` | one segment | `/users/42` → `id = "42"` |
+| Wildcard | `*rest` | the remainder of the path, slashes included | `/files/docs/a.pdf` → `rest = "docs/a.pdf"` |
+
+A parameter (`:name`) matches exactly one path segment. A wildcard (`*name`) matches everything left, including embedded slashes, and **must be the last segment** in the pattern. Each capture name must be unique within a pattern. A `:` or `*` with no name, an empty segment, or a name collision throws `std::invalid_argument` — the pattern is parsed and validated when the tree is built, so the throw fires from `compile()` (or from the auto-compile on the first `route()`), not from the verb call that declared the route.
+
+Read captured values off the context with `path_param`:
+
+<!-- src: qbm/http/routing/context.h:467-470 -->
+```cpp
+[[nodiscard]] std::string path_param(const std::string &name,
+                                     const std::string &not_found_value = "") const;
+```
+
+It returns the captured string, or `not_found_value` (default empty) when the name was not part of the matched pattern — so it never throws for a missing key. The value is always a decoded `std::string`; convert it yourself (`std::stoi`, etc.) and validate, since a client can send any value the pattern shape allows.
+
+<!-- src: derived from examples/qbm/http/03_basic_routing.cpp:88-113 (route shapes) -->
+```cpp
+// One path parameter.
+router().get("/users/:id", [](auto ctx) {
+    const std::string id = ctx->path_param("id");          // "42" for /users/42
+    ctx->text("user " + id);
 });
 
-// POST /submit
-router.post("/submit", [](std::shared_ptr<qb::http::Context<MySession>> ctx) {
-    std::string request_body_str = ctx->request().body().as<std::string>();
-    // Process request_body_str ...
-    ctx->response().status() = qb::http::status::CREATED;
-    ctx->response().body() = "Data submitted: " + request_body_str;
-    ctx->complete();
+// Several parameters in one pattern.
+router().get("/orgs/:org/repos/:repo", [](auto ctx) {
+    ctx->json({{"org", ctx->path_param("org")},
+               {"repo", ctx->path_param("repo")}});
 });
 
-// Route with path parameter
-router.get("/users/:userId", [](std::shared_ptr<qb::http::Context<MySession>> ctx) {
-    std::string user_id = ctx->path_param("userId");
-    ctx->response().status() = qb::http::status::OK;
-    ctx->response().body() = "Profile for user: " + user_id;
-    ctx->complete();
+// Wildcard: captures the rest of the path under the given name.
+router().get("/files/*path", [](auto ctx) {
+    const std::string rel = ctx->path_param("path");       // "docs/report.pdf" for /files/docs/report.pdf
+    ctx->text("serving " + rel);
 });
 ```
 
-**Important**: If the lambda initiates an asynchronous operation (e.g., a database query through `qb::io::async::callback` or another actor message), it must capture the `ctx` (typically as a `std::shared_ptr`) and call `ctx->complete()` within the callback of that asynchronous operation.
+For the whole parameter set at once — iteration, `has`, `size` — reach for `ctx->path_parameters()`, which returns the `qb::http::PathParameters` map (string-view keys into the route pattern, owned string values).
 
-### Using `ICustomRoute` for Complex Handlers
+> Query-string arguments are **not** path parameters. `path_param` reads `:`/`*` captures only; for `?q=...` read `ctx->request().query("q")` (see [Core HTTP concepts](./01-core-concepts.md)).
 
-For more complex, stateful, or reusable route logic, you can define a class that implements the `qb::http::ICustomRoute<SessionType>` interface. This interface requires you to implement:
+## The request context
 
--   `void process(std::shared_ptr<Context<SessionType>> ctx)`: Contains the core request handling logic. Similar to lambdas, this method **must** call `ctx->complete()`.
--   `std::string name() const`: Returns a descriptive name for the route handler, useful for logging and debugging.
--   `void cancel()`: Called if the request processing is cancelled while this handler is active.
+The `ctx` passed to a handler is a `std::shared_ptr<qb::http::Context<SessionType>>` — the single object that carries one request through its lifecycle. For route definition you mainly use four accessors:
 
-There are two ways to register an `ICustomRoute`:
-
-1.  **Passing a `std::shared_ptr<ICustomRoute<SessionType>>`:**
-
-    ```cpp
-    #include <http/http.h> // For ICustomRoute, Context, etc.
-    #include <memory>      // For std::make_shared
-    #include <string>      // For std::string
-
-    // Assume MySession and some MyDatabaseService are defined
-    // using MySession = qb::http::DefaultSession;
-    // struct MyDatabaseService { /* ... */ };
-
-    class UserProfileHandler : public qb::http::ICustomRoute<MySession> {
-    public:
-        std::string name() const override { return "UserProfileHandler"; }
-        void cancel() override { /* cleanup if needed */ }
-
-        void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
-            std::string user_id = ctx->path_param("id");
-            // ... fetch user profile ...
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "Profile for user (custom route): " + user_id;
-            ctx->complete();
-        }
-    };
-
-    auto user_profile_route = std::make_shared<UserProfileHandler>();
-    router.get("/profiles/:id", user_profile_route);
-    ```
-
-2.  **Using the typed template method (constructs in-place):**
-    The router provides templated versions of its method-specific functions (`get`, `post`, etc.) that can construct your `ICustomRoute` derived class in-place.
-
-    ```cpp
-    #include <http/http.h> // For ICustomRoute, Context, etc.
-    #include <memory>      // For std::make_shared
-    #include <string>      // For std::string
-    #include <utility>     // For std::move
-
-    // Assume MySession is defined
-    // using MySession = qb::http::DefaultSession;
-
-    class ProductDetailsHandler : public qb::http::ICustomRoute<MySession> {
-    private:
-        std::string _product_prefix;
-    public:
-        ProductDetailsHandler(std::string prefix) : _product_prefix(std::move(prefix)) {}
-        std::string name() const override { return _product_prefix + "ProductDetailsHandler"; }
-        void cancel() override { /* ... */ }
-
-        void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
-            std::string product_sku = ctx->path_param("sku");
-            ctx->response().body() = _product_prefix + " Details for SKU: " + product_sku;
-            ctx->complete();
-        }
-    };
-
-    // Construct ProductDetailsHandler in-place, passing "Item:" to its constructor
-    router.get<ProductDetailsHandler>("/inventory/:sku", "Item:");
-    ```
-
-Using `ICustomRoute` is beneficial for separating concerns, testing handler logic in isolation, and managing complex state or dependencies within the handler.
-
-## Route Compilation
-
-After all routes, groups, and controllers have been defined, you **must** call `router.compile()` before the router can start processing requests.
-
+<!-- src: qbm/http/routing/context.h:423-470 -->
 ```cpp
-#include <http/http.h> // For Router, etc.
-
-// Assume MyHttpServer is your server class, MySession its session type
-// and status_handler_lambda is defined.
-// MyHttpServer() {
-//     router.get("/status", status_handler_lambda);
-// ... existing code ...
-
-router.compile(); // Crucial step
-// }
+Request  &request();         // the incoming request: method, URI, headers, body, query()
+Response &response();        // the response you populate: status(), set_header(), body()
+std::shared_ptr<SessionType> session();   // the client session (may be null after disconnect)
+std::string path_param(const std::string &name, const std::string &not_found_value = "") const;
 ```
 
-Compilation analyzes the defined routing hierarchy, resolves middleware chains for each endpoint, and builds the internal `RadixTree` for efficient request matching. Attempting to route requests before compilation will result in undefined behavior or errors.
-
-## General Route Definition (`router.add_route()`)
-
-While the HTTP method-specific functions (`get`, `post`, etc.) are the most common way to define routes, the `Router` (and `RouteGroup`) also provides a more general `add_route` method:
+Set the response by hand and then `complete()`, or use a response helper that does both. The two styles are equivalent; the helpers are shorter and harder to get wrong:
 
 ```cpp
-#include <http/http.h> // For Router, method, etc.
+// Manual: set status, headers, body, then finalize.
+ctx->response().status() = qb::http::status::OK;
+ctx->response().set_header("Content-Type", "application/json");
+ctx->response().body() = qb::json{{"ok", true}};
+ctx->complete();
 
-// Assume router, data_put_lambda_handler, MyDeleteResourceHandler, MyConfigHandler are defined.
-// qb::http::Router<MySession> router;
-
-// For lambda handlers
-// ... existing code ...
-
-// For ICustomRoute shared_ptr
-auto custom_delete_handler = std::make_shared<MyDeleteResourceHandler>();
-router.add_route("/resources/:resourceId", qb::http::method::DEL, custom_delete_handler);
-
-// For typed ICustomRoute with constructor arguments
-router.add_custom_route<MyConfigHandler>("/config", qb::http::method::PATCH, "config_arg1");
+// Helper: one call sets Content-Type, body, status, and completes.
+ctx->json(qb::json{{"ok", true}});
 ```
 
-These are useful if the HTTP method is determined dynamically or for more programmatic route construction.
+`session()` returns a `shared_ptr` obtained from a `weak_ptr`, so check it for null before use — by the time an async handler resumes, the client may have disconnected. The richer `Context` surface (typed data slots for passing state between middleware and the handler, lifecycle hooks, `cancel()`, the full helper set) is covered in [The request context](./10-request-context.md).
 
-Previous: [Routing Overview](./03-routing-overview.md)
-Next: [Route Groups](./05-route-groups.md)
+### Asynchronous routes
+
+A handler does not have to finish synchronously. Capture `ctx` into a continuation, return without completing, and call `complete()` when the async work lands:
+
+<!-- src: qbm/http/tests/test-router-async.cpp -->
+```cpp
+router().get("/slow", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+    // Defer work onto the event loop; ctx (a shared_ptr) keeps the context alive.
+    qb::io::async::callback([ctx]() {
+        ctx->text("done");   // resolves later, off the original call stack — completes here
+    }, 0.250 /* seconds */);
+    // handler returns now; the request stays open until the callback fires
+});
+```
+
+The request is held open until that `complete()` runs. If your async path can fail, complete with `AsyncTaskResult::ERROR` (or call a response helper such as `ctx->internal_server_error(...)`) so the configured error chain runs — see [Error handling strategies](./13-error-handling.md).
+
+## Compiling routes
+
+Defining routes only builds the tree. Before the router can match anything, call `compile()` once, after all routes, groups, controllers, and middleware are declared:
+
+<!-- src: examples/qbm/http/03_basic_routing.cpp:42 -->
+```cpp
+router().compile();
+```
+
+`compile()` flattens the node hierarchy, resolves the inherited middleware chain for each endpoint, and populates the `RadixTree`. Any later mutation (adding a route, group, or middleware) marks the router un-compiled; `route()` auto-compiles on first use if you forgot, but relying on that hides definition errors that an explicit `compile()` would surface. Call it explicitly at the end of setup. See [Routing overview](./03-routing-overview.md) for the full compile model.
+
+## Pitfalls
+
+- **Forgetting `ctx->complete(...)`.** The request hangs indefinitely with no response. Every code path through a handler — including early returns and error branches — must reach a `complete()` or a response helper that calls it. The helpers (`json`, `text`, `no_content`, `redirect`, `bad_request`, …) are the safe default.
+- **Calling `complete()` from `ICustomRoute::cancel()`.** `cancel()` must not complete the context; the `Context` is already finalizing. Use it only to release resources.
+- **Storing per-request state on a handler object.** A compiled handler task is shared across concurrent requests. Keep request-scoped data on the `Context` (typed slots), not in `ICustomRoute` members.
+- **Completing before async work finishes.** If you start a `qb::io::async::callback` or send an actor message, do not call `complete()` in the handler body — call it from the continuation, or the response goes out before the work is done.
+- **Confusing path and query parameters.** `path_param("q")` returns the not-found default for `?q=...`; that argument is `ctx->request().query("q")`. A wildcard `*name` captures embedded slashes; a `:name` parameter captures a single segment only.
+- **A wildcard that is not last, or a duplicate capture name.** Both throw `std::invalid_argument` when the tree is built — from `compile()` (or the first `route()` that auto-compiles), not from the verb call that declared the route. Fix the pattern; do not catch and ignore.
+- **Skipping `compile()`.** Without it the router has no `RadixTree` to match against. Auto-compile on first `route()` is a safety net, not a substitute — call `compile()` at the end of `onInit()`.
+
+## See also
+
+- [Routing overview](./03-routing-overview.md) — the match algorithm, the radix tree, and the compile step.
+- [Route groups](./05-route-groups.md) — share a path prefix and scope middleware across many routes.
+- [Controllers](./06-controllers.md) — organize routes as class members with `MEMBER_HANDLER`.
+- [The request context](./10-request-context.md) — the full `Context` surface: helpers, typed slots, lifecycle hooks.
+- [Middleware overview](./07-middleware.md) — insert logic into the task chain before and after the handler.
+- [Error handling strategies](./13-error-handling.md) — the error chain and the not-found handler.
 
 ---
-Return to [Index](./README.md)
+Previous: [Routing overview](./03-routing-overview.md) · Next: [Route groups](./05-route-groups.md) · Up: [Index](./README.md)

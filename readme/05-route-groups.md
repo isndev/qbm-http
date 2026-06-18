@@ -1,191 +1,187 @@
-# 05: Route Groups
+# Route groups
 
-As your application grows, managing a flat list of routes can become cumbersome. `qb::http::RouteGroup` provides a way to organize your routes hierarchically, applying common path prefixes and middleware to a collection of related endpoints.
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
 
-## Creating and Using Route Groups
+Mount a set of related routes under a shared path prefix, nest groups to any depth, and attach middleware that every route inside the group inherits.
 
-A `RouteGroup` is created from an existing `Router` instance or another `RouteGroup` instance using the `group(path_prefix)` method.
+**Prerequisites:** [Defining routes](./04-defining-routes.md), [Routing overview](./03-routing-overview.md) — **See also:** [Controllers](./06-controllers.md), [Middleware overview](./07-middleware.md), [The request context](./10-request-context.md)
 
--   `path_prefix`: A `std::string` that defines the common base path for all routes and subgroups defined within this group. This prefix is prepended to the paths of its children.
+## What a route group is
 
+A `qb::http::RouteGroup<SessionType>` is a non-terminal node in the routing tree. It owns two things: a **path prefix** that is prepended to every route declared inside it, and a **middleware stack** that runs before any route declared inside it. Groups exist to keep large APIs organized — version namespaces (`/api/v1`), feature areas (`/admin`), and authentication boundaries are the typical reasons to reach for one.
+
+`RouteGroup` shares the same fluent route-definition API as the [`Router`](./03-routing-overview.md) and [`Controller`](./06-controllers.md): `get`, `post`, `put`, `del`, `patch`, `options`, `head`, `add_route`, the typed `ICustomRoute` overloads, and three `use()` overloads for middleware. Everything you can do at the router root, you can do on a group — relative to the group's prefix.
+
+Groups are part of the routing tree, so they obey the same compile rule as routes: declare every group, route, controller, and middleware first, then call `router.compile()` once. Any definition mutation resets the compiled flag (`_is_compiled = false`); `route()` auto-compiles on first use if you forgot, but call `compile()` explicitly so the cost is paid at startup, not on the first request.
+
+<!-- src: qbm/http/routing/route_group.h:49-95 -->
+
+## Creating a group
+
+You create a top-level group from the router with `group(path_prefix)`, and a nested group from another group with the same method. Both return a `std::shared_ptr<RouteGroup<SessionType>>` — the result is `[[nodiscard]]`, so capture it and define routes against the pointer.
+
+<!-- src: qbm/http/routing/router.h:171-176, route_group.h:196-205 -->
 ```cpp
-#include <http/http.h> // Main include for Router, RouteGroup, etc.
+#include <http/http.h>   // Router, RouteGroup, Context, method
 
-// Assuming 'router' is a qb::http::Router<MySession> instance
-// and handlers like users_list_handler are defined.
-// qb::http::Router<MySession> router;
+// In a server actor (class Srv : public qb::Actor, public qb::http::Server<>),
+// router() is inherited from Server<> and called inside the actor's onInit().
+// SessionType defaults to qb::http::DefaultSession.
 
-// Create a group for API version 1, prefixed with "/api/v1"
-auto v1_api_group = router.group("/api/v1");
+auto api = router().group("/api/v1");        // std::shared_ptr<RouteGroup<...>>
 
-// Routes defined on v1_api_group will be relative to "/api/v1"
-v1_api_group->get("/users", users_list_handler);         // effective path: /api/v1/users
-v1_api_group->post("/products", products_create_handler); // effective path: /api/v1/products
-
-// Nested groups are also possible
-auto admin_group = v1_api_group->group("/admin");
-admin_group->get("/settings", admin_settings_handler); // effective path: /api/v1/admin/settings
+api->get("/users", [](auto ctx) {            // effective path: /api/v1/users
+    ctx->response().status() = qb::http::status::OK;
+    ctx->complete();
+});
+api->post("/users", [](auto ctx) {           // effective path: /api/v1/users (POST)
+    ctx->response().status() = qb::http::status::CREATED;
+    ctx->complete();
+});
 ```
 
-### Path Resolution
+The handler signature, the `Context` API, and path parameters are identical to top-level routes — see [Defining routes](./04-defining-routes.md). The only difference a group introduces is the prefix.
 
-The `RouteGroup` itself is an `IHandlerNode`. When routes are compiled, the router traverses this hierarchy:
+> DELETE is `del()`, not `delete()` — `delete` is a C++ keyword, so the verb API spells the method `qb::http::method::DEL` throughout (router, group, and controller).
 
--   The `path_prefix` of a `RouteGroup` is combined with the `current_built_path` from its parent (either the main router or another `RouteGroup`).
--   Routes (`qb::http::Route`) or `Controller`s added to a `RouteGroup` have their own path segments, which are then appended to the group's full path.
+## How prefixes compose
 
-**Example Path Resolution:**
+When `compile()` runs, the router walks the tree from the root. Each node calls `build_full_path(parent_path)`, which joins the parent's accumulated path with its own segment through `qb::http::detail::join_paths`. That joiner normalizes slashes, so the prefix you write is forgiving:
 
+- Leading and trailing slashes are stripped before joining: `"/users"`, `"users"`, and `"users/"` all contribute the same segment.
+- The result always starts with `"/"` and never contains a double slash.
+- An empty segment contributes nothing; the root group's prefix is `""`, which is why a route declared directly on the router keeps its own path.
+
+<!-- src: qbm/http/routing/handler_node.h:47-114, 258-260 -->
 ```cpp
-#include <http/http.h> // Main include
+#include <http/http.h>
 
-// Assuming router is qb::http::Router<MySession> and handlers exist.
-// router.get("/health", ...);                           // -> /health
-// auto user_group = router.group("/users");           // Group prefix: /users
-// user_group->get("/:id", ...);                       // -> /users/:id
-// user_group->post("/", ...);                         // -> /users/
-// auto profile_group = user_group->group("/profiles"); // Nested group prefix: /users/profiles
-// profile_group->get("/:userId/view", ...);           // -> /users/profiles/:userId/view
+router().get("/health", h_health);            // -> /health   (root group prefix is "")
+
+auto users = router().group("/users");
+users->get("/:id", h_user_by_id);             // -> /users/:id
+users->post("/", h_user_create);              // -> /users     (trailing "/" normalized away)
+
+auto profiles = users->group("/profiles");    // nested: prefix accumulates to /users/profiles
+profiles->get("/:userId/view", h_view);       // -> /users/profiles/:userId/view
 ```
 
-## Group-Specific Middleware
+Because both arguments are normalized, `router().group("/api/")->group("/v1")` and `router().group("api")->group("v1/")` resolve to the same `/api/v1` base. Write whichever reads best; the joiner makes them equivalent.
 
-One of the primary benefits of `RouteGroup` is the ability to apply middleware that is specific to all routes and sub-nodes (other groups or controllers) within that group. Middleware applied to a group is executed *after* any middleware from its parent group or the main router, and *before* any middleware specific to a child node or the final route handler.
+## Group-scoped middleware
 
+The reason groups matter beyond tidiness is shared middleware. Call `use()` on a group and every route, nested group, and controller mounted under it inherits that middleware. This is the natural place to put authentication, logging, or rate limiting for a whole section of the API instead of repeating it on each route.
+
+`RouteGroup::use()` has the same three overloads as the router:
+
+<!-- src: qbm/http/routing/route_group.h:234-281 -->
 ```cpp
-#include <http/http.h> // Main include
-#include <http/middleware/all.h> // Or specific middleware headers
-#include <memory>      // For std::make_shared
+// 1. Lambda middleware (ctx, next) -> void; second arg names it for logs.
+group->use([](auto ctx, auto next) { /* ... */ next(); }, "trace");
 
-// Assume MySession and relevant handlers are defined.
-// Placeholder Middleware definitions:
-class ApiAuthMiddleware : public qb::http::IMiddleware<MySession> {
-public:
-    ApiAuthMiddleware(std::string name) : _name(name) {}
-    std::string name() const override { return _name; }
-    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
-        // Minimal implementation for example
-        std::cout << "ApiAuthMiddleware: " << ctx->request().uri().path() << std::endl;
-        ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
-    }
-    void cancel() override {}
-private: std::string _name;
-};
-class V1LoggingMiddleware : public qb::http::IMiddleware<MySession> {
-public:
-    V1LoggingMiddleware(std::string name) : _name(name) {}
-    std::string name() const override { return _name; }
-    void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
-        std::cout << "V1LoggingMiddleware: " << ctx->request().uri().path() << std::endl;
-        ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
-    }
-    void cancel() override {}
-private: std::string _name;
- };
-// qb::http::Router<MySession> router;
+// 2. A pre-built IMiddleware instance; name is taken from mw->name() if omitted.
+group->use(std::make_shared<MyMiddleware>(/* ctor args */));
 
-// ... in server setup ...
-auto api_group = router.group("/api");
-api_group->use(std::make_shared<ApiAuthMiddleware>("api_auth")); // Applies to all /api/* routes
-
-auto v1_group = api_group->group("/v1");
-v1_group->use(std::make_shared<V1LoggingMiddleware>("v1_logger")); // Applies to all /api/v1/* routes
-
-v1_group->get("/status", [](auto ctx) { /* ... */ ctx->complete(); });
-// Request to /api/v1/status will execute:
-// 1. Any global router middleware
-// 2. ApiAuthMiddleware (from api_group)
-// 3. V1LoggingMiddleware (from v1_group)
-// 4. The /status route handler
-
-auto v2_group = api_group->group("/v2");
-// v2_group implicitly inherits ApiAuthMiddleware from api_group
-// but does NOT inherit V1LoggingMiddleware from its sibling v1_group.
-v2_group->get("/info", [](auto ctx) { /* ... */ ctx->complete(); });
-// Request to /api/v2/info will execute:
-// 1. Any global router middleware
-// 2. ApiAuthMiddleware (from api_group)
-// 3. The /info route handler
+// 3. Construct the middleware in place from its type and constructor args.
+group->use<MyMiddleware>(/* ctor args */);
 ```
 
-Middleware is added to a `RouteGroup` using the same `use()` methods available on the `Router`:
+The lambda form takes `(ctx, next)` — invoke `next()` to pass control down the chain, or set a response and call `ctx->complete(qb::http::AsyncTaskResult::COMPLETE)` to short-circuit. See [Middleware overview](./07-middleware.md) for the full contract and [Standard middleware](./08-standard-middleware.md) for the built-in handlers (auth, CORS, rate limiting) you typically mount on a group.
 
--   `group.use(MiddlewareHandlerFn<SessionType> mw_fn, std::string name)`: For lambda-based middleware.
--   `group.use(std::shared_ptr<IMiddleware<SessionType>> mw_ptr, std::string name_override)`: For pre-created middleware instances.
--   `group.use<MiddlewareType, Args...>(Args&&... args)`: To construct middleware in-place.
+### Inheritance and execution order
 
-## Mounting Controllers within Groups
+Middleware composes top-down. At compile time each node runs `combine_tasks(inherited)`: it copies the tasks inherited from its parent, then appends its own. The resulting chain for any route is **parent middleware first, then this node's middleware, then the route handler** — in declaration order at each level.
 
-Controllers can also be mounted within `RouteGroup`s. The controller's routes will then be prefixed by the group's full path, and requests to those controller routes will pass through the group's middleware stack (in addition to any global middleware and the controller's own middleware).
-
+<!-- src: qbm/http/routing/handler_node.h:262-274, route_group.h:65-77 -->
 ```cpp
-#include <http/http.h> // Main include
-#include <memory>      // For std::make_shared
+#include <http/http.h>
 
-// Assuming MyUserController and UserGroupSpecificMiddleware are defined
-// class MyUserController : public qb::http::Controller<MySession> { /* ... */ };
-// class UserGroupSpecificMiddleware : public qb::http::IMiddleware<MySession> { /* ... */ };
-// qb::http::Router<MySession> router;
+router().use(global_mw);                       // runs for every request
 
-auto api_users_group = router.group("/api/users");
-// api_users_group->use(std::make_shared<UserGroupSpecificMiddleware>());
+auto api = router().group("/api");
+api->use(api_auth_mw);                          // runs for every /api/* request
 
-// Mount MyUserController at /api/users/manage
-// If MyUserController defines a route GET "/:id", its full path will be /api/users/manage/:id
-// auto user_controller = api_users_group->controller<MyUserController>("/manage");
+auto v1 = api->group("/v1");
+v1->use(v1_logging_mw);                         // runs for every /api/v1/* request
+v1->get("/status", h_status);
+
+// A request to GET /api/v1/status executes, in order:
+//   global_mw  ->  api_auth_mw  ->  v1_logging_mw  ->  h_status
 ```
 
-## Defining Routes Directly on Groups
+This ordering is enforced by the framework, not by chance — a router-middleware test asserts the exact trace `"router_mw;g1_mw;g2_mw;g2_handler"` for a route nested two groups deep. Middleware applies to descendants only: a sibling group does **not** inherit another sibling's middleware.
 
-Just like the main `Router`, `RouteGroup` instances provide the same HTTP method functions (`get`, `post`, `put`, etc.) for defining routes directly within the group. These routes are relative to the group's prefix.
-
+<!-- src: qbm/http/tests/test-router-middleware.cpp:594-608 -->
 ```cpp
-#include <http/http.h> // Main include
+auto api = router().group("/api");
+api->use(api_auth_mw);                          // shared by v1 and v2 below
 
-// Assuming AdminAuthMiddleware and handlers are defined
-// qb::http::Router<MySession> router;
+auto v1 = api->group("/v1");
+v1->use(v1_logging_mw);                          // v1 only
+v1->get("/status", h_status);
+// GET /api/v1/status:  global_mw -> api_auth_mw -> v1_logging_mw -> h_status
 
-auto admin_panel = router.group("/admin-panel");
-// admin_panel->use<AdminAuthMiddleware>();
-
-// admin_panel->get("/dashboard", admin_dashboard_handler); // Path: /admin-panel/dashboard
-// admin_panel->post("/settings/update", update_settings_handler); // Path: /admin-panel/settings/update
+auto v2 = api->group("/v2");
+v2->get("/info", h_info);                        // no v1_logging_mw here
+// GET /api/v2/info:    global_mw -> api_auth_mw -> h_info
 ```
 
-## ASCII Diagram: Group and Middleware Chaining
+## Mounting controllers in a group
 
-```
-Router
-  |- Global Middleware 1 (GM1)
-  |
-  |- Route: GET /public/info (Handler P)
-  |   Exec: GM1 -> Handler P
-  |
-  |- Group: /api (prefix: /api)
-  |   |- Group Middleware A (GMA)
-  |   |
-  |   |- Route: GET /users (Handler U)
-  |   |   Exec: GM1 -> GMA -> Handler U
-  |   |
-  |   |- Group: /v1 (prefix: /api/v1)
-  |   |   |- Group Middleware B (GMB)
-  |   |   |
-  |   |   |- Route: POST /items (Handler I)
-  |   |   |   Exec: GM1 -> GMA -> GMB -> Handler I
-  |   |   |
-  |   |   |- Controller: /products (prefix: /api/v1/products)
-  |   |       |- Controller Middleware C (CMC)
-  |   |       |
-  |   |       |- Route: GET /:id (Handler ProdId)
-  |   |           Exec: GM1 -> GMA -> GMB -> CMC -> Handler ProdId
+A group can host a [`Controller`](./06-controllers.md) the same way the router can, with `controller<C>(path_prefix, ctor_args...)`. The controller's own routes are prefixed by the group's full path, and requests into them pass through the group's middleware stack in addition to the controller's own middleware.
+
+<!-- src: qbm/http/routing/route_group.h:207-223 -->
+```cpp
+#include <http/http.h>
+
+auto api = router().group("/api/users");
+api->use(user_group_auth_mw);
+
+// Mount UserController at /api/users/manage; a GET "/:id" in the
+// controller resolves to /api/users/manage/:id and runs user_group_auth_mw first.
+auto users = api->controller<UserController>("/manage");
 ```
 
-This diagram illustrates how path prefixes accumulate and middleware chains are built up from the router root down through nested groups and controllers.
+## How prefixes and middleware accumulate
 
-Route groups are a powerful tool for structuring larger applications, promoting code organization and reusability of middleware logic across related parts of your API.
+```
+Router  (root group, prefix "")
+  │  global_mw
+  │
+  ├─ GET /public/info ─────────────► global_mw ▸ handler
+  │
+  └─ group /api               (prefix /api)
+       │  api_mw
+       │
+       ├─ GET /users ─────────────► global_mw ▸ api_mw ▸ handler            (/api/users)
+       │
+       └─ group /v1            (prefix /api/v1)
+            │  v1_mw
+            │
+            ├─ POST /items ────────► global_mw ▸ api_mw ▸ v1_mw ▸ handler   (/api/v1/items)
+            │
+            └─ controller /products (prefix /api/v1/products)
+                 │  ctrl_mw
+                 └─ GET /:id ──────► global_mw ▸ api_mw ▸ v1_mw ▸ ctrl_mw ▸ handler
+```
 
-Previous: [Defining Routes](./04-defining-routes.md)
-Next: [Controllers](./06-controllers.md)
+Path prefixes accumulate as you descend; middleware chains build up the same way, each level appending after the levels above it.
+
+## Pitfalls
+
+- **Forgetting `compile()`.** A group's prefix and middleware are flattened into the radix tree only at compile time. Declaring a group after `compile()` has run leaves it unrouted until you recompile; declaring one before invalidates the compiled flag, which `compile()` (or the first `route()`) then rebuilds.
+- **Dropping the returned pointer.** `group()` and `controller()` are `[[nodiscard]]`. The group lives in the tree regardless, but if you discard the `shared_ptr` you have no handle to add routes or middleware to it. Capture it.
+- **Expecting sibling inheritance.** Middleware flows down to descendants only. Two sibling groups under the same parent inherit the parent's stack but never each other's. Put shared middleware on the common ancestor.
+- **Assuming middleware order is alphabetical or registration-global.** Order is structural: parent-before-child, and within a node, declaration order. The 404 and 405 chains additionally inherit root-group (global) middleware, but a user-defined error chain set via `set_error_task_chain` does **not** — include those behaviors explicitly there. See [Error handling](./13-error-handling.md).
+- **Treating the prefix as literal.** `join_paths` normalizes slashes, so a stray leading or trailing `/` is harmless — but it will not collapse path *parameters* or wildcards for you. The prefix is matched as written once normalized; see [Routing overview](./03-routing-overview.md) for the match semantics.
+
+## See also
+
+- [Defining routes](./04-defining-routes.md) — the per-route API that groups reuse, and path parameters.
+- [Controllers](./06-controllers.md) — class-based grouping with `MEMBER_HANDLER`, mountable inside a group.
+- [Middleware overview](./07-middleware.md) — the `(ctx, next)` contract and lifecycle, and [Standard middleware](./08-standard-middleware.md) for built-ins.
+- [Routing overview](./03-routing-overview.md) — the compile step, the radix match algorithm, and dispatch.
 
 ---
-Return to [Index](./README.md)
+
+Previous: [Defining routes](./04-defining-routes.md) · Next: [Controllers](./06-controllers.md) · Up: [Index](./README.md)
