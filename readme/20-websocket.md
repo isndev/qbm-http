@@ -79,7 +79,9 @@ public:
 
     void on(ws_protocol::ping &&) {}  // auto-pong already sent by the framer
     void on(ws_protocol::pong &&) {}
-    void on(ws_protocol::close &&) {} // peer requested close
+    void on(ws_protocol::close &&) {} // peer Close: defining this handler
+                                      // suppresses the framer's auto-echo —
+                                      // re-send the Close or disconnect() here
 };
 
 // The listener: accepts sockets and spawns WsSession instances.
@@ -160,7 +162,7 @@ qb::http::ws::MessageClose bye(qb::http::ws::CloseStatus::Normal, "done");
 *this << bye;
 ```
 
-RFC 6455 §5.5.1 is a two-way handshake: after you send a Close you should wait for the peer's Close echo before tearing the TCP stream down. The framer cooperates — when an inbound Close arrives and you have not yet sent one, the default behavior echoes it back before going `not_ok`. Call `disconnect()` only when you want an immediate teardown. <!-- src: ws/ws.h:560-574, ws/ws.h:1513-1523 -->
+RFC 6455 §5.5.1 is a two-way handshake: after you send a Close you should wait for the peer's Close echo before tearing the TCP stream down. The framer's behavior on an inbound Close depends on whether your session defines an `on(close)` handler. If it does **not**, the framer auto-echoes the peer's Close before going `not_ok`. If it **does** (as the server example above does, with an empty `void on(ws_protocol::close &&) {}`), the framer hands the Close to your handler and goes `not_ok` **without** echoing — re-sending the Close (or calling `disconnect()`) is then your handler's responsibility. Call `disconnect()` only when you want an immediate teardown. <!-- src: ws/ws.h:560-574, ws/ws.h:1513-1523 -->
 
 ## Client: the CRTP form
 

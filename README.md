@@ -101,7 +101,8 @@ public:
 int main() {
     qb::Main engine;
     engine.addActor<ApiServer>(0);
-    engine.start();   // blocks; the actor core drives the event loop
+    engine.start();   // launches one worker thread per used core, then returns
+    engine.join();    // blocks until every actor terminates
     return 0;
 }
 ```
