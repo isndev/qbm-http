@@ -4,7 +4,7 @@
 
 `qbm-http` is a compiled qb module that gives an actor asynchronous HTTP servers and clients — HTTP/1.1 always, plus HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL and QUIC — over qb-io's non-blocking I/O.
 
-**Prerequisites:** a working [qb framework](https://github.com/isndev/qb) checkout (`qb-core` + `qb-io`); C++23 toolchain; CMake 3.14+. — **See also:** [readme/README.md](./readme/README.md) (full guide), [routing](./readme/03-routing-overview.md), [async client](./readme/14-async-http-client.md), [WebSocket](./readme/20-websocket.md).
+**Prerequisites:** a working [qb framework](https://github.com/isndev/qb) checkout (`qb-core` + `qb-io`); a C++20 toolchain (C++23 optional); CMake 3.24+. — **See also:** [readme/README.md](./readme/README.md) (full guide), [routing](./readme/03-routing-overview.md), [async client](./readme/14-async-http-client.md), [WebSocket](./readme/20-websocket.md).
 
 ## What this module is
 
@@ -53,7 +53,7 @@ target_link_libraries(app PRIVATE qbm::http)          # PUBLIC-pulls qb::core, q
 
 `qb_load_modules` globs and sorts the module subdirectories under the given path and `add_subdirectory`s each that has a `CMakeLists.txt`. The `http` module guards on `QB_FOUND` and returns early if qb has not been configured first, so the `add_subdirectory(qb)` line must come before `qb_load_modules`.
 
-Because module dependencies link `PUBLIC`, the `QB_HAS_SSL` / `QB_HAS_QUIC` compile definitions and the `qb::core` / `qb::io` headers propagate to your target — that is what makes the `#ifdef QB_HAS_SSL` and `#ifdef QBM_HTTP_HAS_HTTP3` gates resolve consistently in your own code. The module also requires and propagates `cxx_std_23`.
+Because module dependencies link `PUBLIC`, the `QB_HAS_SSL` / `QB_HAS_QUIC` compile definitions and the `qb::core` / `qb::io` headers propagate to your target — that is what makes the `#ifdef QB_HAS_SSL` and `#ifdef QBM_HTTP_HAS_HTTP3` gates resolve consistently in your own code. The module also propagates the framework C++ standard as a `PUBLIC` usage requirement — `cxx_std_${QB_CXX_STANDARD}`, i.e. `cxx_std_20` by default, or `cxx_std_23` when the build is configured with `QB_CXX_STANDARD=23`.
 
 ```cpp
 #include <http/http.h>            // umbrella: HTTP/1.1 always; HTTP/2 + WS under SSL; HTTP/3 under QUIC
@@ -165,7 +165,7 @@ WebSocket is part of `qbm-http` (namespace `qb::http::ws`); there is no separate
 #include <http/http.h>
 #include <http/ws.h>
 
-class WsSession : public qb::http::use<WsSession>::tcp::client<WsServer> {
+class WsSession : public qb::io::use<WsSession>::tcp::client<WsServer> {
 public:
     using Protocol    = qb::http::protocol<WsSession>;
     using WS_Protocol = qb::http::ws::protocol<WsSession>;
