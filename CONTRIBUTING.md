@@ -27,8 +27,9 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure -R qbm-http
 ```
 
-The SSL-dependent features (HTTP/2, HTTP/3, HTTPS, secure WebSocket, JWT, auth) only build when OpenSSL is
-present (`QB_HAS_SSL`); HTTP/3 additionally requires QUIC and libnghttp3 (`QBM_HTTP_HAS_HTTP3`). Add a test
+The SSL-dependent features (HTTP/2, HTTP/3, HTTPS, WebSocket — including plaintext `ws://`, JWT, auth) only
+build when OpenSSL is present (`QB_HAS_SSL`); HTTP/3 additionally requires QUIC and libnghttp3
+(`QBM_HTTP_HAS_HTTP3`). Add a test
 for any new behavior, and exercise both the SSL-enabled and SSL-disabled configurations when your change
 touches a gated feature.
 
