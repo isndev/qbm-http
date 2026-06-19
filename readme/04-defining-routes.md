@@ -248,7 +248,7 @@ router().get("/slow", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSess
     // Defer work onto the event loop; ctx (a shared_ptr) keeps the context alive.
     qb::io::async::callback([ctx]() {
         ctx->text("done");   // resolves later, off the original call stack — completes here
-    }, 0.250 /* seconds */);
+    }, std::chrono::milliseconds(250));
     // handler returns now; the request stays open until the callback fires
 });
 ```
