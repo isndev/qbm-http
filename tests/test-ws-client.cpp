@@ -9,7 +9,7 @@
  * - Proper connection closure
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -34,8 +34,8 @@
 using namespace qb::io;
 
 // Test configuration constants
-constexpr const std::size_t MESSAGE_COUNT    = 100;
-constexpr const char        TEST_MESSAGE[]   = "Test message from client";
+constexpr const std::size_t MESSAGE_COUNT  = 100;
+constexpr const char        TEST_MESSAGE[] = "Test message from client";
 
 // Test synchronization variables
 std::atomic<std::size_t> messages_received{0};
@@ -57,8 +57,7 @@ std::atomic<bool>        test_complete{false};
  * @return true if condition was met, false if max iterations reached
  */
 bool
-run_until(std::function<bool()> condition, int max_iterations = 1000,
-          int delay_ms = 10) {
+run_until(std::function<bool()> condition, int max_iterations = 1000, int delay_ms = 10) {
     for (int i = 0; i < max_iterations; ++i) {
         async::run(EVRUN_NOWAIT);
         if (condition()) {
@@ -108,8 +107,7 @@ public:
      */
     void
     on(WS_Protocol::message &&event) {
-        qb::io::cout() << "Server received message: " << std::string(event.data, event.size)
-                  << std::endl;
+        qb::io::cout() << "Server received message: " << std::string(event.data, event.size) << std::endl;
 
         // Echo the message back
         *this << event.ws;
@@ -209,8 +207,7 @@ public:
 
             // Start sending test messages
             for (size_t i = 0; i < MESSAGE_COUNT; ++i) {
-                std::string message =
-                    std::string(TEST_MESSAGE) + " #" + std::to_string(i);
+                std::string message = std::string(TEST_MESSAGE) + " #" + std::to_string(i);
                 send_message(message);
             }
         }
@@ -227,8 +224,7 @@ public:
 
         // Check if we've received all expected messages
         if (messages_received >= MESSAGE_COUNT) {
-            qb::io::cout() << "All " << MESSAGE_COUNT
-                      << " messages received, closing connection" << std::endl;
+            qb::io::cout() << "All " << MESSAGE_COUNT << " messages received, closing connection" << std::endl;
 
             // Send close frame
             qb::http::ws::MessageClose close_msg(1000, "Test completed");
@@ -391,24 +387,36 @@ TEST(WebSocketClient, CallbackClientTest) {
         qb::http::ws::client ws_client;
 
         // Configure callbacks using method chaining
-        ws_client.on_connected([&connected](auto& event) {
-            qb::io::cout() << "Callback client: WebSocket connected!" << std::endl;
-            connected = true;
-        })
-        .on_message([](auto& event) {
-            std::string message(event.data, event.size);
-            qb::io::cout() << "Callback client: Received message: " << message << std::endl;
-            ++messages_received;
+        ws_client
+            .on_connected([&connected](auto &event) {
+                qb::io::cout() << "Callback client: WebSocket connected!" << std::endl;
+                connected = true;
+            })
+            .on_message([](auto &event) {
+                std::string message(event.data, event.size);
+                qb::io::cout() << "Callback client: Received message: " << message << std::endl;
+                ++messages_received;
 
-            // Check if we've received all expected messages
-            if (messages_received >= MESSAGE_COUNT) {
-                qb::io::cout() << "Callback client: All " << MESSAGE_COUNT
-                          << " messages received, closing connection" << std::endl;
+                // Check if we've received all expected messages
+                if (messages_received >= MESSAGE_COUNT) {
+                    qb::io::cout() << "Callback client: All " << MESSAGE_COUNT << " messages received, closing connection" << std::endl;
 
-                // Send close frame
-                qb::http::ws::MessageClose close_msg(1000, "Test completed");
-                // Note: We can't access the client from here directly
-                // The close will be handled by the main loop
+                    // Send close frame
+                    qb::http::ws::MessageClose close_msg(1000, "Test completed");
+                    // Note: We can't access the client from here directly
+                    // The close will be handled by the main loop
+
+                    // Signal test completion
+                    {
+                        std::lock_guard<std::mutex> lock(test_mutex);
+                        test_complete = true;
+                    }
+                    test_cv.notify_all();
+                }
+            })
+            .on_error([&error_occurred](auto &event) {
+                qb::io::cout() << "Callback client: Error occurred!" << std::endl;
+                error_occurred = true;
 
                 // Signal test completion
                 {
@@ -416,46 +424,32 @@ TEST(WebSocketClient, CallbackClientTest) {
                     test_complete = true;
                 }
                 test_cv.notify_all();
-            }
-        })
-        .on_error([&error_occurred](auto& event) {
-            qb::io::cout() << "Callback client: Error occurred!" << std::endl;
-            error_occurred = true;
+            })
+            .on_ping([](auto &event) {
+                qb::io::cout() << "Callback client: Received ping frame of size " << event.size << std::endl;
+                ++pings_received;
+            })
+            .on_pong([](auto &event) { qb::io::cout() << "Callback client: Received pong frame of size " << event.size << std::endl; })
+            .on_closed([](auto &event) {
+                qb::io::cout() << "Callback client: WebSocket connection closed" << std::endl;
 
-            // Signal test completion
-            {
-                std::lock_guard<std::mutex> lock(test_mutex);
-                test_complete = true;
-            }
-            test_cv.notify_all();
-        })
-        .on_ping([](auto& event) {
-            qb::io::cout() << "Callback client: Received ping frame of size " << event.size << std::endl;
-            ++pings_received;
-        })
-        .on_pong([](auto& event) {
-            qb::io::cout() << "Callback client: Received pong frame of size " << event.size << std::endl;
-        })
-        .on_closed([](auto& event) {
-            qb::io::cout() << "Callback client: WebSocket connection closed" << std::endl;
+                // Signal test completion
+                {
+                    std::lock_guard<std::mutex> lock(test_mutex);
+                    test_complete = true;
+                }
+                test_cv.notify_all();
+            })
+            .on_disconnected([](auto &event) {
+                qb::io::cout() << "Callback client: TCP connection closed" << std::endl;
 
-            // Signal test completion
-            {
-                std::lock_guard<std::mutex> lock(test_mutex);
-                test_complete = true;
-            }
-            test_cv.notify_all();
-        })
-        .on_disconnected([](auto& event) {
-            qb::io::cout() << "Callback client: TCP connection closed" << std::endl;
-
-            // Signal test completion
-            {
-                std::lock_guard<std::mutex> lock(test_mutex);
-                test_complete = true;
-            }
-            test_cv.notify_all();
-        });
+                // Signal test completion
+                {
+                    std::lock_guard<std::mutex> lock(test_mutex);
+                    test_complete = true;
+                }
+                test_cv.notify_all();
+            });
 
         // Connect to the server
         qb::io::uri uri("ws://localhost:20111/");

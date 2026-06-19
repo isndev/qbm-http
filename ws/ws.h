@@ -13,7 +13,7 @@
  * and requires OpenSSL for security features.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -34,11 +34,11 @@
 #error "websocket protocol requires OpenSSL crypto library"
 #endif
 
-#include <qb/io/async/tcp/connector.h>
-#include <qb/io/crypto.h>
+#include <algorithm>
 #include <chrono>
 #include <functional>
-#include <algorithm>
+#include <qb/io/async/tcp/connector.h>
+#include <qb/io/crypto.h>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -82,12 +82,12 @@ bool is_utf8(std::string_view sv) noexcept;
  * with their corresponding opcode values (including FIN bit set).
  */
 enum opcode : unsigned char {
-    Continuation = 0, /**< Continuation frame (opcode 0x0) */
-    _Text        = 1, /**< Text frame (opcode 0x1) */
-    _Binary      = 2, /**< Binary frame (opcode 0x2) */
-    _Close       = 8, /**< Close frame (opcode 0x8) */
-    _Ping        = 9, /**< Ping frame (opcode 0x9) */
-    _Pong        = 10,/**< Pong frame (opcode 0xA) */
+    Continuation = 0,  /**< Continuation frame (opcode 0x0) */
+    _Text        = 1,  /**< Text frame (opcode 0x1) */
+    _Binary      = 2,  /**< Binary frame (opcode 0x2) */
+    _Close       = 8,  /**< Close frame (opcode 0x8) */
+    _Ping        = 9,  /**< Ping frame (opcode 0x9) */
+    _Pong        = 10, /**< Pong frame (opcode 0xA) */
 
     Text   = 129, /**< Text frame (0x81): FIN bit + opcode 0x1 */
     Binary = 130, /**< Binary frame (0x82): FIN bit + opcode 0x2 */
@@ -104,14 +104,11 @@ enum opcode : unsigned char {
  * data storage, frame composition, and state management.
  */
 struct Message {
-    unsigned char fin_rsv_opcode =
-        0; /**< Combined field for FIN bit, RSV bits, and opcode */
-    bool masked =
-        false; /**< Whether the message should be masked (required for client->server) */
-    ::qb::allocator::pipe<char>
-        _data; /**< Internal buffer storing the message payload */
+    unsigned char               fin_rsv_opcode = 0;     /**< Combined field for FIN bit, RSV bits, and opcode */
+    bool                        masked         = false; /**< Whether the message should be masked (required for client->server) */
+    ::qb::allocator::pipe<char> _data;                  /**< Internal buffer storing the message payload */
 
-    ::qb::allocator::pipe<char>&
+    ::qb::allocator::pipe<char> &
     data() noexcept {
         return _data;
     } /**< Pointer to the message data buffer */
@@ -222,37 +219,37 @@ struct MessagePong : public Message {
  */
 enum class CloseStatus : std::uint16_t {
     /// 1000 - Normal closure; the connection successfully completed its purpose.
-    Normal                 = 1000,
+    Normal = 1000,
     /// 1001 - The endpoint is going away (e.g., server shutdown).
-    GoingAway              = 1001,
+    GoingAway = 1001,
     /// 1002 - Protocol error (malformed frame, reserved opcode, etc.).
-    ProtocolError          = 1002,
+    ProtocolError = 1002,
     /// 1003 - Received data cannot be accepted (e.g., invalid data format).
-    DataNotAccepted        = 1003,
+    DataNotAccepted = 1003,
     /// 1004 - Reserved. MUST NOT be set as a status code in a Close frame.
-    Reserved1004           = 1004,
+    Reserved1004 = 1004,
     /// 1005 - Reserved: "no status received". MUST NOT appear on the wire.
-    NoStatusReceived       = 1005,
+    NoStatusReceived = 1005,
     /// 1006 - Reserved: "abnormal closure". MUST NOT appear on the wire.
-    AbnormalClosure        = 1006,
+    AbnormalClosure = 1006,
     /// 1007 - Data is inconsistent with message type (e.g., non-UTF-8 in Text).
-    DataNotConsistent      = 1007,
+    DataNotConsistent = 1007,
     /// 1008 - Message violates policy.
-    PolicyViolation        = 1008,
+    PolicyViolation = 1008,
     /// 1009 - Message is too large to process.
-    MessageTooBig          = 1009,
+    MessageTooBig = 1009,
     /// 1010 - Client expected server to negotiate an extension.
-    MissingExtension       = 1010,
+    MissingExtension = 1010,
     /// 1011 - Server encountered an unexpected condition.
-    UnexpectedReason       = 1011,
+    UnexpectedReason = 1011,
     /// 1012 - Service restart.
-    ServiceRestart         = 1012,
+    ServiceRestart = 1012,
     /// 1013 - Try again later.
-    TryAgainLater          = 1013,
+    TryAgainLater = 1013,
     /// 1014 - Bad gateway.
-    BadGateway             = 1014,
+    BadGateway = 1014,
     /// 1015 - Reserved: "TLS handshake failure". MUST NOT appear on the wire.
-    TLSHandshakeFailed     = 1015
+    TLSHandshakeFailed = 1015
 };
 
 /**
@@ -268,7 +265,10 @@ is_sendable_close_code(std::uint16_t code) noexcept {
     if (code < 1000u || code > 4999u)
         return false;
     switch (code) {
-        case 1004u: case 1005u: case 1006u: case 1015u:
+        case 1004u:
+        case 1005u:
+        case 1006u:
+        case 1015u:
             return false;
         default:
             return true;
@@ -296,8 +296,7 @@ struct MessageClose : Message {
     /**
      * @brief Construct a Close frame from a typed status code.
      */
-    explicit MessageClose(CloseStatus      status = CloseStatus::Normal,
-                          std::string_view reason = "closed normally")
+    explicit MessageClose(CloseStatus status = CloseStatus::Normal, std::string_view reason = "closed normally")
         : MessageClose(static_cast<std::uint16_t>(status), reason) {}
 
     /**
@@ -305,13 +304,10 @@ struct MessageClose : Message {
      *
      * @throws std::invalid_argument if @p status is reserved or out of range.
      */
-    explicit MessageClose(std::uint16_t    status,
-                          std::string_view reason) {
+    explicit MessageClose(std::uint16_t status, std::string_view reason) {
         if (!is_sendable_close_code(status)) {
-            throw std::invalid_argument(
-                "qb::http::ws::MessageClose: close code " +
-                std::to_string(static_cast<unsigned>(status)) +
-                " is reserved or out of range and must not be sent");
+            throw std::invalid_argument("qb::http::ws::MessageClose: close code " + std::to_string(static_cast<unsigned>(status))
+                                        + " is reserved or out of range and must not be sent");
         }
 
         fin_rsv_opcode = static_cast<unsigned char>(opcode::Close);
@@ -327,14 +323,11 @@ struct MessageClose : Message {
             }
         }
         if (!reason.empty() && !is_utf8(reason)) {
-            throw std::invalid_argument(
-                "qb::http::ws::MessageClose: close reason must be valid UTF-8");
+            throw std::invalid_argument("qb::http::ws::MessageClose: close reason must be valid UTF-8");
         }
 
         _data.reserve(2 + reason.size());
-        _data << static_cast<unsigned char>((status >> 8) & 0xFF)
-              << static_cast<unsigned char>(status & 0xFF)
-              << reason;
+        _data << static_cast<unsigned char>((status >> 8) & 0xFF) << static_cast<unsigned char>(status & 0xFF) << reason;
     }
 };
 
@@ -395,13 +388,13 @@ namespace ws_internal {
  * @brief Constants related to the WebSocket RFC 6455 specification.
  */
 namespace rfc {
-constexpr uint8_t     FIN_BIT_MASK                 = 0x80;
-constexpr uint8_t     RSV_BITS_MASK                = 0x70;
-constexpr uint8_t     OPCODE_MASK                  = 0x0F;
-constexpr uint8_t     MASK_BIT_MASK                = 0x80;
-constexpr size_t      MAX_CONTROL_FRAME_PAYLOAD_SIZE = 125;
-constexpr uint8_t     PAYLOAD_LEN_16_BIT           = 126;
-constexpr uint8_t     PAYLOAD_LEN_64_BIT           = 127;
+constexpr uint8_t FIN_BIT_MASK                   = 0x80;
+constexpr uint8_t RSV_BITS_MASK                  = 0x70;
+constexpr uint8_t OPCODE_MASK                    = 0x0F;
+constexpr uint8_t MASK_BIT_MASK                  = 0x80;
+constexpr size_t  MAX_CONTROL_FRAME_PAYLOAD_SIZE = 125;
+constexpr uint8_t PAYLOAD_LEN_16_BIT             = 126;
+constexpr uint8_t PAYLOAD_LEN_64_BIT             = 127;
 } // namespace rfc
 
 /**
@@ -413,26 +406,26 @@ constexpr uint8_t     PAYLOAD_LEN_64_BIT           = 127;
  * could not bind. These aggregates are shared for every I/O handler type.
  */
 struct event_close {
-    const std::size_t       size;
-    const char             *data;
+    const std::size_t        size;
+    const char              *data;
     ::qb::http::ws::Message &ws;
 };
 
 struct event_ping {
-    const std::size_t       size;
-    const char             *data;
+    const std::size_t        size;
+    const char              *data;
     ::qb::http::ws::Message &ws;
 };
 
 struct event_pong {
-    const std::size_t       size;
-    const char             *data;
+    const std::size_t        size;
+    const char              *data;
     ::qb::http::ws::Message &ws;
 };
 
 struct event_message {
-    const std::size_t       size;
-    const char             *data;
+    const std::size_t        size;
+    const char              *data;
     ::qb::http::ws::Message &ws;
 };
 
@@ -467,11 +460,11 @@ is_valid_received_close_code(std::uint16_t code) noexcept {
  */
 template <typename IO_>
 class base : public qb::io::async::AProtocol<IO_> {
-    std::size_t   _parsed = 0; /**< Number of bytes parsed from the current frame */
-    std::size_t   _expected_size = 0; /**< Expected payload size based on frame header */
-    unsigned char _fin_rsv_opcode = 0; /**< Current frame's FIN, RSV, and opcode bits */
-    unsigned char _data_opcode    = 0; /**< Opcode for the current fragmented data message */
-    ::qb::http::ws::Message _message;   /**< Current message being assembled */
+    std::size_t             _parsed         = 0; /**< Number of bytes parsed from the current frame */
+    std::size_t             _expected_size  = 0; /**< Expected payload size based on frame header */
+    unsigned char           _fin_rsv_opcode = 0; /**< Current frame's FIN, RSV, and opcode bits */
+    unsigned char           _data_opcode    = 0; /**< Opcode for the current fragmented data message */
+    ::qb::http::ws::Message _message;            /**< Current message being assembled */
     // Secure default: bound the reassembled message size so a peer streaming
     // unbounded continuation fragments cannot exhaust server memory. Apps may
     // raise it or set 0 (unlimited) explicitly via set_max_payload_size().
@@ -531,28 +524,19 @@ class base : public qb::io::async::AProtocol<IO_> {
 
         if (frame_opcode == ::qb::http::ws::opcode::_Close) {
             if (current_frame_message.size() == 1u) {
-                fail_connection(::qb::http::ws::CloseStatus::ProtocolError,
-                                "Close frame payload of 1 byte is invalid");
+                fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Close frame payload of 1 byte is invalid");
                 return;
             }
             if (current_frame_message.size() >= 2u) {
-                const auto *payload =
-                    reinterpret_cast<const unsigned char *>(
-                        current_frame_message._data.cbegin());
-                const auto close_code =
-                    static_cast<std::uint16_t>((payload[0] << 8u) | payload[1]);
+                const auto *payload    = reinterpret_cast<const unsigned char *>(current_frame_message._data.cbegin());
+                const auto  close_code = static_cast<std::uint16_t>((payload[0] << 8u) | payload[1]);
                 if (!is_valid_received_close_code(close_code)) {
-                    fail_connection(::qb::http::ws::CloseStatus::ProtocolError,
-                                    "Invalid close status code");
+                    fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Invalid close status code");
                     return;
                 }
-                if (current_frame_message.size() > 2u &&
-                    !::qb::http::ws::is_utf8(
-                        {current_frame_message._data.cbegin() + 2,
-                         current_frame_message.size() - 2})) {
-                    fail_connection(
-                        ::qb::http::ws::CloseStatus::DataNotConsistent,
-                        "Invalid UTF-8 in close reason");
+                if (current_frame_message.size() > 2u
+                    && !::qb::http::ws::is_utf8({current_frame_message._data.cbegin() + 2, current_frame_message.size() - 2})) {
+                    fail_connection(::qb::http::ws::CloseStatus::DataNotConsistent, "Invalid UTF-8 in close reason");
                     return;
                 }
             }
@@ -562,10 +546,7 @@ class base : public qb::io::async::AProtocol<IO_> {
             // silently dropped them (W20). The close frame is simply appended
             // after the in-flight data.
             if constexpr (qb::has_on<IO_, close>) {
-                this->_io.on(
-                    close{current_frame_message.size(),
-                          current_frame_message._data.cbegin(),
-                          current_frame_message});
+                this->_io.on(close{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
             } else {
                 // Default behavior: echo the close frame back (RFC 6455 §5.5.1
                 // requires the peer to respond with a Close — we oblige).
@@ -574,20 +555,14 @@ class base : public qb::io::async::AProtocol<IO_> {
             this->not_ok();
         } else if (frame_opcode == ::qb::http::ws::opcode::_Ping) {
             if constexpr (qb::has_on<IO_, ping>) {
-                this->_io.on(
-                    ping{current_frame_message.size(),
-                         current_frame_message._data.cbegin(),
-                         current_frame_message});
+                this->_io.on(ping{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
             }
             // Send pong automatically
             current_frame_message.fin_rsv_opcode = ::qb::http::ws::opcode::Pong;
             this->_io << current_frame_message;
         } else if (frame_opcode == ::qb::http::ws::opcode::_Pong) {
             if constexpr (qb::has_on<IO_, pong>) {
-                this->_io.on(
-                    pong{current_frame_message.size(),
-                         current_frame_message._data.cbegin(),
-                         current_frame_message});
+                this->_io.on(pong{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
             }
         }
     }
@@ -598,9 +573,7 @@ class base : public qb::io::async::AProtocol<IO_> {
         if (frame_opcode != ::qb::http::ws::opcode::Continuation) {
             if (_data_opcode != 0) {
                 // New data message started before previous one finished.
-                fail_connection(
-                    ::qb::http::ws::CloseStatus::ProtocolError,
-                    "Received new data message before previous was complete");
+                fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Received new data message before previous was complete");
             } else {
                 _data_opcode = frame_opcode;
                 _message.reset();
@@ -608,18 +581,14 @@ class base : public qb::io::async::AProtocol<IO_> {
         } else { // Continuation frame
             if (_data_opcode == 0) {
                 // Continuation frame received without a prior data frame.
-                fail_connection(::qb::http::ws::CloseStatus::ProtocolError,
-                                "Received continuation frame without initial data frame");
+                fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Received continuation frame without initial data frame");
             }
         }
 
         if (this->ok()) {
             if (_max_payload_size > 0u) {
-                if (_message.size() > _max_payload_size ||
-                    current_frame_message.size() >
-                        (_max_payload_size - _message.size())) {
-                    fail_connection(::qb::http::ws::CloseStatus::MessageTooBig,
-                                    "Payload size exceeds configured limit");
+                if (_message.size() > _max_payload_size || current_frame_message.size() > (_max_payload_size - _message.size())) {
+                    fail_connection(::qb::http::ws::CloseStatus::MessageTooBig, "Payload size exceeds configured limit");
                     return;
                 }
             }
@@ -629,27 +598,20 @@ class base : public qb::io::async::AProtocol<IO_> {
             if (is_final_frame) {
                 if (_data_opcode == 0) {
                     // This can happen if a single-frame message is sent with opcode 0
-                    fail_connection(
-                        ::qb::http::ws::CloseStatus::ProtocolError,
-                        "Received final continuation frame with no initial data frame");
+                    fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Received final continuation frame with no initial data frame");
                 } else {
                     // Complete message has been reassembled.
                     _message.fin_rsv_opcode = _data_opcode | rfc::FIN_BIT_MASK;
 
-                    if (_data_opcode == ::qb::http::ws::opcode::_Text &&
-                        !::qb::http::ws::is_utf8(
-                            {_message._data.cbegin(), _message.size()})) {
-                        fail_connection(
-                            ::qb::http::ws::CloseStatus::DataNotConsistent,
-                            "Invalid UTF-8 in text message");
+                    if (_data_opcode == ::qb::http::ws::opcode::_Text && !::qb::http::ws::is_utf8({_message._data.cbegin(), _message.size()})) {
+                        fail_connection(::qb::http::ws::CloseStatus::DataNotConsistent, "Invalid UTF-8 in text message");
                     } else {
                         if constexpr (IO_::has_server)
                             _message.masked = false;
                         else
                             _message.masked = true;
 
-                        this->_io.on(
-                            message{_message.size(), _message._data.cbegin(), _message});
+                        this->_io.on(message{_message.size(), _message._data.cbegin(), _message});
                     }
 
                     // Reset for the next message.
@@ -698,17 +660,16 @@ public:
 
         auto      &buffer      = this->_io.in();
         const auto buffer_size = buffer.size();
-        auto first_bytes = reinterpret_cast<const unsigned char *>(buffer.cbegin());
+        auto       first_bytes = reinterpret_cast<const unsigned char *>(buffer.cbegin());
         if (!_parsed) {
             if (buffer_size < 2u)
                 return 0;
 
-            _fin_rsv_opcode  = first_bytes[0];
+            _fin_rsv_opcode         = first_bytes[0];
             const auto frame_opcode = _fin_rsv_opcode & rfc::OPCODE_MASK;
 
             if (!is_valid_frame_opcode(frame_opcode)) {
-                return fail_connection(::qb::http::ws::CloseStatus::ProtocolError,
-                                       "Reserved or unknown opcode");
+                return fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Reserved or unknown opcode");
             }
 
             // RFC 5.2: RSV bits MUST be 0 unless an extension is negotiated.
@@ -740,12 +701,12 @@ public:
             _parsed += 2u;
         }
         if (!_expected_size) {
-            const auto payload_indicator = first_bytes[1] & 127u;
-            std::size_t length = payload_indicator;
-            const bool is_control_frame = (_fin_rsv_opcode & rfc::OPCODE_MASK) >= ::qb::http::ws::opcode::_Close;
+            const auto  payload_indicator = first_bytes[1] & 127u;
+            std::size_t length            = payload_indicator;
+            const bool  is_control_frame  = (_fin_rsv_opcode & rfc::OPCODE_MASK) >= ::qb::http::ws::opcode::_Close;
 
             if (is_control_frame && length > rfc::MAX_CONTROL_FRAME_PAYLOAD_SIZE) {
-                 return fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Control frame payload cannot exceed 125 bytes");
+                return fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Control frame payload cannot exceed 125 bytes");
             }
 
             // 2 or 8 next bytes is the size of content
@@ -763,27 +724,22 @@ public:
                 if (buffer_size < (num_bytes + 2u))
                     return 0u;
                 // position after 2 firt bytes
-                auto length_bytes =
-                    reinterpret_cast<const unsigned char *>(buffer.cbegin() + 2u);
-                length = 0u;
+                auto length_bytes = reinterpret_cast<const unsigned char *>(buffer.cbegin() + 2u);
+                length            = 0u;
                 for (std::size_t c = 0u; c < num_bytes; c++)
-                    length += static_cast<std::size_t>(length_bytes[c])
-                              << (8u * (num_bytes - 1u - c));
+                    length += static_cast<std::size_t>(length_bytes[c]) << (8u * (num_bytes - 1u - c));
 
-                if (payload_indicator == rfc::PAYLOAD_LEN_64_BIT &&
-                    (length_bytes[0] & 0x80u) != 0u) {
+                if (payload_indicator == rfc::PAYLOAD_LEN_64_BIT && (length_bytes[0] & 0x80u) != 0u) {
                     return fail_connection(::qb::http::ws::CloseStatus::ProtocolError,
                                            "Most significant bit of 64-bit payload length must be 0");
                 }
             }
 
             if (payload_indicator == rfc::PAYLOAD_LEN_16_BIT && length < 126u) {
-                return fail_connection(::qb::http::ws::CloseStatus::ProtocolError,
-                                       "Non-minimal payload length encoding");
+                return fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Non-minimal payload length encoding");
             }
             if (payload_indicator == rfc::PAYLOAD_LEN_64_BIT && length <= 0xFFFFu) {
-                return fail_connection(::qb::http::ws::CloseStatus::ProtocolError,
-                                       "Non-minimal payload length encoding");
+                return fail_connection(::qb::http::ws::CloseStatus::ProtocolError, "Non-minimal payload length encoding");
             }
             _expected_size = length;
 
@@ -794,8 +750,7 @@ public:
             _parsed += num_bytes;
         }
 
-        const auto full_size =
-            _expected_size + _parsed + (_message.masked ? 4u : 0u);
+        const auto full_size = _expected_size + _parsed + (_message.masked ? 4u : 0u);
         if (buffer_size < full_size)
             return 0;
 
@@ -814,8 +769,8 @@ public:
         // Contain it here so a throw fails the connection instead of escaping
         // the noexcept boundary and calling std::terminate.
         try {
-            auto      &buffer      = this->_io.in();
-            const auto frame_opcode      = _fin_rsv_opcode & rfc::OPCODE_MASK;
+            auto      &buffer         = this->_io.in();
+            const auto frame_opcode   = _fin_rsv_opcode & rfc::OPCODE_MASK;
             const bool is_final_frame = (_fin_rsv_opcode & rfc::FIN_BIT_MASK) != 0;
 
             // Create a temporary message to hold the current frame's payload
@@ -824,14 +779,13 @@ public:
             current_frame_message.masked = _message.masked;
 
             if (current_frame_message.masked) {
-                auto mask = reinterpret_cast<const unsigned char *>(buffer.cbegin() + _parsed);
+                auto mask              = reinterpret_cast<const unsigned char *>(buffer.cbegin() + _parsed);
                 auto begin_buffer_data = buffer.begin() + _parsed + 4;
-                auto begin_data = current_frame_message._data.allocate_back(_expected_size);
+                auto begin_data        = current_frame_message._data.allocate_back(_expected_size);
                 for (auto i = 0u; i < _expected_size; ++i)
                     begin_data[i] = begin_buffer_data[i] ^ mask[i % 4];
             } else {
-                std::memcpy(current_frame_message._data.allocate_back(_expected_size),
-                            buffer.begin() + _parsed, _expected_size);
+                std::memcpy(current_frame_message._data.allocate_back(_expected_size), buffer.begin() + _parsed, _expected_size);
             }
 
             const bool is_control_frame = frame_opcode >= ::qb::http::ws::opcode::_Close;
@@ -856,7 +810,7 @@ public:
     reset() noexcept final {
         _message.reset();
         _expected_size = _parsed = _fin_rsv_opcode = 0;
-        _data_opcode = 0;
+        _data_opcode                               = 0;
     }
 };
 
@@ -871,8 +825,7 @@ ascii_to_lower(unsigned char c) noexcept {
 
 // RFC 6455 §1.3 — GUID appended to the client key before SHA-1. Kept as a
 // string_view so we can concatenate without allocating a separate literal.
-inline constexpr std::string_view ws_magic_guid =
-    "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+inline constexpr std::string_view ws_magic_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Compute the `Sec-WebSocket-Accept` header value for a given client key.
 [[nodiscard]] inline std::string
@@ -887,31 +840,26 @@ compute_accept_key(std::string_view client_key) {
 /// Case-insensitive equality test for small ASCII header tokens.
 [[nodiscard]] inline bool
 iequal_ascii(std::string_view a, std::string_view b) noexcept {
-    if (a.size() != b.size()) return false;
+    if (a.size() != b.size())
+        return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
         const auto ca = static_cast<unsigned char>(a[i]);
         const auto cb = static_cast<unsigned char>(b[i]);
-        if (ascii_to_lower(ca) != ascii_to_lower(cb)) return false;
+        if (ascii_to_lower(ca) != ascii_to_lower(cb))
+            return false;
     }
     return true;
 }
 
 [[nodiscard]] inline bool
 is_token_char(unsigned char c) noexcept {
-    return (c >= 'A' && c <= 'Z') ||
-           (c >= 'a' && c <= 'z') ||
-           (c >= '0' && c <= '9') ||
-           c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
-           c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
-           c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' || c == '%'
+           || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
 }
 
 [[nodiscard]] inline bool
 is_valid_token(std::string_view value) noexcept {
-    return !value.empty() &&
-           std::all_of(value.begin(), value.end(), [](unsigned char c) {
-               return is_token_char(c);
-           });
+    return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) { return is_token_char(c); });
 }
 
 /// Case-insensitive token containment for comma-separated header fields
@@ -921,14 +869,14 @@ has_token_ci(std::string_view header_value, std::string_view expected_token) noe
     std::size_t pos = 0;
     while (pos <= header_value.size()) {
         const auto comma = header_value.find(',', pos);
-        const auto end = (comma == std::string_view::npos) ? header_value.size() : comma;
+        const auto end   = (comma == std::string_view::npos) ? header_value.size() : comma;
 
-        auto token = header_value.substr(pos, end - pos);
+        auto       token = header_value.substr(pos, end - pos);
         const auto first = token.find_first_not_of(" \t");
         if (first != std::string_view::npos) {
             token.remove_prefix(first);
             const auto last = token.find_last_not_of(" \t");
-            token = token.substr(0, last + 1);
+            token           = token.substr(0, last + 1);
             if (iequal_ascii(token, expected_token)) {
                 return true;
             }
@@ -956,11 +904,11 @@ trim_ows(std::string_view sv) noexcept {
 /// Constant-time equality for two byte strings of identical length.
 [[nodiscard]] inline bool
 constant_time_equal(std::string_view a, std::string_view b) noexcept {
-    if (a.size() != b.size()) return false;
+    if (a.size() != b.size())
+        return false;
     unsigned diff = 0;
     for (std::size_t i = 0; i < a.size(); ++i) {
-        diff |= static_cast<unsigned char>(a[i]) ^
-                static_cast<unsigned char>(b[i]);
+        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
     }
     return diff == 0;
 }
@@ -983,8 +931,7 @@ class ws_server : public ws_internal::base<IO_> {
      */
     template <typename HttpRequest, typename HttpResponse>
     static bool
-    populate_handshake_response(HttpRequest const &request,
-                                HttpResponse      &response) {
+    populate_handshake_response(HttpRequest const &request, HttpResponse &response) {
         if (request.method() != HTTP_GET)
             return false;
         if (!request.upgrade)
@@ -994,10 +941,8 @@ class ws_server : public ws_internal::base<IO_> {
         if (!detail::has_token_ci(request.header("Connection"), "Upgrade"))
             return false;
 
-        const std::string_view ws_key_raw  =
-            detail::trim_ows(request.header("Sec-WebSocket-Key"));
-        const std::string_view version =
-            detail::trim_ows(request.header("Sec-WebSocket-Version"));
+        const std::string_view ws_key_raw = detail::trim_ows(request.header("Sec-WebSocket-Key"));
+        const std::string_view version    = detail::trim_ows(request.header("Sec-WebSocket-Version"));
         if (ws_key_raw.empty())
             return false;
         // RFC 6455 §4.2.1: client key is a base64 value of 16 random bytes.
@@ -1021,8 +966,7 @@ class ws_server : public ws_internal::base<IO_> {
         response.status() = qb::http::status::SWITCHING_PROTOCOLS;
         response.headers()["Upgrade"].emplace_back("websocket");
         response.headers()["Connection"].emplace_back("Upgrade");
-        response.headers()["Sec-WebSocket-Accept"].emplace_back(
-            detail::compute_accept_key(ws_key));
+        response.headers()["Sec-WebSocket-Accept"].emplace_back(detail::compute_accept_key(ws_key));
         return true;
     }
 
@@ -1070,7 +1014,6 @@ public:
 
 template <typename IO_>
 class ws_client : public ws_internal::base<IO_> {
-
     /**
      * @brief Validate the server's 101 response against the client key.
      *
@@ -1089,8 +1032,7 @@ class ws_client : public ws_internal::base<IO_> {
      */
     template <typename HttpResponse>
     [[nodiscard]] static bool
-    validate_handshake_response(HttpResponse const &http,
-                                std::string const  &key) noexcept {
+    validate_handshake_response(HttpResponse const &http, std::string const &key) noexcept {
         if (!http.upgrade)
             return false;
         if (http.status() != qb::http::status::SWITCHING_PROTOCOLS)
@@ -1100,8 +1042,7 @@ class ws_client : public ws_internal::base<IO_> {
         if (!detail::has_token_ci(http.header("Connection"), "Upgrade"))
             return false;
 
-        const std::string_view res_key =
-            detail::trim_ows(http.header("Sec-WebSocket-Accept"));
+        const std::string_view res_key = detail::trim_ows(http.header("Sec-WebSocket-Accept"));
         if (res_key.empty())
             return false;
 
@@ -1146,7 +1087,6 @@ struct side<IO_, false> {
 template <typename IO_>
 using protocol = typename internal::side<IO_>::protocol;
 
-
 /**
  * @class WebSocket
  * @brief WebSocket client implementation
@@ -1177,17 +1117,23 @@ class WebSocket
     /// `Sec-WebSocket-Protocol` in the `101` response, or empty when the
     /// server did not advertise any). Populated in `on(http_response)`.
     std::string _negotiated_subprotocol;
-    bool _close_sent{false};
+    bool        _close_sent{false};
 
 private:
-    T& derived() noexcept { return *static_cast<T*>(this); }
-    const T& derived() const noexcept { return *static_cast<const T*>(this); }
+    T &
+    derived() noexcept {
+        return *static_cast<T *>(this);
+    }
+    const T &
+    derived() const noexcept {
+        return *static_cast<const T *>(this);
+    }
 
     /// Trim ASCII whitespace from both ends of @p sv (RFC 7230 OWS).
     [[nodiscard]] static std::string_view
     trim_ows(std::string_view sv) noexcept {
-        constexpr std::string_view kOws = " \t";
-        const auto first = sv.find_first_not_of(kOws);
+        constexpr std::string_view kOws  = " \t";
+        const auto                 first = sv.find_first_not_of(kOws);
         if (first == std::string_view::npos)
             return {};
         const auto last = sv.find_last_not_of(kOws);
@@ -1199,9 +1145,8 @@ private:
     /// - Bracket IPv6 literals when needed.
     [[nodiscard]] static std::string
     make_host_header_value(::qb::io::uri const &uri) {
-        std::string host = std::string(uri.host());
-        const bool already_bracketed_ipv6 =
-            host.size() >= 2 && host.front() == '[' && host.back() == ']';
+        std::string host                   = std::string(uri.host());
+        const bool  already_bracketed_ipv6 = host.size() >= 2 && host.front() == '[' && host.back() == ']';
         if (!already_bracketed_ipv6 && host.find(':') != std::string::npos) {
             host = "[" + host + "]";
         }
@@ -1211,11 +1156,9 @@ private:
             return host;
         }
 
-        const std::string_view scheme = uri.scheme();
-        const bool is_default_ws_port =
-            ((scheme == "ws" || scheme == "http") && port == "80");
-        const bool is_default_wss_port =
-            ((scheme == "wss" || scheme == "https") && port == "443");
+        const std::string_view scheme              = uri.scheme();
+        const bool             is_default_ws_port  = ((scheme == "ws" || scheme == "http") && port == "80");
+        const bool             is_default_wss_port = ((scheme == "wss" || scheme == "https") && port == "443");
         if (!is_default_ws_port && !is_default_wss_port) {
             host += ":";
             host += port;
@@ -1233,8 +1176,7 @@ public:
      * @brief Event triggered when a WebSocket handshake request is being sent
      */
     struct sending_http_request {
-        http::WebSocketRequest
-            &request; /**< Reference to the WebSocket handshake request */
+        http::WebSocketRequest &request; /**< Reference to the WebSocket handshake request */
     };
 
     /**
@@ -1249,10 +1191,10 @@ public:
      */
     struct error {};
 
-    using closed  = typename ws_protocol::close;   /**< Connection closed event */
-    using ping    = typename ws_protocol::ping;    /**< Ping message received event */
-    using pong    = typename ws_protocol::pong;    /**< Pong message received event */
-    using message = typename ws_protocol::message; /**< Data message received event */
+    using closed       = typename ws_protocol::close;          /**< Connection closed event */
+    using ping         = typename ws_protocol::ping;           /**< Ping message received event */
+    using pong         = typename ws_protocol::pong;           /**< Pong message received event */
+    using message      = typename ws_protocol::message;        /**< Data message received event */
     using disconnected = ::qb::io::async::event::disconnected; /**< TCP disconnection event */
     using timeout      = ::qb::io::async::event::timeout;      /**< Timeout event for pings */
 
@@ -1265,8 +1207,7 @@ public:
      */
     explicit WebSocket()
         : _ws_key(http::ws::generateKey())
-        , _ping_interval{}
-        {}
+        , _ping_interval{} {}
 
     /**
      * @brief Sets the ping interval for keepalive.
@@ -1294,8 +1235,7 @@ public:
      * @throws std::invalid_argument when @p status is a reserved code.
      */
     void
-    close(CloseStatus status = CloseStatus::Normal,
-          std::string_view reason = "closed normally") {
+    close(CloseStatus status = CloseStatus::Normal, std::string_view reason = "closed normally") {
         MessageClose msg(status, reason);
         _close_sent = true;
         *this << msg;
@@ -1320,8 +1260,7 @@ public:
     set_subprotocols(std::vector<std::string> protocols) {
         for (const auto &protocol : protocols) {
             if (!::qb::protocol::detail::is_valid_token(protocol)) {
-                throw std::invalid_argument(
-                    "qb::http::ws::WebSocket::set_subprotocols: invalid subprotocol token");
+                throw std::invalid_argument("qb::http::ws::WebSocket::set_subprotocols: invalid subprotocol token");
             }
         }
         _offered_subprotocols = std::move(protocols);
@@ -1334,8 +1273,7 @@ public:
     void
     add_subprotocol(std::string protocol) {
         if (!::qb::protocol::detail::is_valid_token(protocol)) {
-            throw std::invalid_argument(
-                "qb::http::ws::WebSocket::add_subprotocol: invalid subprotocol token");
+            throw std::invalid_argument("qb::http::ws::WebSocket::add_subprotocol: invalid subprotocol token");
         }
         _offered_subprotocols.emplace_back(std::move(protocol));
     }
@@ -1359,13 +1297,12 @@ public:
      * performing the WebSocket handshake.
      */
     void
-    connect(::qb::io::uri const &remote, qb::duration timeout = qb::duration::zero(),
-            bool verify_peer = true) {
+    connect(::qb::io::uri const &remote, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
         this->clear_protocols();
         this->setTimeout(qb::duration::zero());
-        _remote                 = remote;
+        _remote = remote;
         _negotiated_subprotocol.clear();
-        _close_sent             = false;
+        _close_sent = false;
         ::qb::io::async::tcp::connect<typename Transport::transport_io_type>(
             remote,
             [this](auto &&transport) {
@@ -1384,13 +1321,12 @@ public:
 
                     if (!_offered_subprotocols.empty()) {
                         std::string joined;
-                        for (std::size_t i = 0; i < _offered_subprotocols.size();
-                             ++i) {
-                            if (i) joined.append(", ");
+                        for (std::size_t i = 0; i < _offered_subprotocols.size(); ++i) {
+                            if (i)
+                                joined.append(", ");
                             joined.append(_offered_subprotocols[i]);
                         }
-                        request.headers()["Sec-WebSocket-Protocol"].emplace_back(
-                            std::move(joined));
+                        request.headers()["Sec-WebSocket-Protocol"].emplace_back(std::move(joined));
                     }
 
                     if constexpr (qb::has_on<T, sending_http_request>) {
@@ -1400,8 +1336,7 @@ public:
                     *this << request;
                 }
             },
-            timeout,
-            verify_peer);
+            timeout, verify_peer);
     }
 
     /**
@@ -1426,13 +1361,11 @@ public:
         // server MUST echo exactly one of the client's offers, or omit
         // the header). We trim OWS and take the first token to be
         // defensive against servers that misuse list syntax.
-        const std::string_view selected =
-            trim_ows(event.header("Sec-WebSocket-Protocol"));
+        const std::string_view selected = trim_ows(event.header("Sec-WebSocket-Protocol"));
         if (!selected.empty()) {
-            const auto comma = selected.find(',');
-            const std::string_view selected_token =
-                trim_ows(selected.substr(0, comma));
-            const bool has_multiple_tokens = (comma != std::string_view::npos);
+            const auto             comma               = selected.find(',');
+            const std::string_view selected_token      = trim_ows(selected.substr(0, comma));
+            const bool             has_multiple_tokens = (comma != std::string_view::npos);
 
             // RFC 6455 §4.2.2: server must return exactly one subprotocol and it
             // must be one the client actually offered.
@@ -1444,12 +1377,8 @@ public:
                 return;
             }
 
-            const bool was_offered =
-                std::any_of(_offered_subprotocols.begin(),
-                            _offered_subprotocols.end(),
-                            [&](const std::string &offered) {
-                                return offered == selected_token;
-                            });
+            const bool was_offered = std::any_of(_offered_subprotocols.begin(), _offered_subprotocols.end(),
+                                                 [&](const std::string &offered) { return offered == selected_token; });
             if (!was_offered) {
                 if constexpr (qb::has_on<T, error>) {
                     derived().on(error{});
@@ -1514,7 +1443,7 @@ public:
     on(closed &&event) {
         if (!_close_sent) {
             Message echo = event.ws;
-            _close_sent = true;
+            _close_sent  = true;
             *this << echo;
         }
         if constexpr (qb::has_on<T, closed>) {
@@ -1555,7 +1484,8 @@ public:
      * @return Reference to this object for method chaining
      */
     template <typename ToSend>
-    WebSocket &operator<<(ToSend &&msg) {
+    WebSocket &
+    operator<<(ToSend &&msg) {
         if constexpr (std::is_base_of_v<Message, std::decay_t<ToSend>>) {
             if constexpr (std::is_same_v<std::decay_t<ToSend>, MessageClose>) {
                 _close_sent = true;
@@ -1597,37 +1527,39 @@ public:
     using base_type = WebSocket<Client<Transport>, Transport>;
 
     // Callback types for each event
-    using sending_http_request_callback_t = std::function<void(typename base_type::sending_http_request&)>;
-    using connected_callback_t = std::function<void(typename base_type::connected&)>;
-    using error_callback_t = std::function<void(typename base_type::error&)>;
-    using closed_callback_t = std::function<void(typename base_type::closed&)>;
-    using ping_callback_t = std::function<void(typename base_type::ping&)>;
-    using pong_callback_t = std::function<void(typename base_type::pong&)>;
-    using message_callback_t = std::function<void(typename base_type::message&)>;
-    using disconnected_callback_t = std::function<void(typename base_type::disconnected&)>;
+    using sending_http_request_callback_t = std::function<void(typename base_type::sending_http_request &)>;
+    using connected_callback_t            = std::function<void(typename base_type::connected &)>;
+    using error_callback_t                = std::function<void(typename base_type::error &)>;
+    using closed_callback_t               = std::function<void(typename base_type::closed &)>;
+    using ping_callback_t                 = std::function<void(typename base_type::ping &)>;
+    using pong_callback_t                 = std::function<void(typename base_type::pong &)>;
+    using message_callback_t              = std::function<void(typename base_type::message &)>;
+    using disconnected_callback_t         = std::function<void(typename base_type::disconnected &)>;
 
 private:
     sending_http_request_callback_t _on_sending_http_request;
-    connected_callback_t _on_connected;
-    error_callback_t _on_error;
-    closed_callback_t _on_closed;
-    ping_callback_t _on_ping;
-    pong_callback_t _on_pong;
-    message_callback_t _on_message;
-    disconnected_callback_t _on_disconnected;
+    connected_callback_t            _on_connected;
+    error_callback_t                _on_error;
+    closed_callback_t               _on_closed;
+    ping_callback_t                 _on_ping;
+    pong_callback_t                 _on_pong;
+    message_callback_t              _on_message;
+    disconnected_callback_t         _on_disconnected;
 
 public:
     /**
      * @brief Constructs a WebSocket client with callback-based event handling
      */
-    Client() : base_type() {}
+    Client()
+        : base_type() {}
 
     /**
      * @brief Set callback for HTTP request sending event
      * @param callback Function to call when sending HTTP request
      * @return Reference to this object for method chaining
      */
-    Client& on_sending_http_request(sending_http_request_callback_t callback) {
+    Client &
+    on_sending_http_request(sending_http_request_callback_t callback) {
         _on_sending_http_request = std::move(callback);
         return *this;
     }
@@ -1637,7 +1569,8 @@ public:
      * @param callback Function to call when connection is established
      * @return Reference to this object for method chaining
      */
-    Client& on_connected(connected_callback_t callback) {
+    Client &
+    on_connected(connected_callback_t callback) {
         _on_connected = std::move(callback);
         return *this;
     }
@@ -1647,7 +1580,8 @@ public:
      * @param callback Function to call when an error occurs
      * @return Reference to this object for method chaining
      */
-    Client& on_error(error_callback_t callback) {
+    Client &
+    on_error(error_callback_t callback) {
         _on_error = std::move(callback);
         return *this;
     }
@@ -1657,7 +1591,8 @@ public:
      * @param callback Function to call when connection is closed
      * @return Reference to this object for method chaining
      */
-    Client& on_closed(closed_callback_t callback) {
+    Client &
+    on_closed(closed_callback_t callback) {
         _on_closed = std::move(callback);
         return *this;
     }
@@ -1667,7 +1602,8 @@ public:
      * @param callback Function to call when ping is received
      * @return Reference to this object for method chaining
      */
-    Client& on_ping(ping_callback_t callback) {
+    Client &
+    on_ping(ping_callback_t callback) {
         _on_ping = std::move(callback);
         return *this;
     }
@@ -1677,7 +1613,8 @@ public:
      * @param callback Function to call when pong is received
      * @return Reference to this object for method chaining
      */
-    Client& on_pong(pong_callback_t callback) {
+    Client &
+    on_pong(pong_callback_t callback) {
         _on_pong = std::move(callback);
         return *this;
     }
@@ -1687,7 +1624,8 @@ public:
      * @param callback Function to call when a message is received
      * @return Reference to this object for method chaining
      */
-    Client& on_message(message_callback_t callback) {
+    Client &
+    on_message(message_callback_t callback) {
         _on_message = std::move(callback);
         return *this;
     }
@@ -1697,55 +1635,64 @@ public:
      * @param callback Function to call when disconnected
      * @return Reference to this object for method chaining
      */
-    Client& on_disconnected(disconnected_callback_t callback) {
+    Client &
+    on_disconnected(disconnected_callback_t callback) {
         _on_disconnected = std::move(callback);
         return *this;
     }
 
     // Event handlers that delegate to callbacks
-    void on(typename base_type::sending_http_request&& event) {
+    void
+    on(typename base_type::sending_http_request &&event) {
         if (_on_sending_http_request) {
             _on_sending_http_request(event);
         }
     }
 
-    void on(typename base_type::connected&& event) {
+    void
+    on(typename base_type::connected &&event) {
         if (_on_connected) {
             _on_connected(event);
         }
     }
 
-    void on(typename base_type::error&& event) {
+    void
+    on(typename base_type::error &&event) {
         if (_on_error) {
             _on_error(event);
         }
     }
 
-    void on(typename base_type::closed&& event) {
+    void
+    on(typename base_type::closed &&event) {
         if (_on_closed) {
             _on_closed(event);
         }
     }
 
-    void on(typename base_type::ping&& event) {
+    void
+    on(typename base_type::ping &&event) {
         if (_on_ping) {
             _on_ping(event);
         }
     }
 
-    void on(typename base_type::pong&& event) {
+    void
+    on(typename base_type::pong &&event) {
         if (_on_pong) {
             _on_pong(event);
         }
     }
 
-    void on(typename base_type::message&& event) {
+    void
+    on(typename base_type::message &&event) {
         if (_on_message) {
             _on_message(event);
         }
     }
 
-    void on(typename base_type::disconnected&& event) {
+    void
+    on(typename base_type::disconnected &&event) {
         if (_on_disconnected) {
             _on_disconnected(event);
         }
@@ -1761,7 +1708,7 @@ public:
  */
 using ClientSecure = Client<::qb::io::transport::stcp>;
 
-using client = Client<::qb::io::transport::tcp>;
+using client        = Client<::qb::io::transport::tcp>;
 using client_secure = Client<::qb::io::transport::stcp>;
 
 } // namespace qb::http::ws

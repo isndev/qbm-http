@@ -28,20 +28,20 @@
  * @endcode
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http2
  */
 
 #pragma once
 
-#include <memory>
-#include <functional>
-#include <vector>
-#include <deque>
-#include <string>
 #include <chrono>
+#include <deque>
+#include <functional>
+#include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include <qb/io/async.h>
 #include <qb/io/protocol/handshake.h>
@@ -49,11 +49,11 @@
 #include <qb/system/container/unordered_map.h>
 #include <qb/uuid.h>
 
-#include "protocol/client.h"
 #include "../coro.h"
+#include "../logger.h"
 #include "../request.h"
 #include "../response.h"
-#include "../logger.h"
+#include "protocol/client.h"
 
 namespace qb::http2 {
 
@@ -70,7 +70,7 @@ using BatchResponseCallback = std::function<void(std::vector<qb::http::Response>
 /**
  * @brief Connection state callback
  */
-using ConnectionCallback = std::function<void(bool connected, const std::string& error_message)>;
+using ConnectionCallback = std::function<void(bool connected, const std::string &error_message)>;
 
 /**
  * @brief Result returned by the coroutine-style `connect()` awaiter.
@@ -84,36 +84,39 @@ struct ConnectResult {
     bool        ok{false};
     std::string error_message;
 
-    explicit operator bool() const noexcept { return ok; }
+    explicit
+    operator bool() const noexcept {
+        return ok;
+    }
 };
 
 /**
  * @brief Request context for tracking pending requests
  */
 struct RequestContext {
-    qb::http::Request request;
-    ResponseCallback callback;
+    qb::http::Request                     request;
+    ResponseCallback                      callback;
     std::chrono::steady_clock::time_point created_at;
-    uint32_t stream_id = 0;
-    bool completed = false;
+    uint32_t                              stream_id = 0;
+    bool                                  completed = false;
 };
 
 /**
  * @brief Batch request context for tracking multiple requests
  */
 struct BatchRequestContext {
-    std::vector<qb::http::Request> requests;
-    BatchResponseCallback callback;
-    std::vector<qb::http::Response> responses;
+    std::vector<qb::http::Request>        requests;
+    BatchResponseCallback                 callback;
+    std::vector<qb::http::Response>       responses;
     std::chrono::steady_clock::time_point created_at;
-    qb::unordered_map<uint32_t, size_t> stream_to_index; // stream_id -> request index
-    size_t completed_count = 0;
-    bool all_completed = false;
+    qb::unordered_map<uint32_t, size_t>   stream_to_index; // stream_id -> request index
+    size_t                                completed_count = 0;
+    bool                                  all_completed   = false;
 };
 
 /**
  * @brief Modern HTTP/2 client with elegant async API
- * 
+ *
  * This client provides a clean, modern interface for HTTP/2 communication:
  * - Automatic connection management with ALPN negotiation
  * - Internal stream ID management
@@ -122,7 +125,7 @@ struct BatchRequestContext {
  * - Automatic reconnection on connection loss
  * - Built-in timeout handling
  * - Connection pooling ready design
- * 
+ *
  * Usage examples:
  * ```cpp
  * // Single request
@@ -130,53 +133,54 @@ struct BatchRequestContext {
  * client->push_request(request, [](auto response) {
  *     // Handle response
  * });
- * 
+ *
  * // Batch requests
  * client->push_requests(requests, [](auto responses) {
  *     // Handle all responses in order
  * });
  * ```
  */
-class Client : public std::enable_shared_from_this<Client>,
-               public qb::io::async::tcp::client<Client, qb::io::transport::stcp>,
-               public qb::io::use<Client>::timeout {
+class Client
+    : public std::enable_shared_from_this<Client>
+    , public qb::io::async::tcp::client<Client, qb::io::transport::stcp>
+    , public qb::io::use<Client>::timeout {
 public:
-    using H2Protocol = qb::protocol::http2::ClientHttp2Protocol<Client>;
+    using H2Protocol        = qb::protocol::http2::ClientHttp2Protocol<Client>;
     using HandshakeProtocol = qb::io::protocol::handshake<Client>;
-    using BaseTcpClient = qb::io::async::tcp::client<Client, qb::io::transport::stcp>;
+    using BaseTcpClient     = qb::io::async::tcp::client<Client, qb::io::transport::stcp>;
 
 private:
     // Connection state
-    qb::io::uri _base_uri;
-    qb::uuid _client_id;
-    std::string _host;
-    uint16_t _port;
-    bool _is_connected = false;
-    bool _is_connecting = false;
-    bool _handshake_completed = false;
-    bool _received_graceful_goaway = false;
-    bool _preserve_pending_on_next_disconnect = false;
+    qb::io::uri                           _base_uri;
+    qb::uuid                              _client_id;
+    std::string                           _host;
+    uint16_t                              _port;
+    bool                                  _is_connected                        = false;
+    bool                                  _is_connecting                       = false;
+    bool                                  _handshake_completed                 = false;
+    bool                                  _received_graceful_goaway            = false;
+    bool                                  _preserve_pending_on_next_disconnect = false;
     std::chrono::steady_clock::time_point _connect_started_at{};
-    
+
     // Protocol handlers
-    H2Protocol* _h2_protocol = nullptr;
-    
+    H2Protocol *_h2_protocol = nullptr;
+
     // Request management
-    std::deque<std::unique_ptr<RequestContext>> _pending_requests;
-    qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>> _active_requests;
+    std::deque<std::unique_ptr<RequestContext>>                       _pending_requests;
+    qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>>      _active_requests;
     qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> _active_batches;
-    uint64_t _next_batch_id = 1;
-    
+    uint64_t                                                          _next_batch_id = 1;
+
     // Configuration
-    qb::duration _connect_timeout = std::chrono::seconds(30);
-    qb::duration _request_timeout = std::chrono::seconds(60);
-    bool   _verify_peer = true; /**< Verify the server TLS certificate (h2 is TLS-only). */
-    size_t _max_concurrent_streams = 100;
-    bool _auto_reconnect = true;
-    
+    qb::duration _connect_timeout        = std::chrono::seconds(30);
+    qb::duration _request_timeout        = std::chrono::seconds(60);
+    bool         _verify_peer            = true; /**< Verify the server TLS certificate (h2 is TLS-only). */
+    size_t       _max_concurrent_streams = 100;
+    bool         _auto_reconnect         = true;
+
     // Callbacks
     std::vector<ConnectionCallback> _connection_callbacks;
-    
+
     // Statistics
     uint64_t _total_requests{0};
     uint64_t _successful_requests{0};
@@ -187,21 +191,21 @@ public:
      * @brief Construct HTTP/2 client
      * @param base_uri Base URI for the connection (scheme, host, port)
      */
-    explicit Client(const std::string& base_uri);
-    
+    explicit Client(const std::string &base_uri);
+
     /**
      * @brief Construct HTTP/2 client with URI object
      * @param uri Base URI for the connection
      */
-    explicit Client(const qb::io::uri& uri);
-    
+    explicit Client(const qb::io::uri &uri);
+
     ~Client();
 
     // Disable copy and move (base class doesn't support them)
-    Client(const Client&) = delete;
-    Client& operator=(const Client&) = delete;
-    Client(Client&&) = delete;
-    Client& operator=(Client&&) = delete;
+    Client(const Client &)            = delete;
+    Client &operator=(const Client &) = delete;
+    Client(Client &&)                 = delete;
+    Client &operator=(Client &&)      = delete;
 
     /**
      * @brief Connect to the server (callback-style).
@@ -244,18 +248,24 @@ public:
      * @brief Disconnect from server
      */
     void disconnect();
-    
+
     /**
      * @brief Check if client is connected
      * @return true if connected and ready for requests
      */
-    [[nodiscard]] bool is_connected() const noexcept { return _is_connected && _handshake_completed; }
-    
+    [[nodiscard]] bool
+    is_connected() const noexcept {
+        return _is_connected && _handshake_completed;
+    }
+
     /**
      * @brief Check if client is connecting
      * @return true if connection attempt in progress
      */
-    [[nodiscard]] bool is_connecting() const noexcept { return _is_connecting; }
+    [[nodiscard]] bool
+    is_connecting() const noexcept {
+        return _is_connecting;
+    }
 
     /**
      * @brief Send a single HTTP request (callback-style).
@@ -278,8 +288,7 @@ public:
      *
      * @return Awaitable yielding a `qb::http::Response`.
      */
-    [[nodiscard]] qb::http::async::awaiter<qb::http::Response>
-    push_request(qb::http::Request request);
+    [[nodiscard]] qb::http::async::awaiter<qb::http::Response> push_request(qb::http::Request request);
 
     /**
      * @brief Send multiple HTTP requests as a batch (callback-style).
@@ -301,46 +310,64 @@ public:
      *
      * @return Awaitable yielding a `std::vector<qb::http::Response>`.
      */
-    [[nodiscard]] qb::http::async::awaiter<std::vector<qb::http::Response>>
-    push_requests(std::vector<qb::http::Request> requests);
+    [[nodiscard]] qb::http::async::awaiter<std::vector<qb::http::Response>> push_requests(std::vector<qb::http::Request> requests);
 
     /**
      * @brief Set connection timeout
      * @param timeout_seconds Timeout in seconds
      */
-    void set_connect_timeout(qb::duration timeout) { _connect_timeout = timeout; }
+    void
+    set_connect_timeout(qb::duration timeout) {
+        _connect_timeout = timeout;
+    }
 
     /**
      * @brief Enable/disable TLS server certificate verification.
      * @param value `true` (default) verifies chain + hostname; `false` disables it
      *              (trusted/self-signed endpoints only). Set before connecting.
      */
-    void set_verify_peer(bool value) noexcept { _verify_peer = value; }
-    [[nodiscard]] bool verify_peer() const noexcept { return _verify_peer; }
+    void
+    set_verify_peer(bool value) noexcept {
+        _verify_peer = value;
+    }
+    [[nodiscard]] bool
+    verify_peer() const noexcept {
+        return _verify_peer;
+    }
 
     /**
      * @brief Set request timeout
      * @param timeout_seconds Timeout in seconds
      */
-    void set_request_timeout(qb::duration timeout) { _request_timeout = timeout; }
-    
+    void
+    set_request_timeout(qb::duration timeout) {
+        _request_timeout = timeout;
+    }
+
     /**
      * @brief Set maximum concurrent streams
      * @param max_streams Maximum number of concurrent streams
      */
-    void set_max_concurrent_streams(size_t max_streams) { _max_concurrent_streams = max_streams; }
-    
+    void
+    set_max_concurrent_streams(size_t max_streams) {
+        _max_concurrent_streams = max_streams;
+    }
+
     /**
      * @brief Enable/disable automatic reconnection
      * @param enable Whether to automatically reconnect on connection loss
      */
-    void set_auto_reconnect(bool enable) { _auto_reconnect = enable; }
+    void
+    set_auto_reconnect(bool enable) {
+        _auto_reconnect = enable;
+    }
 
     /**
      * @brief Get client statistics
      * @return Tuple of (total_requests, successful_requests, failed_requests)
      */
-    [[nodiscard]] std::tuple<uint64_t, uint64_t, uint64_t> get_stats() const noexcept {
+    [[nodiscard]] std::tuple<uint64_t, uint64_t, uint64_t>
+    get_stats() const noexcept {
         return {_total_requests, _successful_requests, _failed_requests};
     }
 
@@ -348,7 +375,8 @@ public:
      * @brief Get number of active requests
      * @return Number of requests currently being processed
      */
-    [[nodiscard]] size_t get_active_request_count() const noexcept {
+    [[nodiscard]] size_t
+    get_active_request_count() const noexcept {
         return _active_requests.size();
     }
 
@@ -356,26 +384,29 @@ public:
      * @brief Get base URI
      * @return Base URI for this client
      */
-    [[nodiscard]] const qb::io::uri& get_base_uri() const noexcept { return _base_uri; }
+    [[nodiscard]] const qb::io::uri &
+    get_base_uri() const noexcept {
+        return _base_uri;
+    }
 
     // Event handlers for qb-io framework
-    void on(qb::io::async::event::handshake&&);
+    void on(qb::io::async::event::handshake &&);
     void on(qb::http::Response response, uint64_t app_request_id);
-    void on(const qb::protocol::http2::Http2StreamErrorEvent& event);
-    void on(const qb::protocol::http2::Http2GoAwayEvent& event);
-    void on(const qb::protocol::http2::Http2PushPromiseEvent& event);
-    void on(const qb::protocol::http2::Http2ConnectionErrorEvent& event);
-    void on(qb::io::async::event::timeout const&);
-    void on(qb::io::async::event::disconnected const& event);
-    void on(qb::io::async::event::dispose const&);
+    void on(const qb::protocol::http2::Http2StreamErrorEvent &event);
+    void on(const qb::protocol::http2::Http2GoAwayEvent &event);
+    void on(const qb::protocol::http2::Http2PushPromiseEvent &event);
+    void on(const qb::protocol::http2::Http2ConnectionErrorEvent &event);
+    void on(qb::io::async::event::timeout const &);
+    void on(qb::io::async::event::disconnected const &event);
+    void on(qb::io::async::event::dispose const &);
 
 private:
     /**
      * @brief Initialize client from URI
      * @param uri URI to parse
      */
-    void initialize_from_uri(const qb::io::uri& uri);
-    
+    void initialize_from_uri(const qb::io::uri &uri);
+
     /**
      * @brief Start connection attempt
      */
@@ -384,62 +415,59 @@ private:
     /**
      * @brief Normalize relative request URI against the client's HTTPS base URI.
      */
-    void ensure_absolute_uri(qb::http::Request& request);
+    void ensure_absolute_uri(qb::http::Request &request);
 
     /**
      * @brief Normalize and validate a request before it can be queued.
      */
-    [[nodiscard]] std::optional<qb::http::Response>
-    prepare_request(qb::http::Request& request);
-    
+    [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
+
     /**
      * @brief Process pending requests queue
      */
     void process_pending_requests();
-    
+
     /**
      * @brief Handle successful connection
      */
     void handle_connection_success();
-    
+
     /**
      * @brief Handle connection failure
      * @param error_message Error description
      */
-    void handle_connection_failure(const std::string& error_message);
-    
+    void handle_connection_failure(const std::string &error_message);
+
     /**
      * @brief Complete a request with response
      * @param stream_id Stream ID of the request
      * @param response HTTP response
      */
     void complete_request(uint32_t stream_id, qb::http::Response response);
-    
+
     /**
      * @brief Fail a request with error
      * @param stream_id Stream ID of the request
      * @param error_message Error description
      */
-    void fail_request(uint32_t stream_id, const std::string& error_message,
-                      qb::http::status status = qb::http::status::BAD_GATEWAY);
+    void fail_request(uint32_t stream_id, const std::string &error_message, qb::http::status status = qb::http::status::BAD_GATEWAY);
 
     /**
      * @brief Fail active streams that the peer explicitly did not process in GOAWAY.
      */
-    void fail_active_requests_after_goaway(uint32_t last_stream_id,
-                                           const std::string& error_message);
+    void fail_active_requests_after_goaway(uint32_t last_stream_id, const std::string &error_message);
 
     /**
      * @brief Finish a graceful GOAWAY drain once accepted streams are complete.
      */
     void finish_graceful_goaway_if_drained();
-    
+
     /**
      * @brief Fail all active requests
      * @param error_message Error description
      */
-    void fail_all_requests(const std::string& error_message);
-    
+    void fail_all_requests(const std::string &error_message);
+
     /**
      * @brief Check and handle request timeouts
      */
@@ -454,7 +482,7 @@ private:
      * @brief Returns true when the current connection attempt exceeded its deadline.
      */
     [[nodiscard]] bool connect_deadline_expired(std::chrono::steady_clock::time_point now) const noexcept;
-    
+
     /**
      * @brief Returns true when there is outstanding client work tied to the current connection.
      */
@@ -464,14 +492,14 @@ private:
      * @brief Attempt reconnection if auto-reconnect is enabled
      */
     void attempt_reconnection();
-    
+
     /**
      * @brief Create error response
      * @param status HTTP status code
      * @param message Error message
      * @return Error response object
      */
-    qb::http::Response create_error_response(qb::http::status status, const std::string& message);
+    qb::http::Response create_error_response(qb::http::status status, const std::string &message);
 };
 using client = Client;
 
@@ -480,13 +508,13 @@ using client = Client;
  * @param base_uri Base URI for the connection
  * @return Shared pointer to HTTP/2 client
  */
-std::shared_ptr<Client> make_client(const std::string& base_uri);
+std::shared_ptr<Client> make_client(const std::string &base_uri);
 
 /**
  * @brief Create a shared HTTP/2 client with URI object
  * @param uri Base URI for the connection
  * @return Shared pointer to HTTP/2 client
  */
-std::shared_ptr<Client> make_client(const qb::io::uri& uri);
+std::shared_ptr<Client> make_client(const qb::io::uri &uri);
 
-} // namespace qb::http2 
+} // namespace qb::http2

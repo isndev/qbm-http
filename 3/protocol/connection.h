@@ -27,8 +27,8 @@
 #include <openssl/rand.h>
 #include <qb/system/container/unordered_map.h>
 
-#include "../../headers.h"
 #include "../../1.1/protocol/base.h"
+#include "../../headers.h"
 #include "../../logger.h"
 #include "../../request.h"
 #include "../../response.h"
@@ -38,38 +38,32 @@ namespace qb::protocol::http3 {
 
 namespace detail {
 
-inline std::string lower_header_name(std::string_view value) {
+inline std::string
+lower_header_name(std::string_view value) {
     std::string out(value);
-    std::transform(out.begin(), out.end(), out.begin(), [](char c) {
-        return qb::http::utility::ascii_to_lower(c);
-    });
+    std::transform(out.begin(), out.end(), out.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
     return out;
 }
 
-inline bool is_forbidden_h3_header(std::string_view name) {
+inline bool
+is_forbidden_h3_header(std::string_view name) {
     const auto lower = lower_header_name(name);
-    return lower == "connection" ||
-           lower == "keep-alive" ||
-           lower == "proxy-connection" ||
-           lower == "proxy-authenticate" ||
-           lower == "proxy-authorization" ||
-           lower == "transfer-encoding" ||
-           lower == "upgrade";
+    return lower == "connection" || lower == "keep-alive" || lower == "proxy-connection" || lower == "proxy-authenticate"
+           || lower == "proxy-authorization" || lower == "transfer-encoding" || lower == "upgrade";
 }
 
-inline bool is_forbidden_h3_trailer(std::string_view name) {
+inline bool
+is_forbidden_h3_trailer(std::string_view name) {
     const auto lower = lower_header_name(name);
-    return lower.empty() || lower.front() == ':' ||
-           lower == "content-length" ||
-           lower == "trailer" ||
-           is_forbidden_h3_header(lower);
+    return lower.empty() || lower.front() == ':' || lower == "content-length" || lower == "trailer" || is_forbidden_h3_header(lower);
 }
 
-inline std::optional<std::uint64_t> parse_content_length(std::string_view value) {
+inline std::optional<std::uint64_t>
+parse_content_length(std::string_view value) {
     std::uint64_t parsed = 0;
-    auto const *begin = value.data();
-    auto const *end = value.data() + value.size();
-    auto [ptr, ec] = std::from_chars(begin, end, parsed);
+    auto const   *begin  = value.data();
+    auto const   *end    = value.data() + value.size();
+    auto [ptr, ec]       = std::from_chars(begin, end, parsed);
     if (ec != std::errc{} || ptr != end) {
         return std::nullopt;
     }
@@ -78,18 +72,19 @@ inline std::optional<std::uint64_t> parse_content_length(std::string_view value)
 
 template <typename Message>
 struct declared_content_length_result {
-    bool ok = true;
+    bool                         ok = true;
     std::optional<std::uint64_t> value;
 };
 
 template <typename Message>
-declared_content_length_result<Message> declared_content_length(Message const& msg) {
+declared_content_length_result<Message>
+declared_content_length(Message const &msg) {
     declared_content_length_result<Message> result;
-    auto it = msg.headers().find("content-length");
+    auto                                    it = msg.headers().find("content-length");
     if (it == msg.headers().end()) {
         return result;
     }
-    for (auto const& raw_value : it->second) {
+    for (auto const &raw_value : it->second) {
         auto parsed = parse_content_length(raw_value);
         if (!parsed || (result.value && *result.value != *parsed)) {
             result.ok = false;
@@ -102,25 +97,24 @@ declared_content_length_result<Message> declared_content_length(Message const& m
 
 struct header_block {
     std::deque<std::pair<std::string, std::string>> storage;
-    std::vector<nghttp3_nv> nva;
+    std::vector<nghttp3_nv>                         nva;
 
-    void add(std::string name, std::string value) {
+    void
+    add(std::string name, std::string value) {
         storage.emplace_back(std::move(name), std::move(value));
-        auto& [stored_name, stored_value] = storage.back();
+        auto &[stored_name, stored_value] = storage.back();
         nva.push_back(nghttp3_nv{
-            reinterpret_cast<uint8_t *>(stored_name.data()),
-            reinterpret_cast<uint8_t *>(stored_value.data()),
-            stored_name.size(),
-            stored_value.size(),
-            NGHTTP3_NV_FLAG_NONE
+            reinterpret_cast<uint8_t *>(stored_name.data()), reinterpret_cast<uint8_t *>(stored_value.data()), stored_name.size(),
+            stored_value.size(), NGHTTP3_NV_FLAG_NONE
         });
     }
 };
 
-inline bool pseudo_headers_before_regular_headers(header_block const& block) noexcept {
+inline bool
+pseudo_headers_before_regular_headers(header_block const &block) noexcept {
     bool regular_headers_started = false;
-    for (auto const& [name, value] : block.storage) {
-        (void)value;
+    for (auto const &[name, value] : block.storage) {
+        (void) value;
         if (!name.empty() && name.front() == ':') {
             if (regular_headers_started) {
                 return false;
@@ -132,28 +126,22 @@ inline bool pseudo_headers_before_regular_headers(header_block const& block) noe
     return true;
 }
 
-inline bool has_required_request_pseudo_headers(std::optional<std::string> const& method,
-                                                std::optional<std::string> const& scheme,
-                                                std::optional<std::string> const& authority,
-                                                std::optional<std::string> const& path) noexcept {
-    return method && !method->empty() &&
-           scheme && !scheme->empty() &&
-           authority && !authority->empty() &&
-           path && !path->empty();
+inline bool
+has_required_request_pseudo_headers(std::optional<std::string> const &method, std::optional<std::string> const &scheme,
+                                    std::optional<std::string> const &authority, std::optional<std::string> const &path) noexcept {
+    return method && !method->empty() && scheme && !scheme->empty() && authority && !authority->empty() && path && !path->empty();
 }
 
-inline bool is_header_name_char(unsigned char c) noexcept {
-    return (c >= 'a' && c <= 'z') ||
-           (c >= '0' && c <= '9') ||
-           c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
-           c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
-           c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+inline bool
+is_header_name_char(unsigned char c) noexcept {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*'
+           || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
 }
 
-inline bool is_valid_header_field(std::string_view name, std::string_view value) noexcept {
-    if (name.empty() ||
-        name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH ||
-        value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+inline bool
+is_valid_header_field(std::string_view name, std::string_view value) noexcept {
+    if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
+        || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
         return false;
     }
 
@@ -175,10 +163,10 @@ inline bool is_valid_header_field(std::string_view name, std::string_view value)
     return true;
 }
 
-inline bool is_valid_incoming_header_field(std::string_view name, std::string_view value) noexcept {
-    if (name.empty() ||
-        name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH ||
-        value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+inline bool
+is_valid_incoming_header_field(std::string_view name, std::string_view value) noexcept {
+    if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
+        || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
         return false;
     }
 
@@ -205,7 +193,8 @@ inline bool is_valid_incoming_header_field(std::string_view name, std::string_vi
 }
 
 template <typename Message>
-std::vector<std::string> announced_trailers(Message const& msg) {
+std::vector<std::string>
+announced_trailers(Message const &msg) {
     std::vector<std::string> trailers;
     if (!msg.has_header("trailer")) {
         return trailers;
@@ -214,26 +203,28 @@ std::vector<std::string> announced_trailers(Message const& msg) {
     if (it == msg.headers().end()) {
         return trailers;
     }
-    for (auto const& value : it->second) {
+    for (auto const &value : it->second) {
         auto names = qb::http::utility::split_and_trim_header_list(value, ',');
-        for (auto& name : names) {
+        for (auto &name : names) {
             trailers.push_back(lower_header_name(name));
         }
     }
     return trailers;
 }
 
-inline bool is_announced_trailer(std::string_view name,
-                                 std::vector<std::string> const& trailers) noexcept {
+inline bool
+is_announced_trailer(std::string_view name, std::vector<std::string> const &trailers) noexcept {
     return std::find(trailers.begin(), trailers.end(), lower_header_name(name)) != trailers.end();
 }
 
-inline std::string rcbuf_to_string(nghttp3_rcbuf *buf) {
+inline std::string
+rcbuf_to_string(nghttp3_rcbuf *buf) {
     const auto view = nghttp3_rcbuf_get_buf(buf);
     return {reinterpret_cast<const char *>(view.base), view.len};
 }
 
-inline std::string request_target(qb::io::uri const& uri) {
+inline std::string
+request_target(qb::io::uri const &uri) {
     std::string path = uri.path().empty() ? "/" : std::string(uri.path());
     if (!uri.encoded_queries().empty()) {
         path.push_back('?');
@@ -242,7 +233,8 @@ inline std::string request_target(qb::io::uri const& uri) {
     return path;
 }
 
-inline std::string authority(qb::io::uri const& uri) {
+inline std::string
+authority(qb::io::uri const &uri) {
     std::string value(uri.host());
     if (!uri.port().empty()) {
         value.push_back(':');
@@ -252,9 +244,10 @@ inline std::string authority(qb::io::uri const& uri) {
 }
 
 template <typename Message>
-bool add_regular_headers(header_block& block, Message const& msg, std::size_t& fields) {
+bool
+add_regular_headers(header_block &block, Message const &msg, std::size_t &fields) {
     const auto trailers = announced_trailers(msg);
-    for (auto const& [name, values] : msg.headers()) {
+    for (auto const &[name, values] : msg.headers()) {
         const auto lower = lower_header_name(name);
         if (lower.empty() || lower.front() == ':' || is_forbidden_h3_header(lower)) {
             return false;
@@ -265,9 +258,8 @@ bool add_regular_headers(header_block& block, Message const& msg, std::size_t& f
         if (lower != "trailer" && is_announced_trailer(lower, trailers)) {
             continue;
         }
-        for (auto const& value : values) {
-            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT ||
-                !is_valid_header_field(lower, value)) {
+        for (auto const &value : values) {
+            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)) {
                 return false;
             }
             block.add(lower, value);
@@ -277,14 +269,15 @@ bool add_regular_headers(header_block& block, Message const& msg, std::size_t& f
 }
 
 template <typename Message>
-std::optional<header_block> make_trailers(Message const& msg) {
+std::optional<header_block>
+make_trailers(Message const &msg) {
     const auto trailers = announced_trailers(msg);
     if (trailers.empty()) {
         return std::nullopt;
     }
     header_block block;
-    std::size_t fields = 0;
-    for (auto const& [name, values] : msg.headers()) {
+    std::size_t  fields = 0;
+    for (auto const &[name, values] : msg.headers()) {
         const auto lower = lower_header_name(name);
         if (!is_announced_trailer(lower, trailers)) {
             continue;
@@ -292,9 +285,8 @@ std::optional<header_block> make_trailers(Message const& msg) {
         if (is_forbidden_h3_trailer(lower)) {
             return std::nullopt;
         }
-        for (auto const& value : values) {
-            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT ||
-                !is_valid_header_field(lower, value)) {
+        for (auto const &value : values) {
+            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)) {
                 return std::nullopt;
             }
             block.add(lower, value);
@@ -303,16 +295,16 @@ std::optional<header_block> make_trailers(Message const& msg) {
     return block.nva.empty() ? std::nullopt : std::optional<header_block>{std::move(block)};
 }
 
-inline std::optional<header_block> make_request_headers(qb::http::Request const& request) {
+inline std::optional<header_block>
+make_request_headers(qb::http::Request const &request) {
     header_block block;
-    std::size_t fields = 4;
-    auto target = request_target(request.uri());
+    std::size_t  fields = 4;
+    auto         target = request_target(request.uri());
     if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH) {
         return std::nullopt;
     }
     const auto declared_length = declared_content_length(request);
-    if (!declared_length.ok ||
-        (declared_length.value && *declared_length.value != request.body().size())) {
+    if (!declared_length.ok || (declared_length.value && *declared_length.value != request.body().size())) {
         return std::nullopt;
     }
     block.add(":method", std::string(request.method()));
@@ -331,20 +323,19 @@ inline std::optional<header_block> make_request_headers(qb::http::Request const&
     return block;
 }
 
-inline bool response_body_length_must_match(qb::http::Response const& response,
-                                            qb::http::Method request_method) noexcept {
+inline bool
+response_body_length_must_match(qb::http::Response const &response, qb::http::Method request_method) noexcept {
     if (request_method == qb::http::method::HEAD) {
         return false;
     }
     const auto status_code = response.status().code();
-    return !((status_code >= 100 && status_code < 200) ||
-             status_code == 204 ||
-             status_code == 304);
+    return !((status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304);
 }
 
-inline std::optional<header_block> make_response_headers(qb::http::Response const& response) {
+inline std::optional<header_block>
+make_response_headers(qb::http::Response const &response) {
     header_block block;
-    std::size_t fields = 1;
+    std::size_t  fields = 1;
     block.add(":status", std::to_string(response.status().code()));
     if (!add_regular_headers(block, response, fields)) {
         return std::nullopt;
@@ -363,49 +354,48 @@ inline std::optional<header_block> make_response_headers(qb::http::Response cons
 template <typename Owner>
 class connection {
 public:
-    enum class role {
-        client,
-        server
-    };
+    enum class role { client, server };
 
 private:
     struct stream_state {
-        qb::http::Request request;
-        qb::http::Response response;
-        detail::header_block incoming_headers;
-        nghttp3_data_reader reader{read_data_cb};
-        std::string tx_body;
-        std::size_t tx_offset = 0;
-        std::size_t incoming_header_fields = 0;
+        qb::http::Request            request;
+        qb::http::Response           response;
+        detail::header_block         incoming_headers;
+        nghttp3_data_reader          reader{read_data_cb};
+        std::string                  tx_body;
+        std::size_t                  tx_offset              = 0;
+        std::size_t                  incoming_header_fields = 0;
         std::optional<std::uint64_t> expected_content_length;
-        bool main_headers_seen = false;
-        bool response_headers_seen = false;
-        bool output_drained = false;
+        bool                         main_headers_seen     = false;
+        bool                         response_headers_seen = false;
+        bool                         output_drained        = false;
     };
 
-    Owner& _owner;
-    role _role;
-    std::uint64_t _connection_id = 0;
-    nghttp3_conn *_conn = nullptr;
+    Owner                                                          &_owner;
+    role                                                            _role;
+    std::uint64_t                                                   _connection_id = 0;
+    nghttp3_conn                                                   *_conn          = nullptr;
     qb::unordered_map<std::uint64_t, std::unique_ptr<stream_state>> _streams;
-    bool _local_streams_bound = false;
-    bool _shutdown_started = false;
+    bool                                                            _local_streams_bound = false;
+    bool                                                            _shutdown_started    = false;
 
-    static nghttp3_tstamp now_ts() noexcept {
+    static nghttp3_tstamp
+    now_ts() noexcept {
         return static_cast<nghttp3_tstamp>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
-    [[nodiscard]] stream_state& state_for(std::uint64_t stream_id) {
-        auto& ptr = _streams[stream_id];
+    [[nodiscard]] stream_state &
+    state_for(std::uint64_t stream_id) {
+        auto &ptr = _streams[stream_id];
         if (!ptr) {
             ptr = std::make_unique<stream_state>();
         }
         return *ptr;
     }
 
-    [[nodiscard]] static connection *self(void *conn_user_data) noexcept {
+    [[nodiscard]] static connection *
+    self(void *conn_user_data) noexcept {
         return static_cast<connection *>(conn_user_data);
     }
 
@@ -417,7 +407,8 @@ private:
     // NGHTTP3_ERR_CALLBACK_FAILURE, which nghttp3 turns into a clean
     // stream/connection failure instead of std::terminate.
     template <typename Fn>
-    static auto guard_callback(Fn &&fn) noexcept -> decltype(fn()) {
+    static auto
+    guard_callback(Fn &&fn) noexcept -> decltype(fn()) {
         try {
             return fn();
         } catch (...) {
@@ -425,7 +416,8 @@ private:
         }
     }
 
-    static void rand_cb(uint8_t *dest, size_t destlen) {
+    static void
+    rand_cb(uint8_t *dest, size_t destlen) {
         if (RAND_bytes(dest, static_cast<int>(destlen)) != 1) {
             // Entropy failure must never hand predictable bytes to the QUIC/HTTP3
             // crypto layer (connection IDs, nonces, ...). Fail closed instead of
@@ -435,284 +427,255 @@ private:
         }
     }
 
-    static nghttp3_ssize read_data_cb(nghttp3_conn *, int64_t stream_id,
-                                      nghttp3_vec *vec, size_t veccnt,
-                                      uint32_t *pflags, void *conn_user_data,
-                                      void *stream_user_data) {
+    static nghttp3_ssize
+    read_data_cb(nghttp3_conn *, int64_t stream_id, nghttp3_vec *vec, size_t veccnt, uint32_t *pflags, void *conn_user_data,
+                 void *stream_user_data) {
         return guard_callback([&]() -> nghttp3_ssize {
-        auto *me = self(conn_user_data);
-        auto *state = stream_user_data
-            ? static_cast<stream_state *>(stream_user_data)
-            : &me->state_for(static_cast<std::uint64_t>(stream_id));
-        if (state->tx_offset >= state->tx_body.size()) {
-            *pflags = NGHTTP3_DATA_FLAG_EOF;
+            auto *me = self(conn_user_data);
+            auto *state =
+                stream_user_data ? static_cast<stream_state *>(stream_user_data) : &me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (state->tx_offset >= state->tx_body.size()) {
+                *pflags = NGHTTP3_DATA_FLAG_EOF;
+                return 0;
+            }
+            if (veccnt == 0) {
+                return NGHTTP3_ERR_WOULDBLOCK;
+            }
+            vec[0].base      = reinterpret_cast<uint8_t *>(state->tx_body.data() + state->tx_offset);
+            vec[0].len       = state->tx_body.size() - state->tx_offset;
+            state->tx_offset = state->tx_body.size();
+            *pflags          = NGHTTP3_DATA_FLAG_EOF;
+            return 1;
+        });
+    }
+
+    static int
+    acked_stream_data_cb(nghttp3_conn *, int64_t stream_id, uint64_t datalen, void *conn_user_data, void *) {
+        return guard_callback([&]() -> int {
+            self(conn_user_data)->_owner.on_http3_stream_acked(static_cast<std::uint64_t>(stream_id), datalen);
             return 0;
-        }
-        if (veccnt == 0) {
-            return NGHTTP3_ERR_WOULDBLOCK;
-        }
-        vec[0].base = reinterpret_cast<uint8_t *>(state->tx_body.data() + state->tx_offset);
-        vec[0].len = state->tx_body.size() - state->tx_offset;
-        state->tx_offset = state->tx_body.size();
-        *pflags = NGHTTP3_DATA_FLAG_EOF;
-        return 1;
         });
     }
 
-    static int acked_stream_data_cb(nghttp3_conn *, int64_t stream_id,
-                                    uint64_t datalen, void *conn_user_data,
-                                    void *) {
+    static int
+    stream_close_cb(nghttp3_conn *, int64_t stream_id, uint64_t app_error_code, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-        self(conn_user_data)->_owner.on_http3_stream_acked(
-            static_cast<std::uint64_t>(stream_id), datalen);
-        return 0;
+            auto *me = self(conn_user_data);
+            if constexpr (requires(Owner &owner, std::uint64_t connection_id, std::uint64_t sid, std::uint64_t code) {
+                              owner.on_http3_stream_closed(connection_id, sid, code);
+                          }) {
+                me->_owner.on_http3_stream_closed(me->_connection_id, static_cast<std::uint64_t>(stream_id), app_error_code);
+            } else {
+                me->_owner.on_http3_stream_closed(static_cast<std::uint64_t>(stream_id), app_error_code);
+            }
+            me->_streams.erase(static_cast<std::uint64_t>(stream_id));
+            return 0;
         });
     }
 
-    static int stream_close_cb(nghttp3_conn *, int64_t stream_id,
-                               uint64_t app_error_code, void *conn_user_data,
-                               void *) {
+    static int
+    recv_data_cb(nghttp3_conn *, int64_t stream_id, const uint8_t *data, size_t datalen, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        if constexpr (requires(Owner& owner, std::uint64_t connection_id,
-                               std::uint64_t sid, std::uint64_t code) {
-            owner.on_http3_stream_closed(connection_id, sid, code);
-        }) {
-            me->_owner.on_http3_stream_closed(me->_connection_id,
-                                              static_cast<std::uint64_t>(stream_id),
-                                              app_error_code);
-        } else {
-            me->_owner.on_http3_stream_closed(static_cast<std::uint64_t>(stream_id),
-                                              app_error_code);
-        }
-        me->_streams.erase(static_cast<std::uint64_t>(stream_id));
-        return 0;
+            auto      *me           = self(conn_user_data);
+            auto      &st           = me->state_for(static_cast<std::uint64_t>(stream_id));
+            const auto current_size = me->_role == role::server ? st.request.body().size() : st.response.body().size();
+            if constexpr (requires(Owner &owner) { owner.max_http3_body_size(); }) {
+                const auto limit = me->_owner.max_http3_body_size();
+                if (limit != 0 && current_size + datalen > limit) {
+                    me->_owner.reset_http3_stream(me->_connection_id, static_cast<std::uint64_t>(stream_id), NGHTTP3_H3_REQUEST_CANCELLED);
+                    return NGHTTP3_ERR_CALLBACK_FAILURE;
+                }
+            }
+            if (me->_role == role::server) {
+                st.request.body().raw().put(reinterpret_cast<const char *>(data), datalen);
+            } else if (st.request.method() != qb::http::method::HEAD) {
+                st.response.body().raw().put(reinterpret_cast<const char *>(data), datalen);
+            }
+            return 0;
         });
     }
 
-    static int recv_data_cb(nghttp3_conn *, int64_t stream_id, const uint8_t *data,
-                            size_t datalen, void *conn_user_data, void *) {
+    static int
+    deferred_consume_cb(nghttp3_conn *, int64_t stream_id, size_t consumed, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        auto& st = me->state_for(static_cast<std::uint64_t>(stream_id));
-        const auto current_size = me->_role == role::server
-            ? st.request.body().size()
-            : st.response.body().size();
-        if constexpr (requires(Owner& owner) { owner.max_http3_body_size(); }) {
-            const auto limit = me->_owner.max_http3_body_size();
-            if (limit != 0 && current_size + datalen > limit) {
-                me->_owner.reset_http3_stream(me->_connection_id,
-                                              static_cast<std::uint64_t>(stream_id),
-                                              NGHTTP3_H3_REQUEST_CANCELLED);
+            auto *me = self(conn_user_data);
+            me->_owner.extend_http3_stream_credit(me->_connection_id, static_cast<std::uint64_t>(stream_id), consumed);
+            return 0;
+        });
+    }
+
+    static int
+    begin_headers_cb(nghttp3_conn *, int64_t stream_id, void *conn_user_data, void *) {
+        return guard_callback([&]() -> int {
+            auto &st                  = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
+            st.incoming_headers       = {};
+            st.incoming_header_fields = 0;
+            return 0;
+        });
+    }
+
+    static int
+    recv_header_cb(nghttp3_conn *, int64_t stream_id, int32_t, nghttp3_rcbuf *name, nghttp3_rcbuf *value, uint8_t, void *conn_user_data,
+                   void *) {
+        return guard_callback([&]() -> int {
+            auto &st           = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
+            auto  header_name  = detail::rcbuf_to_string(name);
+            auto  header_value = detail::rcbuf_to_string(value);
+            if (++st.incoming_header_fields > qb::http::protocol_limits::MAX_HEADERS_COUNT
+                || !detail::is_valid_incoming_header_field(header_name, header_value)) {
                 return NGHTTP3_ERR_CALLBACK_FAILURE;
             }
-        }
-        if (me->_role == role::server) {
-            st.request.body().raw().put(reinterpret_cast<const char *>(data), datalen);
-        } else if (st.request.method() != qb::http::method::HEAD) {
-            st.response.body().raw().put(reinterpret_cast<const char *>(data), datalen);
-        }
-        return 0;
+            st.incoming_headers.add(std::move(header_name), std::move(header_value));
+            return 0;
         });
     }
 
-    static int deferred_consume_cb(nghttp3_conn *, int64_t stream_id,
-                                   size_t consumed, void *conn_user_data, void *) {
+    static int
+    end_headers_cb(nghttp3_conn *, int64_t stream_id, int, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        me->_owner.extend_http3_stream_credit(
-            me->_connection_id, static_cast<std::uint64_t>(stream_id), consumed);
-        return 0;
-        });
-    }
-
-    static int begin_headers_cb(nghttp3_conn *, int64_t stream_id,
-                                void *conn_user_data, void *) {
-        return guard_callback([&]() -> int {
-        auto& st = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-        st.incoming_headers = {};
-        st.incoming_header_fields = 0;
-        return 0;
-        });
-    }
-
-    static int recv_header_cb(nghttp3_conn *, int64_t stream_id, int32_t,
-                              nghttp3_rcbuf *name, nghttp3_rcbuf *value,
-                              uint8_t, void *conn_user_data, void *) {
-        return guard_callback([&]() -> int {
-        auto& st = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-        auto header_name = detail::rcbuf_to_string(name);
-        auto header_value = detail::rcbuf_to_string(value);
-        if (++st.incoming_header_fields > qb::http::protocol_limits::MAX_HEADERS_COUNT ||
-            !detail::is_valid_incoming_header_field(header_name, header_value)) {
-            return NGHTTP3_ERR_CALLBACK_FAILURE;
-        }
-        st.incoming_headers.add(std::move(header_name), std::move(header_value));
-        return 0;
-        });
-    }
-
-    static int end_headers_cb(nghttp3_conn *, int64_t stream_id, int,
-                              void *conn_user_data, void *) {
-        return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        auto& st = me->state_for(static_cast<std::uint64_t>(stream_id));
-        if (!me->materialize_headers(static_cast<std::uint64_t>(stream_id), st)) {
-            me->_owner.close_http3_connection(me->_connection_id,
-                                              NGHTTP3_H3_MESSAGE_ERROR,
-                                              "Malformed HTTP/3 headers");
-            return NGHTTP3_ERR_CALLBACK_FAILURE;
-        }
-        st.main_headers_seen = true;
-        return 0;
-        });
-    }
-
-    static int begin_trailers_cb(nghttp3_conn *, int64_t stream_id,
-                                 void *conn_user_data, void *) {
-        return guard_callback([&]() -> int {
-        auto& st = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-        st.incoming_headers = {};
-        st.incoming_header_fields = 0;
-        return 0;
-        });
-    }
-
-    static int end_trailers_cb(nghttp3_conn *, int64_t stream_id, int,
-                               void *conn_user_data, void *) {
-        return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        auto& st = me->state_for(static_cast<std::uint64_t>(stream_id));
-        if (!me->materialize_trailers(st)) {
-            me->_owner.close_http3_connection(me->_connection_id,
-                                              NGHTTP3_H3_MESSAGE_ERROR,
-                                              "Malformed HTTP/3 trailers");
-            return NGHTTP3_ERR_CALLBACK_FAILURE;
-        }
-        return 0;
-        });
-    }
-
-    static int end_stream_cb(nghttp3_conn *, int64_t stream_id,
-                             void *conn_user_data, void *) {
-        return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        auto& st = me->state_for(static_cast<std::uint64_t>(stream_id));
-        const auto id = static_cast<std::uint64_t>(stream_id);
-        if (!me->content_length_matches(st)) {
-            me->_owner.close_http3_connection(me->_connection_id,
-                                              NGHTTP3_H3_MESSAGE_ERROR,
-                                              "HTTP/3 content-length mismatch");
-            return NGHTTP3_ERR_CALLBACK_FAILURE;
-        }
-        if (me->_role == role::server) {
-            st.request.stream_id = id;
-            if constexpr (requires(Owner& owner, std::uint64_t cid, std::uint64_t sid, qb::http::Request req) {
-                owner.on_http3_request(cid, sid, std::move(req));
-            }) {
-                me->_owner.on_http3_request(me->_connection_id, id, std::move(st.request));
+            auto *me = self(conn_user_data);
+            auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (!me->materialize_headers(static_cast<std::uint64_t>(stream_id), st)) {
+                me->_owner.close_http3_connection(me->_connection_id, NGHTTP3_H3_MESSAGE_ERROR, "Malformed HTTP/3 headers");
+                return NGHTTP3_ERR_CALLBACK_FAILURE;
             }
-        } else {
-            st.response.stream_id = id;
-            if constexpr (requires(Owner& owner, std::uint64_t sid, qb::http::Response res) {
-                owner.on_http3_response(sid, std::move(res));
-            }) {
-                me->_owner.on_http3_response(id, std::move(st.response));
+            st.main_headers_seen = true;
+            return 0;
+        });
+    }
+
+    static int
+    begin_trailers_cb(nghttp3_conn *, int64_t stream_id, void *conn_user_data, void *) {
+        return guard_callback([&]() -> int {
+            auto &st                  = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
+            st.incoming_headers       = {};
+            st.incoming_header_fields = 0;
+            return 0;
+        });
+    }
+
+    static int
+    end_trailers_cb(nghttp3_conn *, int64_t stream_id, int, void *conn_user_data, void *) {
+        return guard_callback([&]() -> int {
+            auto *me = self(conn_user_data);
+            auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (!me->materialize_trailers(st)) {
+                me->_owner.close_http3_connection(me->_connection_id, NGHTTP3_H3_MESSAGE_ERROR, "Malformed HTTP/3 trailers");
+                return NGHTTP3_ERR_CALLBACK_FAILURE;
             }
-        }
-        return 0;
+            return 0;
         });
     }
 
-    static int stop_sending_cb(nghttp3_conn *, int64_t stream_id,
-                               uint64_t app_error_code, void *conn_user_data, void *) {
+    static int
+    end_stream_cb(nghttp3_conn *, int64_t stream_id, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        me->_owner.stop_http3_stream(me->_connection_id,
-                                     static_cast<std::uint64_t>(stream_id),
-                                     app_error_code);
-        return 0;
+            auto      *me = self(conn_user_data);
+            auto      &st = me->state_for(static_cast<std::uint64_t>(stream_id));
+            const auto id = static_cast<std::uint64_t>(stream_id);
+            if (!me->content_length_matches(st)) {
+                me->_owner.close_http3_connection(me->_connection_id, NGHTTP3_H3_MESSAGE_ERROR, "HTTP/3 content-length mismatch");
+                return NGHTTP3_ERR_CALLBACK_FAILURE;
+            }
+            if (me->_role == role::server) {
+                st.request.stream_id = id;
+                if constexpr (requires(Owner &owner, std::uint64_t cid, std::uint64_t sid, qb::http::Request req) {
+                                  owner.on_http3_request(cid, sid, std::move(req));
+                              }) {
+                    me->_owner.on_http3_request(me->_connection_id, id, std::move(st.request));
+                }
+            } else {
+                st.response.stream_id = id;
+                if constexpr (requires(Owner &owner, std::uint64_t sid, qb::http::Response res) {
+                                  owner.on_http3_response(sid, std::move(res));
+                              }) {
+                    me->_owner.on_http3_response(id, std::move(st.response));
+                }
+            }
+            return 0;
         });
     }
 
-    static int reset_stream_cb(nghttp3_conn *, int64_t stream_id,
-                               uint64_t app_error_code, void *conn_user_data, void *) {
+    static int
+    stop_sending_cb(nghttp3_conn *, int64_t stream_id, uint64_t app_error_code, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        me->_owner.reset_http3_stream(me->_connection_id,
-                                      static_cast<std::uint64_t>(stream_id),
-                                      app_error_code);
-        return 0;
+            auto *me = self(conn_user_data);
+            me->_owner.stop_http3_stream(me->_connection_id, static_cast<std::uint64_t>(stream_id), app_error_code);
+            return 0;
         });
     }
 
-    static int shutdown_cb(nghttp3_conn *, int64_t id, void *conn_user_data) {
+    static int
+    reset_stream_cb(nghttp3_conn *, int64_t stream_id, uint64_t app_error_code, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-        auto *me = self(conn_user_data);
-        if constexpr (requires(Owner& owner, std::uint64_t connection_id, std::uint64_t last_id) {
-            owner.on_http3_shutdown(connection_id, last_id);
-        }) {
-            me->_owner.on_http3_shutdown(me->_connection_id, static_cast<std::uint64_t>(id));
-        }
-        return 0;
+            auto *me = self(conn_user_data);
+            me->_owner.reset_http3_stream(me->_connection_id, static_cast<std::uint64_t>(stream_id), app_error_code);
+            return 0;
         });
     }
 
-    bool materialize_headers(std::uint64_t stream_id, stream_state& st) {
+    static int
+    shutdown_cb(nghttp3_conn *, int64_t id, void *conn_user_data) {
+        return guard_callback([&]() -> int {
+            auto *me = self(conn_user_data);
+            if constexpr (requires(Owner &owner, std::uint64_t connection_id, std::uint64_t last_id) {
+                              owner.on_http3_shutdown(connection_id, last_id);
+                          }) {
+                me->_owner.on_http3_shutdown(me->_connection_id, static_cast<std::uint64_t>(id));
+            }
+            return 0;
+        });
+    }
+
+    bool
+    materialize_headers(std::uint64_t stream_id, stream_state &st) {
         if (!detail::pseudo_headers_before_regular_headers(st.incoming_headers)) {
             return false;
         }
 
-        std::optional<std::string> method;
-        std::optional<std::string> scheme;
-        std::optional<std::string> authority;
-        std::optional<std::string> path;
-        std::optional<int> status;
+        std::optional<std::string>   method;
+        std::optional<std::string>   scheme;
+        std::optional<std::string>   authority;
+        std::optional<std::string>   path;
+        std::optional<int>           status;
         std::optional<std::uint64_t> content_length;
 
-        for (auto const& [name, value] : st.incoming_headers.storage) {
+        for (auto const &[name, value] : st.incoming_headers.storage) {
             if (name == ":method") {
                 if (method || _role != role::server) {
                     return false;
                 }
                 method = value;
-            }
-            else if (name == ":scheme") {
+            } else if (name == ":scheme") {
                 if (scheme || _role != role::server) {
                     return false;
                 }
                 scheme = value;
-            }
-            else if (name == ":authority") {
+            } else if (name == ":authority") {
                 if (authority || _role != role::server) {
                     return false;
                 }
                 authority = value;
-            }
-            else if (name == ":path") {
+            } else if (name == ":path") {
                 if (path || _role != role::server) {
                     return false;
                 }
                 path = value;
-            }
-            else if (name == ":status") {
+            } else if (name == ":status") {
                 if (status || _role != role::client) {
                     return false;
                 }
-                int parsed_status = 0;
-                auto const *begin = value.data();
-                auto const *end = value.data() + value.size();
-                auto [ptr, ec] = std::from_chars(begin, end, parsed_status);
-                if (ec != std::errc{} || ptr != end ||
-                    parsed_status < 100 || parsed_status > 999) {
+                int         parsed_status = 0;
+                auto const *begin         = value.data();
+                auto const *end           = value.data() + value.size();
+                auto [ptr, ec]            = std::from_chars(begin, end, parsed_status);
+                if (ec != std::errc{} || ptr != end || parsed_status < 100 || parsed_status > 999) {
                     return false;
                 }
                 status = parsed_status;
-            }
-            else if (!name.empty() && name.front() == ':') {
+            } else if (!name.empty() && name.front() == ':') {
                 return false;
-            }
-            else if (name == "content-length") {
+            } else if (name == "content-length") {
                 auto parsed = detail::parse_content_length(value);
                 if (!parsed || (content_length && *content_length != *parsed)) {
                     return false;
@@ -723,8 +686,7 @@ private:
                 } else {
                     st.response.add_header(name, value);
                 }
-            }
-            else {
+            } else {
                 if (detail::is_forbidden_h3_header(name)) {
                     return false;
                 }
@@ -745,29 +707,30 @@ private:
             if (parsed_method == qb::http::method::UNINITIALIZED) {
                 return false;
             }
-            st.request.method() = parsed_method;
-            st.request.uri() = qb::io::uri(*scheme + "://" + *authority + *path);
+            st.request.method()      = parsed_method;
+            st.request.uri()         = qb::io::uri(*scheme + "://" + *authority + *path);
             st.request.major_version = 3;
             st.request.minor_version = 0;
-            st.request.stream_id = stream_id;
+            st.request.stream_id     = stream_id;
         } else {
             if (!status) {
                 return false;
             }
-            st.response.status() = *status;
+            st.response.status()      = *status;
             st.response.major_version = 3;
             st.response.minor_version = 0;
-            st.response.stream_id = stream_id;
-            st.response_headers_seen = true;
+            st.response.stream_id     = stream_id;
+            st.response_headers_seen  = true;
         }
         return true;
     }
 
-    bool materialize_trailers(stream_state& st) {
+    bool
+    materialize_trailers(stream_state &st) {
         if (!st.main_headers_seen) {
             return false;
         }
-        for (auto const& [name, value] : st.incoming_headers.storage) {
+        for (auto const &[name, value] : st.incoming_headers.storage) {
             if (detail::is_forbidden_h3_trailer(name)) {
                 return false;
             }
@@ -780,7 +743,8 @@ private:
         return true;
     }
 
-    [[nodiscard]] bool content_length_matches(stream_state const& st) const noexcept {
+    [[nodiscard]] bool
+    content_length_matches(stream_state const &st) const noexcept {
         if (!st.expected_content_length) {
             return true;
         }
@@ -789,52 +753,48 @@ private:
         }
         if (_role == role::client) {
             const auto status_code = st.response.status().code();
-            if ((status_code >= 100 && status_code < 200) ||
-                status_code == 204 ||
-                status_code == 304) {
+            if ((status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304) {
                 return true;
             }
         }
-        const auto actual = _role == role::server
-            ? st.request.body().size()
-            : st.response.body().size();
+        const auto actual = _role == role::server ? st.request.body().size() : st.response.body().size();
         return actual == *st.expected_content_length;
     }
 
-    [[nodiscard]] static nghttp3_callbacks callbacks() noexcept {
+    [[nodiscard]] static nghttp3_callbacks
+    callbacks() noexcept {
         nghttp3_callbacks cb{};
         cb.acked_stream_data = acked_stream_data_cb;
-        cb.stream_close = stream_close_cb;
-        cb.recv_data = recv_data_cb;
-        cb.deferred_consume = deferred_consume_cb;
-        cb.begin_headers = begin_headers_cb;
-        cb.recv_header = recv_header_cb;
-        cb.end_headers = end_headers_cb;
-        cb.begin_trailers = begin_trailers_cb;
-        cb.recv_trailer = recv_header_cb;
-        cb.end_trailers = end_trailers_cb;
-        cb.stop_sending = stop_sending_cb;
-        cb.end_stream = end_stream_cb;
-        cb.reset_stream = reset_stream_cb;
-        cb.shutdown = shutdown_cb;
-        cb.rand = rand_cb;
+        cb.stream_close      = stream_close_cb;
+        cb.recv_data         = recv_data_cb;
+        cb.deferred_consume  = deferred_consume_cb;
+        cb.begin_headers     = begin_headers_cb;
+        cb.recv_header       = recv_header_cb;
+        cb.end_headers       = end_headers_cb;
+        cb.begin_trailers    = begin_trailers_cb;
+        cb.recv_trailer      = recv_header_cb;
+        cb.end_trailers      = end_trailers_cb;
+        cb.stop_sending      = stop_sending_cb;
+        cb.end_stream        = end_stream_cb;
+        cb.reset_stream      = reset_stream_cb;
+        cb.shutdown          = shutdown_cb;
+        cb.rand              = rand_cb;
         return cb;
     }
 
 public:
-    connection(Owner& owner, std::uint64_t connection_id, role r)
+    connection(Owner &owner, std::uint64_t connection_id, role r)
         : _owner(owner)
         , _role(r)
         , _connection_id(connection_id) {
         nghttp3_settings settings;
         nghttp3_settings_default(&settings);
-        settings.qpack_blocked_streams = 32;
+        settings.qpack_blocked_streams  = 32;
         settings.max_field_section_size = 64 * 1024;
 
         const auto cb = callbacks();
-        const auto rv = _role == role::server
-            ? nghttp3_conn_server_new(&_conn, &cb, &settings, nghttp3_mem_default(), this)
-            : nghttp3_conn_client_new(&_conn, &cb, &settings, nghttp3_mem_default(), this);
+        const auto rv = _role == role::server ? nghttp3_conn_server_new(&_conn, &cb, &settings, nghttp3_mem_default(), this)
+                                              : nghttp3_conn_client_new(&_conn, &cb, &settings, nghttp3_mem_default(), this);
         if (rv != 0) {
             throw std::runtime_error("nghttp3_conn_new failed");
         }
@@ -844,43 +804,44 @@ public:
         nghttp3_conn_del(_conn);
     }
 
-    connection(connection const&) = delete;
-    connection& operator=(connection const&) = delete;
-    connection(connection&& rhs) noexcept
+    connection(connection const &)            = delete;
+    connection &operator=(connection const &) = delete;
+    connection(connection &&rhs) noexcept
         : _owner(rhs._owner)
         , _role(rhs._role)
         , _connection_id(rhs._connection_id)
         , _conn(std::exchange(rhs._conn, nullptr))
         , _streams(std::move(rhs._streams)) {}
 
-    [[nodiscard]] bool ok() const noexcept { return _conn != nullptr; }
+    [[nodiscard]] bool
+    ok() const noexcept {
+        return _conn != nullptr;
+    }
 
-    bool bind_local_streams() {
+    bool
+    bind_local_streams() {
         if (_local_streams_bound) {
             return true;
         }
-        const auto control = _owner.open_http3_unidirectional_stream(_connection_id);
+        const auto control       = _owner.open_http3_unidirectional_stream(_connection_id);
         const auto qpack_encoder = _owner.open_http3_unidirectional_stream(_connection_id);
         const auto qpack_decoder = _owner.open_http3_unidirectional_stream(_connection_id);
         if (nghttp3_conn_bind_control_stream(_conn, static_cast<int64_t>(control)) != 0)
             return false;
-        if (nghttp3_conn_bind_qpack_streams(_conn,
-                static_cast<int64_t>(qpack_encoder),
-                static_cast<int64_t>(qpack_decoder)) != 0)
+        if (nghttp3_conn_bind_qpack_streams(_conn, static_cast<int64_t>(qpack_encoder), static_cast<int64_t>(qpack_decoder)) != 0)
             return false;
         _local_streams_bound = true;
         drain();
         return true;
     }
 
-    bool read_stream(std::uint64_t stream_id, std::string_view data, bool fin) {
-        (void)state_for(stream_id);
-        auto rv = nghttp3_conn_read_stream2(
-            _conn, static_cast<int64_t>(stream_id),
-            reinterpret_cast<const uint8_t *>(data.data()), data.size(), fin ? 1 : 0, now_ts());
+    bool
+    read_stream(std::uint64_t stream_id, std::string_view data, bool fin) {
+        (void) state_for(stream_id);
+        auto rv = nghttp3_conn_read_stream2(_conn, static_cast<int64_t>(stream_id), reinterpret_cast<const uint8_t *>(data.data()), data.size(),
+                                            fin ? 1 : 0, now_ts());
         if (rv < 0) {
-            _owner.close_http3_connection(_connection_id, static_cast<std::uint64_t>(-rv),
-                                          "HTTP/3 protocol read error");
+            _owner.close_http3_connection(_connection_id, static_cast<std::uint64_t>(-rv), "HTTP/3 protocol read error");
             return false;
         }
         _owner.extend_http3_stream_credit(_connection_id, stream_id, static_cast<std::uint64_t>(rv));
@@ -888,13 +849,15 @@ public:
         return true;
     }
 
-    void add_ack_offset(std::uint64_t stream_id, std::uint64_t bytes) {
+    void
+    add_ack_offset(std::uint64_t stream_id, std::uint64_t bytes) {
         if (bytes != 0) {
-            (void)nghttp3_conn_add_ack_offset(_conn, static_cast<int64_t>(stream_id), bytes);
+            (void) nghttp3_conn_add_ack_offset(_conn, static_cast<int64_t>(stream_id), bytes);
         }
     }
 
-    bool submit_shutdown_notice() {
+    bool
+    submit_shutdown_notice() {
         if (nghttp3_conn_submit_shutdown_notice(_conn) != 0) {
             return false;
         }
@@ -902,7 +865,8 @@ public:
         return true;
     }
 
-    bool shutdown() {
+    bool
+    shutdown() {
         _shutdown_started = true;
         if (nghttp3_conn_shutdown(_conn) != 0) {
             return false;
@@ -911,68 +875,60 @@ public:
         return true;
     }
 
-    [[nodiscard]] bool is_drained() const noexcept {
+    [[nodiscard]] bool
+    is_drained() const noexcept {
         return _shutdown_started && nghttp3_conn_is_drained(_conn) != 0;
     }
 
-    bool submit_response(std::uint64_t stream_id, qb::http::Response const& response) {
-        auto& st = state_for(stream_id);
+    bool
+    submit_response(std::uint64_t stream_id, qb::http::Response const &response) {
+        auto      &st              = state_for(stream_id);
         const auto declared_length = detail::declared_content_length(response);
-        if (!declared_length.ok ||
-            (declared_length.value &&
-             detail::response_body_length_must_match(response, st.request.method()) &&
-             *declared_length.value != response.body().size())) {
+        if (!declared_length.ok
+            || (declared_length.value && detail::response_body_length_must_match(response, st.request.method())
+                && *declared_length.value != response.body().size())) {
             return false;
         }
-        st.tx_body = response.body().template as<std::string>();
+        st.tx_body   = response.body().template as<std::string>();
         st.tx_offset = 0;
         auto headers = detail::make_response_headers(response);
         if (!headers) {
             return false;
         }
-        const auto rv = nghttp3_conn_submit_response(
-            _conn, static_cast<int64_t>(stream_id),
-            headers->nva.data(), headers->nva.size(),
-            st.tx_body.empty() ? nullptr : &st.reader);
+        const auto rv = nghttp3_conn_submit_response(_conn, static_cast<int64_t>(stream_id), headers->nva.data(), headers->nva.size(),
+                                                     st.tx_body.empty() ? nullptr : &st.reader);
         if (rv != 0) {
             return false;
         }
         if (auto trailers = detail::make_trailers(response)) {
-            if (nghttp3_conn_submit_trailers(
-                    _conn, static_cast<int64_t>(stream_id),
-                    trailers->nva.data(), trailers->nva.size()) != 0) {
+            if (nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
                 return false;
             }
         } else if (response.has_header("trailer")) {
             return false;
         }
-        (void)nghttp3_conn_set_stream_user_data(
-            _conn, static_cast<int64_t>(stream_id), &st);
+        (void) nghttp3_conn_set_stream_user_data(_conn, static_cast<int64_t>(stream_id), &st);
         drain();
         return true;
     }
 
-    bool submit_request(std::uint64_t stream_id, qb::http::Request const& request) {
-        auto& st = state_for(stream_id);
-        st.request = request;
-        st.tx_body = request.body().template as<std::string>();
+    bool
+    submit_request(std::uint64_t stream_id, qb::http::Request const &request) {
+        auto &st     = state_for(stream_id);
+        st.request   = request;
+        st.tx_body   = request.body().template as<std::string>();
         st.tx_offset = 0;
         auto headers = detail::make_request_headers(request);
         if (!headers) {
             return false;
         }
-        const auto rv = nghttp3_conn_submit_request(
-            _conn, static_cast<int64_t>(stream_id),
-            headers->nva.data(), headers->nva.size(),
-            st.tx_body.empty() ? nullptr : &st.reader,
-            &st);
+        const auto rv = nghttp3_conn_submit_request(_conn, static_cast<int64_t>(stream_id), headers->nva.data(), headers->nva.size(),
+                                                    st.tx_body.empty() ? nullptr : &st.reader, &st);
         if (rv != 0) {
             return false;
         }
         if (auto trailers = detail::make_trailers(request)) {
-            if (nghttp3_conn_submit_trailers(
-                    _conn, static_cast<int64_t>(stream_id),
-                    trailers->nva.data(), trailers->nva.size()) != 0) {
+            if (nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
                 return false;
             }
         } else if (request.has_header("trailer")) {
@@ -982,26 +938,25 @@ public:
         return true;
     }
 
-    void drain() {
-        nghttp3_vec vec[16];
+    void
+    drain() {
+        nghttp3_vec                vec[16];
         std::vector<std::uint64_t> drained_streams;
-        auto notify_drained = [&]() {
+        auto                       notify_drained = [&]() {
             for (auto stream_id : drained_streams) {
-                if constexpr (requires(Owner& owner, std::uint64_t connection_id,
-                                       std::uint64_t sid) {
-                    owner.on_http3_stream_output_drained(connection_id, sid);
-                }) {
+                if constexpr (requires(Owner &owner, std::uint64_t connection_id, std::uint64_t sid) {
+                                  owner.on_http3_stream_output_drained(connection_id, sid);
+                              }) {
                     _owner.on_http3_stream_output_drained(_connection_id, stream_id);
                 }
             }
         };
         for (std::size_t budget = 0; budget < 256; ++budget) {
-            int64_t stream_id = -1;
-            int fin = 0;
-            const auto nvec = nghttp3_conn_writev_stream(_conn, &stream_id, &fin, vec, 16);
+            int64_t    stream_id = -1;
+            int        fin       = 0;
+            const auto nvec      = nghttp3_conn_writev_stream(_conn, &stream_id, &fin, vec, 16);
             if (nvec < 0) {
-                _owner.close_http3_connection(_connection_id, static_cast<std::uint64_t>(-nvec),
-                                              "HTTP/3 protocol write error");
+                _owner.close_http3_connection(_connection_id, static_cast<std::uint64_t>(-nvec), "HTTP/3 protocol write error");
                 return;
             }
             if (stream_id == -1) {
@@ -1013,22 +968,18 @@ public:
                 if (vec[i].len == 0) {
                     continue;
                 }
-                _owner.send_http3_stream_data(
-                    _connection_id, static_cast<std::uint64_t>(stream_id),
-                    std::string_view(reinterpret_cast<const char *>(vec[i].base), vec[i].len),
-                    false);
+                _owner.send_http3_stream_data(_connection_id, static_cast<std::uint64_t>(stream_id),
+                                              std::string_view(reinterpret_cast<const char *>(vec[i].base), vec[i].len), false);
                 accepted += vec[i].len;
             }
             if (fin && accepted == 0) {
-                _owner.send_http3_stream_data(
-                    _connection_id, static_cast<std::uint64_t>(stream_id), std::string_view{}, true);
+                _owner.send_http3_stream_data(_connection_id, static_cast<std::uint64_t>(stream_id), std::string_view{}, true);
             } else if (fin && accepted != 0) {
-                _owner.send_http3_stream_data(
-                    _connection_id, static_cast<std::uint64_t>(stream_id), std::string_view{}, true);
+                _owner.send_http3_stream_data(_connection_id, static_cast<std::uint64_t>(stream_id), std::string_view{}, true);
             }
-            (void)nghttp3_conn_add_write_offset(_conn, stream_id, accepted);
+            (void) nghttp3_conn_add_write_offset(_conn, stream_id, accepted);
             if (fin) {
-                auto& st = state_for(static_cast<std::uint64_t>(stream_id));
+                auto &st = state_for(static_cast<std::uint64_t>(stream_id));
                 if (!st.output_drained) {
                     st.output_drained = true;
                     drained_streams.push_back(static_cast<std::uint64_t>(stream_id));

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "../validation.h" // Main include for the validation system
 #include <qb/json.h>
+#include "../validation.h" // Main include for the validation system
 
 // Using the new namespace directly for clarity in tests
 using namespace qb::http::validation;
@@ -10,7 +10,8 @@ class ValidationLogicTest : public ::testing::Test {
 protected:
     Result result; // Renamed from ValidationResult
 
-    void SetUp() override {
+    void
+    SetUp() override {
         result.clear();
     }
 };
@@ -129,10 +130,10 @@ TEST_F(ValidationLogicTest, MinLengthRuleValidation) {
     EXPECT_FALSE(result.success());
 
     result.clear();
-    EXPECT_TRUE(rule.validate(qb::json::array({1,2,3}), "test", result));
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
-    EXPECT_FALSE(rule.validate(qb::json::array({1,2}), "test", result));
+    EXPECT_FALSE(rule.validate(qb::json::array({1, 2}), "test", result));
     EXPECT_FALSE(result.success());
 
     result.clear();
@@ -153,10 +154,10 @@ TEST_F(ValidationLogicTest, MaxLengthRuleValidation) {
     EXPECT_FALSE(result.success());
 
     result.clear();
-    EXPECT_TRUE(rule.validate(qb::json::array({1,2,3}), "test", result));
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
-    EXPECT_FALSE(rule.validate(qb::json::array({1,2,3,4}), "test", result));
+    EXPECT_FALSE(rule.validate(qb::json::array({1, 2, 3, 4}), "test", result));
     EXPECT_FALSE(result.success());
 
     result.clear();
@@ -267,11 +268,10 @@ TEST_F(ValidationLogicTest, UniqueItemsRuleValidation) {
     EXPECT_TRUE(rule.validate(qb::json::array(), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
-    EXPECT_TRUE(rule.validate(qb::json({{"a",1}, {"b",2}}), "test", result));
+    EXPECT_TRUE(rule.validate(qb::json({{"a", 1}, {"b", 2}}), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
-    EXPECT_FALSE(
-        rule.validate(qb::json::array({qb::json::object({{"a",1}}), qb::json::object({{"a",1}})}), "test", result));
+    EXPECT_FALSE(rule.validate(qb::json::array({qb::json::object({{"a", 1}}), qb::json::object({{"a", 1}})}), "test", result));
     EXPECT_FALSE(result.success());
     result.clear();
     EXPECT_TRUE(rule.validate(qb::json(123), "test", result));
@@ -281,10 +281,10 @@ TEST_F(ValidationLogicTest, UniqueItemsRuleValidation) {
 TEST_F(ValidationLogicTest, MinItemsRuleValidation) {
     MinItemsRule rule(2);
     result.clear();
-    EXPECT_TRUE(rule.validate(qb::json::array({1,2}), "test", result));
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2}), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
-    EXPECT_TRUE(rule.validate(qb::json::array({1,2,3}), "test", result));
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json::array({1}), "test", result));
@@ -294,19 +294,19 @@ TEST_F(ValidationLogicTest, MinItemsRuleValidation) {
 TEST_F(ValidationLogicTest, MaxItemsRuleValidation) {
     MaxItemsRule rule(2);
     result.clear();
-    EXPECT_TRUE(rule.validate(qb::json::array({1,2}), "test", result));
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2}), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
     EXPECT_TRUE(rule.validate(qb::json::array({1}), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
-    EXPECT_FALSE(rule.validate(qb::json::array({1,2,3}), "test", result));
+    EXPECT_FALSE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
     EXPECT_FALSE(result.success());
 }
 
 TEST_F(ValidationLogicTest, CustomRuleValidation) {
     bool custom_func_called = false;
-    auto fn = [&](const qb::json &val, const std::string &path, Result &res) -> bool {
+    auto fn                 = [&](const qb::json &val, const std::string &path, Result &res) -> bool {
         custom_func_called = true;
         if (val.is_string() && val.get<std::string>() == "custom_valid") {
             return true;
@@ -332,32 +332,26 @@ TEST_F(ValidationLogicTest, CustomRuleValidation) {
     EXPECT_EQ(rule.rule_name(), "myCustomRuleNameRegisteredInValidator");
 }
 
-
 // --- SchemaValidator Tests ---
 TEST_F(ValidationLogicTest, SchemaValidatorBasicObject) {
     qb::json schema = {
         {"type", "object"},
-        {
-            "properties", {
-                {"name", {{"type", "string"}, {"minLength", 3}}},
-                {"age", {{"type", "integer"}, {"minimum", 18}}}
-            }
-        },
+        {"properties", {{"name", {{"type", "string"}, {"minLength", 3}}}, {"age", {{"type", "integer"}, {"minimum", 18}}}}},
         {"required", {"name"}}
     };
     SchemaValidator validator(schema);
 
     result.clear();
     qb::json valid_data = {{"name", "Alice"}, {"age", 30}};
-    bool is_valid_1 = validator.validate(valid_data, result);
+    bool     is_valid_1 = validator.validate(valid_data, result);
     EXPECT_TRUE(is_valid_1);
     EXPECT_TRUE(result.success());
 
     result.clear();
-    qb::json invalid_name_short = {{"name", "Al"}, {"age", 30}};
-    bool outcome_2 = validator.validate(invalid_name_short, result);
-    size_t errors_after_call_2 = result.errors().size();
-    bool success_after_call_2 = result.success();
+    qb::json invalid_name_short   = {{"name", "Al"}, {"age", 30}};
+    bool     outcome_2            = validator.validate(invalid_name_short, result);
+    size_t   errors_after_call_2  = result.errors().size();
+    bool     success_after_call_2 = result.success();
 
     EXPECT_FALSE(outcome_2) << "Validation should fail for short name.";
     EXPECT_FALSE(success_after_call_2) << "Result should show failure for short name.";
@@ -369,7 +363,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorBasicObject) {
 
     result.clear();
     qb::json invalid_age = {{"name", "Bob"}, {"age", 17}};
-    bool is_valid_3 = validator.validate(invalid_age, result);
+    bool     is_valid_3  = validator.validate(invalid_age, result);
     EXPECT_FALSE(is_valid_3);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -380,7 +374,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorBasicObject) {
     result.clear();
 
     qb::json missing_required = {{"age", 25}};
-    bool is_valid_4 = validator.validate(missing_required, result);
+    bool     is_valid_4       = validator.validate(missing_required, result);
     EXPECT_FALSE(is_valid_4);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -391,7 +385,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorBasicObject) {
     result.clear();
 
     qb::json wrong_type = {{"name", 123}, {"age", 30}};
-    bool is_valid_5 = validator.validate(wrong_type, result);
+    bool     is_valid_5 = validator.validate(wrong_type, result);
     EXPECT_FALSE(is_valid_5);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -404,42 +398,31 @@ TEST_F(ValidationLogicTest, SchemaValidatorBasicObject) {
 TEST_F(ValidationLogicTest, SchemaValidatorNestedObject) {
     qb::json schema = {
         {"type", "object"},
-        {
-            "properties", {
-                {
-                    "user", {
-                        {"type", "object"},
-                        {
-                            "properties", {
-                                {"id", {{"type", "integer"}}},
-                                {"username", {{"type", "string"}}}
-                            }
-                        },
-                        {"required", {"id", "username"}}
-                    }
-                }
-            }
-        }
+        {"properties",
+         {{"user",
+           {{"type", "object"},
+            {"properties", {{"id", {{"type", "integer"}}}, {"username", {{"type", "string"}}}}},
+            {"required", {"id", "username"}}}}}}
     };
     SchemaValidator validator(schema);
 
     result.clear();
     qb::json valid_data = {{"user", {{"id", 1}, {"username", "testuser"}}}};
-    bool is_valid_1 = validator.validate(valid_data, result);
+    bool     is_valid_1 = validator.validate(valid_data, result);
     EXPECT_TRUE(is_valid_1);
     EXPECT_TRUE(result.success());
 
     result.clear();
     qb::json invalid_nested = {{"user", {{"id", "not-an-int"}}}};
-    bool is_valid_2 = validator.validate(invalid_nested, result);
+    bool     is_valid_2     = validator.validate(invalid_nested, result);
     EXPECT_FALSE(is_valid_2);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
         EXPECT_EQ(result.errors().size(), 2);
 
-        bool id_type_error_found = false;
+        bool id_type_error_found           = false;
         bool username_required_error_found = false;
-        for (const auto &err: result.errors()) {
+        for (const auto &err : result.errors()) {
             if (err.field_path == "user.id" && err.rule_violated == "type") {
                 id_type_error_found = true;
             }
@@ -453,27 +436,18 @@ TEST_F(ValidationLogicTest, SchemaValidatorNestedObject) {
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorArrayItems) {
-    qb::json schema = {
-        {"type", "array"},
-        {
-            "items", {
-                {"type", "integer"},
-                {"minimum", 0}
-            }
-        },
-        {"minItems", 1}
-    };
+    qb::json        schema = {{"type", "array"}, {"items", {{"type", "integer"}, {"minimum", 0}}}, {"minItems", 1}};
     SchemaValidator validator(schema);
 
     result.clear();
     qb::json valid_data = {1, 2, 3};
-    bool is_valid_1 = validator.validate(valid_data, result);
+    bool     is_valid_1 = validator.validate(valid_data, result);
     EXPECT_TRUE(is_valid_1);
     EXPECT_TRUE(result.success());
 
     result.clear();
     qb::json invalid_item_type = {1, "not-an-int", 3};
-    bool is_valid_2 = validator.validate(invalid_item_type, result);
+    bool     is_valid_2        = validator.validate(invalid_item_type, result);
     EXPECT_FALSE(is_valid_2);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -484,7 +458,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorArrayItems) {
 
     result.clear();
     qb::json invalid_item_value = {1, -5, 3};
-    bool is_valid_3 = validator.validate(invalid_item_value, result);
+    bool     is_valid_3         = validator.validate(invalid_item_value, result);
     EXPECT_FALSE(is_valid_3);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -495,7 +469,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorArrayItems) {
 
     result.clear();
     qb::json too_few_items = qb::json::array();
-    bool is_valid_4 = validator.validate(too_few_items, result);
+    bool     is_valid_4    = validator.validate(too_few_items, result);
     EXPECT_FALSE(is_valid_4) << "Validation should fail for too few items.";
     ASSERT_FALSE(result.success()) << "Result should show failure for too few items.";
     if (!result.success()) {
@@ -506,27 +480,18 @@ TEST_F(ValidationLogicTest, SchemaValidatorArrayItems) {
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorTupleItemsAndAdditionalItems) {
-    qb::json schema = {
-        {"type", "array"},
-        {
-            "items", {
-                {{"type", "string"}},
-                {{"type", "integer"}}
-            }
-        },
-        {"additionalItems", false}
-    };
+    qb::json        schema = {{"type", "array"}, {"items", {{{"type", "string"}}, {{"type", "integer"}}}}, {"additionalItems", false}};
     SchemaValidator validator(schema);
 
     result.clear();
     qb::json valid_tuple = {"hello", 123};
-    bool is_valid_1 = validator.validate(valid_tuple, result);
+    bool     is_valid_1  = validator.validate(valid_tuple, result);
     EXPECT_TRUE(is_valid_1);
     EXPECT_TRUE(result.success());
 
     result.clear();
     qb::json too_many_items = {"hello", 123, "extra"};
-    bool is_valid_2 = validator.validate(too_many_items, result);
+    bool     is_valid_2     = validator.validate(too_many_items, result);
     EXPECT_FALSE(is_valid_2);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -537,7 +502,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorTupleItemsAndAdditionalItems) {
 
     result.clear();
     qb::json wrong_type_in_tuple = {"hello", "not-an-int"};
-    bool is_valid_3 = validator.validate(wrong_type_in_tuple, result);
+    bool     is_valid_3          = validator.validate(wrong_type_in_tuple, result);
     EXPECT_FALSE(is_valid_3);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -547,20 +512,16 @@ TEST_F(ValidationLogicTest, SchemaValidatorTupleItemsAndAdditionalItems) {
     }
 
     result.clear();
-    qb::json schema_additional_schema = {
-        {"type", "array"},
-        {"items", {{{"type", "string"}}}},
-        {"additionalItems", {{"type", "boolean"}}}
-    };
+    qb::json schema_additional_schema = {{"type", "array"}, {"items", {{{"type", "string"}}}}, {"additionalItems", {{"type", "boolean"}}}};
     SchemaValidator validator2(schema_additional_schema);
-    qb::json valid_additional = {"first", true, false};
-    bool is_valid_4 = validator2.validate(valid_additional, result);
+    qb::json        valid_additional = {"first", true, false};
+    bool            is_valid_4       = validator2.validate(valid_additional, result);
     EXPECT_TRUE(is_valid_4);
     EXPECT_TRUE(result.success());
 
     result.clear();
     qb::json invalid_additional = {"first", true, "not-a-bool"};
-    bool is_valid_5 = validator2.validate(invalid_additional, result);
+    bool     is_valid_5         = validator2.validate(invalid_additional, result);
     EXPECT_FALSE(is_valid_5);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
@@ -573,15 +534,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorTupleItemsAndAdditionalItems) {
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorAdditionalProperties) {
-    qb::json schema_no_additional = {
-        {"type", "object"},
-        {
-            "properties", {
-                {"name", {{"type", "string"}}}
-            }
-        },
-        {"additionalProperties", false}
-    };
+    qb::json schema_no_additional = {{"type", "object"}, {"properties", {{"name", {{"type", "string"}}}}}, {"additionalProperties", false}};
     SchemaValidator validator_no_add(schema_no_additional);
     result.clear();
     EXPECT_TRUE(validator_no_add.validate({{"name", "test"}}, result));
@@ -597,13 +550,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorAdditionalProperties) {
     }
 
     qb::json schema_with_additional_schema = {
-        {"type", "object"},
-        {
-            "properties", {
-                {"id", {{"type", "integer"}}}
-            }
-        },
-        {"additionalProperties", {{"type", "string"}}}
+        {"type", "object"}, {"properties", {{"id", {{"type", "integer"}}}}}, {"additionalProperties", {{"type", "string"}}}
     };
     SchemaValidator validator_add_schema(schema_with_additional_schema);
     result.clear();
@@ -625,45 +572,41 @@ TEST_F(ValidationLogicTest, SchemaValidatorAdditionalProperties) {
 // --- SchemaValidator Logical Combinator Tests ---
 TEST_F(ValidationLogicTest, SchemaValidatorAllOf) {
     qb::json schema = {
-        {
-            "allOf", {
-                {{"type", "object"}, {"properties", {{"a", {{"type", "string"}}}}}},
-                {{"type", "object"}, {"properties", {{"b", {{"type", "integer"}}}}}}
-            }
-        }
+        {"allOf",
+         {{{"type", "object"}, {"properties", {{"a", {{"type", "string"}}}}}},
+          {{"type", "object"}, {"properties", {{"b", {{"type", "integer"}}}}}}}}
     };
     SchemaValidator validator(schema);
 
     result.clear();
     qb::json valid_data = {{"a", "text"}, {"b", 123}};
-    bool is_valid_1 = validator.validate(valid_data, result);
+    bool     is_valid_1 = validator.validate(valid_data, result);
     EXPECT_TRUE(is_valid_1);
     EXPECT_TRUE(result.success());
 
     result.clear();
     qb::json schema_refined = {
-        {
-            "allOf", {
-                {{"properties", {{"a", {{"type", "string"}}}}}, {"required", {"a"}}},
-                {{"properties", {{"b", {{"type", "integer"}}}}}, {"required", {"b"}}}
-            }
-        }
+        {"allOf",
+         {{{"properties", {{"a", {{"type", "string"}}}}}, {"required", {"a"}}},
+          {{"properties", {{"b", {{"type", "integer"}}}}}, {"required", {"b"}}}}}
     };
     SchemaValidator validator_refined(schema_refined);
     EXPECT_TRUE(validator_refined.validate(valid_data, result));
     EXPECT_TRUE(result.success());
     result.clear();
     qb::json invalid_missing_b = {{"a", "text"}};
-    bool is_valid_2 = validator_refined.validate(invalid_missing_b, result);
+    bool     is_valid_2        = validator_refined.validate(invalid_missing_b, result);
     EXPECT_FALSE(is_valid_2);
     ASSERT_FALSE(result.success());
     if (!result.success()) {
         EXPECT_EQ(result.errors().size(), 2);
-        bool all_of_error_found = false;
+        bool all_of_error_found     = false;
         bool required_b_error_found = false;
-        for (const auto &err: result.errors()) {
-            if (err.rule_violated == "allOf") all_of_error_found = true;
-            if (err.field_path == "b" && err.rule_violated == "required") required_b_error_found = true;
+        for (const auto &err : result.errors()) {
+            if (err.rule_violated == "allOf")
+                all_of_error_found = true;
+            if (err.field_path == "b" && err.rule_violated == "required")
+                required_b_error_found = true;
         }
         EXPECT_TRUE(all_of_error_found);
         EXPECT_TRUE(required_b_error_found);
@@ -671,14 +614,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorAllOf) {
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorAnyOf) {
-    qb::json schema = {
-        {
-            "anyOf", {
-                {{"type", "string"}, {"minLength", 5}},
-                {{"type", "integer"}, {"minimum", 10}}
-            }
-        }
-    };
+    qb::json        schema = {{"anyOf", {{{"type", "string"}, {"minLength", 5}}, {{"type", "integer"}, {"minimum", 10}}}}};
     SchemaValidator validator(schema);
 
     result.clear();
@@ -711,12 +647,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorAnyOf) {
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorAnyOfRejectsNonObjectSchemaItems) {
-    qb::json schema = {
-        {"anyOf", qb::json::array({
-            qb::json::object({{"type", "string"}}),
-            42
-        })}
-    };
+    qb::json schema = {{"anyOf", qb::json::array({qb::json::object({{"type", "string"}}), 42})}};
 
     SchemaValidator validator(schema);
     result.clear();
@@ -728,13 +659,14 @@ TEST_F(ValidationLogicTest, SchemaValidatorAnyOfRejectsNonObjectSchemaItems) {
 }
 
 // Helper function (can be a lambda in the test too)
-static qb::json validation_errors_to_json_helper(const std::vector<qb::http::validation::Error> &errors) {
+static qb::json
+validation_errors_to_json_helper(const std::vector<qb::http::validation::Error> &errors) {
     qb::json errors_array = qb::json::array();
-    for (const auto &err: errors) {
+    for (const auto &err : errors) {
         qb::json err_obj;
-        err_obj["field_path"] = err.field_path;
+        err_obj["field_path"]    = err.field_path;
         err_obj["rule_violated"] = err.rule_violated;
-        err_obj["message"] = err.message;
+        err_obj["message"]       = err.message;
         if (err.offending_value.has_value()) {
             err_obj["offending_value"] = err.offending_value.value();
         }
@@ -744,14 +676,7 @@ static qb::json validation_errors_to_json_helper(const std::vector<qb::http::val
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorOneOf) {
-    qb::json schema = {
-        {
-            "oneOf", {
-                {{"type", "string"}, {"pattern", "^abc$"}},
-                {{"type", "string"}, {"pattern", "^def$"}}
-            }
-        }
-    };
+    qb::json        schema = {{"oneOf", {{{"type", "string"}, {"pattern", "^abc$"}}, {{"type", "string"}, {"pattern", "^def$"}}}}};
     SchemaValidator validator(schema);
 
     result.clear();
@@ -770,35 +695,22 @@ TEST_F(ValidationLogicTest, SchemaValidatorOneOf) {
         EXPECT_EQ(result.errors()[0].rule_violated, "oneOf");
     }
 
-    qb::json schema_ambiguous = {
-        {
-            "oneOf", {
-                {{"type", "string"}, {"minLength", 2}},
-                {{"type", "string"}, {"maxLength", 5}}
-            }
-        }
-    };
+    qb::json        schema_ambiguous = {{"oneOf", {{{"type", "string"}, {"minLength", 2}}, {{"type", "string"}, {"maxLength", 5}}}}};
     SchemaValidator validator_amb(schema_ambiguous);
     result.clear();
-    qb::json longstring_json = "longstring";
-    bool outcome_longstring = validator_amb.validate(longstring_json, result);
-    size_t errors_after_longstring = result.errors().size();
-    bool success_after_longstring = result.success();
+    qb::json longstring_json          = "longstring";
+    bool     outcome_longstring       = validator_amb.validate(longstring_json, result);
+    size_t   errors_after_longstring  = result.errors().size();
+    bool     success_after_longstring = result.success();
 
-    EXPECT_TRUE(outcome_longstring) << "'longstring' should match oneOf (minLength:2). Errors: " <<
- validation_errors_to_json_helper(result.errors()).dump(2);
+    EXPECT_TRUE(outcome_longstring) << "'longstring' should match oneOf (minLength:2). Errors: "
+                                    << validation_errors_to_json_helper(result.errors()).dump(2);
     EXPECT_TRUE(success_after_longstring);
     EXPECT_EQ(errors_after_longstring, 0) << "No errors expected for valid 'longstring'";
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorNot) {
-    qb::json schema = {
-        {
-            "not", {
-                {"type", "integer"}
-            }
-        }
-    };
+    qb::json        schema = {{"not", {{"type", "integer"}}}};
     SchemaValidator validator(schema);
 
     result.clear();
@@ -822,9 +734,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorNot) {
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorTypeArrayRejectsUnknownTypeEntries) {
-    qb::json schema = {
-        {"type", qb::json::array({"string", "mystery"})}
-    };
+    qb::json        schema = {{"type", qb::json::array({"string", "mystery"})}};
     SchemaValidator validator(schema);
 
     result.clear();
@@ -840,14 +750,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorMinMaxProperties) {
         {"type", "object"},
         {"minProperties", 2},
         {"maxProperties", 3},
-        {
-            "properties", {
-                {"a", {{"type", "string"}}},
-                {"b", {{"type", "integer"}}},
-                {"c", {{"type", "boolean"}}},
-                {"d", {{"type", "string"}}}
-            }
-        }
+        {"properties", {{"a", {{"type", "string"}}}, {"b", {{"type", "integer"}}}, {"c", {{"type", "boolean"}}}, {"d", {{"type", "string"}}}}}
     };
     SchemaValidator validator(schema);
 
@@ -879,18 +782,8 @@ TEST_F(ValidationLogicTest, SchemaValidatorMinMaxProperties) {
 TEST_F(ValidationLogicTest, SchemaValidatorPropertyNames) {
     qb::json schema = {
         {"type", "object"},
-        {
-            "propertyNames", {
-                {"type", "string"},
-                {"pattern", "^[a-z_]+$"}
-            }
-        },
-        {
-            "properties", {
-                {"valid_name", {{"type", "integer"}}},
-                {"another_ok", {{"type", "boolean"}}}
-            }
-        }
+        {"propertyNames", {{"type", "string"}, {"pattern", "^[a-z_]+$"}}},
+        {"properties", {{"valid_name", {{"type", "integer"}}}, {"another_ok", {{"type", "boolean"}}}}}
     };
     SchemaValidator validator(schema);
 
@@ -927,7 +820,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorPropertyNames) {
     }
 }
 
-// --- ParameterValidator Tests --- 
+// --- ParameterValidator Tests ---
 
 TEST_F(ValidationLogicTest, ParameterValidatorRequired) {
     ParameterValidator pv;
@@ -993,33 +886,31 @@ TEST_F(ValidationLogicTest, ParameterValidatorNumberRejectsNaNAndInfinity) {
 
 TEST_F(ValidationLogicTest, ParameterValidatorDefaultValue) {
     ParameterValidator pv;
-    pv.add_param(
-        ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("10").add_rule(
-            std::make_shared<MinimumRule>(1)));
+    pv.add_param(ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("10").add_rule(std::make_shared<MinimumRule>(1)));
 
     result.clear();
     qb::json validated_json;
 
     result.clear();
-    validated_json = pv.validate_single("limit", std::nullopt,
-                                        ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("10").
-                                        add_rule(std::make_shared<MinimumRule>(1)), result, "query");
+    validated_json = pv.validate_single(
+        "limit", std::nullopt,
+        ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("10").add_rule(std::make_shared<MinimumRule>(1)), result, "query");
     EXPECT_TRUE(result.success());
     ASSERT_TRUE(validated_json.is_number_integer());
     EXPECT_EQ(validated_json.get<long long>(), 10);
 
     result.clear();
-    validated_json = pv.validate_single("limit", std::make_optional<std::string>("5"),
-                                        ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("10").
-                                        add_rule(std::make_shared<MinimumRule>(1)), result, "query");
+    validated_json = pv.validate_single(
+        "limit", std::make_optional<std::string>("5"),
+        ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("10").add_rule(std::make_shared<MinimumRule>(1)), result, "query");
     EXPECT_TRUE(result.success());
     ASSERT_TRUE(validated_json.is_number_integer());
     EXPECT_EQ(validated_json.get<long long>(), 5);
 
     result.clear();
-    validated_json = pv.validate_single("limit", std::nullopt,
-                                        ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("0").add_rule(
-                                            std::make_shared<MinimumRule>(1)), result, "query");
+    validated_json = pv.validate_single(
+        "limit", std::nullopt,
+        ParameterRuleSet("limit").set_type(DataType::INTEGER).set_default("0").add_rule(std::make_shared<MinimumRule>(1)), result, "query");
     EXPECT_FALSE(result.success());
     ASSERT_EQ(result.errors().size(), 1);
     EXPECT_EQ(result.errors()[0].rule_violated, "minimum");
@@ -1028,7 +919,7 @@ TEST_F(ValidationLogicTest, ParameterValidatorDefaultValue) {
 
 TEST_F(ValidationLogicTest, ParameterValidatorCustomParser) {
     ParameterValidator pv;
-    auto custom_bool_parser = [](const std::string &input, bool &success) -> qb::json {
+    auto               custom_bool_parser = [](const std::string &input, bool &success) -> qb::json {
         std::string lower_input = input;
         std::transform(lower_input.begin(), lower_input.end(), lower_input.begin(), ::tolower);
         if (lower_input == "yes" || lower_input == "on") {
@@ -1050,10 +941,9 @@ TEST_F(ValidationLogicTest, ParameterValidatorCustomParser) {
     EXPECT_TRUE(pv.validate(params_yes, result, "query"));
     EXPECT_TRUE(result.success());
     result.clear();
-    qb::json parsed = pv.validate_single("enabled", std::make_optional<std::string>("YES"),
-                                         ParameterRuleSet("enabled").set_custom_parser(custom_bool_parser).set_type(
-                                             DataType::BOOLEAN),
-                                         result, "query");
+    qb::json parsed =
+        pv.validate_single("enabled", std::make_optional<std::string>("YES"),
+                           ParameterRuleSet("enabled").set_custom_parser(custom_bool_parser).set_type(DataType::BOOLEAN), result, "query");
     EXPECT_TRUE(result.success());
     ASSERT_TRUE(parsed.is_boolean());
     EXPECT_TRUE(parsed.get<bool>());
@@ -1067,7 +957,7 @@ TEST_F(ValidationLogicTest, ParameterValidatorCustomParser) {
 
 TEST_F(ValidationLogicTest, ParameterValidatorCustomParserExceptionIsCaptured) {
     ParameterValidator pv;
-    auto throwing_parser = [](const std::string &, bool &) -> qb::json {
+    auto               throwing_parser = [](const std::string &, bool &) -> qb::json {
         throw std::runtime_error("parser blew up");
     };
     pv.add_param(ParameterRuleSet("enabled").set_custom_parser(throwing_parser));
@@ -1083,15 +973,10 @@ TEST_F(ValidationLogicTest, ParameterValidatorCustomParserExceptionIsCaptured) {
 
 TEST_F(ValidationLogicTest, ParameterValidatorRuleExceptionIsCaptured) {
     ParameterValidator pv;
-    auto throwing_rule = std::make_shared<CustomRule>(
-        [](const qb::json &, const std::string &, Result &) -> bool {
-            throw std::runtime_error("rule blew up");
-        },
-        "throwing_rule");
+    auto               throwing_rule = std::make_shared<CustomRule>(
+        [](const qb::json &, const std::string &, Result &) -> bool { throw std::runtime_error("rule blew up"); }, "throwing_rule");
 
-    pv.add_param(ParameterRuleSet("name")
-        .set_type(DataType::STRING)
-        .add_rule(throwing_rule));
+    pv.add_param(ParameterRuleSet("name").set_type(DataType::STRING).add_rule(throwing_rule));
 
     result.clear();
     qb::icase_unordered_map<std::string> params = {{"name", "alice"}};
@@ -1113,9 +998,7 @@ TEST_F(ValidationLogicTest, ParameterValidatorStrictMode) {
     EXPECT_TRUE(result.success());
 
     result.clear();
-    qb::icase_unordered_map<std::string> params_extra_strict = {
-        {"id", "123"}, {"name", "test"}, {"unexpected", "value"}
-    };
+    qb::icase_unordered_map<std::string> params_extra_strict = {{"id", "123"}, {"name", "test"}, {"unexpected", "value"}};
     EXPECT_FALSE(pv_strict.validate(params_extra_strict, result, "query"));
     ASSERT_FALSE(result.success());
     ASSERT_EQ(result.errors().size(), 1);
@@ -1126,20 +1009,14 @@ TEST_F(ValidationLogicTest, ParameterValidatorStrictMode) {
     pv_non_strict.add_param(ParameterRuleSet("id").set_type(DataType::INTEGER));
 
     result.clear();
-    qb::icase_unordered_map<std::string> params_extra_non_strict = {
-        {"id", "123"}, {"name", "test"}, {"unexpected", "value"}
-    };
+    qb::icase_unordered_map<std::string> params_extra_non_strict = {{"id", "123"}, {"name", "test"}, {"unexpected", "value"}};
     EXPECT_TRUE(pv_non_strict.validate(params_extra_non_strict, result, "query"));
-    EXPECT_TRUE(result.success()) << "Error details: " << (result.errors().empty()
-                                                               ? "No errors"
-                                                               : result.errors()[0].message);
+    EXPECT_TRUE(result.success()) << "Error details: " << (result.errors().empty() ? "No errors" : result.errors()[0].message);
 }
 
 TEST_F(ValidationLogicTest, RequestValidatorQuerySanitizerExceptionIsCaptured) {
     RequestValidator validator;
-    validator.add_query_param_sanitizer("q", [](const std::string &) -> std::string {
-        throw std::runtime_error("query sanitizer crash");
-    });
+    validator.add_query_param_sanitizer("q", [](const std::string &) -> std::string { throw std::runtime_error("query sanitizer crash"); });
 
     qb::http::Request req;
     req.uri() = qb::io::uri("/search?q=test");
@@ -1154,12 +1031,10 @@ TEST_F(ValidationLogicTest, RequestValidatorQuerySanitizerExceptionIsCaptured) {
 
 TEST_F(ValidationLogicTest, RequestValidatorBodySanitizerExceptionIsCaptured) {
     RequestValidator validator;
-    validator.add_body_sanitizer("name", [](const std::string &) -> std::string {
-        throw std::runtime_error("body sanitizer crash");
-    });
+    validator.add_body_sanitizer("name", [](const std::string &) -> std::string { throw std::runtime_error("body sanitizer crash"); });
 
     qb::http::Request req;
-    req.uri() = qb::io::uri("/submit");
+    req.uri()  = qb::io::uri("/submit");
     req.body() = R"({"name":"alice"})";
 
     Result out;
@@ -1184,7 +1059,6 @@ TEST_F(ValidationLogicTest, RequestValidatorPathRulesRequirePathParameterContext
     EXPECT_EQ(out.errors().front().field_path, "path.userId");
     EXPECT_EQ(out.errors().front().rule_violated, "required");
 }
-
 
 // --- Sanitizer Tests ---
 TEST_F(ValidationLogicTest, SanitizerTrim) {
@@ -1225,12 +1099,7 @@ TEST_F(ValidationLogicTest, SanitizerArrayWildcard) {
 
     qb::json data_for_combined = {
         {"tags", {"TAG_A", "  TagB  ", "  tAgC  "}},
-        {
-            "posts", {
-                {{"title", "  First Post  "}, {"content", "..."}},
-                {{"title", "Second Post  "}, {"content", "..."}}
-            }
-        }
+        {"posts", {{{"title", "  First Post  "}, {"content", "..."}}, {{"title", "Second Post  "}, {"content", "..."}}}}
     };
     s_combined.sanitize(data_for_combined);
     ASSERT_TRUE(data_for_combined["tags"].is_array());
@@ -1247,15 +1116,7 @@ TEST_F(ValidationLogicTest, SanitizerArrayIndexSpecific) {
     Sanitizer s;
     s.add_rule("users[1].name", PredefinedSanitizers::trim());
     result.clear();
-    qb::json data = {
-        {
-            "users", {
-                {{"name", "  Alice  "}},
-                {{"name", "   Bob   "}},
-                {{"name", "  Charlie  "}}
-            }
-        }
-    };
+    qb::json data = {{"users", {{{"name", "  Alice  "}}, {{"name", "   Bob   "}}, {{"name", "  Charlie  "}}}}};
     s.sanitize(data);
     EXPECT_EQ(data["users"][0]["name"].get<std::string>(), "  Alice  ");
     EXPECT_EQ(data["users"][1]["name"].get<std::string>(), "Bob");
@@ -1314,20 +1175,19 @@ TEST_F(ValidationLogicTest, SanitizerEscapeSqlLike) {
     EXPECT_EQ(data_combo["search"].get<std::string>(), "test \\% \\_ ''");
 }
 
-
 // --- Tests for Multi-Value Parameter Handling (primarily in RequestValidator, but ParameterValidator::validate_single is used) ---
 
 TEST_F(ValidationLogicTest, ParameterValidatorMultiValueSupport) {
     ParameterValidator pv;
-    auto rules = ParameterRuleSet("ids").set_type(DataType::INTEGER).add_rule(std::make_shared<MinimumRule>(10));
+    auto               rules = ParameterRuleSet("ids").set_type(DataType::INTEGER).add_rule(std::make_shared<MinimumRule>(10));
 
     result.clear();
-    std::vector<std::string> valid_values = {"10", "20", "30"};
+    std::vector<std::string> valid_values   = {"10", "20", "30"};
     std::vector<std::string> invalid_values = {"15", "5", "25"};
 
     result.clear();
     bool all_valid_pass = true;
-    for (const auto &val_str: valid_values) {
+    for (const auto &val_str : valid_values) {
         Result item_result;
         pv.validate_single("ids", std::make_optional(val_str), rules, item_result, "query");
         if (!item_result.success()) {
@@ -1340,7 +1200,7 @@ TEST_F(ValidationLogicTest, ParameterValidatorMultiValueSupport) {
 
     result.clear();
     bool some_invalid_pass = true;
-    for (const auto &val_str: invalid_values) {
+    for (const auto &val_str : invalid_values) {
         Result item_result;
         pv.validate_single("ids", std::make_optional(val_str), rules, item_result, "query");
         if (!item_result.success()) {
@@ -1559,7 +1419,7 @@ TEST_F(ValidationLogicTest, SanitizerStripHtmlTagsXSSProtection) {
         "<form onsubmit=alert('XSS')><button>Submit</button></form>"
     };
 
-    for (const auto& xss : xss_attempts) {
+    for (const auto &xss : xss_attempts) {
         qb::json data = {{"content", xss}};
         s.sanitize(data);
         std::string result = data["content"].get<std::string>();
@@ -1701,35 +1561,26 @@ TEST_F(ValidationLogicTest, ErrorValuePolicyMergePreservesErrors) {
 
 // SchemaValidator propagates its policy into the Result passed to validate().
 TEST_F(ValidationLogicTest, SchemaValidatorPropagatesErrorValuePolicy) {
-    qb::json schema = {
-        {"type", "object"},
-        {"properties", {{"name", {{"type", "string"}, {"minLength", 3}}}}},
-        {"required", {"name"}}
-    };
+    qb::json        schema = {{"type", "object"}, {"properties", {{"name", {{"type", "string"}, {"minLength", 3}}}}}, {"required", {"name"}}};
     SchemaValidator v(schema);
     v.set_error_value_policy(SchemaValidator::ErrorValuePolicy::None);
 
-    Result out;
+    Result   out;
     qb::json data = {{"name", "ab"}};
     EXPECT_FALSE(v.validate(data, out));
     EXPECT_FALSE(out.success());
-    for (const auto &err: out.errors()) {
+    for (const auto &err : out.errors()) {
         EXPECT_FALSE(err.offending_value.has_value());
     }
 }
 
 TEST_F(ValidationLogicTest, SchemaValidatorAdditionalPropertiesInheritsErrorValuePolicy) {
-    qb::json schema = {
-        {"type", "object"},
-        {"additionalProperties", {
-            {"type", "integer"}
-        }}
-    };
+    qb::json schema = {{"type", "object"}, {"additionalProperties", {{"type", "integer"}}}};
 
     SchemaValidator validator(schema);
     validator.set_error_value_policy(SchemaValidator::ErrorValuePolicy::None);
 
-    Result out;
+    Result   out;
     qb::json data = {{"dynamicField", "not-integer"}};
     EXPECT_FALSE(validator.validate(data, out));
     ASSERT_FALSE(out.success());
@@ -1740,10 +1591,7 @@ TEST_F(ValidationLogicTest, SchemaValidatorAdditionalPropertiesInheritsErrorValu
 
 TEST_F(ValidationLogicTest, ParameterValidatorPropagatesErrorValuePolicyToChildResults) {
     ParameterValidator pv;
-    pv.add_param(
-        ParameterRuleSet("name")
-            .set_type(DataType::STRING)
-            .add_rule(std::make_shared<MinLengthRule>(3)));
+    pv.add_param(ParameterRuleSet("name").set_type(DataType::STRING).add_rule(std::make_shared<MinLengthRule>(3)));
 
     qb::icase_unordered_map<std::string> params;
     params["name"] = "ab";
@@ -1759,7 +1607,8 @@ TEST_F(ValidationLogicTest, ParameterValidatorPropagatesErrorValuePolicyToChildR
     EXPECT_FALSE(out.errors().front().offending_value.has_value());
 }
 
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

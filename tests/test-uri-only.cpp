@@ -11,7 +11,7 @@
  * - Performance benchmarks
  *
  * qb - C++ Actor Framework
- * Copyright (C) 2011-2025 isndev (www.qbaf.io). All rights reserved.
+ * Copyright (C) 2011-2026 isndev (www.qbaf.io). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,11 +26,11 @@
  * limitations under the License.
  */
 
+#include <algorithm>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <qb/io/uri.h>
-#include <chrono>
 #include <vector>
-#include <algorithm>
 
 // ====================================================================
 // Basic URI Component Tests
@@ -67,21 +67,11 @@ TEST(URI_Components, DefaultValues) {
 
 TEST(URI_Components, SchemeSpecificDefaults) {
     // Test default ports for various schemes
-    std::vector<std::pair<std::string, uint16_t> > scheme_ports = {
-        {"http", 80},
-        {"https", 443},
-        {"ftp", 21},
-        {"ssh", 22},
-        {"telnet", 23},
-        {"smtp", 25},
-        {"pop3", 110},
-        {"imap", 143},
-        {"ws", 80},
-        {"wss", 443},
-        {"amqp", 5672}
-    };
+    std::vector<std::pair<std::string, uint16_t>> scheme_ports = {{"http", 80},   {"https", 443}, {"ftp", 21},   {"ssh", 22},
+                                                                  {"telnet", 23}, {"smtp", 25},   {"pop3", 110}, {"imap", 143},
+                                                                  {"ws", 80},     {"wss", 443},   {"amqp", 5672}};
 
-    for (const auto &[scheme, port]: scheme_ports) {
+    for (const auto &[scheme, port] : scheme_ports) {
         std::string uri_str = scheme + "://example.com";
         qb::io::uri uri{uri_str};
 
@@ -186,7 +176,7 @@ TEST(URI_Queries, MultipleValues) {
 
     // Verify that we have correct count of parameters
     const auto &queries = uri.queries();
-    const auto &it = queries.find("param");
+    const auto &it      = queries.find("param");
     ASSERT_NE(it, queries.cend());
     EXPECT_EQ(it->second.size(), 3);
 }
@@ -199,7 +189,7 @@ TEST(URI_Queries, UrlEncodingDecoding) {
     EXPECT_EQ(uri.query("encoded"), " !@#$%^&*()");
 
     // Test direct encoding and query parameter construction
-    std::string param_str = "q=space value&special=a+b+c&brackets=value[]";
+    std::string param_str         = "q=space value&special=a+b+c&brackets=value[]";
     std::string encoded_param_str = qb::io::uri::encode(param_str);
 
     // Manually construct URI with encoded parameters - should be properly decoded
@@ -226,9 +216,9 @@ TEST(URI_Queries, ComplexQueries) {
     // Debug all the queries found
     std::cout << "Debug ComplexQueries - Parsed queries:" << std::endl;
     const auto &queries = uri.queries();
-    for (const auto &[key, values]: queries) {
+    for (const auto &[key, values] : queries) {
         std::cout << "Key: '" << key << "' has " << values.size() << " values: ";
-        for (const auto &val: values) {
+        for (const auto &val : values) {
             std::cout << "'" << val << "', ";
         }
         std::cout << std::endl;
@@ -248,9 +238,9 @@ TEST(URI_Queries, ComplexQueries) {
     // Debug array parameters
     std::cout << "Debug Array Params - Raw: '" << uri2.encoded_queries() << "'" << std::endl;
     const auto &queries2 = uri2.queries();
-    for (const auto &[key, values]: queries2) {
+    for (const auto &[key, values] : queries2) {
         std::cout << "Key: '" << key << "' has " << values.size() << " values: ";
-        for (const auto &val: values) {
+        for (const auto &val : values) {
             std::cout << "'" << val << "', ";
         }
         std::cout << std::endl;
@@ -276,9 +266,9 @@ TEST(URI_Queries, WeirdEdgeCases) {
     // Debug weird cases
     std::cout << "Debug WeirdEdgeCases - Raw: " << uri1.encoded_queries() << std::endl;
     const auto &queries = uri1.queries();
-    for (const auto &[key, values]: queries) {
+    for (const auto &[key, values] : queries) {
         std::cout << "Key: '" << key << "' has " << values.size() << " values: ";
-        for (const auto &val: values) {
+        for (const auto &val : values) {
             std::cout << "'" << val << "', ";
         }
         std::cout << std::endl;
@@ -302,17 +292,16 @@ TEST(URI_Queries, WeirdEdgeCases) {
 
 TEST(URI_Encoding, BasicEncoding) {
     std::string original = "Hello World!@#$%^&*()";
-    std::string encoded = qb::io::uri::encode(original);
-    std::string decoded = qb::io::uri::decode(encoded);
+    std::string encoded  = qb::io::uri::encode(original);
+    std::string decoded  = qb::io::uri::decode(encoded);
 
     EXPECT_EQ(decoded, original);
 }
 
 TEST(URI_Encoding, SpecialCharacters) {
-    std::string original =
-            " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
-    std::string encoded = qb::io::uri::encode(original);
-    std::string decoded = qb::io::uri::decode(encoded);
+    std::string original = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+    std::string encoded  = qb::io::uri::encode(original);
+    std::string decoded  = qb::io::uri::decode(encoded);
 
     EXPECT_EQ(decoded, original);
 }
@@ -320,14 +309,14 @@ TEST(URI_Encoding, SpecialCharacters) {
 TEST(URI_Encoding, EncodedSequences) {
     // Already encoded sequences should remain as-is
     std::string original = "%20%3F%26%3D%23";
-    std::string decoded = qb::io::uri::decode(original);
+    std::string decoded  = qb::io::uri::decode(original);
 
     EXPECT_EQ(decoded, " ?&=#");
 }
 
 TEST(URI_Encoding, InvalidSequences) {
     // Test with invalid % sequences
-    std::string invalid1 = "%2"; // Incomplete
+    std::string invalid1 = "%2";  // Incomplete
     std::string invalid2 = "%XY"; // Not hex digits
 
     std::string decoded1 = qb::io::uri::decode(invalid1);
@@ -385,26 +374,26 @@ TEST(URI_Validation, HostValidation) {
 
 TEST(URI_Validation, PathNormalization) {
     // Test path normalization
-    std::string path1 = "/a/b/../c/./d//e";
-    bool result1 = qb::io::uri::normalize_path(path1);
+    std::string path1   = "/a/b/../c/./d//e";
+    bool        result1 = qb::io::uri::normalize_path(path1);
     EXPECT_TRUE(result1);
     EXPECT_EQ(path1, "/a/c/d/e");
 
     // Test with dots at the beginning
-    std::string path2 = "/./a/../../b/c";
-    bool result2 = qb::io::uri::normalize_path(path2);
+    std::string path2   = "/./a/../../b/c";
+    bool        result2 = qb::io::uri::normalize_path(path2);
     EXPECT_TRUE(result2);
     EXPECT_EQ(path2, "/b/c");
 
     // Test with backslashes
-    std::string path3 = "/a\\b\\c";
-    bool result3 = qb::io::uri::normalize_path(path3);
+    std::string path3   = "/a\\b\\c";
+    bool        result3 = qb::io::uri::normalize_path(path3);
     EXPECT_TRUE(result3);
     EXPECT_EQ(path3, "/a/b/c");
 
     // Test with empty path
-    std::string path4 = "";
-    bool result4 = qb::io::uri::normalize_path(path4);
+    std::string path4   = "";
+    bool        result4 = qb::io::uri::normalize_path(path4);
     EXPECT_TRUE(result4);
     EXPECT_EQ(path4, "/");
 }
@@ -505,9 +494,9 @@ TEST(URI_EdgeCases, WhiteSpaceHandling) {
 
     EXPECT_NO_THROW({
         scheme = uri.scheme();
-        host = uri.host();
-        path = uri.path();
-        });
+        host   = uri.host();
+        path   = uri.path();
+    });
 
     // Additional check that values are accessible, regardless of their exact content
     // Just verifying that we can access these values without crashing
@@ -515,7 +504,7 @@ TEST(URI_EdgeCases, WhiteSpaceHandling) {
         std::cout << "Scheme: " << scheme << std::endl;
         std::cout << "Host: " << host << std::endl;
         std::cout << "Path: " << path << std::endl;
-        });
+    });
 }
 
 // ====================================================================
@@ -533,20 +522,19 @@ TEST(URI_Performance, ParseSimpleURI) {
         EXPECT_FALSE(uri.scheme().empty());
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto                                      end     = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
 
-    std::cout << "Simple URI parsing: " << iterations << " iterations in "
-            << elapsed.count() << " ms ("
-            << (elapsed.count() / iterations) << " ms per parse)" << std::endl;
+    std::cout << "Simple URI parsing: " << iterations << " iterations in " << elapsed.count() << " ms (" << (elapsed.count() / iterations)
+              << " ms per parse)" << std::endl;
 }
 
 TEST(URI_Performance, ParseComplexURI) {
-    const int iterations = 10000;
+    const int   iterations  = 10000;
     std::string complex_uri = "https://username:password@example.com:8080/path/to/resource"
-            "?param1=value1&param2=value2&param3=value3&param4=value4"
-            "&param5=value5&param6=value6&param7=value7&param8=value8"
-            "#section-identifier";
+                              "?param1=value1&param2=value2&param3=value3&param4=value4"
+                              "&param5=value5&param6=value6&param7=value7&param8=value8"
+                              "#section-identifier";
 
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -556,16 +544,15 @@ TEST(URI_Performance, ParseComplexURI) {
         EXPECT_FALSE(uri.scheme().empty());
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto                                      end     = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
 
-    std::cout << "Complex URI parsing: " << iterations << " iterations in "
-            << elapsed.count() << " ms ("
-            << (elapsed.count() / iterations) << " ms per parse)" << std::endl;
+    std::cout << "Complex URI parsing: " << iterations << " iterations in " << elapsed.count() << " ms (" << (elapsed.count() / iterations)
+              << " ms per parse)" << std::endl;
 }
 
 TEST(URI_Performance, EncodeDecode) {
-    const int iterations = 10000;
+    const int   iterations  = 10000;
     std::string test_string = "This is a test string with special characters: !@#$%^&*()_+{}|:<>?~`-=[]\\;',./";
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -578,15 +565,15 @@ TEST(URI_Performance, EncodeDecode) {
         EXPECT_EQ(decoded, test_string);
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto                                      end     = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
 
-    std::cout << "Encode/Decode: " << iterations << " iterations in "
-            << elapsed.count() << " ms ("
-            << (elapsed.count() / iterations) << " ms per operation)" << std::endl;
+    std::cout << "Encode/Decode: " << iterations << " iterations in " << elapsed.count() << " ms (" << (elapsed.count() / iterations)
+              << " ms per operation)" << std::endl;
 }
 
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

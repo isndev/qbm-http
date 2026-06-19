@@ -1,70 +1,69 @@
-#include <gtest/gtest.h>
-#include "../http.h"
 #include <chrono>
 #include <exception>
 #include <filesystem>
+#include <gtest/gtest.h>
 #include <thread>
+#include "../http.h"
 
 using namespace qb::io;
 using namespace std::chrono_literals;
 
 namespace {
-    std::filesystem::path find_ssl_test_resource(const char *file_name) {
-        const auto repo_root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
-        const std::filesystem::path candidates[] = {
-            repo_root / "qb" / "resources" / "ssl" / file_name,
-            repo_root / "out" / "build" / "x64-Release" / "bin" / "tests" / "ssl" / file_name,
-            std::filesystem::current_path() / file_name,
-            std::filesystem::current_path() / "ssl" / file_name,
-            std::filesystem::current_path().parent_path() / "bin" / "tests" / "ssl" / file_name
-        };
+std::filesystem::path
+find_ssl_test_resource(const char *file_name) {
+    const auto                  repo_root    = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+    const std::filesystem::path candidates[] = {
+        repo_root / "qb" / "resources" / "ssl" / file_name, repo_root / "out" / "build" / "x64-Release" / "bin" / "tests" / "ssl" / file_name,
+        std::filesystem::current_path() / file_name, std::filesystem::current_path() / "ssl" / file_name,
+        std::filesystem::current_path().parent_path() / "bin" / "tests" / "ssl" / file_name
+    };
 
-        for (const auto &candidate: candidates) {
-            std::error_code ec;
-            if (std::filesystem::exists(candidate, ec) && !ec) {
-                return candidate;
-            }
+    for (const auto &candidate : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec) && !ec) {
+            return candidate;
         }
-        return candidates[0];
     }
-
-    std::filesystem::path ssl_test_resource(const char *file_name) {
-        return find_ssl_test_resource(file_name);
-    }
+    return candidates[0];
 }
 
-constexpr const std::size_t NB_ITERATION = 4096;
-constexpr const char STRING_MESSAGE[] = "Here is my content test";
-std::atomic<std::size_t> msg_count_server_side = 0;
-std::atomic<std::size_t> msg_count_client_side = 0;
+std::filesystem::path
+ssl_test_resource(const char *file_name) {
+    return find_ssl_test_resource(file_name);
+}
+} // namespace
+
+constexpr const std::size_t NB_ITERATION          = 4096;
+constexpr const char        STRING_MESSAGE[]      = "Here is my content test";
+std::atomic<std::size_t>    msg_count_server_side = 0;
+std::atomic<std::size_t>    msg_count_client_side = 0;
 
 bool
 all_done() {
-    return msg_count_server_side == (NB_ITERATION) &&
-           msg_count_client_side == NB_ITERATION;
+    return msg_count_server_side == (NB_ITERATION) && msg_count_client_side == NB_ITERATION;
 }
 
 namespace {
-    /// Pumps the current thread's @c async loop until @p done(), or the wall @p time_budget,
-    /// whichever comes first. @return true if @p done() became true; false on timeout.
-    /// Used for two-threaded SSL/TCP session tests: the main and worker threads must both
-    /// keep dispatching the reactor until the test completes; a fixed EVRUN_ONCE count can
-    /// end early on the server thread, then thread join blocks while the client still needs
-    /// the server to run on the main event loop.
-    template <typename F>
-    bool
-    pump_event_loop_while(const F &done, const std::chrono::steady_clock::duration time_budget) {
-        const auto deadline = std::chrono::steady_clock::now() + time_budget;
-        for (;;) {
-            if (done()) {
-                return true;
-            }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return false;
-            }
-            async::run(EVRUN_ONCE);
+/// Pumps the current thread's @c async loop until @p done(), or the wall @p time_budget,
+/// whichever comes first. @return true if @p done() became true; false on timeout.
+/// Used for two-threaded SSL/TCP session tests: the main and worker threads must both
+/// keep dispatching the reactor until the test completes; a fixed EVRUN_ONCE count can
+/// end early on the server thread, then thread join blocks while the client still needs
+/// the server to run on the main event loop.
+template <typename F>
+bool
+pump_event_loop_while(const F &done, const std::chrono::steady_clock::duration time_budget) {
+    const auto deadline = std::chrono::steady_clock::now() + time_budget;
+    for (;;) {
+        if (done()) {
+            return true;
         }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        async::run(EVRUN_ONCE);
     }
+}
 } // namespace
 
 TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
@@ -72,8 +71,7 @@ TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
     auto res = qb::http::Request::ContentType("application/json;charset=utf-16");
     EXPECT_EQ(res.type(), "application/json");
     EXPECT_EQ(res.charset(), "utf-16");
-    res = qb::http::Request::ContentType(
-        "   application/json   ;   charset    =   utf-16   ");
+    res = qb::http::Request::ContentType("   application/json   ;   charset    =   utf-16   ");
     EXPECT_EQ(res.type(), "application/json");
     EXPECT_EQ(res.charset(), "utf-16");
     res = qb::http::Request::ContentType("application/json;charset=\"utf-16\"");
@@ -98,8 +96,7 @@ TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
     auto res2 = qb::http::Request::ContentType("application/json;charset=utf-16");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-16");
-    res2 = qb::http::Request::ContentType(
-        "   application/json   ;   charset    =   utf-16   ");
+    res2 = qb::http::Request::ContentType("   application/json   ;   charset    =   utf-16   ");
     EXPECT_EQ(res2.type(), "application/json");
     EXPECT_EQ(res2.charset(), "utf-16");
     res2 = qb::http::Request::ContentType("application/json;charset=\"utf-16\"");
@@ -125,38 +122,29 @@ TEST(Session, HTTP_PARSE_CONTENT_TYPE) {
 TEST(Session, HTTP_PARSE_MULTIPART) {
     qb::http::Multipart mp;
 
-    auto &part1 = mp.create_part();
+    auto &part1                            = mp.create_part();
     part1.headers()["Content-Disposition"] = {R"(form-data; name="company")"};
-    part1.headers()["Content-Type"] = {"text"};
-    part1.body = "isndev";
-    auto &part2 = mp.create_part();
-    part2.headers()["Content-Disposition"] = {
-        R"(file; name="file"; filename="file1.txt")"
-    };
-    part2.headers()["Content-Type"] = {"application/json"};
-    part2.body = R"({"hello": "true"})";
+    part1.headers()["Content-Type"]        = {"text"};
+    part1.body                             = "isndev";
+    auto &part2                            = mp.create_part();
+    part2.headers()["Content-Disposition"] = {R"(file; name="file"; filename="file1.txt")"};
+    part2.headers()["Content-Type"]        = {"application/json"};
+    part2.body                             = R"({"hello": "true"})";
 
     qb::icase_unordered_map<std::string> op{{"Content-Type", {"multipart/form-data"}}};
-    qb::http::Request req{
-        HTTP_POST,
-        {"https://isndev.com"},
-        {{"Content-Type", {"multipart/form-data"}}},
-        mp
-    };
+    qb::http::Request                    req{HTTP_POST, {"https://isndev.com"}, {{"Content-Type", {"multipart/form-data"}}}, mp};
     req.body() = mp;
 
     auto mp2 = req.body().as<qb::http::Multipart>();
     EXPECT_EQ(mp2.parts()[0].header("Content-Type"), "text");
     EXPECT_EQ(mp2.parts()[0].body, "isndev");
-    auto attrs =
-            qb::http::parse_header_attributes(mp2.parts()[0].header("Content-Disposition"));
+    auto attrs = qb::http::parse_header_attributes(mp2.parts()[0].header("Content-Disposition"));
     EXPECT_TRUE(attrs.has("Form-Data"));
     EXPECT_EQ(attrs.at("name"), "company");
 
     EXPECT_EQ(mp2.parts()[1].header("Content-Type"), "application/json");
     EXPECT_EQ(mp2.parts()[1].body, R"({"hello": "true"})");
-    attrs =
-            qb::http::parse_header_attributes(mp2.parts()[1].header("Content-Disposition"));
+    attrs = qb::http::parse_header_attributes(mp2.parts()[1].header("Content-Disposition"));
     EXPECT_TRUE(attrs.has("File"));
     EXPECT_EQ(attrs.at("Name"), "file");
     EXPECT_EQ(attrs.at("Filename"), "file1.txt");
@@ -167,25 +155,24 @@ class HostHeaderCaptureServer;
 class HostHeaderCaptureClient : public qb::io::use<HostHeaderCaptureClient>::tcp::client<HostHeaderCaptureServer> {
 public:
     constexpr static const bool has_server = true;
-    using Protocol = qb::http::protocol<HostHeaderCaptureClient>;
+    using Protocol                         = qb::http::protocol<HostHeaderCaptureClient>;
 
     explicit HostHeaderCaptureClient(HostHeaderCaptureServer &server)
-        : client(server) {
-    }
+        : client(server) {}
 
     static std::string captured_host_header;
 
-    void on(Protocol::request &&request) {
+    void
+    on(Protocol::request &&request) {
         captured_host_header = request.header("host");
         qb::http::Response r;
         r.status() = qb::http::status::OK;
-        r.body() = "ok";
+        r.body()   = "ok";
         *this << r;
     }
 };
 
-class HostHeaderCaptureServer : public qb::http::use<HostHeaderCaptureServer>::server<HostHeaderCaptureClient> {
-};
+class HostHeaderCaptureServer : public qb::http::use<HostHeaderCaptureServer>::server<HostHeaderCaptureClient> {};
 
 std::string HostHeaderCaptureClient::captured_host_header;
 
@@ -200,11 +187,10 @@ TEST(Session, HTTP_CLIENT_SETS_HOST_HEADER_WITH_NON_DEFAULT_PORT) {
     server.start();
 
     qb::http::Request req{{"http://localhost:" + std::to_string(kPort) + "/host-check"}};
-    auto reply = qb::http::run_sync(qb::http::GET(req, 3s));
+    auto              reply = qb::http::run_sync(qb::http::GET(req, 3s));
 
     EXPECT_EQ(reply.response.status(), HTTP_STATUS_OK);
-    EXPECT_EQ(HostHeaderCaptureClient::captured_host_header,
-              "localhost:" + std::to_string(kPort));
+    EXPECT_EQ(HostHeaderCaptureClient::captured_host_header, "localhost:" + std::to_string(kPort));
 }
 
 TEST(Session, HTTP_HOST_HEADER_FORMATS_IPV6_WITH_BRACKETS) {
@@ -334,7 +320,7 @@ TEST(Session, HTTP11_RESPONSE_SERIALIZATION_CHUNKS_PRESENT_BODY) {
 TEST(Session, HTTP11_RESPONSE_SERIALIZATION_REJECTS_BODY_FOR_NO_BODY_STATUS) {
     qb::http::Response response;
     response.status() = qb::http::status::NO_CONTENT;
-    response.body() = "abc";
+    response.body()   = "abc";
 
     qb::allocator::pipe<char> out;
     EXPECT_THROW(out << response, std::length_error);
@@ -399,11 +385,9 @@ public:
     using Protocol = qb::http::protocol<TestServerClient>;
 
     explicit TestServerClient(TestServer &server)
-        : client(server) {
-    }
+        : client(server) {}
 
-    ~TestServerClient() {
-    }
+    ~TestServerClient() {}
 
     void
     on(Protocol::request &&request) {
@@ -415,7 +399,7 @@ public:
 
         qb::http::Response r;
         r.status() = qb::http::status::OK;
-        r.body() = std::move(request.body());
+        r.body()   = std::move(request.body());
         *this << r;
 
         ++msg_count_server_side;
@@ -477,17 +461,12 @@ TEST(Session, HTTP_OVER_TCP) {
         qb::http::Request r{
             HTTP_GET,
             {"http://www.isndev.test:" + std::to_string(kPort) + "/?happy=true"},
-            {
-                {"Host", {"www.isndev.test:" + std::to_string(kPort)}},
-                {"Connection", {"keep-alive"}},
-                {"Transfer-Encoding", {"chunked"}}
-            }
+            {{"Host", {"www.isndev.test:" + std::to_string(kPort)}}, {"Connection", {"keep-alive"}}, {"Transfer-Encoding", {"chunked"}}}
         };
 
         for (auto i = 0u; i < NB_ITERATION; ++i) {
             client << r;
-            client << qb::http::Chunk(STRING_MESSAGE, sizeof(STRING_MESSAGE) - 1)
-                    << qb::http::Chunk();
+            client << qb::http::Chunk(STRING_MESSAGE, sizeof(STRING_MESSAGE) - 1) << qb::http::Chunk();
         }
 
         for (std::size_t i = 0; i < (NB_ITERATION * 5) && !all_done(); ++i)
@@ -515,11 +494,7 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
 
         qb::http::Request r{
             {"http://localhost:" + std::to_string(kPort) + "/?happy=true"},
-            {
-                {"Host", {"www.isndev.test:" + std::to_string(kPort)}},
-                {"Connection", {"keep-alive"}},
-                {"Authorization", {"None"}}
-            },
+            {{"Host", {"www.isndev.test:" + std::to_string(kPort)}}, {"Connection", {"keep-alive"}}, {"Authorization", {"None"}}},
             {STRING_MESSAGE}
         };
 
@@ -541,14 +516,12 @@ TEST(Session, HTTP_OVER_TCP_ASYNC_GET) {
 
 class TestSecureServer;
 
-class TestSecureServerClient
-        : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
+class TestSecureServerClient : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
 public:
     using Protocol = qb::http::protocol<TestSecureServerClient>;
 
     explicit TestSecureServerClient(IOServer &server)
-        : client(server) {
-    }
+        : client(server) {}
 
     ~TestSecureServerClient() = default;
 
@@ -562,15 +535,14 @@ public:
 
         qb::http::Response r;
         r.status() = qb::http::status::OK;
-        r.body() = std::move(request.body());
+        r.body()   = std::move(request.body());
         *this << r;
 
         ++msg_count_server_side;
     }
 };
 
-class TestSecureServer
-        : public use<TestSecureServer>::tcp::ssl::server<TestSecureServerClient> {
+class TestSecureServer : public use<TestSecureServer>::tcp::ssl::server<TestSecureServerClient> {
     std::size_t connection_count = 0u;
 
 public:
@@ -579,7 +551,8 @@ public:
         ++connection_count;
     }
 
-    [[nodiscard]] std::size_t connectionCount() const noexcept {
+    [[nodiscard]] std::size_t
+    connectionCount() const noexcept {
         return connection_count;
     }
 };
@@ -601,7 +574,7 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
     async::init();
 
     const auto cert_path = ssl_test_resource("cert.pem");
-    const auto key_path = ssl_test_resource("key.pem");
+    const auto key_path  = ssl_test_resource("key.pem");
     ASSERT_TRUE(std::filesystem::exists(cert_path)) << "Missing SSL certificate: " << cert_path;
     ASSERT_TRUE(std::filesystem::exists(key_path)) << "Missing SSL key: " << key_path;
 
@@ -610,27 +583,21 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
     // Wall-clock budget: TLS is slower than plain TCP, and the main thread (server) must
     // keep running until all work completes; a limited EVRUN_ONCE count on one thread can
     // return before t.join (deadlock on Windows with asymmetric scheduling).
-    const auto kSslSessionBudget = std::chrono::minutes(3);
+    const auto       kSslSessionBudget = std::chrono::minutes(3);
     TestSecureServer server;
-    server.transport().init(
-        ssl::create_server_context(
-            SSLv23_server_method(),
-            cert_path.string(),
-            key_path.string()));
+    server.transport().init(ssl::create_server_context(SSLv23_server_method(), cert_path.string(), key_path.string()));
     ASSERT_EQ(server.transport().listen_v6(kPort), 0);
     server.start();
 
     std::exception_ptr worker_error;
-    std::thread t([&worker_error, kSslSessionBudget]() {
+    std::thread        t([&worker_error, kSslSessionBudget]() {
         try {
             async::init();
             TestSecureClient client;
             // Self-signed test certificate: opt out of qb-io's secure-by-default
             // peer verification for this local fixture.
             client.transport().set_insecure();
-            if (SocketStatus::Done !=
-                client.transport().connect(
-                    uri{"tcp://[::1]:" + std::to_string(kPort), AF_INET6})) {
+            if (SocketStatus::Done != client.transport().connect(uri{"tcp://[::1]:" + std::to_string(kPort), AF_INET6})) {
                 throw std::runtime_error("could not connect");
             }
             client.start();
@@ -646,11 +613,7 @@ TEST(Session, HTTP_OVER_SECURE_TCP) {
                 client << r;
             }
 
-            (void) pump_event_loop_while(
-                [] {
-                    return all_done();
-                },
-                kSslSessionBudget);
+            (void) pump_event_loop_while([] { return all_done(); }, kSslSessionBudget);
         } catch (...) {
             worker_error = std::current_exception();
         }

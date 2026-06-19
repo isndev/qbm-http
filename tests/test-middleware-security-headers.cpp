@@ -3,27 +3,32 @@
 #include "../middleware/security_headers.h"
 #include "../routing/middleware.h"
 
+#include <functional>
 #include <memory>
+#include <sstream> // For ostringstream in session mock
 #include <string>
 #include <vector>
-#include <functional>
-#include <sstream> // For ostringstream in session mock
 
 // --- Mock Session for SecurityHeadersMiddleware Tests ---
 struct MockSecuritySession {
     qb::http::Response _response;
-    std::string _session_id_str = "security_headers_test_session";
+    std::string        _session_id_str = "security_headers_test_session";
     std::ostringstream _trace;
-    bool _final_handler_called = false;
+    bool               _final_handler_called = false;
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MockSecuritySession &operator<<(const qb::http::Response &resp) {
+    MockSecuritySession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 
-    void reset() {
+    void
+    reset() {
         _response = qb::http::Response();
         _trace.str("");
         _trace.clear();
@@ -31,72 +36,76 @@ struct MockSecuritySession {
     }
 };
 
-// --- Test Fixture for SecurityHeadersMiddleware --- 
+// --- Test Fixture for SecurityHeadersMiddleware ---
 class SecurityHeadersMiddlewareTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockSecuritySession> _session;
-    std::unique_ptr<qb::http::Router<MockSecuritySession> > _router;
+    std::shared_ptr<MockSecuritySession>                   _session;
+    std::unique_ptr<qb::http::Router<MockSecuritySession>> _router;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         _session = std::make_shared<MockSecuritySession>();
-        _router = std::make_unique<qb::http::Router<MockSecuritySession> >();
+        _router  = std::make_unique<qb::http::Router<MockSecuritySession>>();
     }
 
-    qb::http::Request create_request(qb::http::method method_val = qb::http::method::GET,
-                                     const std::string &target_path = "/test",
-                                     const std::string &scheme = "http") {
+    qb::http::Request
+    create_request(qb::http::method method_val = qb::http::method::GET, const std::string &target_path = "/test",
+                   const std::string &scheme = "http") {
         qb::http::Request req;
         req.method() = method_val;
         try {
             req.uri() = qb::io::uri(scheme + "://localhost" + target_path);
         } catch (const std::exception &e) {
-            ADD_FAILURE() << "URI parse failure: " << scheme << "://localhost" << target_path << " (" << e.what() <<
- ")";
+            ADD_FAILURE() << "URI parse failure: " << scheme << "://localhost" << target_path << " (" << e.what() << ")";
             req.uri() = qb::io::uri("/_ERROR_URI_");
         }
         return req;
     }
 
-    qb::http::RouteHandlerFn<MockSecuritySession> basic_success_handler() {
-        return [this](std::shared_ptr<qb::http::Context<MockSecuritySession> > ctx) {
+    qb::http::RouteHandlerFn<MockSecuritySession>
+    basic_success_handler() {
+        return [this](std::shared_ptr<qb::http::Context<MockSecuritySession>> ctx) {
             _session->_final_handler_called = true;
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "Test body";
+            ctx->response().status()        = qb::http::status::OK;
+            ctx->response().body()          = "Test body";
             ctx->complete();
         };
     }
 
-    void configure_router_with_mw(std::shared_ptr<qb::http::IMiddleware<MockSecuritySession> > mw) {
+    void
+    configure_router_with_mw(std::shared_ptr<qb::http::IMiddleware<MockSecuritySession>> mw) {
         _router->use(mw);
         _router->get("/test", basic_success_handler());
         _router->compile();
     }
 
-    void configure_router_with_mw_and_handler(
-        std::shared_ptr<qb::http::IMiddleware<MockSecuritySession> > mw,
-        qb::http::RouteHandlerFn<MockSecuritySession> handler) {
+    void
+    configure_router_with_mw_and_handler(std::shared_ptr<qb::http::IMiddleware<MockSecuritySession>> mw,
+                                         qb::http::RouteHandlerFn<MockSecuritySession>               handler) {
         _router->use(mw);
         _router->get("/test", handler);
         _router->compile();
     }
 
-    void make_request(qb::http::Request request) {
+    void
+    make_request(qb::http::Request request) {
         _session->reset(); // Ensure session is clean before each request
         _router->route(_session, std::move(request));
     }
 
-    void expect_header_value(const std::string &header_name, const std::string &expected_value) {
+    void
+    expect_header_value(const std::string &header_name, const std::string &expected_value) {
         EXPECT_TRUE(_session->_response.has_header(header_name)) << "Header " << header_name << " not found.";
         if (_session->_response.has_header(header_name)) {
             EXPECT_EQ(_session->_response.header(header_name), expected_value)
-                << "Header " << header_name << " has value '" << _session->_response.header(header_name)
-                << "', expected '" << expected_value << "'.";
+                << "Header " << header_name << " has value '" << _session->_response.header(header_name) << "', expected '" << expected_value
+                << "'.";
         }
     }
 
-    void expect_header_absent(const std::string &header_name) {
-        EXPECT_FALSE(_session->_response.has_header(header_name)) << "Header " << header_name <<
- " should not be present.";
+    void
+    expect_header_absent(const std::string &header_name) {
+        EXPECT_FALSE(_session->_response.has_header(header_name)) << "Header " << header_name << " should not be present.";
     }
 };
 
@@ -120,8 +129,7 @@ TEST_F(SecurityHeadersMiddlewareTest, AppliesSecureDefaultHeadersForHTTP) {
     expect_header_value("Content-Security-Policy", *default_opts.get_content_security_policy_value());
     expect_header_value("Referrer-Policy", *default_opts.get_referrer_policy_value());
     expect_header_value("Cross-Origin-Opener-Policy", *default_opts.get_coop_value());
-    expect_header_value("X-Permitted-Cross-Domain-Policies",
-                        *default_opts.get_x_permitted_cross_domain_policies_value());
+    expect_header_value("X-Permitted-Cross-Domain-Policies", *default_opts.get_x_permitted_cross_domain_policies_value());
 
     // Headers not set by default
     expect_header_absent("Content-Security-Policy-Report-Only");
@@ -149,8 +157,7 @@ TEST_F(SecurityHeadersMiddlewareTest, AppliesSecureDefaultHeadersForHTTPSInclude
     expect_header_value("Content-Security-Policy", *default_opts.get_content_security_policy_value());
     expect_header_value("Referrer-Policy", *default_opts.get_referrer_policy_value());
     expect_header_value("Cross-Origin-Opener-Policy", *default_opts.get_coop_value());
-    expect_header_value("X-Permitted-Cross-Domain-Policies",
-                        *default_opts.get_x_permitted_cross_domain_policies_value());
+    expect_header_value("X-Permitted-Cross-Domain-Policies", *default_opts.get_x_permitted_cross_domain_policies_value());
 }
 
 TEST_F(SecurityHeadersMiddlewareTest, AppliesCustomHSTS) {
@@ -235,9 +242,9 @@ TEST_F(SecurityHeadersMiddlewareTest, AppliesCSPReportOnly) {
 }
 
 TEST_F(SecurityHeadersMiddlewareTest, RemovesCSPReportOnly) {
-    qb::http::SecurityHeadersOptions opts; // Start with empty
+    qb::http::SecurityHeadersOptions opts;                  // Start with empty
     opts.with_content_security_policy_report_only("value"); // Set it
-    opts.without_content_security_policy_report_only(); // Then remove it
+    opts.without_content_security_policy_report_only();     // Then remove it
     auto sh_mw = qb::http::security_headers_middleware<MockSecuritySession>(opts);
     configure_router_with_mw(sh_mw);
     make_request(create_request());
@@ -388,7 +395,7 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceGeneratedAndInContext) {
     _router->use(sh_mw);
     _router->get("/test_nonce", [this, &captured_nonce](auto ctx) {
         _session->_final_handler_called = true;
-        auto nonce_opt = ctx->template get<std::string>("csp_nonce");
+        auto nonce_opt                  = ctx->template get<std::string>("csp_nonce");
         EXPECT_TRUE(nonce_opt.has_value()) << "CSP Nonce not found in context properties";
         if (nonce_opt) {
             captured_nonce = *nonce_opt;
@@ -404,18 +411,20 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceGeneratedAndInContext) {
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 
     ASSERT_FALSE(captured_nonce.empty());
-    std::string expected_csp =
-            "default-src 'self'; "
-            "script-src 'self' 'nonce-" + captured_nonce + "' 'strict-dynamic'; "
-            "style-src 'self' 'nonce-" + captured_nonce + "'; "
-            "object-src 'none'; base-uri 'self'; form-action 'self';";
+    std::string expected_csp = "default-src 'self'; "
+                               "script-src 'self' 'nonce-"
+                               + captured_nonce
+                               + "' 'strict-dynamic'; "
+                                 "style-src 'self' 'nonce-"
+                               + captured_nonce
+                               + "'; "
+                                 "object-src 'none'; base-uri 'self'; form-action 'self';";
     expect_header_value("Content-Security-Policy", expected_csp);
 }
 
 TEST_F(SecurityHeadersMiddlewareTest, CSPNonceWithUserProvidedCSP) {
     qb::http::SecurityHeadersOptions opts;
-    opts.with_csp_nonce(true)
-            .with_content_security_policy("custom-csp 'self'; script-src 'unsafe-inline'");
+    opts.with_csp_nonce(true).with_content_security_policy("custom-csp 'self'; script-src 'unsafe-inline'");
 
     std::string captured_nonce_in_handler;
 
@@ -423,7 +432,7 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceWithUserProvidedCSP) {
     _router->use(sh_mw);
     _router->get("/test_nonce_custom_csp", [this, &captured_nonce_in_handler](auto ctx) {
         _session->_final_handler_called = true;
-        auto nonce_opt = ctx->template get<std::string>("csp_nonce");
+        auto nonce_opt                  = ctx->template get<std::string>("csp_nonce");
         EXPECT_TRUE(nonce_opt.has_value()) << "CSP Nonce not found in context properties even with custom CSP";
         if (nonce_opt) {
             captured_nonce_in_handler = *nonce_opt;
@@ -445,8 +454,7 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceWithUserProvidedCSP) {
 TEST_F(SecurityHeadersMiddlewareTest, CSPNonceRequiresSSL) {
     qb::http::SecurityHeadersOptions opts;
     opts.with_csp_nonce(true);
-    EXPECT_THROW((void)qb::http::security_headers_middleware<MockSecuritySession>(opts),
-                 std::logic_error);
+    EXPECT_THROW((void) qb::http::security_headers_middleware<MockSecuritySession>(opts), std::logic_error);
 }
 #endif
 
@@ -459,7 +467,7 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceDisabledNoNonceInContextOrDefaultC
     _router->use(sh_mw);
     _router->get("/test_no_nonce", [this](auto ctx) {
         _session->_final_handler_called = true;
-        auto nonce_opt = ctx->template get<std::string>("csp_nonce");
+        auto nonce_opt                  = ctx->template get<std::string>("csp_nonce");
         EXPECT_FALSE(nonce_opt.has_value()) << "CSP Nonce should not be in context if disabled";
         ctx->response().status() = qb::http::status::OK;
         ctx->complete();
@@ -513,17 +521,15 @@ TEST_F(SecurityHeadersMiddlewareTest, OptionsCanBeUpdated) {
 
     // First request with default options
     make_request(create_request(qb::http::method::GET, "/test_default_opts", "https"));
-    expect_header_value("X-Frame-Options",
-                        *qb::http::SecurityHeadersOptions::secure_defaults().get_x_frame_options_value());
+    expect_header_value("X-Frame-Options", *qb::http::SecurityHeadersOptions::secure_defaults().get_x_frame_options_value());
     expect_header_absent("Permissions-Policy");
 
     // Update options
     qb::http::SecurityHeadersOptions new_opts;
-    new_opts.with_x_frame_options("DENY")
-            .with_permissions_policy("fullscreen=()");
+    new_opts.with_x_frame_options("DENY").with_permissions_policy("fullscreen=()");
 
     // Need to get the concrete type to call update_options
-    auto concrete_mw = std::dynamic_pointer_cast<qb::http::SecurityHeadersMiddleware<MockSecuritySession> >(sh_mw);
+    auto concrete_mw = std::dynamic_pointer_cast<qb::http::SecurityHeadersMiddleware<MockSecuritySession>>(sh_mw);
     ASSERT_NE(concrete_mw, nullptr);
     concrete_mw->update_options(new_opts);
 
@@ -563,10 +569,8 @@ TEST_F(SecurityHeadersMiddlewareTest, MiddlewareNameIsCorrect) {
     auto mw_default_name = qb::http::security_headers_middleware<MockSecuritySession>();
     EXPECT_EQ(mw_default_name->name(), "SecurityHeadersMiddleware");
 
-    auto mw_custom_name = qb::http::security_headers_middleware<MockSecuritySession>(
-        qb::http::SecurityHeadersOptions::secure_defaults(),
-        "MyCustomSecurityHeaders"
-    );
+    auto mw_custom_name = qb::http::security_headers_middleware<MockSecuritySession>(qb::http::SecurityHeadersOptions::secure_defaults(),
+                                                                                     "MyCustomSecurityHeaders");
     EXPECT_EQ(mw_custom_name->name(), "MyCustomSecurityHeaders");
 }
 
@@ -575,8 +579,8 @@ TEST_F(SecurityHeadersMiddlewareTest, GetOptionsReturnsCurrentOptions) {
     qb::http::SecurityHeadersOptions initial_opts;
     initial_opts.with_hsts("max-age=100");
 
-    auto mw = qb::http::security_headers_middleware<MockSecuritySession>(initial_opts);
-    auto concrete_mw = std::dynamic_pointer_cast<qb::http::SecurityHeadersMiddleware<MockSecuritySession> >(mw);
+    auto mw          = qb::http::security_headers_middleware<MockSecuritySession>(initial_opts);
+    auto concrete_mw = std::dynamic_pointer_cast<qb::http::SecurityHeadersMiddleware<MockSecuritySession>>(mw);
     ASSERT_NE(concrete_mw, nullptr);
 
     const auto &retrieved_opts1 = concrete_mw->get_options();

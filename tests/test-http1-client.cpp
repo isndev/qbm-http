@@ -1,8 +1,8 @@
-#include <atomic>
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cctype>
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <thread>
@@ -21,26 +21,23 @@ namespace {
 
 class Http1ClientTestServer;
 
-class Http1ClientTestSession
-    : public qb::http::use<Http1ClientTestSession>::session<Http1ClientTestServer> {
+class Http1ClientTestSession : public qb::http::use<Http1ClientTestSession>::session<Http1ClientTestServer> {
 public:
-    explicit Http1ClientTestSession(Http1ClientTestServer& server);
+    explicit Http1ClientTestSession(Http1ClientTestServer &server);
 };
 
-class Http1ClientTestServer
-    : public qb::http::use<Http1ClientTestServer>::server<Http1ClientTestSession> {
-    std::atomic<int>& _connection_count;
-    std::atomic<int>& _request_count;
+class Http1ClientTestServer : public qb::http::use<Http1ClientTestServer>::server<Http1ClientTestSession> {
+    std::atomic<int> &_connection_count;
+    std::atomic<int> &_request_count;
 
 public:
-    Http1ClientTestServer(std::atomic<int>& connection_count,
-                          std::atomic<int>& request_count)
+    Http1ClientTestServer(std::atomic<int> &connection_count, std::atomic<int> &request_count)
         : _connection_count(connection_count)
         , _request_count(request_count) {
         router().get("/ping", [this](auto ctx) {
             ++_request_count;
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "pong";
+            ctx->response().body()   = "pong";
             ctx->response().set_header("X-Protocol", "HTTP/1.1");
             ctx->complete();
         });
@@ -48,7 +45,7 @@ public:
         router().get("/close", [this](auto ctx) {
             ++_request_count;
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "bye";
+            ctx->response().body()   = "bye";
             ctx->response().set_header("Connection", "close");
             ctx->complete();
         });
@@ -56,29 +53,31 @@ public:
         router().get("/item/:id", [this](auto ctx) {
             ++_request_count;
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = ctx->path_param("id");
+            ctx->response().body()   = ctx->path_param("id");
             ctx->complete();
         });
 
         router().get("/hold/:id", [this](auto ctx) {
             ++_request_count;
             auto id = ctx->path_param("id");
-            qb::io::async::callback([ctx, id = std::move(id)]() mutable {
-                ctx->response().status() = qb::http::status::OK;
-                ctx->response().body() = id;
-                ctx->complete();
-            }, 50ms);
+            qb::io::async::callback(
+                [ctx, id = std::move(id)]() mutable {
+                    ctx->response().status() = qb::http::status::OK;
+                    ctx->response().body()   = id;
+                    ctx->complete();
+                },
+                50ms);
         });
 
         router().get("/never", [this](auto ctx) {
             ++_request_count;
-            (void)ctx;
+            (void) ctx;
         });
 
         router().post("/echo", [this](auto ctx) {
             ++_request_count;
             ctx->response().status() = qb::http::status::CREATED;
-            ctx->response().body() = ctx->request().body().template as<std::string>();
+            ctx->response().body()   = ctx->request().body().template as<std::string>();
             ctx->complete();
         });
 
@@ -99,12 +98,13 @@ public:
         router().compile();
     }
 
-    void on(IOSession&) {
+    void
+    on(IOSession &) {
         ++_connection_count;
     }
 };
 
-Http1ClientTestSession::Http1ClientTestSession(Http1ClientTestServer& server)
+Http1ClientTestSession::Http1ClientTestSession(Http1ClientTestServer &server)
     : session(server) {
     max_pipelined_requests(4);
 }
@@ -138,26 +138,28 @@ struct RunningHttp1Server {
         }
     }
 
-    [[nodiscard]] std::string url(std::string const& path) const {
+    [[nodiscard]] std::string
+    url(std::string const &path) const {
         return "http://127.0.0.1:" + std::to_string(port) + path;
     }
 
-    int port;
-    std::thread thread;
+    int               port;
+    std::thread       thread;
     std::atomic<bool> ready{false};
     std::atomic<bool> running{true};
-    std::atomic<int> connection_count{0};
-    std::atomic<int> request_count{0};
+    std::atomic<int>  connection_count{0};
+    std::atomic<int>  request_count{0};
 };
 
-qb::http::Request request(qb::http::method method, std::string const& target) {
+qb::http::Request
+request(qb::http::method method, std::string const &target) {
     qb::http::Request req{method, qb::io::uri(target)};
     return req;
 }
 
-[[nodiscard]] std::string lowercase(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+[[nodiscard]] std::string
+lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
 }
 
@@ -172,11 +174,11 @@ public:
         }
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(port));
+        addr.sin_port   = htons(static_cast<uint16_t>(port));
         if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
             throw std::runtime_error("inet_pton failed");
         }
-        if (::connect(_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        if (::connect(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
             throw std::runtime_error("connect failed");
         }
     }
@@ -187,11 +189,12 @@ public:
         }
     }
 
-    raw_socket(raw_socket const&) = delete;
-    raw_socket& operator=(raw_socket const&) = delete;
+    raw_socket(raw_socket const &)            = delete;
+    raw_socket &operator=(raw_socket const &) = delete;
 
-    void send_all(std::string const& wire) {
-        const char* data = wire.data();
+    void
+    send_all(std::string const &wire) {
+        const char *data      = wire.data();
         std::size_t remaining = wire.size();
         while (remaining) {
             const auto sent = ::send(_fd, data, remaining, 0);
@@ -203,16 +206,16 @@ public:
         }
     }
 
-    [[nodiscard]] std::string read_until(std::string const& marker,
-                                         std::chrono::milliseconds budget = std::chrono::seconds(3)) {
+    [[nodiscard]] std::string
+    read_until(std::string const &marker, std::chrono::milliseconds budget = std::chrono::seconds(3)) {
         std::string out;
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        char buffer[4096];
+        const auto  deadline = std::chrono::steady_clock::now() + budget;
+        char        buffer[4096];
         while (std::chrono::steady_clock::now() < deadline && out.find(marker) == std::string::npos) {
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(_fd, &fds);
-            timeval tv{0, 50 * 1000};
+            timeval    tv{0, 50 * 1000};
             const auto ready = ::select(_fd + 1, &fds, nullptr, nullptr, &tv);
             if (ready < 0 && errno == EINTR) {
                 continue;
@@ -232,14 +235,15 @@ public:
         return out;
     }
 
-    [[nodiscard]] bool closes_within(std::chrono::milliseconds budget) {
+    [[nodiscard]] bool
+    closes_within(std::chrono::milliseconds budget) {
         const auto deadline = std::chrono::steady_clock::now() + budget;
-        char c;
+        char       c;
         while (std::chrono::steady_clock::now() < deadline) {
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(_fd, &fds);
-            timeval tv{0, 50 * 1000};
+            timeval    tv{0, 50 * 1000};
             const auto ready = ::select(_fd + 1, &fds, nullptr, nullptr, &tv);
             if (ready > 0) {
                 const auto n = ::recv(_fd, &c, 1, MSG_PEEK);
@@ -254,10 +258,10 @@ public:
 
 TEST(Http1ClientTest, ConnectCallbackAndSequentialRequestsReuseOneConnection) {
     RunningHttp1Server server{33101};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
 
     bool connected = false;
-    client->connect([&](bool ok, std::string const& error) {
+    client->connect([&](bool ok, std::string const &error) {
         EXPECT_TRUE(ok) << error;
         connected = ok;
     });
@@ -267,7 +271,7 @@ TEST(Http1ClientTest, ConnectCallbackAndSequentialRequestsReuseOneConnection) {
     }
     ASSERT_TRUE(connected);
 
-    auto first = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+    auto first  = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
     auto second = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/item/42")));
 
     EXPECT_EQ(first.status(), qb::http::status::OK);
@@ -281,15 +285,15 @@ TEST(Http1ClientTest, ConnectCallbackAndSequentialRequestsReuseOneConnection) {
 
 TEST(Http1ClientTest, CoroutineConnectAndSinglePostRequest) {
     RunningHttp1Server server{33102};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
 
     auto connect_result = qb::http::run_sync(client->connect());
     ASSERT_TRUE(connect_result) << connect_result.error_message;
     auto second_connect = qb::http::run_sync(client->connect());
     ASSERT_TRUE(second_connect) << second_connect.error_message;
 
-    auto req = request(qb::http::method::POST, "/echo");
-    req.body() = "hello-http1";
+    auto req      = request(qb::http::method::POST, "/echo");
+    req.body()    = "hello-http1";
     auto response = qb::http::run_sync(client->push_request(std::move(req)));
 
     EXPECT_EQ(response.status(), qb::http::status::CREATED);
@@ -302,9 +306,9 @@ TEST(Http1ClientTest, UserCallbacksMayReleaseLastClientReference) {
     RunningHttp1Server server{33112};
 
     {
-        auto client = qb::http1::make_client(server.url("/"));
+        auto client                  = qb::http1::make_client(server.url("/"));
         bool connect_callback_called = false;
-        client->connect([&](bool ok, std::string const&) {
+        client->connect([&](bool ok, std::string const &) {
             EXPECT_TRUE(ok);
             connect_callback_called = true;
             client.reset();
@@ -317,14 +321,13 @@ TEST(Http1ClientTest, UserCallbacksMayReleaseLastClientReference) {
     }
 
     {
-        auto client = qb::http1::make_client(server.url("/"));
+        auto client                   = qb::http1::make_client(server.url("/"));
         bool response_callback_called = false;
-        client->push_request(request(qb::http::method::GET, "/ping"),
-            [&](qb::http::Response response) {
-                EXPECT_EQ(response.status(), qb::http::status::OK);
-                response_callback_called = true;
-                client.reset();
-            });
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            response_callback_called = true;
+            client.reset();
+        });
         for (int i = 0; i < 300 && !response_callback_called; ++i) {
             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -333,14 +336,13 @@ TEST(Http1ClientTest, UserCallbacksMayReleaseLastClientReference) {
     }
 
     {
-        auto client = qb::http1::make_client(server.url("/"));
+        auto client                   = qb::http1::make_client(server.url("/"));
         bool response_callback_called = false;
-        client->push_request(request(qb::http::method::GET, "/ping"),
-            [&](qb::http::Response response) {
-                EXPECT_EQ(response.status(), qb::http::status::OK);
-                response_callback_called = true;
-                client->disconnect();
-            });
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            response_callback_called = true;
+            client->disconnect();
+        });
         for (int i = 0; i < 300 && !response_callback_called; ++i) {
             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -350,16 +352,15 @@ TEST(Http1ClientTest, UserCallbacksMayReleaseLastClientReference) {
     }
 
     {
-        auto client = qb::http1::make_client(server.url("/"));
-        qb::http::status response_status = qb::http::status::OK;
-        bool response_callback_called = false;
-        bool connect_callback_called = false;
-        client->push_request(request(qb::http::method::GET, "/ping"),
-            [&](qb::http::Response response) {
-                response_status = response.status();
-                response_callback_called = true;
-            });
-        client->connect([&](bool ok, std::string const&) {
+        auto             client                   = qb::http1::make_client(server.url("/"));
+        qb::http::status response_status          = qb::http::status::OK;
+        bool             response_callback_called = false;
+        bool             connect_callback_called  = false;
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+            response_status          = response.status();
+            response_callback_called = true;
+        });
+        client->connect([&](bool ok, std::string const &) {
             EXPECT_TRUE(ok);
             connect_callback_called = true;
             client->disconnect();
@@ -377,7 +378,7 @@ TEST(Http1ClientTest, UserCallbacksMayReleaseLastClientReference) {
 
 TEST(Http1ClientTest, BatchRequestsAreSequentialAndOrderPreserved) {
     RunningHttp1Server server{33103};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
 
     std::vector<qb::http::Request> requests;
     requests.emplace_back(request(qb::http::method::GET, "/item/1"));
@@ -397,17 +398,16 @@ TEST(Http1ClientTest, AbsoluteRequestWithExplicitDefaultPortMatchesBaseOrigin) {
     auto client = qb::http1::make_client("http://127.0.0.1");
     client->set_connect_timeout(200ms);
 
-    auto response = qb::http::run_sync(client->push_request(
-        request(qb::http::method::GET, "http://127.0.0.1:80/ping")));
+    auto response = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "http://127.0.0.1:80/ping")));
 
     EXPECT_NE(response.status(), qb::http::status::BAD_REQUEST);
 }
 
 TEST(Http1ClientTest, SerializationFailureDoesNotBlockQueuedRequests) {
     RunningHttp1Server server{33108};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
 
-    auto bad = request(qb::http::method::POST, "/echo");
+    auto bad   = request(qb::http::method::POST, "/echo");
     bad.body() = "too-long";
     bad.set_header("Content-Length", "1");
 
@@ -425,7 +425,7 @@ TEST(Http1ClientTest, SerializationFailureDoesNotBlockQueuedRequests) {
 
 TEST(Http1ClientTest, PendingRequestTimesOutBehindBlockedActiveRequest) {
     RunningHttp1Server server{33111};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
     client->set_request_timeout(50ms);
 
     std::vector<qb::http::Request> requests;
@@ -441,7 +441,7 @@ TEST(Http1ClientTest, PendingRequestTimesOutBehindBlockedActiveRequest) {
 
 TEST(Http1ClientTest, ConnectionCloseResponseReconnectsBeforeNextRequest) {
     RunningHttp1Server server{33104};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
 
     auto closing = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/close")));
     EXPECT_EQ(closing.status(), qb::http::status::OK);
@@ -455,11 +455,11 @@ TEST(Http1ClientTest, ConnectionCloseResponseReconnectsBeforeNextRequest) {
 
 TEST(Http1ClientTest, HeadAndNoContentDoNotStealNextResponseBytes) {
     RunningHttp1Server server{33105};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
 
-    auto head = qb::http::run_sync(client->push_request(request(qb::http::method::HEAD, "/head-length")));
+    auto head       = qb::http::run_sync(client->push_request(request(qb::http::method::HEAD, "/head-length")));
     auto no_content = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/no-content")));
-    auto ping = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+    auto ping       = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
 
     EXPECT_EQ(head.status(), qb::http::status::OK);
     EXPECT_EQ(head.header("Content-Length"), "123");
@@ -478,7 +478,7 @@ TEST(Http1ClientTest, Http10ClosesByDefaultButKeepAliveCanPersist) {
         raw_socket socket{server.port};
         socket.send_all("GET /ping HTTP/1.0\r\nHost: localhost\r\n\r\n");
         const auto response = socket.read_until("pong");
-        const auto lower = lowercase(response);
+        const auto lower    = lowercase(response);
         EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos);
         EXPECT_NE(lower.find("connection: close"), std::string::npos);
         EXPECT_TRUE(socket.closes_within(std::chrono::seconds(2)));
@@ -498,13 +498,12 @@ TEST(Http1ClientTest, Http10ClosesByDefaultButKeepAliveCanPersist) {
 
 TEST(Http1ClientTest, BackToBackHttp11RequestsAreAnsweredInRequestOrder) {
     RunningHttp1Server server{33107};
-    raw_socket socket{server.port};
+    raw_socket         socket{server.port};
 
-    socket.send_all(
-        "GET /item/first HTTP/1.1\r\nHost: localhost\r\n\r\n"
-        "GET /item/second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    const auto response = socket.read_until("second");
-    const auto first_pos = response.find("first");
+    socket.send_all("GET /item/first HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                    "GET /item/second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    const auto response   = socket.read_until("second");
+    const auto first_pos  = response.find("first");
     const auto second_pos = response.find("second");
 
     ASSERT_NE(first_pos, std::string::npos);
@@ -516,7 +515,7 @@ TEST(Http1ClientTest, BackToBackHttp11RequestsAreAnsweredInRequestOrder) {
 
 TEST(Http1ClientTest, ExcessivePipelinedRequestsAreCapped) {
     RunningHttp1Server server{33109};
-    raw_socket socket{server.port};
+    raw_socket         socket{server.port};
 
     std::string wire;
     for (int i = 0; i < 8; ++i) {
@@ -532,7 +531,7 @@ TEST(Http1ClientTest, ExcessivePipelinedRequestsAreCapped) {
 
 TEST(Http1ClientTest, ConnectAwaiterReturnsErrorWhenClientExpiresBeforeAwait) {
     auto result = qb::io::async::run_sync([]() -> qb::io::async::task<qb::http1::ConnectResult> {
-        auto client = qb::http1::make_client("http://127.0.0.1:1");
+        auto client  = qb::http1::make_client("http://127.0.0.1:1");
         auto awaiter = client->connect();
         client.reset();
         auto connect_result = co_await awaiter;
@@ -573,15 +572,14 @@ TEST(Http1ClientTest, DestroyingClientDuringConnectDoesNotLeaveDanglingCallback)
 // contained and the client must remain usable.
 TEST(Http1ClientTest, ThrowingUserCallbackIsContainedAndClientSurvives) {
     RunningHttp1Server server{33120};
-    auto client = qb::http1::make_client(server.url("/"));
+    auto               client = qb::http1::make_client(server.url("/"));
 
     bool first_called = false;
-    client->push_request(request(qb::http::method::GET, "/ping"),
-        [&](qb::http::Response response) {
-            EXPECT_EQ(response.status(), qb::http::status::OK);
-            first_called = true;
-            throw std::runtime_error("user callback boom");
-        });
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        first_called = true;
+        throw std::runtime_error("user callback boom");
+    });
     for (int i = 0; i < 300 && !first_called; ++i) {
         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

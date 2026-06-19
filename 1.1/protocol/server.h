@@ -21,76 +21,75 @@
  *       can `memmove`/reallocate between reads).
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
 #pragma once
+#include "../../logger.h" // For LOG_HTTP_WARN - SECURITY FIX: Required for exception logging
 #include "../../request.h"
-#include "../../logger.h"  // For LOG_HTTP_WARN - SECURITY FIX: Required for exception logging
 #include "./base.h"
 
 namespace qb::protocol::http {
+/**
+ * @brief HTTP server protocol implementation
+ * @tparam IO_Handler Handler type for I/O operations
+ *
+ * This class implements the HTTP protocol for server-side operations.
+ * It handles HTTP request parsing and dispatches the parsed requests
+ * to the IO handler for processing. Request data is owned
+ * (`std::string`-backed) so handlers may safely move the request
+ * into long-lived structures (async chain, shared context,
+ * coroutine frames, etc.).
+ */
+template <typename IO_Handler>
+class server : public base<IO_Handler, qb::http::Request> {
+    using base_t = base<IO_Handler, qb::http::Request>;
+
+public:
+    server() = delete;
+
     /**
-     * @brief HTTP server protocol implementation
-     * @tparam IO_Handler Handler type for I/O operations
+     * @brief Constructor with IO handler
+     * @param io IO handler for network operations
      *
-     * This class implements the HTTP protocol for server-side operations.
-     * It handles HTTP request parsing and dispatches the parsed requests
-     * to the IO handler for processing. Request data is owned
-     * (`std::string`-backed) so handlers may safely move the request
-     * into long-lived structures (async chain, shared context,
-     * coroutine frames, etc.).
+     * Creates an HTTP server protocol handler attached to the provided
+     * IO handler, which manages the underlying socket connections.
      */
-    template<typename IO_Handler>
-    class server : public base<IO_Handler, qb::http::Request> {
-        using base_t = base<IO_Handler, qb::http::Request>;
+    explicit server(IO_Handler &io) noexcept
+        : base_t(io) {}
 
-    public:
-        server() = delete;
+    using request = qb::http::Request;
 
-        /**
-         * @brief Constructor with IO handler
-         * @param io IO handler for network operations
-         *
-         * Creates an HTTP server protocol handler attached to the provided
-         * IO handler, which manages the underlying socket connections.
-         */
-        explicit server(IO_Handler &io) noexcept
-            : base_t(io) {
+    /**
+     * @brief Process an incoming HTTP request
+     * @param size Size of the incoming message
+     *
+     * This method is called when a complete HTTP request is received.
+     * It parses the request data using the HTTP parser, then routes it
+     * to the appropriate handler based on the request path and method.
+     * The response is automatically sent back to the client.
+     *
+     * @security CRITICAL FIX: All cookie parsing exceptions are caught to prevent
+     * std::terminate() in noexcept context. Malformed cookies are logged and ignored.
+     */
+    void
+    onMessage(std::size_t) noexcept final {
+        auto &request_obj = this->_http_obj.get_parsed_message();
+        // Parse cookies from the Cookie header
+        // SECURITY: Wrap in try/catch - parse_cookie_header() can throw std::runtime_error
+        try {
+            request_obj.parse_cookie_header();
+        } catch (const std::exception &e) {
+            // Log error but continue processing request without cookies
+            // This prevents std::terminate() in noexcept context
+            LOG_HTTP_WARN("Failed to parse Cookie header: " << e.what());
+        } catch (...) {
+            LOG_HTTP_WARN("Failed to parse Cookie header: unknown exception");
         }
-
-        using request = qb::http::Request;
-
-        /**
-         * @brief Process an incoming HTTP request
-         * @param size Size of the incoming message
-         *
-         * This method is called when a complete HTTP request is received.
-         * It parses the request data using the HTTP parser, then routes it
-         * to the appropriate handler based on the request path and method.
-         * The response is automatically sent back to the client.
-         *
-         * @security CRITICAL FIX: All cookie parsing exceptions are caught to prevent
-         * std::terminate() in noexcept context. Malformed cookies are logged and ignored.
-         */
-        void
-        onMessage(std::size_t) noexcept final {
-            auto &request_obj = this->_http_obj.get_parsed_message();
-            // Parse cookies from the Cookie header
-            // SECURITY: Wrap in try/catch - parse_cookie_header() can throw std::runtime_error
-            try {
-                request_obj.parse_cookie_header();
-            } catch (const std::exception &e) {
-                // Log error but continue processing request without cookies
-                // This prevents std::terminate() in noexcept context
-                LOG_HTTP_WARN("Failed to parse Cookie header: " << e.what());
-            } catch (...) {
-                LOG_HTTP_WARN("Failed to parse Cookie header: unknown exception");
-            }
-            this->_io.on(std::move(request_obj));
-            // Reset the parser without consuming (pipe API might have changed)
-            this->_http_obj.reset();
-        }
-    };
-}
+        this->_io.on(std::move(request_obj));
+        // Reset the parser without consuming (pipe API might have changed)
+        this->_http_obj.reset();
+    }
+};
+} // namespace qb::protocol::http

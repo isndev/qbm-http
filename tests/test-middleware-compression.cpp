@@ -1,30 +1,35 @@
 #include <gtest/gtest.h>
-#include "../http.h" // Should provide Router, Request, Response, Context, etc.
+#include "../http.h"                   // Should provide Router, Request, Response, Context, etc.
 #include "../middleware/compression.h" // The adapted CompressionMiddleware
-#include "../routing/middleware.h" // For MiddlewareTask if needed for direct use
+#include "../routing/middleware.h"     // For MiddlewareTask if needed for direct use
 
+#include <functional>
 #include <memory>
+#include <sstream> // For ostringstream in session mock
 #include <string>
 #include <vector>
-#include <functional>
-#include <sstream> // For ostringstream in session mock
 
 // --- Mock Session for CompressionMiddleware Tests ---
 struct MockCompressionSession {
-    qb::http::Response _response;
-    std::string _session_id_str = "compression_test_session";
-    std::ostringstream _trace; // For optional tracing if needed by handlers
-    bool _final_handler_called = false;
+    qb::http::Response                 _response;
+    std::string                        _session_id_str = "compression_test_session";
+    std::ostringstream                 _trace; // For optional tracing if needed by handlers
+    bool                               _final_handler_called = false;
     std::map<std::string, std::string> _response_headers_before_compression_hook;
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MockCompressionSession &operator<<(const qb::http::Response &resp) {
+    MockCompressionSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 
-    void reset() {
+    void
+    reset() {
         _response = qb::http::Response();
         _trace.str("");
         _trace.clear();
@@ -33,23 +38,23 @@ struct MockCompressionSession {
     }
 };
 
-// --- Test Fixture for CompressionMiddleware --- 
+// --- Test Fixture for CompressionMiddleware ---
 class CompressionMiddlewareTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockCompressionSession> _session;
-    std::unique_ptr<qb::http::Router<MockCompressionSession> > _router;
+    std::shared_ptr<MockCompressionSession>                   _session;
+    std::unique_ptr<qb::http::Router<MockCompressionSession>> _router;
     // TaskExecutor might not be needed if CompressionMiddleware is fully sync in its process(),
     // but its response compression hook runs later in the lifecycle.
 
-    void SetUp() override {
+    void
+    SetUp() override {
         _session = std::make_shared<MockCompressionSession>();
-        _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+        _router  = std::make_unique<qb::http::Router<MockCompressionSession>>();
     }
 
-    qb::http::Request create_request(qb::http::method method_val = qb::http::method::GET,
-                                     const std::string &target_path = "/test",
-                                     const std::string &body_content = "",
-                                     const std::string &content_encoding = "") {
+    qb::http::Request
+    create_request(qb::http::method method_val = qb::http::method::GET, const std::string &target_path = "/test",
+                   const std::string &body_content = "", const std::string &content_encoding = "") {
         qb::http::Request req;
         req.method() = method_val;
         try {
@@ -69,34 +74,35 @@ protected:
     }
 
     // Handler that sets a response to be potentially compressed
-    qb::http::RouteHandlerFn<MockCompressionSession> success_handler(const std::string &response_body,
-                                                                     const std::string &content_type = "text/plain") {
-        return [this, response_body, content_type](std::shared_ptr<qb::http::Context<MockCompressionSession> > ctx) {
+    qb::http::RouteHandlerFn<MockCompressionSession>
+    success_handler(const std::string &response_body, const std::string &content_type = "text/plain") {
+        return [this, response_body, content_type](std::shared_ptr<qb::http::Context<MockCompressionSession>> ctx) {
             _session->_final_handler_called = true;
-            ctx->response().status() = qb::http::status::OK;
+            ctx->response().status()        = qb::http::status::OK;
             ctx->response().set_header("Content-Type", content_type);
             ctx->response().body() = response_body;
             // Content-Length will be set by router/server or by compression middleware if body changes
 
             // Capture headers *before* compression hook might run
-            for (const auto &hdr: ctx->response().headers()) {
+            for (const auto &hdr : ctx->response().headers()) {
                 if (!hdr.second.empty()) {
-                    _session->_response_headers_before_compression_hook[std::string(hdr.first)] = std::string(
-                        hdr.second[0]);
+                    _session->_response_headers_before_compression_hook[std::string(hdr.first)] = std::string(hdr.second[0]);
                 }
             }
             ctx->complete();
         };
     }
 
-    void configure_router_with_mw(std::shared_ptr<qb::http::IMiddleware<MockCompressionSession> > mw) {
+    void
+    configure_router_with_mw(std::shared_ptr<qb::http::IMiddleware<MockCompressionSession>> mw) {
         _router->use(mw);
         _router->post("/test", success_handler("Default test response body")); // POST for requests with body
-        _router->get("/test", success_handler("Default test response body")); // GET for responses to compress
+        _router->get("/test", success_handler("Default test response body"));  // GET for responses to compress
         _router->compile();
     }
 
-    void make_request(qb::http::Request request) {
+    void
+    make_request(qb::http::Request request) {
         _session->reset();
         _router->route(_session, std::move(request));
         // CompressionMiddleware's handle is sync, but compression hook is async (lifecycle)
@@ -106,19 +112,20 @@ protected:
     // Helper to simulate gzipping data (simplified, actual zlib needed for real compression)
     // For tests, we might rely on Body::compress if it uses zlib, or mock.
     // This is a HACK for testing content_encoding header logic if real zlib isn't easily mockable here.
-    std::string mock_gzip(const std::string &input) {
+    std::string
+    mock_gzip(const std::string &input) {
         // Prepend a pseudo-gzip header and append a pseudo-footer
         // This is NOT real gzip, just to make it different for tests.
-        if (input.empty()) return "";
+        if (input.empty())
+            return "";
         return "gzip_header_" + input + "_gzip_footer";
     }
 
-    std::string mock_ungzip(const std::string &input) {
-        if (input.rfind("gzip_header_", 0) == 0 && input.length() > (
-                sizeof("gzip_header_") - 1 + sizeof("_gzip_footer") - 1) &&
-            input.substr(input.length() - (sizeof("_gzip_footer") - 1)) == "_gzip_footer") {
-            return input.substr(sizeof("gzip_header_") - 1,
-                                input.length() - (sizeof("gzip_header_") - 1) - (sizeof("_gzip_footer") - 1));
+    std::string
+    mock_ungzip(const std::string &input) {
+        if (input.rfind("gzip_header_", 0) == 0 && input.length() > (sizeof("gzip_header_") - 1 + sizeof("_gzip_footer") - 1)
+            && input.substr(input.length() - (sizeof("_gzip_footer") - 1)) == "_gzip_footer") {
+            return input.substr(sizeof("gzip_header_") - 1, input.length() - (sizeof("gzip_header_") - 1) - (sizeof("_gzip_footer") - 1));
         }
         throw std::runtime_error("Invalid mock gzip data for ungzip");
     }
@@ -143,7 +150,7 @@ TEST_F(CompressionMiddlewareTest, DecompressesGzipRequest) {
 
     // The middleware should decompress the request body before it reaches the handler.
     // We modify the success_handler to check the request body it receives.
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >(); // Reset router to add new handler
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>(); // Reset router to add new handler
     _router->use(comp_mw);
     _router->post("/test", [this, original_body](auto ctx) {
         _session->_final_handler_called = true;
@@ -183,7 +190,7 @@ TEST_F(CompressionMiddlewareTest, CompressesResponseGzip) {
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
     std::string original_response_body(2048, 'A');
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(comp_mw);
     _router->get("/test", success_handler(original_response_body));
     _router->compile();
@@ -210,12 +217,9 @@ TEST_F(CompressionMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
 
     auto req = create_request(qb::http::method::GET, "/test");
     req.set_header("Accept-Encoding", "gzip");
-    auto ctx = std::make_shared<qb::http::Context<MockCompressionSession> >(
-        std::move(req),
-        qb::http::Response{},
-        _session,
-        [](qb::http::Context<MockCompressionSession> &) {},
-        std::weak_ptr<qb::http::RouterCore<MockCompressionSession> >{});
+    auto ctx = std::make_shared<qb::http::Context<MockCompressionSession>>(
+        std::move(req), qb::http::Response{}, _session, [](qb::http::Context<MockCompressionSession> &) {},
+        std::weak_ptr<qb::http::RouterCore<MockCompressionSession>>{});
     const std::string original_response_body(2048, 'D');
     ctx->response().set_header("Content-Type", "text/plain");
     ctx->response().body() = original_response_body;
@@ -291,14 +295,14 @@ TEST_F(CompressionMiddlewareTest, SkipsDecompressionWhenOptionDisabled) {
     opts.decompress_requests(false);
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
-    std::string original_body = "This is test data for gzip.";
-    std::string compressed_body;
+    std::string    original_body = "This is test data for gzip.";
+    std::string    compressed_body;
     qb::http::Body temp_body_compress;
     temp_body_compress = original_body;
     temp_body_compress.compress("gzip");
     compressed_body = temp_body_compress.as<std::string>();
 
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >(); // Reset router to add new handler
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>(); // Reset router to add new handler
     _router->use(comp_mw);
     _router->post("/test_no_decompress", [this, compressed_body](auto ctx) {
         _session->_final_handler_called = true;
@@ -322,7 +326,7 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionKeepsOriginalBodyWhenCompre
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
     std::string original_body_content = "abc";
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router                           = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(comp_mw);
     _router->get("/test_non_compressible_but_applied", success_handler(original_body_content));
     _router->compile();
@@ -341,12 +345,10 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionSelectsCorrectEncodingBased
 
     // Case 1: Server prefers gzip, client sends deflate, gzip
     qb::http::CompressionOptions opts_server_prefers_gzip;
-    opts_server_prefers_gzip.compress_responses(true)
-            .min_size_to_compress(10)
-            .preferred_encodings({"gzip", "deflate"});
+    opts_server_prefers_gzip.compress_responses(true).min_size_to_compress(10).preferred_encodings({"gzip", "deflate"});
     auto mw_server_prefers_gzip = qb::http::compression_middleware<MockCompressionSession>(opts_server_prefers_gzip);
 
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(mw_server_prefers_gzip);
     _router->get("/test_encoding_pref1", success_handler(original_response_body));
     _router->compile();
@@ -366,13 +368,10 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionSelectsCorrectEncodingBased
 
     // Case 2: Server prefers deflate, client sends deflate, gzip
     qb::http::CompressionOptions opts_server_prefers_deflate;
-    opts_server_prefers_deflate.compress_responses(true)
-            .min_size_to_compress(10)
-            .preferred_encodings({"deflate", "gzip"});
-    auto mw_server_prefers_deflate = qb::http::compression_middleware<MockCompressionSession>(
-        opts_server_prefers_deflate);
+    opts_server_prefers_deflate.compress_responses(true).min_size_to_compress(10).preferred_encodings({"deflate", "gzip"});
+    auto mw_server_prefers_deflate = qb::http::compression_middleware<MockCompressionSession>(opts_server_prefers_deflate);
 
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(mw_server_prefers_deflate);
     _router->get("/test_encoding_pref2", success_handler(original_response_body));
     _router->compile();
@@ -391,13 +390,11 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionSelectsCorrectEncodingBased
 
 TEST_F(CompressionMiddlewareTest, ResponseCompressionUsesFirstServerPreferenceIfClientAcceptsWildcard) {
     qb::http::CompressionOptions opts;
-    opts.compress_responses(true)
-            .min_size_to_compress(10)
-            .preferred_encodings({"deflate", "gzip"}); // Server prefers deflate first
+    opts.compress_responses(true).min_size_to_compress(10).preferred_encodings({"deflate", "gzip"}); // Server prefers deflate first
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
     std::string original_response_body(4096, 'C');
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(comp_mw);
     _router->get("/test_wildcard_accept", success_handler(original_response_body));
     _router->compile();
@@ -417,13 +414,11 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionUsesFirstServerPreferenceIf
 
 TEST_F(CompressionMiddlewareTest, ResponseCompressionNotAppliedIfNoCommonSupportedEncoding) {
     qb::http::CompressionOptions opts;
-    opts.compress_responses(true)
-            .min_size_to_compress(10)
-            .preferred_encodings({"gzip", "deflate"}); // Server supports gzip and deflate
+    opts.compress_responses(true).min_size_to_compress(10).preferred_encodings({"gzip", "deflate"}); // Server supports gzip and deflate
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
     std::string original_response_body = "This response body will not be compressed due to no common encoding.";
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router                            = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(comp_mw);
     _router->get("/test_no_common_encoding", success_handler(original_response_body));
     _router->compile();
@@ -440,13 +435,11 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionNotAppliedIfNoCommonSupport
 
 TEST_F(CompressionMiddlewareTest, ResponseCompressionHonorsAcceptEncodingQValues) {
     qb::http::CompressionOptions opts;
-    opts.compress_responses(true)
-            .min_size_to_compress(10)
-            .preferred_encodings({"gzip", "deflate"});
+    opts.compress_responses(true).min_size_to_compress(10).preferred_encodings({"gzip", "deflate"});
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
     std::string original_response_body(4096, 'E');
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(comp_mw);
     _router->get("/test_q_values", success_handler(original_response_body));
     _router->compile();
@@ -466,13 +459,11 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionHonorsAcceptEncodingQValues
 
 TEST_F(CompressionMiddlewareTest, ResponseCompressionRejectsEncodingWithZeroQEvenThroughWildcard) {
     qb::http::CompressionOptions opts;
-    opts.compress_responses(true)
-            .min_size_to_compress(10)
-            .preferred_encodings({"gzip"});
+    opts.compress_responses(true).min_size_to_compress(10).preferred_encodings({"gzip"});
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
     std::string original_response_body(4096, 'F');
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(comp_mw);
     _router->get("/test_q_zero", success_handler(original_response_body));
     _router->compile();
@@ -488,13 +479,11 @@ TEST_F(CompressionMiddlewareTest, ResponseCompressionRejectsEncodingWithZeroQEve
 
 TEST_F(CompressionMiddlewareTest, ResponseCompressionRejectsMalformedQValue) {
     qb::http::CompressionOptions opts;
-    opts.compress_responses(true)
-            .min_size_to_compress(10)
-            .preferred_encodings({"gzip"});
+    opts.compress_responses(true).min_size_to_compress(10).preferred_encodings({"gzip"});
     auto comp_mw = qb::http::compression_middleware<MockCompressionSession>(opts);
 
     std::string original_response_body(4096, 'G');
-    _router = std::make_unique<qb::http::Router<MockCompressionSession> >();
+    _router = std::make_unique<qb::http::Router<MockCompressionSession>>();
     _router->use(comp_mw);
     _router->get("/test_bad_q", success_handler(original_response_body));
     _router->compile();

@@ -4,7 +4,8 @@
 using namespace qb::http;
 
 // Helper function to get a future time point
-std::chrono::system_clock::time_point getFutureTime(int seconds_from_now) {
+std::chrono::system_clock::time_point
+getFutureTime(int seconds_from_now) {
     return std::chrono::system_clock::now() + std::chrono::seconds(seconds_from_now);
 }
 
@@ -14,8 +15,8 @@ std::chrono::system_clock::time_point getFutureTime(int seconds_from_now) {
 
 class CookieTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-    }
+    void
+    SetUp() override {}
 };
 
 TEST_F(CookieTest, BasicConstructionAndGetters) {
@@ -23,10 +24,10 @@ TEST_F(CookieTest, BasicConstructionAndGetters) {
 
     EXPECT_EQ("name", cookie.name());
     EXPECT_EQ("value", cookie.value());
-    EXPECT_EQ("/", cookie.path()); // Default path is "/"
-    EXPECT_EQ("", cookie.domain()); // Default domain is empty
-    EXPECT_FALSE(cookie.secure()); // Default secure is false
-    EXPECT_FALSE(cookie.http_only()); // Default http_only is false
+    EXPECT_EQ("/", cookie.path());                // Default path is "/"
+    EXPECT_EQ("", cookie.domain());               // Default domain is empty
+    EXPECT_FALSE(cookie.secure());                // Default secure is false
+    EXPECT_FALSE(cookie.http_only());             // Default http_only is false
     EXPECT_FALSE(cookie.same_site().has_value()); // Default same_site is not set
 }
 
@@ -34,12 +35,7 @@ TEST_F(CookieTest, Attributes) {
     Cookie cookie("test", "value");
 
     // Test fluent interface for setting attributes
-    cookie.value("new_value")
-            .path("/test")
-            .domain("example.com")
-            .secure(true)
-            .http_only(true)
-            .same_site(SameSite::Lax);
+    cookie.value("new_value").path("/test").domain("example.com").secure(true).http_only(true).same_site(SameSite::Lax);
 
     EXPECT_EQ("new_value", cookie.value());
     EXPECT_EQ("/test", cookie.path());
@@ -85,27 +81,22 @@ TEST_F(CookieTest, ToHeader) {
 
     // Add security flags
     cookie.secure(true).http_only(true);
-    EXPECT_EQ("test=value; Domain=example.com; Path=/; Secure; HttpOnly",
-              cookie.to_header());
+    EXPECT_EQ("test=value; Domain=example.com; Path=/; Secure; HttpOnly", cookie.to_header());
 
     // Add SameSite
     cookie.same_site(SameSite::Strict);
-    EXPECT_EQ("test=value; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Strict",
-              cookie.to_header());
+    EXPECT_EQ("test=value; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Strict", cookie.to_header());
 
     // Add Max-Age
     cookie.max_age(std::chrono::seconds(3600));
-    EXPECT_EQ("test=value; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Strict",
-              cookie.to_header());
+    EXPECT_EQ("test=value; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Strict", cookie.to_header());
 
     // Test different SameSite values
     cookie.same_site(SameSite::Lax);
-    EXPECT_EQ("test=value; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Lax",
-              cookie.to_header());
+    EXPECT_EQ("test=value; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Lax", cookie.to_header());
 
     cookie.same_site(SameSite::None);
-    EXPECT_EQ("test=value; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=None",
-              cookie.to_header());
+    EXPECT_EQ("test=value; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=None", cookie.to_header());
 }
 
 // Test spécifique pour SameSite::NOT_SET
@@ -130,7 +121,7 @@ TEST_F(CookieTest, SpecialCharacters) {
     Cookie cookie("test", "value with spaces and !@#$%^&*()");
 
     std::string header = cookie.to_header();
-    auto result = parse_set_cookie(header);
+    auto        result = parse_set_cookie(header);
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ("value with spaces and !@#$%^&*()", result->value());
@@ -208,7 +199,7 @@ TEST_F(CookieTest, Serialize) {
 TEST_F(CookieTest, SizeLimits) {
     // Créer un cookie avec un nom à la limite
     std::string long_name(1024, 'a'); // COOKIE_NAME_MAX = 1024
-    Cookie cookie(long_name, "value");
+    Cookie      cookie(long_name, "value");
     EXPECT_EQ(long_name, cookie.name());
 
     // Valeur longue mais dans les limites
@@ -302,9 +293,9 @@ TEST_F(CookieTest, ParseMultipleCookies) {
 }
 
 TEST_F(CookieTest, ParseCookiesRejectMalformedQuotedValues) {
-    EXPECT_THROW((void)parse_cookies(std::string(R"(name="unterminated)"), false), std::runtime_error);
-    EXPECT_THROW((void)parse_cookies(std::string(R"(name="value"junk; another=123)"), false), std::runtime_error);
-    EXPECT_THROW((void)parse_cookies(std::string("name=\"bad\nvalue\""), false), std::runtime_error);
+    EXPECT_THROW((void) parse_cookies(std::string(R"(name="unterminated)"), false), std::runtime_error);
+    EXPECT_THROW((void) parse_cookies(std::string(R"(name="value"junk; another=123)"), false), std::runtime_error);
+    EXPECT_THROW((void) parse_cookies(std::string("name=\"bad\nvalue\""), false), std::runtime_error);
 }
 
 //////////////////////////////////////////////////
@@ -315,7 +306,8 @@ class CookieJarTest : public ::testing::Test {
 protected:
     CookieJar jar;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         // Initialize with some cookies
         jar.add("test1", "value1");
         jar.add("test2", "value2");
@@ -468,7 +460,7 @@ TEST(CookieIntegration, ResponseCookies) {
 
     // Check for header
     bool found_header = false;
-    for (const auto &header: response.headers()["Set-Cookie"]) {
+    for (const auto &header : response.headers()["Set-Cookie"]) {
         if (header.find("test2=modified") == 0) {
             found_header = true;
             break;
@@ -523,7 +515,7 @@ TEST(CookieIntegration, UpdateAllCookieHeaders) {
 
     // L'en-tête ne devrait pas être mis à jour
     bool found_modified = false;
-    for (const auto &header: response.headers()["Set-Cookie"]) {
+    for (const auto &header : response.headers()["Set-Cookie"]) {
         if (header.find("test1=modified") == 0) {
             found_modified = true;
             break;
@@ -536,7 +528,7 @@ TEST(CookieIntegration, UpdateAllCookieHeaders) {
 
     // Maintenant l'en-tête devrait être mis à jour
     found_modified = false;
-    for (const auto &header: response.headers()["Set-Cookie"]) {
+    for (const auto &header : response.headers()["Set-Cookie"]) {
         if (header.find("test1=modified") == 0) {
             found_modified = true;
             break;
@@ -707,12 +699,7 @@ TEST_F(CookieTest, ToHeaderOptimizationBasic) {
 
 TEST_F(CookieTest, ToHeaderOptimizationWithAllAttributes) {
     Cookie cookie("session", "abc123");
-    cookie.domain(".example.com")
-          .path("/api")
-          .max_age(std::chrono::seconds(7200))
-          .secure(true)
-          .http_only(true)
-          .same_site(SameSite::Strict);
+    cookie.domain(".example.com").path("/api").max_age(std::chrono::seconds(7200)).secure(true).http_only(true).same_site(SameSite::Strict);
 
     std::string header = cookie.to_header();
 
@@ -726,7 +713,7 @@ TEST_F(CookieTest, ToHeaderOptimizationWithAllAttributes) {
     EXPECT_NE(header.find("SameSite=Strict"), std::string::npos);
 
     // Verify format starts with name=value
-    EXPECT_EQ(header.find("session="), 0); // Starts with session=
+    EXPECT_EQ(header.find("session="), 0);                   // Starts with session=
     EXPECT_NE(header.find("; Max-Age="), std::string::npos); // Has semicolon before Max-Age
 }
 
@@ -736,9 +723,7 @@ TEST_F(CookieTest, ToHeaderOptimizationLargeCookie) {
     std::string large_value(4096, 'v');
 
     Cookie cookie(large_name, large_value);
-    cookie.domain(".subdomain.example.com")
-          .path("/very/long/path/segment")
-          .max_age(std::chrono::seconds(86400));
+    cookie.domain(".subdomain.example.com").path("/very/long/path/segment").max_age(std::chrono::seconds(86400));
 
     std::string header = cookie.to_header();
 
@@ -764,7 +749,7 @@ TEST_F(CookieTest, ToHeaderOptimizationNoAttributes) {
 
 TEST_F(CookieTest, ToHeaderOptimizationOnlyExpires) {
     Cookie cookie("expiring", "soon");
-    auto future = std::chrono::system_clock::now() + std::chrono::hours(24);
+    auto   future = std::chrono::system_clock::now() + std::chrono::hours(24);
     cookie.expires(future);
 
     std::string header = cookie.to_header();
@@ -809,20 +794,15 @@ TEST_F(CookieTest, ToHeaderOptimizationSameSiteVariations) {
 TEST_F(CookieTest, ToHeaderOptimizationAttributeOrdering) {
     // Verify consistent attribute ordering
     Cookie cookie("ordered", "test");
-    cookie.max_age(std::chrono::seconds(3600))
-          .domain("example.com")
-          .path("/secure")
-          .secure(true)
-          .http_only(true)
-          .same_site(SameSite::Lax);
+    cookie.max_age(std::chrono::seconds(3600)).domain("example.com").path("/secure").secure(true).http_only(true).same_site(SameSite::Lax);
 
     std::string header = cookie.to_header();
 
     // Expected order: name=value; Max-Age; Domain; Path; Secure; HttpOnly; SameSite
-    size_t pos_max_age = header.find("Max-Age");
-    size_t pos_domain = header.find("Domain");
-    size_t pos_path = header.find("Path");
-    size_t pos_secure = header.find("Secure");
+    size_t pos_max_age   = header.find("Max-Age");
+    size_t pos_domain    = header.find("Domain");
+    size_t pos_path      = header.find("Path");
+    size_t pos_secure    = header.find("Secure");
     size_t pos_http_only = header.find("HttpOnly");
     size_t pos_same_site = header.find("SameSite");
 
@@ -858,16 +838,16 @@ TEST_F(CookieTest, ToHeaderOptimizationSpecialCharactersInValue) {
 }
 
 TEST_F(CookieTest, ToHeaderRejectsSetCookieAttributeInjection) {
-    EXPECT_THROW((void)Cookie("bad;name", "value").to_header(), std::runtime_error);
-    EXPECT_THROW((void)Cookie("name", "value; HttpOnly").to_header(), std::runtime_error);
+    EXPECT_THROW((void) Cookie("bad;name", "value").to_header(), std::runtime_error);
+    EXPECT_THROW((void) Cookie("name", "value; HttpOnly").to_header(), std::runtime_error);
 
     Cookie bad_domain("name", "value");
     bad_domain.domain("example.com; Secure");
-    EXPECT_THROW((void)bad_domain.to_header(), std::runtime_error);
+    EXPECT_THROW((void) bad_domain.to_header(), std::runtime_error);
 
     Cookie bad_path("name", "value");
     bad_path.path("/; Secure");
-    EXPECT_THROW((void)bad_path.to_header(), std::runtime_error);
+    EXPECT_THROW((void) bad_path.to_header(), std::runtime_error);
 }
 
 //////////////////////////////////////////////////
@@ -884,7 +864,7 @@ TEST_F(CookieTest, MaxAgeRoundTrip) {
 
     // Serialize and re-parse
     std::string serialized = parsed->to_header();
-    auto reparsed = parse_set_cookie(serialized);
+    auto        reparsed   = parse_set_cookie(serialized);
 
     ASSERT_TRUE(reparsed.has_value());
     EXPECT_EQ("session", reparsed->name());
@@ -894,7 +874,8 @@ TEST_F(CookieTest, MaxAgeRoundTrip) {
     EXPECT_EQ(3600, reparsed->max_age().value());
 }
 
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

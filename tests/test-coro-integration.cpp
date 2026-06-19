@@ -28,7 +28,7 @@
  *     503.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0
  */
 
@@ -38,8 +38,8 @@
 #include <string>
 #include <thread>
 
-#include "../http.h"
 #include "../coro.h"
+#include "../http.h"
 
 namespace {
 
@@ -50,47 +50,38 @@ namespace {
 class UpstreamSession;
 class UpstreamServer;
 
-class UpstreamSession
-    : public qb::http::use<UpstreamSession>::session<UpstreamServer> {
+class UpstreamSession : public qb::http::use<UpstreamSession>::session<UpstreamServer> {
 public:
-    explicit UpstreamSession(UpstreamServer& server) : session(server) {}
+    explicit UpstreamSession(UpstreamServer &server)
+        : session(server) {}
 };
 
-class UpstreamServer
-    : public qb::http::use<UpstreamServer>::server<UpstreamSession> {
+class UpstreamServer : public qb::http::use<UpstreamServer>::server<UpstreamSession> {
 public:
     UpstreamServer() {
         using Session = UpstreamSession;
         using namespace std::chrono_literals;
 
-        router().get("/profile/:id",
-            qb::http::coro_handler<Session>(
-                [](auto ctx) -> qb::io::async::task<void> {
-                    co_await qb::io::async::sleep(1ms);
-                    ctx->response().status() = qb::http::status::OK;
-                    ctx->response().set_header("X-Source", "upstream");
-                    ctx->response().body() =
-                        "profile:" + std::string{ctx->path_param("id")};
-                    co_return;
-                }));
+        router().get("/profile/:id", qb::http::coro_handler<Session>([](auto ctx) -> qb::io::async::task<void> {
+                         co_await qb::io::async::sleep(1ms);
+                         ctx->response().status() = qb::http::status::OK;
+                         ctx->response().set_header("X-Source", "upstream");
+                         ctx->response().body() = "profile:" + std::string{ctx->path_param("id")};
+                         co_return;
+                     }));
 
-        router().get("/stats/:id",
-            qb::http::coro_handler<Session>(
-                [](auto ctx) -> qb::io::async::task<void> {
-                    co_await qb::io::async::sleep(1ms);
-                    ctx->response().status() = qb::http::status::OK;
-                    ctx->response().body() =
-                        "stats:" + std::string{ctx->path_param("id")};
-                    co_return;
-                }));
+        router().get("/stats/:id", qb::http::coro_handler<Session>([](auto ctx) -> qb::io::async::task<void> {
+                         co_await qb::io::async::sleep(1ms);
+                         ctx->response().status() = qb::http::status::OK;
+                         ctx->response().body()   = "stats:" + std::string{ctx->path_param("id")};
+                         co_return;
+                     }));
 
-        router().get("/broken",
-            qb::http::coro_handler<Session>(
-                [](auto ctx) -> qb::io::async::task<void> {
-                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                    ctx->response().body()   = "upstream-on-fire";
-                    co_return;
-                }));
+        router().get("/broken", qb::http::coro_handler<Session>([](auto ctx) -> qb::io::async::task<void> {
+                         ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                         ctx->response().body()   = "upstream-on-fire";
+                         co_return;
+                     }));
 
         router().compile();
     }
@@ -104,84 +95,68 @@ public:
 class GatewaySession;
 class GatewayServer;
 
-class GatewaySession
-    : public qb::http::use<GatewaySession>::session<GatewayServer> {
+class GatewaySession : public qb::http::use<GatewaySession>::session<GatewayServer> {
 public:
-    explicit GatewaySession(GatewayServer& server) : session(server) {}
+    explicit GatewaySession(GatewayServer &server)
+        : session(server) {}
 };
 
-class GatewayServer
-    : public qb::http::use<GatewayServer>::server<GatewaySession> {
+class GatewayServer : public qb::http::use<GatewayServer>::server<GatewaySession> {
 public:
     explicit GatewayServer(std::string upstream_base)
         : _upstream_base(std::move(upstream_base)) {
         using Session = GatewaySession;
 
         // ---- /proxy/:id -> upstream /profile/:id ----
-        router().get("/proxy/:id",
-            qb::http::coro_handler<Session>(
-                [base = _upstream_base]
-                (auto ctx) -> qb::io::async::task<void> {
-                    const auto target = base + "/profile/"
-                                      + std::string{ctx->path_param("id")};
-                    auto reply = co_await qb::http::GET(qb::http::Request{{target}});
+        router().get("/proxy/:id", qb::http::coro_handler<Session>([base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+                         const auto target = base + "/profile/" + std::string{ctx->path_param("id")};
+                         auto       reply  = co_await qb::http::GET(qb::http::Request{{target}});
 
-                    ctx->response().status() = reply.response.status();
-                    ctx->response().set_header("X-Gateway", "coro");
-                    ctx->response().set_header(
-                        "X-Upstream-Source",
-                        std::string{reply.response.header("X-Source")});
-                    ctx->response().body() = reply.response.body().template as<std::string>();
-                    co_return;
-                }));
+                         ctx->response().status() = reply.response.status();
+                         ctx->response().set_header("X-Gateway", "coro");
+                         ctx->response().set_header("X-Upstream-Source", std::string{reply.response.header("X-Source")});
+                         ctx->response().body() = reply.response.body().template as<std::string>();
+                         co_return;
+                     }));
 
         // ---- /aggregate/:id -> upstream /profile/:id + /stats/:id ----
-        router().get("/aggregate/:id",
-            qb::http::coro_handler<Session>(
-                [base = _upstream_base]
-                (auto ctx) -> qb::io::async::task<void> {
-                    const auto id       = std::string{ctx->path_param("id")};
-                    const auto prof_url = base + "/profile/" + id;
-                    const auto stat_url = base + "/stats/"   + id;
+        router().get("/aggregate/:id", qb::http::coro_handler<Session>([base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+                         const auto id       = std::string{ctx->path_param("id")};
+                         const auto prof_url = base + "/profile/" + id;
+                         const auto stat_url = base + "/stats/" + id;
 
-                    // Sequential awaits keep the example simple; both still
-                    // happen off the listener thread of the *caller* because
-                    // each `co_await` suspends the coroutine frame.
-                    auto prof = co_await qb::http::GET(qb::http::Request{{prof_url}});
-                    auto stat = co_await qb::http::GET(qb::http::Request{{stat_url}});
+                         // Sequential awaits keep the example simple; both still
+                         // happen off the listener thread of the *caller* because
+                         // each `co_await` suspends the coroutine frame.
+                         auto prof = co_await qb::http::GET(qb::http::Request{{prof_url}});
+                         auto stat = co_await qb::http::GET(qb::http::Request{{stat_url}});
 
-                    if (prof.response.status() != qb::http::status::OK ||
-                        stat.response.status() != qb::http::status::OK) {
-                        ctx->response().status() = qb::http::status::BAD_GATEWAY;
-                        ctx->response().body()   = "aggregate-failed";
-                        co_return;
-                    }
+                         if (prof.response.status() != qb::http::status::OK || stat.response.status() != qb::http::status::OK) {
+                             ctx->response().status() = qb::http::status::BAD_GATEWAY;
+                             ctx->response().body()   = "aggregate-failed";
+                             co_return;
+                         }
 
-                    ctx->response().status() = qb::http::status::OK;
-                    ctx->response().body()   =
-                        prof.response.body().template as<std::string>()
-                        + "|" + stat.response.body().template as<std::string>();
-                    co_return;
-                }));
+                         ctx->response().status() = qb::http::status::OK;
+                         ctx->response().body() =
+                             prof.response.body().template as<std::string>() + "|" + stat.response.body().template as<std::string>();
+                         co_return;
+                     }));
 
         // ---- /fallback -> upstream is broken, degrade to 503 ----
-        router().get("/fallback",
-            qb::http::coro_handler<Session>(
-                [base = _upstream_base]
-                (auto ctx) -> qb::io::async::task<void> {
-                    auto reply = co_await qb::http::GET(
-                        qb::http::Request{{base + "/broken"}});
+        router().get("/fallback", qb::http::coro_handler<Session>([base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+                         auto reply = co_await qb::http::GET(qb::http::Request{{base + "/broken"}});
 
-                    if (reply.response.status() != qb::http::status::OK) {
-                        ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
-                        ctx->response().body()   = "degraded";
-                        co_return;
-                    }
+                         if (reply.response.status() != qb::http::status::OK) {
+                             ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
+                             ctx->response().body()   = "degraded";
+                             co_return;
+                         }
 
-                    ctx->response().status() = qb::http::status::OK;
-                    ctx->response().body()   = reply.response.body().template as<std::string>();
-                    co_return;
-                }));
+                         ctx->response().status() = qb::http::status::OK;
+                         ctx->response().body()   = reply.response.body().template as<std::string>();
+                         co_return;
+                     }));
 
         router().compile();
     }
@@ -208,7 +183,8 @@ protected:
     std::atomic<bool> _gateway_ready{false};
     std::atomic<bool> _keep_running{true};
 
-    void SetUp() override {
+    void
+    SetUp() override {
         qb::io::async::init();
 
         _upstream_thread = std::thread([this] {
@@ -237,23 +213,27 @@ protected:
             }
         });
 
-        while (!_upstream_ready.load(std::memory_order_acquire) ||
-               !_gateway_ready.load(std::memory_order_acquire)) {
+        while (!_upstream_ready.load(std::memory_order_acquire) || !_gateway_ready.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
 
-    void TearDown() override {
+    void
+    TearDown() override {
         _keep_running.store(false, std::memory_order_release);
-        if (_upstream_thread.joinable()) _upstream_thread.join();
-        if (_gateway_thread.joinable())  _gateway_thread.join();
+        if (_upstream_thread.joinable())
+            _upstream_thread.join();
+        if (_gateway_thread.joinable())
+            _gateway_thread.join();
     }
 
-    [[nodiscard]] static std::string upstream_base() {
+    [[nodiscard]] static std::string
+    upstream_base() {
         return "http://localhost:" + std::to_string(kUpstreamPort);
     }
-    [[nodiscard]] static std::string gateway_url(const std::string& path) {
+    [[nodiscard]] static std::string
+    gateway_url(const std::string &path) {
         return "http://localhost:" + std::to_string(kGatewayPort) + path;
     }
 };
@@ -266,8 +246,7 @@ protected:
 // the listener-to-listener suspension / resumption correctly preserves
 // headers, status and body across the network round-trip.
 TEST_F(CoroIntegrationTest, ProxyingRoute) {
-    auto reply = qb::http::run_sync(
-        qb::http::GET(qb::http::Request{{gateway_url("/proxy/42")}}));
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{gateway_url("/proxy/42")}}));
 
     EXPECT_EQ(reply.response.status(), qb::http::status::OK);
     EXPECT_EQ(reply.response.body().template as<std::string>(), "profile:42");
@@ -279,8 +258,7 @@ TEST_F(CoroIntegrationTest, ProxyingRoute) {
 // handler. Verifies that sequential `co_await`s work and that path
 // parameters survive all the way to the composition step.
 TEST_F(CoroIntegrationTest, AggregatingRoute) {
-    auto reply = qb::http::run_sync(
-        qb::http::GET(qb::http::Request{{gateway_url("/aggregate/7")}}));
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{gateway_url("/aggregate/7")}}));
 
     EXPECT_EQ(reply.response.status(), qb::http::status::OK);
     EXPECT_EQ(reply.response.body().template as<std::string>(), "profile:7|stats:7");
@@ -291,8 +269,7 @@ TEST_F(CoroIntegrationTest, AggregatingRoute) {
 // framework must not hijack the outcome with an auto-COMPLETE that
 // overwrites the explicit body.
 TEST_F(CoroIntegrationTest, UpstreamErrorFallback) {
-    auto reply = qb::http::run_sync(
-        qb::http::GET(qb::http::Request{{gateway_url("/fallback")}}));
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{gateway_url("/fallback")}}));
 
     EXPECT_EQ(reply.response.status(), qb::http::status::SERVICE_UNAVAILABLE);
     EXPECT_EQ(reply.response.body().template as<std::string>(), "degraded");

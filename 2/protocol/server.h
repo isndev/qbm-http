@@ -18,7 +18,7 @@
  * with proper flow control and resource management.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http2
  */
@@ -27,36 +27,30 @@
 
 #include "./base.h" // For qb::protocol::http2::Http2Protocol and frame types
 
-
 namespace qb::http::well_known {
-    constexpr std::string_view COLON_METHOD_SV = ":method";
-    constexpr std::string_view COLON_PATH_SV = ":path";
-    constexpr std::string_view COLON_SCHEME_SV = ":scheme";
-    constexpr std::string_view COLON_AUTHORITY_SV = ":authority";
-    constexpr std::string_view CONTENT_LENGTH_SV = "content-length";
-    constexpr std::string_view TRANSFER_ENCODING_SV = "transfer-encoding";
-    constexpr std::string_view TRAILER_SV = "trailer";
+constexpr std::string_view COLON_METHOD_SV      = ":method";
+constexpr std::string_view COLON_PATH_SV        = ":path";
+constexpr std::string_view COLON_SCHEME_SV      = ":scheme";
+constexpr std::string_view COLON_AUTHORITY_SV   = ":authority";
+constexpr std::string_view CONTENT_LENGTH_SV    = "content-length";
+constexpr std::string_view TRANSFER_ENCODING_SV = "transfer-encoding";
+constexpr std::string_view TRAILER_SV           = "trailer";
 
-    /**
-     * @brief Check if a header is hop-by-hop
-     * @param header_name Header name to check
-     * @return true if header is hop-by-hop
-     */
-    inline bool is_hop_by_hop(const std::string& header_name) {
-        // Convert to lowercase for comparison
-        std::string lower_name = header_name;
-        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+/**
+ * @brief Check if a header is hop-by-hop
+ * @param header_name Header name to check
+ * @return true if header is hop-by-hop
+ */
+inline bool
+is_hop_by_hop(const std::string &header_name) {
+    // Convert to lowercase for comparison
+    std::string lower_name = header_name;
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
 
-        return lower_name == "connection" ||
-               lower_name == "keep-alive" ||
-               lower_name == "proxy-authenticate" ||
-               lower_name == "proxy-authorization" ||
-               lower_name == "te" ||
-               lower_name == "trailers" ||
-               lower_name == "transfer-encoding" ||
-               lower_name == "upgrade";
-    }
+    return lower_name == "connection" || lower_name == "keep-alive" || lower_name == "proxy-authenticate" || lower_name == "proxy-authorization"
+           || lower_name == "te" || lower_name == "trailers" || lower_name == "transfer-encoding" || lower_name == "upgrade";
 }
+} // namespace qb::http::well_known
 
 namespace qb::protocol::http2 {
 
@@ -72,48 +66,49 @@ constexpr std::string_view STATUS_HEADER_NAME_SV = ":status";
  *
  * @tparam IO_Handler Type that receives HTTP request objects and handles responses
  */
-template<typename IO_Handler>
+template <typename IO_Handler>
 class ServerHttp2Protocol : public Http2Protocol<IO_Handler, ServerHttp2Protocol<IO_Handler>> {
 public:
     using FramerBase = Http2Protocol<IO_Handler, ServerHttp2Protocol<IO_Handler>>;
     friend class qb::protocol::http2::Http2Protocol<IO_Handler, ServerHttp2Protocol<IO_Handler>>;
 
 private:
-    qb::unordered_map<uint32_t, Http2ServerStream> _server_streams;      ///< Active stream contexts
-    uint32_t _last_client_initiated_stream_id = 0;                       ///< Last valid client stream ID
-    uint32_t _next_server_initiated_stream_id = 2;                       ///< Next server stream ID (for PUSH)
+    qb::unordered_map<uint32_t, Http2ServerStream> _server_streams;                      ///< Active stream contexts
+    uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
+    uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
 
-    std::vector<uint8_t> _current_header_block_fragment;                 ///< Header block assembly buffer
-    uint32_t _current_header_stream_id = 0;                              ///< Stream ID for header assembly
+    std::vector<uint8_t> _current_header_block_fragment; ///< Header block assembly buffer
+    uint32_t             _current_header_stream_id = 0;  ///< Stream ID for header assembly
 
-    int64_t _connection_send_window;                                     ///< Connection-level send window
-    int64_t _connection_receive_window = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;  ///< Connection-level receive window
+    int64_t              _connection_send_window;                                                    ///< Connection-level send window
+    int64_t              _connection_receive_window          = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE; ///< Connection-level receive window
     static constexpr int CONNECTION_WINDOW_THRESHOLD_DIVISOR = 2;
 
     // Peer (Client) Settings
-    uint32_t _initial_peer_window_size = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;     ///< Client's initial window size
+    uint32_t _initial_peer_window_size    = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;    ///< Client's initial window size
     uint32_t _peer_max_concurrent_streams = DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS; ///< Max concurrent streams from client
-    uint64_t _peer_max_header_list_size = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;   ///< Max header list size client accepts
-    bool _peer_allows_push = true;                                                   ///< Whether client allows server push
+    uint64_t _peer_max_header_list_size   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;   ///< Max header list size client accepts
+    bool     _peer_allows_push            = true;                                    ///< Whether client allows server push
 
     // Our Settings
-    qb::unordered_map<Http2SettingIdentifier, uint32_t> _our_settings;   ///< Server's HTTP/2 settings
-    bool _initial_settings_sent = false;                                  ///< Whether initial SETTINGS sent
+    qb::unordered_map<Http2SettingIdentifier, uint32_t> _our_settings;                  ///< Server's HTTP/2 settings
+    bool                                                _initial_settings_sent = false; ///< Whether initial SETTINGS sent
 
-    bool _connection_active = true;                                       ///< Connection active flag
-    bool _graceful_shutdown_initiated = false;                            ///< Graceful shutdown flag
+    bool _connection_active           = true;  ///< Connection active flag
+    bool _graceful_shutdown_initiated = false; ///< Graceful shutdown flag
 
-    qb::protocol::hpack::Decoder _hpack_decoder;        ///< HPACK decoder (F35 &mdash; owned by value)
-    qb::protocol::hpack::Encoder _hpack_encoder;        ///< HPACK encoder (F35 &mdash; owned by value)
+    qb::protocol::hpack::Decoder _hpack_decoder; ///< HPACK decoder (F35 &mdash; owned by value)
+    qb::protocol::hpack::Encoder _hpack_encoder; ///< HPACK encoder (F35 &mdash; owned by value)
 
-    int64_t _connection_bytes_consumed_since_last_window_update = 0;     ///< Bytes consumed for window update
+    int64_t _connection_bytes_consumed_since_last_window_update = 0; ///< Bytes consumed for window update
 
     // Add as a private member to ServerHttp2Protocol class
     // private:
     //    bool _debug_send_padded_data = false; // Set to true to test sending padded DATA frames
 
 public:
-    [[nodiscard]] bool is_stream_closed(uint32_t stream_id) const {
+    [[nodiscard]] bool
+    is_stream_closed(uint32_t stream_id) const {
         auto it = _server_streams.find(stream_id);
         return it == _server_streams.end() || it->second.is_closed();
     }
@@ -131,19 +126,19 @@ public:
      * - Values may contain TAB (0x09) but no other control characters (0x00-0x1F)
      * - Names must be valid token strings (no separators like : , ; etc.)
      */
-    [[nodiscard]] static bool is_valid_header_field(const std::string& name, const std::string& value) noexcept {
+    [[nodiscard]] static bool
+    is_valid_header_field(const std::string &name, const std::string &value) noexcept {
         return HeaderValidator::is_valid_header_field(name, value);
     }
     /**
      * @brief Construct HTTP/2 server protocol handler
      * @param io_handler_ref Reference to IO handler that receives requests
      */
-    explicit ServerHttp2Protocol(IO_Handler& io_handler_ref)
-        : FramerBase(io_handler_ref)
-    {
+    explicit ServerHttp2Protocol(IO_Handler &io_handler_ref)
+        : FramerBase(io_handler_ref) {
         LOG_HTTP_DEBUG("ServerHttp2Protocol: Constructing HTTP/2 server protocol handler");
         this->_our_max_frame_size = this->initialize_our_max_frame_size();
-        _connection_send_window = this->get_initial_window_size_from_settings();
+        _connection_send_window   = this->get_initial_window_size_from_settings();
 
         // Apply HPACK encoder settings based on _our_settings.
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
@@ -159,38 +154,39 @@ public:
     ~ServerHttp2Protocol() override = default;
 
     // Disable copy and move
-    ServerHttp2Protocol(const ServerHttp2Protocol&) = delete;
-    ServerHttp2Protocol& operator=(const ServerHttp2Protocol&) = delete;
-    ServerHttp2Protocol(ServerHttp2Protocol&&) = delete;
-    ServerHttp2Protocol& operator=(ServerHttp2Protocol&&) = delete;
+    ServerHttp2Protocol(const ServerHttp2Protocol &)            = delete;
+    ServerHttp2Protocol &operator=(const ServerHttp2Protocol &) = delete;
+    ServerHttp2Protocol(ServerHttp2Protocol &&)                 = delete;
+    ServerHttp2Protocol &operator=(ServerHttp2Protocol &&)      = delete;
 
     /**
      * @brief Reset protocol state to initial conditions
      */
-    void reset() noexcept override {
+    void
+    reset() noexcept override {
         LOG_HTTP_DEBUG("ServerHttp2Protocol: Resetting protocol state to initial conditions");
         FramerBase::reset(); // Call base class reset first
 
         _server_streams.clear();
         _current_header_block_fragment.clear();
-        _current_header_stream_id = 0;
+        _current_header_stream_id        = 0;
         _last_client_initiated_stream_id = 0;
         _next_server_initiated_stream_id = 2;
-        _connection_active = true;
-        _graceful_shutdown_initiated = false;
-        _initial_settings_sent = false;
+        _connection_active               = true;
+        _graceful_shutdown_initiated     = false;
+        _initial_settings_sent           = false;
 
         // Re-initialize our settings and derived values
         this->initialize_our_settings_map();
 
-        _connection_send_window = this->get_initial_window_size_from_settings();
+        _connection_send_window    = this->get_initial_window_size_from_settings();
         _connection_receive_window = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
 
         _initial_peer_window_size = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
         FramerBase::set_peer_max_frame_size(DEFAULT_SETTINGS_MAX_FRAME_SIZE);
         _peer_max_concurrent_streams = DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS;
-        _peer_max_header_list_size = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
-        _peer_allows_push = true;
+        _peer_max_header_list_size   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
+        _peer_allows_push            = true;
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
@@ -205,7 +201,8 @@ public:
      * @brief Handle preface complete event
      * @param event Preface complete event
      */
-    void on(qb::protocol::http2::PrefaceCompleteEvent /*event*/) {
+    void
+    on(qb::protocol::http2::PrefaceCompleteEvent /*event*/) {
         LOG_HTTP_DEBUG("ServerHttp2Protocol: Received preface complete event");
         if (!this->ok() || !_connection_active) {
             LOG_HTTP_WARN("ServerHttp2Protocol: Cannot process preface complete - protocol not OK or connection inactive");
@@ -215,11 +212,11 @@ public:
         if (!_initial_settings_sent) {
             LOG_HTTP_DEBUG("Server: Sending initial SETTINGS frame");
             Http2FrameData<SettingsFrame> settings_frame_data;
-            settings_frame_data.header.type = static_cast<uint8_t>(FrameType::SETTINGS);
+            settings_frame_data.header.type  = static_cast<uint8_t>(FrameType::SETTINGS);
             settings_frame_data.header.flags = 0;
             settings_frame_data.header.set_stream_id(0);
 
-            for(const auto& setting_pair : _our_settings) {
+            for (const auto &setting_pair : _our_settings) {
                 settings_frame_data.payload.entries.push_back({setting_pair.first, setting_pair.second});
             }
 
@@ -233,14 +230,16 @@ public:
      * @brief Handle DATA frame
      * @param data_event DATA frame event
      */
-    void on(Http2FrameData<DataFrame> data_event) noexcept {
-        if (!this->ok() || !_connection_active) return;
+    void
+    on(Http2FrameData<DataFrame> data_event) noexcept {
+        if (!this->ok() || !_connection_active)
+            return;
 
-        const FrameHeader& header = data_event.header;
-        uint32_t stream_id = header.get_stream_id();
-        std::size_t data_payload_size = data_event.payload.data_payload.size();
+        const FrameHeader &header            = data_event.header;
+        uint32_t           stream_id         = header.get_stream_id();
+        std::size_t        data_payload_size = data_event.payload.data_payload.size();
 
-        LOG_HTTP_TRACE_PA(stream_id, "Server: Received DATA frame, size: " << data_payload_size << ", flags: " << (int)header.flags);
+        LOG_HTTP_TRACE_PA(stream_id, "Server: Received DATA frame, size: " << data_payload_size << ", flags: " << (int) header.flags);
 
         if (stream_id == 0) {
             LOG_HTTP_ERROR_PA(stream_id, "Server: DATA frame received on stream 0.");
@@ -248,11 +247,11 @@ public:
             return;
         }
 
-        if (static_cast<int64_t>(data_payload_size) > this->_connection_receive_window && data_payload_size > 0) { // allow empty data frames if window is 0
+        if (static_cast<int64_t>(data_payload_size) > this->_connection_receive_window
+            && data_payload_size > 0) { // allow empty data frames if window is 0
             this->on_connection_error(ErrorCode::FLOW_CONTROL_ERROR, "Connection flow control window underflow on data frame.");
             return;
         }
-
 
         auto it = _server_streams.find(stream_id);
         if (it == _server_streams.end()) {
@@ -266,24 +265,24 @@ public:
             return;
         }
 
-        Http2ServerStream& stream = it->second;
+        Http2ServerStream &stream = it->second;
 
-        if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::CLOSED || stream.rst_stream_sent || stream.rst_stream_received) {
-             this->_connection_receive_window -= data_payload_size;
-             this->conditionally_send_connection_window_update();
-            if (stream.state == Http2StreamConcreteState::IDLE){
-                 this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame on IDLE stream.");
+        if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::CLOSED || stream.rst_stream_sent
+            || stream.rst_stream_received) {
+            this->_connection_receive_window -= data_payload_size;
+            this->conditionally_send_connection_window_update();
+            if (stream.state == Http2StreamConcreteState::IDLE) {
+                this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame on IDLE stream.");
             }
             return;
         }
         if (stream.end_stream_received) {
-            //this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received after END_STREAM.");
+            // this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received after END_STREAM.");
             this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received after END_STREAM.");
-             this->_connection_receive_window -= data_payload_size;
-             this->conditionally_send_connection_window_update();
+            this->_connection_receive_window -= data_payload_size;
+            this->conditionally_send_connection_window_update();
             return;
         }
-
 
         if (static_cast<int64_t>(data_payload_size) > stream.local_window_size && data_payload_size > 0) {
             this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR, "Stream flow control window exceeded.");
@@ -296,8 +295,8 @@ public:
 
         stream.local_window_size -= data_payload_size;
 
-        auto& body_pipe = stream.assembled_request.body().raw();
-        body_pipe.put(reinterpret_cast<const char*>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
+        auto &body_pipe = stream.assembled_request.body().raw();
+        body_pipe.put(reinterpret_cast<const char *>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
 
         if (body_pipe.size() > qb::http::protocol_limits::MAX_BODY_SIZE) {
             this->send_rst_stream(stream_id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 request body exceeds configured limit");
@@ -307,7 +306,6 @@ public:
             this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request body exceeds content-length");
             return;
         }
-
 
         if (header.flags & FLAG_END_STREAM) {
             stream.end_stream_received = true;
@@ -322,8 +320,7 @@ public:
             this->conditionally_send_connection_window_update();
 
             if (stream.headers_received_main) {
-                if (stream.expected_content_length &&
-                    stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
+                if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
                     this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                     return;
                 }
@@ -333,7 +330,7 @@ public:
             // erase the stream. Reacquire before updating lifecycle state.
             auto after_dispatch = _server_streams.find(stream_id);
             if (after_dispatch != _server_streams.end()) {
-                Http2ServerStream& current_stream = after_dispatch->second;
+                Http2ServerStream &current_stream = after_dispatch->second;
                 // If END_STREAM also means end of connection for this stream, update state.
                 if (current_stream.end_stream_sent) { // If we also sent END_STREAM
                     current_stream.state = Http2StreamConcreteState::CLOSED;
@@ -347,7 +344,8 @@ public:
 
         // Send WINDOW_UPDATE for stream if necessary
         stream.processed_bytes_for_window_update += data_payload_size;
-        if (stream.processed_bytes_for_window_update >= stream.window_update_threshold && stream.window_update_threshold > 0) { // only if threshold > 0
+        if (stream.processed_bytes_for_window_update >= stream.window_update_threshold
+            && stream.window_update_threshold > 0) { // only if threshold > 0
             uint32_t increment = stream.processed_bytes_for_window_update;
             send_window_update(stream_id, increment);
             stream.local_window_size += increment;
@@ -362,15 +360,17 @@ public:
      * @brief Handle HEADERS frame
      * @param headers_event HEADERS frame event
      */
-    void on(Http2FrameData<HeadersFrame> headers_event) noexcept {
-        if (!this->ok() || !_connection_active) return;
+    void
+    on(Http2FrameData<HeadersFrame> headers_event) noexcept {
+        if (!this->ok() || !_connection_active)
+            return;
 
-        const FrameHeader& header = headers_event.header;
-        const uint32_t stream_id = header.get_stream_id();
-        const bool end_stream = (header.flags & FLAG_END_STREAM) != 0;
-        const bool end_headers = (header.flags & FLAG_END_HEADERS) != 0;
+        const FrameHeader &header      = headers_event.header;
+        const uint32_t     stream_id   = header.get_stream_id();
+        const bool         end_stream  = (header.flags & FLAG_END_STREAM) != 0;
+        const bool         end_headers = (header.flags & FLAG_END_HEADERS) != 0;
 
-        LOG_HTTP_TRACE_PA(stream_id, "Server: Received HEADERS frame, flags: " << (int)header.flags);
+        LOG_HTTP_TRACE_PA(stream_id, "Server: Received HEADERS frame, flags: " << (int) header.flags);
 
         if (stream_id == 0) {
             LOG_HTTP_ERROR_PA(stream_id, "Server: HEADERS frame on stream 0.");
@@ -383,8 +383,8 @@ public:
             return;
         }
 
-        Http2ServerStream* stream_ptr = nullptr;
-        auto it = _server_streams.find(stream_id);
+        Http2ServerStream *stream_ptr = nullptr;
+        auto               it         = _server_streams.find(stream_id);
 
         if (it == _server_streams.end()) {
             if (stream_id <= _last_client_initiated_stream_id) {
@@ -392,21 +392,21 @@ public:
                 return;
             }
             if (_graceful_shutdown_initiated) {
-                 this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "New stream during graceful shutdown");
+                this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "New stream during graceful shutdown");
                 return;
             }
             uint32_t active_client_streams = 0;
-            for (const auto& pair : _server_streams) {
+            for (const auto &pair : _server_streams) {
                 if (pair.first % 2 != 0) {
-                    const auto& s = pair.second;
-                    if (s.state == Http2StreamConcreteState::OPEN ||
-                        s.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL ||
-                        s.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
+                    const auto &s = pair.second;
+                    if (s.state == Http2StreamConcreteState::OPEN || s.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL
+                        || s.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
                         active_client_streams++;
                     }
                 }
             }
-            uint32_t max_concurrent_from_us = this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS);
+            uint32_t max_concurrent_from_us = this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS,
+                                                                                 DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS);
             if (active_client_streams >= max_concurrent_from_us) {
                 LOG_HTTP_WARN_PA(stream_id, "Server: Refused new stream. Max concurrent streams limit reached: " << max_concurrent_from_us);
                 this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "Exceeded MAX_CONCURRENT_STREAMS limit");
@@ -415,18 +415,17 @@ public:
 
             LOG_HTTP_DEBUG_PA(stream_id, "Server: Creating new stream for client request");
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
-            auto emp_res = _server_streams.emplace(stream_id, std::move(new_stream));
-            stream_ptr = &emp_res.first->second;
+            auto              emp_res        = _server_streams.emplace(stream_id, std::move(new_stream));
+            stream_ptr                       = &emp_res.first->second;
             _last_client_initiated_stream_id = std::max(_last_client_initiated_stream_id, stream_id);
         } else {
             stream_ptr = &it->second;
         }
-        Http2ServerStream& stream = *stream_ptr;
+        Http2ServerStream &stream = *stream_ptr;
 
         if (stream.expecting_continuation) {
-            this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR,
-                "New HEADERS frame received for stream " + std::to_string(stream_id) +
-                " while previous header block for this stream was incomplete.");
+            this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "New HEADERS frame received for stream " + std::to_string(stream_id)
+                                                                       + " while previous header block for this stream was incomplete.");
             this->clear_header_assembly_state();
             return;
         }
@@ -435,7 +434,8 @@ public:
             return;
         }
         if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE && !stream.trailers_expected) {
-            this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "Unexpected HEADERS frame after client sent END_STREAM (no trailers expected)");
+            this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR,
+                                  "Unexpected HEADERS frame after client sent END_STREAM (no trailers expected)");
             return;
         }
         bool is_current_block_trailers = stream.headers_received_main;
@@ -446,8 +446,7 @@ public:
         }
         _current_header_stream_id = stream_id;
 
-        _current_header_block_fragment.insert(_current_header_block_fragment.end(),
-                                              headers_event.payload.header_block_fragment.begin(),
+        _current_header_block_fragment.insert(_current_header_block_fragment.end(), headers_event.payload.header_block_fragment.begin(),
                                               headers_event.payload.header_block_fragment.end());
         if (_current_header_block_fragment.size() > qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE) {
             this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 header block exceeds configured limit");
@@ -478,8 +477,7 @@ public:
                 // the application, which may send a response and erase the
                 // stream. Never touch the old reference after that call.
                 auto after_process = _server_streams.find(stream_id);
-                if (after_process != _server_streams.end() &&
-                    after_process->second.state == Http2StreamConcreteState::CLOSED) {
+                if (after_process != _server_streams.end() && after_process->second.state == Http2StreamConcreteState::CLOSED) {
                     this->try_close_stream_context(stream_id);
                 }
             }
@@ -493,12 +491,14 @@ public:
      * @brief Handle CONTINUATION frame
      * @param continuation_event CONTINUATION frame event
      */
-    void on(Http2FrameData<ContinuationFrame> continuation_event) noexcept {
-        if (!this->ok() || !_connection_active) return;
+    void
+    on(Http2FrameData<ContinuationFrame> continuation_event) noexcept {
+        if (!this->ok() || !_connection_active)
+            return;
 
-        const FrameHeader& header = continuation_event.header;
-        const uint32_t stream_id = header.get_stream_id();
-        const bool end_headers = header.flags & FLAG_END_HEADERS;
+        const FrameHeader &header      = continuation_event.header;
+        const uint32_t     stream_id   = header.get_stream_id();
+        const bool         end_headers = header.flags & FLAG_END_HEADERS;
 
         if (stream_id == 0 || _current_header_stream_id == 0 || stream_id != _current_header_stream_id) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "CONTINUATION frame error (no prior HEADERS or wrong stream_id)");
@@ -508,11 +508,12 @@ public:
 
         auto it = _server_streams.find(stream_id);
         if (it == _server_streams.end()) {
-            this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "CONTINUATION for unknown stream (internal state error or stream closed mid-sequence)");
+            this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR,
+                                        "CONTINUATION for unknown stream (internal state error or stream closed mid-sequence)");
             this->clear_header_assembly_state();
             return;
         }
-        Http2ServerStream& stream = it->second;
+        Http2ServerStream &stream = it->second;
 
         if (!stream.expecting_continuation) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Unexpected CONTINUATION frame");
@@ -520,17 +521,16 @@ public:
             return;
         }
 
-            _current_header_block_fragment.insert(_current_header_block_fragment.end(),
-                                                continuation_event.payload.header_block_fragment.begin(),
-                                                continuation_event.payload.header_block_fragment.end());
-            if (_current_header_block_fragment.size() > qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE) {
-                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 header block exceeds configured limit");
-                this->clear_header_assembly_state();
-                return;
-            }
+        _current_header_block_fragment.insert(_current_header_block_fragment.end(), continuation_event.payload.header_block_fragment.begin(),
+                                              continuation_event.payload.header_block_fragment.end());
+        if (_current_header_block_fragment.size() > qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 header block exceeds configured limit");
+            this->clear_header_assembly_state();
+            return;
+        }
 
         if (end_headers) {
-            stream.expecting_continuation = false;
+            stream.expecting_continuation  = false;
             bool is_current_block_trailers = stream.headers_received_main;
 
             if (!this->process_complete_header_block(stream, is_current_block_trailers)) {
@@ -541,7 +541,7 @@ public:
                 // in the frame handler. Reacquire before touching stream state.
                 auto after_process = _server_streams.find(stream_id);
                 if (after_process != _server_streams.end()) {
-                    Http2ServerStream& current_stream = after_process->second;
+                    Http2ServerStream &current_stream = after_process->second;
 
                     if (is_current_block_trailers) {
                         current_stream.trailers_received = true;
@@ -574,12 +574,14 @@ public:
      * @brief Handle SETTINGS frame
      * @param settings_event SETTINGS frame event
      */
-    void on(Http2FrameData<SettingsFrame> settings_event) noexcept {
-        if (!this->ok() || !_connection_active) return;
+    void
+    on(Http2FrameData<SettingsFrame> settings_event) noexcept {
+        if (!this->ok() || !_connection_active)
+            return;
 
-        const FrameHeader& header = settings_event.header;
+        const FrameHeader &header = settings_event.header;
 
-        LOG_HTTP_TRACE_PA(header.get_stream_id(), "Server: Received SETTINGS frame, flags: " << (int)header.flags);
+        LOG_HTTP_TRACE_PA(header.get_stream_id(), "Server: Received SETTINGS frame, flags: " << (int) header.flags);
         if (header.get_stream_id() != 0) {
             LOG_HTTP_ERROR_PA(header.get_stream_id(), "Server: SETTINGS frame on non-zero stream_id.");
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "SETTINGS frame on non-zero stream_id");
@@ -597,9 +599,9 @@ public:
         }
 
         // SETTINGS frame from client (not an ACK) - validate and process each setting
-        for (const auto& setting_entry : settings_event.payload.entries) {
-            Http2SettingIdentifier id = setting_entry.identifier;
-            uint32_t value = setting_entry.value;
+        for (const auto &setting_entry : settings_event.payload.entries) {
+            Http2SettingIdentifier id    = setting_entry.identifier;
+            uint32_t               value = setting_entry.value;
 
             // Validate setting using centralized helper
             auto validation_result = SettingsHelper::validate_setting(id, value, true); // true = from client
@@ -609,7 +611,7 @@ public:
             }
 
             // Apply validated setting
-            switch(id) {
+            switch (id) {
                 case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
                     // Client informs us the max table size its decoder supports for headers we send.
                     // Our encoder must respect this.
@@ -645,15 +647,14 @@ public:
 
                 default:
                     // Unknown setting identifiers MUST be ignored by recipient.
-                    LOG_HTTP_TRACE_PA(0, "Server: Ignoring unknown setting ID "
-                                     << static_cast<uint16_t>(id) << " from client.");
+                    LOG_HTTP_TRACE_PA(0, "Server: Ignoring unknown setting ID " << static_cast<uint16_t>(id) << " from client.");
                     break;
             }
         }
 
         // Send SETTINGS ACK using centralized frame sending
         Http2FrameData<SettingsFrame> ack_frame;
-        ack_frame.header.type = static_cast<uint8_t>(FrameType::SETTINGS);
+        ack_frame.header.type  = static_cast<uint8_t>(FrameType::SETTINGS);
         ack_frame.header.flags = FLAG_ACK;
         ack_frame.header.set_stream_id(0);
         this->_io << ack_frame;
@@ -664,10 +665,12 @@ public:
      * @brief Handle RST_STREAM frame
      * @param rst_event RST_STREAM frame event
      */
-    void on(Http2FrameData<RstStreamFrame> rst_event) noexcept {
-        if (!this->ok() || !_connection_active) return;
+    void
+    on(Http2FrameData<RstStreamFrame> rst_event) noexcept {
+        if (!this->ok() || !_connection_active)
+            return;
 
-        const uint32_t stream_id = rst_event.header.get_stream_id();
+        const uint32_t  stream_id  = rst_event.header.get_stream_id();
         const ErrorCode error_code = rst_event.payload.error_code;
 
         if (stream_id == 0) {
@@ -677,13 +680,14 @@ public:
 
         auto it = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
-            Http2ServerStream& stream = it->second;
+            Http2ServerStream &stream  = it->second;
             stream.rst_stream_received = true;
-            stream.error_code = error_code;
-            stream.state = Http2StreamConcreteState::CLOSED;
+            stream.error_code          = error_code;
+            stream.state               = Http2StreamConcreteState::CLOSED;
 
             // Notify application if request wasn't dispatched or response wasn't fully sent by us yet.
-            if ((!stream.request_dispatched || !stream.end_stream_sent) && stream.error_code != ErrorCode::NO_ERROR) { // Check stream.error_code as rst_stream_received is now true
+            if ((!stream.request_dispatched || !stream.end_stream_sent)
+                && stream.error_code != ErrorCode::NO_ERROR) { // Check stream.error_code as rst_stream_received is now true
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM received from client"};
                 this->_io.on(stream_error_event);
             }
@@ -698,7 +702,8 @@ public:
      * @brief Handle PUSH_PROMISE frame (error case for server)
      * @param pp_event PUSH_PROMISE frame event
      */
-    void on(Http2FrameData<PushPromiseFrame> /*pp_event*/) noexcept {
+    void
+    on(Http2FrameData<PushPromiseFrame> /*pp_event*/) noexcept {
         // Server should not receive PUSH_PROMISE from client.
         this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Server received PUSH_PROMISE frame from client");
     }
@@ -707,49 +712,46 @@ public:
      * @brief Handle GOAWAY frame
      * @param goaway_event GOAWAY frame event
      */
-    void on(Http2FrameData<GoAwayFrame> goaway_event) noexcept {
-        if (!this->ok() && _graceful_shutdown_initiated) return; // Already processing a GOAWAY or shutting down
+    void
+    on(Http2FrameData<GoAwayFrame> goaway_event) noexcept {
+        if (!this->ok() && _graceful_shutdown_initiated)
+            return; // Already processing a GOAWAY or shutting down
 
         const std::string debug_data_str(goaway_event.payload.additional_debug_data.begin(), goaway_event.payload.additional_debug_data.end());
-        LOG_HTTP_WARN_PA(0, "Server: Received GOAWAY frame from client. Last Stream ID: "
-            << goaway_event.payload.last_stream_id << ", Error: " << static_cast<int>(goaway_event.payload.error_code)
-            << ", Debug: " << debug_data_str);
+        LOG_HTTP_WARN_PA(0, "Server: Received GOAWAY frame from client. Last Stream ID: " << goaway_event.payload.last_stream_id << ", Error: "
+                                                                                          << static_cast<int>(goaway_event.payload.error_code)
+                                                                                          << ", Debug: " << debug_data_str);
 
         _graceful_shutdown_initiated = true;
         FramerBase::set_last_peer_initiated_stream_id_processed_in_goaway(goaway_event.payload.last_stream_id);
         const ErrorCode error_code = goaway_event.payload.error_code;
 
-        Http2GoAwayEvent event_to_dispatch{
-            error_code,
-            goaway_event.payload.last_stream_id,
-            debug_data_str
-        };
+        Http2GoAwayEvent event_to_dispatch{error_code, goaway_event.payload.last_stream_id, debug_data_str};
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             this->get_io_handler().on(event_to_dispatch);
         }
 
-        for (auto it_stream = _server_streams.begin(); it_stream != _server_streams.end(); ) {
+        for (auto it_stream = _server_streams.begin(); it_stream != _server_streams.end();) {
             if (it_stream->first % 2 == 0) { // Server-pushed stream
-                Http2ServerStream& pushed_stream_ref = it_stream->second;
-                bool close_pushed_stream = false;
+                Http2ServerStream &pushed_stream_ref   = it_stream->second;
+                bool               close_pushed_stream = false;
 
-                if (pushed_stream_ref.id > FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() &&
-                    FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() != 0) {
+                if (pushed_stream_ref.id > FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway()
+                    && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() != 0) {
                     // This condition might be too aggressive. GOAWAY's last_stream_id refers to peer-initiated streams.
                     // A pushed stream (server-initiated) is primarily affected if its *parent* client stream is affected.
                 }
 
                 // More accurately, close pushed stream if its parent client stream is > last_stream_id sent by client in GOAWAY
                 // or if the parent stream is now closed/reset due to this GOAWAY.
-                if (pushed_stream_ref.parent_stream_id > goaway_event.payload.last_stream_id && goaway_event.payload.last_stream_id !=0 ) {
-                     close_pushed_stream = true;
+                if (pushed_stream_ref.parent_stream_id > goaway_event.payload.last_stream_id && goaway_event.payload.last_stream_id != 0) {
+                    close_pushed_stream = true;
                 }
                 // Additionally, if the parent stream itself is being cleaned up because it *is* one of the closed client streams:
                 auto parent_client_stream_iter = _server_streams.find(pushed_stream_ref.parent_stream_id);
                 if (parent_client_stream_iter != _server_streams.end()) {
                     // If parent client stream ID is > last_stream_id from GOAWAY (and it's a client stream)
-                    if (parent_client_stream_iter->first % 2 != 0 &&
-                        parent_client_stream_iter->first > goaway_event.payload.last_stream_id) {
+                    if (parent_client_stream_iter->first % 2 != 0 && parent_client_stream_iter->first > goaway_event.payload.last_stream_id) {
                         // This parent client stream will be closed by other logic handling GOAWAY for client streams.
                         // So, the pushed stream associated with it should also be closed.
                         close_pushed_stream = true;
@@ -760,11 +762,15 @@ public:
                 }
 
                 if (close_pushed_stream && pushed_stream_ref.state != Http2StreamConcreteState::CLOSED) {
-                    // QB_LOG_WARN_PA(this->getName(), "Server: Pushed stream " << pushed_stream_ref.id << " (parent: " << pushed_stream_ref.parent_stream_id
-                    //                << ") being closed due to GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id << ").");
-                    pushed_stream_ref.state = Http2StreamConcreteState::CLOSED;
+                    // QB_LOG_WARN_PA(this->getName(), "Server: Pushed stream " << pushed_stream_ref.id << " (parent: " <<
+                    // pushed_stream_ref.parent_stream_id
+                    //                << ") being closed due to GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id <<
+                    //                ").");
+                    pushed_stream_ref.state      = Http2StreamConcreteState::CLOSED;
                     pushed_stream_ref.error_code = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::CANCEL : error_code;
-                    Http2StreamErrorEvent push_stream_error{pushed_stream_ref.id, pushed_stream_ref.error_code, "Pushed stream implicitly closed due to client GOAWAY"};
+                    Http2StreamErrorEvent push_stream_error{
+                        pushed_stream_ref.id, pushed_stream_ref.error_code, "Pushed stream implicitly closed due to client GOAWAY"
+                    };
                     if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                         this->get_io_handler().on(push_stream_error);
                     }
@@ -772,22 +778,25 @@ public:
                     continue;
                 }
             } else if (it_stream->first % 2 != 0) { // Client-initiated stream
-                 Http2ServerStream& client_stream_ref = it_stream->second;
-                 if (client_stream_ref.id > goaway_event.payload.last_stream_id &&
-                     client_stream_ref.state != Http2StreamConcreteState::IDLE && // Don't try to error out streams that never fully started
-                     client_stream_ref.state != Http2StreamConcreteState::CLOSED) {
+                Http2ServerStream &client_stream_ref = it_stream->second;
+                if (client_stream_ref.id > goaway_event.payload.last_stream_id && client_stream_ref.state != Http2StreamConcreteState::IDLE
+                    && // Don't try to error out streams that never fully started
+                    client_stream_ref.state != Http2StreamConcreteState::CLOSED) {
                     // QB_LOG_WARN_PA(this->getName(), "Server: Client stream " << client_stream_ref.id
-                    //                << " implicitly closed by GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id << ").");
-                    client_stream_ref.state = Http2StreamConcreteState::CLOSED;
+                    //                << " implicitly closed by GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id <<
+                    //                ").");
+                    client_stream_ref.state               = Http2StreamConcreteState::CLOSED;
                     client_stream_ref.rst_stream_received = true; // Treat as if RST received from client perspective for this stream
-                    client_stream_ref.error_code = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::STREAM_CLOSED : error_code;
-                    Http2StreamErrorEvent client_stream_error{client_stream_ref.id, client_stream_ref.error_code, "Client stream implicitly closed by client GOAWAY"};
+                    client_stream_ref.error_code          = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::STREAM_CLOSED : error_code;
+                    Http2StreamErrorEvent client_stream_error{
+                        client_stream_ref.id, client_stream_ref.error_code, "Client stream implicitly closed by client GOAWAY"
+                    };
                     if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                         this->get_io_handler().on(client_stream_error);
                     }
                     it_stream = _server_streams.erase(it_stream); // Erase and advance iterator
                     continue;
-                 }
+                }
             }
             ++it_stream;
         }
@@ -808,10 +817,11 @@ public:
      * @brief Handle WINDOW_UPDATE frame
      * @param wu_event WINDOW_UPDATE frame event
      */
-    void on(Http2FrameData<WindowUpdateFrame> wu_event) noexcept {
-        const FrameHeader& header = wu_event.header;
-        uint32_t stream_id = header.get_stream_id();
-        uint32_t window_increment = wu_event.payload.window_size_increment;
+    void
+    on(Http2FrameData<WindowUpdateFrame> wu_event) noexcept {
+        const FrameHeader &header           = wu_event.header;
+        uint32_t           stream_id        = header.get_stream_id();
+        uint32_t           window_increment = wu_event.payload.window_size_increment;
 
         LOG_HTTP_TRACE_PA(stream_id, "Server: Received WINDOW_UPDATE frame with increment " << window_increment);
 
@@ -826,16 +836,18 @@ public:
 
         if (stream_id == 0) {
             if (this->_connection_send_window > (static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT) - window_increment)) {
-                this->on_connection_error(ErrorCode::FLOW_CONTROL_ERROR, "Connection WINDOW_UPDATE causes flow control window to exceed maximum.");
+                this->on_connection_error(ErrorCode::FLOW_CONTROL_ERROR,
+                                          "Connection WINDOW_UPDATE causes flow control window to exceed maximum.");
                 return;
             }
             this->_connection_send_window += window_increment;
-             for (auto& pair : _server_streams) {
-                 if (pair.second.has_pending_data_to_send) {
-                     try_send_pending_data_for_stream(pair.first, pair.second);
-                     if(!this->_connection_active) break;
-                 }
-             }
+            for (auto &pair : _server_streams) {
+                if (pair.second.has_pending_data_to_send) {
+                    try_send_pending_data_for_stream(pair.first, pair.second);
+                    if (!this->_connection_active)
+                        break;
+                }
+            }
 
         } else {
             auto it = _server_streams.find(stream_id);
@@ -845,31 +857,34 @@ public:
                 }
                 return;
             }
-            Http2ServerStream& stream = it->second;
+            Http2ServerStream &stream = it->second;
             if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::CLOSED) {
-                 // Per RFC 9113, 6.9.1: WINDOW_UPDATE on IDLE or CLOSED (after RST or normal closure) is a PROTOCOL_ERROR if it causes window > 2^31-1.
-                 // Otherwise, it can be ignored for closed/rst streams if it doesn't cause overflow.
-                 // Simpler to just check for overflow if closed, or treat any WU on IDLE as error.
-                 if (stream.state == Http2StreamConcreteState::IDLE) {
+                // Per RFC 9113, 6.9.1: WINDOW_UPDATE on IDLE or CLOSED (after RST or normal closure) is a PROTOCOL_ERROR if it causes window >
+                // 2^31-1. Otherwise, it can be ignored for closed/rst streams if it doesn't cause overflow. Simpler to just check for overflow
+                // if closed, or treat any WU on IDLE as error.
+                if (stream.state == Http2StreamConcreteState::IDLE) {
                     this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE on IDLE stream.");
                     return;
-                 }
-                 if (stream.peer_window_size > (static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT) - window_increment)) {
-                    this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR, "WINDOW_UPDATE on closed stream causes flow control window to exceed maximum.");
-                 }
-                 return; // Otherwise ignore for CLOSED stream if no overflow
+                }
+                if (stream.peer_window_size > (static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT) - window_increment)) {
+                    this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR,
+                                          "WINDOW_UPDATE on closed stream causes flow control window to exceed maximum.");
+                }
+                return; // Otherwise ignore for CLOSED stream if no overflow
             }
 
             if (stream.peer_window_size > (static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT) - window_increment)) {
-                this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR, "Stream WINDOW_UPDATE causes flow control window to exceed maximum.");
+                this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR,
+                                      "Stream WINDOW_UPDATE causes flow control window to exceed maximum.");
                 return;
             }
 
             stream.peer_window_size += window_increment;
-            // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " peer window updated from " << old_stream_peer_window << " to " << stream.peer_window_size);
+            // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " peer window updated from " << old_stream_peer_window << " to
+            // " << stream.peer_window_size);
 
             if (stream.has_pending_data_to_send) {
-                 // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " has pending data. Attempting to send.");
+                // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " has pending data. Attempting to send.");
                 try_send_pending_data_for_stream(stream_id, stream);
             }
         }
@@ -879,12 +894,14 @@ public:
      * @brief Handle PING frame
      * @param ping_event PING frame event
      */
-    void on(Http2FrameData<PingFrame> ping_event) noexcept {
-        if (!this->ok() || !_connection_active) return;
+    void
+    on(Http2FrameData<PingFrame> ping_event) noexcept {
+        if (!this->ok() || !_connection_active)
+            return;
 
-        const FrameHeader& header = ping_event.header;
+        const FrameHeader &header = ping_event.header;
 
-        LOG_HTTP_TRACE_PA(header.get_stream_id(), "Server: Received PING frame, flags: " << (int)header.flags);
+        LOG_HTTP_TRACE_PA(header.get_stream_id(), "Server: Received PING frame, flags: " << (int) header.flags);
 
         if (header.get_stream_id() != 0) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "PING frame on non-zero stream_id");
@@ -900,7 +917,7 @@ public:
             // This is a PING from client, send PONG (PING with ACK).
             // QB_LOG_TRACE_PA(this->getName(), "Server: Received PING from client, sending PONG.");
             Http2FrameData<PingFrame> pong_frame;
-            pong_frame.header.type = static_cast<uint8_t>(FrameType::PING);
+            pong_frame.header.type  = static_cast<uint8_t>(FrameType::PING);
             pong_frame.header.flags = FLAG_ACK;
             pong_frame.header.set_stream_id(0);
             // pong_frame.header.set_payload_length(HTTP2_PING_PAYLOAD_SIZE); // Length is implicit from PingFrame
@@ -914,11 +931,13 @@ public:
      * @brief Handle PRIORITY frame
      * @param priority_event PRIORITY frame event
      */
-    void on(Http2FrameData<PriorityFrame> priority_event) noexcept {
-        if (!this->ok() || !_connection_active) return;
+    void
+    on(Http2FrameData<PriorityFrame> priority_event) noexcept {
+        if (!this->ok() || !_connection_active)
+            return;
 
-        const FrameHeader& header = priority_event.header;
-        uint32_t stream_id = header.get_stream_id();
+        const FrameHeader &header    = priority_event.header;
+        uint32_t           stream_id = header.get_stream_id();
 
         if (stream_id == 0) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "PRIORITY frame on stream 0 from client");
@@ -947,15 +966,16 @@ public:
      * @param http_response HTTP response object containing status, headers, and body
      * @return true if response sent successfully, false on error
      */
-    bool send_response(uint32_t stream_id, qb::http::Response const &http_response) {
+    bool
+    send_response(uint32_t stream_id, qb::http::Response const &http_response) {
         LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Attempting to send response");
         auto it = _server_streams.find(stream_id);
         if (it == _server_streams.end()) {
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on non-existent stream");
             return false; // Or send RST_STREAM(STREAM_CLOSED) if appropriate
         }
-        Http2ServerStream& stream = it->second;
-        stream.response_to_send = http_response;
+        Http2ServerStream &stream = it->second;
+        stream.response_to_send   = http_response;
         stream.send_buffer_offset = 0;
 
         if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
@@ -973,32 +993,29 @@ public:
         std::vector<qb::protocol::hpack::HeaderField> hf_vector;
         hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
         std::optional<std::uint64_t> declared_content_length;
-        for (const auto& header_item : http_response.headers()) { // Assuming http_response.headers() gives iterable key-value pairs
+        for (const auto &header_item : http_response.headers()) { // Assuming http_response.headers() gives iterable key-value pairs
             std::string name_lower = header_item.first;
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
                            [](char c) { return qb::http::utility::ascii_to_lower(c); });
-            if (name_lower.empty() || name_lower[0] == ':' ||
-                HeaderValidator::is_forbidden_response_header(name_lower)) {
+            if (name_lower.empty() || name_lower[0] == ':' || HeaderValidator::is_forbidden_response_header(name_lower)) {
                 this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
                                       "Forbidden or invalid HTTP/2 response header: " + header_item.first);
                 return false;
             }
-            for (const auto& value : header_item.second) { // Assuming header_item.second is iterable (e.g. vector of strings for multi-value headers)
+            for (const auto &value :
+                 header_item.second) { // Assuming header_item.second is iterable (e.g. vector of strings for multi-value headers)
                 if (!HeaderValidator::is_valid_header_field(name_lower, value)) {
-                    this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
-                                          "Invalid HTTP/2 response header field: " + header_item.first);
+                    this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response header field: " + header_item.first);
                     return false;
                 }
                 if (name_lower == "content-length") {
                     const auto parsed = HeaderValidator::parse_content_length(value);
                     if (!parsed) {
-                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
-                                              "Invalid HTTP/2 response content-length");
+                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response content-length");
                         return false;
                     }
                     if (declared_content_length && *declared_content_length != *parsed) {
-                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
-                                              "Conflicting HTTP/2 response content-length headers");
+                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Conflicting HTTP/2 response content-length headers");
                         return false;
                     }
                     declared_content_length = *parsed;
@@ -1013,24 +1030,17 @@ public:
             stream.headers_sent_in_initial_frame.insert(header_item.first);
         }
 
-        const auto& body_pipe = http_response.body().raw();
-        const auto status_code = http_response.status().code();
-        const bool response_to_head =
-            stream.assembled_request.method() == qb::http::method::HEAD;
-        const bool body_length_must_match =
-            !response_to_head &&
-            !((status_code >= 100 && status_code < 200) ||
-              status_code == 204 ||
-              status_code == 304);
-        if (declared_content_length && body_length_must_match &&
-            body_pipe.size() != *declared_content_length) {
-            this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
-                                  "HTTP/2 response content-length mismatch");
+        const auto &body_pipe        = http_response.body().raw();
+        const auto  status_code      = http_response.status().code();
+        const bool  response_to_head = stream.assembled_request.method() == qb::http::method::HEAD;
+        const bool  body_length_must_match =
+            !response_to_head && !((status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304);
+        if (declared_content_length && body_length_must_match && body_pipe.size() != *declared_content_length) {
+            this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response content-length mismatch");
             return false;
         }
         if (body_pipe.size() > qb::http::protocol_limits::MAX_BODY_SIZE) {
-            this->on_stream_error(stream_id, ErrorCode::ENHANCE_YOUR_CALM,
-                                  "HTTP/2 response body exceeds configured limit");
+            this->on_stream_error(stream_id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
             return false;
         }
 
@@ -1041,10 +1051,9 @@ public:
             return false;
         }
 
-
-
         if (_peer_max_header_list_size > 0 && encoded_headers.size() > _peer_max_header_list_size) {
-            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Encoded headers size " << encoded_headers.size() << " exceeds peer's MAX_HEADER_LIST_SIZE " << _peer_max_header_list_size);
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Encoded headers size "
+                                            << encoded_headers.size() << " exceeds peer's MAX_HEADER_LIST_SIZE " << _peer_max_header_list_size);
             send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
             return false;
         }
@@ -1085,7 +1094,7 @@ public:
                 LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Response sent successfully");
                 return this->ok();
             }
-            Http2ServerStream& current_stream = after_body->second;
+            Http2ServerStream &current_stream = after_body->second;
             if (current_stream.state == Http2StreamConcreteState::CLOSED) {
                 this->try_close_stream_context(stream_id); // Corrected call
             }
@@ -1110,14 +1119,17 @@ public:
      * @param promised_request_pseudo_headers Request headers for the promised resource
      * @return true if PUSH_PROMISE sent successfully, false on error
      */
-    [[nodiscard]] std::optional<PushPromiseFailureReason> send_push_promise(uint32_t associated_stream_id, uint32_t promised_stream_id, qb::http::Request promised_request_pseudo_headers) {
+    [[nodiscard]] std::optional<PushPromiseFailureReason>
+    send_push_promise(uint32_t associated_stream_id, uint32_t promised_stream_id, qb::http::Request promised_request_pseudo_headers) {
         LOG_HTTP_DEBUG_PA(associated_stream_id, "Server: Attempting to send PUSH_PROMISE for promised_stream_id " << promised_stream_id);
         if (!this->ok() || !_connection_active) {
             LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE. Protocol not OK or connection inactive.");
             return PushPromiseFailureReason::CONNECTION_INACTIVE;
         }
         if (!_peer_allows_push) {
-            LOG_HTTP_INFO_PA(associated_stream_id, "Server: Client has disabled PUSH_PROMISE (SETTINGS_ENABLE_PUSH = 0). Cannot send push for promised_stream_id " << promised_stream_id);
+            LOG_HTTP_INFO_PA(associated_stream_id,
+                             "Server: Client has disabled PUSH_PROMISE (SETTINGS_ENABLE_PUSH = 0). Cannot send push for promised_stream_id "
+                                 << promised_stream_id);
             return PushPromiseFailureReason::PEER_PUSH_DISABLED;
         }
         if (promised_stream_id == 0 || (promised_stream_id & 1u) != 0u) {
@@ -1125,7 +1137,9 @@ public:
             return PushPromiseFailureReason::INVALID_PROMISED_STREAM;
         }
         if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
-            LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE for promised_stream_id " << promised_stream_id << ". Would exceed client's MAX_CONCURRENT_STREAMS limit: " << _peer_max_concurrent_streams);
+            LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE for promised_stream_id "
+                                                       << promised_stream_id << ". Would exceed client's MAX_CONCURRENT_STREAMS limit: "
+                                                       << _peer_max_concurrent_streams);
             return PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED;
         }
 
@@ -1135,21 +1149,22 @@ public:
             return PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM;
         }
 
-        if (it_assoc_stream->second.state != Http2StreamConcreteState::OPEN && it_assoc_stream->second.state != Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
+        if (it_assoc_stream->second.state != Http2StreamConcreteState::OPEN
+            && it_assoc_stream->second.state != Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
             // QB_LOG_WARN_PA(this->getName(), "Server: PUSH_PROMISE on associated stream " << associated_stream_id << " not in valid state.");
             return PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM;
         }
 
         // Create a new stream context for the promised stream
         Http2ServerStream promised_stream(promised_stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
-        promised_stream.state = Http2StreamConcreteState::RESERVED_LOCAL;
+        promised_stream.state            = Http2StreamConcreteState::RESERVED_LOCAL;
         promised_stream.parent_stream_id = associated_stream_id;
 
         // Emplace the stream
         auto emp_res = _server_streams.emplace(promised_stream_id, std::move(promised_stream));
         if (!emp_res.second) {
             // QB_LOG_ERROR_PA(this->getName(), "Server: Failed to emplace promised stream " << promised_stream_id << " context.");
-             return PushPromiseFailureReason::INTERNAL_ERROR;
+            return PushPromiseFailureReason::INTERNAL_ERROR;
         }
 
         Http2FrameData<PushPromiseFrame> pp_frame_data;
@@ -1160,9 +1175,9 @@ public:
         // PUSH_PROMISE frames MUST include pseudo-header fields for :method, :scheme, :authority, and :path.
         // They MAY include other headers that are valid for requests.
 
-        const auto& promised_uri = promised_request_pseudo_headers.uri();
+        const auto &promised_uri = promised_request_pseudo_headers.uri();
         std::string promised_authority(promised_uri.host());
-        const bool already_bracketed_ipv6 =
+        const bool  already_bracketed_ipv6 =
             promised_authority.size() >= 2 && promised_authority.front() == '[' && promised_authority.back() == ']';
         if (!already_bracketed_ipv6 && promised_authority.find(':') != std::string::npos) {
             promised_authority = "[" + promised_authority + "]";
@@ -1171,16 +1186,14 @@ public:
             promised_authority += ":" + std::string(promised_uri.port());
         }
 
-        std::string promised_path = promised_uri.path().empty()
-            ? std::string{"/"}
-            : std::string(promised_uri.path());
+        std::string promised_path = promised_uri.path().empty() ? std::string{"/"} : std::string(promised_uri.path());
         if (!promised_uri.encoded_queries().empty()) {
             promised_path.push_back('?');
             promised_path += promised_uri.encoded_queries();
         }
 
-        if (promised_request_pseudo_headers.method() == qb::http::method::UNINITIALIZED ||
-            promised_uri.scheme().empty() || promised_authority.empty() || promised_path.empty()) {
+        if (promised_request_pseudo_headers.method() == qb::http::method::UNINITIALIZED || promised_uri.scheme().empty()
+            || promised_authority.empty() || promised_path.empty()) {
             _server_streams.erase(promised_stream_id);
             return PushPromiseFailureReason::INVALID_PROMISED_REQUEST;
         }
@@ -1190,24 +1203,24 @@ public:
         hf_vector.push_back({std::string(qb::http::well_known::COLON_AUTHORITY_SV), std::move(promised_authority)});
         hf_vector.push_back({std::string(qb::http::well_known::COLON_PATH_SV), std::move(promised_path)});
 
-        for (const auto& header_entry : promised_request_pseudo_headers.headers()) { // Iterate map from .headers()
+        for (const auto &header_entry : promised_request_pseudo_headers.headers()) { // Iterate map from .headers()
             // Skip pseudo-headers already added, and ":content-length" which is forbidden in PUSH_PROMISE
-            if (header_entry.first[0] == ':' &&
-                (header_entry.first == qb::http::well_known::COLON_METHOD_SV ||
-                 header_entry.first == qb::http::well_known::COLON_PATH_SV ||
-                 header_entry.first == qb::http::well_known::COLON_SCHEME_SV ||
-                 header_entry.first == qb::http::well_known::COLON_AUTHORITY_SV ||
-                 header_entry.first == "content-length" )) { // content-length also forbidden
+            if (header_entry.first[0] == ':'
+                && (header_entry.first == qb::http::well_known::COLON_METHOD_SV || header_entry.first == qb::http::well_known::COLON_PATH_SV
+                    || header_entry.first == qb::http::well_known::COLON_SCHEME_SV
+                    || header_entry.first == qb::http::well_known::COLON_AUTHORITY_SV
+                    || header_entry.first == "content-length")) { // content-length also forbidden
                 continue;
             }
-            for (const auto& value : header_entry.second) { // Iterate vector of values for this header name
-                 hf_vector.push_back({header_entry.first, value});
+            for (const auto &value : header_entry.second) { // Iterate vector of values for this header name
+                hf_vector.push_back({header_entry.first, value});
             }
         }
 
         std::vector<uint8_t> encoded_headers;
         if (!_hpack_encoder.encode(hf_vector, encoded_headers)) {
-            LOG_HTTP_ERROR_PA(associated_stream_id, "Server: HPACK encoding failed for PUSH_PROMISE on promised_stream_id " << promised_stream_id);
+            LOG_HTTP_ERROR_PA(associated_stream_id,
+                              "Server: HPACK encoding failed for PUSH_PROMISE on promised_stream_id " << promised_stream_id);
             _server_streams.erase(promised_stream_id);
             return PushPromiseFailureReason::INTERNAL_HPACK_ERROR;
         }
@@ -1215,16 +1228,16 @@ public:
         pp_frame_data.payload.header_block_fragment = std::move(encoded_headers);
 
         FrameHeader header_to_send;
-        header_to_send.type = static_cast<uint8_t>(FrameType::PUSH_PROMISE);
+        header_to_send.type  = static_cast<uint8_t>(FrameType::PUSH_PROMISE);
         header_to_send.flags = FLAG_END_HEADERS; // PUSH_PROMISE contains a full header block, so END_HEADERS implicitly
         header_to_send.set_stream_id(associated_stream_id);
         pp_frame_data.header = header_to_send;
         this->_io << pp_frame_data;
 
-        if (!this->ok()) { // Check if the send operation itself failed (e.g. underlying transport error)
-             _server_streams.erase(promised_stream_id); // Clean up if send failed
-             // The not_ok() might have been set by the transport, leading to CONNECTION_INACTIVE on next attempt
-             return PushPromiseFailureReason::CONNECTION_INACTIVE; // Or a more generic send error
+        if (!this->ok()) {                             // Check if the send operation itself failed (e.g. underlying transport error)
+            _server_streams.erase(promised_stream_id); // Clean up if send failed
+            // The not_ok() might have been set by the transport, leading to CONNECTION_INACTIVE on next attempt
+            return PushPromiseFailureReason::CONNECTION_INACTIVE; // Or a more generic send error
         }
         LOG_HTTP_INFO_PA(associated_stream_id, "Server: Sending PUSH_PROMISE for promised_stream_id " << promised_stream_id);
         return std::nullopt; // Success
@@ -1240,12 +1253,12 @@ public:
      * @param max_incomplete Maximum time for incomplete streams (default: 10s)
      * @return Number of streams cleaned up
      */
-    uint32_t cleanup_idle_streams(qb::duration max_idle       = std::chrono::seconds(30),
-                                  qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
+    uint32_t
+    cleanup_idle_streams(qb::duration max_idle = std::chrono::seconds(30), qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
         uint32_t cleaned_count = 0;
 
         for (auto it = _server_streams.begin(); it != _server_streams.end();) {
-            auto& stream = it->second;
+            auto    &stream    = it->second;
             uint32_t stream_id = it->first;
 
             // Skip already closed streams
@@ -1254,13 +1267,12 @@ public:
                 continue;
             }
 
-            auto idle_time = stream.get_idle_time();
+            auto idle_time         = stream.get_idle_time();
             auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
 
             // Check for incomplete streams (not dispatched yet)
-            bool is_incomplete = !stream.request_dispatched &&
-                                 (stream.state == Http2StreamConcreteState::IDLE ||
-                                  stream.state == Http2StreamConcreteState::OPEN);
+            bool is_incomplete = !stream.request_dispatched
+                                 && (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::OPEN);
 
             // Check for idle timeout
             bool should_cleanup = false;
@@ -1273,8 +1285,7 @@ public:
             }
 
             if (should_cleanup) {
-                this->send_rst_stream(stream_id, ErrorCode::CANCEL,
-                    "Stream idle timeout (" + std::to_string(idle_time_seconds) + "s)");
+                this->send_rst_stream(stream_id, ErrorCode::CANCEL, "Stream idle timeout (" + std::to_string(idle_time_seconds) + "s)");
                 it = _server_streams.erase(it);
                 cleaned_count++;
             } else {
@@ -1300,20 +1311,21 @@ public:
      * @param error_code Error code for the reset
      * @param context_msg Debug context message
      */
-    void send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string& context_msg = "",
-                         bool close_context = true) noexcept {
-
-        if (!_connection_active && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
+    void
+    send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg = "", bool close_context = true) noexcept {
+        if (!_connection_active
+            && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Tried to send RST_STREAM but connection is not active");
             return;
         }
-        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Sending RST_STREAM with error code " << static_cast<uint32_t>(error_code) << ". Context: " << context_msg);
+        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Sending RST_STREAM with error code " << static_cast<uint32_t>(error_code)
+                                                                                                << ". Context: " << context_msg);
 
         Http2FrameData<RstStreamFrame> rst_frame_data;
         rst_frame_data.payload.error_code = error_code;
 
         FrameHeader header;
-        header.type = static_cast<uint8_t>(FrameType::RST_STREAM);
+        header.type  = static_cast<uint8_t>(FrameType::RST_STREAM);
         header.flags = 0;
         header.set_stream_id(stream_id);
 
@@ -1322,14 +1334,14 @@ public:
 
         auto it = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
-            it->second.state = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
+            it->second.state           = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
             it->second.rst_stream_sent = true;
-            it->second.error_code = error_code;
+            it->second.error_code      = error_code;
             LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream marked as CLOSED due to sent RST_STREAM");
 
             // Notify IO_Handler if request wasn't dispatched or response wasn't fully sent
             if ((!it->second.request_dispatched || !it->second.end_stream_sent) && error_code != ErrorCode::NO_ERROR) {
-                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by server: " + context_msg};
+                Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by server: " + context_msg};
                 if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                     this->get_io_handler().on(stream_error_event);
                 }
@@ -1348,24 +1360,27 @@ private:
     /**
      * @brief Initialize server's HTTP/2 settings to defaults
      */
-    void initialize_our_settings_map() noexcept {
+    void
+    initialize_our_settings_map() noexcept {
         _our_settings.clear();
         _our_settings[Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE] = hpack::HPACK_DEFAULT_MAX_TABLE_SIZE;
-        _our_settings[Http2SettingIdentifier::SETTINGS_ENABLE_PUSH] = 0; // Server disables push by default
+        _our_settings[Http2SettingIdentifier::SETTINGS_ENABLE_PUSH]       = 0; // Server disables push by default
         // Use lower default for DDoS protection (can be increased if needed)
         _our_settings[Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS] = 50; // Max streams we allow client to open (reduced from 100)
-        _our_settings[Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE] = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
-        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE] = DEFAULT_SETTINGS_MAX_FRAME_SIZE;
-        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE] = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
+        _our_settings[Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE]    = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
+        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE]         = DEFAULT_SETTINGS_MAX_FRAME_SIZE;
+        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE]   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
     }
 
     /**
      * @brief Calculate and validate max frame size from settings
      * @return Valid max frame size for initialization
      */
-    uint32_t initialize_our_max_frame_size() {
+    uint32_t
+    initialize_our_max_frame_size() {
         this->initialize_our_settings_map();
-        uint32_t calculated_max_frame_size = this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE, DEFAULT_SETTINGS_MAX_FRAME_SIZE);
+        uint32_t calculated_max_frame_size =
+            this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE, DEFAULT_SETTINGS_MAX_FRAME_SIZE);
         if (calculated_max_frame_size < DEFAULT_SETTINGS_MAX_FRAME_SIZE || calculated_max_frame_size > MAX_FRAME_SIZE_LIMIT) {
             calculated_max_frame_size = DEFAULT_SETTINGS_MAX_FRAME_SIZE;
         }
@@ -1376,7 +1391,8 @@ private:
      * @brief Get initial window size from settings
      * @return Initial window size value
      */
-    uint32_t get_initial_window_size_from_settings() const noexcept {
+    uint32_t
+    get_initial_window_size_from_settings() const noexcept {
         return this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE);
     }
 
@@ -1386,7 +1402,8 @@ private:
      * @param default_val Default value if setting not found
      * @return Setting value or default
      */
-    uint32_t get_setting_value_or_default(Http2SettingIdentifier id, uint32_t default_val) const noexcept {
+    uint32_t
+    get_setting_value_or_default(Http2SettingIdentifier id, uint32_t default_val) const noexcept {
         auto it = _our_settings.find(id);
         if (it != _our_settings.end()) {
             return it->second;
@@ -1397,7 +1414,8 @@ private:
     /**
      * @brief Clear header assembly state between header blocks
      */
-    void clear_header_assembly_state() noexcept {
+    void
+    clear_header_assembly_state() noexcept {
         _current_header_block_fragment.clear();
         _current_header_stream_id = 0;
     }
@@ -1412,13 +1430,14 @@ private:
      * @param is_trailers_block Whether this is a trailers block
      * @return true if processing succeeded, false on error
      */
-    bool process_complete_header_block(Http2ServerStream& stream, bool is_trailers_block) {
-
+    bool
+    process_complete_header_block(Http2ServerStream &stream, bool is_trailers_block) {
         // Debug: Log raw HPACK bytes (removed in production)
 
-        // QB_LOG_TRACE_PA(this->getName(), "Stream " << stream.id << ": Processing complete header block (is_trailers=" << is_trailers_block << ")");
+        // QB_LOG_TRACE_PA(this->getName(), "Stream " << stream.id << ": Processing complete header block (is_trailers=" << is_trailers_block <<
+        // ")");
         qb::http::Headers current_headers_decoded; // Decoded headers for this block
-        bool possibly_incomplete_hpack = false;
+        bool              possibly_incomplete_hpack = false;
 
         if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)) {
             // QB_LOG_ERROR_PA(this->getName(), "Stream " << stream.id << ": HPACK decoding failed.");
@@ -1432,8 +1451,6 @@ private:
             return false;
         }
 
-
-
         // Convert decoded_header_fields to qb::http::Headers and qb::http::Request (if main headers)
         // and apply to stream.assembled_request or stream.response_to_send.trailers()
         // Also, validate pseudo-headers for main request headers.
@@ -1445,56 +1462,59 @@ private:
         _current_header_block_fragment.clear(); // Clear for next use
         stream.expecting_continuation = false;
 
-
         if (!is_trailers_block) { // Main headers (request)
             stream.headers_received_main = true;
             // Validate pseudo-headers and convert to qb::http::Request components
             std::optional<std::string_view> method_sv, scheme_sv, path_sv, authority_sv;
-            bool pseudo_headers_finished = false;
+            bool                            pseudo_headers_finished = false;
 
             std::string temp_method_str; // Temporary for method conversion
 
-            for (const auto& hf : stream.decoded_header_fields) {
-                const std::string& name = hf.name;
-                const std::string& value = hf.value;
+            for (const auto &hf : stream.decoded_header_fields) {
+                const std::string &name  = hf.name;
+                const std::string &value = hf.value;
 
                 if (name.empty()) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header field name received."); return false;
+                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header field name received.");
+                    return false;
                 }
                 if (name[0] == ':') { // Pseudo-header
                     if (pseudo_headers_finished) {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header received after regular header."); return false;
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header received after regular header.");
+                        return false;
                     }
                     if (!HeaderValidator::is_valid_header_value(value)) {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                              "Invalid pseudo-header value format.");
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid pseudo-header value format.");
                         return false;
                     }
                     // Process pseudo-headers
                     if (name == ":method") {
                         if (method_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :method pseudo-header."); return false;
+                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :method pseudo-header.");
+                            return false;
                         }
-                        method_sv = value;
+                        method_sv       = value;
                         temp_method_str = value; // Store for later conversion
                     } else if (name == ":scheme") {
                         if (scheme_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :scheme pseudo-header."); return false;
+                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :scheme pseudo-header.");
+                            return false;
                         }
                         scheme_sv = value;
                     } else if (name == ":path") {
                         if (path_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :path pseudo-header."); return false;
+                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :path pseudo-header.");
+                            return false;
                         }
                         path_sv = value;
                     } else if (name == ":authority") {
                         if (authority_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :authority pseudo-header."); return false;
+                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :authority pseudo-header.");
+                            return false;
                         }
                         authority_sv = value;
                     } else {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                              "Unknown pseudo-header in request: " + name);
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Unknown pseudo-header in request: " + name);
                         return false;
                     }
                 } else { // Regular header
@@ -1502,25 +1522,21 @@ private:
                     // SECURITY FIX: Validate header name/value format per RFC 9113
                     if (!is_valid_header_field(name, value)) {
                         this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                            "Invalid header field name or value format (contains forbidden characters).");
+                                              "Invalid header field name or value format (contains forbidden characters).");
                         return false;
                     }
-                    if (HeaderValidator::is_forbidden_header(name) ||
-                        (name == "te" && !HeaderValidator::is_valid_request_te_value(value))) {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                              "Forbidden connection-specific header in request: " + name);
+                    if (HeaderValidator::is_forbidden_header(name) || (name == "te" && !HeaderValidator::is_valid_request_te_value(value))) {
+                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header in request: " + name);
                         return false;
                     }
                     if (name == "content-length") {
                         auto parsed = HeaderValidator::parse_content_length(value);
                         if (!parsed) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                  "Invalid content-length header in HTTP/2 request");
+                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid content-length header in HTTP/2 request");
                             return false;
                         }
                         if (stream.expected_content_length && *stream.expected_content_length != *parsed) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                  "Conflicting content-length headers in HTTP/2 request");
+                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Conflicting content-length headers in HTTP/2 request");
                             return false;
                         }
                         if (*parsed > qb::http::protocol_limits::MAX_BODY_SIZE) {
@@ -1535,20 +1551,22 @@ private:
             }
 
             if (!method_sv || !scheme_sv || !path_sv) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing mandatory pseudo-header (:method, :scheme, or :path)."); return false;
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing mandatory pseudo-header (:method, :scheme, or :path).");
+                return false;
             }
             if (path_sv.value().empty()) {
-                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty."); return false;
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty.");
+                return false;
             }
             if (!authority_sv || authority_sv.value().empty()) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                      "Missing or empty :authority pseudo-header.");
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing or empty :authority pseudo-header.");
                 return false;
             }
 
             qb::http::Method method_from_string_view(temp_method_str);
             if (method_from_string_view == qb::http::Method::Value::UNINITIALIZED) {
-                this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid :method value"); return false;
+                this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid :method value");
+                return false;
             }
             stream.assembled_request.method() = method_from_string_view;
 
@@ -1558,10 +1576,8 @@ private:
             stream.assembled_request.uri() = qb::io::uri::parse(uri_str);
 
             if (stream.end_stream_received) { // end_stream_received would have been set by on(HeadersFrame) if END_STREAM was on the header
-                if (stream.expected_content_length &&
-                    stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                          "HTTP/2 request content-length mismatch");
+                if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
+                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                     return false;
                 }
                 this->dispatch_complete_request(stream.id, stream);
@@ -1569,20 +1585,20 @@ private:
 
         } else { // Trailers block
             stream.trailers_received = true;
-            for (const auto& hf : stream.decoded_header_fields) {
-                const std::string& name = hf.name;
-                const std::string& value = hf.value;
+            for (const auto &hf : stream.decoded_header_fields) {
+                const std::string &name  = hf.name;
+                const std::string &value = hf.value;
                 if (name.empty() || name[0] == ':') {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid header field name in trailers (empty or pseudo-header)."); return false;
+                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                          "Invalid header field name in trailers (empty or pseudo-header).");
+                    return false;
                 }
                 if (!is_valid_header_field(name, value)) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                          "Invalid trailer header field name or value format.");
+                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid trailer header field name or value format.");
                     return false;
                 }
                 if (HeaderValidator::is_forbidden_trailer_header(name)) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                          "Forbidden header in trailers: " + name);
+                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + name);
                     return false;
                 }
                 stream.assembled_request.add_header(name, value); // Add to request trailers
@@ -1591,12 +1607,11 @@ private:
             // As per RFC 9113, a trailer section's final frame MUST contain END_STREAM.
             // stream.end_stream_received should have been set by the on(HeadersFrame/ContinuationFrame) that had END_HEADERS and END_STREAM.
             if (!stream.end_stream_received) {
-                this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Trailers HEADERS block did not end the stream."); return false;
+                this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Trailers HEADERS block did not end the stream.");
+                return false;
             }
-            if (stream.expected_content_length &&
-                stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                      "HTTP/2 request content-length mismatch");
+            if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                 return false;
             }
 
@@ -1604,7 +1619,7 @@ private:
             // these trailers are supplementary. The application might need a way to access them post-dispatch.
             // If not yet dispatched (e.g. END_STREAM came only with trailers), dispatch now.
             if (stream.request_dispatched == false && stream.end_stream_received) {
-                 this->dispatch_complete_request(stream.id, stream);
+                this->dispatch_complete_request(stream.id, stream);
             }
         }
         return true;
@@ -1620,56 +1635,58 @@ private:
      * @param http_response Response containing body data
      * @return true if body sent/buffered successfully, false on error
      */
-    bool send_response_body(Http2ServerStream& stream, const qb::http::Response& http_response) {
+    bool
+    send_response_body(Http2ServerStream &stream, const qb::http::Response &http_response) {
         // This function is called after initial HEADERS are sent.
         // stream.response_to_send should already be populated by the calling send_response function.
         // stream.send_buffer_offset should be 0 if this is the first attempt for this body.
         const uint32_t stream_id = stream.id;
 
-        const auto& body_pipe = http_response.body().raw(); // Use http_response passed in, which should be same as stream.response_to_send
-        std::size_t body_size = body_pipe.size();
-        const char* body_data_ptr = body_pipe.data();
+        const auto &body_pipe     = http_response.body().raw(); // Use http_response passed in, which should be same as stream.response_to_send
+        std::size_t body_size     = body_pipe.size();
+        const char *body_data_ptr = body_pipe.data();
 
         // send_buffer_offset tracks progress within stream.response_to_send.body(), which is http_response.body()
         // uint32_t sent_bytes_this_function_call = 0; // Tracks what this specific call achieves
 
         stream.is_trailers = http_response.has_header("Trailer"); // Or a more robust check for actual trailer fields intended
-                                                                // For now, presence of "Trailer" header implies intent.
+                                                                  // For now, presence of "Trailer" header implies intent.
 
         while (stream.send_buffer_offset < body_size) {
             if (stream.peer_window_size <= 0 || _connection_send_window <= 0) {
                 stream.has_pending_data_to_send = true; // Mark that body data remains unsent
-                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream.id << ": Send body blocked by flow control. Offset: " << stream.send_buffer_offset);
+                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream.id << ": Send body blocked by flow control. Offset: " <<
+                // stream.send_buffer_offset);
                 return true; // Successfully buffered/marked pending, not a protocol error
             }
 
-            uint32_t max_can_send_on_stream = static_cast<uint32_t>(std::min(this->FramerBase::get_peer_max_frame_size(), static_cast<uint32_t>(stream.peer_window_size)));
-            uint32_t max_can_send_on_conn = static_cast<uint32_t>(std::min(this->FramerBase::get_peer_max_frame_size(), static_cast<uint32_t>(_connection_send_window)));
-            uint32_t chunk_size = std::min({
-                static_cast<uint32_t>(body_size - stream.send_buffer_offset),
-                max_can_send_on_stream,
-                max_can_send_on_conn,
-                this->FramerBase::get_peer_max_frame_size()
-            });
+            uint32_t max_can_send_on_stream =
+                static_cast<uint32_t>(std::min(this->FramerBase::get_peer_max_frame_size(), static_cast<uint32_t>(stream.peer_window_size)));
+            uint32_t max_can_send_on_conn =
+                static_cast<uint32_t>(std::min(this->FramerBase::get_peer_max_frame_size(), static_cast<uint32_t>(_connection_send_window)));
+            uint32_t chunk_size = std::min(
+                {static_cast<uint32_t>(body_size - stream.send_buffer_offset), max_can_send_on_stream, max_can_send_on_conn,
+                 this->FramerBase::get_peer_max_frame_size()});
 
             if (chunk_size == 0 && (body_size - stream.send_buffer_offset) > 0) {
                 stream.has_pending_data_to_send = true;
-                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream.id << ": Send body blocked by zero chunk_size. Offset: " << stream.send_buffer_offset);
+                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream.id << ": Send body blocked by zero chunk_size. Offset: " <<
+                // stream.send_buffer_offset);
                 return true;
             }
-             if (chunk_size == 0 && body_size == 0 && stream.send_buffer_offset == 0) { // Empty body case
-                 break; // Nothing to send for body
+            if (chunk_size == 0 && body_size == 0 && stream.send_buffer_offset == 0) { // Empty body case
+                break;                                                                 // Nothing to send for body
             }
-             if (chunk_size == 0 && stream.send_buffer_offset == body_size) { // All body already processed
+            if (chunk_size == 0 && stream.send_buffer_offset == body_size) { // All body already processed
                 break;
             }
 
             Http2FrameData<DataFrame> data_frame_data;
             data_frame_data.payload.data_payload.assign(body_data_ptr + stream.send_buffer_offset,
-                                                      body_data_ptr + stream.send_buffer_offset + chunk_size);
+                                                        body_data_ptr + stream.send_buffer_offset + chunk_size);
 
             FrameHeader header_to_send;
-            header_to_send.type = static_cast<uint8_t>(FrameType::DATA);
+            header_to_send.type  = static_cast<uint8_t>(FrameType::DATA);
             header_to_send.flags = 0;
             header_to_send.set_stream_id(stream.id);
 
@@ -1680,38 +1697,39 @@ private:
             _connection_send_window -= chunk_size;
 
             if (stream.send_buffer_offset == body_size && !stream.is_trailers) {
-                 header_to_send.flags |= FLAG_END_STREAM;
-                 // stream.end_stream_sent will be set after successful send
+                header_to_send.flags |= FLAG_END_STREAM;
+                // stream.end_stream_sent will be set after successful send
             }
 
             data_frame_data.header = header_to_send;
             this->_io << data_frame_data;
 
             if (!this->ok()) {
-                // QB_LOG_ERROR_PA(this->getName(), "Server Stream " << stream.id << ": Send failed for DATA frame during send_response_body. Reverting offset.");
+                // QB_LOG_ERROR_PA(this->getName(), "Server Stream " << stream.id << ": Send failed for DATA frame during send_response_body.
+                // Reverting offset.");
                 stream.send_buffer_offset -= chunk_size; // Revert offset for this failed chunk
                 stream.peer_window_size += chunk_size;   // Revert window consumption
-                _connection_send_window += chunk_size; // Revert window consumption
-                stream.has_pending_data_to_send = true; // Mark as pending because send failed
-                return false; // Indicate send failure
+                _connection_send_window += chunk_size;   // Revert window consumption
+                stream.has_pending_data_to_send = true;  // Mark as pending because send failed
+                return false;                            // Indicate send failure
             }
 
             if (header_to_send.flags & FLAG_END_STREAM) {
-                 stream.end_stream_sent = true;
-                 stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
-                 // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream.id << ": END_STREAM sent with DATA in send_response_body.");
+                stream.end_stream_sent = true;
+                stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream.id << ": END_STREAM sent with DATA in send_response_body.");
             }
 
-            if(stream.end_stream_sent && !stream.is_trailers) {
+            if (stream.end_stream_sent && !stream.is_trailers) {
                 break; // All body sent, no trailers, we are done with body sending.
             }
         }
 
-        // After loop: if all body is sent (offset == size) and there are trailers, trailers will be handled by try_send_pending_data or a dedicated trailer send call.
-        // If not all body is sent, has_pending_data_to_send is already true.
+        // After loop: if all body is sent (offset == size) and there are trailers, trailers will be handled by try_send_pending_data or a
+        // dedicated trailer send call. If not all body is sent, has_pending_data_to_send is already true.
         if (stream.send_buffer_offset == body_size) {
             stream.has_pending_data_to_send = false; // All *body* data processed by this function or was empty.
-                                                 // If trailers are present, `is_trailers` will trigger next step.
+                                                     // If trailers are present, `is_trailers` will trigger next step.
         } else {
             stream.has_pending_data_to_send = true; // Still more body data to send later.
         }
@@ -1719,14 +1737,14 @@ private:
         // If trailers are expected and all body data has been sent by this function.
         // The actual sending of trailers is usually handled by try_send_pending_data_for_stream or a subsequent call.
         if (stream.send_buffer_offset == body_size && stream.is_trailers && !stream.end_stream_sent) {
-            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Body fully processed in send_response_body, trailers are pending.");
-            // At this point, try_send_pending_data_for_stream will pick up trailer sending.
+            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Body fully processed in send_response_body, trailers
+            // are pending."); At this point, try_send_pending_data_for_stream will pick up trailer sending.
             try_send_pending_data_for_stream(stream_id, stream);
             auto after_trailers = _server_streams.find(stream_id);
             if (after_trailers == _server_streams.end()) {
                 return true;
             }
-            Http2ServerStream& current_stream = after_trailers->second;
+            Http2ServerStream &current_stream = after_trailers->second;
             if (current_stream.end_stream_sent && current_stream.end_stream_received) {
                 current_stream.state = Http2StreamConcreteState::CLOSED;
             }
@@ -1749,8 +1767,8 @@ private:
      * @param stream_id Stream identifier
      * @param stream Stream context with assembled request
      */
-    void dispatch_complete_request(uint32_t stream_id, Http2ServerStream& stream) {
-
+    void
+    dispatch_complete_request(uint32_t stream_id, Http2ServerStream &stream) {
         if (stream.request_dispatched || stream.rst_stream_sent || stream.rst_stream_received) {
             LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Skipping request dispatch - already dispatched or stream reset");
             return;
@@ -1768,9 +1786,9 @@ private:
 
             // Ensure mandatory fields are present if not checked earlier during header processing
             if (stream.assembled_request.method() == qb::http::Method::Value::UNINITIALIZED || stream.assembled_request.uri().path().empty()) {
-                 LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Attempt to dispatch incomplete request (missing method/path)");
-                 this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Attempt to dispatch incomplete request (missing method/path)");
-                 return;
+                LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Attempt to dispatch incomplete request (missing method/path)");
+                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Attempt to dispatch incomplete request (missing method/path)");
+                return;
             }
             stream.assembled_request.major_version = 2;
             stream.assembled_request.minor_version = 0;
@@ -1786,19 +1804,17 @@ private:
             // Contain it: reset the offending stream and keep the connection.
             try {
                 this->_io.on(std::move(stream.assembled_request), stream_id); // Pass stream_id as context/correlation
-            } catch (const std::exception& e) {
+            } catch (const std::exception &e) {
                 LOG_HTTP_ERROR_PA(stream_id, "HTTP/2 request handler threw: " << e.what());
                 // Do NOT erase the stream context here: this runs deep inside
                 // on(HeadersFrame/DataFrame/ContinuationFrame), which still hold a
                 // reference to the stream. Mark it reset + send RST_STREAM; the
                 // caller's normal cleanup reclaims the context once it is done.
-                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR,
-                                      "Request handler threw an exception", /*close_context=*/false);
+                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Request handler threw an exception", /*close_context=*/false);
                 return;
             } catch (...) {
                 LOG_HTTP_ERROR_PA(stream_id, "HTTP/2 request handler threw an unknown exception");
-                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR,
-                                      "Request handler threw an exception", /*close_context=*/false);
+                this->send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Request handler threw an exception", /*close_context=*/false);
                 return;
             }
 
@@ -1827,18 +1843,19 @@ private:
      *
      * @param stream_id Stream identifier
      */
-    void try_close_stream_context(uint32_t stream_id) noexcept {
+    void
+    try_close_stream_context(uint32_t stream_id) noexcept {
         auto it = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
-            Http2ServerStream& stream = it->second;
+            Http2ServerStream &stream = it->second;
 
             bool can_cleanup = (stream.state == Http2StreamConcreteState::CLOSED) || stream.rst_stream_sent || stream.rst_stream_received;
 
             if (can_cleanup) {
                 LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Cleaning up stream context");
                 // If an error occurred that wasn't dispatched because request/response cycle was aborted by RST
-                if ((!stream.request_dispatched || !stream.end_stream_sent) &&
-                    (stream.rst_stream_sent || stream.rst_stream_received) && stream.error_code != ErrorCode::NO_ERROR) {
+                if ((!stream.request_dispatched || !stream.end_stream_sent) && (stream.rst_stream_sent || stream.rst_stream_received)
+                    && stream.error_code != ErrorCode::NO_ERROR) {
                     // Stream was reset before full lifecycle completion by app. Error already dispatched by RST handler.
                 }
                 _server_streams.erase(it);
@@ -1851,9 +1868,10 @@ private:
                         LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all relevant streams closed");
                         this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
                     }
-                } else if (_graceful_shutdown_initiated && _server_streams.empty() && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() == 0) {
-                    // We initiated GOAWAY (so last_peer_id_processed might be 0 from our side if we didn't process any from peer before deciding to goaway)
-                    // and all our streams are now gone.
+                } else if (_graceful_shutdown_initiated && _server_streams.empty()
+                           && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() == 0) {
+                    // We initiated GOAWAY (so last_peer_id_processed might be 0 from our side if we didn't process any from peer before
+                    // deciding to goaway) and all our streams are now gone.
                     _connection_active = false;
                     LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all streams closed");
                     // this->not_ok() was already called by send_goaway_and_close.
@@ -1875,8 +1893,8 @@ private:
      * @param error_code Error code for GOAWAY
      * @param debug_message Debug information
      */
-    void send_goaway_and_close(ErrorCode error_code, const std::string& debug_message) noexcept {
-
+    void
+    send_goaway_and_close(ErrorCode error_code, const std::string &debug_message) noexcept {
         if (!_connection_active) { // Removed .load(std::memory_order_relaxed)
             LOG_HTTP_DEBUG("ServerHttp2Protocol: Avoiding GOAWAY send - connection already inactive");
             return; // Avoid sending if already inactive.
@@ -1885,14 +1903,15 @@ private:
         LOG_HTTP_WARN("ServerHttp2Protocol: Sending GOAWAY frame. Error: " << static_cast<int>(error_code) << ", Message: " << debug_message);
 
         Http2FrameData<GoAwayFrame> goaway_frame_data;
-        goaway_frame_data.payload.last_stream_id = _last_client_initiated_stream_id; // Report last stream ID client successfully initiated with us
+        goaway_frame_data.payload.last_stream_id =
+            _last_client_initiated_stream_id; // Report last stream ID client successfully initiated with us
         goaway_frame_data.payload.error_code = error_code;
         if (!debug_message.empty()) {
             goaway_frame_data.payload.additional_debug_data.assign(debug_message.begin(), debug_message.end());
         }
 
         FrameHeader header;
-        header.type = static_cast<uint8_t>(FrameType::GOAWAY);
+        header.type  = static_cast<uint8_t>(FrameType::GOAWAY);
         header.flags = 0;
         header.set_stream_id(0); // GOAWAY is on stream 0
 
@@ -1900,7 +1919,7 @@ private:
         this->_io << goaway_frame_data;
 
         _graceful_shutdown_initiated = true;
-        _connection_active = false; // Connection is being shut down
+        _connection_active           = false; // Connection is being shut down
 
         // Notify IO_Handler about sending GOAWAY
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
@@ -1918,13 +1937,14 @@ private:
      * @param stream_id Stream ID (0 for connection-level)
      * @param increment Window size increment
      */
-    void send_window_update(uint32_t stream_id, uint32_t increment) noexcept {
+    void
+    send_window_update(uint32_t stream_id, uint32_t increment) noexcept {
         if (!this->ok() || increment == 0) {
             return;
         }
 
         Http2FrameData<WindowUpdateFrame> wu_frame_data;
-        wu_frame_data.header.type = static_cast<uint8_t>(FrameType::WINDOW_UPDATE);
+        wu_frame_data.header.type  = static_cast<uint8_t>(FrameType::WINDOW_UPDATE);
         wu_frame_data.header.flags = 0;
         wu_frame_data.header.set_stream_id(stream_id);
         wu_frame_data.payload.window_size_increment = increment;
@@ -1938,8 +1958,10 @@ private:
      * Sends WINDOW_UPDATE for the connection if the receive window
      * falls below the threshold.
      */
-    void conditionally_send_connection_window_update() noexcept {
-        const int64_t connection_window_update_thresh = static_cast<int64_t>(DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE) / CONNECTION_WINDOW_THRESHOLD_DIVISOR;
+    void
+    conditionally_send_connection_window_update() noexcept {
+        const int64_t connection_window_update_thresh =
+            static_cast<int64_t>(DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE) / CONNECTION_WINDOW_THRESHOLD_DIVISOR;
         int64_t current_conn_recv_window = this->_connection_receive_window;
 
         if (current_conn_recv_window < connection_window_update_thresh) {
@@ -1959,29 +1981,36 @@ private:
      *
      * @param new_size New initial window size
      */
-    void update_initial_peer_window_size(uint32_t new_size) noexcept {
+    void
+    update_initial_peer_window_size(uint32_t new_size) noexcept {
         // This `new_size` is client's SETTINGS_INITIAL_WINDOW_SIZE
         // It affects how much data *we* (server) can send on *new* streams initiated by client
         // or on PUSH_PROMISE streams we initiate.
-        int64_t delta = static_cast<int64_t>(new_size) - static_cast<int64_t>(_initial_peer_window_size);
+        int64_t delta             = static_cast<int64_t>(new_size) - static_cast<int64_t>(_initial_peer_window_size);
         _initial_peer_window_size = new_size;
 
-        for (auto& pair : _server_streams) {
-            Http2ServerStream& stream = pair.second;
-            // Affects streams where server is sending data: OPEN, HALF_CLOSED_LOCAL (server sending, client receiving), RESERVED_LOCAL (for PUSH)
-            if (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
+        for (auto &pair : _server_streams) {
+            Http2ServerStream &stream = pair.second;
+            // Affects streams where server is sending data: OPEN, HALF_CLOSED_LOCAL (server sending, client receiving), RESERVED_LOCAL (for
+            // PUSH)
+            if (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL
+                || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
                 int64_t old_stream_peer_window = stream.peer_window_size;
                 stream.peer_window_size += delta;
 
                 if (stream.peer_window_size > static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT)) {
-                     this->send_rst_stream(stream.id, ErrorCode::FLOW_CONTROL_ERROR, "Stream window overflow (server side) due to client SETTINGS_INITIAL_WINDOW_SIZE change");
-                     this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR, "Client SETTINGS_INITIAL_WINDOW_SIZE change caused stream window overflow (conn error)");
-                     return;
+                    this->send_rst_stream(stream.id, ErrorCode::FLOW_CONTROL_ERROR,
+                                          "Stream window overflow (server side) due to client SETTINGS_INITIAL_WINDOW_SIZE change");
+                    this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR,
+                                                "Client SETTINGS_INITIAL_WINDOW_SIZE change caused stream window overflow (conn error)");
+                    return;
                 }
                 if (stream.peer_window_size < 0) {
-                     this->send_rst_stream(stream.id, ErrorCode::FLOW_CONTROL_ERROR, "Stream window negative (server side) due to client SETTINGS_INITIAL_WINDOW_SIZE change");
-                     this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR, "Client SETTINGS_INITIAL_WINDOW_SIZE change caused negative stream window (conn error)");
-                     return;
+                    this->send_rst_stream(stream.id, ErrorCode::FLOW_CONTROL_ERROR,
+                                          "Stream window negative (server side) due to client SETTINGS_INITIAL_WINDOW_SIZE change");
+                    this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR,
+                                                "Client SETTINGS_INITIAL_WINDOW_SIZE change caused negative stream window (conn error)");
+                    return;
                 }
                 if (old_stream_peer_window <= 0 && stream.peer_window_size > 0 && stream.has_pending_data_to_send) {
                     this->try_send_pending_data_for_stream(stream.id, stream);
@@ -1995,21 +2024,22 @@ private:
      *
      * Attempts to resume sending for all streams with pending data.
      */
-    void try_send_pending_data_all_streams() noexcept {
-        if (!this->ok() || !_connection_active) return; // Removed .load(std::memory_order_relaxed)
-        for (auto& pair : _server_streams) {
-            Http2ServerStream& stream = pair.second;
-            if (stream.has_pending_data_to_send &&
-                (stream.state == Http2StreamConcreteState::OPEN ||
-                 stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE)) {
-                 // Reconstruct or retrieve pending qb::http::Response associated with stream.application_response_id
-                 // This is complex as the original Response object might be gone.
-                 // A robust pending data queue is needed, storing actual data segments.
-                 // For now, this is a placeholder for that logic.
-                 // Example: if (stream.application_response_id != 0) {
-                 //    qb::http::Response pending_response = get_pending_response_by_id(stream.application_response_id);
-                 //    send_response_body(stream, pending_response);
-                 // }
+    void
+    try_send_pending_data_all_streams() noexcept {
+        if (!this->ok() || !_connection_active)
+            return; // Removed .load(std::memory_order_relaxed)
+        for (auto &pair : _server_streams) {
+            Http2ServerStream &stream = pair.second;
+            if (stream.has_pending_data_to_send
+                && (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE)) {
+                // Reconstruct or retrieve pending qb::http::Response associated with stream.application_response_id
+                // This is complex as the original Response object might be gone.
+                // A robust pending data queue is needed, storing actual data segments.
+                // For now, this is a placeholder for that logic.
+                // Example: if (stream.application_response_id != 0) {
+                //    qb::http::Response pending_response = get_pending_response_by_id(stream.application_response_id);
+                //    send_response_body(stream, pending_response);
+                // }
             }
         }
     }
@@ -2023,16 +2053,17 @@ private:
      * @param stream_id_param Stream identifier
      * @param stream Stream context with pending data
      */
-    void try_send_pending_data_for_stream(uint32_t stream_id_param, Http2ServerStream& stream) noexcept {
-
+    void
+    try_send_pending_data_for_stream(uint32_t stream_id_param, Http2ServerStream &stream) noexcept {
         if (!this->ok() || !_connection_active) {
-            // QB_LOG_WARN_PA(this->getName(), "Server Stream " << stream_id_param << ": Connection not OK or inactive in try_send_pending_data.");
+            // QB_LOG_WARN_PA(this->getName(), "Server Stream " << stream_id_param << ": Connection not OK or inactive in
+            // try_send_pending_data.");
             return;
         }
 
-        if (stream.state != Http2StreamConcreteState::OPEN &&
-            stream.state != Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
-            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Attempt to send pending data but stream not in OPEN or HALF_CLOSED_LOCAL state. Current state: " << static_cast<int>(stream.state));
+        if (stream.state != Http2StreamConcreteState::OPEN && stream.state != Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
+            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Attempt to send pending data but stream not in OPEN or
+            // HALF_CLOSED_LOCAL state. Current state: " << static_cast<int>(stream.state));
             return;
         }
 
@@ -2040,40 +2071,41 @@ private:
 
         // Part 1: Try to send remaining body data if any
         if (stream.has_pending_data_to_send && !body_fully_sent_or_empty) {
-            const auto& body_pipe = stream.response_to_send.body().raw();
+            const auto &body_pipe       = stream.response_to_send.body().raw();
             std::size_t total_body_size = body_pipe.size();
-            const char* body_data_ptr = body_pipe.data();
+            const char *body_data_ptr   = body_pipe.data();
 
             while (stream.send_buffer_offset < total_body_size) {
                 if (stream.peer_window_size <= 0 || this->_connection_send_window <= 0) {
-                    // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Send pending body blocked by flow control. PeerWin: " << stream.peer_window_size << " ConnWin: " << this->_connection_send_window);
+                    // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Send pending body blocked by flow control.
+                    // PeerWin: " << stream.peer_window_size << " ConnWin: " << this->_connection_send_window);
                     stream.has_pending_data_to_send = true; // Ensure it's still marked
-                    return; // Blocked, will retry later
+                    return;                                 // Blocked, will retry later
                 }
 
-                uint32_t max_chunk_size = std::min({
-                    static_cast<uint32_t>(stream.peer_window_size),
-                    static_cast<uint32_t>(this->_connection_send_window),
-                    this->FramerBase::get_peer_max_frame_size()
-                });
+                uint32_t max_chunk_size = std::min(
+                    {static_cast<uint32_t>(stream.peer_window_size), static_cast<uint32_t>(this->_connection_send_window),
+                     this->FramerBase::get_peer_max_frame_size()});
                 if (max_chunk_size == 0) {
-                    // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Max chunk size is 0 for pending body, cannot send.");
+                    // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Max chunk size is 0 for pending body, cannot
+                    // send.");
                     stream.has_pending_data_to_send = true; // Still effectively blocked
                     return;
                 }
 
                 uint32_t remaining_body_to_send = static_cast<uint32_t>(total_body_size - stream.send_buffer_offset);
-                uint32_t current_chunk_size = std::min(remaining_body_to_send, max_chunk_size);
+                uint32_t current_chunk_size     = std::min(remaining_body_to_send, max_chunk_size);
 
                 if (current_chunk_size == 0 && remaining_body_to_send > 0) { // Should not happen if max_chunk_size > 0
                     stream.has_pending_data_to_send = true;
                     return;
                 }
-                if (current_chunk_size == 0 && remaining_body_to_send == 0) break; // All body sent
+                if (current_chunk_size == 0 && remaining_body_to_send == 0)
+                    break; // All body sent
 
                 // START PADDING LOGIC MODIFICATION FOR SERVER DATA FRAMES
-                uint8_t pad_length_s = 0;
-                bool add_padding_s = false; // Use the debug flag
+                uint8_t pad_length_s  = 0;
+                bool    add_padding_s = false; // Use the debug flag
 
                 if (add_padding_s && current_chunk_size > 0) {
                     uint32_t max_payload_without_pad_field_s = this->FramerBase::get_peer_max_frame_size() - 1;
@@ -2081,9 +2113,9 @@ private:
                         add_padding_s = false;
                     } else {
                         uint32_t available_for_padding_s = max_payload_without_pad_field_s - current_chunk_size;
-                        pad_length_s = static_cast<uint8_t>(std::min((uint32_t)15, available_for_padding_s));
+                        pad_length_s                     = static_cast<uint8_t>(std::min((uint32_t) 15, available_for_padding_s));
                         if (current_chunk_size + pad_length_s > max_payload_without_pad_field_s) {
-                             pad_length_s = static_cast<uint8_t>(max_payload_without_pad_field_s - current_chunk_size);
+                            pad_length_s = static_cast<uint8_t>(max_payload_without_pad_field_s - current_chunk_size);
                         }
                     }
                 } else {
@@ -2091,7 +2123,7 @@ private:
                 }
 
                 Http2FrameData<DataFrame> data_frame_event;
-                data_frame_event.header.type = static_cast<uint8_t>(FrameType::DATA);
+                data_frame_event.header.type  = static_cast<uint8_t>(FrameType::DATA);
                 data_frame_event.header.flags = 0; // No PADDED flag by default
                 data_frame_event.header.set_stream_id(stream_id_param);
 
@@ -2121,8 +2153,8 @@ private:
                 // REVERTED PADDING LOGIC (flow control decrement)
 
                 if (data_frame_event.header.flags & FLAG_END_STREAM) {
-                    stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
-                    stream.end_stream_sent = true;
+                    stream.state                    = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+                    stream.end_stream_sent          = true;
                     stream.has_pending_data_to_send = false;
                     break;
                 }
@@ -2138,19 +2170,20 @@ private:
             // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": All body sent, proceeding to send trailers.");
 
             std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers;
-            const qb::http::Response& original_response = stream.response_to_send;
+            const qb::http::Response                     &original_response = stream.response_to_send;
 
-            for (const auto& header_item : original_response.headers()) {
-                if (stream.headers_sent_in_initial_frame.count(header_item.first)) continue;
+            for (const auto &header_item : original_response.headers()) {
+                if (stream.headers_sent_in_initial_frame.count(header_item.first))
+                    continue;
                 std::string name_lower = header_item.first;
                 std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
 
                 // Standard pseudo-headers and connection-specific headers are forbidden in trailers
-                if (header_item.first.empty() || header_item.first[0] == ':' ||
-                    HeaderValidator::is_forbidden_trailer_header(name_lower)) { // The "Trailer" header itself shouldn't be a trailer
+                if (header_item.first.empty() || header_item.first[0] == ':'
+                    || HeaderValidator::is_forbidden_trailer_header(name_lower)) { // The "Trailer" header itself shouldn't be a trailer
                     continue;
                 }
-                for (const auto& value : header_item.second) {
+                for (const auto &value : header_item.second) {
                     if (!HeaderValidator::is_valid_header_field(header_item.first, value)) {
                         continue;
                     }
@@ -2159,12 +2192,13 @@ private:
             }
 
             Http2FrameData<HeadersFrame> trailers_frame_event;
-            trailers_frame_event.header.type = static_cast<uint8_t>(FrameType::HEADERS);
+            trailers_frame_event.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
             trailers_frame_event.header.flags = FLAG_END_HEADERS | FLAG_END_STREAM; // Trailers always end the stream
             trailers_frame_event.header.set_stream_id(stream_id_param);
 
             if (!hf_vector_trailers.empty()) {
-                // QB_LOG_TRACE_PA(this->getName(), "Server Stream " << stream_id_param << ": Encoding " << hf_vector_trailers.size() << " trailer fields.");
+                // QB_LOG_TRACE_PA(this->getName(), "Server Stream " << stream_id_param << ": Encoding " << hf_vector_trailers.size() << "
+                // trailer fields.");
                 if (_hpack_encoder.encode(hf_vector_trailers, trailers_frame_event.payload.header_block_fragment)) {
                     // Successfully encoded trailers
                 } else {
@@ -2173,15 +2207,15 @@ private:
                     return; // Stop processing for this stream
                 }
             } else {
-                 // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": No actual trailer fields to send, sending empty HEADERS with END_STREAM for trailers.");
-                 // Payload remains empty for empty trailers frame
+                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": No actual trailer fields to send, sending empty
+                // HEADERS with END_STREAM for trailers."); Payload remains empty for empty trailers frame
             }
 
             this->_io << trailers_frame_event;
             if (this->ok()) {
-                stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+                stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
                 stream.end_stream_sent = true;
-                stream.is_trailers = false; // Trailers have been handled
+                stream.is_trailers     = false; // Trailers have been handled
                 // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Trailers sent with END_STREAM.");
             } else {
                 // QB_LOG_ERROR_PA(this->getName(), "Server Stream " << stream_id_param << ": Send failed for trailers frame.");
@@ -2193,10 +2227,11 @@ private:
 
         // Final check for stream closure
         if (stream.end_stream_sent) {
-            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": END_STREAM is sent. Current state: " << static_cast<int>(stream.state) << ", end_stream_received: " << stream.end_stream_received);
+            // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": END_STREAM is sent. Current state: " <<
+            // static_cast<int>(stream.state) << ", end_stream_received: " << stream.end_stream_received);
             if (stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL && stream.end_stream_received) {
-                 stream.state = Http2StreamConcreteState::CLOSED;
-                 // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": State changed to CLOSED.");
+                stream.state = Http2StreamConcreteState::CLOSED;
+                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": State changed to CLOSED.");
             }
             try_close_stream_context(stream_id_param);
         }
@@ -2211,7 +2246,8 @@ private:
      * @param message Error description
      * @param stream_id_context Stream ID if error is stream-specific, 0 for connection errors
      */
-    void handle_framer_detected_error(ErrorCode reason, const std::string& message, uint32_t stream_id_context) noexcept {
+    void
+    handle_framer_detected_error(ErrorCode reason, const std::string &message, uint32_t stream_id_context) noexcept {
         if (stream_id_context != 0) {
             // Error is specific to a stream - send RST_STREAM
             this->send_rst_stream(stream_id_context, reason, message);
@@ -2221,7 +2257,7 @@ private:
         }
     }
 
-        /**
+    /**
      * @brief Handle stream-level error
      *
      * Override from base class to handle stream errors properly
@@ -2230,8 +2266,10 @@ private:
      * @param error_code Error code
      * @param debug_message Error description
      */
-    void on_stream_error(uint32_t stream_id, ErrorCode error_code, const std::string& debug_message) noexcept {
-        LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Stream error detected - " << debug_message << " (code: " << static_cast<int>(error_code) << ")");
+    void
+    on_stream_error(uint32_t stream_id, ErrorCode error_code, const std::string &debug_message) noexcept {
+        LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Stream error detected - " << debug_message
+                                                                                     << " (code: " << static_cast<int>(error_code) << ")");
         // Send RST_STREAM for the specific stream
         this->send_rst_stream(stream_id, error_code, debug_message);
     }
@@ -2244,8 +2282,10 @@ private:
      * @param error_code Error code
      * @param debug_message Error description
      */
-    void on_connection_error(ErrorCode error_code, const std::string& debug_message) noexcept {
-        LOG_HTTP_ERROR("ServerHttp2Protocol: Connection error detected - " << debug_message << " (code: " << static_cast<int>(error_code) << ")");
+    void
+    on_connection_error(ErrorCode error_code, const std::string &debug_message) noexcept {
+        LOG_HTTP_ERROR("ServerHttp2Protocol: Connection error detected - " << debug_message << " (code: " << static_cast<int>(error_code)
+                                                                           << ")");
         // Send GOAWAY and close the connection
         this->send_goaway_and_close(error_code, debug_message);
     }
@@ -2258,17 +2298,18 @@ private:
      * @param last_known_stream_id Last stream ID from GOAWAY
      * @return true if all relevant streams are closed
      */
-    [[nodiscard]] bool are_all_relevant_streams_closed(uint32_t last_known_stream_id) const noexcept {
+    [[nodiscard]] bool
+    are_all_relevant_streams_closed(uint32_t last_known_stream_id) const noexcept {
         // Specific implementation for server-side graceful shutdown.
         // Checks if all streams up to and including last_known_stream_id that were
         // initiated by the peer (client) are in a closed state.
         if (_graceful_shutdown_initiated) {
-            for (const auto& pair : _server_streams) {
-                const Http2ServerStream& stream = pair.second;
+            for (const auto &pair : _server_streams) {
+                const Http2ServerStream &stream = pair.second;
                 // Check client-initiated streams (odd IDs) up to the last ID client acknowledged processing.
                 if (stream.id % 2 != 0 && stream.id <= last_known_stream_id) {
-                    if (stream.state != Http2StreamConcreteState::CLOSED &&
-                        stream.state != Http2StreamConcreteState::IDLE && // IDLE might be considered effectively closed for new work
+                    if (stream.state != Http2StreamConcreteState::CLOSED && stream.state != Http2StreamConcreteState::IDLE
+                        && // IDLE might be considered effectively closed for new work
                         !stream.rst_stream_sent && !stream.rst_stream_received) {
                         return false; // Found an active client-initiated stream that should be closed.
                     }
@@ -2279,8 +2320,6 @@ private:
         return false; // Not in graceful shutdown or no streams to check in that context
     }
 
-
-
     /**
      * @brief Get existing stream or create new stream context
      *
@@ -2288,7 +2327,8 @@ private:
      * @param is_client_initiated Whether stream was initiated by client (unused, inferred from ID)
      * @return Reference to stream context
      */
-    Http2ServerStream& get_or_create_stream_context(uint32_t stream_id, bool /*is_client_initiated -- inferred from stream_id */) {
+    Http2ServerStream &
+    get_or_create_stream_context(uint32_t stream_id, bool /*is_client_initiated -- inferred from stream_id */) {
         auto it = _server_streams.find(stream_id);
         if (it == _server_streams.end()) {
             // Create new stream context
@@ -2298,7 +2338,7 @@ private:
             // new_stream.is_client_initiated = client_init; // is_client_initiated is not a member of Http2ServerStream
             // The count of active client streams is handled elsewhere, e.g. on HEADERS receipt.
             auto result = _server_streams.emplace(stream_id, std::move(new_stream));
-            it = result.first;
+            it          = result.first;
         }
         return it->second;
     }
@@ -2307,7 +2347,8 @@ private:
      * @brief Get reference to I/O handler (application layer).
      * @return Reference to I/O handler.
      */
-    [[nodiscard]] IO_Handler& get_io_handler() noexcept {
+    [[nodiscard]] IO_Handler &
+    get_io_handler() noexcept {
         return this->_io;
     }
 
@@ -2315,7 +2356,8 @@ private:
      * @brief Get reference to I/O handler (application layer), const version.
      * @return Const reference to I/O handler.
      */
-    [[nodiscard]] const IO_Handler& get_io_handler() const noexcept {
+    [[nodiscard]] const IO_Handler &
+    get_io_handler() const noexcept {
         return this->_io;
     }
 
@@ -2325,13 +2367,12 @@ private:
      *                               If false, counts odd-numbered (client-initiated) request streams.
      * @return Number of active streams matching the criteria.
      */
-    [[nodiscard]] uint32_t get_active_stream_count(bool server_initiated_check) const noexcept {
+    [[nodiscard]] uint32_t
+    get_active_stream_count(bool server_initiated_check) const noexcept {
         uint32_t count = 0;
-        for (const auto& [stream_id, stream_obj] : _server_streams) {
-            if (stream_obj.state != Http2StreamConcreteState::IDLE &&
-                stream_obj.state != Http2StreamConcreteState::CLOSED &&
-                !stream_obj.rst_stream_sent &&
-                !stream_obj.rst_stream_received) {
+        for (const auto &[stream_id, stream_obj] : _server_streams) {
+            if (stream_obj.state != Http2StreamConcreteState::IDLE && stream_obj.state != Http2StreamConcreteState::CLOSED
+                && !stream_obj.rst_stream_sent && !stream_obj.rst_stream_received) {
                 if (server_initiated_check) { // Count server-initiated/pushed (even) streams
                     if (stream_id % 2 == 0) {
                         count++;

@@ -11,7 +11,7 @@
  * Oversized serialization fails with std::length_error and clears the output pipe.
  *
  * qb - C++ Actor Framework
- * Copyright (C) 2011-2025 isndev (www.qbaf.io). All rights reserved.
+ * Copyright (C) 2011-2026 isndev (www.qbaf.io). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,10 +27,10 @@
  */
 
 #include <gtest/gtest.h>
-#include "../http.h"
-#include "../1.1/protocol/base.h"
 #include <qb/system/allocator/pipe.h>
 #include <stdexcept>
+#include "../1.1/protocol/base.h"
+#include "../http.h"
 
 using namespace qb::http;
 
@@ -42,7 +42,8 @@ class RequestDoSProtectionTest : public ::testing::Test {
 protected:
     qb::allocator::pipe<char> pipe;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         pipe.clear();
     }
 };
@@ -51,8 +52,8 @@ TEST_F(RequestDoSProtectionTest, NormalURLRequestSucceeds) {
     // Create a normal-sized request
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/api/users?page=1&limit=10");
-    req.body() = R"({"filter": "active"})";
+    req.uri()    = qb::io::uri("/api/users?page=1&limit=10");
+    req.body()   = R"({"filter": "active"})";
 
     // Serialization should succeed
     pipe.put(req);
@@ -68,7 +69,7 @@ TEST_F(RequestDoSProtectionTest, URLAtLimitSucceeds) {
 
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri(long_path);
+    req.uri()    = qb::io::uri(long_path);
 
     // Should succeed at exactly the limit
     pipe.put(req);
@@ -103,7 +104,7 @@ TEST_F(RequestDoSProtectionTest, QueryStringExceedingLimitIsRejected) {
 
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/search?" + oversized_query);
+    req.uri()    = qb::io::uri("/search?" + oversized_query);
 
     EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
@@ -115,8 +116,8 @@ TEST_F(RequestDoSProtectionTest, NormalBodySucceeds) {
 
     Request req;
     req.method() = method::POST;
-    req.uri() = qb::io::uri("/upload");
-    req.body() = body_data;
+    req.uri()    = qb::io::uri("/upload");
+    req.body()   = body_data;
 
     pipe.put(req);
     EXPECT_GT(pipe.size(), 0);
@@ -132,8 +133,8 @@ TEST_F(RequestDoSProtectionTest, BodyAtLimitSucceeds) {
 
     Request req;
     req.method() = method::POST;
-    req.uri() = qb::io::uri("/upload");
-    req.body() = body_data;
+    req.uri()    = qb::io::uri("/upload");
+    req.body()   = body_data;
 
     // Should succeed for test size (which is below 100MB limit)
     if (test_size <= protocol_limits::MAX_BODY_SIZE) {
@@ -147,7 +148,7 @@ TEST_F(RequestDoSProtectionTest, BodyExceedingLimitIsRejected) {
     // For testing, we simulate by checking the limit directly
     Request req;
     req.method() = method::POST;
-    req.uri() = qb::io::uri("/upload");
+    req.uri()    = qb::io::uri("/upload");
 
     // Simulate oversized body by checking behavior
     // In reality, creating >100MB string in test is resource-intensive
@@ -158,7 +159,7 @@ TEST_F(RequestDoSProtectionTest, BodyExceedingLimitIsRejected) {
 TEST_F(RequestDoSProtectionTest, NormalHeadersSucceed) {
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/api/data");
+    req.uri()    = qb::io::uri("/api/data");
 
     // Add normal-sized headers
     req.set_header("Content-Type", "application/json");
@@ -173,7 +174,7 @@ TEST_F(RequestDoSProtectionTest, RequestWithMultipleHeadersSucceeds) {
     // Test that requests with multiple normal-sized headers work correctly
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/api/data");
+    req.uri()    = qb::io::uri("/api/data");
 
     req.set_header("Content-Type", "application/json");
     req.set_header("Authorization", "Bearer token123");
@@ -189,7 +190,7 @@ TEST_F(RequestDoSProtectionTest, RequestWithLongButValidHeaders) {
     // Test that requests with headers approaching but under the limit work
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/api/data");
+    req.uri()    = qb::io::uri("/api/data");
 
     // Header name that is long but under 1KB limit
     std::string long_name(900, 'H');
@@ -208,7 +209,7 @@ TEST_F(RequestDoSProtectionTest, RequestWithLongButValidHeaders) {
 TEST_F(RequestDoSProtectionTest, OversizedHeaderNameIsRejected) {
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/api/data");
+    req.uri()    = qb::io::uri("/api/data");
 
     std::string long_name(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H');
     req.set_header(long_name, "value1");
@@ -220,7 +221,7 @@ TEST_F(RequestDoSProtectionTest, OversizedHeaderNameIsRejected) {
 TEST_F(RequestDoSProtectionTest, OversizedHeaderValueIsRejected) {
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/api/data");
+    req.uri()    = qb::io::uri("/api/data");
 
     std::string long_value(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');
     req.set_header("X-Data", long_value);
@@ -232,7 +233,7 @@ TEST_F(RequestDoSProtectionTest, OversizedHeaderValueIsRejected) {
 TEST_F(RequestDoSProtectionTest, HeaderNameInjectionIsRejected) {
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/test");
+    req.uri()    = qb::io::uri("/test");
     req.set_header("X-Test\r\nInjected", "value");
 
     EXPECT_THROW(pipe.put(req), std::length_error);
@@ -242,7 +243,7 @@ TEST_F(RequestDoSProtectionTest, HeaderNameInjectionIsRejected) {
 TEST_F(RequestDoSProtectionTest, HeaderValueInjectionIsRejected) {
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/test");
+    req.uri()    = qb::io::uri("/test");
     req.set_header("X-Test", "safe\r\nInjected: bad");
 
     EXPECT_THROW(pipe.put(req), std::length_error);
@@ -252,17 +253,15 @@ TEST_F(RequestDoSProtectionTest, HeaderValueInjectionIsRejected) {
 TEST_F(RequestDoSProtectionTest, RejectedSerializationClearsExistingBufferContent) {
     Request ok_req;
     ok_req.method() = method::GET;
-    ok_req.uri() = qb::io::uri("/ok");
+    ok_req.uri()    = qb::io::uri("/ok");
     ok_req.set_header("X-Test", "ok");
     pipe.put(ok_req);
     ASSERT_GT(pipe.size(), 0);
 
     Request bad_req;
     bad_req.method() = method::GET;
-    bad_req.uri() = qb::io::uri("/bad");
-    bad_req.set_header(
-        std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'),
-        "value");
+    bad_req.uri()    = qb::io::uri("/bad");
+    bad_req.set_header(std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'), "value");
 
     EXPECT_THROW(pipe.put(bad_req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
@@ -271,14 +270,14 @@ TEST_F(RequestDoSProtectionTest, RejectedSerializationClearsExistingBufferConten
 TEST_F(RequestDoSProtectionTest, FramingErrorClearsExistingBufferBeforeWriting) {
     Request ok_req;
     ok_req.method() = method::GET;
-    ok_req.uri() = qb::io::uri("/ok");
+    ok_req.uri()    = qb::io::uri("/ok");
     pipe.put(ok_req);
     ASSERT_GT(pipe.size(), 0);
 
     Request bad_req;
     bad_req.method() = method::POST;
-    bad_req.uri() = qb::io::uri("/bad");
-    bad_req.body() = "payload";
+    bad_req.uri()    = qb::io::uri("/bad");
+    bad_req.body()   = "payload";
     bad_req.set_header("Content-Length", "1");
 
     EXPECT_THROW(pipe.put(bad_req), std::length_error);
@@ -291,7 +290,7 @@ TEST_F(RequestDoSProtectionTest, FragmentIsNotSerializedIntoHttpRequestTarget) {
 
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/page#" + oversized_fragment);
+    req.uri()    = qb::io::uri("/page#" + oversized_fragment);
 
     ASSERT_NO_THROW(pipe.put(req));
     const std::string raw_request = pipe.str();
@@ -307,7 +306,8 @@ class ResponseDoSProtectionTest : public ::testing::Test {
 protected:
     qb::allocator::pipe<char> pipe;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         pipe.clear();
     }
 };
@@ -315,7 +315,7 @@ protected:
 TEST_F(ResponseDoSProtectionTest, NormalResponseSucceeds) {
     Response resp;
     resp.status() = status::OK;
-    resp.body() = R"({"status": "success"})";
+    resp.body()   = R"({"status": "success"})";
     resp.set_header("Content-Type", "application/json");
 
     pipe.put(resp);
@@ -328,7 +328,7 @@ TEST_F(ResponseDoSProtectionTest, NormalBodySizeSucceeds) {
 
     Response resp;
     resp.status() = status::OK;
-    resp.body() = body_data;
+    resp.body()   = body_data;
 
     pipe.put(resp);
     EXPECT_GT(pipe.size(), 0);
@@ -447,9 +447,7 @@ TEST_F(ResponseDoSProtectionTest, RejectedSerializationClearsExistingBufferConte
 
     Response bad_resp;
     bad_resp.status() = status::OK;
-    bad_resp.set_header(
-        std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'),
-        "value");
+    bad_resp.set_header(std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'), "value");
 
     EXPECT_THROW(pipe.put(bad_resp), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
@@ -458,13 +456,13 @@ TEST_F(ResponseDoSProtectionTest, RejectedSerializationClearsExistingBufferConte
 TEST_F(ResponseDoSProtectionTest, FramingErrorClearsExistingBufferBeforeWriting) {
     Response ok_resp;
     ok_resp.status() = status::OK;
-    ok_resp.body() = "ok";
+    ok_resp.body()   = "ok";
     pipe.put(ok_resp);
     ASSERT_GT(pipe.size(), 0);
 
     Response bad_resp;
     bad_resp.status() = status::OK;
-    bad_resp.body() = "payload";
+    bad_resp.body()   = "payload";
     bad_resp.set_header("Content-Length", "1");
 
     EXPECT_THROW(pipe.put(bad_resp), std::length_error);
@@ -509,34 +507,28 @@ class IncomingParserLimitsTest : public ::testing::Test {};
 
 TEST_F(IncomingParserLimitsTest, OversizedUrlIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw = "GET /" + std::string(protocol_limits::MAX_URL_LENGTH + 1, 'x') + " HTTP/1.1\r\n\r\n";
+    std::string               raw = "GET /" + std::string(protocol_limits::MAX_URL_LENGTH + 1, 'x') + " HTTP/1.1\r\n\r\n";
 
     EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderNameIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw =
-        "GET / HTTP/1.1\r\n" +
-        std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') +
-        ": value\r\n\r\n";
+    std::string               raw = "GET / HTTP/1.1\r\n" + std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') + ": value\r\n\r\n";
 
     EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderValueIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw =
-        "GET / HTTP/1.1\r\nX-Test: " +
-        std::string(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V') +
-        "\r\n\r\n";
+    std::string               raw = "GET / HTTP/1.1\r\nX-Test: " + std::string(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V') + "\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
 }
 
 TEST_F(IncomingParserLimitsTest, TooManyHeadersAreRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw = "GET / HTTP/1.1\r\n";
+    std::string               raw = "GET / HTTP/1.1\r\n";
     for (std::size_t i = 0; i < protocol_limits::MAX_HEADERS_COUNT + 1; ++i) {
         raw += "X-Test-" + std::to_string(i) + ": value\r\n";
     }
@@ -547,17 +539,14 @@ TEST_F(IncomingParserLimitsTest, TooManyHeadersAreRejectedWhileParsing) {
 
 TEST_F(IncomingParserLimitsTest, OversizedContentLengthIsRejectedBeforeBodyAllocation) {
     qb::http::Parser<Request> parser;
-    std::string raw =
-        "POST /upload HTTP/1.1\r\nContent-Length: " +
-        std::to_string(protocol_limits::MAX_BODY_SIZE + 1) +
-        "\r\n\r\n";
+    std::string raw = "POST /upload HTTP/1.1\r\nContent-Length: " + std::to_string(protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\n";
 
     EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
 }
 
 TEST_F(IncomingParserLimitsTest, HeaderOnlyRequestNormalizesUnknownLengthToZero) {
     qb::http::Parser<Request> parser;
-    std::string raw = "GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    std::string               raw = "GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n";
 
     // Parser pauses at end-of-headers in this implementation.
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
@@ -567,7 +556,7 @@ TEST_F(IncomingParserLimitsTest, HeaderOnlyRequestNormalizesUnknownLengthToZero)
 
 TEST_F(IncomingParserLimitsTest, ChunkedTransferEncodingIsAcceptedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    std::string               raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
     EXPECT_TRUE(parser.headers_completed());
@@ -575,7 +564,7 @@ TEST_F(IncomingParserLimitsTest, ChunkedTransferEncodingIsAcceptedWhileParsing) 
 
 TEST_F(IncomingParserLimitsTest, UnsupportedTransferEncodingIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+    std::string               raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
 
     const auto err = parser.parse(raw.data(), raw.size());
     EXPECT_NE(err, HPE_OK);
@@ -584,19 +573,17 @@ TEST_F(IncomingParserLimitsTest, UnsupportedTransferEncodingIsRejectedWhileParsi
 
 TEST_F(IncomingParserLimitsTest, TransferEncodingWithContentLengthIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw =
-        "POST /upload HTTP/1.1\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "Content-Length: 3\r\n\r\n";
+    std::string               raw = "POST /upload HTTP/1.1\r\n"
+                                    "Transfer-Encoding: chunked\r\n"
+                                    "Content-Length: 3\r\n\r\n";
 
     EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
 }
 
 TEST_F(IncomingParserLimitsTest, NoBodyResponseStatusIgnoresDeclaredContentLength) {
     qb::http::Parser<Response> parser;
-    std::string raw =
-        "HTTP/1.1 304 Not Modified\r\n"
-        "Content-Length: 4\r\n\r\n";
+    std::string                raw = "HTTP/1.1 304 Not Modified\r\n"
+                                     "Content-Length: 4\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
     EXPECT_TRUE(parser.headers_completed());
@@ -605,9 +592,8 @@ TEST_F(IncomingParserLimitsTest, NoBodyResponseStatusIgnoresDeclaredContentLengt
 
 TEST_F(IncomingParserLimitsTest, NoContentResponseIgnoresDeclaredContentLength) {
     qb::http::Parser<Response> parser;
-    std::string raw =
-        "HTTP/1.1 204 No Content\r\n"
-        "Content-Length: 4\r\n\r\n";
+    std::string                raw = "HTTP/1.1 204 No Content\r\n"
+                                     "Content-Length: 4\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
     EXPECT_TRUE(parser.headers_completed());
@@ -635,7 +621,7 @@ TEST_F(IncomingParserLimitsTest, FragmentedHeaderFieldAndValueAreReassembledCorr
 
 TEST_F(IncomingParserLimitsTest, IncrementalParsingDoesNotOvercountFragmentedHeaderFields) {
     qb::http::Parser<Request> parser;
-    std::string raw = "GET / HTTP/1.1\r\n";
+    std::string               raw = "GET / HTTP/1.1\r\n";
     for (std::size_t i = 0; i < protocol_limits::MAX_HEADERS_COUNT; ++i) {
         raw += "X-H-" + std::to_string(i) + ": v\r\n";
     }
@@ -685,7 +671,8 @@ class DoSEdgeCasesTest : public ::testing::Test {
 protected:
     qb::allocator::pipe<char> pipe;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         pipe.clear();
     }
 };
@@ -693,7 +680,7 @@ protected:
 TEST_F(DoSEdgeCasesTest, EmptyRequestSucceeds) {
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/");
+    req.uri()    = qb::io::uri("/");
 
     pipe.put(req);
     EXPECT_GT(pipe.size(), 0);
@@ -710,7 +697,7 @@ TEST_F(DoSEdgeCasesTest, EmptyResponseSucceeds) {
 TEST_F(DoSEdgeCasesTest, RequestWithOnlyHeadersSucceeds) {
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri("/api");
+    req.uri()    = qb::io::uri("/api");
     req.set_header("Accept", "application/json");
     req.set_header("Accept-Language", "en-US");
 
@@ -735,7 +722,7 @@ TEST_F(DoSEdgeCasesTest, URLBoundaryAt8192Characters) {
 
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri(path);
+    req.uri()    = qb::io::uri(path);
 
     pipe.put(req);
     EXPECT_GT(pipe.size(), 0);
@@ -748,13 +735,14 @@ TEST_F(DoSEdgeCasesTest, URLJustOverBoundaryIsRejected) {
 
     Request req;
     req.method() = method::GET;
-    req.uri() = qb::io::uri(path);
+    req.uri()    = qb::io::uri(path);
 
     EXPECT_THROW(pipe.put(req), std::length_error);
     EXPECT_EQ(pipe.size(), 0);
 }
 
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

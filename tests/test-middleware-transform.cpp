@@ -3,38 +3,43 @@
 #include "../middleware/transform.h" // The adapted TransformMiddleware
 #include "../routing/middleware.h"   // For MiddlewareTask if needed
 
+#include <functional>
+#include <iostream> // Ensure iostream is included for std::cerr
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <functional>
-#include <sstream>
-#include <iostream> // Ensure iostream is included for std::cerr
 
 // --- Mock Session for TransformMiddleware Tests ---
 struct MockTransformSession {
     qb::http::Response _response;
-    std::string _session_id_str = "transform_test_session";
+    std::string        _session_id_str = "transform_test_session";
     // Store modified request/response parts for verification if needed
     std::string _request_body_at_handler;
     // qb::http::headers_map _request_headers_at_handler; // Removed
-    std::string _xtransformed_header_value; // For RequestTransformation test
-    bool _xbody_cleared_header_present; // For RequestBodyClearedByTransformer test
-    std::string _xbody_cleared_header_value; // For RequestBodyClearedByTransformer test
+    std::string _xtransformed_header_value;    // For RequestTransformation test
+    bool        _xbody_cleared_header_present; // For RequestBodyClearedByTransformer test
+    std::string _xbody_cleared_header_value;   // For RequestBodyClearedByTransformer test
     // For RequestContentTypeTransform, we already check body. Content-Type header itself:
-    std::string _content_type_header_at_handler;
+    std::string      _content_type_header_at_handler;
     qb::http::method _method_at_handler; // Added for method change test
 
     std::string _response_body_before_transform_hook;
-    bool _final_handler_called = false;
+    bool        _final_handler_called = false;
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MockTransformSession &operator<<(const qb::http::Response &resp) {
+    MockTransformSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 
-    void reset() {
+    void
+    reset() {
         _response = qb::http::Response();
         _request_body_at_handler.clear();
         // _request_headers_at_handler.clear(); // Removed
@@ -48,21 +53,21 @@ struct MockTransformSession {
     }
 };
 
-// --- Test Fixture for TransformMiddleware --- 
+// --- Test Fixture for TransformMiddleware ---
 class TransformMiddlewareTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockTransformSession> _session;
-    std::unique_ptr<qb::http::Router<MockTransformSession> > _router;
+    std::shared_ptr<MockTransformSession>                   _session;
+    std::unique_ptr<qb::http::Router<MockTransformSession>> _router;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         _session = std::make_shared<MockTransformSession>();
-        _router = std::make_unique<qb::http::Router<MockTransformSession> >();
+        _router  = std::make_unique<qb::http::Router<MockTransformSession>>();
     }
 
-    qb::http::Request create_request(
-        const std::string &target_path = "/transform_route",
-        const std::string &body = "",
-        qb::http::method http_method = qb::http::method::POST // Default to POST
+    qb::http::Request
+    create_request(const std::string &target_path = "/transform_route", const std::string &body = "",
+                   qb::http::method http_method = qb::http::method::POST // Default to POST
     ) {
         qb::http::Request req;
         req.method() = http_method;
@@ -79,12 +84,13 @@ protected:
         return req;
     }
 
-    qb::http::RouteHandlerFn<MockTransformSession> test_handler() {
-        return [this](std::shared_ptr<qb::http::Context<MockTransformSession> > ctx) {
+    qb::http::RouteHandlerFn<MockTransformSession>
+    test_handler() {
+        return [this](std::shared_ptr<qb::http::Context<MockTransformSession>> ctx) {
             if (_session) {
-                _session->_final_handler_called = true;
+                _session->_final_handler_called    = true;
                 _session->_request_body_at_handler = ctx->request().body().as<std::string>();
-                _session->_method_at_handler = ctx->request().method(); // Capture the method
+                _session->_method_at_handler       = ctx->request().method(); // Capture the method
                 // _session->_request_headers_at_handler = ctx->request().headers(); // Removed
 
                 // Capture specific headers using the public API of THeaders (via Request)
@@ -103,15 +109,15 @@ protected:
                 _session->_response_body_before_transform_hook = "Initial Handler Response Body";
             }
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "Initial Handler Response Body";
+            ctx->response().body()   = "Initial Handler Response Body";
             ctx->complete();
         };
     }
 
-    void configure_router_and_run(std::shared_ptr<qb::http::TransformMiddleware<MockTransformSession> > transform_mw,
-                                  qb::http::Request request) {
+    void
+    configure_router_and_run(std::shared_ptr<qb::http::TransformMiddleware<MockTransformSession>> transform_mw, qb::http::Request request) {
         _router->use(transform_mw);
-        _router->post("/transform_route", test_handler()); // Use POST to easily send request body
+        _router->post("/transform_route", test_handler());    // Use POST to easily send request body
         _router->get("/transform_route_get", test_handler()); // For tests not needing req body
         _router->compile();
 
@@ -122,20 +128,20 @@ protected:
 };
 
 // Define this function globally or as a static member if preferred for organization
-void TestThrowingRequestTransformerFunction(qb::http::Request & /*req*/) {
+void
+TestThrowingRequestTransformerFunction(qb::http::Request & /*req*/) {
     std::cerr << "TestThrowingRequestTransformerFunction: Entered function. About to attempt throw." << std::endl;
     // For now, let's see if it even prints. If this prints, then the throw is the next problem.
     throw std::runtime_error("Intentional error from TestThrowingRequestTransformerFunction");
 }
 
-// --- Test Cases --- 
+// --- Test Cases ---
 
 TEST_F(TransformMiddlewareTest, RequestTransformation) {
-    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer =
-            [](qb::http::Request &req) {
+    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer = [](qb::http::Request &req) {
         req.set_header("X-Request-Transformed", "true");
         std::string current_body = req.body().as<std::string>();
-        req.body() = "Transformed:" + current_body;
+        req.body()               = "Transformed:" + current_body;
     };
 
     auto transform_mw = qb::http::transform_middleware<MockTransformSession>(req_transformer, "RequestTransformerTest");
@@ -148,9 +154,9 @@ TEST_F(TransformMiddlewareTest, RequestTransformation) {
     EXPECT_EQ(_session->_xtransformed_header_value, "true");
     // EXPECT_TRUE(_session->_xbody_cleared_header_present); // This was an error, belongs to another test
     // EXPECT_EQ(_session->_xbody_cleared_header_value, "true"); // This was an error, belongs to another test
-    // EXPECT_EQ(_session->_content_type_header_at_handler, "text/plain"); // Content-Type is set by create_request, not explicitly transformed here.
-    // For simplicity, we'll assume the body check is sufficient to prove the transformer ran on the request.
-    // To check headers, the test_handler or mock session would need to capture request headers.
+    // EXPECT_EQ(_session->_content_type_header_at_handler, "text/plain"); // Content-Type is set by create_request, not explicitly transformed
+    // here. For simplicity, we'll assume the body check is sufficient to prove the transformer ran on the request. To check headers, the
+    // test_handler or mock session would need to capture request headers.
 }
 
 TEST_F(TransformMiddlewareTest, NullTransformersDoNothing) {
@@ -175,17 +181,15 @@ TEST_F(TransformMiddlewareTest, FactoryFunction) {
 
 TEST_F(TransformMiddlewareTest, RequestTransformerThrows) {
     // Using an inline lambda that prints and throws
-    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer_throws =
-            [](qb::http::Request &req /*req*/) {
+    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer_throws = [](qb::http::Request &req /*req*/) {
         std::cerr << "RequestTransformerThrows_Lambda: Entered. About to throw." << std::endl;
         throw std::runtime_error("Intentional error from req_transformer_throws lambda");
     };
 
-    auto transform_mw = qb::http::transform_middleware<MockTransformSession>(
-        req_transformer_throws, "ReqTransformerThrows");
+    auto transform_mw = qb::http::transform_middleware<MockTransformSession>(req_transformer_throws, "ReqTransformerThrows");
 
     // Need to re-initialize router for specific error handling setup if any
-    _router = std::make_unique<qb::http::Router<MockTransformSession> >();
+    _router = std::make_unique<qb::http::Router<MockTransformSession>>();
     _router->use(transform_mw);
     _router->post("/transform_route", test_handler());
     // Add a generic error handler to the router if necessary to verify status code,
@@ -193,9 +197,7 @@ TEST_F(TransformMiddlewareTest, RequestTransformerThrows) {
     _router->compile();
 
     _session->reset();
-    EXPECT_NO_THROW({
-        _router->route(_session, create_request("/transform_route", "OriginalBody"));
-        });
+    EXPECT_NO_THROW({ _router->route(_session, create_request("/transform_route", "OriginalBody")); });
 
     EXPECT_FALSE(_session->_final_handler_called); // Handler should not be reached
     // Expecting a server error status code, assuming the router sets one when a middleware exec_task fails like this.
@@ -205,8 +207,7 @@ TEST_F(TransformMiddlewareTest, RequestTransformerThrows) {
 }
 
 TEST_F(TransformMiddlewareTest, RequestContentTypeTransform) {
-    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer =
-            [](qb::http::Request &req) {
+    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer = [](qb::http::Request &req) {
         req.set_header("Content-Type", "application/json");
         req.body() = "JSON:" + req.body().as<std::string>();
     };
@@ -225,8 +226,7 @@ TEST_F(TransformMiddlewareTest, RequestContentTypeTransform) {
 }
 
 TEST_F(TransformMiddlewareTest, RequestBodyClearedByTransformer) {
-    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer =
-            [](qb::http::Request &req) {
+    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer = [](qb::http::Request &req) {
         req.body().clear(); // Clear the body
         req.set_header("X-Body-Cleared", "true");
     };
@@ -242,15 +242,14 @@ TEST_F(TransformMiddlewareTest, RequestBodyClearedByTransformer) {
 }
 
 TEST_F(TransformMiddlewareTest, RequestMethodChangedByTransformer_LeadsToMiss) {
-    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer =
-            [](qb::http::Request &req) {
+    qb::http::TransformMiddleware<MockTransformSession>::RequestTransformer req_transformer = [](qb::http::Request &req) {
         req.method() = qb::http::method::PUT; // Change method from POST to PUT
         req.set_header("X-Method-Changed", "true");
     };
 
     auto transform_mw = qb::http::transform_middleware<MockTransformSession>(req_transformer, "RequestMethodChanger");
 
-    _router = std::make_unique<qb::http::Router<MockTransformSession> >();
+    _router = std::make_unique<qb::http::Router<MockTransformSession>>();
     _router->use(transform_mw);
     _router->post("/transform_route", test_handler()); // Define only a POST route
     _router->put("/transform_route", test_handler());
@@ -266,7 +265,7 @@ TEST_F(TransformMiddlewareTest, RequestMethodChangedByTransformer_LeadsToMiss) {
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->_method_at_handler, qb::http::method::PUT);
     // We can also check that the response is a 404 Not Found or 405 Method Not Allowed
-    // depending on router's behavior for unhandled routes/methods. 
+    // depending on router's behavior for unhandled routes/methods.
     // For now, not calling the handler is the primary check.
     // EXPECT_NE(_session->get_response_ref().status(), qb::http::status::OK);
 }
@@ -277,4 +276,4 @@ TEST_F(TransformMiddlewareTest, RequestMethodChangedByTransformer_LeadsToMiss) {
 // TODO:
 // - Test ContentTypeTransformation (e.g. request from XML to JSON, response from JSON to XML)
 // - Test ErrorHandlingDuringTransformation (what if a transformer throws?)
-// - ConditionalTransformation (perhaps by wrapping TransformMiddleware in a ConditionalMiddleware) 
+// - ConditionalTransformation (perhaps by wrapping TransformMiddleware in a ConditionalMiddleware)

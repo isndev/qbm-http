@@ -17,7 +17,7 @@
  * ensure compliance with RFC 6455 and proper handling of network conditions.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -59,8 +59,7 @@ using namespace std::chrono_literals;
  * - CONCURRENT_CLIENTS: Number of simultaneous client connections
  * - PING_INTERVAL_MS: Time between ping/pong health checks
  */
-constexpr const std::size_t LARGE_MESSAGE_SIZE =
-    1024 * 16; // 16KB for more robust testing
+constexpr const std::size_t LARGE_MESSAGE_SIZE = 1024 * 16; // 16KB for more robust testing
 
 /**
  * @brief Global state variables for test synchronization and metrics
@@ -157,9 +156,9 @@ class RobustServerClient
     : public use<RobustServerClient>::tcp::client<RobustServer>
     , public use<RobustServerClient>::timeout {
 private:
-    int _ping_interval_ms = 0; /**< Interval between ping messages in milliseconds */
-    std::string       _last_message; /**< Last received text message content */
-    std::vector<char> _last_binary;  /**< Last received binary message content */
+    int               _ping_interval_ms = 0; /**< Interval between ping messages in milliseconds */
+    std::string       _last_message;         /**< Last received text message content */
+    std::vector<char> _last_binary;          /**< Last received binary message content */
 
 public:
     using Protocol    = qb::http::protocol<RobustServerClient>;
@@ -224,27 +223,22 @@ public:
         // Based on the fin_rsv_opcode, determine the message type
         if ((event.ws.fin_rsv_opcode & 0x0f) == 1) {
             // Text frame
-            _last_message   = std::string(event.data, event.size);
+            _last_message = std::string(event.data, event.size);
             *this << event.ws;
             ++text_message_count;
         } else if ((event.ws.fin_rsv_opcode & 0x0f) == 2) {
             // Binary frame
-            std::cout << "RobustServerClient: Received binary message of size "
-                      << event.size << std::endl;
+            std::cout << "RobustServerClient: Received binary message of size " << event.size << std::endl;
             _last_binary.assign(event.data, event.data + event.size);
             try {
-                std::cout << "RobustServerClient: Sending binary message back, size="
-                          << event.size << std::endl;
+                std::cout << "RobustServerClient: Sending binary message back, size=" << event.size << std::endl;
                 *this << event.ws;
                 std::cout << "RobustServerClient: Binary message sent" << std::endl;
                 ++binary_message_count;
             } catch (const std::exception &e) {
-                std::cerr << "RobustServerClient: Exception in binary message handling: "
-                          << e.what() << std::endl;
+                std::cerr << "RobustServerClient: Exception in binary message handling: " << e.what() << std::endl;
             } catch (...) {
-                std::cerr
-                    << "RobustServerClient: Unknown exception in binary message handling"
-                    << std::endl;
+                std::cerr << "RobustServerClient: Unknown exception in binary message handling" << std::endl;
             }
         }
     }
@@ -267,8 +261,7 @@ public:
         // Send the PONG
         *this << pong_msg;
         ++ping_count;
-        std::cout << "Server received PING with data [" << ping_data
-                  << "], sent PONG response, ping_count=" << ping_count << std::endl;
+        std::cout << "Server received PING with data [" << ping_data << "], sent PONG response, ping_count=" << ping_count << std::endl;
     }
 
     /**
@@ -312,8 +305,7 @@ public:
             qb::http::ws::MessagePing ping_msg;
             *this << ping_msg;
             ++ping_count;
-            std::cout << "Server sent PING on timeout, ping_count=" << ping_count
-                      << std::endl;
+            std::cout << "Server sent PING on timeout, ping_count=" << ping_count << std::endl;
             this->setTimeout(std::chrono::milliseconds(_ping_interval_ms));
         }
     }
@@ -331,10 +323,9 @@ public:
  */
 class RobustServer : public use<RobustServer>::tcp::server<RobustServerClient> {
 private:
-    std::size_t _expected_connections; /**< Expected number of client connections */
-    std::size_t _current_connections =
-        0;                 /**< Current number of active client connections */
-    int _ping_interval_ms; /**< Ping interval in milliseconds for clients */
+    std::size_t _expected_connections;    /**< Expected number of client connections */
+    std::size_t _current_connections = 0; /**< Current number of active client connections */
+    int         _ping_interval_ms;        /**< Ping interval in milliseconds for clients */
 
 public:
     /**
@@ -383,8 +374,7 @@ public:
      */
     void
     on(async::event::disconnected const &) {
-        if (--_current_connections == 0 &&
-            _current_connections != _expected_connections) {
+        if (--_current_connections == 0 && _current_connections != _expected_connections) {
             // Ne pas incrémenter connection_count ici
         }
     }
@@ -482,27 +472,21 @@ public:
     void
     on(WS_Protocol::message &&event) {
         ++received_count_;
-        std::cout << "RobustClient: Received message, opcode="
-                  << (event.ws.fin_rsv_opcode & 0x0f) << ", size=" << event.size
-                  << std::endl;
+        std::cout << "RobustClient: Received message, opcode=" << (event.ws.fin_rsv_opcode & 0x0f) << ", size=" << event.size << std::endl;
 
         if ((event.ws.fin_rsv_opcode & 0x0f) == 1) { // Text
             std::cout << "RobustClient: Processing text message" << std::endl;
             last_text_message_ = std::string(event.data, event.size);
-            std::cout << "RobustClient: Text message stored, size="
-                      << last_text_message_.size() << std::endl;
+            std::cout << "RobustClient: Text message stored, size=" << last_text_message_.size() << std::endl;
         } else if ((event.ws.fin_rsv_opcode & 0x0f) == 2) { // Binary
             std::cout << "RobustClient: Processing binary message" << std::endl;
             try {
                 last_binary_message_.assign(event.data, event.data + event.size);
-                std::cout << "RobustClient: Binary message stored, size="
-                          << last_binary_message_.size() << std::endl;
+                std::cout << "RobustClient: Binary message stored, size=" << last_binary_message_.size() << std::endl;
             } catch (const std::exception &e) {
-                std::cerr << "RobustClient: Exception in binary message handling: "
-                          << e.what() << std::endl;
+                std::cerr << "RobustClient: Exception in binary message handling: " << e.what() << std::endl;
             } catch (...) {
-                std::cerr << "RobustClient: Unknown exception in binary message handling"
-                          << std::endl;
+                std::cerr << "RobustClient: Unknown exception in binary message handling" << std::endl;
             }
         }
     }
@@ -592,24 +576,20 @@ public:
      */
     void
     send_binary_message(const std::vector<char> &data) {
-        std::cout << "RobustClient: Creating binary message of size " << data.size()
-                  << std::endl;
+        std::cout << "RobustClient: Creating binary message of size " << data.size() << std::endl;
         qb::http::ws::MessageBinary msg;
         msg.masked = true;
         try {
             // Utiliser directement l'opérateur << avec une string construite à partir
             // des données binaires
             msg << std::string(data.data(), data.size());
-            std::cout << "RobustClient: Binary message prepared, sending..."
-                      << std::endl;
+            std::cout << "RobustClient: Binary message prepared, sending..." << std::endl;
             *this << msg;
             std::cout << "RobustClient: Binary message sent" << std::endl;
         } catch (const std::exception &e) {
-            std::cerr << "RobustClient: Exception in send_binary_message: " << e.what()
-                      << std::endl;
+            std::cerr << "RobustClient: Exception in send_binary_message: " << e.what() << std::endl;
         } catch (...) {
-            std::cerr << "RobustClient: Unknown exception in send_binary_message"
-                      << std::endl;
+            std::cerr << "RobustClient: Unknown exception in send_binary_message" << std::endl;
         }
     }
 
@@ -704,8 +684,7 @@ public:
  * @return True if the condition was met, false if max iterations were reached
  */
 bool
-run_until(std::function<bool()> condition, int max_iterations = 1000,
-          int delay_ms = 10) {
+run_until(std::function<bool()> condition, int max_iterations = 1000, int delay_ms = 10) {
     for (int i = 0; i < max_iterations && !condition(); ++i) {
         async::run(EVRUN_ONCE);
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
@@ -727,8 +706,7 @@ void
 dump_buffer(const char *buffer, size_t size, const std::string &label) {
     std::cout << "===== " << label << " (" << size << " bytes) =====" << std::endl;
     for (size_t i = 0; i < std::min(size, size_t(100)); ++i) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0')
-                  << (static_cast<int>(buffer[i]) & 0xFF) << " ";
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << (static_cast<int>(buffer[i]) & 0xFF) << " ";
         if ((i + 1) % 16 == 0)
             std::cout << std::endl;
     }
@@ -778,8 +756,7 @@ TEST(Robustness, LARGE_MESSAGES) {
         client.send_handshake();
 
         // Wait for connection
-        if (!run_until(
-                [&]() { return client.state() == RobustClient::State::Connected; })) {
+        if (!run_until([&]() { return client.state() == RobustClient::State::Connected; })) {
             std::cerr << "Failed to establish WebSocket connection" << std::endl;
             return;
         }
@@ -803,8 +780,7 @@ TEST(Robustness, LARGE_MESSAGES) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         // Send the binary message
-        std::cout << "Sending binary message of size " << binary_data.size()
-                  << std::endl;
+        std::cout << "Sending binary message of size " << binary_data.size() << std::endl;
         client.send_binary_message(binary_data);
 
         // Wait for the binary message to be processed
@@ -821,8 +797,7 @@ TEST(Robustness, LARGE_MESSAGES) {
 
         // Terminer la connexion proprement
         client.send_close();
-        run_until([&]() { return client.state() == RobustClient::State::Disconnected; },
-                  100);
+        run_until([&]() { return client.state() == RobustClient::State::Disconnected; }, 100);
 
         test_complete = true;
     });
@@ -832,8 +807,7 @@ TEST(Robustness, LARGE_MESSAGES) {
     run_until([&]() { return test_complete.load(); }, 2000);
 
     // Vérifier que le serveur a reçu et traité les messages
-    std::cout << "Final server stats - Text: " << text_message_count
-              << ", Binary: " << binary_message_count << std::endl;
+    std::cout << "Final server stats - Text: " << text_message_count << ", Binary: " << binary_message_count << std::endl;
     EXPECT_EQ(text_message_count, 1);
     EXPECT_EQ(binary_message_count, 1);
 
@@ -899,8 +873,8 @@ public:
     };
 
 private:
-    const std::string ws_key;           /**< WebSocket key for handshake */
-    State current_state_{Disconnected}; /**< Current client connection state */
+    const std::string ws_key;                       /**< WebSocket key for handshake */
+    State             current_state_{Disconnected}; /**< Current client connection state */
 
 public:
     std::string last_pong_data_; /**< Data from last received pong */
@@ -934,8 +908,7 @@ public:
         std::cout << "DebugClient: Connecting to " << host << ":" << port << std::endl;
         auto status = this->transport().connect_v6(host, port);
         if (status != SocketStatus::Done) {
-            std::cout << "DebugClient: Connection failed with status "
-                      << static_cast<int>(status) << std::endl;
+            std::cout << "DebugClient: Connection failed with status " << static_cast<int>(status) << std::endl;
             return false;
         }
 
@@ -973,8 +946,7 @@ public:
      */
     void
     on(Protocol::response &&response) {
-        std::cout << "DebugClient: Received HTTP response, status="
-                  << response.status() << std::endl;
+        std::cout << "DebugClient: Received HTTP response, status=" << response.status() << std::endl;
 
         // Afficher les entêtes de la réponse pour le débogage
         std::cout << "Response headers:" << std::endl;
@@ -987,13 +959,11 @@ public:
         }
 
         if (!this->switch_protocol<WS_Protocol>(*this, response, ws_key)) {
-            std::cout << "DebugClient: Failed to switch to WebSocket protocol"
-                      << std::endl;
+            std::cout << "DebugClient: Failed to switch to WebSocket protocol" << std::endl;
             current_state_ = Disconnected;
             disconnect();
         } else {
-            std::cout << "DebugClient: Successfully switched to WebSocket protocol"
-                      << std::endl;
+            std::cout << "DebugClient: Successfully switched to WebSocket protocol" << std::endl;
             current_state_ = Connected;
         }
     }
@@ -1008,8 +978,7 @@ public:
      */
     void
     send_ping_direct(const std::string &data) {
-        std::cout << "RobustClient: Sending PING directly with data size " << data.size()
-                  << std::endl;
+        std::cout << "RobustClient: Sending PING directly with data size " << data.size() << std::endl;
 
         // Create a PING message
         qb::http::ws::MessagePing ping_msg;
@@ -1055,8 +1024,7 @@ public:
      */
     void
     on(WS_Protocol::ping &&event) {
-        std::cout << "DebugClient: Received PING with data size " << event.size
-                  << std::endl;
+        std::cout << "DebugClient: Received PING with data size " << event.size << std::endl;
 
         // Créer et envoyer un PONG
         qb::http::ws::MessagePong pong;
@@ -1078,8 +1046,7 @@ public:
     void
     on(WS_Protocol::pong &&event) {
         std::string pong_data(event.data, event.size);
-        std::cout << "DebugClient: Received PONG with data '" << pong_data << "'"
-                  << std::endl;
+        std::cout << "DebugClient: Received PONG with data '" << pong_data << "'" << std::endl;
         last_pong_data_ = pong_data;
     }
 
@@ -1093,9 +1060,7 @@ public:
      */
     void
     on(WS_Protocol::message &&event) {
-        std::cout << "DebugClient: Received message, opcode="
-                  << (event.ws.fin_rsv_opcode & 0x0f) << ", size=" << event.size
-                  << std::endl;
+        std::cout << "DebugClient: Received message, opcode=" << (event.ws.fin_rsv_opcode & 0x0f) << ", size=" << event.size << std::endl;
     }
 
     /**
@@ -1159,8 +1124,7 @@ TEST(Robustness, PING_PONG) {
     // Wait for the client to connect
     std::cout << "Waiting for client to connect..." << std::endl;
     auto start_time = std::chrono::steady_clock::now();
-    while (client.state() != DebugClient::State::Connected &&
-           std::chrono::steady_clock::now() - start_time < std::chrono::seconds(5)) {
+    while (client.state() != DebugClient::State::Connected && std::chrono::steady_clock::now() - start_time < std::chrono::seconds(5)) {
         async::run(EVRUN_NOWAIT);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -1185,14 +1149,12 @@ TEST(Robustness, PING_PONG) {
     start_time         = std::chrono::steady_clock::now();
     bool pong_received = false;
 
-    while (!pong_received &&
-           std::chrono::steady_clock::now() - start_time < std::chrono::seconds(5)) {
+    while (!pong_received && std::chrono::steady_clock::now() - start_time < std::chrono::seconds(5)) {
         async::run(EVRUN_NOWAIT);
 
         if (!client.last_pong_data_.empty()) {
             pong_received = true;
-            std::cout << "PONG received with data: " << client.last_pong_data_
-                      << std::endl;
+            std::cout << "PONG received with data: " << client.last_pong_data_ << std::endl;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1201,8 +1163,7 @@ TEST(Robustness, PING_PONG) {
     // Verify the result
     EXPECT_TRUE(pong_received) << "No PONG response received within timeout";
     if (pong_received) {
-        EXPECT_EQ(client.last_pong_data_, "PING_DEBUG_TEST")
-            << "PONG data doesn't match PING data";
+        EXPECT_EQ(client.last_pong_data_, "PING_DEBUG_TEST") << "PONG data doesn't match PING data";
     }
 
     // Close the connection

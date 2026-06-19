@@ -1,24 +1,26 @@
+#include <functional>
 #include <gtest/gtest.h>
-#include "../routing.h" // Main include for all routing components
+#include <iostream> // For potential debug prints during development
 #include <memory>
 #include <string>
 #include <vector>
-#include <functional>
-#include <iostream> // For potential debug prints during development
+#include "../routing.h" // Main include for all routing components
 
 // --- Mock Session ---
 struct MockApiSession {
     qb::http::Response _response;
 
-    MockApiSession &operator<<(const qb::http::Response &resp) {
+    MockApiSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 };
 
 // --- Helper Handler Lambda ---
-qb::http::RouteHandlerFn<MockApiSession> simple_api_lambda_handler(const std::string &id) {
-    return [id](std::shared_ptr<qb::http::Context<MockApiSession> > ctx) {
+qb::http::RouteHandlerFn<MockApiSession>
+simple_api_lambda_handler(const std::string &id) {
+    return [id](std::shared_ptr<qb::http::Context<MockApiSession>> ctx) {
         ctx->response().body() = "Lambda " + id;
         ctx->complete();
     };
@@ -29,18 +31,22 @@ class SimpleApiCustomRoute : public qb::http::ICustomRoute<MockApiSession> {
 public:
     std::string _id;
 
-    SimpleApiCustomRoute(std::string id, const std::string & /*arg2_placeholder*/ = "") : _id(std::move(id)) {
-    }
+    SimpleApiCustomRoute(std::string id, const std::string & /*arg2_placeholder*/ = "")
+        : _id(std::move(id)) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockApiSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockApiSession>> ctx) override {
         ctx->response().body() = "CustomRoute " + _id;
         ctx->complete();
     }
 
-    std::string name() const override { return "SimpleApiCustomRoute_" + _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return "SimpleApiCustomRoute_" + _id;
     }
+
+    void
+    cancel() override {}
 };
 
 // --- Helper IMiddleware ---
@@ -48,18 +54,22 @@ class SimpleApiMiddleware : public qb::http::IMiddleware<MockApiSession> {
 public:
     std::string _id;
 
-    SimpleApiMiddleware(std::string id, const std::string & /*arg2_placeholder*/ = "") : _id(std::move(id)) {
-    }
+    SimpleApiMiddleware(std::string id, const std::string & /*arg2_placeholder*/ = "")
+        : _id(std::move(id)) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockApiSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockApiSession>> ctx) override {
         ctx->request().set_header("X-Middleware-" + _id, "applied");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 
-    std::string name() const override { return "SimpleApiMiddleware_" + _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return "SimpleApiMiddleware_" + _id;
     }
+
+    void
+    cancel() override {}
 };
 
 // --- Helper Controller for API Tests ---
@@ -68,10 +78,10 @@ public:
     ApiTestController() = default;
 
     // Constructor to satisfy controller<C>(path, args...) if args are provided
-    ApiTestController(const std::string & /*name_placeholder*/) {
-    }
+    ApiTestController(const std::string & /*name_placeholder*/) {}
 
-    void initialize_routes() override {
+    void
+    initialize_routes() override {
         // Lambda Handlers
         this->get("/lambda_get", simple_api_lambda_handler("CtrlGetLambda"));
         this->post("/lambda_post", simple_api_lambda_handler("CtrlPostLambda"));
@@ -105,17 +115,20 @@ public:
         this->use(std::make_shared<SimpleApiMiddleware>("CtrlMwShared"));
     }
 
-    std::string get_node_name() const override { return "ApiTestController"; }
+    std::string
+    get_node_name() const override {
+        return "ApiTestController";
+    }
 };
-
 
 // --- Test Fixture ---
 class RouterApiCompilationTest : public ::testing::Test {
 protected:
-    std::shared_ptr<qb::http::Router<MockApiSession> > _router;
+    std::shared_ptr<qb::http::Router<MockApiSession>> _router;
 
-    void SetUp() override {
-        _router = std::make_shared<qb::http::Router<MockApiSession> >();
+    void
+    SetUp() override {
+        _router = std::make_shared<qb::http::Router<MockApiSession>>();
     }
 };
 
@@ -152,10 +165,12 @@ TEST_F(RouterApiCompilationTest, AllApisCompile) {
     // Router Middleware
     _router->use<SimpleApiMiddleware>("RouterMwTyped", "arg2");
     _router->use(std::make_shared<SimpleApiMiddleware>("RouterMwShared"));
-    _router->use([](auto ctx, auto next) {
-        ctx->request().set_header("X-Router-Func-Mw", "applied");
-        next();
-    }, "RouterMwFunctional");
+    _router->use(
+        [](auto ctx, auto next) {
+            ctx->request().set_header("X-Router-Func-Mw", "applied");
+            next();
+        },
+        "RouterMwFunctional");
 
     // --- RouteGroup Level API Tests ---
     auto group1 = _router->group("/group1");
@@ -190,10 +205,12 @@ TEST_F(RouterApiCompilationTest, AllApisCompile) {
     // Group Middleware
     group1->use<SimpleApiMiddleware>("Group1MwTyped", "arg2");
     group1->use(std::make_shared<SimpleApiMiddleware>("Group1MwShared"));
-    group1->use([](auto ctx, auto next) {
-        ctx->request().set_header("X-Group1-Func-Mw", "applied");
-        next();
-    }, "Group1MwFunctional");
+    group1->use(
+        [](auto ctx, auto next) {
+            ctx->request().set_header("X-Group1-Func-Mw", "applied");
+            next();
+        },
+        "Group1MwFunctional");
 
     // Nested Group
     auto group2 = group1->group("/group2");
@@ -201,14 +218,13 @@ TEST_F(RouterApiCompilationTest, AllApisCompile) {
     group2->use<SimpleApiMiddleware>("Group2MwTyped", "arg2");
 
     // --- Controller Mounting ---
-    auto ctrl1 = _router->controller<ApiTestController>("/controller_api_test");
+    auto ctrl1           = _router->controller<ApiTestController>("/controller_api_test");
     auto ctrl2_with_args = _router->controller<ApiTestController>("/controller_api_test_args", "arg_for_ctrl_ctor");
     // ApiTestController's initialize_routes() is tested implicitly when controller is compiled.
 
     // Nested controller
-    auto ctrl_in_group = group1->controller<ApiTestController>("/controller_in_group1");
-    auto ctrl_in_group_args = group1->controller<ApiTestController>("/controller_in_group1_args",
-                                                                    "arg_for_ctrl_ctor_in_group");
+    auto ctrl_in_group      = group1->controller<ApiTestController>("/controller_in_group1");
+    auto ctrl_in_group_args = group1->controller<ApiTestController>("/controller_in_group1_args", "arg_for_ctrl_ctor_in_group");
 
     // Attempt to compile everything
     try {

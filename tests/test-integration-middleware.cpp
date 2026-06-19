@@ -4,65 +4,67 @@
 // Middleware Headers - These are the specific items under test or used by tests.
 #include "../middleware/all.h" // Prefer including the 'all.h' for tested middleware if it exists and is appropriate
 
-#include <qb/json.h>
 #include <qb/io/crypto_jwt.h>
+#include <qb/json.h>
 
-#include <thread>
 #include <atomic>
 #include <chrono>
-#include <iostream> // Keep for GetCurrentTestNameMid and intentional test output
-#include <vector>
-#include <memory>
-#include <sstream>
-#include <iomanip> // For std::setfill, std::setw in jwt generation helper
 #include <filesystem>
-#include <mutex>
 #include <fstream>
+#include <iomanip>  // For std::setfill, std::setw in jwt generation helper
+#include <iostream> // Keep for GetCurrentTestNameMid and intentional test output
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <thread>
+#include <vector>
 
 // --- Test Counters (Global state for tests, generally acceptable in gtest) ---
-std::atomic<int> mid_request_count_server{0};
-std::atomic<int> mid_request_count_client{0};
+std::atomic<int>  mid_request_count_server{0};
+std::atomic<int>  mid_request_count_client{0};
 std::atomic<bool> mid_server_ready{false};
-std::atomic<int> mid_server_side_assertions{0};
-std::atomic<int> mid_expected_server_assertions{0}; // Used by TearDown to verify test-specific expectations
+std::atomic<int>  mid_server_side_assertions{0};
+std::atomic<int>  mid_expected_server_assertions{0}; // Used by TearDown to verify test-specific expectations
 
 // --- Forward Declarations ---
-class MiddlewareIntegrationServer; // Server class for these integration tests
+class MiddlewareIntegrationServer;   // Server class for these integration tests
 class MiddlewareHttpIntegrationTest; // Test fixture
 
 // --- Helper for Capturing Log Output in Tests ---
 struct TestLogCapture {
-    std::mutex log_mutex;
-    std::vector<std::pair<qb::http::LogLevel, std::string> > messages;
+    std::mutex                                              log_mutex;
+    std::vector<std::pair<qb::http::LogLevel, std::string>> messages;
 
-    void log_message(qb::http::LogLevel level, const std::string &message) {
+    void
+    log_message(qb::http::LogLevel level, const std::string &message) {
         std::lock_guard<std::mutex> guard(log_mutex);
         messages.emplace_back(level, message);
     }
 
-    void clear() {
+    void
+    clear() {
         std::lock_guard<std::mutex> guard(log_mutex);
         messages.clear();
     }
 
-    size_t count_messages() {
+    size_t
+    count_messages() {
         std::lock_guard<std::mutex> guard(log_mutex);
         return messages.size();
     }
 
-    std::vector<std::pair<qb::http::LogLevel, std::string> > snapshot_messages() {
+    std::vector<std::pair<qb::http::LogLevel, std::string>>
+    snapshot_messages() {
         std::lock_guard<std::mutex> guard(log_mutex);
         return messages;
     }
 };
 
 // --- Session Class for Middleware Integration Tests ---
-class MiddlewareIntegrationSession : public qb::http::use<MiddlewareIntegrationSession>::session<
-            MiddlewareIntegrationServer> {
+class MiddlewareIntegrationSession : public qb::http::use<MiddlewareIntegrationSession>::session<MiddlewareIntegrationServer> {
 public:
     MiddlewareIntegrationSession(MiddlewareIntegrationServer &server_ref)
-        : session(server_ref) {
-    }
+        : session(server_ref) {}
 };
 
 // --- Typedefs for Middleware Test Context and Controllers ---
@@ -73,7 +75,8 @@ using MidCtx = qb::http::Context<MiddlewareIntegrationSession>;
 using MidMiddleware = qb::http::IMiddleware<MiddlewareIntegrationSession>; // Useful alias
 
 // Helper to get current GTest test name for logging purposes
-static std::string GetCurrentTestNameMid() {
+static std::string
+GetCurrentTestNameMid() {
     const auto *current_test_info = ::testing::UnitTest::GetInstance()->current_test_info();
     if (current_test_info) {
         return std::string(current_test_info->test_suite_name()) + "." + current_test_info->name();
@@ -82,27 +85,24 @@ static std::string GetCurrentTestNameMid() {
 }
 
 // --- Server Class for Middleware Integration Tests ---
-class MiddlewareIntegrationServer : public qb::http::use<MiddlewareIntegrationServer>::server<
-            MiddlewareIntegrationSession> {
+class MiddlewareIntegrationServer : public qb::http::use<MiddlewareIntegrationServer>::server<MiddlewareIntegrationSession> {
 public:
     MiddlewareHttpIntegrationTest *_fixture_ptr; // To access fixture members like TestLogCapture
 
     MiddlewareIntegrationServer(MiddlewareHttpIntegrationTest *fixture_ptr)
-        : qb::http::use<MiddlewareIntegrationServer>::server<MiddlewareIntegrationSession>(),
-          _fixture_ptr(fixture_ptr) {
-        qb::io::cout() << "Setting up middleware test routes for server instance for test: "
-                << GetCurrentTestNameMid() << "\n";
+        : qb::http::use<MiddlewareIntegrationServer>::server<MiddlewareIntegrationSession>()
+        , _fixture_ptr(fixture_ptr) {
+        qb::io::cout() << "Setting up middleware test routes for server instance for test: " << GetCurrentTestNameMid() << "\n";
 
         this->router().set_not_found_handler([](std::shared_ptr<MidCtx> ctx) {
             mid_server_side_assertions++;
             ctx->response().status() = qb::http::status::NOT_FOUND;
-            ctx->response().body() = "Test default: Resource not found.";
+            ctx->response().body()   = "Test default: Resource not found.";
             ctx->response().set_header("X-Test-404", "DefaultMiddlewareTest404");
             ctx->complete();
         });
 
-        qb::http::RouteHandlerFn<MiddlewareIntegrationSession> custom_global_server_error_handler_fn =
-                [](std::shared_ptr<MidCtx> ctx) {
+        qb::http::RouteHandlerFn<MiddlewareIntegrationSession> custom_global_server_error_handler_fn = [](std::shared_ptr<MidCtx> ctx) {
             mid_server_side_assertions++;
             qb::io::cout() << "[TestGlobalServerErrorHandler] Path: " << ctx->request().uri().path() << "\n";
             if (ctx->response().status() < qb::http::status::BAD_REQUEST) {
@@ -112,10 +112,9 @@ public:
             ctx->response().set_header("X-Test-Global-Error-Handler", "Applied");
             ctx->complete();
         };
-        auto global_error_handler_task = std::make_shared<qb::http::RouteLambdaTask<MiddlewareIntegrationSession> >(
-            custom_global_server_error_handler_fn, "TestGlobalServerErrorHandlerTask"
-        );
-        std::vector<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession> > > error_chain_list;
+        auto global_error_handler_task = std::make_shared<qb::http::RouteLambdaTask<MiddlewareIntegrationSession>>(
+            custom_global_server_error_handler_fn, "TestGlobalServerErrorHandlerTask");
+        std::vector<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession>>> error_chain_list;
         error_chain_list.push_back(global_error_handler_task);
         this->router().set_error_task_chain(std::move(error_chain_list));
 
@@ -123,7 +122,7 @@ public:
             mid_request_count_server++;
             mid_server_side_assertions++;
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "pong_middleware_test";
+            ctx->response().body()   = "pong_middleware_test";
             ctx->complete();
         });
 
@@ -139,17 +138,18 @@ public:
 
 protected:
     std::unique_ptr<MiddlewareIntegrationServer> _server;
-    std::thread _server_thread;
+    std::thread                                  _server_thread;
     // std::atomic<int> _server_side_assertions_before_test_scenario{0}; // Removed, use mid_expected_server_assertions directly
 
-    void SetUp() override {
+    void
+    SetUp() override {
         qb::io::async::init();
 
-        mid_request_count_server = 0;
-        mid_request_count_client = 0;
-        mid_server_side_assertions = 0;
+        mid_request_count_server       = 0;
+        mid_request_count_client       = 0;
+        mid_server_side_assertions     = 0;
         mid_expected_server_assertions = 0;
-        mid_server_ready = false;
+        mid_server_ready               = false;
         _test_log_capture.clear();
 
         _server = std::make_unique<MiddlewareIntegrationServer>(this);
@@ -160,17 +160,13 @@ protected:
             _server->transport().listen_v4(29888);
             _server->start();
             mid_server_ready = true;
-            qb::io::cout() << "MiddlewareIntegrationServer is ready on port 29888 for test: "
-                    << GetCurrentTestNameMid()
-                    << "\n";
+            qb::io::cout() << "MiddlewareIntegrationServer is ready on port 29888 for test: " << GetCurrentTestNameMid() << "\n";
 
             while (mid_server_ready.load(std::memory_order_acquire)) {
                 qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            qb::io::cout() << "MiddlewareIntegrationServer thread finishing for test: "
-                    << GetCurrentTestNameMid()
-                    << "\n";
+            qb::io::cout() << "MiddlewareIntegrationServer thread finishing for test: " << GetCurrentTestNameMid() << "\n";
         });
 
         auto start_time = std::chrono::steady_clock::now();
@@ -183,30 +179,27 @@ protected:
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    void TearDown() override {
+    void
+    TearDown() override {
         mid_server_ready = false;
         if (_server_thread.joinable()) {
             _server_thread.join();
         }
         _server.reset();
 
-        qb::io::cout() << "Finished test: "
-                << GetCurrentTestNameMid()
-                << " Client-Requests: " << mid_request_count_client.load()
-                << ", Server-Requests: " << mid_request_count_server.load()
-                << ", Server-Assertions-Made: " << mid_server_side_assertions.load()
-                << ", Server-Assertions-Expected: " << mid_expected_server_assertions.load()
-                << "\n";
+        qb::io::cout() << "Finished test: " << GetCurrentTestNameMid() << " Client-Requests: " << mid_request_count_client.load()
+                       << ", Server-Requests: " << mid_request_count_server.load()
+                       << ", Server-Assertions-Made: " << mid_server_side_assertions.load()
+                       << ", Server-Assertions-Expected: " << mid_expected_server_assertions.load() << "\n";
 
         if (::testing::Test::HasFailure()) {
             std::cerr << "Test " << GetCurrentTestNameMid() << " already failed before checking server-side assertions."
-                    << "\n";
+                      << "\n";
         } else {
             // This ensures that the number of assertions made on the server side matches what the test expected.
             ASSERT_EQ(mid_expected_server_assertions.load(), mid_server_side_assertions.load())
                 << "Server side assertion count mismatch at TearDown for test: " << GetCurrentTestNameMid()
-                << ". Expected: " << mid_expected_server_assertions.load()
-                << ", Got: " << mid_server_side_assertions.load();
+                << ". Expected: " << mid_expected_server_assertions.load() << ", Got: " << mid_server_side_assertions.load();
         }
     }
 
@@ -223,7 +216,7 @@ TEST_F(MiddlewareHttpIntegrationTest, InitialPing) {
 
     qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /ping\n";
     qb::http::Request request{{"http://localhost:29888/ping"}};
-    auto response = qb::http::run_sync(qb::http::GET(request)).response;
+    auto              response = qb::http::run_sync(qb::http::GET(request)).response;
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_middleware_test", response.body().as<std::string>());
     mid_request_count_client++;
@@ -240,10 +233,8 @@ TEST_F(MiddlewareHttpIntegrationTest, InitialPing) {
 TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
     mid_expected_server_assertions = 1; // For the /logged_route handler itself.
 
-    _server->router().use<qb::http::LoggingMiddleware<MiddlewareIntegrationSession> >(
-        [this](qb::http::LogLevel level, const std::string &message) {
-            _test_log_capture.log_message(level, message);
-        },
+    _server->router().use<qb::http::LoggingMiddleware<MiddlewareIntegrationSession>>(
+        [this](qb::http::LogLevel level, const std::string &message) { _test_log_capture.log_message(level, message); },
         qb::http::LogLevel::Info, // Request log level
         qb::http::LogLevel::Debug // Response log level
     );
@@ -252,38 +243,34 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Logged route content";
+        ctx->response().body()   = "Logged route content";
         ctx->complete();
     });
     _server->router().compile();
 
     qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /logged_route\n";
     qb::http::Request request{{"http://localhost:29888/logged_route"}};
-    auto response = qb::http::run_sync(qb::http::GET(request)).response;
+    auto              response = qb::http::run_sync(qb::http::GET(request)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Logged route content", response.body().as<std::string>());
     mid_request_count_client++;
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (_test_log_capture.count_messages() < 2 &&
-           std::chrono::steady_clock::now() < deadline) {
+    while (_test_log_capture.count_messages() < 2 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    ASSERT_EQ(_test_log_capture.count_messages(), 2)
-        << "Expected 2 log messages (1 request, 1 response).";
+    ASSERT_EQ(_test_log_capture.count_messages(), 2) << "Expected 2 log messages (1 request, 1 response).";
 
-    bool request_log_found = false;
+    bool request_log_found  = false;
     bool response_log_found = false;
 
-    for (const auto &log_entry: _test_log_capture.snapshot_messages()) {
-        if (log_entry.first == qb::http::LogLevel::Info &&
-            log_entry.second.find("Request: GET /logged_route") != std::string::npos) {
+    for (const auto &log_entry : _test_log_capture.snapshot_messages()) {
+        if (log_entry.first == qb::http::LogLevel::Info && log_entry.second.find("Request: GET /logged_route") != std::string::npos) {
             request_log_found = true;
         }
-        if (log_entry.first == qb::http::LogLevel::Debug &&
-            log_entry.second.find("Response: 200") != std::string::npos) {
+        if (log_entry.first == qb::http::LogLevel::Debug && log_entry.second.find("Response: 200") != std::string::npos) {
             response_log_found = true;
         }
     }
@@ -298,26 +285,24 @@ TEST_F(MiddlewareHttpIntegrationTest, LoggingMiddlewareTest) {
 TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
     mid_expected_server_assertions = 1; // For the /timed_route handler.
 
-    _server->router().use<qb::http::TimingMiddleware<MiddlewareIntegrationSession> >(
-        [this](const std::chrono::milliseconds &duration) {
-            std::string message = "Response time: " + std::to_string(duration.count()) + "ms";
-            _test_log_capture.log_message(qb::http::LogLevel::Info, message);
-        }
-    );
+    _server->router().use<qb::http::TimingMiddleware<MiddlewareIntegrationSession>>([this](const std::chrono::milliseconds &duration) {
+        std::string message = "Response time: " + std::to_string(duration.count()) + "ms";
+        _test_log_capture.log_message(qb::http::LogLevel::Info, message);
+    });
 
     _server->router().get("/timed_route", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Introduce a small delay
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Timed route content";
+        ctx->response().body()   = "Timed route content";
         ctx->complete();
     });
     _server->router().compile();
 
     qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /timed_route\n";
     qb::http::Request request{{"http://localhost:29888/timed_route"}};
-    auto response = qb::http::run_sync(qb::http::GET(request)).response;
+    auto              response = qb::http::run_sync(qb::http::GET(request)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Timed route content", response.body().as<std::string>());
@@ -337,9 +322,8 @@ TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     bool timing_log_found = false;
-    for (const auto &log_entry: _test_log_capture.snapshot_messages()) {
-        if (log_entry.first == qb::http::LogLevel::Info &&
-            log_entry.second.find("Response time: ") != std::string::npos) {
+    for (const auto &log_entry : _test_log_capture.snapshot_messages()) {
+        if (log_entry.first == qb::http::LogLevel::Info && log_entry.second.find("Response time: ") != std::string::npos) {
             // Simpler check
             timing_log_found = true;
             break;
@@ -357,14 +341,14 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
 
     qb::http::SecurityHeadersOptions security_options;
     security_options.with_hsts("max-age=63072000; includeSubDomains; preload")
-            .with_x_content_type_options_nosniff()
-            .with_x_frame_options("DENY")
-            .with_content_security_policy("default-src 'self'; script-src 'self' 'nonce-{NONCE}'; object-src 'none';")
-            .with_referrer_policy("no-referrer")
-            .with_permissions_policy("microphone=(), geolocation=()")
-            .with_csp_nonce(true);
+        .with_x_content_type_options_nosniff()
+        .with_x_frame_options("DENY")
+        .with_content_security_policy("default-src 'self'; script-src 'self' 'nonce-{NONCE}'; object-src 'none';")
+        .with_referrer_policy("no-referrer")
+        .with_permissions_policy("microphone=(), geolocation=()")
+        .with_csp_nonce(true);
 
-    _server->router().use<qb::http::SecurityHeadersMiddleware<MiddlewareIntegrationSession> >(security_options);
+    _server->router().use<qb::http::SecurityHeadersMiddleware<MiddlewareIntegrationSession>>(security_options);
 
     _server->router().get("/secure_route", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
@@ -377,7 +361,7 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
         }
 
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Secure route response";
+        ctx->response().body()   = "Secure route response";
         ctx->response().set_header("Content-Type", "text/html");
         ctx->complete();
     });
@@ -385,7 +369,7 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
 
     qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /secure_route (HTTPS)\n";
     qb::http::Request request{{"https://localhost:29888/secure_route"}};
-    auto response = qb::http::run_sync(qb::http::GET(request)).response;
+    auto              response = qb::http::run_sync(qb::http::GET(request)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Secure route response", response.body().as<std::string>());
@@ -399,12 +383,11 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
 
     std::string csp_header = response.header("Content-Security-Policy");
     EXPECT_FALSE(csp_header.empty()) << "Content-Security-Policy header is missing.";
-    EXPECT_NE(csp_header.find("script-src 'self' 'nonce-"),
-              std::string::npos) << "CSP nonce placeholder not found or incorrect in script-src: " << csp_header;
+    EXPECT_NE(csp_header.find("script-src 'self' 'nonce-"), std::string::npos)
+        << "CSP nonce placeholder not found or incorrect in script-src: " << csp_header;
     EXPECT_NE(csp_header.find("default-src 'self'"), std::string::npos) << "CSP default-src not found: " << csp_header;
     EXPECT_NE(csp_header.find("object-src 'none'"), std::string::npos) << "CSP object-src not found: " << csp_header;
-    EXPECT_EQ(csp_header.find("{NONCE}"), std::string::npos) << "CSP {NONCE} placeholder was not replaced in: " <<
- csp_header;
+    EXPECT_EQ(csp_header.find("{NONCE}"), std::string::npos) << "CSP {NONCE} placeholder was not replaced in: " << csp_header;
 
     EXPECT_EQ(1, mid_request_count_client.load());
     EXPECT_EQ(1, mid_request_count_server.load());
@@ -418,10 +401,10 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     // auto-compressed by the client. The server will decompress it successfully.
     // So, the /decompress_test_route handler will also be hit, adding 1 assertion.
     // Inside /decompress_test_route, if QB_HAS_COMPRESSION, we expect Content-Encoding to be removed (1 assertion for the EXPECT_TRUE).
-    // Total with ZLIB: 1 (GET) + 1 (POST handler) + 1 (POST header check) = 3. But the header check is inside the handler, which already counts as 1 assertion for the handler hit.
-    // Let's be precise: Handler for /compressible_route (1), Handler for /decompress_test_route (1). Total 2.
-    // The EXPECT_TRUE for Content-Encoding inside the /decompress_test_route handler is a server-side check but doesn't increment mid_server_side_assertions itself.
-    // So, if both handlers are hit, mid_server_side_assertions should be 2.
+    // Total with ZLIB: 1 (GET) + 1 (POST handler) + 1 (POST header check) = 3. But the header check is inside the handler, which already counts
+    // as 1 assertion for the handler hit. Let's be precise: Handler for /compressible_route (1), Handler for /decompress_test_route (1).
+    // Total 2. The EXPECT_TRUE for Content-Encoding inside the /decompress_test_route handler is a server-side check but doesn't increment
+    // mid_server_side_assertions itself. So, if both handlers are hit, mid_server_side_assertions should be 2.
 #ifdef QB_HAS_COMPRESSION
     mid_expected_server_assertions = 2; // Handler for GET + Handler for POST
 #else
@@ -429,21 +412,20 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
 #endif
 
     qb::http::CompressionOptions comp_options;
-    comp_options.compress_responses(true)
-            .decompress_requests(true)
-            .min_size_to_compress(100)
-            .preferred_encodings({"gzip", "deflate"});
+    comp_options.compress_responses(true).decompress_requests(true).min_size_to_compress(100).preferred_encodings({"gzip", "deflate"});
 
-    _server->router().use<qb::http::CompressionMiddleware<MiddlewareIntegrationSession> >(comp_options);
+    _server->router().use<qb::http::CompressionMiddleware<MiddlewareIntegrationSession>>(comp_options);
 
     std::string original_compressible_body_content =
-            "This is a sufficiently long string that should be compressed. Repeating to make it longer. This is a sufficiently long string that should be compressed. Repeating to make it longer. This is a sufficiently long string that should be compressed. Repeating to make it longer.";
+        "This is a sufficiently long string that should be compressed. Repeating to make it longer. This is a sufficiently long string that "
+        "should be compressed. Repeating to make it longer. This is a sufficiently long string that should be compressed. Repeating to make it "
+        "longer.";
 
     _server->router().get("/compressible_route", [original_compressible_body_content](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = original_compressible_body_content;
+        ctx->response().body()   = original_compressible_body_content;
         ctx->response().set_header("Content-Type", "text/plain");
         ctx->complete();
     });
@@ -451,9 +433,9 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
     _server->router().post("/decompress_test_route", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
         mid_server_side_assertions++;
-        ctx->response().status() = qb::http::status::OK;
+        ctx->response().status()  = qb::http::status::OK;
         std::string received_body = ctx->request().body().template as<std::string>();
-        ctx->response().body() = "Received body: " + received_body;
+        ctx->response().body()    = "Received body: " + received_body;
 
 #ifdef QB_HAS_COMPRESSION
         EXPECT_TRUE(ctx->request().header("Content-Encoding").empty())
@@ -466,8 +448,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
 
     // Test Response Compression
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
-                "): Sending GET /compressible_route with Accept-Encoding: gzip\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /compressible_route with Accept-Encoding: gzip\n";
         qb::http::Request request{{"http://localhost:29888/compressible_route"}};
         request.add_header("Accept-Encoding", "gzip, deflate");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -476,8 +457,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
         mid_request_count_client++;
 
 #ifdef QB_HAS_COMPRESSION
-        EXPECT_EQ("gzip", response.header("Content-Encoding"))
-            << "Content-Encoding header should be gzip.";
+        EXPECT_EQ("gzip", response.header("Content-Encoding")) << "Content-Encoding header should be gzip.";
         EXPECT_NE(std::to_string(original_compressible_body_content.length()), response.header("Content-Length"))
             << "Content-Length should be different for compressed content.";
         EXPECT_FALSE(response.body().as<std::string>().empty()) << "Response body should not be empty.";
@@ -493,11 +473,10 @@ TEST_F(MiddlewareHttpIntegrationTest, CompressionMiddlewareTest) {
 
     // Test Request Decompression
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
-                "): Sending POST /decompress_test_route with pseudo-compressed data\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending POST /decompress_test_route with pseudo-compressed data\n";
         qb::http::Request request{qb::http::method::POST, {"http://localhost:29888/decompress_test_route"}};
-        std::string data_sent_in_post_request = "invalid gzipped data";
-        request.body() = data_sent_in_post_request;
+        std::string       data_sent_in_post_request = "invalid gzipped data";
+        request.body()                              = data_sent_in_post_request;
         request.add_header("Content-Encoding", "gzip");
         request.add_header("Content-Type", "text/plain");
 
@@ -542,19 +521,19 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
 
     qb::http::CorsOptions cors_opts;
     cors_opts.origins({"http://allowed.example.com", "http://another.example.com"})
-            .methods({"GET", "POST", "OPTIONS"})
-            .headers({"X-Custom-Header", "Content-Type"})
-            .expose_headers({"X-Response-Info"})
-            .credentials(qb::http::CorsOptions::AllowCredentials::Yes)
-            .max_age(std::chrono::seconds(3600));
+        .methods({"GET", "POST", "OPTIONS"})
+        .headers({"X-Custom-Header", "Content-Type"})
+        .expose_headers({"X-Response-Info"})
+        .credentials(qb::http::CorsOptions::AllowCredentials::Yes)
+        .max_age(std::chrono::seconds(3600));
 
-    _server->router().use<qb::http::CorsMiddleware<MiddlewareIntegrationSession> >(cors_opts);
+    _server->router().use<qb::http::CorsMiddleware<MiddlewareIntegrationSession>>(cors_opts);
 
     _server->router().get("/cors_test_route", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "CORS test route content";
+        ctx->response().body()   = "CORS test route content";
         ctx->response().set_header("X-Response-Info", "Some info");
         ctx->complete();
     });
@@ -575,7 +554,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "CORS credentials route content";
+        ctx->response().body()   = "CORS credentials route content";
         ctx->complete();
     });
 
@@ -599,8 +578,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
 
     // 2. Simple GET from disallowed origin
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
-                "): Sending GET /cors_test_route from disallowed origin\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /cors_test_route from disallowed origin\n";
         qb::http::Request request{{"http://localhost:29888/cors_test_route"}};
         request.add_header("Origin", "http://disallowed.example.com");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -634,8 +612,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
 
     // 4. GET request with credentials from allowed origin
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
-                "): Sending GET /cors_test_route_credentials with Origin and credentials\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /cors_test_route_credentials with Origin and credentials\n";
         qb::http::Request request{{"http://localhost:29888/cors_test_route_credentials"}};
         request.add_header("Origin", "http://allowed.example.com");
         request.add_header("Cookie", "sessionid=12345");
@@ -668,17 +645,17 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
 
     qb::http::RateLimitOptions rl_options;
     rl_options.max_requests(3)
-            .window(std::chrono::seconds(2))
-            .status_code(qb::http::status::TOO_MANY_REQUESTS)
-            .message("Custom: Too many requests!");
+        .window(std::chrono::seconds(2))
+        .status_code(qb::http::status::TOO_MANY_REQUESTS)
+        .message("Custom: Too many requests!");
 
-    _server->router().use<qb::http::RateLimitMiddleware<MiddlewareIntegrationSession> >(rl_options);
+    _server->router().use<qb::http::RateLimitMiddleware<MiddlewareIntegrationSession>>(rl_options);
 
     _server->router().get("/rate_limited_route", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Rate limit test content";
+        ctx->response().body()   = "Rate limit test content";
         ctx->complete();
     });
     _server->router().compile();
@@ -688,8 +665,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
 
     // 1. Send requests within the limit
     for (int i = 0; i < 3; ++i) {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt " << (i + 1)
-                << ")\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt " << (i + 1) << ")\n";
         auto response = qb::http::run_sync(qb::http::GET(base_request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status()) << "Request " << (i + 1) << " should succeed.";
         EXPECT_EQ("Rate limit test content", response.body().as<std::string>());
@@ -701,8 +677,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
 
     // 2. Send request that exceeds the limit
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
-                "): Sending GET /rate_limited_route (Attempt 4 - expecting rate limit)\n";
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt 4 - expecting rate limit)\n";
         auto response = qb::http::run_sync(qb::http::GET(base_request)).response;
         EXPECT_EQ(qb::http::status::TOO_MANY_REQUESTS, response.status());
         EXPECT_EQ("Custom: Too many requests!", response.body().as<std::string>());
@@ -710,7 +685,9 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
         EXPECT_EQ("0", response.header("X-RateLimit-Remaining"));
         EXPECT_FALSE(response.header("X-RateLimit-Reset").empty());
         long reset_time_sec = 0;
-        try { reset_time_sec = std::stol(response.header("X-RateLimit-Reset")); } catch (...) {
+        try {
+            reset_time_sec = std::stol(response.header("X-RateLimit-Reset"));
+        } catch (...) {
         }
         EXPECT_LE(reset_time_sec, 2);
         EXPECT_LE(reset_time_sec, 2);
@@ -724,8 +701,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
 
     // 4. Send request after window reset - should succeed
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() <<
-                "): Sending GET /rate_limited_route (Attempt 5 - after reset)" << std::endl;
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /rate_limited_route (Attempt 5 - after reset)" << std::endl;
         auto response = qb::http::run_sync(qb::http::GET(base_request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Rate limit test content", response.body().as<std::string>());
@@ -755,27 +731,25 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
     error_mw->on_status(qb::http::status::FORBIDDEN, [](std::shared_ptr<MidCtx> ctx) {
         mid_server_side_assertions++; // For the specific 403 handler in ErrorHandlingMiddleware
         ctx->response().status() = qb::http::status::FORBIDDEN;
-        ctx->response().body() = "Custom Forbidden Error Page from ErrorHandlingMiddleware";
+        ctx->response().body()   = "Custom Forbidden Error Page from ErrorHandlingMiddleware";
         ctx->response().set_header("X-Error-Handler", "Specific-403");
         // ErrorHandlingMiddleware itself calls ctx->complete(AsyncTaskResult::COMPLETE) after this handler.
     });
 
-    error_mw->on_status_range(qb::http::status::INTERNAL_SERVER_ERROR, qb::http::status::BAD_GATEWAY,
-                              [](std::shared_ptr<MidCtx> ctx) {
-                                  mid_server_side_assertions++; // For the 500-502 range handler
-                                  ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
-                                  // Change it for test
-                                  ctx->response().body() =
-                                          "Custom 50x Error Page (became 503) from ErrorHandlingMiddleware";
-                                  ctx->response().set_header("X-Error-Handler", "Range-50x-to-503");
-                              });
+    error_mw->on_status_range(qb::http::status::INTERNAL_SERVER_ERROR, qb::http::status::BAD_GATEWAY, [](std::shared_ptr<MidCtx> ctx) {
+        mid_server_side_assertions++; // For the 500-502 range handler
+        ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
+        // Change it for test
+        ctx->response().body() = "Custom 50x Error Page (became 503) from ErrorHandlingMiddleware";
+        ctx->response().set_header("X-Error-Handler", "Range-50x-to-503");
+    });
 
     error_mw->on_any_error([](std::shared_ptr<MidCtx> ctx, const std::string &error_message) {
         mid_server_side_assertions++; // For the generic error handler in ErrorHandlingMiddleware
         // Default status if not set by erroring task might be 500 or something else.
         // Here, we ensure it becomes something specific if it falls to generic.
-        if (ctx->response().status() < qb::http::status::BAD_REQUEST || ctx->response().status() >=
-            qb::http::status::NETWORK_AUTHENTICATION_REQUIRED) {
+        if (ctx->response().status() < qb::http::status::BAD_REQUEST
+            || ctx->response().status() >= qb::http::status::NETWORK_AUTHENTICATION_REQUIRED) {
             ctx->response().status() = qb::http::status::IM_A_TEAPOT; // Corrected Teapot
         }
         ctx->response().body() = "Generic Error from ErrorHandlingMiddleware: " + error_message;
@@ -783,15 +757,13 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
         // ErrorHandlingMiddleware itself calls ctx->complete(AsyncTaskResult::COMPLETE) after this handler.
     });
 
-    std::vector<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession> > > error_chain;
-    error_chain.push_back(
-        std::make_shared<qb::http::MiddlewareTask<MiddlewareIntegrationSession> >(
-            error_mw, "ErrorHandlingMiddlewareTask"));
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MiddlewareIntegrationSession>>> error_chain;
+    error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MiddlewareIntegrationSession>>(error_mw, "ErrorHandlingMiddlewareTask"));
     _server->router().set_error_task_chain(std::move(error_chain));
 
     _server->router().get("/route_triggering_generic_error", [](std::shared_ptr<MidCtx> ctx) {
         mid_request_count_server++;
-        mid_server_side_assertions++; // For the handler itself
+        mid_server_side_assertions++;                                                   // For the handler itself
         ctx->set("__error_message", std::string("Something bad happened generically")); // Ensure std::string
         // No specific status set, should be handled by on_any_error or default to 500 then caught by on_any_error
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
@@ -817,23 +789,20 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
 
     // 1. Test generic error (no specific status set by handler)
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_generic_error" <<
-                std::endl;
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_generic_error" << std::endl;
         qb::http::Request request{{"http://localhost:29888/route_triggering_generic_error"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::IM_A_TEAPOT, response.status()); // Corrected Teapot
-        EXPECT_EQ("Generic Error from ErrorHandlingMiddleware: Something bad happened generically",
-                  response.body().as<std::string>());
+        EXPECT_EQ("Generic Error from ErrorHandlingMiddleware: Something bad happened generically", response.body().as<std::string>());
         EXPECT_EQ("Generic", response.header("X-Error-Handler"));
         mid_request_count_client++;
     }
 
     // 2. Test specific error (403 Forbidden)
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_specific_error" <<
-                std::endl;
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_specific_error" << std::endl;
         qb::http::Request request{{"http://localhost:29888/route_triggering_specific_error"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::FORBIDDEN, response.status());
         EXPECT_EQ("Custom Forbidden Error Page from ErrorHandlingMiddleware", response.body().as<std::string>());
         EXPECT_EQ("Specific-403", response.header("X-Error-Handler"));
@@ -842,10 +811,9 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
 
     // 3. Test error in range (500 Internal Server Error, handled by 500-502 range rule)
     {
-        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_500_for_range" <<
-                std::endl;
+        qb::io::cout() << "Client (" << GetCurrentTestNameMid() << "): Sending GET /route_triggering_500_for_range" << std::endl;
         qb::http::Request request{{"http://localhost:29888/route_triggering_500_for_range"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::SERVICE_UNAVAILABLE, response.status()); // Changed by range handler
         EXPECT_EQ("Custom 50x Error Page (became 503) from ErrorHandlingMiddleware", response.body().as<std::string>());
         EXPECT_EQ("Range-50x-to-503", response.header("X-Error-Handler"));
@@ -864,38 +832,31 @@ TEST_F(MiddlewareHttpIntegrationTest, ErrorHandlingMiddlewareTest) {
 }
 
 // --- Test Case for JwtMiddleware ---
-const std::string JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST = "another_secret_for_jwt_testing_09876_XYZ";
+const std::string JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST    = "another_secret_for_jwt_testing_09876_XYZ";
 const std::string JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST = "HS256";
 
 // Simplified Helper to generate a JWT for testing this specific middleware integration test file.
 // For full AuthManager capabilities, use its direct methods if testing AuthManager itself.
-std::string generate_simple_test_jwt_for_mid_test(
-    const std::string &subject_id,
-    const std::vector<std::pair<std::string, qb::json> > &claims_map = {},
-    long long exp_delta_seconds = 3600,
-    long long nbf_delta_seconds = 0
-) {
+std::string
+generate_simple_test_jwt_for_mid_test(const std::string &subject_id, const std::vector<std::pair<std::string, qb::json>> &claims_map = {},
+                                      long long exp_delta_seconds = 3600, long long nbf_delta_seconds = 0) {
     std::map<std::string, std::string> jwt_payload_map_str;
     jwt_payload_map_str["sub"] = subject_id;
-    auto now = std::chrono::system_clock::now();
-    jwt_payload_map_str["iat"] = std::to_string(
-        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+    auto now                   = std::chrono::system_clock::now();
+    jwt_payload_map_str["iat"] = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
     if (exp_delta_seconds != 0) {
         jwt_payload_map_str["exp"] = std::to_string(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                (now + std::chrono::seconds(exp_delta_seconds)).time_since_epoch()).count());
+            std::chrono::duration_cast<std::chrono::seconds>((now + std::chrono::seconds(exp_delta_seconds)).time_since_epoch()).count());
     }
     if (nbf_delta_seconds != 0) {
         jwt_payload_map_str["nbf"] = std::to_string(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                (now + std::chrono::seconds(nbf_delta_seconds)).time_since_epoch()).count());
+            std::chrono::duration_cast<std::chrono::seconds>((now + std::chrono::seconds(nbf_delta_seconds)).time_since_epoch()).count());
     } else {
-        jwt_payload_map_str["nbf"] = std::to_string(
-            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+        jwt_payload_map_str["nbf"] = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
         // Default NBF to now if not specified
     }
 
-    for (const auto &pair: claims_map) {
+    for (const auto &pair : claims_map) {
         // Convert qb::json value to string for qb::jwt::create
         if (pair.second.is_string()) {
             jwt_payload_map_str[pair.first] = pair.second.get<std::string>();
@@ -906,10 +867,11 @@ std::string generate_simple_test_jwt_for_mid_test(
     }
 
     qb::jwt::CreateOptions jwt_create_options;
-    auto alg_opt = qb::jwt::algorithm_from_string(JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST);
-    if (!alg_opt) throw std::runtime_error("Invalid algorithm for JWT generation in test helper.");
+    auto                   alg_opt = qb::jwt::algorithm_from_string(JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST);
+    if (!alg_opt)
+        throw std::runtime_error("Invalid algorithm for JWT generation in test helper.");
     jwt_create_options.algorithm = *alg_opt;
-    jwt_create_options.key = JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST;
+    jwt_create_options.key       = JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST;
 
     return qb::jwt::create(jwt_payload_map_str, jwt_create_options);
 }
@@ -918,14 +880,14 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
     mid_expected_server_assertions = 2; // 1 for handler, 1 for payload check in handler
 
     qb::http::JwtOptions jwt_options;
-    jwt_options.secret = JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST;
-    jwt_options.algorithm = JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST;
-    jwt_options.verify_exp = true;
-    jwt_options.verify_nbf = true;
-    jwt_options.leeway = std::chrono::seconds(2);
+    jwt_options.secret         = JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST;
+    jwt_options.algorithm      = JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST;
+    jwt_options.verify_exp     = true;
+    jwt_options.verify_nbf     = true;
+    jwt_options.leeway         = std::chrono::seconds(2);
     jwt_options.token_location = qb::http::JwtTokenLocation::HEADER;
-    jwt_options.token_name = "Authorization";
-    jwt_options.auth_scheme = "Bearer";
+    jwt_options.token_name     = "Authorization";
+    jwt_options.auth_scheme    = "Bearer";
 
     auto jwt_mw = qb::http::jwt_middleware_with_options<MiddlewareIntegrationSession>(jwt_options);
     jwt_mw->require_claims({"custom_claim"}); // Middleware will check for this claim's existence.
@@ -948,7 +910,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
             mid_server_side_assertions++; // For successful payload content check
         }
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "JWT Simplified Auth OK";
+        ctx->response().body()   = "JWT Simplified Auth OK";
         ctx->complete();
     });
     _server->router().compile();
@@ -956,7 +918,7 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
     // 1. No token
     {
         qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         mid_request_count_client++;
     }
@@ -972,8 +934,8 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
 
     // 3. Expired token
     {
-        std::string expired_token = generate_simple_test_jwt_for_mid_test(
-            "simple_user", {{"custom_claim", qb::json("value")}}, -10); // Expired 10s ago
+        std::string expired_token =
+            generate_simple_test_jwt_for_mid_test("simple_user", {{"custom_claim", qb::json("value")}}, -10); // Expired 10s ago
         qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + expired_token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -983,10 +945,8 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
 
     // 4. Token not yet active (NBF)
     {
-        std::string nbf_token = generate_simple_test_jwt_for_mid_test("simple_user",
-                                                                      {
-                                                                          {"custom_claim", qb::json("value")}
-                                                                      }, 3600, 60); // NBF in 60s
+        std::string nbf_token =
+            generate_simple_test_jwt_for_mid_test("simple_user", {{"custom_claim", qb::json("value")}}, 3600, 60); // NBF in 60s
         qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + nbf_token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -996,20 +956,18 @@ TEST_F(MiddlewareHttpIntegrationTest, JwtMiddlewareSimplifiedTest) {
 
     // 5. Valid token but missing required claim
     {
-        std::string token_no_req_claim = generate_simple_test_jwt_for_mid_test("simple_user"); // No custom_claim here
+        std::string       token_no_req_claim = generate_simple_test_jwt_for_mid_test("simple_user"); // No custom_claim here
         qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + token_no_req_claim);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
-        EXPECT_NE(response.body().as<std::string>().find("Required claim 'custom_claim' is missing"),
-                  std::string::npos);
+        EXPECT_NE(response.body().as<std::string>().find("Required claim 'custom_claim' is missing"), std::string::npos);
         mid_request_count_client++;
     }
 
     // 6. Fully valid token
     {
-        std::string valid_token = generate_simple_test_jwt_for_mid_test("simple_user", {{"custom_claim", "value"}},
-                                                                        3600, -5);
+        std::string       valid_token = generate_simple_test_jwt_for_mid_test("simple_user", {{"custom_claim", "value"}}, 3600, -5);
         qb::http::Request request{{"http://localhost:29888/jwt_simplified_route"}};
         request.add_header("Authorization", "Bearer " + valid_token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1037,10 +995,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
     // Algorithm defaults to HMAC_SHA256 in auth::Options, matching our JWT helper.
 
     auto auth_mw = qb::http::create_jwt_auth_middleware<MiddlewareIntegrationSession>(
-        JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST,
-        JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST,
-        "TestAuthMiddlewareInstance"
-    );
+        JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST, JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST, "TestAuthMiddlewareInstance");
     // Apply the auth_options to the middleware instance if its constructor doesn't take full options
     // Or, ensure the factory/constructor used correctly sets up the underlying AuthManager.
     // The create_jwt_auth_middleware factory above takes secret and algorithm string,
@@ -1055,8 +1010,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
         mid_server_side_assertions++; // For the handler itself
 
         auto auth_user_opt = ctx->template get<qb::http::auth::User>("user"); // Default context key
-        EXPECT_TRUE(
-            auth_user_opt.has_value()) << "Authenticated user (qb::http::auth::User) not found in context key 'user'";
+        EXPECT_TRUE(auth_user_opt.has_value()) << "Authenticated user (qb::http::auth::User) not found in context key 'user'";
         if (auth_user_opt.has_value()) {
             const auto &auth_user = *auth_user_opt;
             EXPECT_EQ("user123", auth_user.id) << "Authenticated user ID mismatch";
@@ -1070,7 +1024,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
             }
         }
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Auth Route New OK - JWT Verified";
+        ctx->response().body()   = "Auth Route New OK - JWT Verified";
         ctx->complete();
     });
     _server->router().compile();
@@ -1078,7 +1032,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
     // 1. No Authorization header
     {
         qb::http::Request request{{"http://localhost:29888/auth_route_new"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
         EXPECT_NE(response.body().as<std::string>().find("Authentication required"), std::string::npos);
         mid_request_count_client++;
@@ -1096,9 +1050,7 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
 
     // 3. Valid JWT, but user does not have the required role ("editor")
     {
-        std::string token_wrong_role = generate_simple_test_jwt_for_mid_test("user123", {
-                                                                                 {"roles", qb::json::array({"viewer"})}
-                                                                             });
+        std::string       token_wrong_role = generate_simple_test_jwt_for_mid_test("user123", {{"roles", qb::json::array({"viewer"})}});
         qb::http::Request request{{"http://localhost:29888/auth_route_new"}};
         request.add_header("Authorization", "Bearer " + token_wrong_role);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1109,14 +1061,8 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
 
     // 4. Valid JWT, correct subject, and correct role ("editor")
     {
-        std::string token_correct_role = generate_simple_test_jwt_for_mid_test("user123", {
-                                                                                   {
-                                                                                       "roles",
-                                                                                       qb::json::array({
-                                                                                           "editor", "another_role"
-                                                                                       })
-                                                                                   }
-                                                                               });
+        std::string token_correct_role =
+            generate_simple_test_jwt_for_mid_test("user123", {{"roles", qb::json::array({"editor", "another_role"})}});
         qb::http::Request request{{"http://localhost:29888/auth_route_new"}};
         request.add_header("Authorization", "Bearer " + token_correct_role);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1132,17 +1078,17 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
 // Helper middleware for ConditionalMiddleware tests in the integration fixture
 class ResponseHeaderMiddleware : public qb::http::IMiddleware<MiddlewareIntegrationSession> {
 public:
-    ResponseHeaderMiddleware(std::string id, std::string header_name, std::string header_value,
-                             bool complete_request = false)
-        : _id(std::move(id)), _header_name(std::move(header_name)), _header_value(std::move(header_value)),
-          _complete_request(complete_request) {
-    }
+    ResponseHeaderMiddleware(std::string id, std::string header_name, std::string header_value, bool complete_request = false)
+        : _id(std::move(id))
+        , _header_name(std::move(header_name))
+        , _header_value(std::move(header_value))
+        , _complete_request(complete_request) {}
 
-    void process(std::shared_ptr<MidCtx> ctx) override {
+    void
+    process(std::shared_ptr<MidCtx> ctx) override {
         ctx->response().set_header(_header_name, _header_value);
         if (_complete_request) {
-            if (ctx->response().status() < qb::http::status::OK || ctx->response().status() >=
-                qb::http::status::MULTIPLE_CHOICES) {
+            if (ctx->response().status() < qb::http::status::OK || ctx->response().status() >= qb::http::status::MULTIPLE_CHOICES) {
                 ctx->response().status() = qb::http::status::NO_CONTENT;
             }
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
@@ -1151,26 +1097,30 @@ public:
         }
     }
 
-    std::string name() const override { return _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return _id;
     }
+
+    void
+    cancel() override {}
 
 private:
     std::string _id;
     std::string _header_name;
     std::string _header_value;
-    bool _complete_request;
+    bool        _complete_request;
 };
-
 
 // --- ConditionalMiddleware Tests ---
 TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S1_PredicateFalse_NoElse_MainRuns) {
     _server->router().clear();
     mid_expected_server_assertions = 1;
 
-    auto predicate_s1 = [](const auto & /*ctx*/) -> bool { return false; };
-    auto if_mw_s1 = std::make_shared<ResponseHeaderMiddleware>("If_S1", "X-If-S1-Ran", "true");
+    auto predicate_s1 = [](const auto & /*ctx*/) -> bool {
+        return false;
+    };
+    auto if_mw_s1   = std::make_shared<ResponseHeaderMiddleware>("If_S1", "X-If-S1-Ran", "true");
     auto cond_mw_s1 = qb::http::conditional_middleware<MiddlewareIntegrationSession>(predicate_s1, if_mw_s1);
 
     _server->router().use(cond_mw_s1);
@@ -1179,13 +1129,13 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S1_PredicateFalse_No
         mid_server_side_assertions++;
         ctx->response().set_header("X-Main-S1-Ran", "true");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "S1 Main Handler";
+        ctx->response().body()   = "S1 Main Handler";
         ctx->complete();
     });
     _server->router().compile();
 
     qb::http::Request request_s1{{"http://localhost:29888/cond_test_s1"}};
-    auto response_s1 = qb::http::run_sync(qb::http::GET(request_s1)).response;
+    auto              response_s1 = qb::http::run_sync(qb::http::GET(request_s1)).response;
 
     EXPECT_EQ(qb::http::status::OK, response_s1.status());
     EXPECT_EQ("S1 Main Handler", response_s1.body().as<std::string>());
@@ -1200,7 +1150,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S2_PredicateTrue_IfR
     auto predicate_s2 = [](const auto &ctx) -> bool {
         return ctx->request().uri().query("exec_if") == "1";
     };
-    auto if_mw_s2 = std::make_shared<ResponseHeaderMiddleware>("If_S2", "X-If-S2-Ran", "true");
+    auto if_mw_s2   = std::make_shared<ResponseHeaderMiddleware>("If_S2", "X-If-S2-Ran", "true");
     auto cond_mw_s2 = qb::http::conditional_middleware<MiddlewareIntegrationSession>(predicate_s2, if_mw_s2);
 
     _server->router().use(cond_mw_s2);
@@ -1209,13 +1159,13 @@ TEST_F(MiddlewareHttpIntegrationTest, ConditionalMiddleware_S2_PredicateTrue_IfR
         mid_server_side_assertions++;
         ctx->response().set_header("X-Main-S2-Ran", "true");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "S2 Main Handler";
+        ctx->response().body()   = "S2 Main Handler";
         ctx->complete();
     });
     _server->router().compile();
 
     qb::http::Request request_s2{{"http://localhost:29888/cond_test_s2?exec_if=1"}};
-    auto response_s2 = qb::http::run_sync(qb::http::GET(request_s2)).response;
+    auto              response_s2 = qb::http::run_sync(qb::http::GET(request_s2)).response;
 
     EXPECT_EQ(qb::http::status::OK, response_s2.status());
     EXPECT_EQ("S2 Main Handler", response_s2.body().as<std::string>());
@@ -1267,7 +1217,8 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         create_file("subdir/other.txt", "Other file in subdir");
     } catch (const std::exception &e) {
         FAIL() << "Exception during StaticFilesMiddlewareTest SetUp: " << e.what();
-        if (!test_root_dir.empty()) std::filesystem::remove_all(test_root_dir); // Attempt cleanup on failure
+        if (!test_root_dir.empty())
+            std::filesystem::remove_all(test_root_dir); // Attempt cleanup on failure
         return;
     }
 
@@ -1275,20 +1226,20 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
     {
         _server->router().clear();
         qb::http::StaticFilesOptions options(test_root_dir.string());
-        auto sf_mw = qb::http::static_files_middleware<MiddlewareIntegrationSession>(options);
+        auto                         sf_mw = qb::http::static_files_middleware<MiddlewareIntegrationSession>(options);
         _server->router().use(sf_mw);
         // Add a fallback handler to see if middleware passes through unexpectedly
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx) {
             // This should not be hit if a file is served
             mid_server_side_assertions++; // Should remain 0 if files are served correctly
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-            ctx->response().body() = "Fallback handler hit unexpectedly";
+            ctx->response().body()   = "Fallback handler hit unexpectedly";
             ctx->complete();
         });
         _server->router().compile();
 
         qb::http::Request request{{"http://localhost:29888/file1.txt"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
 
         EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Contents of file1.txt", response.body().as<std::string>());
@@ -1301,18 +1252,18 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
     {
         _server->router().clear();
         qb::http::StaticFilesOptions options(test_root_dir.string());
-        auto sf_mw = qb::http::static_files_middleware<MiddlewareIntegrationSession>(options);
+        auto                         sf_mw = qb::http::static_files_middleware<MiddlewareIntegrationSession>(options);
         _server->router().use(sf_mw);
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx) {
             mid_server_side_assertions++;
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-            ctx->response().body() = "Fallback handler hit unexpectedly for 404 test";
+            ctx->response().body()   = "Fallback handler hit unexpectedly for 404 test";
             ctx->complete();
         });
         _server->router().compile();
 
         qb::http::Request request{{"http://localhost:29888/nonexistent.txt"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::NOT_FOUND, response.status());
         // The body for 404 is set by StaticFilesMiddleware itself
         EXPECT_EQ("File not found", response.body().as<std::string>());
@@ -1323,18 +1274,18 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
     {
         _server->router().clear();
         qb::http::StaticFilesOptions options(test_root_dir.string()); // serve_index_file is true by default
-        auto sf_mw = qb::http::static_files_middleware<MiddlewareIntegrationSession>(options);
+        auto                         sf_mw = qb::http::static_files_middleware<MiddlewareIntegrationSession>(options);
         _server->router().use(sf_mw);
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx) {
             mid_server_side_assertions++;
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-            ctx->response().body() = "Fallback handler hit unexpectedly for root index";
+            ctx->response().body()   = "Fallback handler hit unexpectedly for root index";
             ctx->complete();
         });
         _server->router().compile();
 
         qb::http::Request request{{"http://localhost:29888/"}};
-        auto response = qb::http::run_sync(qb::http::GET(request)).response;
+        auto              response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("Root Index HTML", response.body().as<std::string>());
         EXPECT_EQ("text/html; charset=utf-8", response.header("Content-Type"));
@@ -1351,12 +1302,12 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
         _server->router().get("/*any", [](std::shared_ptr<MidCtx> ctx) {
             mid_server_side_assertions++;
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-            ctx->response().body() = "Fallback handler hit unexpectedly for range test";
+            ctx->response().body()   = "Fallback handler hit unexpectedly for range test";
             ctx->complete();
         });
         _server->router().compile();
 
-        std::string file_content = "Contents of file1.txt";
+        std::string       file_content = "Contents of file1.txt";
         qb::http::Request request{{"http://localhost:29888/file1.txt"}};
         request.add_header("Range", "bytes=9-14");
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -1382,20 +1333,17 @@ TEST_F(MiddlewareHttpIntegrationTest, StaticFilesMiddlewareTest) {
 
 // (The orphaned router restore block that was here previously is correctly removed by previous steps)
 
-
 // --- TransformMiddleware Tests ---
 TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S1_RequestBodyAndHeader) {
     _server->router().clear();
     mid_expected_server_assertions = 1;
 
-    qb::http::TransformMiddleware<MiddlewareIntegrationSession>::RequestTransformer req_transformer =
-            [](qb::http::Request &req) {
+    qb::http::TransformMiddleware<MiddlewareIntegrationSession>::RequestTransformer req_transformer = [](qb::http::Request &req) {
         req.set_header("X-Request-Transformed-New", "true");
         std::string current_body = req.body().as<std::string>();
-        req.body() = "TransformedBody:" + current_body;
+        req.body()               = "TransformedBody:" + current_body;
     };
-    auto transform_mw = qb::http::transform_middleware<MiddlewareIntegrationSession>(
-        req_transformer, "RequestTransformTestMW");
+    auto transform_mw = qb::http::transform_middleware<MiddlewareIntegrationSession>(req_transformer, "RequestTransformTestMW");
 
     _server->router().use(transform_mw);
     _server->router().post("/transformed_route_final", [](std::shared_ptr<MidCtx> ctx) {
@@ -1404,7 +1352,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S1_RequestBodyAndHeade
         EXPECT_EQ("true", ctx->request().header("X-Request-Transformed-New"));
         EXPECT_EQ("TransformedBody:OriginalData", ctx->request().body().as<std::string>());
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Transformed Route Final Content Handled";
+        ctx->response().body()   = "Transformed Route Final Content Handled";
         ctx->response().set_header("X-Handler-Saw-Header", ctx->request().header("X-Request-Transformed-New"));
         ctx->response().set_header("X-Handler-Saw-Body-Prefix", ctx->request().body().as<std::string>().substr(0, 15));
         ctx->complete();
@@ -1413,7 +1361,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S1_RequestBodyAndHeade
 
     qb::http::Request http_req{qb::http::method::POST, {"http://localhost:29888/transformed_route_final"}};
     http_req.body() = "OriginalData";
-    auto response = qb::http::run_sync(qb::http::POST(http_req)).response;
+    auto response   = qb::http::run_sync(qb::http::POST(http_req)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Transformed Route Final Content Handled", response.body().as<std::string>());
@@ -1425,13 +1373,11 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S2_RequestMethodChange
     _server->router().clear();
     mid_expected_server_assertions = 1;
 
-    qb::http::TransformMiddleware<MiddlewareIntegrationSession>::RequestTransformer method_changer =
-            [](qb::http::Request &req) {
+    qb::http::TransformMiddleware<MiddlewareIntegrationSession>::RequestTransformer method_changer = [](qb::http::Request &req) {
         req.method() = qb::http::method::PUT;
         req.set_header("X-Method-Altered", "true");
     };
-    auto transform_mw_method_change = qb::http::transform_middleware<MiddlewareIntegrationSession>(
-        method_changer, "MethodChangerMW");
+    auto transform_mw_method_change = qb::http::transform_middleware<MiddlewareIntegrationSession>(method_changer, "MethodChangerMW");
 
     _server->router().use(transform_mw_method_change);
     _server->router().post("/method_change_test", [](std::shared_ptr<MidCtx> ctx) {
@@ -1440,7 +1386,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S2_RequestMethodChange
         EXPECT_EQ(ctx->request().method(), qb::http::method::PUT);
         EXPECT_EQ(ctx->request().header("X-Method-Altered"), "true");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Method change test handled";
+        ctx->response().body()   = "Method change test handled";
         ctx->response().set_header("X-Handler-Actual-Method", std::to_string(ctx->request().method()));
         ctx->complete();
     });
@@ -1448,29 +1394,20 @@ TEST_F(MiddlewareHttpIntegrationTest, TransformMiddleware_S2_RequestMethodChange
 
     qb::http::Request http_req_post{qb::http::method::POST, {"http://localhost:29888/method_change_test"}};
     http_req_post.body() = "data";
-    auto response = qb::http::run_sync(qb::http::POST(http_req_post)).response;
+    auto response        = qb::http::run_sync(qb::http::POST(http_req_post)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("Method change test handled", response.body().as<std::string>());
     EXPECT_EQ(std::to_string(qb::http::method::PUT), response.header("X-Handler-Actual-Method"));
 }
 
-
 // --- ValidationMiddleware Tests ---
 TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S1_ValidBody) {
     _server->router().clear();
     mid_expected_server_assertions = 1;
 
-    auto request_validator = std::make_shared<qb::http::validation::RequestValidator>();
-    qb::json body_schema = {
-        {"type", "object"},
-        {
-            "properties", {
-                {"name", {{"type", "string"}}}
-            }
-        },
-        {"required", {"name"}}
-    };
+    auto     request_validator = std::make_shared<qb::http::validation::RequestValidator>();
+    qb::json body_schema       = {{"type", "object"}, {"properties", {{"name", {{"type", "string"}}}}}, {"required", {"name"}}};
     request_validator->for_body(body_schema);
     auto val_mw = qb::http::validation_middleware<MiddlewareIntegrationSession>(request_validator);
 
@@ -1479,14 +1416,14 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S1_ValidBody) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Valid body processed";
+        ctx->response().body()   = "Valid body processed";
         ctx->complete();
     });
     _server->router().compile();
 
     qb::http::Request req{qb::http::method::POST, {"http://localhost:29888/val_test_body"}};
-    qb::json valid_body_data = {{"name", "Test User"}};
-    req.body() = valid_body_data.dump();
+    qb::json          valid_body_data = {{"name", "Test User"}};
+    req.body()                        = valid_body_data.dump();
     req.set_header("Content-Type", "application/json");
     auto response = qb::http::run_sync(qb::http::POST(req)).response;
 
@@ -1498,14 +1435,10 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S2_InvalidBody) {
     _server->router().clear();
     mid_expected_server_assertions = 0;
 
-    auto request_validator = std::make_shared<qb::http::validation::RequestValidator>();
-    qb::json body_schema = {
+    auto     request_validator = std::make_shared<qb::http::validation::RequestValidator>();
+    qb::json body_schema       = {
         {"type", "object"},
-        {
-            "properties", {
-                {"email", {{"type", "string"}, {"pattern", "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"}}}
-            }
-        },
+        {"properties", {{"email", {{"type", "string"}, {"pattern", "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"}}}}},
         {"required", {"email"}}
     };
     request_validator->for_body(body_schema);
@@ -1516,14 +1449,14 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S2_InvalidBody) {
         mid_request_count_server++;
         mid_server_side_assertions++;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Handler reached unexpectedly";
+        ctx->response().body()   = "Handler reached unexpectedly";
         ctx->complete();
     });
     _server->router().compile();
 
     qb::http::Request req{qb::http::method::POST, {"http://localhost:29888/val_test_body_invalid"}};
-    qb::json invalid_body_data = {{"email", "not-an-email"}};
-    req.body() = invalid_body_data.dump();
+    qb::json          invalid_body_data = {{"email", "not-an-email"}};
+    req.body()                          = invalid_body_data.dump();
     req.set_header("Content-Type", "application/json");
     auto response = qb::http::run_sync(qb::http::POST(req)).response;
 
@@ -1533,7 +1466,7 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S2_InvalidBody) {
     EXPECT_EQ("Validation failed.", error_response["message"].get<std::string>());
     ASSERT_TRUE(error_response["errors"].is_array() && !error_response["errors"].empty());
     bool email_pattern_error_found = false;
-    for (const auto &err: error_response["errors"]) {
+    for (const auto &err : error_response["errors"]) {
         if (err["field"].get<std::string>() == "email" && err["rule"].get<std::string>() == "pattern") {
             email_pattern_error_found = true;
             break;
@@ -1569,8 +1502,8 @@ TEST_F(MiddlewareHttpIntegrationTest, ValidationMiddleware_S2_InvalidBody) {
             ctx->response().body() = "Test default: A global server error occurred.";
             ctx->complete();
     };
-    auto default_error_task_v = std::make_shared<qb::http::RouteLambdaTask<MiddlewareIntegrationSession>>(default_error_handler_fn_v, "DefaultGlobalServerErrorTaskV");
-    _server->router().set_error_task_chain({default_error_task_v});
-     _server->router().get("/ping", [](std::shared_ptr<MidCtx> ctx){ mid_request_count_server++; mid_server_side_assertions++; ctx->response().status() = qb::http::status::OK; ctx->response().body() = "pong_middleware_test"; ctx->complete(); });
-    _server->router().compile();
+    auto default_error_task_v = std::make_shared<qb::http::RouteLambdaTask<MiddlewareIntegrationSession>>(default_error_handler_fn_v,
+   "DefaultGlobalServerErrorTaskV"); _server->router().set_error_task_chain({default_error_task_v}); _server->router().get("/ping",
+   [](std::shared_ptr<MidCtx> ctx){ mid_request_count_server++; mid_server_side_assertions++; ctx->response().status() = qb::http::status::OK;
+   ctx->response().body() = "pong_middleware_test"; ctx->complete(); }); _server->router().compile();
 */
