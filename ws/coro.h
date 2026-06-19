@@ -59,7 +59,7 @@
  * @endcode
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -114,18 +114,18 @@ struct ConnectResult {
  */
 struct IncomingFrame {
     enum class Kind : std::uint8_t {
-        Message,      ///< Text or binary data frame.
-        Ping,         ///< Incoming ping (pong is auto-sent by the protocol layer).
-        Pong,         ///< Incoming pong (response to a locally-sent ping).
-        Close,        ///< Peer requested connection close (payload is reason).
-        Disconnected  ///< Transport went away before a frame arrived.
+        Message,     ///< Text or binary data frame.
+        Ping,        ///< Incoming ping (pong is auto-sent by the protocol layer).
+        Pong,        ///< Incoming pong (response to a locally-sent ping).
+        Close,       ///< Peer requested connection close (payload is reason).
+        Disconnected ///< Transport went away before a frame arrived.
     };
 
     Kind          kind{Kind::Disconnected};
-    std::string   payload{};       ///< Owning copy of the frame payload.
-    bool          is_text{false};  ///< True when `kind == Message` and type is Text.
-    std::uint16_t close_code{0};   ///< Parsed close code (only meaningful for `Close`).
-    std::string   close_reason{};  ///< Human-readable close reason.
+    std::string   payload{};      ///< Owning copy of the frame payload.
+    bool          is_text{false}; ///< True when `kind == Message` and type is Text.
+    std::uint16_t close_code{0};  ///< Parsed close code (only meaningful for `Close`).
+    std::string   close_reason{}; ///< Human-readable close reason.
 };
 
 /**
@@ -147,18 +147,17 @@ struct CloseResult {
  * so all framing / RFC compliance logic is shared with the callback client.
  */
 template <typename Transport = ::qb::io::transport::tcp>
-class coro_client
-    : public WebSocket<coro_client<Transport>, Transport> {
+class coro_client : public WebSocket<coro_client<Transport>, Transport> {
     using base = WebSocket<coro_client<Transport>, Transport>;
 
 public:
+    using typename base::closed;
     using typename base::connected;
     using typename base::disconnected;
     using typename base::error;
     using typename base::message;
     using typename base::ping;
     using typename base::pong;
-    using typename base::closed;
     using typename base::timeout;
 
 private:
@@ -184,16 +183,14 @@ private:
     static IncomingFrame
     make_message_frame(message const &event) {
         IncomingFrame frame;
-        frame.kind    = IncomingFrame::Kind::Message;
+        frame.kind = IncomingFrame::Kind::Message;
         frame.payload.assign(event.data, event.size);
         frame.is_text = ((event.ws.fin_rsv_opcode & 0x0F) == opcode::_Text);
         return frame;
     }
 
     static IncomingFrame
-    make_control_frame(IncomingFrame::Kind kind,
-                       std::size_t         size,
-                       char const         *data) {
+    make_control_frame(IncomingFrame::Kind kind, std::size_t size, char const *data) {
         IncomingFrame frame;
         frame.kind = kind;
         frame.payload.assign(data, size);
@@ -205,9 +202,9 @@ private:
         IncomingFrame frame;
         frame.kind = IncomingFrame::Kind::Close;
         if (size >= 2u) {
-            const auto hi     = static_cast<std::uint8_t>(data[0]);
-            const auto lo     = static_cast<std::uint8_t>(data[1]);
-            frame.close_code  = static_cast<std::uint16_t>((hi << 8) | lo);
+            const auto hi    = static_cast<std::uint8_t>(data[0]);
+            const auto lo    = static_cast<std::uint8_t>(data[1]);
+            frame.close_code = static_cast<std::uint16_t>((hi << 8) | lo);
             frame.close_reason.assign(data + 2, size - 2);
         }
         return frame;
@@ -249,9 +246,8 @@ private:
     void
     install_frame_complete(Complete &&cb) {
         if (_frame_complete) {
-            throw std::logic_error(
-                "qb::http::ws::coro_client::receive(): another awaiter is "
-                "already waiting for a frame on this client");
+            throw std::logic_error("qb::http::ws::coro_client::receive(): another awaiter is "
+                                   "already waiting for a frame on this client");
         }
         _frame_complete = std::forward<Complete>(cb);
     }
@@ -316,23 +312,19 @@ public:
 
     void
     on(ping &&event) {
-        deliver_frame(make_control_frame(IncomingFrame::Kind::Ping,
-                                         event.size,
-                                         event.data));
+        deliver_frame(make_control_frame(IncomingFrame::Kind::Ping, event.size, event.data));
     }
 
     void
     on(pong &&event) {
-        deliver_frame(make_control_frame(IncomingFrame::Kind::Pong,
-                                         event.size,
-                                         event.data));
+        deliver_frame(make_control_frame(IncomingFrame::Kind::Pong, event.size, event.data));
     }
 
     void
     on(closed &&event) {
         if (!_close_sent) {
             ::qb::http::ws::Message echo = event.ws;
-            _close_sent = true;
+            _close_sent                  = true;
             *this << echo;
         }
         deliver_frame(make_close_frame(event.size, event.data));
@@ -345,7 +337,7 @@ public:
     void
     on(disconnected &&) {
         _disconnected = true;
-        _close_sent = false;
+        _close_sent   = false;
         // Fire pending completions with a failure so coroutines don't hang
         // when the transport is yanked from under them. `coro_client` is a
         // leaf type: no further forwarding to the base's CRTP `on()` is
@@ -382,34 +374,31 @@ public:
      * @endcode
      */
     [[nodiscard]] auto
-    connect(::qb::io::uri const &remote,
-            qb::duration timeout = qb::duration::zero()) {
-        return qb::http::async::make_awaiter<ConnectResult>(
-            [this, remote, timeout](auto complete) {
-                if (_frame_complete) {
-                    IncomingFrame frame;
-                    frame.kind = IncomingFrame::Kind::Disconnected;
-                    auto cb = std::exchange(_frame_complete, {});
-                    cb(std::move(frame));
-                }
-                if (_close_complete) {
-                    auto cb = std::exchange(_close_complete, {});
-                    cb(CloseResult{false});
-                }
-                _pending_frames.clear();
-                _disconnected = false;
-                _close_sent = false;
-                install_connect_complete(std::move(complete));
-                base::connect(remote, timeout);
-            });
+    connect(::qb::io::uri const &remote, qb::duration timeout = qb::duration::zero()) {
+        return qb::http::async::make_awaiter<ConnectResult>([this, remote, timeout](auto complete) {
+            if (_frame_complete) {
+                IncomingFrame frame;
+                frame.kind = IncomingFrame::Kind::Disconnected;
+                auto cb    = std::exchange(_frame_complete, {});
+                cb(std::move(frame));
+            }
+            if (_close_complete) {
+                auto cb = std::exchange(_close_complete, {});
+                cb(CloseResult{false});
+            }
+            _pending_frames.clear();
+            _disconnected = false;
+            _close_sent   = false;
+            install_connect_complete(std::move(complete));
+            base::connect(remote, timeout);
+        });
     }
 
     /**
      * @brief Overload that accepts a stringish URI for terseness in tests.
      */
     [[nodiscard]] auto
-    connect(std::string_view remote_uri,
-            qb::duration timeout = qb::duration::zero()) {
+    connect(std::string_view remote_uri, qb::duration timeout = qb::duration::zero()) {
         return connect(::qb::io::uri(std::string(remote_uri)), timeout);
     }
 
@@ -426,22 +415,21 @@ public:
      */
     [[nodiscard]] auto
     receive() {
-        return qb::http::async::make_awaiter<IncomingFrame>(
-            [this](auto complete) {
-                if (!_pending_frames.empty()) {
-                    auto frame = std::move(_pending_frames.front());
-                    _pending_frames.pop_front();
-                    complete(std::move(frame));
-                    return;
-                }
-                if (_disconnected) {
-                    IncomingFrame frame;
-                    frame.kind = IncomingFrame::Kind::Disconnected;
-                    complete(std::move(frame));
-                    return;
-                }
-                install_frame_complete(std::move(complete));
-            });
+        return qb::http::async::make_awaiter<IncomingFrame>([this](auto complete) {
+            if (!_pending_frames.empty()) {
+                auto frame = std::move(_pending_frames.front());
+                _pending_frames.pop_front();
+                complete(std::move(frame));
+                return;
+            }
+            if (_disconnected) {
+                IncomingFrame frame;
+                frame.kind = IncomingFrame::Kind::Disconnected;
+                complete(std::move(frame));
+                return;
+            }
+            install_frame_complete(std::move(complete));
+        });
     }
 
     /**
@@ -454,24 +442,21 @@ public:
      * @throws std::invalid_argument if @p status is a reserved close code.
      */
     [[nodiscard]] auto
-    close_async(CloseStatus      status = CloseStatus::Normal,
-                std::string_view reason = "closed normally") {
-        return qb::http::async::make_awaiter<CloseResult>(
-            [this, status, reason = std::string(reason)](auto complete) {
-                if (_close_complete) {
-                    throw std::logic_error(
-                        "qb::http::ws::coro_client::close_async(): another "
-                        "close awaiter is already pending");
-                }
-                if (_disconnected) {
-                    complete(CloseResult{true});
-                    return;
-                }
-                _close_sent = true;
-                _close_complete = std::move(complete);
-                MessageClose msg(status, reason);
-                *this << msg;
-            });
+    close_async(CloseStatus status = CloseStatus::Normal, std::string_view reason = "closed normally") {
+        return qb::http::async::make_awaiter<CloseResult>([this, status, reason = std::string(reason)](auto complete) {
+            if (_close_complete) {
+                throw std::logic_error("qb::http::ws::coro_client::close_async(): another "
+                                       "close awaiter is already pending");
+            }
+            if (_disconnected) {
+                complete(CloseResult{true});
+                return;
+            }
+            _close_sent     = true;
+            _close_complete = std::move(complete);
+            MessageClose msg(status, reason);
+            *this << msg;
+        });
     }
 };
 
@@ -493,8 +478,7 @@ using coro_client_secure = coro_client<::qb::io::transport::stcp>;
  */
 template <typename Awaitable>
 auto
-run_sync(Awaitable &&awaitable)
-    -> decltype(qb::io::async::run_sync(std::forward<Awaitable>(awaitable))) {
+run_sync(Awaitable &&awaitable) -> decltype(qb::io::async::run_sync(std::forward<Awaitable>(awaitable))) {
     return qb::io::async::run_sync(std::forward<Awaitable>(awaitable));
 }
 
@@ -557,8 +541,7 @@ run_sync(Awaitable &&awaitable)
  */
 namespace detail {
 template <typename Self, typename Server>
-using coro_session_base_t =
-    typename qb::io::use<Self>::tcp::template client<Server>;
+using coro_session_base_t = typename qb::io::use<Self>::tcp::template client<Server>;
 } // namespace detail
 
 template <typename Self, typename Server>
@@ -572,7 +555,7 @@ public:
     /// alias can be instantiated while the user's derived type is still
     /// incomplete. The base's `has_server == true` routes requests to the
     /// server variant.
-    using Protocol    = qb::http::protocol<Self_t>;
+    using Protocol = qb::http::protocol<Self_t>;
     /// WebSocket protocol (installed on successful upgrade).
     using WS_Protocol = qb::http::ws::protocol<Self_t>;
 
@@ -585,12 +568,10 @@ public:
      * `response.status()` to a non-success code and the base will send it
      * as-is before dropping the connection.
      */
-    using HandshakeHook = std::function<bool(Self &             session,
-                                             qb::http::Request  &request,
-                                             qb::http::Response &response)>;
+    using HandshakeHook = std::function<bool(Self &session, qb::http::Request &request, qb::http::Response &response)>;
 
 private:
-    std::deque<IncomingFrame>            _pending_frames;
+    std::deque<IncomingFrame>             _pending_frames;
     std::function<void(IncomingFrame &&)> _frame_complete;
     std::function<void(CloseResult &&)>   _close_complete;
     std::size_t                           _pending_cap{1024};
@@ -643,33 +624,30 @@ private:
             return;
         }
 
-        qb::io::async::coro_scheduler().spawn(
-            [self_sp]() mutable -> qb::io::async::task<void> {
+        qb::io::async::coro_scheduler().spawn([self_sp]() mutable -> qb::io::async::task<void> {
+            try {
+                co_await self_sp->run();
+            } catch (const std::exception &) {
+                // Best-effort orderly shutdown on uncaught exceptions:
+                // notify the peer with a 1011 Close and drop the TCP
+                // stream. We swallow any secondary failure because the
+                // transport may already be gone.
                 try {
-                    co_await self_sp->run();
-                } catch (const std::exception &) {
-                    // Best-effort orderly shutdown on uncaught exceptions:
-                    // notify the peer with a 1011 Close and drop the TCP
-                    // stream. We swallow any secondary failure because the
-                    // transport may already be gone.
-                    try {
-                        MessageClose msg(CloseStatus::UnexpectedReason,
-                                         "internal server error");
-                        *self_sp << msg;
-                    } catch (...) {
-                    }
-                    self_sp->disconnect();
+                    MessageClose msg(CloseStatus::UnexpectedReason, "internal server error");
+                    *self_sp << msg;
                 } catch (...) {
-                    try {
-                        MessageClose msg(CloseStatus::UnexpectedReason,
-                                         "internal server error");
-                        *self_sp << msg;
-                    } catch (...) {
-                    }
-                    self_sp->disconnect();
                 }
-                co_return;
-            });
+                self_sp->disconnect();
+            } catch (...) {
+                try {
+                    MessageClose msg(CloseStatus::UnexpectedReason, "internal server error");
+                    *self_sp << msg;
+                } catch (...) {
+                }
+                self_sp->disconnect();
+            }
+            co_return;
+        });
     }
 
 public:
@@ -755,8 +733,7 @@ public:
             return false;
         }
 
-        if (!this->template switch_protocol<WS_Protocol>(self(), request,
-                                                         response)) {
+        if (!this->template switch_protocol<WS_Protocol>(self(), request, response)) {
             // `switch_protocol` sets BAD_REQUEST on handshake failures; deliver
             // it before closing so clients get a concrete HTTP rejection.
             if (static_cast<int>(response.status()) == 0) {
@@ -813,8 +790,8 @@ public:
         IncomingFrame frame;
         frame.kind = IncomingFrame::Kind::Close;
         if (event.size >= 2u) {
-            const auto hi = static_cast<std::uint8_t>(event.data[0]);
-            const auto lo = static_cast<std::uint8_t>(event.data[1]);
+            const auto hi    = static_cast<std::uint8_t>(event.data[0]);
+            const auto lo    = static_cast<std::uint8_t>(event.data[1]);
             frame.close_code = static_cast<std::uint16_t>((hi << 8) | lo);
             frame.close_reason.assign(event.data + 2, event.size - 2);
         }
@@ -837,7 +814,7 @@ public:
     void
     on(qb::io::async::event::disconnected &&) {
         _disconnected = true;
-        _close_sent = false;
+        _close_sent   = false;
 
         IncomingFrame frame;
         frame.kind = IncomingFrame::Kind::Disconnected;
@@ -863,27 +840,25 @@ public:
      */
     [[nodiscard]] auto
     next_frame() {
-        return qb::http::async::make_awaiter<IncomingFrame>(
-            [this](auto complete) {
-                if (!_pending_frames.empty()) {
-                    auto frame = std::move(_pending_frames.front());
-                    _pending_frames.pop_front();
-                    complete(std::move(frame));
-                    return;
-                }
-                if (_disconnected) {
-                    IncomingFrame frame;
-                    frame.kind = IncomingFrame::Kind::Disconnected;
-                    complete(std::move(frame));
-                    return;
-                }
-                if (_frame_complete) {
-                    throw std::logic_error(
-                        "qb::http::ws::coro_session::next_frame(): another "
-                        "awaiter is already suspended on this session");
-                }
-                _frame_complete = std::move(complete);
-            });
+        return qb::http::async::make_awaiter<IncomingFrame>([this](auto complete) {
+            if (!_pending_frames.empty()) {
+                auto frame = std::move(_pending_frames.front());
+                _pending_frames.pop_front();
+                complete(std::move(frame));
+                return;
+            }
+            if (_disconnected) {
+                IncomingFrame frame;
+                frame.kind = IncomingFrame::Kind::Disconnected;
+                complete(std::move(frame));
+                return;
+            }
+            if (_frame_complete) {
+                throw std::logic_error("qb::http::ws::coro_session::next_frame(): another "
+                                       "awaiter is already suspended on this session");
+            }
+            _frame_complete = std::move(complete);
+        });
     }
 
     /**
@@ -893,24 +868,21 @@ public:
      * @throws std::invalid_argument when @p status is a reserved code.
      */
     [[nodiscard]] auto
-    close_async(CloseStatus      status = CloseStatus::Normal,
-                std::string_view reason = "closed normally") {
-        return qb::http::async::make_awaiter<CloseResult>(
-            [this, status, reason = std::string(reason)](auto complete) {
-                if (_close_complete) {
-                    throw std::logic_error(
-                        "qb::http::ws::coro_session::close_async(): another "
-                        "close awaiter is already pending");
-                }
-                if (_disconnected) {
-                    complete(CloseResult{true});
-                    return;
-                }
-                _close_sent = true;
-                _close_complete = std::move(complete);
-                MessageClose msg(status, reason);
-                *this << msg;
-            });
+    close_async(CloseStatus status = CloseStatus::Normal, std::string_view reason = "closed normally") {
+        return qb::http::async::make_awaiter<CloseResult>([this, status, reason = std::string(reason)](auto complete) {
+            if (_close_complete) {
+                throw std::logic_error("qb::http::ws::coro_session::close_async(): another "
+                                       "close awaiter is already pending");
+            }
+            if (_disconnected) {
+                complete(CloseResult{true});
+                return;
+            }
+            _close_sent     = true;
+            _close_complete = std::move(complete);
+            MessageClose msg(status, reason);
+            *this << msg;
+        });
     }
 };
 

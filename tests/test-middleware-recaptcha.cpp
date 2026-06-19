@@ -3,60 +3,66 @@
 #include "../middleware/recaptcha.h" // The adapted RecaptchaMiddleware
 #include "../routing/middleware.h"   // For MiddlewareTask and IMiddleware
 
+#include <functional>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <functional>
-#include <sstream>
 
 // --- Mock Session for RecaptchaMiddleware Tests ---
 struct MockRecaptchaSession {
-    qb::http::Response _response;
-    std::string _session_id_str = "recaptcha_test_session";
+    qb::http::Response                       _response;
+    std::string                              _session_id_str = "recaptcha_test_session";
     std::optional<qb::http::RecaptchaResult> _recaptcha_result_in_context;
-    bool _final_handler_called = false;
-    std::string _trace;
+    bool                                     _final_handler_called = false;
+    std::string                              _trace;
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MockRecaptchaSession &operator<<(const qb::http::Response &resp) {
+    MockRecaptchaSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 
-    void reset() {
+    void
+    reset() {
         _response = qb::http::Response();
         _recaptcha_result_in_context.reset();
         _final_handler_called = false;
         _trace.clear();
     }
 
-    void trace(const std::string &point) {
-        if (!_trace.empty()) _trace += ";";
+    void
+    trace(const std::string &point) {
+        if (!_trace.empty())
+            _trace += ";";
         _trace += point;
     }
 };
 
-// --- Test Fixture for RecaptchaMiddleware --- 
+// --- Test Fixture for RecaptchaMiddleware ---
 class RecaptchaMiddlewareTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockRecaptchaSession> _session;
-    std::unique_ptr<qb::http::Router<MockRecaptchaSession> > _router;
+    std::shared_ptr<MockRecaptchaSession>                   _session;
+    std::unique_ptr<qb::http::Router<MockRecaptchaSession>> _router;
 
-
-    void SetUp() override {
+    void
+    SetUp() override {
         _session = std::make_shared<MockRecaptchaSession>();
-        _router = std::make_unique<qb::http::Router<MockRecaptchaSession> >();
+        _router  = std::make_unique<qb::http::Router<MockRecaptchaSession>>();
     }
 
-    qb::http::Request create_request(const std::string &token_value = "",
-                                     qb::http::RecaptchaOptions::TokenLocation location =
-                                             qb::http::RecaptchaOptions::TokenLocation::Body,
-                                     const std::string &field_name = "g-recaptcha-response",
-                                     bool body_as_form = false) {
+    qb::http::Request
+    create_request(const std::string                        &token_value = "",
+                   qb::http::RecaptchaOptions::TokenLocation location    = qb::http::RecaptchaOptions::TokenLocation::Body,
+                   const std::string &field_name = "g-recaptcha-response", bool body_as_form = false) {
         qb::http::Request req;
         req.method() = qb::http::method::POST; // Often used with forms needing reCAPTCHA
-        req.uri() = qb::io::uri("/submit_form");
+        req.uri()    = qb::io::uri("/submit_form");
 
         if (!token_value.empty()) {
             switch (location) {
@@ -72,10 +78,10 @@ protected:
                     } else {
                         qb::json body_json;
                         body_json[field_name] = token_value;
-                        req.body() = body_json.dump();
+                        req.body()            = body_json.dump();
                         req.set_header("Content-Type", "application/json");
                     }
-                break;
+                    break;
                 case qb::http::RecaptchaOptions::TokenLocation::Query:
                     req.uri() = qb::io::uri("/submit_form?" + field_name + "=" + token_value);
                     break;
@@ -84,23 +90,23 @@ protected:
         return req;
     }
 
-    qb::http::RouteHandlerFn<MockRecaptchaSession> success_handler() {
-        return [this](std::shared_ptr<qb::http::Context<MockRecaptchaSession> > ctx) {
+    qb::http::RouteHandlerFn<MockRecaptchaSession>
+    success_handler() {
+        return [this](std::shared_ptr<qb::http::Context<MockRecaptchaSession>> ctx) {
             if (_session) {
                 _session->_final_handler_called = true;
                 if (ctx->has("recaptcha_result")) {
-                    _session->_recaptcha_result_in_context = ctx->template get<qb::http::RecaptchaResult>(
-                        "recaptcha_result");
+                    _session->_recaptcha_result_in_context = ctx->template get<qb::http::RecaptchaResult>("recaptcha_result");
                 }
             }
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "Form Submitted Successfully";
+            ctx->response().body()   = "Form Submitted Successfully";
             ctx->complete();
         };
     }
 
-    void configure_router_and_run(std::shared_ptr<qb::http::RecaptchaMiddleware<MockRecaptchaSession> > recap_mw,
-                                  qb::http::Request request) {
+    void
+    configure_router_and_run(std::shared_ptr<qb::http::RecaptchaMiddleware<MockRecaptchaSession>> recap_mw, qb::http::Request request) {
         _router->use(recap_mw);
         _router->post("/submit_form", success_handler()); // Assuming POST for reCAPTCHA-protected forms
         _router->compile();
@@ -115,7 +121,7 @@ protected:
 
 TEST_F(RecaptchaMiddlewareTest, MissingToken) {
     qb::http::RecaptchaOptions opts("test_secret");
-    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    auto                       recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
     configure_router_and_run(recap_mw, create_request("")); // Empty token
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
@@ -124,18 +130,16 @@ TEST_F(RecaptchaMiddlewareTest, MissingToken) {
 }
 
 TEST(RecaptchaRequestEncoding, VerificationBodyEscapesFormReservedCharacters) {
-    const std::string body = qb::http::detail::build_recaptcha_verification_body(
-        "secret&with=reserved+chars%",
-        "token+with&separators=and%percent");
+    const std::string body =
+        qb::http::detail::build_recaptcha_verification_body("secret&with=reserved+chars%", "token+with&separators=and%percent");
 
-    EXPECT_EQ(body,
-              "secret=secret%26with%3Dreserved%2Bchars%25&response=token%2Bwith%26separators%3Dand%25percent");
+    EXPECT_EQ(body, "secret=secret%26with%3Dreserved%2Bchars%25&response=token%2Bwith%26separators%3Dand%25percent");
 }
 
 TEST_F(RecaptchaMiddlewareTest, ValidTokenPassesWithInjectedVerifier) {
     qb::http::RecaptchaOptions opts("fake_secret_for_mocked_success");
     opts.min_score(0.5f);
-    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    auto recap_mw        = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
     bool verifier_called = false;
     recap_mw->verification_client([&](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
         verifier_called = true;
@@ -144,7 +148,7 @@ TEST_F(RecaptchaMiddlewareTest, ValidTokenPassesWithInjectedVerifier) {
 
         qb::http::Response response;
         response.status() = qb::http::status::OK;
-        response.body() = R"({"success":true,"score":0.9,"action":"submit","hostname":"test.com"})";
+        response.body()   = R"({"success":true,"score":0.9,"action":"submit","hostname":"test.com"})";
         cb(qb::http::async::Reply{std::move(request), std::move(response)});
     });
 
@@ -160,12 +164,11 @@ TEST_F(RecaptchaMiddlewareTest, ValidTokenPassesWithInjectedVerifier) {
 
 TEST_F(RecaptchaMiddlewareTest, ScorelessV2SuccessPassesDefaultScoreThreshold) {
     qb::http::RecaptchaOptions opts("fake_secret_for_mocked_v2_success");
-    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
-    recap_mw->verification_client([](qb::http::Request request,
-                                     qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+    auto                       recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
         qb::http::Response response;
         response.status() = qb::http::status::OK;
-        response.body() = R"({"success":true,"hostname":"test.com"})";
+        response.body()   = R"({"success":true,"hostname":"test.com"})";
         cb(qb::http::async::Reply{std::move(request), std::move(response)});
     });
 
@@ -179,43 +182,35 @@ TEST_F(RecaptchaMiddlewareTest, ScorelessV2SuccessPassesDefaultScoreThreshold) {
 }
 
 TEST_F(RecaptchaMiddlewareTest, ExplicitV3RejectsScorelessSuccess) {
-    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(
-        qb::http::RecaptchaOptions::v3("fake_secret_for_mocked_scoreless_v3"));
-    recap_mw->verification_client([](qb::http::Request request,
-                                     qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(qb::http::RecaptchaOptions::v3("fake_secret_for_mocked_scoreless_v3"));
+    recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
         qb::http::Response response;
         response.status() = qb::http::status::OK;
-        response.body() = R"({"success":true,"hostname":"test.com"})";
+        response.body()   = R"({"success":true,"hostname":"test.com"})";
         cb(qb::http::async::Reply{std::move(request), std::move(response)});
     });
 
     configure_router_and_run(recap_mw, create_request("scoreless_mocked_v3_token"));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Score is required"),
-              std::string::npos);
+    EXPECT_NE(_session->_response.body().as<std::string>().find("Score is required"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(RecaptchaMiddlewareTest, TokenExtractionFromUrlEncodedFormBody) {
     qb::http::RecaptchaOptions opts("test_secret");
-    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
-    recap_mw->verification_client([](qb::http::Request request,
-                                     qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
-        EXPECT_NE(request.body().as<std::string>().find("response=form%2Btoken%26reserved"),
-                  std::string::npos);
+    auto                       recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
+        EXPECT_NE(request.body().as<std::string>().find("response=form%2Btoken%26reserved"), std::string::npos);
 
         qb::http::Response response;
         response.status() = qb::http::status::OK;
-        response.body() = R"({"success":true,"score":0.9})";
+        response.body()   = R"({"success":true,"score":0.9})";
         cb(qb::http::async::Reply{std::move(request), std::move(response)});
     });
 
-    configure_router_and_run(recap_mw,
-                             create_request("form+token&reserved",
-                                            qb::http::RecaptchaOptions::TokenLocation::Body,
-                                            "g-recaptcha-response",
-                                            true));
+    configure_router_and_run(
+        recap_mw, create_request("form+token&reserved", qb::http::RecaptchaOptions::TokenLocation::Body, "g-recaptcha-response", true));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
@@ -228,7 +223,7 @@ TEST_F(RecaptchaMiddlewareTest, TokenScoreTooLowRejectsWithInjectedVerifier) {
     recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
         qb::http::Response response;
         response.status() = qb::http::status::OK;
-        response.body() = R"({"success":true,"score":0.3})";
+        response.body()   = R"({"success":true,"score":0.3})";
         cb(qb::http::async::Reply{std::move(request), std::move(response)});
     });
 
@@ -241,11 +236,11 @@ TEST_F(RecaptchaMiddlewareTest, TokenScoreTooLowRejectsWithInjectedVerifier) {
 
 TEST_F(RecaptchaMiddlewareTest, GoogleApiErrorRejectsWithInjectedVerifier) {
     qb::http::RecaptchaOptions opts("invalid_secret_for_google_error");
-    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
+    auto                       recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
     recap_mw->verification_client([](qb::http::Request request, qb::http::RecaptchaMiddleware<MockRecaptchaSession>::VerificationCallback cb) {
         qb::http::Response response;
         response.status() = qb::http::status::OK;
-        response.body() = R"({"success":false,"error-codes":["invalid-input-secret"]})";
+        response.body()   = R"({"success":false,"error-codes":["invalid-input-secret"]})";
         cb(qb::http::async::Reply{std::move(request), std::move(response)});
     });
 
@@ -265,12 +260,11 @@ TEST_F(RecaptchaMiddlewareTest, TokenExtractionFromHeader) {
 
         qb::http::Response response;
         response.status() = qb::http::status::OK;
-        response.body() = R"({"success":true,"score":1.0})";
+        response.body()   = R"({"success":true,"score":1.0})";
         cb(qb::http::async::Reply{std::move(request), std::move(response)});
     });
 
-    configure_router_and_run(recap_mw, create_request("header_token", qb::http::RecaptchaOptions::TokenLocation::Header,
-                                                      "X-reCAPTCHA-Token"));
+    configure_router_and_run(recap_mw, create_request("header_token", qb::http::RecaptchaOptions::TokenLocation::Header, "X-reCAPTCHA-Token"));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);

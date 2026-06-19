@@ -3,72 +3,76 @@
 // qb::http::method, qb::http::status (e.g. HTTP_STATUS_OK), NextMiddlewareFunc
 // Also qb::uuid, qb::generate_random_uuid, qb::io::uri
 
-#include <string> // For std::string
-#include <memory> // For std::shared_ptr
-#include <utility> // For std::move
-#include <optional> // For std::optional, in case PathParameters::get() uses it and it's not in http.h
-#include <stdexcept> // For std::runtime_error
 #include <algorithm> // For std::find
+#include <memory>    // For std::shared_ptr
+#include <optional>  // For std::optional, in case PathParameters::get() uses it and it's not in http.h
+#include <stdexcept> // For std::runtime_error
+#include <string>    // For std::string
+#include <utility>   // For std::move
 #include <vector>
 
 // Mock session for testing
 struct MockSession {
     qb::http::Response _response;
-    qb::uuid _session_id = qb::generate_random_uuid(); // Assuming qb::generate_random_uuid() is available
-    unsigned int _response_write_count = 0;
+    qb::uuid           _session_id           = qb::generate_random_uuid(); // Assuming qb::generate_random_uuid() is available
+    unsigned int       _response_write_count = 0;
 
-    qb::http::Response &get_response_ref() {
+    qb::http::Response &
+    get_response_ref() {
         return _response;
     }
 
-    MockSession &operator<<(const qb::http::Response &response) {
+    MockSession &
+    operator<<(const qb::http::Response &response) {
         _response = response;
         _response_write_count++;
         if (_response_write_count > 1) {
-            throw std::runtime_error("MockSession::operator<< called " +
-                                     std::to_string(_response_write_count) +
-                                     " times. Expected no more than 1 call between resets.");
+            throw std::runtime_error("MockSession::operator<< called " + std::to_string(_response_write_count)
+                                     + " times. Expected no more than 1 call between resets.");
         }
         return *this;
     }
 
-    [[nodiscard]] const qb::uuid &id() const {
+    [[nodiscard]] const qb::uuid &
+    id() const {
         return _session_id;
     }
 
-    void reset() {
-        _response = qb::http::Response();
+    void
+    reset() {
+        _response             = qb::http::Response();
         _response_write_count = 0;
     }
 
     // Verifies the exact number of times operator<< was called.
     // Useful to ensure a response was written (count = 1) or not written (count = 0).
-    void verify_response_write_count(unsigned int expected_count = 1) const {
+    void
+    verify_response_write_count(unsigned int expected_count = 1) const {
         ASSERT_EQ(_response_write_count, expected_count)
-            << "MockSession final response_write_count mismatch. Expected: " << expected_count
-            << ", Actual: " << _response_write_count;
+            << "MockSession final response_write_count mismatch. Expected: " << expected_count << ", Actual: " << _response_write_count;
     }
 };
 
 // Test fixture for Router tests
 class RouterTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockSession> mock_session;
+    std::shared_ptr<MockSession>  mock_session;
     qb::http::Router<MockSession> router; // Assuming Router is in qb::http
 
-    void SetUp() override {
+    void
+    SetUp() override {
         mock_session = std::make_shared<MockSession>();
         // Router is default constructed
     }
 
     // Default destructor for gtest compatibility with non-trivial members
-    ~RouterTest() override {
-    }
+    ~RouterTest() override {}
 
-    qb::http::Request create_request(qb::http::method method_val, const std::string &target_path) {
+    qb::http::Request
+    create_request(qb::http::method method_val, const std::string &target_path) {
         qb::http::Request req; // Default constructor
-        req.method() = method_val;
-        req.uri() = qb::io::uri(target_path); // Construct URI from path
+        req.method()      = method_val;
+        req.uri()         = qb::io::uri(target_path); // Construct URI from path
         req.major_version = 1;
         req.minor_version = 1; // HTTP/1.1
         // Add any other necessary fields if your Request requires them, e.g. headers
@@ -83,7 +87,7 @@ TEST_F(RouterTest, RouterInitialization) {
 TEST_F(RouterTest, AddAndMatchSimpleGetRoute) {
     router.get("/hello", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "world";
+        ctx->response().body()   = "world";
         ctx->complete();
     });
 
@@ -99,9 +103,7 @@ TEST_F(RouterTest, AddAndMatchSimpleGetRoute) {
 
 TEST_F(RouterTest, RouterLifecycleHookSeesPreRouting) {
     std::vector<qb::http::HookPoint> observed;
-    router.add_lifecycle_hook([&observed](auto &, qb::http::HookPoint point) {
-        observed.push_back(point);
-    });
+    router.add_lifecycle_hook([&observed](auto &, qb::http::HookPoint point) { observed.push_back(point); });
 
     router.get("/hooked", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
@@ -114,8 +116,7 @@ TEST_F(RouterTest, RouterLifecycleHookSeesPreRouting) {
 
     ASSERT_FALSE(observed.empty());
     EXPECT_EQ(observed.front(), qb::http::HookPoint::PRE_ROUTING);
-    EXPECT_NE(std::find(observed.begin(), observed.end(), qb::http::HookPoint::PRE_RESPONSE_SEND),
-              observed.end());
+    EXPECT_NE(std::find(observed.begin(), observed.end(), qb::http::HookPoint::PRE_RESPONSE_SEND), observed.end());
 }
 
 TEST_F(RouterTest, RouteNotFound) {
@@ -142,7 +143,7 @@ TEST_F(RouterTest, AddRouteWithParametersAndMatch) {
         // if (id_param.empty()) { id_param = "not_found_safeguard"; }
 
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "User ID: " + id_param;
+        ctx->response().body()   = "User ID: " + id_param;
         ctx->complete();
     });
 
@@ -157,14 +158,16 @@ TEST_F(RouterTest, AddRouteWithParametersAndMatch) {
 }
 
 TEST_F(RouterTest, RouteWithMiddleware) {
-    router.use([](auto ctx, auto next) {
-        ctx->response().set_header("X-Middleware-Applied", "true");
-        next();
-    }, "GlobalMiddleware");
+    router.use(
+        [](auto ctx, auto next) {
+            ctx->response().set_header("X-Middleware-Applied", "true");
+            next();
+        },
+        "GlobalMiddleware");
 
     router.get("/protected", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Protected content";
+        ctx->response().body()   = "Protected content";
         ctx->complete();
     });
 
@@ -182,9 +185,9 @@ TEST_F(RouterTest, RouteWithMiddleware) {
 
 TEST_F(RouterTest, WildcardRouteSimple) {
     router.get("/files/*filepath", [](auto ctx) {
-        auto fp = ctx->path_param("filepath");
+        auto fp                  = ctx->path_param("filepath");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "File: " + fp;
+        ctx->response().body()   = "File: " + fp;
         ctx->complete();
     });
 
@@ -209,15 +212,15 @@ TEST_F(RouterTest, StaticRoutePriorityOverWildcard) {
     // Define static route
     router.get("/data/specific", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Static specific data";
+        ctx->response().body()   = "Static specific data";
         ctx->complete();
     });
 
     // Define wildcard route with same prefix
     router.get("/data/*whatever", [](auto ctx) {
-        auto what = ctx->path_param("whatever");
+        auto what                = ctx->path_param("whatever");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Wildcard data: " + what;
+        ctx->response().body()   = "Wildcard data: " + what;
         ctx->complete();
     });
 
@@ -242,17 +245,17 @@ TEST_F(RouterTest, StaticRoutePriorityOverWildcard) {
 TEST_F(RouterTest, ParameterRoutePriorityOverWildcard) {
     // Define parameterized route
     router.get("/api/:version/info", [](auto ctx) {
-        auto version = ctx->path_param("version");
+        auto version             = ctx->path_param("version");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "API Info Version: " + version;
+        ctx->response().body()   = "API Info Version: " + version;
         ctx->complete();
     });
 
     // Define wildcard route with same prefix
     router.get("/api/*path", [](auto ctx) {
-        auto p_val = ctx->path_param("path");
+        auto p_val               = ctx->path_param("path");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "API Wildcard Path: " + p_val;
+        ctx->response().body()   = "API Wildcard Path: " + p_val;
         ctx->complete();
     });
 
@@ -277,7 +280,7 @@ TEST_F(RouterTest, ParameterRoutePriorityOverWildcard) {
 TEST_F(RouterTest, PostRouteSimple) {
     router.post("/create", [](auto ctx) {
         ctx->response().status() = qb::http::status::CREATED; // 201
-        ctx->response().body() = "Resource created";
+        ctx->response().body()   = "Resource created";
         ctx->complete();
     });
 
@@ -294,14 +297,14 @@ TEST_F(RouterTest, PostRouteSimple) {
 TEST_F(RouterTest, RouteOverwriting) {
     router.get("/overwrite", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "First definition";
+        ctx->response().body()   = "First definition";
         ctx->complete();
     });
 
     // Overwrite with a new handler for the same path and method
     router.get("/overwrite", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Second definition takes precedence";
+        ctx->response().body()   = "Second definition takes precedence";
         ctx->complete();
     });
 
@@ -319,7 +322,7 @@ TEST_F(RouterTest, TrailingSlashEquivalence) {
     // Define route without trailing slash
     router.get("/path", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Path matched";
+        ctx->response().body()   = "Path matched";
         ctx->complete();
     });
 
@@ -345,7 +348,7 @@ TEST_F(RouterTest, TrailingSlashEquivalence) {
 TEST_F(RouterTest, RootPath) {
     router.get("/", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Root path matched";
+        ctx->response().body()   = "Root path matched";
         ctx->complete();
     });
 
@@ -362,7 +365,7 @@ TEST_F(RouterTest, RootPath) {
 TEST_F(RouterTest, PathCaseSensitivity) {
     router.get("/casepath", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Correct case";
+        ctx->response().body()   = "Correct case";
         ctx->complete();
     });
 
@@ -386,20 +389,24 @@ TEST_F(RouterTest, PathCaseSensitivity) {
 
 TEST_F(RouterTest, MultipleMiddleware) {
     // First middleware, adds header one
-    router.use([](auto ctx, auto next) {
-        ctx->response().add_header("X-Middleware-One", "AppliedOne");
-        next();
-    }, "MiddlewareOne");
+    router.use(
+        [](auto ctx, auto next) {
+            ctx->response().add_header("X-Middleware-One", "AppliedOne");
+            next();
+        },
+        "MiddlewareOne");
 
     // Second middleware, adds header two
-    router.use([](auto ctx, auto next) {
-        ctx->response().add_header("X-Middleware-Two", "AppliedTwo");
-        next();
-    }, "MiddlewareTwo");
+    router.use(
+        [](auto ctx, auto next) {
+            ctx->response().add_header("X-Middleware-Two", "AppliedTwo");
+            next();
+        },
+        "MiddlewareTwo");
 
     router.get("/multi-mw", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Multi-middleware content";
+        ctx->response().body()   = "Multi-middleware content";
         ctx->complete();
     });
 
@@ -424,7 +431,7 @@ TEST_F(RouterTest, MultipleMiddleware) {
 TEST_F(RouterTest, AddAndMatchSimplePutRoute) {
     router.put("/resource/123", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Resource 123 updated";
+        ctx->response().body()   = "Resource 123 updated";
         ctx->complete();
     });
 
@@ -432,7 +439,7 @@ TEST_F(RouterTest, AddAndMatchSimplePutRoute) {
 
     auto request = create_request(HTTP_PUT, "/resource/123");
     // Optionally add request body for PUT if your Request object supports it easily
-    // request.body() = "put data"; 
+    // request.body() = "put data";
     router.route(mock_session, std::move(request));
 
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
@@ -460,7 +467,7 @@ TEST_F(RouterTest, AddAndMatchSimpleDeleteRoute) {
 TEST_F(RouterTest, AddAndMatchSimplePatchRoute) {
     router.patch("/resource/789", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Resource 789 patched";
+        ctx->response().body()   = "Resource 789 patched";
         ctx->complete();
     });
 
@@ -481,7 +488,7 @@ TEST_F(RouterTest, AddAndMatchSimpleHeadRoute) {
     router.get("/info", [](auto ctx) {
         ctx->response().set_header("X-Info-Detail", "SomeDetail");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "This is info"; // Body for GET
+        ctx->response().body()   = "This is info"; // Body for GET
         ctx->complete();
     });
 
@@ -527,24 +534,26 @@ TEST_F(RouterTest, AddAndMatchSimpleOptionsRoute) {
 }
 
 TEST_F(RouterTest, MiddlewareModifyingRequest) {
-    router.use([](auto ctx, auto next) {
-        ctx->set("middleware_flag", true);
-        next();
-    }, "FlagSettingMiddleware");
+    router.use(
+        [](auto ctx, auto next) {
+            ctx->set("middleware_flag", true);
+            next();
+        },
+        "FlagSettingMiddleware");
 
     router.get("/check-flag", [](auto ctx) {
         bool flag_found = false;
-        auto flag_opt = ctx->template get<bool>("middleware_flag");
+        auto flag_opt   = ctx->template get<bool>("middleware_flag");
         if (flag_opt.has_value()) {
             flag_found = flag_opt.value();
         }
 
         if (flag_found) {
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "Flag was set";
+            ctx->response().body()   = "Flag was set";
         } else {
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-            ctx->response().body() = "Flag not set or wrong type";
+            ctx->response().body()   = "Flag not set or wrong type";
         }
         ctx->complete();
     });
@@ -560,18 +569,20 @@ TEST_F(RouterTest, MiddlewareModifyingRequest) {
 }
 
 TEST_F(RouterTest, MiddlewareShortCircuitingResponse) {
-    router.use([](auto ctx, auto next) {
-        ctx->response().status() = qb::http::status::UNAUTHORIZED;
-        ctx->response().body() = "Access denied by middleware";
-        ctx->response().set_header("X-ShortCircuit", "true");
-        ctx->complete(); // Middleware completes the response, `next` should not be called by RouterCore
-        // next(); // Should not be called if response is sent
-    }, "AuthMiddleware");
+    router.use(
+        [](auto ctx, auto next) {
+            ctx->response().status() = qb::http::status::UNAUTHORIZED;
+            ctx->response().body()   = "Access denied by middleware";
+            ctx->response().set_header("X-ShortCircuit", "true");
+            ctx->complete(); // Middleware completes the response, `next` should not be called by RouterCore
+            // next(); // Should not be called if response is sent
+        },
+        "AuthMiddleware");
 
     // This route handler should ideally not be called.
     router.get("/secret-data", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "This should not be seen";
+        ctx->response().body()   = "This should not be seen";
         ctx->complete();
     });
 
@@ -588,20 +599,22 @@ TEST_F(RouterTest, MiddlewareShortCircuitingResponse) {
 
 TEST_F(RouterTest, RouteSpecificMiddleware) {
     auto group = router.group("/api");
-    group->use([](auto ctx, auto next) {
-        ctx->response().add_header("X-Api-Group", "true");
-        next();
-    }, "ApiGroupMiddleware");
+    group->use(
+        [](auto ctx, auto next) {
+            ctx->response().add_header("X-Api-Group", "true");
+            next();
+        },
+        "ApiGroupMiddleware");
 
     group->get("/status", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "API Status OK";
+        ctx->response().body()   = "API Status OK";
         ctx->complete();
     });
 
     router.get("/non-api/status", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Non-API Status OK";
+        ctx->response().body()   = "Non-API Status OK";
         ctx->complete();
     });
 
@@ -628,10 +641,10 @@ TEST_F(RouterTest, RouteSpecificMiddleware) {
 
 TEST_F(RouterTest, RouteWithMultipleParameters) {
     router.get("/users/:userId/items/:itemId", [](auto ctx) {
-        auto user_id = ctx->path_param("userId");
-        auto item_id = ctx->path_param("itemId");
+        auto user_id             = ctx->path_param("userId");
+        auto item_id             = ctx->path_param("itemId");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "User: " + user_id + ", Item: " + item_id;
+        ctx->response().body()   = "User: " + user_id + ", Item: " + item_id;
         ctx->complete();
     });
 
@@ -647,9 +660,9 @@ TEST_F(RouterTest, RouteWithMultipleParameters) {
 
 TEST_F(RouterTest, ParameterAtEndOfPath) {
     router.get("/content/:pageId", [](auto ctx) {
-        auto page_id = ctx->path_param("pageId");
+        auto page_id             = ctx->path_param("pageId");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Page: " + page_id;
+        ctx->response().body()   = "Page: " + page_id;
         ctx->complete();
     });
 
@@ -665,16 +678,16 @@ TEST_F(RouterTest, ParameterAtEndOfPath) {
 
 TEST_F(RouterTest, RouteWithEmptyParameterValue) {
     router.get("/files/:filename/details", [](auto ctx) {
-        auto filename = ctx->path_param("filename");
+        auto filename            = ctx->path_param("filename");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "File: " + filename;
+        ctx->response().body()   = "File: " + filename;
         ctx->complete();
     });
 
     router.compile();
 
     // Request path like /files//details - how RadixTree handles empty segments for params
-    // Assuming it might not match or treat param as empty. 
+    // Assuming it might not match or treat param as empty.
     // Current RadixTree split_path_to_segments might already filter out empty segments from `//`.
     // If it filters them, then "/files//details" becomes {"files", "details"} and won't match /files/:filename/details.
     // Test for 404 first. If it should match with empty param, this test needs adjustment.
@@ -690,9 +703,9 @@ TEST_F(RouterTest, RouteWithEmptyParameterValue) {
 
 TEST_F(RouterTest, WildcardAtRoot) {
     router.get("/*filepath", [](auto ctx) {
-        auto fp = ctx->path_param("filepath");
+        auto fp                  = ctx->path_param("filepath");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Root wildcard: " + fp;
+        ctx->response().body()   = "Root wildcard: " + fp;
         ctx->complete();
     });
 
@@ -715,9 +728,9 @@ TEST_F(RouterTest, WildcardAtRoot) {
 TEST_F(RouterTest, WildcardConsumingNothing) {
     // Route where wildcard is at the end, after a slash
     router.get("/archive/*subpath", [](auto ctx) {
-        auto sp = ctx->path_param("subpath");
+        auto sp                  = ctx->path_param("subpath");
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Archive subpath: [" + sp + "]"; // Brackets to see if empty
+        ctx->response().body()   = "Archive subpath: [" + sp + "]"; // Brackets to see if empty
         ctx->complete();
     });
 
@@ -751,14 +764,12 @@ TEST_F(RouterTest, AddRouteWithDuplicateParameterNameInSameSegment) {
     router.get("/test/:id/:id", [](auto ctx) {
         // This handler should not be reached if the definition throws.
         ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-        ctx->response().body() = "Handler reached for invalid route /test/:id/:id";
+        ctx->response().body()   = "Handler reached for invalid route /test/:id/:id";
         ctx->complete();
     });
 
-    ASSERT_THROW(
-        router.compile(), // Exception expected during compilation of routes
-        std::invalid_argument
-    );
+    ASSERT_THROW(router.compile(), // Exception expected during compilation of routes
+                 std::invalid_argument);
 
     // Reset router state for the next part of the test, as compile() might have partially modified it or cleared it.
     // A robust way is to use a new router instance or ensure a full clear.
@@ -770,13 +781,11 @@ TEST_F(RouterTest, AddRouteWithDuplicateParameterNameInSameSegment) {
     // Also test conflicting param and wildcard names
     router.get("/other/:name/*name", [](auto ctx) {
         ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-        ctx->response().body() = "Handler reached for invalid route /other/:name/*name";
+        ctx->response().body()   = "Handler reached for invalid route /other/:name/*name";
         ctx->complete();
     });
-    ASSERT_THROW(
-        router.compile(), // Exception expected during compilation
-        std::invalid_argument
-    );
+    ASSERT_THROW(router.compile(), // Exception expected during compilation
+                 std::invalid_argument);
 
     // Re-initialize router again before testing a valid route.
     router = qb::http::Router<MockSession>();
@@ -785,7 +794,7 @@ TEST_F(RouterTest, AddRouteWithDuplicateParameterNameInSameSegment) {
     // meaning the router's internal state wasn't corrupted or was reset.
     router.get("/good/route", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Good route ok";
+        ctx->response().body()   = "Good route ok";
         ctx->complete();
     });
 

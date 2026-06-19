@@ -9,533 +9,569 @@
  * Actual compression/decompression operations require the `QB_HAS_COMPRESSION` macro to be defined.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Middleware
  */
 #pragma once
 
-#include <memory>      // For std::shared_ptr
-#include <string>      // For std::string
-#include <vector>      // For std::vector
-#include <algorithm>   // For std::find_if
-#include <chrono>      // For std::chrono::seconds etc.
-#include <stdexcept>   // For std::runtime_error (used by Body compression)
+#include <algorithm> // For std::find_if
+#include <chrono>    // For std::chrono::seconds etc.
+#include <memory>    // For std::shared_ptr
+#include <stdexcept> // For std::runtime_error (used by Body compression)
+#include <string>    // For std::string
+#include <vector>    // For std::vector
 
-#include "../routing/middleware.h" // For IMiddleware, Context, AsyncTaskResult, HookPoint
-#include "../utility.h"            // For qb::http::utility::split_string, ::iequals
 #include "../body.h"               // For qb::http::Body
 #include "../request.h"            // For qb::http::Request (used by Context)
 #include "../response.h"           // For qb::http::Response (used by Context)
+#include "../routing/middleware.h" // For IMiddleware, Context, AsyncTaskResult, HookPoint
 #include "../types.h"              // For qb::http::status constants and qb::http::method
+#include "../utility.h"            // For qb::http::utility::split_string, ::iequals
 
 namespace qb::http {
+/**
+ * @brief Configuration options for HTTP content compression and decompression.
+ *
+ * Allows fine-grained control over how the `CompressionMiddleware` behaves,
+ * including enabling/disabling request/response processing, setting minimum body sizes
+ * for compression, and specifying a list of preferred encoding algorithms.
+ */
+class CompressionOptions {
+private:
+    bool                     _compress_responses;   ///< If true, middleware will attempt to compress response bodies.
+    bool                     _decompress_requests;  ///< If true, middleware will attempt to decompress request bodies.
+    size_t                   _min_size_to_compress; ///< Minimum response body size (bytes) to consider for compression.
+    std::vector<std::string> _preferred_encodings;  ///< Ordered list of preferred server-side compression encodings.
+
+public:
     /**
-     * @brief Configuration options for HTTP content compression and decompression.
+     * @brief Default constructor.
      *
-     * Allows fine-grained control over how the `CompressionMiddleware` behaves,
-     * including enabling/disabling request/response processing, setting minimum body sizes
-     * for compression, and specifying a list of preferred encoding algorithms.
+     * Initializes with common defaults:
+     * - Response compression: enabled
+     * - Request decompression: enabled
+     * - Minimum size to compress: 1024 bytes
+     * - Preferred encodings: {"gzip", "deflate"}
      */
-    class CompressionOptions {
-    private:
-        bool _compress_responses; ///< If true, middleware will attempt to compress response bodies.
-        bool _decompress_requests; ///< If true, middleware will attempt to decompress request bodies.
-        size_t _min_size_to_compress; ///< Minimum response body size (bytes) to consider for compression.
-        std::vector<std::string> _preferred_encodings; ///< Ordered list of preferred server-side compression encodings.
-
-    public:
-        /**
-         * @brief Default constructor.
-         *
-         * Initializes with common defaults:
-         * - Response compression: enabled
-         * - Request decompression: enabled
-         * - Minimum size to compress: 1024 bytes
-         * - Preferred encodings: {"gzip", "deflate"}
-         */
-        CompressionOptions() noexcept
-            : _compress_responses(true)
-              , _decompress_requests(true)
-              , _min_size_to_compress(1024)
-              , _preferred_encodings({"gzip", "deflate"}) {
-        }
-
-        /**
-         * @brief Enables or disables compression of HTTP response bodies.
-         * @param enable If `true`, responses may be compressed. Default is `true`.
-         * @return Reference to this `CompressionOptions` instance for chaining.
-         */
-        CompressionOptions &compress_responses(bool enable) noexcept {
-            _compress_responses = enable;
-            return *this;
-        }
-
-        /**
-         * @brief Enables or disables decompression of HTTP request bodies.
-         * @param enable If `true`, incoming request bodies with `Content-Encoding` may be decompressed. Default is `true`.
-         * @return Reference to this `CompressionOptions` instance for chaining.
-         */
-        CompressionOptions &decompress_requests(bool enable) noexcept {
-            _decompress_requests = enable;
-            return *this;
-        }
-
-        /**
-         * @brief Sets the minimum size (in bytes) a response body must have to be eligible for compression.
-         * Responses smaller than this size will not be compressed, even if other conditions are met.
-         * @param size The minimum size in bytes. Default is 1024.
-         * @return Reference to this `CompressionOptions` instance for chaining.
-         */
-        CompressionOptions &min_size_to_compress(size_t size) noexcept {
-            _min_size_to_compress = size;
-            return *this;
-        }
-
-        /**
-         * @brief Sets the list of preferred compression encodings that the server supports and prefers, in order of preference.
-         * Example: `{"gzip", "deflate"}`.
-         * This list is used to negotiate with the client's `Accept-Encoding` header.
-         * @param encodings A vector of strings representing encoding names (e.g., "gzip").
-         * @return Reference to this `CompressionOptions` instance for chaining.
-         */
-        CompressionOptions &preferred_encodings(std::vector<std::string> encodings) {
-            // Can allocate
-            _preferred_encodings = std::move(encodings);
-            return *this;
-        }
-
-        /** 
-         * @brief Provides a pre-configured `CompressionOptions` instance optimized for higher compression ratios.
-         * This typically means compressing smaller bodies and potentially including more computationally intensive algorithms
-         * if available (e.g., Brotli, if the underlying compression library supports it and it's added here).
-         * @return A `CompressionOptions` instance with settings for maximum compression.
-         */
-        [[nodiscard]] static CompressionOptions max_compression() noexcept {
-            return CompressionOptions()
-                    .min_size_to_compress(256) // Compress smaller files
-                    .preferred_encodings({"gzip", "deflate"}); // "br" would need Brotli support
-        }
-
-        /** 
-         * @brief Provides a pre-configured `CompressionOptions` instance optimized for faster compression speed.
-         * This typically means compressing only larger bodies and preferring algorithms known for speed.
-         * @return A `CompressionOptions` instance with settings for fast compression.
-         */
-        [[nodiscard]] static CompressionOptions fast_compression() noexcept {
-            return CompressionOptions()
-                    .min_size_to_compress(2048) // Compress only larger files
-                    .preferred_encodings({"deflate", "gzip"}); // Deflate is often faster than gzip
-        }
-
-        // --- Getters ---
-        [[nodiscard]] bool should_compress_responses() const noexcept { return _compress_responses; }
-        [[nodiscard]] bool should_decompress_requests() const noexcept { return _decompress_requests; }
-        [[nodiscard]] size_t get_min_size_to_compress() const noexcept { return _min_size_to_compress; }
-
-        [[nodiscard]] const std::vector<std::string> &get_preferred_encodings() const noexcept {
-            return _preferred_encodings;
-        }
-    };
+    CompressionOptions() noexcept
+        : _compress_responses(true)
+        , _decompress_requests(true)
+        , _min_size_to_compress(1024)
+        , _preferred_encodings({"gzip", "deflate"}) {}
 
     /**
-     * @brief Middleware for automatic request body decompression and response body compression.
-     *
-     * This middleware inspects the `Content-Encoding` header for incoming requests and attempts
-     * to decompress the body if a supported encoding (e.g., gzip, deflate) is specified and
-     * if `QB_HAS_COMPRESSION` is defined.
-     *
-     * For outgoing responses, it inspects the client's `Accept-Encoding` header and the response body.
-     * If conditions are met (e.g., body size exceeds `min_size_to_compress`, content type is not
-     * already compressed, client accepts a supported encoding), it compresses the response body
-     * and sets appropriate headers (`Content-Encoding`, `Vary`, `Content-Length`).
-     * Response compression occurs via a `HookPoint::PRE_RESPONSE_SEND` lifecycle hook.
-     * 
-     * @tparam SessionType The type of the session object managed by the router, used by `Context`.
+     * @brief Enables or disables compression of HTTP response bodies.
+     * @param enable If `true`, responses may be compressed. Default is `true`.
+     * @return Reference to this `CompressionOptions` instance for chaining.
      */
-    template<typename SessionType>
-    class CompressionMiddleware final : public IMiddleware<SessionType> {
-    public:
-        using ContextPtr = std::shared_ptr<Context<SessionType> >;
-        using RequestType = Request; // Usually qb::http::Request
-        using ResponseType = Response; // Usually qb::http::Response
+    CompressionOptions &
+    compress_responses(bool enable) noexcept {
+        _compress_responses = enable;
+        return *this;
+    }
 
-        /**
-         * @brief Constructs `CompressionMiddleware` with default `CompressionOptions`.
-         * @param name An optional name for this middleware instance, for logging or identification.
-         */
-        explicit CompressionMiddleware(std::string name = "CompressionMiddleware") noexcept
-            : _options() // Default constructed CompressionOptions
-              , _name(std::move(name)) {
-        }
+    /**
+     * @brief Enables or disables decompression of HTTP request bodies.
+     * @param enable If `true`, incoming request bodies with `Content-Encoding` may be decompressed. Default is `true`.
+     * @return Reference to this `CompressionOptions` instance for chaining.
+     */
+    CompressionOptions &
+    decompress_requests(bool enable) noexcept {
+        _decompress_requests = enable;
+        return *this;
+    }
 
-        /**
-         * @brief Constructs `CompressionMiddleware` with specified `CompressionOptions`.
-         * @param options The compression options to use.
-         * @param name An optional name for this middleware instance.
-         */
-        CompressionMiddleware(CompressionOptions options,
-                              std::string name = "CompressionMiddleware") noexcept
-            : _options(std::move(options)) // Options passed by value and moved
-              , _name(std::move(name)) {
-        }
+    /**
+     * @brief Sets the minimum size (in bytes) a response body must have to be eligible for compression.
+     * Responses smaller than this size will not be compressed, even if other conditions are met.
+     * @param size The minimum size in bytes. Default is 1024.
+     * @return Reference to this `CompressionOptions` instance for chaining.
+     */
+    CompressionOptions &
+    min_size_to_compress(size_t size) noexcept {
+        _min_size_to_compress = size;
+        return *this;
+    }
 
-        /**
-         * @brief Processes the request: attempts to decompress request body if applicable,
-         *        and registers a lifecycle hook to compress the response body before sending.
-         * @param ctx The shared `Context` for the current request.
-         */
-        void process(ContextPtr ctx) override {
+    /**
+     * @brief Sets the list of preferred compression encodings that the server supports and prefers, in order of preference.
+     * Example: `{"gzip", "deflate"}`.
+     * This list is used to negotiate with the client's `Accept-Encoding` header.
+     * @param encodings A vector of strings representing encoding names (e.g., "gzip").
+     * @return Reference to this `CompressionOptions` instance for chaining.
+     */
+    CompressionOptions &
+    preferred_encodings(std::vector<std::string> encodings) {
+        // Can allocate
+        _preferred_encodings = std::move(encodings);
+        return *this;
+    }
+
+    /**
+     * @brief Provides a pre-configured `CompressionOptions` instance optimized for higher compression ratios.
+     * This typically means compressing smaller bodies and potentially including more computationally intensive algorithms
+     * if available (e.g., Brotli, if the underlying compression library supports it and it's added here).
+     * @return A `CompressionOptions` instance with settings for maximum compression.
+     */
+    [[nodiscard]] static CompressionOptions
+    max_compression() noexcept {
+        return CompressionOptions()
+            .min_size_to_compress(256)                 // Compress smaller files
+            .preferred_encodings({"gzip", "deflate"}); // "br" would need Brotli support
+    }
+
+    /**
+     * @brief Provides a pre-configured `CompressionOptions` instance optimized for faster compression speed.
+     * This typically means compressing only larger bodies and preferring algorithms known for speed.
+     * @return A `CompressionOptions` instance with settings for fast compression.
+     */
+    [[nodiscard]] static CompressionOptions
+    fast_compression() noexcept {
+        return CompressionOptions()
+            .min_size_to_compress(2048)                // Compress only larger files
+            .preferred_encodings({"deflate", "gzip"}); // Deflate is often faster than gzip
+    }
+
+    // --- Getters ---
+    [[nodiscard]] bool
+    should_compress_responses() const noexcept {
+        return _compress_responses;
+    }
+    [[nodiscard]] bool
+    should_decompress_requests() const noexcept {
+        return _decompress_requests;
+    }
+    [[nodiscard]] size_t
+    get_min_size_to_compress() const noexcept {
+        return _min_size_to_compress;
+    }
+
+    [[nodiscard]] const std::vector<std::string> &
+    get_preferred_encodings() const noexcept {
+        return _preferred_encodings;
+    }
+};
+
+/**
+ * @brief Middleware for automatic request body decompression and response body compression.
+ *
+ * This middleware inspects the `Content-Encoding` header for incoming requests and attempts
+ * to decompress the body if a supported encoding (e.g., gzip, deflate) is specified and
+ * if `QB_HAS_COMPRESSION` is defined.
+ *
+ * For outgoing responses, it inspects the client's `Accept-Encoding` header and the response body.
+ * If conditions are met (e.g., body size exceeds `min_size_to_compress`, content type is not
+ * already compressed, client accepts a supported encoding), it compresses the response body
+ * and sets appropriate headers (`Content-Encoding`, `Vary`, `Content-Length`).
+ * Response compression occurs via a `HookPoint::PRE_RESPONSE_SEND` lifecycle hook.
+ *
+ * @tparam SessionType The type of the session object managed by the router, used by `Context`.
+ */
+template <typename SessionType>
+class CompressionMiddleware final : public IMiddleware<SessionType> {
+public:
+    using ContextPtr   = std::shared_ptr<Context<SessionType>>;
+    using RequestType  = Request;  // Usually qb::http::Request
+    using ResponseType = Response; // Usually qb::http::Response
+
+    /**
+     * @brief Constructs `CompressionMiddleware` with default `CompressionOptions`.
+     * @param name An optional name for this middleware instance, for logging or identification.
+     */
+    explicit CompressionMiddleware(std::string name = "CompressionMiddleware") noexcept
+        : _options() // Default constructed CompressionOptions
+        , _name(std::move(name)) {}
+
+    /**
+     * @brief Constructs `CompressionMiddleware` with specified `CompressionOptions`.
+     * @param options The compression options to use.
+     * @param name An optional name for this middleware instance.
+     */
+    CompressionMiddleware(CompressionOptions options,
+                          std::string        name = "CompressionMiddleware") noexcept
+        : _options(std::move(options)) // Options passed by value and moved
+        , _name(std::move(name)) {}
+
+    /**
+     * @brief Processes the request: attempts to decompress request body if applicable,
+     *        and registers a lifecycle hook to compress the response body before sending.
+     * @param ctx The shared `Context` for the current request.
+     */
+    void
+    process(ContextPtr ctx) override {
 #ifdef QB_HAS_COMPRESSION
-            if (_options.should_decompress_requests() && can_decompress_request(ctx->request())) {
-                try {
-                    decompress_request_body(ctx->request());
-                } catch (const std::runtime_error &e) {
-                    ctx->response().status() = qb::http::status::BAD_REQUEST;
-                    ctx->response().body() = std::string("Invalid compressed request body: ") + e.what();
-                    ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
-                    ctx->complete(AsyncTaskResult::COMPLETE); // Stop processing
-                    return;
-                } catch (const std::exception &e) {
-                    // Catch other potential exceptions from Body::uncompress
-                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                    ctx->response().body() = std::string("Error during request body decompression: ") + e.what();
-                    ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
-                    ctx->complete(AsyncTaskResult::COMPLETE);
-                    return;
-                }
+        if (_options.should_decompress_requests() && can_decompress_request(ctx->request())) {
+            try {
+                decompress_request_body(ctx->request());
+            } catch (const std::runtime_error &e) {
+                ctx->response().status() = qb::http::status::BAD_REQUEST;
+                ctx->response().body()   = std::string("Invalid compressed request body: ") + e.what();
+                ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                ctx->complete(AsyncTaskResult::COMPLETE); // Stop processing
+                return;
+            } catch (const std::exception &e) {
+                // Catch other potential exceptions from Body::uncompress
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                ctx->response().body()   = std::string("Error during request body decompression: ") + e.what();
+                ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
+                ctx->complete(AsyncTaskResult::COMPLETE);
+                return;
             }
+        }
 
-            if (_options.should_compress_responses()) {
-                // Add a PRE_RESPONSE_SEND hook for response compression.
-                // This ensures compression happens after all handlers have finalized the response body.
-                auto options_snapshot = _options;
-                ctx->add_lifecycle_hook([options_snapshot = std::move(options_snapshot)](
-                                            Context<SessionType> &ctx_ref, HookPoint point) {
-                    if (point == HookPoint::PRE_RESPONSE_SEND) {
-                        if (!ctx_ref.response().body().empty()) {
-                            try {
-                                compress_response_body(ctx_ref, options_snapshot);
-                            } catch (const std::runtime_error &) {
-                                // Log error, but don't modify response further at this critical stage.
-                                // Or, strip Content-Encoding if partially set before error?
-                                // For now, just log (if logging is available).
-                                // std::cerr << "CompressionMiddleware: Error compressing response: " << e.what() << std::endl;
-                            } catch (const std::exception &) {
-                                // std::cerr << "CompressionMiddleware: Generic error compressing response: " << e.what() << std::endl;
-                            }
+        if (_options.should_compress_responses()) {
+            // Add a PRE_RESPONSE_SEND hook for response compression.
+            // This ensures compression happens after all handlers have finalized the response body.
+            auto options_snapshot = _options;
+            ctx->add_lifecycle_hook([options_snapshot = std::move(options_snapshot)](Context<SessionType> &ctx_ref, HookPoint point) {
+                if (point == HookPoint::PRE_RESPONSE_SEND) {
+                    if (!ctx_ref.response().body().empty()) {
+                        try {
+                            compress_response_body(ctx_ref, options_snapshot);
+                        } catch (const std::runtime_error &) {
+                            // Log error, but don't modify response further at this critical stage.
+                            // Or, strip Content-Encoding if partially set before error?
+                            // For now, just log (if logging is available).
+                            // std::cerr << "CompressionMiddleware: Error compressing response: " << e.what() << std::endl;
+                        } catch (const std::exception &) {
+                            // std::cerr << "CompressionMiddleware: Generic error compressing response: " << e.what() << std::endl;
                         }
                     }
-                });
-            }
-#endif // QB_HAS_COMPRESSION
-            ctx->complete(AsyncTaskResult::CONTINUE); // Continue to next middleware/handler
+                }
+            });
         }
+#endif                                            // QB_HAS_COMPRESSION
+        ctx->complete(AsyncTaskResult::CONTINUE); // Continue to next middleware/handler
+    }
 
-        /** @brief Gets the name of this middleware instance. */
-        [[nodiscard]] std::string name() const noexcept override {
-            return _name;
-        }
+    /** @brief Gets the name of this middleware instance. */
+    [[nodiscard]] std::string
+    name() const noexcept override {
+        return _name;
+    }
 
-        /** @brief Handles cancellation; currently a no-op for this middleware. */
-        void cancel() noexcept override {
-            // No specific asynchronous operations to cancel within this middleware itself.
-        }
+    /** @brief Handles cancellation; currently a no-op for this middleware. */
+    void
+    cancel() noexcept override {
+        // No specific asynchronous operations to cancel within this middleware itself.
+    }
 
-        /**
-         * @brief Updates the compression options for this middleware instance.
-         * @param opts The new `CompressionOptions` to use.
-         */
-        void update_options(CompressionOptions opts) noexcept {
-            // Pass by value for potential move
-            _options = std::move(opts);
-        }
+    /**
+     * @brief Updates the compression options for this middleware instance.
+     * @param opts The new `CompressionOptions` to use.
+     */
+    void
+    update_options(CompressionOptions opts) noexcept {
+        // Pass by value for potential move
+        _options = std::move(opts);
+    }
 
-        /** @brief Gets a constant reference to the current `CompressionOptions`. */
-        [[nodiscard]] const CompressionOptions &get_options() const noexcept {
-            return _options;
-        }
+    /** @brief Gets a constant reference to the current `CompressionOptions`. */
+    [[nodiscard]] const CompressionOptions &
+    get_options() const noexcept {
+        return _options;
+    }
 
-    private:
-        CompressionOptions _options;
-        std::string _name;
+private:
+    CompressionOptions _options;
+    std::string        _name;
 
-        /**
-         * @brief Checks if the request has a `Content-Encoding` header indicating a compressed body.
-         * @param request The HTTP request object.
-         * @return `true` if `Content-Encoding` header is present and not empty, `false` otherwise.
-         */
-        [[nodiscard]] bool can_decompress_request(const RequestType &request) const noexcept {
-            // The actual encoding value is checked by Body::uncompress and its helpers.
-            return request.has_header("Content-Encoding") && !request.header("Content-Encoding").empty();
-        }
+    /**
+     * @brief Checks if the request has a `Content-Encoding` header indicating a compressed body.
+     * @param request The HTTP request object.
+     * @return `true` if `Content-Encoding` header is present and not empty, `false` otherwise.
+     */
+    [[nodiscard]] bool
+    can_decompress_request(const RequestType &request) const noexcept {
+        // The actual encoding value is checked by Body::uncompress and its helpers.
+        return request.has_header("Content-Encoding") && !request.header("Content-Encoding").empty();
+    }
 
-        /**
-         * @brief Decompresses the request body in-place if `QB_HAS_COMPRESSION` is defined.
-         * Modifies the request object by replacing its body with the decompressed content
-         * and removing/updating `Content-Encoding` and `Content-Length` headers.
-         * @param request The HTTP request object (mutable).
-         * @throws std::runtime_error if decompression fails (e.g., bad data, unsupported encoding within Body::uncompress).
-         */
-        void decompress_request_body(RequestType &request) {
+    /**
+     * @brief Decompresses the request body in-place if `QB_HAS_COMPRESSION` is defined.
+     * Modifies the request object by replacing its body with the decompressed content
+     * and removing/updating `Content-Encoding` and `Content-Length` headers.
+     * @param request The HTTP request object (mutable).
+     * @throws std::runtime_error if decompression fails (e.g., bad data, unsupported encoding within Body::uncompress).
+     */
+    void
+    decompress_request_body(RequestType &request) {
 #ifdef QB_HAS_COMPRESSION
-            // `request.header()` now always returns `const std::string&` – the template
-            // dance around `std::string_view` headers was retired along with the owning
-            // purge. Just borrow the reference and hand it off to `Body::uncompress`.
-            const std::string &encoding_str = request.header("Content-Encoding");
+        // `request.header()` now always returns `const std::string&` – the template
+        // dance around `std::string_view` headers was retired along with the owning
+        // purge. Just borrow the reference and hand it off to `Body::uncompress`.
+        const std::string &encoding_str = request.header("Content-Encoding");
 
-            if (request.body().empty() || encoding_str.empty()) {
-                return;
-            }
-
-            // Body::uncompress can throw std::runtime_error
-            request.body().uncompress(encoding_str);
-
-            request.remove_header("Content-Encoding");
-            if (request.has_header("Content-Length")) {
-                // Update Content-Length if present
-                request.set_header("Content-Length", std::to_string(request.body().size()));
-            }
-#else
-        (void)request; // Avoid unused parameter warning
-#endif
+        if (request.body().empty() || encoding_str.empty()) {
+            return;
         }
 
-        /**
-         * @brief Compresses the response body in-place if `QB_HAS_COMPRESSION` is defined and conditions are met.
-         * Modifies the response object by replacing its body with compressed content and setting
-         * `Content-Encoding`, `Vary`, and `Content-Length` headers.
-         * @param ctx_ref Reference to the `Context` object containing the response.
-         * @throws std::runtime_error if compression fails (e.g., unsupported encoding within Body::compress).
-         */
-        static void compress_response_body(Context<SessionType> &ctx_ref,
-                                           const CompressionOptions &options) {
+        // Body::uncompress can throw std::runtime_error
+        request.body().uncompress(encoding_str);
+
+        request.remove_header("Content-Encoding");
+        if (request.has_header("Content-Length")) {
+            // Update Content-Length if present
+            request.set_header("Content-Length", std::to_string(request.body().size()));
+        }
+#else
+        (void) request; // Avoid unused parameter warning
+#endif
+    }
+
+    /**
+     * @brief Compresses the response body in-place if `QB_HAS_COMPRESSION` is defined and conditions are met.
+     * Modifies the response object by replacing its body with compressed content and setting
+     * `Content-Encoding`, `Vary`, and `Content-Length` headers.
+     * @param ctx_ref Reference to the `Context` object containing the response.
+     * @throws std::runtime_error if compression fails (e.g., unsupported encoding within Body::compress).
+     */
+    static void
+    compress_response_body(Context<SessionType> &ctx_ref, const CompressionOptions &options) {
 #ifdef QB_HAS_COMPRESSION
-            ResponseType &response = ctx_ref.response(); // Get mutable reference
+        ResponseType &response = ctx_ref.response(); // Get mutable reference
 
-            if (response.body().size() < options.get_min_size_to_compress() ||
-                response.has_header("Content-Encoding") ||
-                is_precompressed_content_type(std::string(response.content_type().type()))) {
-                // Use parsed ContentType
-                return;
-            }
-
-            std::string selected_encoding = select_best_encoding(ctx_ref.request(), options);
-            if (selected_encoding.empty()) {
-                return; // No suitable encoding accepted by client or supported by server
-            }
-
-            // Redundant check, already done above, but kept for safety.
-            if (response.body().size() < options.get_min_size_to_compress()) {
-                return;
-            }
-
-            const std::size_t original_size = response.body().size();
-            const std::string original_body = response.body().as<std::string>();
-
-            // Body::compress can throw std::runtime_error
-            std::size_t compressed_size = response.body().compress(selected_encoding);
-
-            if (compressed_size > 0 && compressed_size < original_size) {
-                // Only set headers if compression was effective
-                response.set_header("Content-Encoding", selected_encoding);
-                response.add_header("Vary", "Accept-Encoding"); // Add to existing Vary or create new
-                response.set_header("Content-Length", std::to_string(compressed_size));
-            } else if (compressed_size > 0) {
-                response.body() = original_body;
-                response.remove_header("Content-Encoding");
-                response.remove_header("Content-Length");
-            }
-            // If compressed_size is 0 (e.g. error or empty result from compress not throwing), headers are not set.
-#else
-        (void)ctx_ref; // Avoid unused parameter warning
-#endif
+        if (response.body().size() < options.get_min_size_to_compress() || response.has_header("Content-Encoding")
+            || is_precompressed_content_type(std::string(response.content_type().type()))) {
+            // Use parsed ContentType
+            return;
         }
 
-        /**
-         * @brief Selects the best supported compression encoding based on client's `Accept-Encoding` header.
-         * @param request The HTTP request containing `Accept-Encoding` header.
-         * @return The name of the best matching encoding (e.g., "gzip") or an empty string if no suitable match.
-         */
-        [[nodiscard]] static std::string select_best_encoding(const RequestType &request,
-                                                              const CompressionOptions &options) noexcept {
-            // After the string_view purge, `request.header()` always returns `const std::string&`.
-            const std::string &accept_encoding_header_str = request.header("Accept-Encoding");
+        std::string selected_encoding = select_best_encoding(ctx_ref.request(), options);
+        if (selected_encoding.empty()) {
+            return; // No suitable encoding accepted by client or supported by server
+        }
 
-            if (accept_encoding_header_str.empty()) {
-                return ""; // Client did not specify Accept-Encoding
+        // Redundant check, already done above, but kept for safety.
+        if (response.body().size() < options.get_min_size_to_compress()) {
+            return;
+        }
+
+        const std::size_t original_size = response.body().size();
+        const std::string original_body = response.body().as<std::string>();
+
+        // Body::compress can throw std::runtime_error
+        std::size_t compressed_size = response.body().compress(selected_encoding);
+
+        if (compressed_size > 0 && compressed_size < original_size) {
+            // Only set headers if compression was effective
+            response.set_header("Content-Encoding", selected_encoding);
+            response.add_header("Vary", "Accept-Encoding"); // Add to existing Vary or create new
+            response.set_header("Content-Length", std::to_string(compressed_size));
+        } else if (compressed_size > 0) {
+            response.body() = original_body;
+            response.remove_header("Content-Encoding");
+            response.remove_header("Content-Length");
+        }
+        // If compressed_size is 0 (e.g. error or empty result from compress not throwing), headers are not set.
+#else
+        (void) ctx_ref; // Avoid unused parameter warning
+#endif
+    }
+
+    /**
+     * @brief Selects the best supported compression encoding based on client's `Accept-Encoding` header.
+     * @param request The HTTP request containing `Accept-Encoding` header.
+     * @return The name of the best matching encoding (e.g., "gzip") or an empty string if no suitable match.
+     */
+    [[nodiscard]] static std::string
+    select_best_encoding(const RequestType &request, const CompressionOptions &options) noexcept {
+        // After the string_view purge, `request.header()` always returns `const std::string&`.
+        const std::string &accept_encoding_header_str = request.header("Accept-Encoding");
+
+        if (accept_encoding_header_str.empty()) {
+            return ""; // Client did not specify Accept-Encoding
+        }
+
+        // Parse `Accept-Encoding: value1;q=x, value2;q=y, ...` over
+        // string_views and honour q=0 exclusions. When several supported
+        // encodings are acceptable, pick the highest client q-value and use
+        // the server preference list as a deterministic tie-breaker.
+        struct AcceptedEncoding {
+            std::string_view name;
+            int              q_milli = 1000;
+        };
+
+        auto parse_q_value_milli = [](std::string_view raw_q) noexcept -> int {
+            auto q = utility::trim_http_whitespace(raw_q);
+            if (q.empty()) {
+                return -1;
             }
-
-            // Parse `Accept-Encoding: value1;q=x, value2;q=y, ...` over
-            // string_views and honour q=0 exclusions. When several supported
-            // encodings are acceptable, pick the highest client q-value and use
-            // the server preference list as a deterministic tie-breaker.
-            struct AcceptedEncoding {
-                std::string_view name;
-                int q_milli = 1000;
-            };
-
-            auto parse_q_value_milli = [](std::string_view raw_q) noexcept -> int {
-                auto q = utility::trim_http_whitespace(raw_q);
-                if (q.empty()) {
-                    return -1;
-                }
-                if (q == "1" || q == "1.0" || q == "1.00" || q == "1.000") {
-                    return 1000;
-                }
-                if (q[0] != '0') {
-                    return -1;
-                }
-                if (q.size() == 1) {
-                    return 0;
-                }
-                if (q.size() < 3 || q[1] != '.') {
-                    return -1;
-                }
-
-                int milli = 0;
-                int place = 100;
-                for (std::size_t i = 2; i < q.size(); ++i) {
-                    const char c = q[i];
-                    if (c < '0' || c > '9' || place == 0) {
-                        return -1;
-                    }
-                    milli += (c - '0') * place;
-                    place /= 10;
-                }
-                return milli;
-            };
-
-            auto parse_q_value = [parse_q_value_milli](std::string_view token) noexcept -> int {
-                auto params = utility::split_string<std::string_view>(token, ";");
-                for (std::size_t i = 1; i < params.size(); ++i) {
-                    auto param = utility::trim_http_whitespace(params[i]);
-                    const auto eq_pos = param.find('=');
-                    if (eq_pos == std::string_view::npos) continue;
-                    auto key = utility::trim_http_whitespace(param.substr(0, eq_pos));
-                    if (!utility::iequals(key, "q")) continue;
-
-                    auto value = utility::trim_http_whitespace(param.substr(eq_pos + 1));
-                    const int q_milli = parse_q_value_milli(value);
-                    return q_milli >= 0 ? q_milli : 0;
-                }
+            if (q == "1" || q == "1.0" || q == "1.00" || q == "1.000") {
                 return 1000;
-            };
-
-            std::vector<AcceptedEncoding> accepted_encodings;
-            auto client_tokens = utility::split_string<std::string_view>(accept_encoding_header_str, ",");
-            for (auto &token: client_tokens) {
-                const auto q = parse_q_value(token);
-                auto name = utility::trim_http_whitespace(token);
-                if (const auto q_pos = name.find(';'); q_pos != std::string_view::npos) {
-                    name = utility::trim_http_whitespace(name.substr(0, q_pos));
-                }
-                if (!name.empty()) {
-                    accepted_encodings.push_back({name, q});
-                }
+            }
+            if (q[0] != '0') {
+                return -1;
+            }
+            if (q.size() == 1) {
+                return 0;
+            }
+            if (q.size() < 3 || q[1] != '.') {
+                return -1;
             }
 
-            std::string best_encoding;
-            int best_q = 0;
-            for (const auto &preferred_server_encoding: options.get_preferred_encodings()) {
-                int explicit_q = -1;
-                int wildcard_q = -1;
-
-                for (const auto &client_encoding: accepted_encodings) {
-                    if (utility::iequals(client_encoding.name, preferred_server_encoding)) {
-                        explicit_q = client_encoding.q_milli;
-                        break;
-                    }
-                    if (client_encoding.name == "*") {
-                        wildcard_q = client_encoding.q_milli;
-                    }
+            int milli = 0;
+            int place = 100;
+            for (std::size_t i = 2; i < q.size(); ++i) {
+                const char c = q[i];
+                if (c < '0' || c > '9' || place == 0) {
+                    return -1;
                 }
-
-                const int candidate_q = explicit_q >= 0 ? explicit_q : wildcard_q;
-                if (candidate_q > best_q) {
-                    best_q = candidate_q;
-                    best_encoding = preferred_server_encoding;
-                }
+                milli += (c - '0') * place;
+                place /= 10;
             }
-            return best_q > 0 ? best_encoding : "";
+            return milli;
+        };
+
+        auto parse_q_value = [parse_q_value_milli](std::string_view token) noexcept -> int {
+            auto params = utility::split_string<std::string_view>(token, ";");
+            for (std::size_t i = 1; i < params.size(); ++i) {
+                auto       param  = utility::trim_http_whitespace(params[i]);
+                const auto eq_pos = param.find('=');
+                if (eq_pos == std::string_view::npos)
+                    continue;
+                auto key = utility::trim_http_whitespace(param.substr(0, eq_pos));
+                if (!utility::iequals(key, "q"))
+                    continue;
+
+                auto      value   = utility::trim_http_whitespace(param.substr(eq_pos + 1));
+                const int q_milli = parse_q_value_milli(value);
+                return q_milli >= 0 ? q_milli : 0;
+            }
+            return 1000;
+        };
+
+        std::vector<AcceptedEncoding> accepted_encodings;
+        auto                          client_tokens = utility::split_string<std::string_view>(accept_encoding_header_str, ",");
+        for (auto &token : client_tokens) {
+            const auto q    = parse_q_value(token);
+            auto       name = utility::trim_http_whitespace(token);
+            if (const auto q_pos = name.find(';'); q_pos != std::string_view::npos) {
+                name = utility::trim_http_whitespace(name.substr(0, q_pos));
+            }
+            if (!name.empty()) {
+                accepted_encodings.push_back({name, q});
+            }
         }
 
-        /**
-         * @brief Checks if a given Content-Type string typically represents already compressed content.
-         * @param content_type_header The value of the Content-Type header.
-         * @return `true` if the MIME type suggests pre-compressed content (e.g., "image/jpeg", "application/pdf"),
-         *         `false` otherwise.
-         */
-        [[nodiscard]] static bool is_precompressed_content_type(const std::string &content_type_header) noexcept {
-            static const std::vector<std::string_view> compressed_mime_types = {
-                // Use string_view for efficiency
-                "image/jpeg", "image/png", "image/gif", "image/webp", "image/jp2", "image/jxr",
-                "audio/mpeg", "audio/ogg", "audio/aac", "audio/opus", "audio/flac",
-                "video/mp4", "video/webm", "video/ogg", "video/quicktime",
-                "application/zip", "application/gzip", "application/x-rar-compressed",
-                "application/x-7z-compressed", "application/x-bzip2", "application/pdf",
-                "application/vnd.oasis.opendocument.text", // ODT often compressed
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" // DOCX
-                // Add more as needed
-            };
+        std::string best_encoding;
+        int         best_q = 0;
+        for (const auto &preferred_server_encoding : options.get_preferred_encodings()) {
+            int explicit_q = -1;
+            int wildcard_q = -1;
 
-            std::string_view main_type_sv = content_type_header;
-            size_t semicolon_pos = main_type_sv.find(';');
-            if (semicolon_pos != std::string_view::npos) {
-                main_type_sv = main_type_sv.substr(0, semicolon_pos);
-            }
-            main_type_sv = utility::trim_http_whitespace(main_type_sv);
-
-            if (main_type_sv.empty()) return false;
-
-            for (const auto &compressed_type: compressed_mime_types) {
-                if (utility::iequals(main_type_sv, compressed_type)) {
-                    return true;
+            for (const auto &client_encoding : accepted_encodings) {
+                if (utility::iequals(client_encoding.name, preferred_server_encoding)) {
+                    explicit_q = client_encoding.q_milli;
+                    break;
+                }
+                if (client_encoding.name == "*") {
+                    wildcard_q = client_encoding.q_milli;
                 }
             }
+
+            const int candidate_q = explicit_q >= 0 ? explicit_q : wildcard_q;
+            if (candidate_q > best_q) {
+                best_q        = candidate_q;
+                best_encoding = preferred_server_encoding;
+            }
+        }
+        return best_q > 0 ? best_encoding : "";
+    }
+
+    /**
+     * @brief Checks if a given Content-Type string typically represents already compressed content.
+     * @param content_type_header The value of the Content-Type header.
+     * @return `true` if the MIME type suggests pre-compressed content (e.g., "image/jpeg", "application/pdf"),
+     *         `false` otherwise.
+     */
+    [[nodiscard]] static bool
+    is_precompressed_content_type(const std::string &content_type_header) noexcept {
+        static const std::vector<std::string_view> compressed_mime_types = {
+            // Use string_view for efficiency
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/jp2",
+            "image/jxr",
+            "audio/mpeg",
+            "audio/ogg",
+            "audio/aac",
+            "audio/opus",
+            "audio/flac",
+            "video/mp4",
+            "video/webm",
+            "video/ogg",
+            "video/quicktime",
+            "application/zip",
+            "application/gzip",
+            "application/x-rar-compressed",
+            "application/x-7z-compressed",
+            "application/x-bzip2",
+            "application/pdf",
+            "application/vnd.oasis.opendocument.text",                                // ODT often compressed
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" // DOCX
+            // Add more as needed
+        };
+
+        std::string_view main_type_sv  = content_type_header;
+        size_t           semicolon_pos = main_type_sv.find(';');
+        if (semicolon_pos != std::string_view::npos) {
+            main_type_sv = main_type_sv.substr(0, semicolon_pos);
+        }
+        main_type_sv = utility::trim_http_whitespace(main_type_sv);
+
+        if (main_type_sv.empty())
             return false;
+
+        for (const auto &compressed_type : compressed_mime_types) {
+            if (utility::iequals(main_type_sv, compressed_type)) {
+                return true;
+            }
         }
-    };
-
-    // --- Factory Functions ---
-
-    /**
-     * @brief Creates a `std::shared_ptr` to a `CompressionMiddleware` instance.
-     * @tparam SessionType The session type used by the HTTP context.
-     * @param options `CompressionOptions` to configure the middleware. Defaults to default-constructed `CompressionOptions`.
-     * @param name An optional name for the middleware instance, for logging or identification purposes.
-     * @return A `std::shared_ptr<CompressionMiddleware<SessionType>>`.
-     */
-    template<typename SessionType>
-    [[nodiscard]] std::shared_ptr<CompressionMiddleware<SessionType> >
-    compression_middleware(
-        CompressionOptions options = CompressionOptions(), // Pass by value for potential move
-        const std::string &name = "CompressionMiddleware"
-    ) {
-        return std::make_shared<CompressionMiddleware<SessionType> >(std::move(options), name);
+        return false;
     }
+};
 
-    /**
-     * @brief Creates a `CompressionMiddleware` instance pre-configured for maximum compression ratios.
-     * @tparam SessionType The session type.
-     * @param name Optional name for the middleware instance.
-     * @return `std::shared_ptr<CompressionMiddleware<SessionType>>`.
-     */
-    template<typename SessionType>
-    [[nodiscard]] std::shared_ptr<CompressionMiddleware<SessionType> >
-    max_compression_middleware(const std::string &name = "MaxCompressionMiddleware") {
-        return std::make_shared<CompressionMiddleware<SessionType> >(CompressionOptions::max_compression(), name);
-    }
+// --- Factory Functions ---
 
-    /**
-     * @brief Creates a `CompressionMiddleware` instance pre-configured for faster compression speeds.
-     * @tparam SessionType The session type.
-     * @param name Optional name for the middleware instance.
-     * @return `std::shared_ptr<CompressionMiddleware<SessionType>>`.
-     */
-    template<typename SessionType>
-    [[nodiscard]] std::shared_ptr<CompressionMiddleware<SessionType> >
-    fast_compression_middleware(const std::string &name = "FastCompressionMiddleware") {
-        return std::make_shared<CompressionMiddleware<SessionType> >(CompressionOptions::fast_compression(), name);
-    }
-} // namespace qb::http 
+/**
+ * @brief Creates a `std::shared_ptr` to a `CompressionMiddleware` instance.
+ * @tparam SessionType The session type used by the HTTP context.
+ * @param options `CompressionOptions` to configure the middleware. Defaults to default-constructed `CompressionOptions`.
+ * @param name An optional name for the middleware instance, for logging or identification purposes.
+ * @return A `std::shared_ptr<CompressionMiddleware<SessionType>>`.
+ */
+template <typename SessionType>
+[[nodiscard]] std::shared_ptr<CompressionMiddleware<SessionType>>
+compression_middleware(CompressionOptions options = CompressionOptions(), // Pass by value for potential move
+                       const std::string &name    = "CompressionMiddleware") {
+    return std::make_shared<CompressionMiddleware<SessionType>>(std::move(options), name);
+}
+
+/**
+ * @brief Creates a `CompressionMiddleware` instance pre-configured for maximum compression ratios.
+ * @tparam SessionType The session type.
+ * @param name Optional name for the middleware instance.
+ * @return `std::shared_ptr<CompressionMiddleware<SessionType>>`.
+ */
+template <typename SessionType>
+[[nodiscard]] std::shared_ptr<CompressionMiddleware<SessionType>>
+max_compression_middleware(const std::string &name = "MaxCompressionMiddleware") {
+    return std::make_shared<CompressionMiddleware<SessionType>>(CompressionOptions::max_compression(), name);
+}
+
+/**
+ * @brief Creates a `CompressionMiddleware` instance pre-configured for faster compression speeds.
+ * @tparam SessionType The session type.
+ * @param name Optional name for the middleware instance.
+ * @return `std::shared_ptr<CompressionMiddleware<SessionType>>`.
+ */
+template <typename SessionType>
+[[nodiscard]] std::shared_ptr<CompressionMiddleware<SessionType>>
+fast_compression_middleware(const std::string &name = "FastCompressionMiddleware") {
+    return std::make_shared<CompressionMiddleware<SessionType>>(CompressionOptions::fast_compression(), name);
+}
+} // namespace qb::http

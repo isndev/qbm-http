@@ -12,7 +12,7 @@
  * security requirements and protocol rules.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -26,6 +26,7 @@
  *         limitations under the License.
  */
 
+#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -33,15 +34,14 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <mutex>
+#include <netinet/in.h>
 #include <qb/io/async.h>
 #include <set>
 #include <stdexcept>
 #include <string_view>
-#include <thread>
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <thread>
 #include <unistd.h>
 #include "../ws/ws.h"
 
@@ -68,11 +68,9 @@ class SecurityServer;
  * Implements validation of WebSocket handshakes and protocol compliance
  * by checking headers, keys, and message masking requirements.
  */
-class SecurityServerClient
-    : public qb::io::use<SecurityServerClient>::tcp::client<SecurityServer> {
+class SecurityServerClient : public qb::io::use<SecurityServerClient>::tcp::client<SecurityServer> {
 private:
-    bool _validated =
-        false; ///< Flag indicating whether the client handshake was validated
+    bool _validated = false; ///< Flag indicating whether the client handshake was validated
 
 public:
     using Protocol    = qb::http::protocol<SecurityServerClient>;
@@ -110,8 +108,7 @@ public:
         }
 
         // Check for upgrade header
-        if (!request.upgrade || request.header("Upgrade") != "websocket" ||
-            request.header("Connection").find("Upgrade") == std::string::npos) {
+        if (!request.upgrade || request.header("Upgrade") != "websocket" || request.header("Connection").find("Upgrade") == std::string::npos) {
             valid = false;
         }
 
@@ -130,7 +127,7 @@ public:
             // Return 400 Bad Request for invalid requests
             qb::http::Response res;
             res.status() = qb::http::status::BAD_REQUEST;
-            res.body()      = "Invalid WebSocket request";
+            res.body()   = "Invalid WebSocket request";
             *this << res;
             ++rejection_count;
             disconnect();
@@ -169,8 +166,7 @@ public:
  *
  * Manages WebSocket connections and handles test completion tracking.
  */
-class SecurityServer
-    : public qb::io::use<SecurityServer>::tcp::server<SecurityServerClient> {
+class SecurityServer : public qb::io::use<SecurityServer>::tcp::server<SecurityServerClient> {
 public:
     /**
      * @brief Handle new IO session
@@ -190,10 +186,8 @@ public:
     void
     on(qb::io::async::event::disconnected &) {
         auto current = connection_count.load(std::memory_order_acquire);
-        while (current != 0 &&
-               !connection_count.compare_exchange_weak(
-                   current, current - 1, std::memory_order_acq_rel,
-                   std::memory_order_acquire)) {
+        while (current != 0
+               && !connection_count.compare_exchange_weak(current, current - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
 
         if (current == 1 && server_active) {
@@ -234,9 +228,8 @@ public:
             qb::io::async::init();
 
             SecurityServer server;
-            const auto listen_status = server.transport().listen_v6(_port);
-            _listening.store(listen_status == qb::io::SocketStatus::Done,
-                             std::memory_order_release);
+            const auto     listen_status = server.transport().listen_v6(_port);
+            _listening.store(listen_status == qb::io::SocketStatus::Done, std::memory_order_release);
             _ready.store(true, std::memory_order_release);
             if (listen_status != qb::io::SocketStatus::Done) {
                 return;
@@ -336,9 +329,7 @@ public:
 };
 
 std::string
-raw_handshake_request(std::string_view key,
-                      std::string_view version = "13",
-                      std::string_view method = "GET") {
+raw_handshake_request(std::string_view key, std::string_view version = "13", std::string_view method = "GET") {
     std::string request;
     request += method;
     request += " / HTTP/1.1\r\n";
@@ -461,9 +452,7 @@ TEST(Security, UNMASKED_FRAMES) {
     ASSERT_GE(close_frame.size(), 4u);
     EXPECT_EQ(static_cast<unsigned char>(close_frame[0]), 0x88);
     EXPECT_LE(static_cast<unsigned char>(close_frame[1]), 125);
-    const auto code =
-        (static_cast<unsigned char>(close_frame[2]) << 8) |
-        static_cast<unsigned char>(close_frame[3]);
+    const auto code = (static_cast<unsigned char>(close_frame[2]) << 8) | static_cast<unsigned char>(close_frame[3]);
     EXPECT_EQ(code, static_cast<int>(qb::http::ws::CloseStatus::ProtocolError));
 }
 
@@ -496,9 +485,8 @@ TEST(Security, ACCEPT_KEY_COMPUTATION) {
     std::string key             = "dGhlIHNhbXBsZSBub25jZQ==";
     std::string expected_accept = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
-    std::string magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    std::string computed_accept =
-        qb::crypto::base64::encode(qb::crypto::sha1(key + magic));
+    std::string magic           = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    std::string computed_accept = qb::crypto::base64::encode(qb::crypto::sha1(key + magic));
 
     EXPECT_EQ(computed_accept, expected_accept) << "Accept key computation is incorrect";
 }

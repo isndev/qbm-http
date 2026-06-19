@@ -13,7 +13,7 @@
  * The implementation follows RFC 6455 (The WebSocket Protocol).
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -79,8 +79,7 @@ fill_secure_bytes(unsigned char *out, std::size_t n) {
         if (pool.offset >= kMaskPoolBytes) {
             pool.refill();
         }
-        const auto take =
-            std::min<std::size_t>(n, kMaskPoolBytes - pool.offset);
+        const auto take = std::min<std::size_t>(n, kMaskPoolBytes - pool.offset);
         std::memcpy(out, pool.data.data() + pool.offset, take);
         pool.offset += take;
         out += take;
@@ -122,49 +121,60 @@ is_utf8(std::string_view sv) noexcept {
         }
 
         if (b0 >= 0xC2u && b0 <= 0xDFu) {
-            if (i + 1u >= n) return false;
+            if (i + 1u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
-            if (!is_cont(b1)) return false;
+            if (!is_cont(b1))
+                return false;
             i += 2u;
             continue;
         }
 
         if (b0 == 0xE0u) {
-            if (i + 2u >= n) return false;
+            if (i + 2u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
             const unsigned char b2 = bytes[i + 2u];
-            if (b1 < 0xA0u || b1 > 0xBFu || !is_cont(b2)) return false;
+            if (b1 < 0xA0u || b1 > 0xBFu || !is_cont(b2))
+                return false;
             i += 3u;
             continue;
         }
         if (b0 >= 0xE1u && b0 <= 0xECu) {
-            if (i + 2u >= n) return false;
+            if (i + 2u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
             const unsigned char b2 = bytes[i + 2u];
-            if (!is_cont(b1) || !is_cont(b2)) return false;
+            if (!is_cont(b1) || !is_cont(b2))
+                return false;
             i += 3u;
             continue;
         }
         if (b0 == 0xEDu) {
-            if (i + 2u >= n) return false;
+            if (i + 2u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
             const unsigned char b2 = bytes[i + 2u];
             // U+D800..U+DFFF surrogates are forbidden in UTF-8.
-            if (b1 < 0x80u || b1 > 0x9Fu || !is_cont(b2)) return false;
+            if (b1 < 0x80u || b1 > 0x9Fu || !is_cont(b2))
+                return false;
             i += 3u;
             continue;
         }
         if (b0 >= 0xEEu && b0 <= 0xEFu) {
-            if (i + 2u >= n) return false;
+            if (i + 2u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
             const unsigned char b2 = bytes[i + 2u];
-            if (!is_cont(b1) || !is_cont(b2)) return false;
+            if (!is_cont(b1) || !is_cont(b2))
+                return false;
             i += 3u;
             continue;
         }
 
         if (b0 == 0xF0u) {
-            if (i + 3u >= n) return false;
+            if (i + 3u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
             const unsigned char b2 = bytes[i + 2u];
             const unsigned char b3 = bytes[i + 3u];
@@ -174,16 +184,19 @@ is_utf8(std::string_view sv) noexcept {
             continue;
         }
         if (b0 >= 0xF1u && b0 <= 0xF3u) {
-            if (i + 3u >= n) return false;
+            if (i + 3u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
             const unsigned char b2 = bytes[i + 2u];
             const unsigned char b3 = bytes[i + 3u];
-            if (!is_cont(b1) || !is_cont(b2) || !is_cont(b3)) return false;
+            if (!is_cont(b1) || !is_cont(b2) || !is_cont(b3))
+                return false;
             i += 4u;
             continue;
         }
         if (b0 == 0xF4u) {
-            if (i + 3u >= n) return false;
+            if (i + 3u >= n)
+                return false;
             const unsigned char b1 = bytes[i + 1u];
             const unsigned char b2 = bytes[i + 2u];
             const unsigned char b3 = bytes[i + 3u];
@@ -228,25 +241,18 @@ is_control_opcode(unsigned char fin_rsv_opcode) noexcept {
 
 void
 enforce_outgoing_frame_constraints(const http::ws::Message &msg) {
-    const auto opcode = static_cast<unsigned char>(
-        msg.fin_rsv_opcode & qb::protocol::ws_internal::rfc::OPCODE_MASK);
+    const auto opcode = static_cast<unsigned char>(msg.fin_rsv_opcode & qb::protocol::ws_internal::rfc::OPCODE_MASK);
     if ((msg.fin_rsv_opcode & qb::protocol::ws_internal::rfc::RSV_BITS_MASK) != 0u) {
-        throw std::invalid_argument(
-            "qb::http::ws: RSV bits require an extension and must be clear");
+        throw std::invalid_argument("qb::http::ws: RSV bits require an extension and must be clear");
     }
     if (!qb::protocol::ws_internal::is_valid_frame_opcode(opcode)) {
-        throw std::invalid_argument(
-            "qb::http::ws: reserved or unknown opcode cannot be serialized");
+        throw std::invalid_argument("qb::http::ws: reserved or unknown opcode cannot be serialized");
     }
-    if (is_control_opcode(msg.fin_rsv_opcode) &&
-        msg.size() > qb::protocol::ws_internal::rfc::MAX_CONTROL_FRAME_PAYLOAD_SIZE) {
-        throw std::invalid_argument(
-            "qb::http::ws: control frame payload exceeds 125-byte RFC 6455 limit");
+    if (is_control_opcode(msg.fin_rsv_opcode) && msg.size() > qb::protocol::ws_internal::rfc::MAX_CONTROL_FRAME_PAYLOAD_SIZE) {
+        throw std::invalid_argument("qb::http::ws: control frame payload exceeds 125-byte RFC 6455 limit");
     }
-    if (is_control_opcode(msg.fin_rsv_opcode) &&
-        (msg.fin_rsv_opcode & qb::protocol::ws_internal::rfc::FIN_BIT_MASK) == 0u) {
-        throw std::invalid_argument(
-            "qb::http::ws: control frames must not be fragmented");
+    if (is_control_opcode(msg.fin_rsv_opcode) && (msg.fin_rsv_opcode & qb::protocol::ws_internal::rfc::FIN_BIT_MASK) == 0u) {
+        throw std::invalid_argument("qb::http::ws: control frames must not be fragmented");
     }
 }
 
@@ -286,8 +292,7 @@ fill_unmasked_message(pipe<char> &pipe, const http::ws::Message &msg) {
 
         // Write the length bytes in network byte order (big-endian)
         for (std::size_t c = num_bytes - 1; c != static_cast<std::size_t>(-1); --c)
-            pipe << static_cast<char>(
-                (static_cast<unsigned long long>(length) >> (8 * c)) % 256);
+            pipe << static_cast<char>((static_cast<unsigned long long>(length) >> (8 * c)) % 256);
     } else {
         // For lengths < 126, use 1-byte length format
         pipe << static_cast<char>(length);
@@ -338,8 +343,7 @@ fill_masked_message(pipe<char> &pipe, const http::ws::Message &msg) {
 
         // Write the length bytes in network byte order (big-endian)
         for (std::size_t c = num_bytes - 1; c != static_cast<std::size_t>(-1); --c)
-            pipe << static_cast<char>(
-                (static_cast<unsigned long long>(length) >> (8 * c)) % 256);
+            pipe << static_cast<char>((static_cast<unsigned long long>(length) >> (8 * c)) % 256);
     } else {
         // For lengths < 126, use 1-byte length format
         pipe << static_cast<char>(length + 128); // length + mask bit

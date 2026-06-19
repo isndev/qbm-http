@@ -18,12 +18,12 @@
  * idiom used by the existing `test-coro-*` suites in `qbm/http`.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0
  */
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -42,8 +42,7 @@ using namespace std::chrono_literals;
 
 class EchoServer;
 
-class EchoClient
-    : public qb::io::use<EchoClient>::tcp::client<EchoServer> {
+class EchoClient : public qb::io::use<EchoClient>::tcp::client<EchoServer> {
 public:
     using Protocol    = qb::http::protocol<EchoClient>;
     using WS_Protocol = qb::http::ws::protocol<EchoClient>;
@@ -75,7 +74,8 @@ public:
 
 class EchoServer : public qb::io::use<EchoServer>::tcp::server<EchoClient> {
 public:
-    void on(IOSession &) {}
+    void
+    on(IOSession &) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -86,8 +86,7 @@ public:
 
 class ClosingServer;
 
-class ClosingClient
-    : public qb::io::use<ClosingClient>::tcp::client<ClosingServer> {
+class ClosingClient : public qb::io::use<ClosingClient>::tcp::client<ClosingServer> {
 public:
     using Protocol    = qb::http::protocol<ClosingClient>;
     using WS_Protocol = qb::http::ws::protocol<ClosingClient>;
@@ -101,8 +100,7 @@ public:
             this->disconnect();
             return;
         }
-        qb::http::ws::MessageClose msg(
-            qb::http::ws::CloseStatus::PolicyViolation, "bye from server");
+        qb::http::ws::MessageClose msg(qb::http::ws::CloseStatus::PolicyViolation, "bye from server");
         *this << msg;
     }
 
@@ -110,10 +108,10 @@ public:
     on(WS_Protocol::message &&) {}
 };
 
-class ClosingServer
-    : public qb::io::use<ClosingServer>::tcp::server<ClosingClient> {
+class ClosingServer : public qb::io::use<ClosingServer>::tcp::server<ClosingClient> {
 public:
-    void on(IOSession &) {}
+    void
+    on(IOSession &) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -122,8 +120,7 @@ public:
 
 class DisconnectingServer;
 
-class DisconnectingClient
-    : public qb::io::use<DisconnectingClient>::tcp::client<DisconnectingServer> {
+class DisconnectingClient : public qb::io::use<DisconnectingClient>::tcp::client<DisconnectingServer> {
 public:
     using Protocol    = qb::http::protocol<DisconnectingClient>;
     using WS_Protocol = qb::http::ws::protocol<DisconnectingClient>;
@@ -144,16 +141,15 @@ public:
     on(WS_Protocol::message &&) {}
 };
 
-class DisconnectingServer
-    : public qb::io::use<DisconnectingServer>::tcp::server<DisconnectingClient> {
+class DisconnectingServer : public qb::io::use<DisconnectingServer>::tcp::server<DisconnectingClient> {
 public:
-    void on(IOSession &) {}
+    void
+    on(IOSession &) {}
 };
 
 class InvalidFrameServer;
 
-class InvalidFrameClient
-    : public qb::io::use<InvalidFrameClient>::tcp::client<InvalidFrameServer> {
+class InvalidFrameClient : public qb::io::use<InvalidFrameClient>::tcp::client<InvalidFrameServer> {
 public:
     using Protocol    = qb::http::protocol<InvalidFrameClient>;
     using WS_Protocol = qb::http::ws::protocol<InvalidFrameClient>;
@@ -170,22 +166,21 @@ public:
 
         // Server-to-client frames must never be masked. This frame is
         // deliberately invalid and should trip the client's protocol-error path.
-        constexpr std::array<char, 7> frame{
-            static_cast<char>(0x81u), static_cast<char>(0x80u | 1u),
-            static_cast<char>(0x12u), static_cast<char>(0x34u),
-            static_cast<char>(0x56u), static_cast<char>(0x78u),
-            static_cast<char>('x' ^ 0x12u)};
+        constexpr std::array<char, 7> frame{static_cast<char>(0x81u),      static_cast<char>(0x80u | 1u), static_cast<char>(0x12u),
+                                            static_cast<char>(0x34u),      static_cast<char>(0x56u),      static_cast<char>(0x78u),
+                                            static_cast<char>('x' ^ 0x12u)};
         std::memcpy(this->out().allocate_back(frame.size()), frame.data(), frame.size());
         this->ready_to_write();
     }
 
-    void on(WS_Protocol::message &&) {}
+    void
+    on(WS_Protocol::message &&) {}
 };
 
-class InvalidFrameServer
-    : public qb::io::use<InvalidFrameServer>::tcp::server<InvalidFrameClient> {
+class InvalidFrameServer : public qb::io::use<InvalidFrameServer>::tcp::server<InvalidFrameClient> {
 public:
-    void on(IOSession &) {}
+    void
+    on(IOSession &) {}
 };
 
 std::atomic<std::size_t> g_coro_close_echoes{0};
@@ -199,33 +194,39 @@ public:
     using Protocol    = qb::http::protocol<CloseEchoClient>;
     using WS_Protocol = qb::http::ws::protocol<CloseEchoClient>;
 
-    explicit CloseEchoClient(IOServer &s) : client(s) {}
+    explicit CloseEchoClient(IOServer &s)
+        : client(s) {}
 
-    void on(Protocol::request &&req) {
+    void
+    on(Protocol::request &&req) {
         if (!this->switch_protocol<WS_Protocol>(*this, req)) {
             this->disconnect();
             return;
         }
-        qb::http::ws::MessageClose msg(
-            qb::http::ws::CloseStatus::GoingAway, "server-closing");
+        qb::http::ws::MessageClose msg(qb::http::ws::CloseStatus::GoingAway, "server-closing");
         *this << msg;
         this->setTimeout(200s);
     }
 
-    void on(WS_Protocol::close &&) {
+    void
+    on(WS_Protocol::close &&) {
         ++g_coro_close_echoes;
         this->disconnect();
     }
 
-    void on(qb::io::async::event::timeout const &) { this->disconnect(); }
+    void
+    on(qb::io::async::event::timeout const &) {
+        this->disconnect();
+    }
 
-    void on(WS_Protocol::message &&) {}
+    void
+    on(WS_Protocol::message &&) {}
 };
 
-class CloseEchoServer
-    : public qb::io::use<CloseEchoServer>::tcp::server<CloseEchoClient> {
+class CloseEchoServer : public qb::io::use<CloseEchoServer>::tcp::server<CloseEchoClient> {
 public:
-    void on(IOSession &) {}
+    void
+    on(IOSession &) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -262,13 +263,17 @@ struct ServerThread {
 
     ~ServerThread() {
         running.store(false, std::memory_order_release);
-        if (thread.joinable()) thread.join();
+        if (thread.joinable())
+            thread.join();
     }
 };
 
 class CoroClientTest : public ::testing::Test {
 protected:
-    void SetUp() override { qb::io::async::init(); }
+    void
+    SetUp() override {
+        qb::io::async::init();
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -280,9 +285,10 @@ TEST_F(CoroClientTest, ConnectsAndExchangesText) {
 
     auto task = [&]() -> qb::io::async::task<std::string> {
         qb::http::ws::coro_client ws;
-        auto res = co_await ws.connect("ws://localhost:19931/");
+        auto                      res = co_await ws.connect("ws://localhost:19931/");
         EXPECT_TRUE(res.ok) << "connect failed";
-        if (!res.ok) co_return std::string{};
+        if (!res.ok)
+            co_return std::string{};
 
         qb::http::ws::MessageText msg;
         msg << "hello-coro";
@@ -303,12 +309,13 @@ TEST_F(CoroClientTest, HandlesBinaryPayload) {
 
     auto task = [&]() -> qb::io::async::task<std::string> {
         qb::http::ws::coro_client ws;
-        const auto c = co_await ws.connect("ws://localhost:19932/");
+        const auto                c = co_await ws.connect("ws://localhost:19932/");
         EXPECT_TRUE(c.ok);
-        if (!c.ok) co_return std::string{};
+        if (!c.ok)
+            co_return std::string{};
 
         qb::http::ws::MessageBinary msg;
-        const std::string payload("\x00\x01\x02binary", 9);
+        const std::string           payload("\x00\x01\x02binary", 9);
         msg << payload;
         ws << msg;
 
@@ -328,17 +335,17 @@ TEST_F(CoroClientTest, CloseTransportsStatusCode) {
 
     auto task = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
         qb::http::ws::coro_client ws;
-        const auto c = co_await ws.connect("ws://localhost:19933/");
+        const auto                c = co_await ws.connect("ws://localhost:19933/");
         EXPECT_TRUE(c.ok);
-        if (!c.ok) co_return qb::http::ws::IncomingFrame{};
+        if (!c.ok)
+            co_return qb::http::ws::IncomingFrame{};
         auto frame = co_await ws.receive();
         co_return frame;
     };
 
     auto frame = qb::http::ws::run_sync(task());
     EXPECT_EQ(frame.kind, qb::http::ws::IncomingFrame::Kind::Close);
-    EXPECT_EQ(frame.close_code,
-              static_cast<std::uint16_t>(qb::http::ws::CloseStatus::PolicyViolation));
+    EXPECT_EQ(frame.close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::PolicyViolation));
     EXPECT_EQ(frame.close_reason, "bye from server");
 }
 
@@ -356,8 +363,9 @@ TEST_F(CoroClientTest, ReceiveUnblocksOnDisconnect) {
     // Either outcome proves that no awaiter hangs on a dropped transport.
     auto task = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame::Kind> {
         qb::http::ws::coro_client ws;
-        const auto c = co_await ws.connect("ws://localhost:19934/");
-        if (!c.ok) co_return qb::http::ws::IncomingFrame::Kind::Disconnected;
+        const auto                c = co_await ws.connect("ws://localhost:19934/");
+        if (!c.ok)
+            co_return qb::http::ws::IncomingFrame::Kind::Disconnected;
         auto frame = co_await ws.receive();
         co_return frame.kind;
     };
@@ -386,9 +394,10 @@ TEST_F(CoroClientTest, ReceiveUnblocksOnProtocolError) {
 
     auto task = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame::Kind> {
         qb::http::ws::coro_client ws;
-        const auto c = co_await ws.connect("ws://localhost:19938/");
+        const auto                c = co_await ws.connect("ws://localhost:19938/");
         EXPECT_TRUE(c.ok);
-        if (!c.ok) co_return qb::http::ws::IncomingFrame::Kind::Disconnected;
+        if (!c.ok)
+            co_return qb::http::ws::IncomingFrame::Kind::Disconnected;
         auto frame = co_await ws.receive();
         co_return frame.kind;
     };
@@ -402,11 +411,11 @@ TEST_F(CoroClientTest, CloseAsyncCompletesAfterPeerEcho) {
 
     auto task = [&]() -> qb::io::async::task<bool> {
         qb::http::ws::coro_client ws;
-        const auto c = co_await ws.connect("ws://localhost:19935/");
+        const auto                c = co_await ws.connect("ws://localhost:19935/");
         EXPECT_TRUE(c.ok);
-        if (!c.ok) co_return false;
-        auto res = co_await ws.close_async(
-            qb::http::ws::CloseStatus::Normal, "all-good");
+        if (!c.ok)
+            co_return false;
+        auto res = co_await ws.close_async(qb::http::ws::CloseStatus::Normal, "all-good");
         co_return res.ok;
     };
 
@@ -419,16 +428,16 @@ TEST_F(CoroClientTest, EchoesPeerCloseFrame) {
 
     auto task = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame::Kind> {
         qb::http::ws::coro_client ws;
-        const auto c = co_await ws.connect("ws://localhost:19937/");
+        const auto                c = co_await ws.connect("ws://localhost:19937/");
         EXPECT_TRUE(c.ok);
-        if (!c.ok) co_return qb::http::ws::IncomingFrame::Kind::Disconnected;
+        if (!c.ok)
+            co_return qb::http::ws::IncomingFrame::Kind::Disconnected;
         auto frame = co_await ws.receive();
         co_return frame.kind;
     };
 
     const auto kind = qb::http::ws::run_sync(task());
-    EXPECT_TRUE(kind == qb::http::ws::IncomingFrame::Kind::Close ||
-                kind == qb::http::ws::IncomingFrame::Kind::Disconnected);
+    EXPECT_TRUE(kind == qb::http::ws::IncomingFrame::Kind::Close || kind == qb::http::ws::IncomingFrame::Kind::Disconnected);
     EXPECT_LE(g_coro_close_echoes.load(), 1u);
 }
 

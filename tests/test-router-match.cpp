@@ -1,31 +1,39 @@
 #include <gtest/gtest.h>
-#include "../http.h" // Provides qb::http::Router, Request, Response, Context, PathParameters, etc.
-#include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
 #include <memory>
+#include <optional>  // For std::optional, if used by PathParameters or Context
+#include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
 #include <string>
-#include <utility> // For std::move
-#include <optional> // For std::optional, if used by PathParameters or Context
+#include <utility>   // For std::move
+#include "../http.h" // Provides qb::http::Router, Request, Response, Context, PathParameters, etc.
 
 // Minimal Mock Session for match testing
 struct MatchTestSession {
-    qb::http::Response _response;
-    bool _handler_executed = false;
-    std::string _handler_id; // To identify which handler was called
+    qb::http::Response       _response;
+    bool                     _handler_executed = false;
+    std::string              _handler_id; // To identify which handler was called
     qb::http::PathParameters _captured_params;
-    qb::uuid _session_id = qb::generate_random_uuid(); // Assuming qb::generate_random_uuid available via http.h
+    qb::uuid                 _session_id = qb::generate_random_uuid(); // Assuming qb::generate_random_uuid available via http.h
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MatchTestSession &operator<<(const qb::http::Response &resp) {
+    MatchTestSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         // In match tests, we don't focus on multiple writes like in full router tests.
         return *this;
     }
 
-    [[nodiscard]] const qb::uuid &id() const { return _session_id; }
+    [[nodiscard]] const qb::uuid &
+    id() const {
+        return _session_id;
+    }
 
-    void reset() {
-        _response = qb::http::Response();
+    void
+    reset() {
+        _response         = qb::http::Response();
         _handler_executed = false;
         _handler_id.clear();
         _captured_params.clear(); // Assuming PathParameters has a clear method or can be reassigned
@@ -35,17 +43,19 @@ struct MatchTestSession {
 // Test Fixture for Router Matching Tests
 class RouterMatchTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MatchTestSession> mock_session;
+    std::shared_ptr<MatchTestSession>  mock_session;
     qb::http::Router<MatchTestSession> router;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         mock_session = std::make_shared<MatchTestSession>();
-        router = qb::http::Router<MatchTestSession>(); // Fresh router for each test
+        router       = qb::http::Router<MatchTestSession>(); // Fresh router for each test
     }
 
     ~RouterMatchTest() noexcept override = default; // Explicitly noexcept(true)
 
-    qb::http::Request create_request(qb::http::method method_val, const std::string &target_path) {
+    qb::http::Request
+    create_request(qb::http::method method_val, const std::string &target_path) {
         qb::http::Request req;
         req.method() = method_val;
         try {
@@ -66,8 +76,8 @@ protected:
         return [handler_id](auto ctx) {
             if (ctx->session()) {
                 ctx->session()->_handler_executed = true;
-                ctx->session()->_handler_id = handler_id;
-                ctx->session()->_captured_params = ctx->path_parameters();
+                ctx->session()->_handler_id       = handler_id;
+                ctx->session()->_captured_params  = ctx->path_parameters();
             }
             ctx->response().status() = qb::http::status::OK; // Indicate a match and successful handling
             ctx->complete();
@@ -95,7 +105,7 @@ TEST_F(RouterMatchTest, StaticRouteNoMatch) {
     auto request = create_request(HTTP_GET, "/other");
     router.route(mock_session, std::move(request));
 
-    ASSERT_FALSE(mock_session->_handler_executed); // Handler for /world should not run
+    ASSERT_FALSE(mock_session->_handler_executed);                      // Handler for /world should not run
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND); // Default 404
 }
 
@@ -257,7 +267,7 @@ TEST_F(RouterMatchTest, ConsecutiveParameterSegmentsMatch) {
     ASSERT_TRUE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_handler_id, "double_param_handler");
 
-    auto tenant = mock_session->_captured_params.get("tenant");
+    auto tenant   = mock_session->_captured_params.get("tenant");
     auto resource = mock_session->_captured_params.get("resource");
     ASSERT_TRUE(tenant.has_value());
     ASSERT_TRUE(resource.has_value());
@@ -276,7 +286,7 @@ TEST_F(RouterMatchTest, WildcardUnderParameterSegmentMatchesRemainingPath) {
     ASSERT_EQ(mock_session->_handler_id, "param_wildcard_handler");
 
     auto tenant = mock_session->_captured_params.get("tenant");
-    auto rest = mock_session->_captured_params.get("rest");
+    auto rest   = mock_session->_captured_params.get("rest");
     ASSERT_TRUE(tenant.has_value());
     ASSERT_TRUE(rest.has_value());
     ASSERT_EQ(tenant.value(), "acme");
@@ -310,7 +320,6 @@ TEST_F(RouterMatchTest, ParameterValueEmptySegment) {
     ASSERT_FALSE(mock_session->_handler_executed);
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
-
 
 // --- Wildcard Route Matching ---
 TEST_F(RouterMatchTest, WildcardSimpleMatch) {
@@ -698,8 +707,8 @@ TEST_F(RouterMatchTest, PathIsExtensionOfDefinedParamRoute) {
 TEST_F(RouterMatchTest, ComplexPriorityMix) {
     router.get("/mix/static_segment/specific_end", make_verifying_handler("H_SS")); // Static-Static
     router.get("/mix/:param_segment/specific_end", make_verifying_handler("H_PS")); // Param-Static
-    router.get("/mix/static_segment/:param_end", make_verifying_handler("H_SP")); // Static-Param
-    router.get("/mix/*wildcard_capture", make_verifying_handler("H_WC")); // Wildcard (changed from H_SW for clarity)
+    router.get("/mix/static_segment/:param_end", make_verifying_handler("H_SP"));   // Static-Param
+    router.get("/mix/*wildcard_capture", make_verifying_handler("H_WC"));           // Wildcard (changed from H_SW for clarity)
     router.compile();
 
     // Test 1: Match Static-Static
@@ -752,7 +761,6 @@ TEST_F(RouterMatchTest, ComplexPriorityMix) {
     // The RadixTree wildcard matches from the point it's defined.
     // If router is /mix/*wildcard_capture, and path is /mix/static_segment, wildcard_capture is "static_segment".
     ASSERT_EQ(param_wc_prefix_ss.value(), "static_segment");
-
 
     // Test 6: Match Wildcard for another prefix case
     mock_session->reset();

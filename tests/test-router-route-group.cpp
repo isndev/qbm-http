@@ -1,69 +1,82 @@
+#include <functional> // For std::function
 #include <gtest/gtest.h>
-#include "../http.h" // Provides qb::http::Router, Request, Response, Context, RouteGroup, etc.
-#include <qb/uuid.h>    // For qb::uuid and qb::generate_random_uuid
+#include <iostream> // For potential debugging, can be removed later
 #include <memory>
+#include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
 #include <string>
 #include <vector>
-#include <functional> // For std::function
-#include <iostream>   // For potential debugging, can be removed later
+#include "../http.h" // Provides qb::http::Router, Request, Response, Context, RouteGroup, etc.
 
 // --- Helper Classes for RouteGroup Tests ---
 
 // Simple Task Executor (can be refactored into a common test utility later)
 class TaskExecutor {
 public:
-    void addTask(std::function<void()> task) {
+    void
+    addTask(std::function<void()> task) {
         _tasks.push_back(std::move(task));
     }
 
-    void processAllTasks() {
-        std::vector<std::function<void()> > tasks_to_process = _tasks;
+    void
+    processAllTasks() {
+        std::vector<std::function<void()>> tasks_to_process = _tasks;
         _tasks.clear();
-        for (auto &task: tasks_to_process) {
+        for (auto &task : tasks_to_process) {
             task();
         }
     }
 
-    size_t getPendingTaskCount() const {
+    size_t
+    getPendingTaskCount() const {
         return _tasks.size();
     }
 
 private:
-    std::vector<std::function<void()> > _tasks;
+    std::vector<std::function<void()>> _tasks;
 };
 
 // Mock Session for RouteGroup Tests
 struct MockRouteGroupSession {
-    qb::http::Response _response;
-    qb::uuid _session_id = qb::generate_random_uuid();
-    std::string _trace_log; // For logging execution order
+    qb::http::Response       _response;
+    qb::uuid                 _session_id = qb::generate_random_uuid();
+    std::string              _trace_log; // For logging execution order
     qb::http::PathParameters _captured_params;
-    bool _handler_executed_flag = false;
+    bool                     _handler_executed_flag = false;
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MockRouteGroupSession &operator<<(const qb::http::Response &resp) {
+    MockRouteGroupSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 
-    [[nodiscard]] const qb::uuid &id() const { return _session_id; }
+    [[nodiscard]] const qb::uuid &
+    id() const {
+        return _session_id;
+    }
 
-    void reset() {
+    void
+    reset() {
         _response = qb::http::Response();
         _trace_log.clear();
-        _captured_params = qb::http::PathParameters();
+        _captured_params       = qb::http::PathParameters();
         _handler_executed_flag = false;
     }
 
-    void trace(const std::string &point) {
+    void
+    trace(const std::string &point) {
         if (!_trace_log.empty()) {
             _trace_log += ";";
         }
         _trace_log += point;
     }
 
-    const std::string &get_trace() const {
+    const std::string &
+    get_trace() const {
         return _trace_log;
     }
 };
@@ -71,15 +84,17 @@ struct MockRouteGroupSession {
 // Test Fixture for RouteGroup Tests
 class RouterRouteGroupTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockRouteGroupSession> _mock_session;
+    std::shared_ptr<MockRouteGroupSession>  _mock_session;
     qb::http::Router<MockRouteGroupSession> _router;
-    TaskExecutor _task_executor; // For testing async operations
+    TaskExecutor                            _task_executor; // For testing async operations
 
-    void SetUp() override {
+    void
+    SetUp() override {
         _mock_session = std::make_shared<MockRouteGroupSession>();
     }
 
-    qb::http::Request create_request(qb::http::method method_val, const std::string &target_path) {
+    qb::http::Request
+    create_request(qb::http::method method_val, const std::string &target_path) {
         qb::http::Request req;
         req.method() = method_val;
         try {
@@ -95,16 +110,16 @@ protected:
     }
 
     // Helper to make a simple synchronous handler for testing
-    qb::http::RouteHandlerFn<MockRouteGroupSession> make_simple_handler(
-        const std::string &id, qb::http::status status = qb::http::status::OK,
-        const std::string &body_prefix = "Handler response: ") {
-        return [id, status, body_prefix](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
+    qb::http::RouteHandlerFn<MockRouteGroupSession>
+    make_simple_handler(const std::string &id, qb::http::status status = qb::http::status::OK,
+                        const std::string &body_prefix = "Handler response: ") {
+        return [id, status, body_prefix](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
             if (ctx->session()) {
                 ctx->session()->trace(id);
                 ctx->session()->_handler_executed_flag = true;
             }
             ctx->response().status() = status;
-            ctx->response().body() = body_prefix + id;
+            ctx->response().body()   = body_prefix + id;
             ctx->complete();
         };
     }
@@ -115,23 +130,29 @@ protected:
 class TestRouteGroupSyncMiddleware : public qb::http::IMiddleware<MockRouteGroupSession> {
 public:
     TestRouteGroupSyncMiddleware(std::string id, std::string header_to_set = "", std::string value_to_set = "")
-        : _id(std::move(id)), _header_to_set(std::move(header_to_set)), _value_to_set(std::move(value_to_set)) {
-    }
+        : _id(std::move(id))
+        , _header_to_set(std::move(header_to_set))
+        , _value_to_set(std::move(value_to_set)) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
         if (ctx->session()) {
             ctx->session()->trace(_id);
         }
         if (!_header_to_set.empty()) {
-            ctx->request().set_header(_header_to_set, _value_to_set); // Modify request for downstream
+            ctx->request().set_header(_header_to_set, _value_to_set);  // Modify request for downstream
             ctx->response().set_header(_header_to_set, _value_to_set); // Or response for upstream/final
         }
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 
-    std::string name() const override { return _id; }
+    std::string
+    name() const override {
+        return _id;
+    }
 
-    void cancel() override {
+    void
+    cancel() override {
         if (_id.find("cancel") != std::string::npos) {
             /* simple check for test */
         }
@@ -145,14 +166,17 @@ private:
 
 class TestRouteGroupAsyncMiddleware : public qb::http::IMiddleware<MockRouteGroupSession> {
 public:
-    TestRouteGroupAsyncMiddleware(std::string id, TaskExecutor *executor, std::string header_to_set = "",
-                                  std::string value_to_set = "")
-        : _id(std::move(id)), _executor(executor), _header_to_set(std::move(header_to_set)),
-          _value_to_set(std::move(value_to_set)) {
-        if (!_executor) throw std::runtime_error("TaskExecutor cannot be null for Async Middleware");
+    TestRouteGroupAsyncMiddleware(std::string id, TaskExecutor *executor, std::string header_to_set = "", std::string value_to_set = "")
+        : _id(std::move(id))
+        , _executor(executor)
+        , _header_to_set(std::move(header_to_set))
+        , _value_to_set(std::move(value_to_set)) {
+        if (!_executor)
+            throw std::runtime_error("TaskExecutor cannot be null for Async Middleware");
     }
 
-    void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
         if (ctx->session()) {
             ctx->session()->trace(_id + "_HANDLE_CALLED");
         }
@@ -169,106 +193,122 @@ public:
         });
     }
 
-    std::string name() const override { return _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return _id;
     }
 
+    void
+    cancel() override {}
+
 private:
-    std::string _id;
+    std::string   _id;
     TaskExecutor *_executor;
-    std::string _header_to_set;
-    std::string _value_to_set;
+    std::string   _header_to_set;
+    std::string   _value_to_set;
 };
 
 class TestRouteGroupShortCircuitMiddleware : public qb::http::IMiddleware<MockRouteGroupSession> {
 public:
     TestRouteGroupShortCircuitMiddleware(std::string id, qb::http::status status_code, std::string body)
-        : _id(std::move(id)), _status_code(status_code), _body(std::move(body)) {
-    }
+        : _id(std::move(id))
+        , _status_code(status_code)
+        , _body(std::move(body)) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) override {
-        if (ctx->session()) ctx->session()->trace(_id);
+    void
+    process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
+        if (ctx->session())
+            ctx->session()->trace(_id);
         ctx->response().status() = _status_code;
-        ctx->response().body() = _body;
+        ctx->response().body()   = _body;
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Short-circuit
     }
 
-    std::string name() const override { return _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return _id;
     }
 
+    void
+    cancel() override {}
+
 private:
-    std::string _id;
+    std::string      _id;
     qb::http::status _status_code;
-    std::string _body;
+    std::string      _body;
 };
 
 class TestRouteGroupErrorMiddleware : public qb::http::IMiddleware<MockRouteGroupSession> {
 public:
-    TestRouteGroupErrorMiddleware(std::string id,
-                                  qb::http::status status_to_set_before_error = qb::http::status::SERVICE_UNAVAILABLE,
+    TestRouteGroupErrorMiddleware(std::string id, qb::http::status status_to_set_before_error = qb::http::status::SERVICE_UNAVAILABLE,
                                   std::string body_prefix = "Error from mw: ")
-        : _id(std::move(id)), _status_to_set_before_error(status_to_set_before_error),
-          _body_prefix(std::move(body_prefix)) {
-    }
+        : _id(std::move(id))
+        , _status_to_set_before_error(status_to_set_before_error)
+        , _body_prefix(std::move(body_prefix)) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) override {
-        if (ctx->session()) ctx->session()->trace(_id);
+    void
+    process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
+        if (ctx->session())
+            ctx->session()->trace(_id);
         ctx->response().status() = _status_to_set_before_error;
-        ctx->response().body() = _body_prefix + _id;
+        ctx->response().body()   = _body_prefix + _id;
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     }
 
-    std::string name() const override { return _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return _id;
     }
 
+    void
+    cancel() override {}
+
 private:
-    std::string _id;
+    std::string      _id;
     qb::http::status _status_to_set_before_error;
-    std::string _body_prefix;
+    std::string      _body_prefix;
 };
 
 // --- Helper Controller for RouteGroup Tests ---
 class TestSimpleController : public qb::http::Controller<MockRouteGroupSession> {
 public:
-    TestSimpleController() : qb::http::Controller<MockRouteGroupSession>() {
+    TestSimpleController()
+        : qb::http::Controller<MockRouteGroupSession>() {
         // Call default Controller ctor
         // The actual base path segment will be set by RouteGroup::controller using set_base_path_segment.
         // This controller defines routes relative to that future base path.
         initialize_routes();
     }
 
-    void initialize_routes() override {
+    void
+    initialize_routes() override {
         // This middleware will be prepended to controller's own task chain for its routes
         this->use(std::make_shared<TestRouteGroupSyncMiddleware>("ctrl_sync_mw"));
 
-        this->add_controller_route("/hello", qb::http::method::GET,
-                                   [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-                                       if (ctx->session()) {
-                                           ctx->session()->trace("ctrl_hello_handler");
-                                       }
-                                       ctx->response().status() = qb::http::status::OK;
-                                       ctx->response().body() = "Hello from controller in group";
-                                       ctx->complete();
-                                   });
+        this->add_controller_route("/hello", qb::http::method::GET, [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+            if (ctx->session()) {
+                ctx->session()->trace("ctrl_hello_handler");
+            }
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "Hello from controller in group";
+            ctx->complete();
+        });
 
-        this->add_controller_route("/world", qb::http::method::GET,
-                                   [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-                                       if (ctx->session()) {
-                                           ctx->session()->trace("ctrl_world_handler");
-                                       }
-                                       ctx->response().status() = qb::http::status::OK;
-                                       ctx->response().body() = "World from controller in group";
-                                       ctx->complete();
-                                   });
+        this->add_controller_route("/world", qb::http::method::GET, [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+            if (ctx->session()) {
+                ctx->session()->trace("ctrl_world_handler");
+            }
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "World from controller in group";
+            ctx->complete();
+        });
     }
 
     // Correctly override get_node_name from IHandlerNode
-    std::string get_node_name() const override { return "TestSimpleController"; }
+    std::string
+    get_node_name() const override {
+        return "TestSimpleController";
+    }
 };
 
 // --- Helper Custom Route for RouteGroup Tests ---
@@ -276,36 +316,42 @@ class TestCustomRoute : public qb::http::ICustomRoute<MockRouteGroupSession> {
 public:
     TestCustomRoute(std::string id, bool signal_error = false, qb::http::status status_code = qb::http::status::OK,
                     std::string body_content = "Custom Route Body")
-        : _id(std::move(id)), _signal_error(signal_error), _status_code(status_code),
-          _body_content(std::move(body_content)) {
-    }
+        : _id(std::move(id))
+        , _signal_error(signal_error)
+        , _status_code(status_code)
+        , _body_content(std::move(body_content)) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) override {
         if (ctx->session()) {
             ctx->session()->trace(_id);
         }
         if (_signal_error) {
             ctx->response().status() = qb::http::status::EXPECTATION_FAILED; // Some status before error
-            ctx->response().body() = "Custom route " + _id + " signaling error";
+            ctx->response().body()   = "Custom route " + _id + " signaling error";
             ctx->complete(qb::http::AsyncTaskResult::ERROR);
         } else {
             ctx->response().status() = _status_code;
-            ctx->response().body() = _body_content;
+            ctx->response().body()   = _body_content;
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
         }
     }
 
-    std::string name() const override { return "TestCustomRoute_" + _id; }
+    std::string
+    name() const override {
+        return "TestCustomRoute_" + _id;
+    }
 
-    void cancel() override {
+    void
+    cancel() override {
         /* No-op for this simple test version */
     }
 
 private:
-    std::string _id;
-    bool _signal_error;
+    std::string      _id;
+    bool             _signal_error;
     qb::http::status _status_code;
-    std::string _body_content;
+    std::string      _body_content;
 };
 
 // --- Basic RouteGroup Tests ---
@@ -328,7 +374,7 @@ TEST_F(RouterRouteGroupTest, MountRouteGroupAndCallRoute) {
 
 TEST_F(RouterRouteGroupTest, NestedRouteGroup) {
     auto api_group = _router.group("/api");
-    auto v1_group = api_group->group("/v1");
+    auto v1_group  = api_group->group("/v1");
     v1_group->get("/status", make_simple_handler("api_v1_status_handler"));
 
     _router.compile();
@@ -345,20 +391,18 @@ TEST_F(RouterRouteGroupTest, NestedRouteGroup) {
 
 TEST_F(RouterRouteGroupTest, RouteGroupWithPathParameters) {
     auto items_group = _router.group("/items");
-    items_group->get("/:item_id/details",
-                     [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-                         if (ctx->session()) {
-                             ctx->session()->trace("item_details_handler");
-                             ctx->session()->_handler_executed_flag = true;
-                             ctx->session()->_captured_params = ctx->path_parameters();
-                         }
-                         // Explicitly construct std::string from std::string_view
-                         std::string item_id_str(ctx->path_parameters().get("item_id").value_or("NOT_FOUND"));
-                         ctx->response().status() = qb::http::status::OK;
-                         ctx->response().body() = "Item: " + item_id_str;
-                         ctx->complete();
-                     }
-    );
+    items_group->get("/:item_id/details", [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("item_details_handler");
+            ctx->session()->_handler_executed_flag = true;
+            ctx->session()->_captured_params       = ctx->path_parameters();
+        }
+        // Explicitly construct std::string from std::string_view
+        std::string item_id_str(ctx->path_parameters().get("item_id").value_or("NOT_FOUND"));
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "Item: " + item_id_str;
+        ctx->complete();
+    });
 
     _router.compile();
 
@@ -458,9 +502,7 @@ TEST_F(RouterRouteGroupTest, GlobalAndGroupMiddlewareInteraction) {
 
 TEST_F(RouterRouteGroupTest, GroupMiddlewareShortCircuit) {
     auto api_group = _router.group("/api");
-    api_group->use(
-        std::make_shared<TestRouteGroupShortCircuitMiddleware>("short_circuit_mw", HTTP_STATUS_ACCEPTED,
-                                                               "Short-circuited!"));
+    api_group->use(std::make_shared<TestRouteGroupShortCircuitMiddleware>("short_circuit_mw", HTTP_STATUS_ACCEPTED, "Short-circuited!"));
     api_group->use(std::make_shared<TestRouteGroupSyncMiddleware>("after_short_mw"));
     api_group->get("/data", make_simple_handler("api_data_handler"));
 
@@ -498,16 +540,14 @@ TEST_F(RouterRouteGroupTest, GroupMiddlewareSignalsError) {
 
 TEST_F(RouterRouteGroupTest, ErrorInRouteHandlerWithinGroup) {
     auto api_group = _router.group("/api");
-    api_group->get("/error_route",
-                   [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-                       if (ctx->session()) {
-                           ctx->session()->trace("error_handler_in_group");
-                       }
-                       ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                       ctx->response().body() = "Error in handler within group";
-                       ctx->complete(qb::http::AsyncTaskResult::ERROR);
-                   }
-    );
+    api_group->get("/error_route", [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("error_handler_in_group");
+        }
+        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+        ctx->response().body()   = "Error in handler within group";
+        ctx->complete(qb::http::AsyncTaskResult::ERROR);
+    });
     api_group->use(std::make_shared<TestRouteGroupSyncMiddleware>("group_mw_before_error_route"));
 
     _router.compile();
@@ -630,19 +670,17 @@ TEST_F(RouterRouteGroupTest, PathParameterPropagationFromGroupToRoute) {
     // The handler for route /user/:user_id/profile within group /tenant/:tenant_id
     // Path parameters from both group and route should be available.
     // The final path pattern registered would be something like /tenant/:tenant_id/user/:user_id/profile
-    tenant_group->get("/user/:user_id/profile",
-                      [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-                          if (ctx->session()) {
-                              ctx->session()->trace("profile_handler");
-                              ctx->session()->_captured_params = ctx->path_parameters();
-                          }
-                          std::string tenant_id = std::string(ctx->path_parameters().get("tenant_id").value_or("N/A"));
-                          std::string user_id = std::string(ctx->path_parameters().get("user_id").value_or("N/A"));
-                          ctx->response().status() = qb::http::status::OK;
-                          ctx->response().body() = "Tenant: " + tenant_id + ", User: " + user_id;
-                          ctx->complete();
-                      }
-    );
+    tenant_group->get("/user/:user_id/profile", [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("profile_handler");
+            ctx->session()->_captured_params = ctx->path_parameters();
+        }
+        std::string tenant_id    = std::string(ctx->path_parameters().get("tenant_id").value_or("N/A"));
+        std::string user_id      = std::string(ctx->path_parameters().get("user_id").value_or("N/A"));
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "Tenant: " + tenant_id + ", User: " + user_id;
+        ctx->complete();
+    });
 
     _router.compile();
 
@@ -661,18 +699,16 @@ TEST_F(RouterRouteGroupTest, PathParameterPropagationFromGroupToRoute) {
 
 TEST_F(RouterRouteGroupTest, NotFoundWithinGroupUsesRouterNotFoundHandler) {
     // Use set_not_found_handler with a single lambda
-    _router.set_not_found_handler(
-        [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-            // Explicitly type ctx
-            if (ctx->session()) {
-                // Check session existence
-                ctx->session()->trace("CUSTOM_404_HANDLER");
-            }
-            ctx->response().status() = qb::http::status::NOT_FOUND;
-            ctx->response().body() = "Custom Page Not Found From Router";
-            ctx->complete();
+    _router.set_not_found_handler([](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+        // Explicitly type ctx
+        if (ctx->session()) {
+            // Check session existence
+            ctx->session()->trace("CUSTOM_404_HANDLER");
         }
-    );
+        ctx->response().status() = qb::http::status::NOT_FOUND;
+        ctx->response().body()   = "Custom Page Not Found From Router";
+        ctx->complete();
+    });
 
     auto api_group = _router.group("/api");
     api_group->use(std::make_shared<TestRouteGroupSyncMiddleware>("api_group_mw_for_404"));
@@ -701,39 +737,32 @@ TEST_F(RouterRouteGroupTest, ErrorInGroupMiddlewareUsesRouterErrorHandler) {
     _router.use(global_mw_for_error_test_instance);
 
     // Create an IAsyncTask wrapper for the global middleware to add it to the error chain
-    auto global_mw_task_for_error_chain = std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession> >(
-        global_mw_for_error_test_instance, // The IMiddleware instance
-        global_mw_for_error_test_instance->name()
-    );
+    auto global_mw_task_for_error_chain =
+        std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession>>(global_mw_for_error_test_instance, // The IMiddleware instance
+                                                                          global_mw_for_error_test_instance->name());
 
-    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession> > > error_chain_tasks;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession>>> error_chain_tasks;
     error_chain_tasks.push_back(global_mw_task_for_error_chain); // Explicitly prepend
     error_chain_tasks.push_back(
-        std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession> >(
-            std::make_shared<TestRouteGroupSyncMiddleware>("custom_error_mw")
-        )
-    );
+        std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession>>(std::make_shared<TestRouteGroupSyncMiddleware>("custom_error_mw")));
     error_chain_tasks.push_back(
-        std::make_shared<qb::http::RouteLambdaTask<MockRouteGroupSession> >(
-            [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-                // Explicitly type ctx
-                if (ctx->session()) {
-                    // Check session existence
-                    ctx->session()->trace("CUSTOM_500_HANDLER");
-                }
-                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                ctx->response().body() = "Custom Internal Error From Router";
-                ctx->complete();
+        std::make_shared<qb::http::RouteLambdaTask<MockRouteGroupSession>>([](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+            // Explicitly type ctx
+            if (ctx->session()) {
+                // Check session existence
+                ctx->session()->trace("CUSTOM_500_HANDLER");
             }
-        )
-    );
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+            ctx->response().body()   = "Custom Internal Error From Router";
+            ctx->complete();
+        }));
     _router.set_error_task_chain(std::move(error_chain_tasks));
 
     auto api_group = _router.group("/api");
     api_group->use(std::make_shared<TestRouteGroupSyncMiddleware>("api_group_mw_before_error"));
-    api_group->use(std::make_shared<TestRouteGroupErrorMiddleware>("group_error_trigger_mw")); // This one signals error
+    api_group->use(std::make_shared<TestRouteGroupErrorMiddleware>("group_error_trigger_mw"));  // This one signals error
     api_group->use(std::make_shared<TestRouteGroupSyncMiddleware>("api_group_mw_after_error")); // Should not run
-    api_group->get("/some_route", make_simple_handler("some_route_handler")); // Should not run
+    api_group->get("/some_route", make_simple_handler("some_route_handler"));                   // Should not run
 
     _router.compile();
 
@@ -743,11 +772,11 @@ TEST_F(RouterRouteGroupTest, ErrorInGroupMiddlewareUsesRouterErrorHandler) {
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Custom Internal Error From Router");
-    // Expected trace: global_mw_for_error_test (router global) -> api_group_mw_before_error (group) -> group_error_trigger_mw (group, signals error)
-    // Then error chain: global_mw_for_error_test (router global, re-applied for error chain) -> custom_error_mw -> CUSTOM_500_HANDLER
+    // Expected trace: global_mw_for_error_test (router global) -> api_group_mw_before_error (group) -> group_error_trigger_mw (group, signals
+    // error) Then error chain: global_mw_for_error_test (router global, re-applied for error chain) -> custom_error_mw -> CUSTOM_500_HANDLER
     // The RouterCore prepends global _router_ tasks also to the error chain.
-    EXPECT_EQ(_mock_session->get_trace(),
-              "global_mw_for_error_test;api_group_mw_before_error;group_error_trigger_mw;global_mw_for_error_test;custom_error_mw;CUSTOM_500_HANDLER");
+    EXPECT_EQ(_mock_session->get_trace(), "global_mw_for_error_test;api_group_mw_before_error;group_error_trigger_mw;global_mw_for_error_test;"
+                                          "custom_error_mw;CUSTOM_500_HANDLER");
 }
 
 // --- Additional RouteGroup Tests ---
@@ -788,7 +817,6 @@ TEST_F(RouterRouteGroupTest, CustomRouteInGroupWithGroupMiddleware) {
     // and `add_custom_route<CustomRouteType>(...)` and `get<CustomRouteType>(...)`.
     // Let's use the specific templated `get` for variety if it implies construction.
     api_group->template get<TestCustomRoute>("/custom2", "custom_route_hdlr2_constructed");
-
 
     _router.compile();
 
@@ -852,27 +880,22 @@ TEST_F(RouterRouteGroupTest, ErrorInCustomRouteInGroup) {
     _router.use(global_mw_instance);
 
     // Create an IAsyncTask wrapper for the global middleware
-    auto global_mw_task_for_error_chain = std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession> >(
-        global_mw_instance,
-        global_mw_instance->name()
-    );
+    auto global_mw_task_for_error_chain =
+        std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession>>(global_mw_instance, global_mw_instance->name());
 
-    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession> > > error_chain_tasks;
+    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockRouteGroupSession>>> error_chain_tasks;
     error_chain_tasks.push_back(global_mw_task_for_error_chain); // Explicitly prepend
-    error_chain_tasks.push_back(
-        std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession> >(
-            std::make_shared<TestRouteGroupSyncMiddleware>("router_error_chain_mw")
-        )
-    );
-    error_chain_tasks.push_back(
-        std::make_shared<qb::http::RouteLambdaTask<MockRouteGroupSession> >(
-            [](std::shared_ptr<qb::http::Context<MockRouteGroupSession> > ctx) {
-                if (ctx->session()) ctx->session()->trace("ROUTER_CUSTOM_500_HANDLER");
-                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                ctx->response().body() = "Router Custom 500 from ErrorInCustomRouteInGroup";
-                ctx->complete();
-            }, "RouterCustom500Lambda")
-    );
+    error_chain_tasks.push_back(std::make_shared<qb::http::MiddlewareTask<MockRouteGroupSession>>(
+        std::make_shared<TestRouteGroupSyncMiddleware>("router_error_chain_mw")));
+    error_chain_tasks.push_back(std::make_shared<qb::http::RouteLambdaTask<MockRouteGroupSession>>(
+        [](std::shared_ptr<qb::http::Context<MockRouteGroupSession>> ctx) {
+            if (ctx->session())
+                ctx->session()->trace("ROUTER_CUSTOM_500_HANDLER");
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+            ctx->response().body()   = "Router Custom 500 from ErrorInCustomRouteInGroup";
+            ctx->complete();
+        },
+        "RouterCustom500Lambda"));
     _router.set_error_task_chain(std::move(error_chain_tasks));
 
     auto error_group = _router.group("/error_group");
@@ -887,7 +910,8 @@ TEST_F(RouterRouteGroupTest, ErrorInCustomRouteInGroup) {
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Router Custom 500 from ErrorInCustomRouteInGroup");
-    // Trace: global -> group_mw -> custom_route (signals error) -> global (for error chain) -> router_error_chain_mw -> ROUTER_CUSTOM_500_HANDLER
-    EXPECT_EQ(_mock_session->get_trace(),
-              "global_mw_for_custom_error;error_group_mw;custom_error_trigger;global_mw_for_custom_error;router_error_chain_mw;ROUTER_CUSTOM_500_HANDLER");
+    // Trace: global -> group_mw -> custom_route (signals error) -> global (for error chain) -> router_error_chain_mw ->
+    // ROUTER_CUSTOM_500_HANDLER
+    EXPECT_EQ(_mock_session->get_trace(), "global_mw_for_custom_error;error_group_mw;custom_error_trigger;global_mw_for_custom_error;router_"
+                                          "error_chain_mw;ROUTER_CUSTOM_500_HANDLER");
 }

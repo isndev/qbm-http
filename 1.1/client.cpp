@@ -10,20 +10,21 @@
 #include <qb/io/transport/stcp.h>
 #endif
 
-#include "./http.h"
 #include "../headers.h"
 #include "../origin.h"
 #include "../utility.h"
+#include "./http.h"
 
 namespace qb::http1 {
 namespace {
 
-[[nodiscard]] bool has_connection_close(qb::http::Response const& response) {
+[[nodiscard]] bool
+has_connection_close(qb::http::Response const &response) {
     auto it = response.headers().find("Connection");
     if (it == response.headers().end()) {
         return false;
     }
-    for (auto const& value : it->second) {
+    for (auto const &value : it->second) {
         for (auto token : qb::http::utility::split_string<std::string>(value, ",")) {
             token = std::string(qb::http::utility::trim_http_whitespace(token));
             if (qb::http::utility::iequals(token, "close")) {
@@ -42,14 +43,14 @@ class Client::connection final
     , public qb::io::async::tcp::client<connection<Transport>, Transport>
     , public qb::io::use<connection<Transport>>::timeout {
     using base_t = qb::io::async::tcp::client<connection<Transport>, Transport>;
-    Client& _owner;
-    qb::http::method _active_method = qb::http::method::GET;
-    std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
+    Client               &_owner;
+    qb::http::method      _active_method = qb::http::method::GET;
+    std::shared_ptr<bool> _alive         = std::make_shared<bool>(true);
 
 public:
     using http_protocol = qb::protocol::http::client<connection<Transport>>;
 
-    explicit connection(Client& owner)
+    explicit connection(Client &owner)
         : _owner(owner) {
         this->template switch_protocol<http_protocol>(*this);
         this->setTimeout(qb::duration::zero());
@@ -59,15 +60,17 @@ public:
         *_alive = false;
     }
 
-    [[nodiscard]] bool http1_response_body_forbidden() const noexcept {
+    [[nodiscard]] bool
+    http1_response_body_forbidden() const noexcept {
         return _active_method == qb::http::Method::HEAD;
     }
 
-    void connect(qb::io::uri const& uri, qb::duration timeout, bool verify_peer) override {
+    void
+    connect(qb::io::uri const &uri, qb::duration timeout, bool verify_peer) override {
         auto alive = std::weak_ptr<bool>(_alive);
         qb::io::async::tcp::connect<typename Transport::transport_io_type>(
             uri,
-            [this, alive, timeout](auto&& socket) {
+            [this, alive, timeout](auto &&socket) {
                 auto guard = alive.lock();
                 if (!guard || !*guard) {
                     return;
@@ -82,22 +85,23 @@ public:
                 this->setTimeout(timeout);
                 _owner.handle_connection_success();
             },
-            timeout,
-            verify_peer);
+            timeout, verify_peer);
     }
 
-    void disconnect() override {
+    void
+    disconnect() override {
         this->base_t::disconnect(1);
     }
 
-    void send(qb::http::Request request, qb::duration timeout) override {
+    void
+    send(qb::http::Request request, qb::duration timeout) override {
         _active_method = request.method();
 #ifdef QB_HAS_COMPRESSION
         try {
             if (request.has_header("Content-Encoding")) {
                 request.body().compress(request.header("Content-Encoding"));
             }
-        } catch (std::exception const& e) {
+        } catch (std::exception const &e) {
             _owner.fail_active_request(e.what(), qb::http::status::BAD_REQUEST);
             return;
         }
@@ -107,16 +111,18 @@ public:
         try {
             *this << request;
             this->setTimeout(timeout);
-        } catch (std::exception const& e) {
+        } catch (std::exception const &e) {
             _owner.fail_active_request(e.what(), qb::http::status::BAD_REQUEST);
         }
     }
 
-    [[nodiscard]] bool is_open() const noexcept override {
+    [[nodiscard]] bool
+    is_open() const noexcept override {
         return this->transport().is_open();
     }
 
-    void on(typename http_protocol::response response) {
+    void
+    on(typename http_protocol::response response) {
         auto owner_guard = _owner.weak_from_this().lock();
         this->setTimeout(qb::duration::zero());
 #ifdef QB_HAS_COMPRESSION
@@ -124,32 +130,35 @@ public:
             if (response.has_header("Content-Encoding")) {
                 response.body().uncompress(response.header("Content-Encoding"));
             }
-        } catch (std::exception const& e) {
+        } catch (std::exception const &e) {
             response.status() = qb::http::status::BAD_REQUEST;
-            response.body() = std::string(e.what());
+            response.body()   = std::string(e.what());
         }
 #endif
         _owner.handle_response(std::move(response));
     }
 
-    void on(qb::io::async::event::timeout const&) {
+    void
+    on(qb::io::async::event::timeout const &) {
         auto owner_guard = _owner.weak_from_this().lock();
         _owner.handle_timeout();
     }
 
-    void on(qb::io::async::event::disconnected const& event) {
+    void
+    on(qb::io::async::event::disconnected const &event) {
         auto owner_guard = _owner.weak_from_this().lock();
         _owner.handle_disconnected(event.reason);
     }
 
-    void on(qb::io::async::event::dispose const&) {}
+    void
+    on(qb::io::async::event::dispose const &) {}
 };
 
 class Client::callback_scope {
-    Client& _client;
+    Client &_client;
 
 public:
-    explicit callback_scope(Client& client)
+    explicit callback_scope(Client &client)
         : _client(client) {
         _client.enter_user_callback();
     }
@@ -160,21 +169,22 @@ public:
 };
 
 template <typename Fn>
-void Client::invoke_user_callback(Fn&& fn) noexcept {
+void
+Client::invoke_user_callback(Fn &&fn) noexcept {
     callback_scope scope(*this);
     try {
         fn();
-    } catch (std::exception const& e) {
+    } catch (std::exception const &e) {
         LOG_HTTP_WARN("HTTP/1.1 client user callback threw: " << e.what());
     } catch (...) {
         LOG_HTTP_WARN("HTTP/1.1 client user callback threw an unknown exception");
     }
 }
 
-Client::Client(std::string const& base_uri)
+Client::Client(std::string const &base_uri)
     : Client(qb::io::uri(base_uri)) {}
 
-Client::Client(qb::io::uri const& uri) {
+Client::Client(qb::io::uri const &uri) {
     initialize_from_uri(uri);
 }
 
@@ -182,10 +192,10 @@ Client::~Client() {
     disconnect();
 }
 
-void Client::initialize_from_uri(qb::io::uri const& uri) {
+void
+Client::initialize_from_uri(qb::io::uri const &uri) {
 #ifdef QB_HAS_SSL
-    if (!qb::http::origin::scheme_eq(uri.scheme(), "http") &&
-        !qb::http::origin::scheme_eq(uri.scheme(), "https")) {
+    if (!qb::http::origin::scheme_eq(uri.scheme(), "http") && !qb::http::origin::scheme_eq(uri.scheme(), "https")) {
         throw std::invalid_argument("HTTP/1.1 client base URI must use http or https");
     }
 #else
@@ -197,11 +207,12 @@ void Client::initialize_from_uri(qb::io::uri const& uri) {
         throw std::invalid_argument("HTTP/1.1 client base URI is missing a host");
     }
     _base_uri = uri;
-    _host = qb::http::host_header_value(_base_uri);
+    _host     = qb::http::host_header_value(_base_uri);
     create_connection();
 }
 
-void Client::create_connection() {
+void
+Client::create_connection() {
 #ifdef QB_HAS_SSL
     if (qb::http::origin::scheme_eq(_base_uri.scheme(), "https")) {
         _connection = std::make_unique<connection<qb::io::transport::stcp>>(*this);
@@ -213,7 +224,8 @@ void Client::create_connection() {
 #endif
 }
 
-bool Client::connect(ConnectionCallback callback) {
+bool
+Client::connect(ConnectionCallback callback) {
     if (_is_connected) {
         if (callback) {
             callback_scope scope(*this);
@@ -232,7 +244,7 @@ bool Client::connect(ConnectionCallback callback) {
         _connection_callbacks.emplace_back(std::move(callback));
     }
     _intentional_disconnect = false;
-    _is_connecting = true;
+    _is_connecting          = true;
     if (!_connection || !_connection->is_open()) {
         create_connection();
     }
@@ -240,33 +252,32 @@ bool Client::connect(ConnectionCallback callback) {
     return true;
 }
 
-qb::http::async::awaiter<ConnectResult> Client::connect() {
+qb::http::async::awaiter<ConnectResult>
+Client::connect() {
     auto weak_self = weak_from_this();
-    return qb::http::async::make_awaiter<ConnectResult>(
-        [weak_self](std::function<void(ConnectResult&&)> complete) mutable {
-            auto self = weak_self.lock();
-            if (!self) {
-                complete(ConnectResult{false, "HTTP/1.1 client no longer available"});
-                return;
+    return qb::http::async::make_awaiter<ConnectResult>([weak_self](std::function<void(ConnectResult &&)> complete) mutable {
+        auto self = weak_self.lock();
+        if (!self) {
+            complete(ConnectResult{false, "HTTP/1.1 client no longer available"});
+            return;
+        }
+        if (!self->connect([complete = std::move(complete)](bool ok, std::string const &err) mutable { complete(ConnectResult{ok, err}); })) {
+            if (self->is_connected()) {
+                complete(ConnectResult{true, ""});
+            } else if (self->is_connecting()) {
+                complete(ConnectResult{false, "Connection already in progress"});
+            } else {
+                complete(ConnectResult{false, "Unable to start connection"});
             }
-            if (!self->connect([complete = std::move(complete)](bool ok, std::string const& err) mutable {
-                    complete(ConnectResult{ok, err});
-                })) {
-                if (self->is_connected()) {
-                    complete(ConnectResult{true, ""});
-                } else if (self->is_connecting()) {
-                    complete(ConnectResult{false, "Connection already in progress"});
-                } else {
-                    complete(ConnectResult{false, "Unable to start connection"});
-                }
-            }
-        });
+        }
+    });
 }
 
-void Client::disconnect() {
-    _intentional_disconnect = true;
-    _is_connected = false;
-    _is_connecting = false;
+void
+Client::disconnect() {
+    _intentional_disconnect     = true;
+    _is_connected               = false;
+    _is_connecting              = false;
     _reconnect_after_disconnect = false;
     fail_active_request("Connection closed", qb::http::status::SERVICE_UNAVAILABLE);
     fail_all_requests("Connection closed", qb::http::status::SERVICE_UNAVAILABLE);
@@ -280,7 +291,8 @@ void Client::disconnect() {
     }
 }
 
-void Client::ensure_absolute_uri(qb::http::Request& request) {
+void
+Client::ensure_absolute_uri(qb::http::Request &request) {
     if (!request.uri().host().empty()) {
         return;
     }
@@ -297,15 +309,14 @@ void Client::ensure_absolute_uri(qb::http::Request& request) {
     request.uri() = qb::io::uri(std::move(absolute));
 }
 
-std::optional<qb::http::Response> Client::prepare_request(qb::http::Request& request) {
+std::optional<qb::http::Response>
+Client::prepare_request(qb::http::Request &request) {
     ensure_absolute_uri(request);
     if (request.uri().host().empty()) {
-        return create_error_response(qb::http::status::BAD_REQUEST,
-                                     "HTTP/1.1 request URI is missing a host");
+        return create_error_response(qb::http::status::BAD_REQUEST, "HTTP/1.1 request URI is missing a host");
     }
     if (!qb::http::origin::same(request.uri(), _base_uri)) {
-        return create_error_response(qb::http::status::BAD_REQUEST,
-                                     "HTTP/1.1 persistent client only accepts same-origin requests");
+        return create_error_response(qb::http::status::BAD_REQUEST, "HTTP/1.1 persistent client only accepts same-origin requests");
     }
     if (!request.has_header("Host")) {
         request.set_header("Host", _host);
@@ -319,7 +330,8 @@ std::optional<qb::http::Response> Client::prepare_request(qb::http::Request& req
     return std::nullopt;
 }
 
-bool Client::push_request(qb::http::Request request, ResponseCallback callback) {
+bool
+Client::push_request(qb::http::Request request, ResponseCallback callback) {
     if (!callback) {
         return false;
     }
@@ -331,17 +343,15 @@ bool Client::push_request(qb::http::Request request, ResponseCallback callback) 
     }
     if (_pending_requests.size() + (_active_request ? 1u : 0u) >= _max_pending_requests) {
         ++_failed_requests;
-        invoke_user_callback([&] {
-            callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
-                                           "HTTP/1.1 client pending request limit reached"));
-        });
+        invoke_user_callback(
+            [&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client pending request limit reached")); });
         return false;
     }
-    auto ctx = std::make_unique<RequestContext>();
-    ctx->request_id = _next_request_id++;
-    ctx->request = std::move(request);
-    ctx->callback = std::move(callback);
-    ctx->created_at = std::chrono::steady_clock::now();
+    auto ctx              = std::make_unique<RequestContext>();
+    ctx->request_id       = _next_request_id++;
+    ctx->request          = std::move(request);
+    ctx->callback         = std::move(callback);
+    ctx->created_at       = std::chrono::steady_clock::now();
     const auto request_id = ctx->request_id;
     _pending_requests.emplace_back(std::move(ctx));
     arm_pending_timeout(request_id);
@@ -353,23 +363,22 @@ qb::http::async::awaiter<qb::http::Response>
 Client::push_request(qb::http::Request request) {
     auto weak_self = weak_from_this();
     return qb::http::async::make_awaiter<qb::http::Response>(
-        [weak_self, req = std::move(request)](std::function<void(qb::http::Response&&)> complete) mutable {
+        [weak_self, req = std::move(request)](std::function<void(qb::http::Response &&)> complete) mutable {
             auto self = weak_self.lock();
             if (!self) {
                 qb::http::Response response;
                 response.status() = qb::http::status::SERVICE_UNAVAILABLE;
-                response.body() = "HTTP/1.1 client no longer available";
+                response.body()   = "HTTP/1.1 client no longer available";
                 complete(std::move(response));
                 return;
             }
             self->push_request(std::move(req),
-                [complete = std::move(complete)](qb::http::Response response) mutable {
-                    complete(std::move(response));
-                });
+                               [complete = std::move(complete)](qb::http::Response response) mutable { complete(std::move(response)); });
         });
 }
 
-bool Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback) {
+bool
+Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback) {
     if (!callback) {
         return false;
     }
@@ -378,30 +387,31 @@ bool Client::push_requests(std::vector<qb::http::Request> requests, BatchRespons
         return true;
     }
     const auto batch_id = _next_batch_id++;
-    auto batch = std::make_unique<BatchRequestContext>();
-    batch->callback = std::move(callback);
+    auto       batch    = std::make_unique<BatchRequestContext>();
+    batch->callback     = std::move(callback);
     batch->responses.resize(requests.size());
     _active_batches.emplace(batch_id, std::move(batch));
 
     bool queued_all = true;
     for (std::size_t i = 0; i < requests.size(); ++i) {
         queued_all = push_request(std::move(requests[i]),
-            [this, batch_id, index = i](qb::http::Response response) {
-                auto it = _active_batches.find(batch_id);
-                if (it == _active_batches.end()) {
-                    return;
-                }
-                auto& batch_ref = *it->second;
-                batch_ref.responses[index] = std::move(response);
-                if (++batch_ref.completed_count == batch_ref.responses.size()) {
-                    auto done = std::move(batch_ref.responses);
-                    auto cb = std::move(batch_ref.callback);
-                    _active_batches.erase(it);
-                    if (cb) {
-                        invoke_user_callback([&] { cb(std::move(done)); });
-                    }
-                }
-            }) && queued_all;
+                                  [this, batch_id, index = i](qb::http::Response response) {
+                                      auto it = _active_batches.find(batch_id);
+                                      if (it == _active_batches.end()) {
+                                          return;
+                                      }
+                                      auto &batch_ref            = *it->second;
+                                      batch_ref.responses[index] = std::move(response);
+                                      if (++batch_ref.completed_count == batch_ref.responses.size()) {
+                                          auto done = std::move(batch_ref.responses);
+                                          auto cb   = std::move(batch_ref.callback);
+                                          _active_batches.erase(it);
+                                          if (cb) {
+                                              invoke_user_callback([&] { cb(std::move(done)); });
+                                          }
+                                      }
+                                  })
+                     && queued_all;
     }
     return queued_all;
 }
@@ -410,21 +420,20 @@ qb::http::async::awaiter<std::vector<qb::http::Response>>
 Client::push_requests(std::vector<qb::http::Request> requests) {
     auto weak_self = weak_from_this();
     return qb::http::async::make_awaiter<std::vector<qb::http::Response>>(
-        [weak_self, reqs = std::move(requests)]
-        (std::function<void(std::vector<qb::http::Response>&&)> complete) mutable {
+        [weak_self, reqs = std::move(requests)](std::function<void(std::vector<qb::http::Response> &&)> complete) mutable {
             auto self = weak_self.lock();
             if (!self) {
                 complete({});
                 return;
             }
-            self->push_requests(std::move(reqs),
-                [complete = std::move(complete)](std::vector<qb::http::Response> responses) mutable {
-                    complete(std::move(responses));
-                });
+            self->push_requests(std::move(reqs), [complete = std::move(complete)](std::vector<qb::http::Response> responses) mutable {
+                complete(std::move(responses));
+            });
         });
 }
 
-void Client::process_pending_requests() {
+void
+Client::process_pending_requests() {
     if (_active_request || _pending_requests.empty()) {
         return;
     }
@@ -433,10 +442,8 @@ void Client::process_pending_requests() {
             auto ctx = std::move(_pending_requests.front());
             _pending_requests.pop_front();
             ++_failed_requests;
-            invoke_user_callback([&] {
-                ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
-                                                    "HTTP/1.1 client is not connected"));
-            });
+            invoke_user_callback(
+                [&] { ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client is not connected")); });
             process_pending_requests();
             return;
         }
@@ -453,33 +460,39 @@ void Client::process_pending_requests() {
     }
 }
 
-void Client::hold_through_current_tick() {
+void
+Client::hold_through_current_tick() {
     auto self = weak_from_this().lock();
     if (!self) {
         return;
     }
     _callback_self_guard = std::move(self);
-    auto weak_self = weak_from_this();
-    qb::io::async::callback([weak_self]() {
-        if (auto self = weak_self.lock()) {
-            self->reset_deferred_connection_if_ready();
-            self->_callback_self_guard.reset();
-        }
-    }, std::chrono::microseconds(1));
+    auto weak_self       = weak_from_this();
+    qb::io::async::callback(
+        [weak_self]() {
+            if (auto self = weak_self.lock()) {
+                self->reset_deferred_connection_if_ready();
+                self->_callback_self_guard.reset();
+            }
+        },
+        std::chrono::microseconds(1));
 }
 
-void Client::enter_user_callback() {
+void
+Client::enter_user_callback() {
     ++_callback_depth;
     hold_through_current_tick();
 }
 
-void Client::leave_user_callback() noexcept {
+void
+Client::leave_user_callback() noexcept {
     if (_callback_depth) {
         --_callback_depth;
     }
 }
 
-void Client::reset_deferred_connection_if_ready() {
+void
+Client::reset_deferred_connection_if_ready() {
     if (_callback_depth || !_deferred_connection_reset) {
         return;
     }
@@ -487,27 +500,27 @@ void Client::reset_deferred_connection_if_ready() {
     _connection.reset();
 }
 
-void Client::arm_pending_timeout(std::uint64_t request_id) {
+void
+Client::arm_pending_timeout(std::uint64_t request_id) {
     if (_request_timeout <= qb::duration::zero()) {
         return;
     }
     auto weak_self = weak_from_this();
-    qb::io::async::callback([weak_self, request_id]() {
-        auto self = weak_self.lock();
-        if (!self) {
-            return;
-        }
-        if (self->fail_pending_request(request_id,
-                                       "HTTP/1.1 request timeout while pending",
-                                       qb::http::status::REQUEST_TIMEOUT)) {
-            self->process_pending_requests();
-        }
-    }, _request_timeout);
+    qb::io::async::callback(
+        [weak_self, request_id]() {
+            auto self = weak_self.lock();
+            if (!self) {
+                return;
+            }
+            if (self->fail_pending_request(request_id, "HTTP/1.1 request timeout while pending", qb::http::status::REQUEST_TIMEOUT)) {
+                self->process_pending_requests();
+            }
+        },
+        _request_timeout);
 }
 
-bool Client::fail_pending_request(std::uint64_t request_id,
-                                  std::string const& error,
-                                  qb::http::status status) {
+bool
+Client::fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status) {
     auto self_guard = weak_from_this().lock();
     for (auto it = _pending_requests.begin(); it != _pending_requests.end(); ++it) {
         if (!*it || (*it)->request_id != request_id) {
@@ -522,14 +535,15 @@ bool Client::fail_pending_request(std::uint64_t request_id,
     return false;
 }
 
-void Client::handle_connection_success() {
-    auto self_guard = weak_from_this().lock();
-    _is_connected = true;
-    _is_connecting = false;
+void
+Client::handle_connection_success() {
+    auto self_guard         = weak_from_this().lock();
+    _is_connected           = true;
+    _is_connecting          = false;
     _intentional_disconnect = false;
-    auto callbacks = std::move(_connection_callbacks);
+    auto callbacks          = std::move(_connection_callbacks);
     _connection_callbacks.clear();
-    for (auto& cb : callbacks) {
+    for (auto &cb : callbacks) {
         if (cb) {
             invoke_user_callback([&] { cb(true, ""); });
         }
@@ -540,13 +554,14 @@ void Client::handle_connection_success() {
     process_pending_requests();
 }
 
-void Client::handle_connection_failure(std::string const& error) {
+void
+Client::handle_connection_failure(std::string const &error) {
     auto self_guard = weak_from_this().lock();
-    _is_connected = false;
-    _is_connecting = false;
-    auto callbacks = std::move(_connection_callbacks);
+    _is_connected   = false;
+    _is_connecting  = false;
+    auto callbacks  = std::move(_connection_callbacks);
     _connection_callbacks.clear();
-    for (auto& cb : callbacks) {
+    for (auto &cb : callbacks) {
         if (cb) {
             invoke_user_callback([&] { cb(false, error); });
         }
@@ -557,12 +572,13 @@ void Client::handle_connection_failure(std::string const& error) {
     fail_all_requests(error);
 }
 
-void Client::handle_response(qb::http::Response response) {
+void
+Client::handle_response(qb::http::Response response) {
     auto self_guard = weak_from_this().lock();
     if (!_active_request) {
         return;
     }
-    auto ctx = std::move(_active_request);
+    auto       ctx        = std::move(_active_request);
     const bool keep_alive = response.keep_alive && !has_connection_close(response);
     ++_successful_requests;
     invoke_user_callback([&] { ctx->callback(std::move(response)); });
@@ -570,7 +586,7 @@ void Client::handle_response(qb::http::Response response) {
         return;
     }
     if (!keep_alive) {
-        _is_connected = false;
+        _is_connected               = false;
         _reconnect_after_disconnect = has_pending_work();
         if (_connection) {
             _connection->disconnect();
@@ -591,7 +607,8 @@ void Client::handle_response(qb::http::Response response) {
     process_pending_requests();
 }
 
-void Client::handle_timeout() {
+void
+Client::handle_timeout() {
     if (_is_connecting && !_is_connected) {
         handle_connection_failure("Connection timeout");
         return;
@@ -602,10 +619,11 @@ void Client::handle_timeout() {
     }
 }
 
-void Client::handle_disconnected(int reason) {
+void
+Client::handle_disconnected(int reason) {
     const bool intentional = _intentional_disconnect || reason != 0;
-    _is_connected = false;
-    _is_connecting = false;
+    _is_connected          = false;
+    _is_connecting         = false;
     if (_active_request) {
         fail_active_request(intentional ? "Connection closed" : "Connection lost");
     }
@@ -627,7 +645,8 @@ void Client::handle_disconnected(int reason) {
     }
 }
 
-void Client::fail_active_request(std::string const& error, qb::http::status status) {
+void
+Client::fail_active_request(std::string const &error, qb::http::status status) {
     auto self_guard = weak_from_this().lock();
     if (!_active_request) {
         return;
@@ -637,7 +656,8 @@ void Client::fail_active_request(std::string const& error, qb::http::status stat
     invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
 }
 
-void Client::fail_all_requests(std::string const& error, qb::http::status status) {
+void
+Client::fail_all_requests(std::string const &error, qb::http::status status) {
     auto self_guard = weak_from_this().lock();
     while (!_pending_requests.empty()) {
         auto ctx = std::move(_pending_requests.front());
@@ -647,26 +667,29 @@ void Client::fail_all_requests(std::string const& error, qb::http::status status
     }
 }
 
-bool Client::has_pending_work() const noexcept {
+bool
+Client::has_pending_work() const noexcept {
     return _active_request || !_pending_requests.empty();
 }
 
-qb::http::Response Client::create_error_response(qb::http::status status,
-                                                 std::string const& message) {
+qb::http::Response
+Client::create_error_response(qb::http::status status, std::string const &message) {
     qb::http::Response response;
     response.status() = status;
-    response.body() = message;
+    response.body()   = message;
     response.set_header("content-type", "text/plain");
     response.set_header("content-length", std::to_string(response.body().raw().size()));
     response.keep_alive = false;
     return response;
 }
 
-std::shared_ptr<Client> make_client(std::string const& base_uri) {
+std::shared_ptr<Client>
+make_client(std::string const &base_uri) {
     return std::make_shared<Client>(base_uri);
 }
 
-std::shared_ptr<Client> make_client(qb::io::uri const& uri) {
+std::shared_ptr<Client>
+make_client(qb::io::uri const &uri) {
     return std::make_shared<Client>(uri);
 }
 

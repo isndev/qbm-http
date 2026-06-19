@@ -13,7 +13,7 @@
  * implementation under various load conditions.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -51,8 +51,7 @@
 constexpr const std::size_t MESSAGE_SIZE_SMALL  = 128;   // Small message size in bytes
 constexpr const std::size_t MESSAGE_SIZE_MEDIUM = 2048;  // Medium message size in bytes
 constexpr const std::size_t MESSAGE_SIZE_LARGE  = 16384; // Large message size in bytes
-constexpr const int         MAX_TEST_SECONDS =
-    30; // Maximum test duration in seconds (increased from 10)
+constexpr const int         MAX_TEST_SECONDS    = 30;    // Maximum test duration in seconds (increased from 10)
 
 /**
  * @brief Global variables for test synchronization and statistics
@@ -68,8 +67,8 @@ std::atomic<std::size_t> protocol_errors{0};    // Protocol-level errors
 std::atomic<std::size_t> active_connections{0}; // Currently active connections
 std::atomic<bool>        server_ready{false};   // Server ready state flag
 std::mutex               test_mutex;            // Mutex for test synchronization
-std::condition_variable  test_cv; // Condition variable for test coordination
-std::atomic<bool>        test_complete{false}; // Test completion flag
+std::condition_variable  test_cv;               // Condition variable for test coordination
+std::atomic<bool>        test_complete{false};  // Test completion flag
 
 // Additional synchronization variables
 std::atomic<std::size_t> message_count{0}; // Message counter for specific tests
@@ -151,9 +150,7 @@ bool
 decrement_client_count_once() {
     std::size_t current = client_count.load(std::memory_order_relaxed);
     while (current > 0) {
-        if (client_count.compare_exchange_weak(current, current - 1,
-                                               std::memory_order_relaxed,
-                                               std::memory_order_relaxed)) {
+        if (client_count.compare_exchange_weak(current, current - 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
             return (current - 1) == 0;
         }
     }
@@ -237,15 +234,13 @@ public:
      */
     void
     on(typename Protocol::request &&request) {
-        qb::io::cout() << "Server received client request, switching to WebSocket protocol..."
-                  << std::endl;
+        qb::io::cout() << "Server received client request, switching to WebSocket protocol..." << std::endl;
         if (!this->switch_protocol<WS_Protocol>(*this, request)) {
             qb::io::cout() << "Server failed to switch protocols" << std::endl;
             ++protocol_errors;
             disconnect();
         } else {
-            qb::io::cout() << "Server successfully switched to WebSocket protocol"
-                      << std::endl;
+            qb::io::cout() << "Server successfully switched to WebSocket protocol" << std::endl;
             ++active_connections;
         }
     }
@@ -261,9 +256,8 @@ public:
     void
     on(typename WS_Protocol::message &&event) {
         // Echo back the message
-        qb::io::cout() << "Server received message from client, opcode="
-                  << static_cast<int>(event.ws.fin_rsv_opcode & 0x0f)
-                  << ", size=" << event.size << std::endl;
+        qb::io::cout() << "Server received message from client, opcode=" << static_cast<int>(event.ws.fin_rsv_opcode & 0x0f)
+                       << ", size=" << event.size << std::endl;
 
         // Important: make sure to echo back with proper masking setting
         event.ws.masked = false;
@@ -271,8 +265,7 @@ public:
 
         ++_received_count;
         ++messages_received;
-        qb::io::cout() << "Server echo complete, total received: " << messages_received
-                  << std::endl;
+        qb::io::cout() << "Server echo complete, total received: " << messages_received << std::endl;
     }
 
     /**
@@ -347,7 +340,7 @@ class StressServer : public qb::io::use<StressServer>::tcp::server<StressServerC
 private:
     std::size_t _expected_messages; ///< Expected number of messages for the test
     std::size_t _total_received{0}; ///< Counter for received messages
-    Timer                    _server_timer;      ///< Timer for tracking server uptime
+    Timer       _server_timer;      ///< Timer for tracking server uptime
 
 public:
     /**
@@ -379,17 +372,14 @@ public:
     void
     on(qb::io::async::event::disconnected &) {
         std::size_t current = active_connections.load(std::memory_order_relaxed);
-        while (current > 0 &&
-               !active_connections.compare_exchange_weak(current, current - 1,
-                                                         std::memory_order_relaxed,
-                                                         std::memory_order_relaxed)) {
+        while (current > 0
+               && !active_connections.compare_exchange_weak(current, current - 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
         }
 
         // Signal test completion when all connections are closed and messages were
         // processed
         if (active_connections == 0 && messages_received > 0) {
-            qb::io::cout() << "No active connections left and messages processed: "
-                      << messages_received << ", forcing completion" << std::endl;
+            qb::io::cout() << "No active connections left and messages processed: " << messages_received << ", forcing completion" << std::endl;
             force_test_completion();
         }
 
@@ -451,7 +441,7 @@ private:
     std::size_t       _max_message_size  = 0;
     int               _client_id         = 0;
     Timer             _timer;
-    bool              _close_sent        = false;
+    bool              _close_sent = false;
 
 public:
     // Define protocol types with fully qualified namespaces
@@ -467,8 +457,7 @@ public:
      * Initializes the client with the specified parameters and generates
      * a unique WebSocket key for the handshake.
      */
-    StressClient(int client_id, std::size_t messages_to_send,
-                 std::size_t max_message_size)
+    StressClient(int client_id, std::size_t messages_to_send, std::size_t max_message_size)
         : qb::io::use<StressClient>::tcp::client<>()
         , _ws_key(qb::http::ws::generateKey())
         , _messages_to_send(messages_to_send)
@@ -504,9 +493,7 @@ public:
                 return;
             }
             // All messages sent, close connection
-            qb::io::cout() << "Client " << _client_id
-                      << " sending close message after sending " << _messages_sent
-                      << " messages" << std::endl;
+            qb::io::cout() << "Client " << _client_id << " sending close message after sending " << _messages_sent << " messages" << std::endl;
             qb::http::ws::MessageClose msg(qb::http::ws::CloseStatus::Normal);
             msg.masked = true;
             *this << msg;
@@ -526,8 +513,7 @@ public:
         qb::http::ws::MessageText msg;
         msg.masked = true;
         msg << data;
-        qb::io::cout() << "Client " << _client_id << " sending message #"
-                  << (_messages_sent + 1) << ", size=" << data.size() << std::endl;
+        qb::io::cout() << "Client " << _client_id << " sending message #" << (_messages_sent + 1) << ", size=" << data.size() << std::endl;
         *this << msg;
 
         ++_messages_sent;
@@ -552,20 +538,16 @@ public:
      */
     void
     on(typename Protocol::response &&response) {
-        qb::io::cout() << "Client " << _client_id
-                  << " received HTTP response, status=" << response.status()
-                  << std::endl;
+        qb::io::cout() << "Client " << _client_id << " received HTTP response, status=" << response.status() << std::endl;
 
         if (!this->switch_protocol<WS_Protocol>(*this, response, _ws_key)) {
-            qb::io::cout() << "Client " << _client_id << " failed to switch protocols"
-                      << std::endl;
+            qb::io::cout() << "Client " << _client_id << " failed to switch protocols" << std::endl;
             ++protocol_errors;
             disconnect();
             return;
         }
 
-        qb::io::cout() << "Client " << _client_id
-                  << " successfully switched to WebSocket protocol" << std::endl;
+        qb::io::cout() << "Client " << _client_id << " successfully switched to WebSocket protocol" << std::endl;
         // Start sending messages after a short delay
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         send_messages();
@@ -581,8 +563,7 @@ public:
      */
     void
     on(typename WS_Protocol::message &&event) {
-        qb::io::cout() << "Client " << _client_id << " received message, size=" << event.size
-                  << std::endl;
+        qb::io::cout() << "Client " << _client_id << " received message, size=" << event.size << std::endl;
         ++_messages_received;
 
         // After receiving a message, send another with a short delay
@@ -591,8 +572,7 @@ public:
 
         // Check if we're done
         if (_messages_received >= _messages_to_send) {
-            qb::io::cout() << "Client " << _client_id << " completed all "
-                      << _messages_to_send << " messages" << std::endl;
+            qb::io::cout() << "Client " << _client_id << " completed all " << _messages_to_send << " messages" << std::endl;
         }
     }
 
@@ -620,12 +600,10 @@ public:
     on(qb::io::async::event::disconnected const &event) {
         qb::io::cout() << "Client " << _client_id << " disconnected" << std::endl;
         if (decrement_client_count_once()) {
-            qb::io::cout() << "Last client disconnected, forcing test completion"
-                      << std::endl;
+            qb::io::cout() << "Last client disconnected, forcing test completion" << std::endl;
             force_test_completion();
         }
-        qb::io::cout() << "Decremented client_count to " << client_count.load()
-                  << std::endl;
+        qb::io::cout() << "Decremented client_count to " << client_count.load() << std::endl;
     }
 
     /**
@@ -673,8 +651,7 @@ public:
  * 4. Verifies test results
  */
 void
-run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
-                std::size_t msg_size) {
+run_stress_test(std::size_t num_clients, std::size_t msgs_per_client, std::size_t msg_size) {
     reset_test_state();
 
     const std::size_t total_expected_msgs = num_clients * msgs_per_client;
@@ -685,8 +662,7 @@ run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
     server.start();
     server.signal_ready();
 
-    qb::io::cout() << "Server started on port 20150, expecting " << total_expected_msgs
-              << " messages" << std::endl;
+    qb::io::cout() << "Server started on port 20150, expecting " << total_expected_msgs << " messages" << std::endl;
 
     // Create client threads
     std::vector<std::thread> threads;
@@ -709,16 +685,14 @@ run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
             }
 
             if (!server_ready) {
-                qb::io::cout() << "Client " << client_id << " timed out waiting for server"
-                          << std::endl;
+                qb::io::cout() << "Client " << client_id << " timed out waiting for server" << std::endl;
                 if (decrement_client_count_once()) {
                     force_test_completion();
                 }
                 return;
             }
 
-            qb::io::cout() << "Client " << client_id << " connected and sent handshake"
-                      << std::endl;
+            qb::io::cout() << "Client " << client_id << " connected and sent handshake" << std::endl;
             StressClient client(client_id, msgs_per_client, msg_size);
 
             // Connect to server
@@ -729,17 +703,16 @@ run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
 
                 // Process events until client completes or test times out
                 Timer client_timer;
-                while (!test_complete.load(std::memory_order_relaxed) && !client.is_complete() &&
-                       client_timer.elapsed_ms() < MAX_TEST_SECONDS * 1000) {
+                while (!test_complete.load(std::memory_order_relaxed) && !client.is_complete()
+                       && client_timer.elapsed_ms() < MAX_TEST_SECONDS * 1000) {
                     qb::io::async::run(EVRUN_NOWAIT);
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
 
                 // If not completed normally, time out
                 if (!client.is_complete() && !test_complete.load(std::memory_order_relaxed)) {
-                    qb::io::cout() << "Client " << client_id << " timed out with "
-                              << client.received_count() << "/" << msgs_per_client
-                              << " messages" << std::endl;
+                    qb::io::cout() << "Client " << client_id << " timed out with " << client.received_count() << "/" << msgs_per_client
+                                   << " messages" << std::endl;
                 }
 
                 // Add a delay to process any pending messages before disconnect
@@ -771,8 +744,8 @@ run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
 
         // Check if we've received all expected messages
         if (messages_received >= total_expected_msgs) {
-            qb::io::cout() << "All expected messages received (" << messages_received << "/"
-                      << total_expected_msgs << "), completing test" << std::endl;
+            qb::io::cout() << "All expected messages received (" << messages_received << "/" << total_expected_msgs << "), completing test"
+                           << std::endl;
             break;
         }
 
@@ -782,19 +755,15 @@ run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
 
             // Print progress every second during stalls
             if (stall_count % 500 == 0) {
-                qb::io::cout() << "Progress update: " << messages_received << "/"
-                          << total_expected_msgs << " messages, " << active_connections
-                          << " active connections" << std::endl;
+                qb::io::cout() << "Progress update: " << messages_received << "/" << total_expected_msgs << " messages, " << active_connections
+                               << " active connections" << std::endl;
             }
 
             // Consider test complete if no messages received for 3 seconds and we're at
             // least 80% done
             if (stall_count > 3000 && messages_received >= total_expected_msgs * 0.8) {
-                qb::io::cout()
-                    << "Message flow stalled at " << messages_received << "/"
-                    << total_expected_msgs
-                    << " messages, but we've reached at least 80% - completing test"
-                    << std::endl;
+                qb::io::cout() << "Message flow stalled at " << messages_received << "/" << total_expected_msgs
+                               << " messages, but we've reached at least 80% - completing test" << std::endl;
                 break;
             }
         } else {
@@ -821,13 +790,13 @@ run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
 
     // Output results
     qb::io::cout() << "Stress Test Results:" << std::endl
-              << "  Clients: " << num_clients << std::endl
-              << "  Messages per client: " << msgs_per_client << std::endl
-              << "  Message size: " << msg_size << " bytes" << std::endl
-              << "  Messages sent: " << messages_sent << std::endl
-              << "  Messages received: " << messages_received << std::endl
-              << "  Connection errors: " << connection_errors << std::endl
-              << "  Protocol errors: " << protocol_errors << std::endl;
+                   << "  Clients: " << num_clients << std::endl
+                   << "  Messages per client: " << msgs_per_client << std::endl
+                   << "  Message size: " << msg_size << " bytes" << std::endl
+                   << "  Messages sent: " << messages_sent << std::endl
+                   << "  Messages received: " << messages_received << std::endl
+                   << "  Connection errors: " << connection_errors << std::endl
+                   << "  Protocol errors: " << protocol_errors << std::endl;
 
     // Verify results with adaptive tolerance based on message size and client count
     double tolerance_percent = 0.10; // 10% base tolerance for all tests
@@ -840,11 +809,9 @@ run_stress_test(std::size_t num_clients, std::size_t msgs_per_client,
         tolerance_percent += 0.05; // Add 5% more tolerance for many clients
     }
 
-    std::size_t tolerance =
-        static_cast<std::size_t>(total_expected_msgs * tolerance_percent);
+    std::size_t tolerance = static_cast<std::size_t>(total_expected_msgs * tolerance_percent);
 
-    qb::io::cout() << "  Tolerance: " << tolerance << " messages ("
-              << (tolerance_percent * 100) << "%)" << std::endl;
+    qb::io::cout() << "  Tolerance: " << tolerance << " messages (" << (tolerance_percent * 100) << "%)" << std::endl;
 
     EXPECT_GE(messages_sent, total_expected_msgs - tolerance);
     EXPECT_GE(messages_received, total_expected_msgs - tolerance);
@@ -944,41 +911,40 @@ TEST(Stress, RAPID_CONNECTIONS) {
 
     // Create and start client threads
     for (int i = 0; i < 8; ++i) { // 8 client threads
-        threads.emplace_back(
-            [i, &connected_count, &disconnected_count, &test_running]() {
-                qb::io::async::init();
+        threads.emplace_back([i, &connected_count, &disconnected_count, &test_running]() {
+            qb::io::async::init();
 
-                // Wait for server to be ready with fast timeout
-                Timer wait_timer;
-                while (!server_ready && wait_timer.elapsed_ms() < 500) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
+            // Wait for server to be ready with fast timeout
+            Timer wait_timer;
+            while (!server_ready && wait_timer.elapsed_ms() < 500) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
 
-                for (int j = 0; j < num_iterations && test_running; ++j) {
-                    // Create new client for each connection
-                    StressClient client(i * 100 + j, 1, MESSAGE_SIZE_SMALL);
+            for (int j = 0; j < num_iterations && test_running; ++j) {
+                // Create new client for each connection
+                StressClient client(i * 100 + j, 1, MESSAGE_SIZE_SMALL);
 
-                    auto status = client.transport().connect_v6("::1", 20150);
-                    if (status == qb::io::SocketStatus::Done) {
-                        ++connected_count;
-                        client.start();
-                        client.send_handshake();
+                auto status = client.transport().connect_v6("::1", 20150);
+                if (status == qb::io::SocketStatus::Done) {
+                    ++connected_count;
+                    client.start();
+                    client.send_handshake();
 
-                        // Very short processing time
-                        for (int k = 0; k < 5 && test_running; ++k) {
-                            qb::io::async::run(EVRUN_NOWAIT);
-                            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                        }
-
-                        // Force disconnect after brief connection
-                        client.disconnect();
-                        ++disconnected_count;
+                    // Very short processing time
+                    for (int k = 0; k < 5 && test_running; ++k) {
+                        qb::io::async::run(EVRUN_NOWAIT);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
                     }
 
-                    // Short delay between connections
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    // Force disconnect after brief connection
+                    client.disconnect();
+                    ++disconnected_count;
                 }
-            });
+
+                // Short delay between connections
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
     }
 
     // Run for a short time
@@ -1006,8 +972,8 @@ TEST(Stress, RAPID_CONNECTIONS) {
     }
 
     qb::io::cout() << "RAPID_CONNECTIONS test results:" << std::endl
-              << "  Connections established: " << connected_count << std::endl
-              << "  Disconnections: " << disconnected_count << std::endl;
+                   << "  Connections established: " << connected_count << std::endl
+                   << "  Disconnections: " << disconnected_count << std::endl;
 
     // Verify some connections were made
     EXPECT_GT(connected_count, 0);
@@ -1052,8 +1018,7 @@ TEST(Stress, LONG_LIVED_CONNECTIONS) {
             }
 
             if (!server_ready) {
-                qb::io::cout() << "Client " << i << " timed out waiting for server"
-                          << std::endl;
+                qb::io::cout() << "Client " << i << " timed out waiting for server" << std::endl;
                 return;
             }
 
@@ -1071,8 +1036,7 @@ TEST(Stress, LONG_LIVED_CONNECTIONS) {
                 Timer client_timer;
                 int   last_ping_time = 0;
 
-                while (test_running &&
-                       client_timer.elapsed_ms() < connection_duration_ms) {
+                while (test_running && client_timer.elapsed_ms() < connection_duration_ms) {
                     qb::io::async::run(EVRUN_NOWAIT);
 
                     // Send pings at regular intervals
@@ -1080,13 +1044,11 @@ TEST(Stress, LONG_LIVED_CONNECTIONS) {
                     if (current_time - last_ping_time >= ping_interval_ms) {
                         qb::http::ws::MessagePing ping;
                         ping.masked = true;
-                        ping << "PING-" + std::to_string(i) + "-" +
-                                    std::to_string(current_time);
+                        ping << "PING-" + std::to_string(i) + "-" + std::to_string(current_time);
                         client << ping;
                         ++ping_pong_count;
                         last_ping_time = current_time;
-                        qb::io::cout() << "Client " << i << " sent PING at " << current_time
-                                  << "ms" << std::endl;
+                        qb::io::cout() << "Client " << i << " sent PING at " << current_time << "ms" << std::endl;
                     }
 
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1096,8 +1058,7 @@ TEST(Stress, LONG_LIVED_CONNECTIONS) {
                 qb::http::ws::MessageClose close(qb::http::ws::CloseStatus::Normal);
                 close.masked = true;
                 client << close;
-                qb::io::cout() << "Client " << i << " sent close frame after "
-                          << client_timer.elapsed_ms() << "ms" << std::endl;
+                qb::io::cout() << "Client " << i << " sent close frame after " << client_timer.elapsed_ms() << "ms" << std::endl;
 
                 // Wait briefly for close to be processed
                 for (int k = 0; k < 10 && test_running; ++k) {
@@ -1120,8 +1081,7 @@ TEST(Stress, LONG_LIVED_CONNECTIONS) {
 
         // Print status every 250ms
         if (static_cast<int>(server_timer.elapsed_ms()) % 250 == 0) {
-            qb::io::cout() << "Status: Ping/Pong=" << ping_pong_count
-                      << ", Active=" << active_connections << std::endl;
+            qb::io::cout() << "Status: Ping/Pong=" << ping_pong_count << ", Active=" << active_connections << std::endl;
         }
 
         // If we got pings and there are no more active connections, complete the test
@@ -1145,10 +1105,10 @@ TEST(Stress, LONG_LIVED_CONNECTIONS) {
     }
 
     qb::io::cout() << "LONG_LIVED_CONNECTIONS test results:" << std::endl
-              << "  Duration: " << server_timer.elapsed_ms() << "ms" << std::endl
-              << "  Clients: " << num_clients << std::endl
-              << "  Ping/Pong exchanges: " << ping_pong_count << std::endl
-              << "  Result: " << (success ? "SUCCESS" : "TIMEOUT") << std::endl;
+                   << "  Duration: " << server_timer.elapsed_ms() << "ms" << std::endl
+                   << "  Clients: " << num_clients << std::endl
+                   << "  Ping/Pong exchanges: " << ping_pong_count << std::endl
+                   << "  Result: " << (success ? "SUCCESS" : "TIMEOUT") << std::endl;
 
     // Verify multiple ping-pong exchanges occurred
     EXPECT_GT(ping_pong_count, num_clients * 3);

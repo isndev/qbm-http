@@ -15,7 +15,7 @@
  * directly through this header as they are not part of the primary public API for defining routes.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
@@ -26,23 +26,22 @@
 // middleware, controllers, and request processing contexts.
 
 // Core types and interfaces for the routing system
-#include "./routing/types.h"         // Basic types, enums (HookPoint, AsyncTaskResult), function signatures (RouteHandlerFn).
+#include "./routing/types.h" // Basic types, enums (HookPoint, AsyncTaskResult), function signatures (RouteHandlerFn).
 
-
-#include "./routing/async_task.h"    // IAsyncTask interface for tasks in the processing chain.
-#include "./routing/context.h"       // Context object for request/response lifecycle management.
-#include "./routing/middleware.h"    // IMiddleware interface and MiddlewareTask adapter.
+#include "./routing/async_task.h"      // IAsyncTask interface for tasks in the processing chain.
+#include "./routing/context.h"         // Context object for request/response lifecycle management.
+#include "./routing/middleware.h"      // IMiddleware interface and MiddlewareTask adapter.
 #include "./routing/path_parameters.h" // PathParameters class for extracted route parameters.
 
 // Building blocks for route definitions
-#include "./routing/handler_node.h"  // IHandlerNode base class for routes, groups, controllers.
-#include "./routing/route.h"         // Route class for defining specific endpoints.
-#include "./routing/custom_route.h"  // ICustomRoute interface for advanced route handlers.
-#include "./routing/route_group.h"   // RouteGroup for organizing routes under common prefixes/middleware.
-#include "./routing/controller.h"    // Controller base class for grouping related routes.
+#include "./routing/controller.h"   // Controller base class for grouping related routes.
+#include "./routing/custom_route.h" // ICustomRoute interface for advanced route handlers.
+#include "./routing/handler_node.h" // IHandlerNode base class for routes, groups, controllers.
+#include "./routing/route.h"        // Route class for defining specific endpoints.
+#include "./routing/route_group.h"  // RouteGroup for organizing routes under common prefixes/middleware.
 
 // Main router class
-#include "./routing/router.h"        // The main Router class for defining the routing tree.
+#include "./routing/router.h" // The main Router class for defining the routing tree.
 
 // Note: Internal implementation details such as RadixTree.h (the routing tree algorithm)
 // and RouterCore.h (the router's internal logic engine) are not exposed through this
@@ -55,13 +54,13 @@
  * nested `qb::http::routing` namespace (though specific types might be directly in `qb::http`).
  */
 namespace qb::http {
-    // This convenience header primarily includes other headers.
-    // No specific declarations or definitions are typically placed directly in routing.h itself.
+// This convenience header primarily includes other headers.
+// No specific declarations or definitions are typically placed directly in routing.h itself.
 
-    /**
-     * @namespace qb::http::routing
-     * @brief Contains core components and types specific to the HTTP routing system.
-     * This namespace is not explicitly opened here but is documented as many included
-     * files will declare types within it.
-     */
-} // namespace qb::http 
+/**
+ * @namespace qb::http::routing
+ * @brief Contains core components and types specific to the HTTP routing system.
+ * This namespace is not explicitly opened here but is documented as many included
+ * files will declare types within it.
+ */
+} // namespace qb::http

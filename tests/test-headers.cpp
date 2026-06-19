@@ -25,7 +25,7 @@ TEST(HeadersUtility, WildcardDoesNotReenableExplicitlyDisabledEncoding) {
         GTEST_SKIP() << "Compression support is not available in this build.";
     }
 
-    const std::string header = first_supported + ";q=0, *;q=1";
+    const std::string header   = first_supported + ";q=0, *;q=1";
     const std::string selected = qb::http::content_encoding(header);
 
     EXPECT_TRUE(selected.empty() || selected != first_supported);
@@ -100,19 +100,19 @@ TEST(HeadersUtility, HeaderAttributesHandleQuotedPairs) {
 TEST(HeadersUtility, HeaderAttributesRejectDanglingQuotedPair) {
     const std::string attrs = R"(filename="abc\)";
 
-    EXPECT_THROW((void)qb::http::parse_header_attributes(attrs), std::runtime_error);
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
 }
 
 TEST(HeadersUtility, HeaderAttributesRejectJunkAfterQuotedValue) {
     const std::string attrs = R"(filename="document.pdf"junk; name=file)";
 
-    EXPECT_THROW((void)qb::http::parse_header_attributes(attrs), std::runtime_error);
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
 }
 
 TEST(HeadersUtility, HeaderAttributesRejectMissingName) {
     const std::string attrs = R"(=document.pdf; name=file)";
 
-    EXPECT_THROW((void)qb::http::parse_header_attributes(attrs), std::runtime_error);
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
 }
 
 TEST(HeadersUtility, HeaderAttributesAllowWhitespaceAfterQuotedValue) {
@@ -133,7 +133,7 @@ TEST(HeadersUtility, HeaderAttributesRejectEscapedControlChar) {
     attrs.push_back('\r');
     attrs += "b\"";
 
-    EXPECT_THROW((void)qb::http::parse_header_attributes(attrs), std::runtime_error);
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
 }
 
 // RFC 7230 qdtext excludes control characters (except HTAB); a literal LF inside
@@ -143,7 +143,7 @@ TEST(HeadersUtility, HeaderAttributesRejectLiteralControlCharInQuotes) {
     attrs.push_back('\n');
     attrs += "b\"";
 
-    EXPECT_THROW((void)qb::http::parse_header_attributes(attrs), std::runtime_error);
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
 }
 
 // HTAB is a valid quoted-pair character and must be preserved.

@@ -8,25 +8,25 @@
  * compression, security headers, static file serving, and more.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Middleware
  */
 #pragma once
 
 // Include all standard middleware components
-#include "./timing.h"
-#include "./logging.h"
-#include "./transform.h"
 #include "./conditional.h"
-#include "./error_handling.h"
 #include "./cors.h"
-#include "./validation.h"
+#include "./error_handling.h"
+#include "./logging.h"
 #include "./rate_limit.h"
+#include "./timing.h"
+#include "./transform.h"
+#include "./validation.h"
 // #include "./recaptcha.h" // Uncomment if reCAPTCHA middleware is to be included by default
 #ifdef QB_HAS_SSL
-#include "./jwt.h"
 #include "./auth.h"
+#include "./jwt.h"
 #endif
 #include "./compression.h"
 #include "./security_headers.h"
@@ -47,7 +47,7 @@
  *        Middleware components are typically defined within this namespace or sub-namespaces.
  */
 namespace qb::http {
-    // This file primarily serves as a bulk include for middleware headers.
-    // No specific declarations or definitions are typically placed directly here,
-    // beyond what the included middleware headers provide.
+// This file primarily serves as a bulk include for middleware headers.
+// No specific declarations or definitions are typically placed directly here,
+// beyond what the included middleware headers provide.
 } // namespace qb::http

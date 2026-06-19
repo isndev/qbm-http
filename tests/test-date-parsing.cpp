@@ -6,7 +6,7 @@
  * which is ~10x faster than std::stoi (no exceptions, no allocations).
  *
  * qb - C++ Actor Framework
- * Copyright (C) 2011-2025 isndev (www.qbaf.io). All rights reserved.
+ * Copyright (C) 2011-2026 isndev (www.qbaf.io). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,8 +30,7 @@ using namespace qb::http::date;
 #define __has_feature(x) 0
 #endif
 
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || \
-    defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define QB_TEST_UNDER_SANITIZER 1
 #endif
 
@@ -41,7 +40,8 @@ using namespace qb::http::date;
 
 class DateParsingTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
+    void
+    SetUp() override {}
 };
 
 TEST_F(DateParsingTest, ParseHttpDateRFC1123Format) {
@@ -56,17 +56,12 @@ TEST_F(DateParsingTest, ParseHttpDateRFC1123Format) {
 
 TEST_F(DateParsingTest, ParseHttpDateVariousDays) {
     // Test all days of week - just verify parsing succeeds
-    const char* days[] = {
-        "Sun, 01 Jan 2024 00:00:00 GMT",
-        "Mon, 02 Jan 2024 00:00:00 GMT",
-        "Tue, 03 Jan 2024 00:00:00 GMT",
-        "Wed, 04 Jan 2024 00:00:00 GMT",
-        "Thu, 05 Jan 2024 00:00:00 GMT",
-        "Fri, 06 Jan 2024 00:00:00 GMT",
-        "Sat, 07 Jan 2024 00:00:00 GMT",
+    const char *days[] = {
+        "Sun, 01 Jan 2024 00:00:00 GMT", "Mon, 02 Jan 2024 00:00:00 GMT", "Tue, 03 Jan 2024 00:00:00 GMT", "Wed, 04 Jan 2024 00:00:00 GMT",
+        "Thu, 05 Jan 2024 00:00:00 GMT", "Fri, 06 Jan 2024 00:00:00 GMT", "Sat, 07 Jan 2024 00:00:00 GMT",
     };
 
-    for (const auto& date : days) {
+    for (const auto &date : days) {
         auto result = parse_http_date(std::string_view(date));
         EXPECT_TRUE(result.has_value()) << "Failed to parse: " << date;
     }
@@ -74,8 +69,7 @@ TEST_F(DateParsingTest, ParseHttpDateVariousDays) {
 
 TEST_F(DateParsingTest, ParseHttpDateVariousMonths) {
     // Test all months
-    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
     for (int i = 0; i < 12; ++i) {
         char date_str[30];
@@ -204,9 +198,9 @@ TEST_F(DateParsingTest, ParseANSICDateTwoDigitDay) {
 
 TEST_F(DateParsingTest, RoundTripHttpDate) {
     // Format then parse should give consistent results
-    auto now = std::chrono::system_clock::now();
+    auto now       = std::chrono::system_clock::now();
     auto formatted = format_http_date(now);
-    auto parsed = parse_http_date(formatted);
+    auto parsed    = parse_http_date(formatted);
 
     ASSERT_TRUE(parsed.has_value());
 
@@ -217,9 +211,9 @@ TEST_F(DateParsingTest, RoundTripHttpDate) {
 
 TEST_F(DateParsingTest, RoundTripCookieDate) {
     // Cookie date format
-    auto now = std::chrono::system_clock::now();
+    auto now       = std::chrono::system_clock::now();
     auto formatted = format_cookie_date(now);
-    auto parsed = parse_cookie_date(formatted);
+    auto parsed    = parse_cookie_date(formatted);
 
     ASSERT_TRUE(parsed.has_value());
 
@@ -246,7 +240,7 @@ TEST_F(DateParsingTest, PerformanceParseManyDates) {
         ASSERT_TRUE(result.has_value());
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto end      = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
     // Should be very fast with std::from_chars (no exceptions, no allocations)
@@ -305,22 +299,22 @@ TEST_F(DateParsingTest, NullOptForInvalidDates) {
         "Sun Feb 31 08:49:37 1994",
     };
 
-    for (const auto& date : invalid_dates) {
-        EXPECT_FALSE(parse_http_date(date).has_value())
-            << "Should return nullopt for: " << date;
+    for (const auto &date : invalid_dates) {
+        EXPECT_FALSE(parse_http_date(date).has_value()) << "Should return nullopt for: " << date;
     }
 }
 
 TEST_F(DateParsingTest, ExceptionSafety) {
     // All parsing functions should be noexcept (no exceptions thrown)
-    EXPECT_NO_THROW((void)parse_http_date(std::string_view("")));
-    EXPECT_NO_THROW((void)parse_http_date(std::string_view("invalid")));
-    EXPECT_NO_THROW((void)parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT")));
-    EXPECT_NO_THROW((void)parse_cookie_date(std::string_view("")));
-    EXPECT_NO_THROW((void)parse_cookie_date(std::string_view("invalid")));
+    EXPECT_NO_THROW((void) parse_http_date(std::string_view("")));
+    EXPECT_NO_THROW((void) parse_http_date(std::string_view("invalid")));
+    EXPECT_NO_THROW((void) parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT")));
+    EXPECT_NO_THROW((void) parse_cookie_date(std::string_view("")));
+    EXPECT_NO_THROW((void) parse_cookie_date(std::string_view("invalid")));
 }
 
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

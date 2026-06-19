@@ -34,21 +34,21 @@
  * @endcode
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
 #ifndef QB_MODULE_HTTP_H_
 #define QB_MODULE_HTTP_H_
-#include "./1.1/http.h"
 #include "./1.1/client.h"
+#include "./1.1/http.h"
 #ifdef QB_HAS_SSL
 #include "./2/http2.h"
 #include "./ws/ws.h"
 #endif
 #ifdef QBM_HTTP_HAS_HTTP3
-#include "./3/http3.h"
 #include "./3/client.h"
 #include "./3/dual_stack.h"
+#include "./3/http3.h"
 #endif
 #endif // QB_MODULE_HTTP_H_

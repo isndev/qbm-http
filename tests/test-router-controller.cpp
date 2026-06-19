@@ -1,56 +1,67 @@
+#include <functional> // For std::function
 #include <gtest/gtest.h>
-#include "../http.h" // Provides qb::http::Router, Request, Response, Context, Controller, etc.
-#include <qb/uuid.h>    // For qb::uuid and qb::generate_random_uuid
+#include <iostream>
 #include <memory>
+#include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
 #include <string>
 #include <vector>
-#include <functional> // For std::function
-#include <iostream>
+#include "../http.h" // Provides qb::http::Router, Request, Response, Context, Controller, etc.
 
 // --- Helper Classes for Controller Router Tests ---
 
 // Simple Task Executor for testing deferred execution (copied from test-router-async.cpp)
 class TaskExecutor {
 public:
-    void addTask(std::function<void()> task) {
+    void
+    addTask(std::function<void()> task) {
         _tasks.push_back(std::move(task));
     }
 
-    void processAllTasks() {
-        std::vector<std::function<void()> > tasks_to_process = _tasks;
+    void
+    processAllTasks() {
+        std::vector<std::function<void()>> tasks_to_process = _tasks;
         _tasks.clear();
-        for (auto &task: tasks_to_process) {
+        for (auto &task : tasks_to_process) {
             task();
         }
     }
 
-    size_t getPendingTaskCount() const {
+    size_t
+    getPendingTaskCount() const {
         return _tasks.size();
     }
 
 private:
-    std::vector<std::function<void()> > _tasks;
+    std::vector<std::function<void()>> _tasks;
 };
 
 // Mock Session for Controller Router Tests (adapted from MockAsyncSession)
 struct MockControllerSession {
-    qb::http::Response _response;
-    qb::uuid _session_id = qb::generate_random_uuid();
-    std::string _handler_id_executed; // Tracks which handler/method was called
-    qb::http::PathParameters _captured_params;
-    std::weak_ptr<qb::http::Context<MockControllerSession> > _last_context_seen;
-    bool _controller_method_done = false; // Specific for controller async logic
+    qb::http::Response                                      _response;
+    qb::uuid                                                _session_id = qb::generate_random_uuid();
+    std::string                                             _handler_id_executed; // Tracks which handler/method was called
+    qb::http::PathParameters                                _captured_params;
+    std::weak_ptr<qb::http::Context<MockControllerSession>> _last_context_seen;
+    bool                                                    _controller_method_done = false; // Specific for controller async logic
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MockControllerSession &operator<<(const qb::http::Response &resp) {
+    MockControllerSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 
-    [[nodiscard]] const qb::uuid &id() const { return _session_id; }
+    [[nodiscard]] const qb::uuid &
+    id() const {
+        return _session_id;
+    }
 
-    void reset() {
+    void
+    reset() {
         _response = qb::http::Response();
         _handler_id_executed.clear();
         _captured_params = qb::http::PathParameters();
@@ -62,16 +73,18 @@ struct MockControllerSession {
 // Test Fixture for Controller Router Tests
 class RouterControllerTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockControllerSession> _mock_session;
+    std::shared_ptr<MockControllerSession>  _mock_session;
     qb::http::Router<MockControllerSession> _router;
-    TaskExecutor _task_executor; // For testing async controller methods
-    std::string _prefix_data;
+    TaskExecutor                            _task_executor; // For testing async controller methods
+    std::string                             _prefix_data;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         _mock_session = std::make_shared<MockControllerSession>();
     }
 
-    qb::http::Request create_request(qb::http::method method_val, const std::string &target_path) {
+    qb::http::Request
+    create_request(qb::http::method method_val, const std::string &target_path) {
         qb::http::Request req;
         req.method() = method_val;
         try {
@@ -91,48 +104,49 @@ protected:
 // Synchronous Controller Example
 class SyncTestController : public qb::http::Controller<MockControllerSession> {
 public:
-    SyncTestController(std::string prefix_data) : _prefix_data(std::move(prefix_data)) {
-    }
+    SyncTestController(std::string prefix_data)
+        : _prefix_data(std::move(prefix_data)) {}
 
-    void initialize_routes() override {
+    void
+    initialize_routes() override {
         // Using RouteHandlerFn for direct lambda binding
         add_controller_route("/get_data", qb::http::method::GET,
-                             [this](std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
-                                 this->get_data_handler(ctx);
-                             });
+                             [this](std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) { this->get_data_handler(ctx); });
 
         // Using MEMBER_HANDLER macro
-        add_controller_route("/post_data", qb::http::method::POST,
-                             MEMBER_HANDLER(&SyncTestController::post_data_handler));
+        add_controller_route("/post_data", qb::http::method::POST, MEMBER_HANDLER(&SyncTestController::post_data_handler));
         add_controller_route("/item/:id", qb::http::method::GET, MEMBER_HANDLER(&SyncTestController::get_item_handler));
     }
 
-    void get_data_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    get_data_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _prefix_data + "SyncTestController::get_data_handler";
         }
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Synchronous GET data";
+        ctx->response().body()   = "Synchronous GET data";
         ctx->complete();
     }
 
-    void post_data_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    post_data_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _prefix_data + "SyncTestController::post_data_handler";
         }
         ctx->response().status() = qb::http::status::CREATED;
-        ctx->response().body() = "Synchronous POST data accepted";
+        ctx->response().body()   = "Synchronous POST data accepted";
         ctx->complete();
     }
 
-    void get_item_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    get_item_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _prefix_data + "SyncTestController::get_item_handler";
-            ctx->session()->_captured_params = ctx->path_parameters();
+            ctx->session()->_captured_params     = ctx->path_parameters();
         }
         std::string item_id(ctx->path_parameters().get("id").value_or("not_found"));
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "Item ID: " + item_id;
+        ctx->response().body()   = "Item ID: " + item_id;
         ctx->complete();
     }
 
@@ -145,60 +159,58 @@ class AsyncTestController : public qb::http::Controller<MockControllerSession> {
 public:
     // Constructor taking a pointer to the test fixture's TaskExecutor
     AsyncTestController(TaskExecutor *executor, std::string prefix_data)
-        : _executor(executor), _prefix_data(std::move(prefix_data)) {
+        : _executor(executor)
+        , _prefix_data(std::move(prefix_data)) {
         if (!_executor) {
             throw std::runtime_error("TaskExecutor cannot be null for AsyncTestController");
         }
     }
 
-    void initialize_routes() override {
+    void
+    initialize_routes() override {
         add_controller_route("/async_get", qb::http::method::GET,
-                             [this](std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
-                                 this->async_get_handler(ctx);
-                             });
-        add_controller_route("/async_post", qb::http::method::POST,
-                             MEMBER_HANDLER(&AsyncTestController::async_post_handler));
+                             [this](std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) { this->async_get_handler(ctx); });
+        add_controller_route("/async_post", qb::http::method::POST, MEMBER_HANDLER(&AsyncTestController::async_post_handler));
     }
 
-    void async_get_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    async_get_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _prefix_data + "AsyncTestController::async_get_handler_CALLED";
         }
         auto shared_ctx = ctx; // Capture for lambda
         _executor->addTask([shared_ctx, this]() {
             if (shared_ctx->session()) {
-                shared_ctx->session()->_handler_id_executed =
-                        _prefix_data + "AsyncTestController::async_get_handler_EXECUTED";
+                shared_ctx->session()->_handler_id_executed    = _prefix_data + "AsyncTestController::async_get_handler_EXECUTED";
                 shared_ctx->session()->_controller_method_done = true;
             }
             shared_ctx->response().status() = qb::http::status::OK;
-            shared_ctx->response().body() = "Asynchronous GET data";
+            shared_ctx->response().body()   = "Asynchronous GET data";
             shared_ctx->complete();
         });
     }
 
-    void async_post_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    async_post_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _prefix_data + "AsyncTestController::async_post_handler_CALLED";
         }
         auto shared_ctx = ctx; // Capture for lambda
         _executor->addTask([shared_ctx, this]() {
             if (shared_ctx->session()) {
-                shared_ctx->session()->_handler_id_executed =
-                        _prefix_data + "AsyncTestController::async_post_handler_EXECUTED";
+                shared_ctx->session()->_handler_id_executed    = _prefix_data + "AsyncTestController::async_post_handler_EXECUTED";
                 shared_ctx->session()->_controller_method_done = true;
             }
             shared_ctx->response().status() = qb::http::status::ACCEPTED;
-            shared_ctx->response().body() = "Asynchronous POST data accepted";
+            shared_ctx->response().body()   = "Asynchronous POST data accepted";
             shared_ctx->complete();
         });
     }
 
 private:
     TaskExecutor *_executor;
-    std::string _prefix_data;
+    std::string   _prefix_data;
 };
-
 
 // --- New Helper Classes for Advanced Controller Tests ---
 
@@ -206,10 +218,12 @@ private:
 class TestControllerSyncMiddleware : public qb::http::IMiddleware<MockControllerSession> {
 public:
     TestControllerSyncMiddleware(std::string id, std::string header_name, std::string header_value)
-        : _id(std::move(id)), _header_name(std::move(header_name)), _header_value(std::move(header_value)) {
-    }
+        : _id(std::move(id))
+        , _header_name(std::move(header_name))
+        , _header_value(std::move(header_value)) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) override {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed += (_id + ";");
         }
@@ -217,10 +231,13 @@ public:
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 
-    std::string name() const override { return _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return _id;
     }
+
+    void
+    cancel() override {}
 
 private:
     std::string _id;
@@ -231,14 +248,19 @@ private:
 // Asynchronous Middleware for Controller Tests
 class TestControllerAsyncMiddleware : public qb::http::IMiddleware<MockControllerSession> {
 public:
-    TestControllerAsyncMiddleware(std::string id, TaskExecutor *executor, std::string header_name,
-                                  std::string header_value, bool signal_error = false)
-        : _id(std::move(id)), _executor(executor), _header_name(std::move(header_name)),
-          _header_value(std::move(header_value)), _signal_error(signal_error) {
-        if (!_executor) throw std::runtime_error("TaskExecutor cannot be null for TestControllerAsyncMiddleware");
+    TestControllerAsyncMiddleware(std::string id, TaskExecutor *executor, std::string header_name, std::string header_value,
+                                  bool signal_error = false)
+        : _id(std::move(id))
+        , _executor(executor)
+        , _header_name(std::move(header_name))
+        , _header_value(std::move(header_value))
+        , _signal_error(signal_error) {
+        if (!_executor)
+            throw std::runtime_error("TaskExecutor cannot be null for TestControllerAsyncMiddleware");
     }
 
-    void process(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) override {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed += (_id + "_HANDLE_CALLED;");
         }
@@ -258,27 +280,31 @@ public:
         });
     }
 
-    std::string name() const override { return _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return _id;
     }
 
+    void
+    cancel() override {}
+
 private:
-    std::string _id;
+    std::string   _id;
     TaskExecutor *_executor;
-    std::string _header_name;
-    std::string _header_value;
-    bool _signal_error;
+    std::string   _header_name;
+    std::string   _header_value;
+    bool          _signal_error;
 };
 
 // Custom Route for Controller Tests
 class MyCustomControllerRoute : public qb::http::ICustomRoute<MockControllerSession> {
 public:
-    MyCustomControllerRoute(std::string id,
-                            TaskExecutor *executor = nullptr) : _id(std::move(id)), _executor(executor) {
-    }
+    MyCustomControllerRoute(std::string id, TaskExecutor *executor = nullptr)
+        : _id(std::move(id))
+        , _executor(executor) {}
 
-    void process(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) override {
+    void
+    process(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) override {
         if (_executor) {
             // Async version
             if (ctx->session()) {
@@ -290,7 +316,7 @@ public:
                     shared_ctx->session()->_handler_id_executed += (_id + "_CUSTOM_ASYNC_TASK_EXECUTED;");
                     shared_ctx->session()->_controller_method_done = true;
                 }
-                shared_ctx->response().body() = "Response from " + _id + " (async custom route)";
+                shared_ctx->response().body()   = "Response from " + _id + " (async custom route)";
                 shared_ctx->response().status() = qb::http::status::OK;
                 shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
             });
@@ -300,19 +326,22 @@ public:
                 ctx->session()->_handler_id_executed += (_id + "_CUSTOM_SYNC_EXECUTED;");
                 ctx->session()->_controller_method_done = true;
             }
-            ctx->response().body() = "Response from " + _id + " (sync custom route)";
+            ctx->response().body()   = "Response from " + _id + " (sync custom route)";
             ctx->response().status() = qb::http::status::OK;
             ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
         }
     }
 
-    std::string name() const override { return _id; }
-
-    void cancel() override {
+    std::string
+    name() const override {
+        return _id;
     }
 
+    void
+    cancel() override {}
+
 private:
-    std::string _id;
+    std::string   _id;
     TaskExecutor *_executor;
 };
 
@@ -320,7 +349,8 @@ private:
 class ControllerWithAdvancedFeatures : public qb::http::Controller<MockControllerSession> {
 public:
     ControllerWithAdvancedFeatures(TaskExecutor *executor, const std::string &marker)
-        : _executor(executor), _marker(marker) {
+        : _executor(executor)
+        , _marker(marker) {
         if (!_executor && marker.find("async") != std::string::npos) {
             // Basic check
             // Only throw if executor is needed for an async-prefixed marker test.
@@ -328,18 +358,16 @@ public:
         }
     }
 
-    void initialize_routes() override {
+    void
+    initialize_routes() override {
         // Route with controller-specific sync middleware
-        add_controller_route("/sync_mw_route", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::basic_handler));
+        add_controller_route("/sync_mw_route", qb::http::method::GET, MEMBER_HANDLER(&ControllerWithAdvancedFeatures::basic_handler));
 
         // Route with controller-specific async middleware
-        add_controller_route("/async_mw_route", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::basic_handler));
+        add_controller_route("/async_mw_route", qb::http::method::GET, MEMBER_HANDLER(&ControllerWithAdvancedFeatures::basic_handler));
 
         // Route for sync error
-        add_controller_route("/sync_error", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::sync_error_handler));
+        add_controller_route("/sync_error", qb::http::method::GET, MEMBER_HANDLER(&ControllerWithAdvancedFeatures::sync_error_handler));
 
         // Route for async error (error in deferred task)
         add_controller_route("/async_error_deferred", qb::http::method::GET,
@@ -354,8 +382,7 @@ public:
         add_controller_route("/custom_sync", qb::http::method::GET, sync_custom_route);
 
         // Route using an asynchronous ICustomRoute
-        auto async_custom_route = std::make_shared<
-            MyCustomControllerRoute>(_marker + "AsyncCustomRouteImpl", _executor);
+        auto async_custom_route = std::make_shared<MyCustomControllerRoute>(_marker + "AsyncCustomRouteImpl", _executor);
         add_controller_route("/custom_async", qb::http::method::GET, async_custom_route);
 
         // Add routes for throwing handlers
@@ -367,53 +394,56 @@ public:
                              MEMBER_HANDLER(&ControllerWithAdvancedFeatures::async_throwing_before_task_handler));
     }
 
-    void basic_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    basic_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed += (_marker + "_basic_handler;");
             ctx->session()->_controller_method_done = true;
         }
-        ctx->response().body() = _marker + " basic_handler response";
+        ctx->response().body()   = _marker + " basic_handler response";
         ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     }
 
-    void sync_error_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    sync_error_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed += (_marker + "_sync_error_handler;");
             ctx->session()->_controller_method_done = true;
         }
-        ctx->response().body() = _marker + " sync error about to happen";
+        ctx->response().body()   = _marker + " sync error about to happen";
         ctx->response().status() = qb::http::status::GONE; // Some non-500 status before error
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     }
 
-    void async_error_immediate_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    async_error_immediate_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed += (_marker + "_async_error_immediate_handler;");
         }
         // Error happens before deferring to executor
-        ctx->response().body() = _marker + " async immediate error";
+        ctx->response().body()   = _marker + " async immediate error";
         ctx->response().status() = qb::http::status::EXPECTATION_FAILED;
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
         // No task added to executor
     }
 
-    void async_error_deferred_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    async_error_deferred_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed += (_marker + "_async_error_deferred_handler_CALLED;");
         }
         auto shared_ctx = ctx;
         if (!_executor) {
             // Should be caught by constructor or test setup
-            shared_ctx->response().body() = "NO EXECUTOR FOR ASYNC ERROR";
+            shared_ctx->response().body()   = "NO EXECUTOR FOR ASYNC ERROR";
             shared_ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
             return;
         }
         _executor->addTask([shared_ctx, this]() {
             if (shared_ctx->session()) {
-                shared_ctx->session()->_handler_id_executed += (
-                    _marker + "_async_error_deferred_handler_TASK_EXECUTED;");
+                shared_ctx->session()->_handler_id_executed += (_marker + "_async_error_deferred_handler_TASK_EXECUTED;");
                 shared_ctx->session()->_controller_method_done = true; // Mark done even if erroring
             }
             shared_ctx->response().body() = _marker + " async deferred error";
@@ -423,7 +453,8 @@ public:
     }
 
     // New handler that throws synchronously
-    void sync_throwing_handler_direct(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    sync_throwing_handler_direct(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _marker + "_sync_throwing_handler_direct_CALLED";
         }
@@ -431,13 +462,14 @@ public:
     }
 
     // New handler that throws from an async task
-    void async_throwing_in_task_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    async_throwing_in_task_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _marker + "_async_throwing_in_task_handler_CALLED";
         }
         auto shared_ctx = ctx;
         if (!_executor) {
-            shared_ctx->response().body() = "NO EXECUTOR FOR ASYNC THROWING TASK HANDLER";
+            shared_ctx->response().body()   = "NO EXECUTOR FOR ASYNC THROWING TASK HANDLER";
             shared_ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
             return;
@@ -450,7 +482,7 @@ public:
                 }
                 throw std::runtime_error("Intentional async exception from " + marker + "_async_throwing_in_task");
                 // The following line would be unreachable, but shown for pattern
-                // shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE); 
+                // shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
             } catch (const std::exception &e) {
                 // Log or handle exception e if necessary, then signal error to context
                 std::cerr << "Async task for " << marker << " caught exception: " << e.what() << std::endl;
@@ -467,7 +499,8 @@ public:
     }
 
     // New handler that is designed to be async but throws before queueing task
-    void async_throwing_before_task_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    async_throwing_before_task_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _marker + "_async_throwing_before_task_CALLED";
         }
@@ -481,7 +514,7 @@ public:
 
 private:
     TaskExecutor *_executor;
-    std::string _marker;
+    std::string   _marker;
 };
 
 class ThrowingConstructorController : public qb::http::Controller<MockControllerSession> {
@@ -490,7 +523,8 @@ public:
         throw std::runtime_error("Exception from ThrowingConstructorController constructor");
     }
 
-    void initialize_routes() override {
+    void
+    initialize_routes() override {
         /* Will not be called */
     }
 };
@@ -498,40 +532,41 @@ public:
 // Controller to test instance reusability and statefulness
 class StatefulController : public qb::http::Controller<MockControllerSession> {
 public:
-    StatefulController(const std::string &base_id) : _base_id(base_id), _request_count(0) {
+    StatefulController(const std::string &base_id)
+        : _base_id(base_id)
+        , _request_count(0) {}
+
+    void
+    initialize_routes() override {
+        add_controller_route("/ping_and_set/:modifier", qb::http::method::GET, MEMBER_HANDLER(&StatefulController::ping_and_set_handler));
+        add_controller_route("/get_state", qb::http::method::GET, MEMBER_HANDLER(&StatefulController::get_state_handler));
     }
 
-    void initialize_routes() override {
-        add_controller_route("/ping_and_set/:modifier", qb::http::method::GET,
-                             MEMBER_HANDLER(&StatefulController::ping_and_set_handler));
-        add_controller_route("/get_state", qb::http::method::GET,
-                             MEMBER_HANDLER(&StatefulController::get_state_handler));
-    }
-
-    void ping_and_set_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    ping_and_set_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         _request_count++;
         _last_modifier_id = ctx->path_parameters().get("modifier").value_or("unknown");
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _base_id + "_ping_set_" + _last_modifier_id;
         }
-        ctx->response().body() = "Count: " + std::to_string(_request_count) + ", Last Modifier: " + _last_modifier_id;
+        ctx->response().body()   = "Count: " + std::to_string(_request_count) + ", Last Modifier: " + _last_modifier_id;
         ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     }
 
-    void get_state_handler(std::shared_ptr<qb::http::Context<MockControllerSession> > ctx) {
+    void
+    get_state_handler(std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) {
         if (ctx->session()) {
             ctx->session()->_handler_id_executed = _base_id + "_get_state";
         }
-        ctx->response().body() = "Current Count: " + std::to_string(_request_count) + ", Last Modifier ID: " +
-                                 _last_modifier_id;
+        ctx->response().body()   = "Current Count: " + std::to_string(_request_count) + ", Last Modifier ID: " + _last_modifier_id;
         ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     }
 
 private:
     std::string _base_id;
-    int _request_count;
+    int         _request_count;
     std::string _last_modifier_id;
 };
 
@@ -539,20 +574,22 @@ class MiddlewareOnlyController : public qb::http::Controller<MockControllerSessi
 public:
     static int initialize_calls;
 
-    void initialize_routes() override {
+    void
+    initialize_routes() override {
         ++initialize_calls;
-        use([](std::shared_ptr<qb::http::Context<MockControllerSession>> ctx, std::function<void()> next) {
-            if (ctx && ctx->session()) {
-                ctx->session()->_handler_id_executed += "middleware_only_ctrl;";
-            }
-            next();
-        }, "MiddlewareOnlyControllerInitMw");
+        use(
+            [](std::shared_ptr<qb::http::Context<MockControllerSession>> ctx, std::function<void()> next) {
+                if (ctx && ctx->session()) {
+                    ctx->session()->_handler_id_executed += "middleware_only_ctrl;";
+                }
+                next();
+            },
+            "MiddlewareOnlyControllerInitMw");
         // Intentionally no routes.
     }
 };
 
 int MiddlewareOnlyController::initialize_calls = 0;
-
 
 // --- Basic Controller Tests ---
 
@@ -642,16 +679,17 @@ TEST_F(RouterControllerTest, MountAndCallAsyncControllerPostMethodDeferred) {
 TEST_F(RouterControllerTest, ControllerConstructorThrows) {
     // Expect the router.controller call itself to throw if the controller constructor fails.
     // The router should not store a partially constructed or invalid controller.
-    EXPECT_THROW({
-                 auto controller = _router.controller<ThrowingConstructorController>("/throwing_ctrl", "ThrowingMarker")
-                 ;
-                 // If controller() doesn't throw, we might want to fail or check if controller is null, 
-                 // but the expectation is that it re-throws the constructor exception.
-                 if (controller) {
-                 // This part should ideally not be reached if EXPECT_THROW works as intended for constructor exceptions.
-                 // If it is reached, it implies the exception wasn't propagated by controller() as expected.
-                 }
-                 }, std::runtime_error);
+    EXPECT_THROW(
+        {
+            auto controller = _router.controller<ThrowingConstructorController>("/throwing_ctrl", "ThrowingMarker");
+            // If controller() doesn't throw, we might want to fail or check if controller is null,
+            // but the expectation is that it re-throws the constructor exception.
+            if (controller) {
+                // This part should ideally not be reached if EXPECT_THROW works as intended for constructor exceptions.
+                // If it is reached, it implies the exception wasn't propagated by controller() as expected.
+            }
+        },
+        std::runtime_error);
 
     // Ensure no routes were inadvertently compiled or that the router is still in a sane state.
     _router.compile(); // Should still work or be a no-op if nothing was added.
@@ -708,7 +746,7 @@ TEST_F(RouterControllerTest, ControllerInstanceReusabilityAndState) {
 
 TEST_F(RouterControllerTest, ControllerInitializeRoutesRunsOnlyOnceWithoutRoutes) {
     MiddlewareOnlyController::initialize_calls = 0;
-    auto controller = _router.controller<MiddlewareOnlyController>("/mw_only");
+    auto controller                            = _router.controller<MiddlewareOnlyController>("/mw_only");
     ASSERT_NE(controller, nullptr);
 
     _router.compile();
@@ -718,13 +756,11 @@ TEST_F(RouterControllerTest, ControllerInitializeRoutesRunsOnlyOnceWithoutRoutes
 }
 
 TEST_F(RouterControllerTest, ControllerMiddlewareAndCustomRouteOrdering) {
-    auto controller = _router.controller<ControllerWithAdvancedFeatures>(
-        "/adv_api_order_test", &_task_executor, "CtrlOrderTest");
+    auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api_order_test", &_task_executor, "CtrlOrderTest");
     ASSERT_NE(controller, nullptr);
 
     // Add a controller-specific synchronous middleware
-    controller->use(
-        std::make_shared<TestControllerSyncMiddleware>("CtrlOrderSyncMw", "X-CtrlOrder-Sync", "AppliedCtrlOrder"));
+    controller->use(std::make_shared<TestControllerSyncMiddleware>("CtrlOrderSyncMw", "X-CtrlOrder-Sync", "AppliedCtrlOrder"));
 
     // The controller already has /custom_sync and /custom_async routes from its initialize_routes method.
     // We will test with the synchronous custom route first.
@@ -739,20 +775,18 @@ TEST_F(RouterControllerTest, ControllerMiddlewareAndCustomRouteOrdering) {
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.header("X-CtrlOrder-Sync"), "AppliedCtrlOrder");
     // Expected trace: Controller Middleware -> Custom Route Handler
-    EXPECT_EQ(_mock_session->_handler_id_executed,
-              "CtrlOrderSyncMw;CtrlOrderTestSyncCustomRouteImpl_CUSTOM_SYNC_EXECUTED;");
+    EXPECT_EQ(_mock_session->_handler_id_executed, "CtrlOrderSyncMw;CtrlOrderTestSyncCustomRouteImpl_CUSTOM_SYNC_EXECUTED;");
     EXPECT_TRUE(_mock_session->_controller_method_done); // MyCustomControllerRoute sets this
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);
 
     // Test with Asynchronous Custom Route
     _mock_session->reset();
     _mock_session->_controller_method_done = false; // Reset for async custom route
-    auto req_async_custom = create_request(HTTP_GET, "/adv_api_order_test/custom_async");
+    auto req_async_custom                  = create_request(HTTP_GET, "/adv_api_order_test/custom_async");
     _router.route(_mock_session, std::move(req_async_custom));
 
     // Expected trace after sync part: Controller Middleware -> Custom Route ASYNC_HANDLE_CALLED
-    EXPECT_EQ(_mock_session->_handler_id_executed,
-              "CtrlOrderSyncMw;CtrlOrderTestAsyncCustomRouteImpl_CUSTOM_ASYNC_HANDLE_CALLED;");
+    EXPECT_EQ(_mock_session->_handler_id_executed, "CtrlOrderSyncMw;CtrlOrderTestAsyncCustomRouteImpl_CUSTOM_ASYNC_HANDLE_CALLED;");
     ASSERT_FALSE(_mock_session->_controller_method_done);
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 1); // Task from MyCustomControllerRoute (async version)
 
@@ -761,12 +795,11 @@ TEST_F(RouterControllerTest, ControllerMiddlewareAndCustomRouteOrdering) {
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.header("X-CtrlOrder-Sync"), "AppliedCtrlOrder"); // Still there
     // Expected full trace
-    EXPECT_EQ(_mock_session->_handler_id_executed,
-              "CtrlOrderSyncMw;CtrlOrderTestAsyncCustomRouteImpl_CUSTOM_ASYNC_HANDLE_CALLED;CtrlOrderTestAsyncCustomRouteImpl_CUSTOM_ASYNC_TASK_EXECUTED;");
+    EXPECT_EQ(_mock_session->_handler_id_executed, "CtrlOrderSyncMw;CtrlOrderTestAsyncCustomRouteImpl_CUSTOM_ASYNC_HANDLE_CALLED;"
+                                                   "CtrlOrderTestAsyncCustomRouteImpl_CUSTOM_ASYNC_TASK_EXECUTED;");
     EXPECT_TRUE(_mock_session->_controller_method_done);
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);
 }
-
 
 // --- Advanced Controller Tests ---
 
@@ -788,9 +821,7 @@ TEST_F(RouterControllerTest, ControllerWithSyncPrefixMiddleware) {
 TEST_F(RouterControllerTest, ControllerWithAsyncPrefixMiddleware) {
     auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "TestAsyncMw");
     ASSERT_NE(controller, nullptr);
-    controller->use(
-        std::make_shared<TestControllerAsyncMiddleware>("CtrlAsyncMw", &_task_executor, "X-Ctrl-Async",
-                                                        "AppliedAsync"));
+    controller->use(std::make_shared<TestControllerAsyncMiddleware>("CtrlAsyncMw", &_task_executor, "X-Ctrl-Async", "AppliedAsync"));
     _router.compile();
 
     auto request = create_request(HTTP_GET, "/adv_api/async_mw_route");
@@ -805,8 +836,7 @@ TEST_F(RouterControllerTest, ControllerWithAsyncPrefixMiddleware) {
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.header("X-Ctrl-Async"), "AppliedAsync");
-    EXPECT_EQ(_mock_session->_handler_id_executed,
-              "CtrlAsyncMw_HANDLE_CALLED;CtrlAsyncMw_TASK_EXECUTED;TestAsyncMw_basic_handler;");
+    EXPECT_EQ(_mock_session->_handler_id_executed, "CtrlAsyncMw_HANDLE_CALLED;CtrlAsyncMw_TASK_EXECUTED;TestAsyncMw_basic_handler;");
     EXPECT_TRUE(_mock_session->_controller_method_done);
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);
 }
@@ -828,8 +858,7 @@ TEST_F(RouterControllerTest, ControllerSyncMethodSignalsError) {
 }
 
 TEST_F(RouterControllerTest, ControllerAsyncMethodSignalsErrorInDeferredTask) {
-    auto controller = _router.controller<ControllerWithAdvancedFeatures>(
-        "/adv_api", &_task_executor, "AsyncDeferredErr");
+    auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "AsyncDeferredErr");
     ASSERT_NE(controller, nullptr);
     _router.compile();
 
@@ -851,8 +880,7 @@ TEST_F(RouterControllerTest, ControllerAsyncMethodSignalsErrorInDeferredTask) {
 }
 
 TEST_F(RouterControllerTest, ControllerAsyncMethodSignalsErrorImmediatelyInHandle) {
-    auto controller = _router.controller<ControllerWithAdvancedFeatures>(
-        "/adv_api", &_task_executor, "AsyncImmediateErr");
+    auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "AsyncImmediateErr");
     ASSERT_NE(controller, nullptr);
     _router.compile();
 
@@ -877,15 +905,13 @@ TEST_F(RouterControllerTest, ControllerWithSyncCustomRoute) {
     _router.route(_mock_session, std::move(request));
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
-    EXPECT_EQ(_mock_session->_response.body().as<std::string>(),
-              "Response from CtrlSyncCustomSyncCustomRouteImpl (sync custom route)");
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Response from CtrlSyncCustomSyncCustomRouteImpl (sync custom route)");
     EXPECT_EQ(_mock_session->_handler_id_executed, "CtrlSyncCustomSyncCustomRouteImpl_CUSTOM_SYNC_EXECUTED;");
     EXPECT_TRUE(_mock_session->_controller_method_done);
 }
 
 TEST_F(RouterControllerTest, ControllerWithAsyncCustomRoute) {
-    auto controller = _router.controller<
-        ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "CtrlAsyncCustom");
+    auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "CtrlAsyncCustom");
     ASSERT_NE(controller, nullptr);
     _router.compile();
 
@@ -899,8 +925,7 @@ TEST_F(RouterControllerTest, ControllerWithAsyncCustomRoute) {
     _task_executor.processAllTasks();
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
-    EXPECT_EQ(_mock_session->_response.body().as<std::string>(),
-              "Response from CtrlAsyncCustomAsyncCustomRouteImpl (async custom route)");
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Response from CtrlAsyncCustomAsyncCustomRouteImpl (async custom route)");
     EXPECT_EQ(_mock_session->_handler_id_executed,
               "CtrlAsyncCustomAsyncCustomRouteImpl_CUSTOM_ASYNC_HANDLE_CALLED;CtrlAsyncCustomAsyncCustomRouteImpl_CUSTOM_ASYNC_TASK_EXECUTED;");
     EXPECT_TRUE(_mock_session->_controller_method_done);
@@ -927,8 +952,7 @@ TEST_F(RouterControllerTest, ControllerSyncMethodThrowsException) {
 }
 
 TEST_F(RouterControllerTest, ControllerAsyncMethodThrowsExceptionInTask) {
-    auto controller = _router.controller<ControllerWithAdvancedFeatures>(
-        "/adv_api", &_task_executor, "AsyncThrowTaskTest");
+    auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "AsyncThrowTaskTest");
     ASSERT_NE(controller, nullptr);
     // Routes are now added in ControllerWithAdvancedFeatures::initialize_routes
 
@@ -944,15 +968,13 @@ TEST_F(RouterControllerTest, ControllerAsyncMethodThrowsExceptionInTask) {
     _task_executor.processAllTasks();
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    EXPECT_EQ(_mock_session->_handler_id_executed,
-              "AsyncThrowTaskTest_async_throwing_in_task_handler_CALLED;TASK_STARTED_FOR_THROW");
+    EXPECT_EQ(_mock_session->_handler_id_executed, "AsyncThrowTaskTest_async_throwing_in_task_handler_CALLED;TASK_STARTED_FOR_THROW");
     ASSERT_FALSE(_mock_session->_controller_method_done);
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);
 }
 
 TEST_F(RouterControllerTest, ControllerAsyncMethodThrowsExceptionBeforeTaskExecution) {
-    auto controller = _router.controller<ControllerWithAdvancedFeatures>(
-        "/adv_api", &_task_executor, "AsyncThrowBeforeTask");
+    auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "AsyncThrowBeforeTask");
     ASSERT_NE(controller, nullptr);
     _router.compile();
 
@@ -963,5 +985,5 @@ TEST_F(RouterControllerTest, ControllerAsyncMethodThrowsExceptionBeforeTaskExecu
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_mock_session->_handler_id_executed, "AsyncThrowBeforeTask_async_throwing_before_task_CALLED");
     ASSERT_FALSE(_mock_session->_controller_method_done); // Method did not complete its async part
-    EXPECT_EQ(_task_executor.getPendingTaskCount(), 0); // No task should have been queued
+    EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);   // No task should have been queued
 }

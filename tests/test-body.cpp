@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "../http.h" // Should include body.h, multipart.h, etc.
 #include <qb/json.h>
+#include "../http.h" // Should include body.h, multipart.h, etc.
 
 // Conditional include for compression tests
 #ifdef QB_HAS_COMPRESSION
@@ -10,9 +10,10 @@
 using namespace qb::http;
 
 // Helper function to create a simple multipart body
-Multipart create_simple_multipart() {
+Multipart
+create_simple_multipart() {
     Multipart mp;
-    auto &part1 = mp.create_part();
+    auto     &part1 = mp.create_part();
     part1.set_header("Content-Disposition", "form-data; name=\"text_field\"");
     part1.body = "Simple text";
 
@@ -24,7 +25,8 @@ Multipart create_simple_multipart() {
 }
 
 // Helper function to create a simple Form
-Form create_simple_form() {
+Form
+create_simple_form() {
     Form form;
     form.add("name", "test_user");
     form.add("email", "test@example.com");
@@ -37,7 +39,8 @@ class BodyTest : public ::testing::Test {
 protected:
     Body body;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         // Common setup for tests, if any
     }
 };
@@ -63,9 +66,9 @@ TEST(HttpMessageReset, RequestResetClearsBodyAndMessageState) {
     request.cookies().add("sid", "abc");
     request.major_version = 3;
     request.minor_version = 0;
-    request.upgrade = true;
-    request.stream_id = 123;
-    request.keep_alive = true;
+    request.upgrade       = true;
+    request.stream_id     = 123;
+    request.keep_alive    = true;
 
     request.reset();
 
@@ -89,9 +92,9 @@ TEST(HttpMessageReset, ResponseResetClearsBodyAndMessageState) {
     response.add_cookie("sid", "abc");
     response.major_version = 3;
     response.minor_version = 0;
-    response.upgrade = true;
-    response.stream_id = 123;
-    response.keep_alive = true;
+    response.upgrade       = true;
+    response.stream_id     = 123;
+    response.keep_alive    = true;
 
     response.reset();
 
@@ -126,18 +129,18 @@ TEST_F(BodyTest, ChunkSerializationPreservesInternalZeroHexDigits) {
 
 TEST_F(BodyTest, AssignString) {
     std::string s_val = "Test String";
-    body = s_val;
+    body              = s_val;
     EXPECT_EQ(s_val, body.as<std::string>());
 
     std::string s_val_move = "Test String Move";
-    body = std::move(s_val_move);
+    body                   = std::move(s_val_move);
     EXPECT_EQ("Test String Move", body.as<std::string>());
     // s_val_move is in a valid but unspecified state, typically empty after move for strings
 }
 
 TEST_F(BodyTest, AssignStringView) {
     std::string_view sv_val = "Test StringView";
-    body = sv_val; // This will call the const& generic operator=
+    body                    = sv_val; // This will call the const& generic operator=
     EXPECT_EQ(sv_val, body.as<std::string_view>());
 
     body = std::string_view("Test StringView Move"); // rvalue
@@ -146,17 +149,17 @@ TEST_F(BodyTest, AssignStringView) {
 
 TEST_F(BodyTest, AssignCString) {
     const char *c_str = "Test C-String";
-    body = c_str;
+    body              = c_str;
     EXPECT_EQ(c_str, body.as<std::string>());
 }
 
 TEST_F(BodyTest, AssignVectorChar) {
     std::vector<char> vec = {'t', 'e', 's', 't'};
-    body = vec;
+    body                  = vec;
     EXPECT_EQ("test", body.as<std::string>());
 
     std::vector<char> vec_move = {'m', 'o', 'v', 'e'};
-    body = std::move(vec_move);
+    body                       = std::move(vec_move);
     EXPECT_EQ("move", body.as<std::string>());
     EXPECT_TRUE(vec_move.empty()); // Vector is cleared after move
 }
@@ -182,16 +185,16 @@ TEST_F(BodyTest, RawAccess) {
 
 TEST_F(BodyTest, Iterators) {
     std::string data = "Iterator Test";
-    body = data;
+    body             = data;
     std::string iterated_data;
-    for (char c: body) {
+    for (char c : body) {
         iterated_data += c;
     }
     EXPECT_EQ(data, iterated_data);
 
-    const Body const_body = data;
+    const Body  const_body = data;
     std::string const_iterated_data;
-    for (char c: const_body) {
+    for (char c : const_body) {
         const_iterated_data += c;
     }
     EXPECT_EQ(data, const_iterated_data);
@@ -199,20 +202,20 @@ TEST_F(BodyTest, Iterators) {
 
 TEST_F(BodyTest, JsonAssignmentAndConversion) {
     qb::json j_val = {{"key", "value"}, {"number", 123}};
-    body = j_val;
+    body           = j_val;
 
     qb::json j_parsed = body.as<qb::json>();
     EXPECT_EQ(j_val.dump(), j_parsed.dump());
 
     qb::json j_val_move = {{"moved", true}};
-    body = std::move(j_val_move);
-    j_parsed = body.as<qb::json>();
+    body                = std::move(j_val_move);
+    j_parsed            = body.as<qb::json>();
     EXPECT_EQ(qb::json({{"moved", true}}).dump(), j_parsed.dump());
 }
 
 TEST_F(BodyTest, FormAssignmentAndConversion) {
     Form original_form = create_simple_form();
-    body = original_form;
+    body               = original_form;
 
     // Check serialization (this is a basic check, assumes url_encode works)
     std::string encoded_form = body.as<std::string>();
@@ -221,7 +224,6 @@ TEST_F(BodyTest, FormAssignmentAndConversion) {
     EXPECT_NE(encoded_form.find("param=value1"), std::string::npos);
     EXPECT_NE(encoded_form.find("param=value2"), std::string::npos);
 
-
     Form parsed_form = body.as<Form>();
     EXPECT_EQ(original_form.fields().size(), parsed_form.fields().size());
     EXPECT_EQ("test_user", parsed_form.get_first("name").value_or(""));
@@ -229,7 +231,6 @@ TEST_F(BodyTest, FormAssignmentAndConversion) {
     auto params = parsed_form.get("param");
     ASSERT_EQ(2, params.size());
     EXPECT_TRUE((params[0] == "value1" && params[1] == "value2") || (params[0] == "value2" && params[1] == "value1"));
-
 
     Form form_to_move = create_simple_form();
     form_to_move.add("extra", "move_val");
@@ -245,7 +246,7 @@ TEST_F(BodyTest, FormAssignmentAndConversion) {
 
 TEST_F(BodyTest, MultipartAssignmentAndConversion) {
     Multipart original_mp = create_simple_multipart();
-    body = original_mp;
+    body                  = original_mp;
 
     // Basic check: The body should contain the boundary.
     std::string body_str = body.as<std::string>();
@@ -264,16 +265,14 @@ TEST_F(BodyTest, MultipartAssignmentAndConversion) {
 }
 
 TEST_F(BodyTest, MultipartConversionPreservesPartDataAcrossMultipleParserCallbacks) {
-    const std::string boundary = "Boundary123";
-    const std::string tricky_payload =
-        "alpha\r\n--Boundary123Xbeta\r\n--Boundary123Ygamma";
+    const std::string boundary       = "Boundary123";
+    const std::string tricky_payload = "alpha\r\n--Boundary123Xbeta\r\n--Boundary123Ygamma";
 
-    body =
-        "--" + boundary + "\r\n"
-        "Content-Disposition: form-data; name=\"file\"\r\n"
-        "\r\n" +
-        tricky_payload +
-        "\r\n--" + boundary + "--";
+    body = "--" + boundary
+           + "\r\n"
+             "Content-Disposition: form-data; name=\"file\"\r\n"
+             "\r\n"
+           + tricky_payload + "\r\n--" + boundary + "--";
 
     Multipart parsed_mp = body.as<Multipart>();
     ASSERT_EQ(parsed_mp.parts().size(), 1u);
@@ -283,19 +282,19 @@ TEST_F(BodyTest, MultipartConversionPreservesPartDataAcrossMultipleParserCallbac
 #ifdef QB_HAS_COMPRESSION
 TEST_F(BodyTest, CompressionAndDecompression) {
     std::string original_data = "This is some data to compress. Repeat: This is some data to compress.";
-    body = original_data;
+    body                      = original_data;
 
     // Test GZIP
     std::size_t compressed_size_gzip = body.compress("gzip");
     EXPECT_GT(original_data.size(), compressed_size_gzip); // Expect compression
-    EXPECT_NE(original_data, body.as<std::string>()); // Body is now compressed
+    EXPECT_NE(original_data, body.as<std::string>());      // Body is now compressed
 
     std::size_t decompressed_size_gzip = body.uncompress("gzip");
     EXPECT_EQ(original_data.size(), decompressed_size_gzip);
     EXPECT_EQ(original_data, body.as<std::string>()); // Body is back to original
 
     // Test Deflate
-    body = original_data; // Reset body
+    body                                = original_data; // Reset body
     std::size_t compressed_size_deflate = body.compress("deflate");
     EXPECT_GT(original_data.size(), compressed_size_deflate);
     EXPECT_NE(original_data, body.as<std::string>());
@@ -341,7 +340,7 @@ TEST_F(BodyTest, CompressionAndDecompression) {
 
 TEST_F(BodyTest, MultipleCompressionsDecompressions) {
     std::string original_data = "Data for multiple compressions.";
-    body = original_data;
+    body                      = original_data;
 
     body.compress("gzip");
     // Trying to compress again without decompressing might lead to issues
@@ -360,43 +359,43 @@ TEST_F(BodyTest, MultipleCompressionsDecompressions) {
 
 TEST_F(BodyTest, FormParsingEdgeCases) {
     // Empty key
-    body = "=value";
+    body       = "=value";
     Form form1 = body.as<Form>();
     EXPECT_TRUE(form1.empty()); // Empty keys are typically ignored or treated as error
 
     // Empty value
-    body = "key=";
+    body       = "key=";
     Form form2 = body.as<Form>();
     EXPECT_FALSE(form2.empty());
     ASSERT_TRUE(form2.get_first("key").has_value());
     EXPECT_EQ("", form2.get_first("key").value());
 
     // Key only, no '='
-    body = "keyonly";
+    body       = "keyonly";
     Form form3 = body.as<Form>();
     EXPECT_FALSE(form3.empty());
     ASSERT_TRUE(form3.get_first("keyonly").has_value());
     EXPECT_EQ("", form3.get_first("keyonly").value());
 
     // Multiple empty values and keys
-    body = "key1=value1&=nokey&key2=";
+    body       = "key1=value1&=nokey&key2=";
     Form form4 = body.as<Form>();
     EXPECT_EQ(2, form4.fields().size()); // =nokey should be ignored
     EXPECT_EQ("value1", form4.get_first("key1").value_or("WRONG"));
     EXPECT_EQ("", form4.get_first("key2").value_or("WRONG"));
 
     // Empty body
-    body = "";
+    body       = "";
     Form form5 = body.as<Form>();
     EXPECT_TRUE(form5.empty());
 
     // Just an ampersand
-    body = "&";
+    body       = "&";
     Form form6 = body.as<Form>();
     EXPECT_TRUE(form6.empty());
 
     // Leading and trailing ampersands
-    body = "&key1=value1&key2=value2&";
+    body       = "&key1=value1&key2=value2&";
     Form form7 = body.as<Form>();
     EXPECT_EQ(2, form7.fields().size());
     EXPECT_EQ("value1", form7.get_first("key1").value_or("WRONG"));
@@ -413,7 +412,7 @@ TEST_F(BodyTest, FormParsingEdgeCases) {
 TEST_F(BodyTest, MultipartDetailedComparisonAndBoundaryInBody) {
     Multipart original_mp = create_simple_multipart();
     // Manually construct the body string with the boundary
-    std::string boundary_str = original_mp.boundary();
+    std::string boundary_str     = original_mp.boundary();
     std::string raw_body_content = "--" + boundary_str + "\r\n";
     raw_body_content += "Content-Disposition: form-data; name=\"text_field\"\r\n";
     raw_body_content += "\r\n";
@@ -433,10 +432,10 @@ TEST_F(BodyTest, MultipartDetailedComparisonAndBoundaryInBody) {
 
     for (size_t i = 0; i < original_mp.parts().size(); ++i) {
         const auto &original_part = original_mp.parts()[i];
-        const auto &parsed_part = parsed_mp.parts()[i];
+        const auto &parsed_part   = parsed_mp.parts()[i];
         EXPECT_EQ(original_part.body, parsed_part.body);
         ASSERT_EQ(original_part.headers().size(), parsed_part.headers().size());
-        for (const auto &header_pair: original_part.headers()) {
+        for (const auto &header_pair : original_part.headers()) {
             EXPECT_TRUE(parsed_part.has_header(header_pair.first));
             EXPECT_EQ(original_part.header(header_pair.first), parsed_part.header(header_pair.first));
         }
@@ -445,13 +444,13 @@ TEST_F(BodyTest, MultipartDetailedComparisonAndBoundaryInBody) {
 
 TEST_F(BodyTest, JsonErrorConditions) {
     body = "not a valid json";
-    EXPECT_THROW((void)body.as<qb::json>(), qb::json::parse_error);
+    EXPECT_THROW((void) body.as<qb::json>(), qb::json::parse_error);
 
     body = "{\"key\": \"value\","; // Incomplete JSON
-    EXPECT_THROW((void)body.as<qb::json>(), qb::json::parse_error);
+    EXPECT_THROW((void) body.as<qb::json>(), qb::json::parse_error);
 
     body = ""; // Empty body
-    EXPECT_THROW((void)body.as<qb::json>(), qb::json::parse_error);
+    EXPECT_THROW((void) body.as<qb::json>(), qb::json::parse_error);
 }
 
 TEST_F(BodyTest, SelfAssignment) {
@@ -459,9 +458,9 @@ TEST_F(BodyTest, SelfAssignment) {
     body = body; // Test self-assignment (copy)
     EXPECT_EQ("initial data", body.as<std::string>());
 
-    Body body2 = "other data";
+    Body  body2    = "other data";
     Body &body_ref = body2;
-    body2 = body_ref; // Test self-assignment (copy) via reference
+    body2          = body_ref; // Test self-assignment (copy) via reference
     EXPECT_EQ("other data", body2.as<std::string>());
 
     // Test self-move assignment
@@ -472,7 +471,7 @@ TEST_F(BodyTest, SelfAssignment) {
     // A common outcome is that the object is left in a valid but unspecified state.
     // It's generally not a useful test unless specific guarantees are made.
 
-    // No specific test for self-move for now as default implementation should handle it, 
+    // No specific test for self-move for now as default implementation should handle it,
     // and direct self-move is often undefined behavior or leads to an unspecified state.
     // The existing move assignment test `body = std::move(s_val_move);` already tests the move mechanics.
 }
@@ -494,14 +493,14 @@ TEST_F(BodyTest, ExplicitBodyConstructorsAndAssignments) {
     // Copy assignment
     Body b4 = "initial data for b4";
     Body b5 = "will be overwritten";
-    b5 = b4;
+    b5      = b4;
     EXPECT_EQ("initial data for b4", b4.as<std::string>());
     EXPECT_EQ("initial data for b4", b5.as<std::string>());
     EXPECT_NE(b4.raw().begin(), b5.raw().begin());
 
     // Move assignment
     Body b6 = "will be moved";
-    b5 = std::move(b6);
+    b5      = std::move(b6);
     EXPECT_EQ("will be moved", b5.as<std::string>());
     EXPECT_TRUE(b6.empty() || b6.raw().begin() == nullptr);
 
@@ -541,7 +540,7 @@ TEST_F(BodyTest, FormEncodingDecodingComplexValues) {
     form.add("equals=key", "equals=value");
     form.add("unicode✓key", "unicode✓value"); // Requires UTF-8 aware URI encoding
 
-    body = form;
+    body                     = form;
     std::string encoded_body = body.as<std::string>();
 
     // Basic checks for encoding (exact encoding depends on qb::io::uri::encode)
@@ -569,12 +568,12 @@ TEST_F(BodyTest, FormEncodingDecodingComplexValues) {
 #ifdef QB_HAS_COMPRESSION
 TEST_F(BodyTest, CompressionWithChunkedEncoding) {
     std::string original_data = "Test data for chunked encoding considerations.";
-    body = original_data;
+    body                      = original_data;
 
     // get_compressor_from_header should ignore "chunked"
     EXPECT_NO_THROW(body.compress("gzip, chunked"));
     EXPECT_NE(original_data, body.as<std::string>()); // Should be gzipped
-    body.uncompress("gzip"); // Decompress with just gzip
+    body.uncompress("gzip");                          // Decompress with just gzip
     EXPECT_EQ(original_data, body.as<std::string>());
 
     body = original_data;
@@ -614,7 +613,8 @@ TEST_F(BodyTest, DecompressionMultipleEncodingsError) {
 }
 #endif // QB_HAS_COMPRESSION
 
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

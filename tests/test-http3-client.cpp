@@ -29,58 +29,63 @@ namespace {
 class CustomHttp3Session;
 using CustomHttp3Server = qb::http3::Server<CustomHttp3Session>;
 
-class CustomHttp3Session
-    : public qb::http3::use<CustomHttp3Session>::session<CustomHttp3Server> {
+class CustomHttp3Session : public qb::http3::use<CustomHttp3Session>::session<CustomHttp3Server> {
 public:
     using Base = qb::http3::use<CustomHttp3Session>::session<CustomHttp3Server>;
 
-    explicit CustomHttp3Session(CustomHttp3Server& server)
+    explicit CustomHttp3Session(CustomHttp3Server &server)
         : Base(server) {}
 };
 
 class ReuseHttp3Server;
 
-class ReuseHttp3Session
-    : public qb::http3::use<ReuseHttp3Session>::session<ReuseHttp3Server> {
+class ReuseHttp3Session : public qb::http3::use<ReuseHttp3Session>::session<ReuseHttp3Server> {
 public:
     using Base = qb::http3::use<ReuseHttp3Session>::session<ReuseHttp3Server>;
 
-    explicit ReuseHttp3Session(ReuseHttp3Server& server)
+    explicit ReuseHttp3Session(ReuseHttp3Server &server)
         : Base(server) {}
 };
 
-class ReuseHttp3Server
-    : public qb::http3::use<ReuseHttp3Server>::server<ReuseHttp3Session> {
+class ReuseHttp3Server : public qb::http3::use<ReuseHttp3Server>::server<ReuseHttp3Session> {
 public:
     std::atomic<int> connected_events{0};
 
-    void on(qb::io::async::quic::event::connected const&) {
+    void
+    on(qb::io::async::quic::event::connected const &) {
         ++connected_events;
     }
 };
 
-std::filesystem::path ssl_resource_path(char const *file_name) {
-    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
-           "qb" / "source" / "io" / "tests" / "system" / "resources" / "ssl" / file_name;
+std::filesystem::path
+ssl_resource_path(char const *file_name) {
+    return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "qb" / "source" / "io" / "tests" / "system"
+           / "resources" / "ssl" / file_name;
 }
 
-std::filesystem::path cert_path() { return ssl_resource_path("cert.pem"); }
-std::filesystem::path key_path() { return ssl_resource_path("key.pem"); }
+std::filesystem::path
+cert_path() {
+    return ssl_resource_path("cert.pem");
+}
+std::filesystem::path
+key_path() {
+    return ssl_resource_path("key.pem");
+}
 
-bool certs_available() {
+bool
+certs_available() {
     std::ifstream cert(cert_path());
     std::ifstream key(key_path());
     return cert.good() && key.good();
 }
 
-std::filesystem::path homebrew_curl_path() {
+std::filesystem::path
+homebrew_curl_path() {
     if (auto const *configured = std::getenv("QB_HTTP3_CURL"); configured && *configured) {
         return configured;
     }
-    for (auto const& candidate : {
-             std::filesystem::path{"/opt/homebrew/opt/curl/bin/curl"},
-             std::filesystem::path{"/usr/local/opt/curl/bin/curl"}
-         }) {
+    for (auto const &candidate :
+         {std::filesystem::path{"/opt/homebrew/opt/curl/bin/curl"}, std::filesystem::path{"/usr/local/opt/curl/bin/curl"}}) {
         if (std::filesystem::exists(candidate)) {
             return candidate;
         }
@@ -88,21 +93,24 @@ std::filesystem::path homebrew_curl_path() {
     return {};
 }
 
-std::filesystem::path configured_tool_path(char const *env_name) {
+std::filesystem::path
+configured_tool_path(char const *env_name) {
     if (auto const *configured = std::getenv(env_name); configured && *configured) {
         return configured;
     }
     return {};
 }
 
-std::string configured_env_value(char const *env_name) {
+std::string
+configured_env_value(char const *env_name) {
     if (auto const *configured = std::getenv(env_name); configured && *configured) {
         return configured;
     }
     return {};
 }
 
-std::string read_file(std::filesystem::path const& path) {
+std::string
+read_file(std::filesystem::path const &path) {
     std::ifstream in(path);
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
@@ -129,37 +137,33 @@ TEST(Http3ProtocolValidationTest, RejectsPseudoHeadersAfterRegularHeaders) {
 }
 
 TEST(Http3ProtocolValidationTest, RequiresNonEmptyAuthorityAndPathForRequests) {
-    std::optional<std::string> method = "GET";
-    std::optional<std::string> scheme = "https";
+    std::optional<std::string> method    = "GET";
+    std::optional<std::string> scheme    = "https";
     std::optional<std::string> authority = "example.test";
-    std::optional<std::string> path = "/";
+    std::optional<std::string> path      = "/";
 
-    EXPECT_TRUE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
-        method, scheme, authority, path));
+    EXPECT_TRUE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
 
     authority = "";
-    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
-        method, scheme, authority, path));
+    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
 
     authority = std::nullopt;
-    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
-        method, scheme, authority, path));
+    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
 
     authority = "example.test";
-    path = "";
-    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(
-        method, scheme, authority, path));
+    path      = "";
+    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
 }
 
 struct CommandResult {
-    int exit_code = -1;
+    int  exit_code = -1;
     bool timed_out = false;
 };
 
-[[maybe_unused]] CommandResult run_command_with_timeout(std::string const& command,
-                                                        std::chrono::milliseconds timeout) {
+[[maybe_unused]] CommandResult
+run_command_with_timeout(std::string const &command, std::chrono::milliseconds timeout) {
 #ifdef _WIN32
-    (void)timeout;
+    (void) timeout;
     return {std::system(command.c_str()), false};
 #else
     const auto pid = fork();
@@ -172,7 +176,7 @@ struct CommandResult {
     }
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    int status = 0;
+    int        status   = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         const auto result = waitpid(pid, &status, WNOHANG);
         if (result == pid) {
@@ -195,13 +199,13 @@ struct CommandResult {
     if (waitpid(pid, &status, WNOHANG) == 0) {
         kill(pid, SIGKILL);
     }
-    (void)waitpid(pid, &status, 0);
+    (void) waitpid(pid, &status, 0);
     return {-1, true};
 #endif
 }
 
-CommandResult run_command_while_pumping(std::string const& command,
-                                        std::chrono::milliseconds timeout) {
+CommandResult
+run_command_while_pumping(std::string const &command, std::chrono::milliseconds timeout) {
 #ifdef _WIN32
     return run_command_with_timeout(command, timeout);
 #else
@@ -215,7 +219,7 @@ CommandResult run_command_while_pumping(std::string const& command,
     }
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    int status = 0;
+    int        status   = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         const auto result = waitpid(pid, &status, WNOHANG);
         if (result == pid) {
@@ -240,12 +244,13 @@ CommandResult run_command_while_pumping(std::string const& command,
     if (waitpid(pid, &status, WNOHANG) == 0) {
         kill(pid, SIGKILL);
     }
-    (void)waitpid(pid, &status, 0);
+    (void) waitpid(pid, &status, 0);
     return {-1, true};
 #endif
 }
 
-void pump_until(std::function<bool()> done, std::chrono::milliseconds timeout) {
+void
+pump_until(std::function<bool()> done, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (!done() && std::chrono::steady_clock::now() < deadline) {
         if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
@@ -263,7 +268,7 @@ TEST(Http3ClientIntegrationTest, SimpleGetRequest) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/ping", [&server_requests](auto ctx) {
         ++server_requests;
@@ -279,12 +284,12 @@ TEST(Http3ClientIntegrationTest, SimpleGetRequest) {
     auto client = qb::http3::make_client("https://127.0.0.1:31943");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("https://127.0.0.1:31943/ping")};
+    qb::http::Request  request{qb::io::uri("https://127.0.0.1:31943/ping")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -309,17 +314,13 @@ TEST(Http3DualStackIntegrationTest, SameRouteServesHttp2AndHttp3OnSeparateSocket
     auto server = qb::http::make_dual_stack_server();
     server->router().get("/shared", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().set_header("x-version",
-                                   ctx->request().major_version == 3 ? "h3" : "h2");
-        ctx->response().body() =
-            ctx->request().major_version == 3 ? "shared-over-h3" : "shared-over-h2";
+        ctx->response().set_header("x-version", ctx->request().major_version == 3 ? "h3" : "h2");
+        ctx->response().body() = ctx->request().major_version == 3 ? "shared-over-h3" : "shared-over-h2";
         ctx->complete();
     });
     server->router().compile();
 
-    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31987"),
-                               qb::io::uri("https://127.0.0.1:31988"),
-                               cert_path(), key_path()));
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31987"), qb::io::uri("https://127.0.0.1:31988"), cert_path(), key_path()));
 
     auto http2_client = qb::http2::make_client("https://127.0.0.1:31987");
     http2_client->set_connect_timeout(5s);
@@ -327,22 +328,22 @@ TEST(Http3DualStackIntegrationTest, SameRouteServesHttp2AndHttp3OnSeparateSocket
     auto http3_client = qb::http3::make_client("https://127.0.0.1:31988");
     http3_client->set_verify_peer(false);
 
-    std::atomic<bool> h2_done{false};
-    std::atomic<bool> h3_done{false};
+    std::atomic<bool>  h2_done{false};
+    std::atomic<bool>  h3_done{false};
     qb::http::Response h2_response;
     qb::http::Response h3_response;
 
     qb::http::Request h2_request{qb::io::uri("/shared")};
     ASSERT_TRUE(http2_client->push_request(std::move(h2_request), [&](qb::http::Response res) {
         h2_response = std::move(res);
-        h2_done = true;
+        h2_done     = true;
     }));
     ASSERT_TRUE(http2_client->connect(nullptr));
 
     qb::http::Request h3_request{qb::io::uri("/shared")};
     ASSERT_TRUE(http3_client->push_request(std::move(h3_request), [&](qb::http::Response res) {
         h3_response = std::move(res);
-        h3_done = true;
+        h3_done     = true;
     }));
 
     pump_until([&] { return h2_done.load() && h3_done.load(); }, std::chrono::seconds(5));
@@ -372,14 +373,12 @@ TEST(Http3DualStackIntegrationTest, ClosingHttp3SideKeepsHttp2SideServing) {
     auto server = qb::http::make_dual_stack_server();
     server->router().get("/h2-only-after-h3-close", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "h2-still-alive";
+        ctx->response().body()   = "h2-still-alive";
         ctx->complete();
     });
     server->router().compile();
 
-    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31989"),
-                               qb::io::uri("https://127.0.0.1:31990"),
-                               cert_path(), key_path()));
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31989"), qb::io::uri("https://127.0.0.1:31990"), cert_path(), key_path()));
 
     server->close_http3();
 
@@ -387,14 +386,12 @@ TEST(Http3DualStackIntegrationTest, ClosingHttp3SideKeepsHttp2SideServing) {
     http2_client->set_connect_timeout(5s);
     http2_client->set_verify_peer(false); // self-signed test cert
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    ASSERT_TRUE(http2_client->push_request(
-        qb::http::Request{qb::io::uri("/h2-only-after-h3-close")},
-        [&](qb::http::Response res) {
-            response = std::move(res);
-            done = true;
-        }));
+    ASSERT_TRUE(http2_client->push_request(qb::http::Request{qb::io::uri("/h2-only-after-h3-close")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        done     = true;
+    }));
     ASSERT_TRUE(http2_client->connect(nullptr));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -418,22 +415,19 @@ TEST(Http3DualStackIntegrationTest, ClosingHttp2SideKeepsHttp3SideServing) {
     auto server = qb::http::make_dual_stack_server();
     server->router().get("/h3-only-after-h2-close", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "h3-still-alive";
+        ctx->response().body()   = "h3-still-alive";
         ctx->complete();
     });
     server->router().compile();
 
-    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31991"),
-                               qb::io::uri("https://127.0.0.1:31992"),
-                               cert_path(), key_path()));
+    ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31991"), qb::io::uri("https://127.0.0.1:31992"), cert_path(), key_path()));
 
     server->close_http2();
 
     auto http3_client = qb::http3::make_client("https://127.0.0.1:31992");
     http3_client->set_verify_peer(false);
 
-    auto response = qb::http::run_sync(
-        http3_client->push_request(qb::http::Request{qb::io::uri("/h3-only-after-h2-close")}));
+    auto response = qb::http::run_sync(http3_client->push_request(qb::http::Request{qb::io::uri("/h3-only-after-h2-close")}));
 
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().as<std::string>(), "h3-still-alive");
@@ -453,7 +447,7 @@ TEST(Http3ClientIntegrationTest, BatchRequestsPreserveOrder) {
     auto server = qb::http3::make_server();
     server->router().get("/item/:id", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = ctx->path_param("id");
+        ctx->response().body()   = ctx->path_param("id");
         ctx->complete();
     });
     server->router().compile();
@@ -468,11 +462,11 @@ TEST(Http3ClientIntegrationTest, BatchRequestsPreserveOrder) {
         requests.emplace_back(qb::io::uri("https://127.0.0.1:31944/item/" + std::to_string(i)));
     }
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>               done{false};
     std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
-        done = true;
+        done      = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -515,11 +509,11 @@ TEST(Http3ClientIntegrationTest, BatchKeepsEmptySuccessWhenAnotherRequestTimesOu
     requests.emplace_back(qb::io::uri("/empty"));
     requests.emplace_back(qb::io::uri("/stall"));
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>               done{false};
     std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
-        done = true;
+        done      = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -549,7 +543,7 @@ TEST(Http3ClientIntegrationTest, RelativeUriUsesClientBaseUri) {
     auto server = qb::http3::make_server();
     server->router().get("/relative", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "relative-ok";
+        ctx->response().body()   = "relative-ok";
         ctx->complete();
     });
     server->router().compile();
@@ -559,12 +553,12 @@ TEST(Http3ClientIntegrationTest, RelativeUriUsesClientBaseUri) {
     auto client = qb::http3::make_client("https://127.0.0.1:31950");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("/relative")};
+    qb::http::Request  request{qb::io::uri("/relative")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -583,14 +577,12 @@ TEST(Http3ClientIntegrationTest, RejectsPlainHttpAbsoluteRequestWithoutConnectin
     auto client = qb::http3::make_client("https://127.0.0.1:32997");
     client->set_connect_timeout(10ms);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    ASSERT_TRUE(client->push_request(
-        qb::http::Request{qb::io::uri("http://127.0.0.1:32997/plain")},
-        [&](qb::http::Response res) {
-            response = std::move(res);
-            done = true;
-        }));
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("http://127.0.0.1:32997/plain")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        done     = true;
+    }));
 
     EXPECT_TRUE(done.load());
     EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
@@ -609,19 +601,16 @@ TEST(Http3ClientIntegrationTest, RejectsCrossOriginAbsoluteRequestWithoutConnect
 
     auto client = qb::http3::make_client("https://127.0.0.1:443");
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    ASSERT_TRUE(client->push_request(
-        qb::http::Request{qb::io::uri("https://localhost:443/cross-origin")},
-        [&](qb::http::Response res) {
-            response = std::move(res);
-            done = true;
-        }));
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("https://localhost:443/cross-origin")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        done     = true;
+    }));
 
     EXPECT_TRUE(done.load());
     EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
-    EXPECT_EQ(response.body().as<std::string>(),
-              "HTTP/3 persistent client only accepts same-origin requests");
+    EXPECT_EQ(response.body().as<std::string>(), "HTTP/3 persistent client only accepts same-origin requests");
     EXPECT_FALSE(client->is_connecting());
     EXPECT_FALSE(client->is_connected());
 }
@@ -636,7 +625,7 @@ TEST(Http3ClientIntegrationTest, BatchRejectsInvalidSchemesAndPreservesOrder) {
     auto server = qb::http3::make_server();
     server->router().get("/valid", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "valid-h3";
+        ctx->response().body()   = "valid-h3";
         ctx->complete();
     });
     server->router().compile();
@@ -652,11 +641,11 @@ TEST(Http3ClientIntegrationTest, BatchRejectsInvalidSchemesAndPreservesOrder) {
     requests.emplace_back(qb::io::uri("https://localhost:31979/cross-origin"));
     requests.emplace_back(qb::io::uri("ws://127.0.0.1:31979/ws"));
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>               done{false};
     std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
-        done = true;
+        done      = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -668,8 +657,7 @@ TEST(Http3ClientIntegrationTest, BatchRejectsInvalidSchemesAndPreservesOrder) {
     EXPECT_EQ(responses[1].status(), qb::http::status::OK);
     EXPECT_EQ(responses[1].body().as<std::string>(), "valid-h3");
     EXPECT_EQ(responses[2].status(), qb::http::status::BAD_REQUEST);
-    EXPECT_EQ(responses[2].body().as<std::string>(),
-              "HTTP/3 persistent client only accepts same-origin requests");
+    EXPECT_EQ(responses[2].body().as<std::string>(), "HTTP/3 persistent client only accepts same-origin requests");
     EXPECT_EQ(responses[3].status(), qb::http::status::BAD_REQUEST);
     EXPECT_EQ(responses[3].body().as<std::string>(), "HTTP/3 request URI must use https");
 
@@ -706,11 +694,11 @@ TEST(Http3ClientIntegrationTest, PostRequestWithBody) {
     qb::http::Request request{qb::http::method::POST, qb::io::uri("https://127.0.0.1:31945/echo")};
     request.body() = "payload-h3";
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -746,7 +734,7 @@ TEST(Http3ClientIntegrationTest, HeadResponseKeepsHeadersButNoBody) {
     client->set_verify_peer(false);
 
     qb::http::Request request{qb::http::method::HEAD, qb::io::uri("/metadata")};
-    auto response = qb::http::run_sync(client->push_request(std::move(request)));
+    auto              response = qb::http::run_sync(client->push_request(std::move(request)));
 
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.header("x-head"), "yes");
@@ -838,7 +826,7 @@ TEST(Http3ClientIntegrationTest, LargePostBody) {
     auto server = qb::http3::make_server();
     server->router().post("/large", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = std::to_string(ctx->request().body().size());
+        ctx->response().body()   = std::to_string(ctx->request().body().size());
         ctx->complete();
     });
     server->router().compile();
@@ -848,15 +836,15 @@ TEST(Http3ClientIntegrationTest, LargePostBody) {
     auto client = qb::http3::make_client("https://127.0.0.1:31948");
     client->set_verify_peer(false);
 
-    std::string payload(128 * 1024, 'x');
+    std::string       payload(128 * 1024, 'x');
     qb::http::Request request{qb::http::method::POST, qb::io::uri("https://127.0.0.1:31948/large")};
     request.body() = payload;
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -877,10 +865,10 @@ TEST(Http3ClientIntegrationTest, LargeResponseBody) {
     qb::io::async::init();
 
     std::string payload(160 * 1024, 'r');
-    auto server = qb::http3::make_server();
+    auto        server = qb::http3::make_server();
     server->router().get("/large-response", [&payload](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = payload;
+        ctx->response().body()   = payload;
         ctx->complete();
     });
     server->router().compile();
@@ -890,12 +878,12 @@ TEST(Http3ClientIntegrationTest, LargeResponseBody) {
     auto client = qb::http3::make_client("https://127.0.0.1:31951");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("https://127.0.0.1:31951/large-response")};
+    qb::http::Request  request{qb::io::uri("https://127.0.0.1:31951/large-response")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -928,12 +916,12 @@ TEST(Http3ClientIntegrationTest, RouterNotFoundReturns404) {
     auto client = qb::http3::make_client("https://127.0.0.1:31946");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("https://127.0.0.1:31946/missing")};
+    qb::http::Request  request{qb::io::uri("https://127.0.0.1:31946/missing")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -966,12 +954,12 @@ TEST(Http3ClientIntegrationTest, ServerErrorResponseIsDelivered) {
     auto client = qb::http3::make_client("https://127.0.0.1:31955");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("/error")};
+    qb::http::Request  request{qb::io::uri("/error")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1004,12 +992,12 @@ TEST(Http3ClientIntegrationTest, RequestTimeoutReturnsTimeoutResponse) {
     client->set_verify_peer(false);
     client->set_request_timeout(30ms);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("https://127.0.0.1:31947/stall")};
+    qb::http::Request  request{qb::io::uri("https://127.0.0.1:31947/stall")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1041,12 +1029,12 @@ TEST(Http3ClientIntegrationTest, ManualDisconnectFailsActiveRequestImmediately) 
     client->set_verify_peer(false);
     client->set_request_timeout(10s);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("/stall")};
+    qb::http::Request  request{qb::io::uri("/stall")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return client->get_active_request_count() == 1u; }, std::chrono::seconds(5));
@@ -1090,11 +1078,11 @@ TEST(Http3ClientIntegrationTest, ManualDisconnectFailsBatchOncePerRequest) {
     requests.emplace_back(qb::io::uri("/stall/0"));
     requests.emplace_back(qb::io::uri("/stall/1"));
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>               done{false};
     std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
-        done = true;
+        done      = true;
     }));
 
     pump_until([&] { return client->get_active_request_count() == 2u; }, std::chrono::seconds(5));
@@ -1134,12 +1122,11 @@ TEST(Http3ClientIntegrationTest, RemoteConnectionCloseFailsActiveRequestWithoutG
     client->set_verify_peer(false);
     client->set_request_timeout(10s);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/stall")},
-                                     [&](qb::http::Response res) {
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return client->get_active_request_count() == 1u; }, std::chrono::seconds(5));
@@ -1169,11 +1156,9 @@ TEST(Http3ClientIntegrationTest, MaxConcurrentStreamsQueuesPendingRequests) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto                                                                       server = qb::http3::make_server();
     std::vector<std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>>> held_contexts;
-    server->router().get("/hold/:id", [&held_contexts](auto ctx) {
-        held_contexts.push_back(ctx);
-    });
+    server->router().get("/hold/:id", [&held_contexts](auto ctx) { held_contexts.push_back(ctx); });
     server->router().compile();
 
     ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31964"), cert_path(), key_path()));
@@ -1183,7 +1168,7 @@ TEST(Http3ClientIntegrationTest, MaxConcurrentStreamsQueuesPendingRequests) {
     client->set_max_concurrent_streams(1);
     client->set_request_timeout(10s);
 
-    std::atomic<int> done{0};
+    std::atomic<int>                done{0};
     std::vector<qb::http::Response> responses(2);
     for (int i = 0; i < 2; ++i) {
         qb::http::Request request{qb::io::uri("/hold/" + std::to_string(i))};
@@ -1193,18 +1178,16 @@ TEST(Http3ClientIntegrationTest, MaxConcurrentStreamsQueuesPendingRequests) {
         }));
     }
 
-    pump_until([&] { return held_contexts.size() == 1u && client->get_active_request_count() == 1u; },
-               std::chrono::seconds(5));
+    pump_until([&] { return held_contexts.size() == 1u && client->get_active_request_count() == 1u; }, std::chrono::seconds(5));
     ASSERT_EQ(held_contexts.size(), 1u);
     EXPECT_EQ(client->get_active_request_count(), 1u);
     EXPECT_EQ(done.load(), 0);
 
     held_contexts.front()->response().status() = qb::http::status::OK;
-    held_contexts.front()->response().body() = "first";
+    held_contexts.front()->response().body()   = "first";
     held_contexts.front()->complete();
 
-    pump_until([&] { return done.load() == 1 && held_contexts.size() == 2u; },
-               std::chrono::seconds(5));
+    pump_until([&] { return done.load() == 1 && held_contexts.size() == 2u; }, std::chrono::seconds(5));
     ASSERT_EQ(done.load(), 1);
     ASSERT_EQ(held_contexts.size(), 2u);
     EXPECT_EQ(responses[0].status(), qb::http::status::OK);
@@ -1212,7 +1195,7 @@ TEST(Http3ClientIntegrationTest, MaxConcurrentStreamsQueuesPendingRequests) {
     EXPECT_EQ(client->get_active_request_count(), 1u);
 
     held_contexts.back()->response().status() = qb::http::status::OK;
-    held_contexts.back()->response().body() = "second";
+    held_contexts.back()->response().body()   = "second";
     held_contexts.back()->complete();
 
     pump_until([&] { return done.load() == 2; }, std::chrono::seconds(5));
@@ -1232,11 +1215,9 @@ TEST(Http3ClientIntegrationTest, RequestTimeoutIncludesPendingBehindConcurrencyL
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto                                                                       server = qb::http3::make_server();
     std::vector<std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>>> held_contexts;
-    server->router().get("/hold/:id", [&held_contexts](auto ctx) {
-        held_contexts.push_back(ctx);
-    });
+    server->router().get("/hold/:id", [&held_contexts](auto ctx) { held_contexts.push_back(ctx); });
     server->router().compile();
 
     ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31966"), cert_path(), key_path()));
@@ -1246,7 +1227,7 @@ TEST(Http3ClientIntegrationTest, RequestTimeoutIncludesPendingBehindConcurrencyL
     client->set_max_concurrent_streams(1);
     client->set_request_timeout(30ms);
 
-    std::atomic<int> done{0};
+    std::atomic<int>                done{0};
     std::vector<qb::http::Response> responses(2);
     for (int i = 0; i < 2; ++i) {
         qb::http::Request request{qb::io::uri("/hold/" + std::to_string(i))};
@@ -1282,11 +1263,11 @@ TEST(Http3ClientIntegrationTest, ConnectTimeoutFailsQueuedRequest) {
     client->set_connect_timeout(30ms);
 
     std::atomic<bool> connected_callback{false};
-    bool connected = true;
-    std::string error;
-    ASSERT_TRUE(client->connect([&](bool ok, std::string const& message) {
-        connected = ok;
-        error = message;
+    bool              connected = true;
+    std::string       error;
+    ASSERT_TRUE(client->connect([&](bool ok, std::string const &message) {
+        connected          = ok;
+        error              = message;
         connected_callback = true;
     }));
 
@@ -1305,12 +1286,12 @@ TEST(Http3ClientIntegrationTest, ConnectTimeoutFailsImplicitQueuedRequest) {
     client->set_verify_peer(false);
     client->set_connect_timeout(30ms);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("/never")};
+    qb::http::Request  request{qb::io::uri("/never")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1343,7 +1324,7 @@ TEST(Http3ClientIntegrationTest, AwaiterApiMatchesCallbackApi) {
     client->set_verify_peer(false);
 
     qb::http::Request request{qb::io::uri("/await")};
-    auto response = qb::http::run_sync(client->push_request(std::move(request)));
+    auto              response = qb::http::run_sync(client->push_request(std::move(request)));
 
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.header("x-protocol"), "HTTP/3");
@@ -1374,11 +1355,11 @@ TEST(Http3ClientIntegrationTest, CoAwaitConnectAndPushRequestInsideCoroutine) {
     auto client = qb::http3::make_client("https://127.0.0.1:31980");
     client->set_verify_peer(false);
 
-    bool connected = false;
+    bool               connected = false;
     qb::http::Response captured;
     qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
         auto result = co_await client->connect();
-        connected = result.ok;
+        connected   = result.ok;
         if (!connected) {
             co_return;
         }
@@ -1386,7 +1367,7 @@ TEST(Http3ClientIntegrationTest, CoAwaitConnectAndPushRequestInsideCoroutine) {
         qb::http::Request request{qb::http::method::POST, qb::io::uri("/data")};
         request.set_header("content-type", "text/plain");
         request.body() = "payload-h3-coro";
-        captured = co_await client->push_request(std::move(request));
+        captured       = co_await client->push_request(std::move(request));
         co_return;
     }());
 
@@ -1409,7 +1390,7 @@ TEST(Http3ClientIntegrationTest, ServerCleansClosedConnectionsAndAcceptsNewClien
     auto server = qb::http3::make_server();
     server->router().get("/again", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "again";
+        ctx->response().body()   = "again";
         ctx->complete();
     });
     server->router().compile();
@@ -1420,15 +1401,17 @@ TEST(Http3ClientIntegrationTest, ServerCleansClosedConnectionsAndAcceptsNewClien
         auto client = qb::http3::make_client("https://127.0.0.1:31953");
         client->set_verify_peer(false);
         qb::http::Request request{qb::io::uri("/again")};
-        auto response = qb::http::run_sync(client->push_request(std::move(request)));
+        auto              response = qb::http::run_sync(client->push_request(std::move(request)));
         ASSERT_EQ(response.status(), qb::http::status::OK);
         client->disconnect();
     }
 
-    pump_until([&] {
-        qb::io::async::run(EVRUN_NOWAIT);
-        return server->stats().active_connections == 0u;
-    }, std::chrono::seconds(5));
+    pump_until(
+        [&] {
+            qb::io::async::run(EVRUN_NOWAIT);
+            return server->stats().active_connections == 0u;
+        },
+        std::chrono::seconds(5));
 
     EXPECT_EQ(server->stats().active_connections, 0u);
     EXPECT_TRUE(server->is_open());
@@ -1436,7 +1419,7 @@ TEST(Http3ClientIntegrationTest, ServerCleansClosedConnectionsAndAcceptsNewClien
     auto second = qb::http3::make_client("https://127.0.0.1:31953");
     second->set_verify_peer(false);
     qb::http::Request request{qb::io::uri("/again")};
-    auto response = qb::http::run_sync(second->push_request(std::move(request)));
+    auto              response = qb::http::run_sync(second->push_request(std::move(request)));
 
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().as<std::string>(), "again");
@@ -1466,12 +1449,12 @@ TEST(Http3ClientIntegrationTest, CustomSessionServerUsesSameRouterApi) {
     auto client = qb::http3::make_client("https://127.0.0.1:31949");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("https://127.0.0.1:31949/custom")};
+    qb::http::Request  request{qb::io::uri("https://127.0.0.1:31949/custom")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1505,14 +1488,14 @@ TEST(Http3ClientIntegrationTest, MultipleConnectCallbacksShareOneHandshake) {
     client->set_verify_peer(false);
 
     std::atomic<int> callbacks{0};
-    bool first_ok = false;
-    bool second_ok = false;
+    bool             first_ok  = false;
+    bool             second_ok = false;
 
-    ASSERT_TRUE(client->connect([&](bool ok, std::string const&) {
+    ASSERT_TRUE(client->connect([&](bool ok, std::string const &) {
         first_ok = ok;
         ++callbacks;
     }));
-    ASSERT_TRUE(client->connect([&](bool ok, std::string const&) {
+    ASSERT_TRUE(client->connect([&](bool ok, std::string const &) {
         second_ok = ok;
         ++callbacks;
     }));
@@ -1541,7 +1524,7 @@ TEST(Http3ClientIntegrationTest, SequentialRequestsReuseOneConnection) {
     auto server = std::make_unique<ReuseHttp3Server>();
     server->router().get("/seq/:id", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = ctx->path_param("id");
+        ctx->response().body()   = ctx->path_param("id");
         ctx->complete();
     });
     server->router().compile();
@@ -1552,14 +1535,14 @@ TEST(Http3ClientIntegrationTest, SequentialRequestsReuseOneConnection) {
     client->set_verify_peer(false);
 
     qb::http::Request first{qb::io::uri("/seq/first")};
-    auto first_response = qb::http::run_sync(client->push_request(std::move(first)));
+    auto              first_response = qb::http::run_sync(client->push_request(std::move(first)));
     ASSERT_EQ(first_response.status(), qb::http::status::OK);
     EXPECT_EQ(first_response.body().as<std::string>(), "first");
     ASSERT_EQ(server->connected_events.load(), 1);
     ASSERT_TRUE(client->is_connected());
 
     qb::http::Request second{qb::io::uri("/seq/second")};
-    auto second_response = qb::http::run_sync(client->push_request(std::move(second)));
+    auto              second_response = qb::http::run_sync(client->push_request(std::move(second)));
     EXPECT_EQ(second_response.status(), qb::http::status::OK);
     EXPECT_EQ(second_response.body().as<std::string>(), "second");
     EXPECT_EQ(server->connected_events.load(), 1);
@@ -1579,7 +1562,7 @@ TEST(Http3ClientIntegrationTest, BatchAwaiterPreservesMixedResponses) {
     auto server = qb::http3::make_server();
     server->router().get("/ok/:id", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = ctx->path_param("id");
+        ctx->response().body()   = ctx->path_param("id");
         ctx->complete();
     });
     server->router().get("/empty", [](auto ctx) {
@@ -1588,7 +1571,7 @@ TEST(Http3ClientIntegrationTest, BatchAwaiterPreservesMixedResponses) {
     });
     server->router().get("/error", [](auto ctx) {
         ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-        ctx->response().body() = "boom";
+        ctx->response().body()   = "boom";
         ctx->complete();
     });
     server->router().compile();
@@ -1626,12 +1609,12 @@ TEST(Http3ClientIntegrationTest, MultipleClientsCanUseOneServerConcurrently) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/client/:id", [&server_requests](auto ctx) {
         ++server_requests;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = ctx->path_param("id");
+        ctx->response().body()   = ctx->path_param("id");
         ctx->complete();
     });
     server->router().compile();
@@ -1639,8 +1622,8 @@ TEST(Http3ClientIntegrationTest, MultipleClientsCanUseOneServerConcurrently) {
     ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31958"), cert_path(), key_path()));
 
     std::vector<std::shared_ptr<qb::http3::Client>> clients;
-    std::vector<qb::http::Response> responses(3);
-    std::atomic<int> done{0};
+    std::vector<qb::http::Response>                 responses(3);
+    std::atomic<int>                                done{0};
 
     for (int i = 0; i < 3; ++i) {
         auto client = qb::http3::make_client("https://127.0.0.1:31958");
@@ -1662,7 +1645,7 @@ TEST(Http3ClientIntegrationTest, MultipleClientsCanUseOneServerConcurrently) {
     }
     EXPECT_EQ(server_requests.load(), 3);
 
-    for (auto& client : clients) {
+    for (auto &client : clients) {
         client->disconnect();
     }
     server->close();
@@ -1679,7 +1662,7 @@ TEST(Http3ClientIntegrationTest, ServerRejectsRequestBodyOverLimit) {
     server->set_max_body_size(8);
     server->router().post("/limited", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = std::to_string(ctx->request().body().size());
+        ctx->response().body()   = std::to_string(ctx->request().body().size());
         ctx->complete();
     });
     server->router().compile();
@@ -1692,11 +1675,11 @@ TEST(Http3ClientIntegrationTest, ServerRejectsRequestBodyOverLimit) {
     qb::http::Request request{qb::http::method::POST, qb::io::uri("/limited")};
     request.body() = std::string(64, 'x');
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1710,7 +1693,7 @@ TEST(Http3ClientIntegrationTest, ServerRejectsRequestBodyOverLimit) {
     second->set_verify_peer(false);
     qb::http::Request ok_request{qb::http::method::POST, qb::io::uri("/limited")};
     ok_request.body() = "ok";
-    auto ok_response = qb::http::run_sync(second->push_request(std::move(ok_request)));
+    auto ok_response  = qb::http::run_sync(second->push_request(std::move(ok_request)));
     EXPECT_EQ(ok_response.status(), qb::http::status::OK);
     EXPECT_EQ(ok_response.body().as<std::string>(), "2");
 
@@ -1729,7 +1712,7 @@ TEST(Http3ClientIntegrationTest, ClientRejectsResponseBodyOverLimit) {
     auto server = qb::http3::make_server();
     server->router().get("/too-large", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = std::string(64, 'r');
+        ctx->response().body()   = std::string(64, 'r');
         ctx->complete();
     });
     server->router().compile();
@@ -1740,12 +1723,12 @@ TEST(Http3ClientIntegrationTest, ClientRejectsResponseBodyOverLimit) {
     client->set_verify_peer(false);
     client->set_max_body_size(8);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("/too-large")};
+    qb::http::Request  request{qb::io::uri("/too-large")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1768,7 +1751,7 @@ TEST(Http3ClientIntegrationTest, ServerRejectsRequestContentLengthMismatch) {
     auto server = qb::http3::make_server();
     server->router().post("/length", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "accepted";
+        ctx->response().body()   = "accepted";
         ctx->complete();
     });
     server->router().compile();
@@ -1782,11 +1765,11 @@ TEST(Http3ClientIntegrationTest, ServerRejectsRequestContentLengthMismatch) {
     request.set_header("content-length", "1");
     request.body() = "abc";
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1805,7 +1788,7 @@ TEST(Http3ClientIntegrationTest, ClientRejectsOutgoingRequestContentLengthMismat
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().post("/length", [&server_requests](auto ctx) {
         ++server_requests;
@@ -1839,12 +1822,12 @@ TEST(Http3ClientIntegrationTest, ClientRejectsOutgoingRequestContentLengthWithOW
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().post("/length-ows", [&server_requests](auto ctx) {
         ++server_requests;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = ctx->request().body().template as<std::string>();
+        ctx->response().body()   = ctx->request().body().template as<std::string>();
         ctx->complete();
     });
     server->router().compile();
@@ -1888,12 +1871,12 @@ TEST(Http3ClientIntegrationTest, ClientRejectsResponseContentLengthMismatch) {
     auto client = qb::http3::make_client("https://127.0.0.1:31962");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request request{qb::io::uri("/bad-length")};
+    qb::http::Request  request{qb::io::uri("/bad-length")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return done.load(); }, std::chrono::seconds(5));
@@ -1912,7 +1895,7 @@ TEST(Http3ClientIntegrationTest, ClientRejectsOversizedOutgoingHeader) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/guarded", [&server_requests](auto ctx) {
         ++server_requests;
@@ -1950,7 +1933,7 @@ TEST(Http3ClientIntegrationTest, ClientRejectsInvalidOutgoingHeaderField) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/guarded-invalid", [&server_requests](auto ctx) {
         ++server_requests;
@@ -1985,9 +1968,7 @@ TEST(Http3ClientIntegrationTest, ServerResetsStreamForOversizedOutgoingHeader) {
 
     auto server = qb::http3::make_server();
     server->router().get("/bad-response", [](auto ctx) {
-        ctx->response().set_header(
-            "x-too-large",
-            std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'));
+        ctx->response().set_header("x-too-large", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'));
         ctx->response().body() = "not sent";
         ctx->complete();
     });
@@ -1999,7 +1980,7 @@ TEST(Http3ClientIntegrationTest, ServerResetsStreamForOversizedOutgoingHeader) {
     client->set_verify_peer(false);
 
     qb::http::Request request{qb::io::uri("/bad-response")};
-    auto response = qb::http::run_sync(client->push_request(std::move(request)));
+    auto              response = qb::http::run_sync(client->push_request(std::move(request)));
 
     EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
     EXPECT_TRUE(server->is_open());
@@ -2028,8 +2009,7 @@ TEST(Http3ClientIntegrationTest, ServerRejectsInvalidOutgoingHeaderField) {
     auto client = qb::http3::make_client("https://127.0.0.1:32011");
     client->set_verify_peer(false);
 
-    auto response = qb::http::run_sync(
-        client->push_request(qb::http::Request{qb::io::uri("/bad-response-field")}));
+    auto response = qb::http::run_sync(client->push_request(qb::http::Request{qb::io::uri("/bad-response-field")}));
 
     EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
     EXPECT_TRUE(server->is_open());
@@ -2048,12 +2028,12 @@ TEST(Http3ClientIntegrationTest, GracefulShutdownClosesCurrentConnectionOnly) {
     auto server = qb::http3::make_server();
     server->router().get("/ping", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "pong-before-shutdown";
+        ctx->response().body()   = "pong-before-shutdown";
         ctx->complete();
     });
     server->router().get("/again", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "new-connection-ok";
+        ctx->response().body()   = "new-connection-ok";
         ctx->complete();
     });
     server->router().compile();
@@ -2072,8 +2052,7 @@ TEST(Http3ClientIntegrationTest, GracefulShutdownClosesCurrentConnectionOnly) {
 
     auto second_client = qb::http3::make_client("https://127.0.0.1:31971");
     second_client->set_verify_peer(false);
-    auto second = qb::http::run_sync(
-        second_client->push_request(qb::http::Request{qb::io::uri("/again")}));
+    auto second = qb::http::run_sync(second_client->push_request(qb::http::Request{qb::io::uri("/again")}));
     EXPECT_EQ(second.status(), qb::http::status::OK);
     EXPECT_EQ(second.body().as<std::string>(), "new-connection-ok");
 
@@ -2089,11 +2068,9 @@ TEST(Http3ClientIntegrationTest, GracefulShutdownWaitsForActiveAsyncContext) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto                                                          server = qb::http3::make_server();
     std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
-    server->router().get("/delayed", [&](auto ctx) {
-        held_context = ctx;
-    });
+    server->router().get("/delayed", [&](auto ctx) { held_context = ctx; });
     server->router().compile();
 
     ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31982"), cert_path(), key_path()));
@@ -2101,12 +2078,11 @@ TEST(Http3ClientIntegrationTest, GracefulShutdownWaitsForActiveAsyncContext) {
     auto client = qb::http3::make_client("https://127.0.0.1:31982");
     client->set_verify_peer(false);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/delayed")},
-                                     [&](qb::http::Response res) {
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/delayed")}, [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     }));
 
     pump_until([&] { return held_context != nullptr; }, std::chrono::seconds(5));
@@ -2121,7 +2097,7 @@ TEST(Http3ClientIntegrationTest, GracefulShutdownWaitsForActiveAsyncContext) {
     EXPECT_FALSE(done.load());
 
     held_context->response().status() = qb::http::status::OK;
-    held_context->response().body() = "delayed-ok";
+    held_context->response().body()   = "delayed-ok";
     held_context->complete();
     held_context.reset();
 
@@ -2154,12 +2130,11 @@ TEST(Http3ClientIntegrationTest, CancelActiveRequestResetsStreamAndCompletesCall
     client->set_verify_peer(false);
     client->set_request_timeout(10s);
 
-    std::atomic<bool> done{false};
+    std::atomic<bool>  done{false};
     qb::http::Response response;
-    auto id = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")},
-                                           [&](qb::http::Response res) {
+    auto               id = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response res) {
         response = std::move(res);
-        done = true;
+        done     = true;
     });
     ASSERT_NE(id, 0u);
 
@@ -2182,7 +2157,7 @@ TEST(Http3ClientIntegrationTest, CancelPendingRequestCompletesWithoutOpeningStre
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> fast_requests{0};
     server->router().get("/stall", [](auto) {
         // Keep the first stream active so the second request remains queued.
@@ -2202,18 +2177,14 @@ TEST(Http3ClientIntegrationTest, CancelPendingRequestCompletesWithoutOpeningStre
     client->set_request_timeout(10s);
 
     std::atomic<bool> first_done{false};
-    auto first = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")},
-                                              [&](qb::http::Response) {
-        first_done = true;
-    });
+    auto first = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { first_done = true; });
     ASSERT_NE(first, 0u);
 
-    std::atomic<bool> second_done{false};
+    std::atomic<bool>  second_done{false};
     qb::http::Response second_response;
-    auto second = client->push_request_with_id(qb::http::Request{qb::io::uri("/fast")},
-                                               [&](qb::http::Response response) {
+    auto               second = client->push_request_with_id(qb::http::Request{qb::io::uri("/fast")}, [&](qb::http::Response response) {
         second_response = std::move(response);
-        second_done = true;
+        second_done     = true;
     });
     ASSERT_NE(second, 0u);
 
@@ -2253,8 +2224,7 @@ TEST(Http3ClientIntegrationTest, ResponseTrailersAreDeliveredAsHeaders) {
     auto client = qb::http3::make_client("https://127.0.0.1:31974");
     client->set_verify_peer(false);
 
-    auto response = qb::http::run_sync(
-        client->push_request(qb::http::Request{qb::io::uri("/trailers")}));
+    auto response = qb::http::run_sync(client->push_request(qb::http::Request{qb::io::uri("/trailers")}));
 
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().as<std::string>(), "body-with-trailer");
@@ -2274,7 +2244,7 @@ TEST(Http3ClientIntegrationTest, RequestTrailersAreDeliveredToRouter) {
     auto server = qb::http3::make_server();
     server->router().post("/trailers", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = ctx->request().header("x-client-checksum");
+        ctx->response().body()   = ctx->request().header("x-client-checksum");
         ctx->complete();
     });
     server->router().compile();
@@ -2305,7 +2275,7 @@ TEST(Http3ClientIntegrationTest, ClientRejectsForbiddenOutgoingRequestTrailer) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().post("/forbidden-trailer", [&server_requests](auto ctx) {
         ++server_requests;
@@ -2340,7 +2310,7 @@ TEST(Http3ClientIntegrationTest, ClientRejectsForbiddenOutgoingRequestHeader) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/forbidden-header", [&server_requests](auto ctx) {
         ++server_requests;
@@ -2388,8 +2358,7 @@ TEST(Http3ClientIntegrationTest, ServerRejectsForbiddenOutgoingResponseTrailer) 
     auto client = qb::http3::make_client("https://127.0.0.1:31977");
     client->set_verify_peer(false);
 
-    auto response = qb::http::run_sync(
-        client->push_request(qb::http::Request{qb::io::uri("/forbidden-trailer")}));
+    auto response = qb::http::run_sync(client->push_request(qb::http::Request{qb::io::uri("/forbidden-trailer")}));
 
     EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
     EXPECT_TRUE(server->is_open());
@@ -2419,8 +2388,7 @@ TEST(Http3ClientIntegrationTest, ServerRejectsForbiddenOutgoingResponseHeader) {
     auto client = qb::http3::make_client("https://127.0.0.1:31986");
     client->set_verify_peer(false);
 
-    auto response = qb::http::run_sync(
-        client->push_request(qb::http::Request{qb::io::uri("/forbidden-header")}));
+    auto response = qb::http::run_sync(client->push_request(qb::http::Request{qb::io::uri("/forbidden-header")}));
 
     EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
     EXPECT_TRUE(server->is_open());
@@ -2436,13 +2404,13 @@ TEST(Http3ClientIntegrationTest, LifecycleHooksFollowHttpSessionSemantics) {
 
     qb::io::async::init();
 
-    auto server = qb::http3::make_server();
+    auto             server = qb::http3::make_server();
     std::atomic<int> pre_response{0};
     std::atomic<int> post_response{0};
     std::atomic<int> request_complete{0};
 
     server->router().get("/hooks", [&](auto ctx) {
-        ctx->add_lifecycle_hook([&](auto& hook_ctx, qb::http::HookPoint point) {
+        ctx->add_lifecycle_hook([&](auto &hook_ctx, qb::http::HookPoint point) {
             if (point == qb::http::HookPoint::PRE_RESPONSE_SEND) {
                 ++pre_response;
                 hook_ctx.response().set_header("x-hook-pre", "1");
@@ -2453,7 +2421,7 @@ TEST(Http3ClientIntegrationTest, LifecycleHooksFollowHttpSessionSemantics) {
             }
         });
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "hooked";
+        ctx->response().body()   = "hooked";
         ctx->complete();
     });
     server->router().compile();
@@ -2464,11 +2432,9 @@ TEST(Http3ClientIntegrationTest, LifecycleHooksFollowHttpSessionSemantics) {
     client->set_verify_peer(false);
 
     qb::http::Request request{qb::io::uri("/hooks")};
-    auto response = qb::http::run_sync(client->push_request(std::move(request)));
+    auto              response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    pump_until([&] {
-        return post_response.load() == 1 && request_complete.load() == 1;
-    }, std::chrono::seconds(5));
+    pump_until([&] { return post_response.load() == 1 && request_complete.load() == 1; }, std::chrono::seconds(5));
 
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().as<std::string>(), "hooked");
@@ -2502,26 +2468,31 @@ TEST(Http3InteropTest, HomebrewCurlCanCallQbHttp3ServerWhenAvailable) {
 
     ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31978"), cert_path(), key_path()));
 
-    const auto base = std::filesystem::temp_directory_path() /
-                      ("qb-http3-curl-" + std::to_string(
-                          std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto base      = std::filesystem::temp_directory_path()
+                           / ("qb-http3-curl-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const auto body_path = base.string() + ".body";
     const auto code_path = base.string() + ".code";
-    const auto err_path = base.string() + ".err";
+    const auto err_path  = base.string() + ".err";
 
-    const auto command = "\"" + homebrew_curl_path().string() + "\""
-        " --http3-only --insecure --silent --show-error --max-time 5"
-        " --output \"" + body_path + "\""
-        " --write-out \"%{http_code}\""
-        " https://127.0.0.1:31978/interop"
-        " > \"" + code_path + "\""
-        " 2> \"" + err_path + "\"";
+    const auto command = "\"" + homebrew_curl_path().string()
+                         + "\""
+                           " --http3-only --insecure --silent --show-error --max-time 5"
+                           " --output \""
+                         + body_path
+                         + "\""
+                           " --write-out \"%{http_code}\""
+                           " https://127.0.0.1:31978/interop"
+                           " > \""
+                         + code_path
+                         + "\""
+                           " 2> \""
+                         + err_path + "\"";
 
     const auto result = run_command_while_pumping(command, std::chrono::seconds(6));
 
     const auto body = read_file(body_path);
     const auto code = read_file(code_path);
-    const auto err = read_file(err_path);
+    const auto err  = read_file(err_path);
 
     std::filesystem::remove(body_path);
     std::filesystem::remove(code_path);
@@ -2557,16 +2528,19 @@ TEST(Http3InteropTest, ConfiguredNghttp3ClientCanCallQbHttp3Server) {
 
     ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31993"), cert_path(), key_path()));
 
-    const auto base = std::filesystem::temp_directory_path() /
-                      ("qb-http3-nghttp3-client-" + std::to_string(
-                          std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto base     = std::filesystem::temp_directory_path()
+                          / ("qb-http3-nghttp3-client-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const auto out_path = base.string() + ".out";
     const auto err_path = base.string() + ".err";
 
-    const auto command = "\"" + client_tool.string() + "\""
-        " https://127.0.0.1:31993/nghttp3"
-        " > \"" + out_path + "\""
-        " 2> \"" + err_path + "\"";
+    const auto command = "\"" + client_tool.string()
+                         + "\""
+                           " https://127.0.0.1:31993/nghttp3"
+                           " > \""
+                         + out_path
+                         + "\""
+                           " 2> \""
+                         + err_path + "\"";
 
     const auto result = run_command_while_pumping(command, std::chrono::seconds(6));
 
@@ -2596,23 +2570,26 @@ TEST(Http3InteropTest, ConfiguredH3SpecCanProbeQbHttp3Server) {
     auto server = qb::http3::make_server();
     server->router().get("/", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body() = "h3spec-ok";
+        ctx->response().body()   = "h3spec-ok";
         ctx->complete();
     });
     server->router().compile();
 
     ASSERT_TRUE(server->listen(qb::io::uri("https://127.0.0.1:31994"), cert_path(), key_path()));
 
-    const auto base = std::filesystem::temp_directory_path() /
-                      ("qb-http3-h3spec-" + std::to_string(
-                          std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto base     = std::filesystem::temp_directory_path()
+                          / ("qb-http3-h3spec-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const auto out_path = base.string() + ".out";
     const auto err_path = base.string() + ".err";
 
-    const auto command = "\"" + h3spec_tool.string() + "\""
-        " -host 127.0.0.1 -port 31994 -insecure"
-        " > \"" + out_path + "\""
-        " 2> \"" + err_path + "\"";
+    const auto command = "\"" + h3spec_tool.string()
+                         + "\""
+                           " -host 127.0.0.1 -port 31994 -insecure"
+                           " > \""
+                         + out_path
+                         + "\""
+                           " 2> \""
+                         + err_path + "\"";
 
     const auto result = run_command_while_pumping(command, std::chrono::seconds(20));
 
@@ -2652,8 +2629,7 @@ TEST(Http3InteropTest, QbHttp3ClientCanCallConfiguredExternalServer) {
         client->set_verify_peer(false);
     }
 
-    auto response = qb::http::run_sync(
-        client->push_request(qb::http::Request{std::move(target)}));
+    auto response = qb::http::run_sync(client->push_request(qb::http::Request{std::move(target)}));
 
     const auto expected_status = configured_env_value("QB_HTTP3_EXTERNAL_EXPECT_STATUS");
     if (!expected_status.empty()) {

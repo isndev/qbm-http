@@ -13,7 +13,7 @@
  * with proper session lifecycle management.
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -53,8 +53,7 @@ std::atomic<std::size_t> msg_count_client_side = 0;
  */
 bool
 all_done() {
-    return msg_count_server_side == (NB_ITERATION + 1) &&
-           msg_count_client_side == (NB_ITERATION + 1);
+    return msg_count_server_side == (NB_ITERATION + 1) && msg_count_client_side == (NB_ITERATION + 1);
 }
 
 // OVER TCP
@@ -291,8 +290,7 @@ class TestSecureServer;
  * - Validating and responding to encrypted client messages
  * - Tracking message counts for test verification
  */
-class TestSecureServerClient
-    : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
+class TestSecureServerClient : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
 public:
     using Protocol    = qb::http::protocol<TestSecureServerClient>;
     using WS_Protocol = qb::http::ws::protocol<TestSecureServerClient>;
@@ -343,8 +341,7 @@ public:
  * secure connections and creates TestSecureServerClient instances to handle them.
  * It uses SSL/TLS for transport security.
  */
-class TestSecureServer
-    : public use<TestSecureServer>::tcp::ssl::server<TestSecureServerClient> {
+class TestSecureServer : public use<TestSecureServer>::tcp::ssl::server<TestSecureServerClient> {
     std::size_t connection_count = 0u;
 
 public:
@@ -464,8 +461,7 @@ TEST(Session, WEBSOCKET_OVER_SECURE_TCP) {
     msg_count_client_side = 0;
 
     TestSecureServer server;
-    server.transport().init(
-        ssl::create_server_context(SSLv23_server_method(), "cert.pem", "key.pem"));
+    server.transport().init(ssl::create_server_context(SSLv23_server_method(), "cert.pem", "key.pem"));
     server.transport().listen_v4(20101);
     server.start();
 

@@ -19,41 +19,41 @@
 // Minimal session stub sufficient to parameterise Context<T>.
 struct SlotTestSession {
     qb::http::Response _response;
-    SlotTestSession &operator<<(const qb::http::Response &r) { _response = r; return *this; }
+    SlotTestSession &
+    operator<<(const qb::http::Response &r) {
+        _response = r;
+        return *this;
+    }
 };
 
 using TestContext = qb::http::Context<SlotTestSession>;
 
 namespace {
-    // Slot declarations are intentionally at namespace scope with `inline
-    // constexpr` so they mirror real-world usage (slots shared between
-    // middleware and handlers).
-    struct UserProfile {
-        std::string id;
-        std::string email;
-        int         role = 0;
+// Slot declarations are intentionally at namespace scope with `inline
+// constexpr` so they mirror real-world usage (slots shared between
+// middleware and handlers).
+struct UserProfile {
+    std::string id;
+    std::string email;
+    int         role = 0;
 
-        bool operator==(const UserProfile&) const = default;
-    };
+    bool operator==(const UserProfile &) const = default;
+};
 
-    inline constexpr qb::http::Slot<int>         kRequestCount{"metrics.requests"};
-    inline constexpr qb::http::Slot<std::string> kTraceId{"trace.id"};
-    inline constexpr qb::http::Slot<UserProfile> kAuthUser{"auth.user"};
+inline constexpr qb::http::Slot<int>         kRequestCount{"metrics.requests"};
+inline constexpr qb::http::Slot<std::string> kTraceId{"trace.id"};
+inline constexpr qb::http::Slot<UserProfile> kAuthUser{"auth.user"};
 
-    // Helper that builds a bare-bones Context for the tests. The returned
-    // shared_ptr owns the context; the tests never drive it through the
-    // router, so no finalised-state invariant is tripped.
-    std::shared_ptr<TestContext> make_ctx() {
-        auto session = std::make_shared<SlotTestSession>();
-        return std::make_shared<TestContext>(
-            qb::http::Request{},
-            qb::http::Response{},
-            session,
-            [](TestContext&) {},
-            std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{}
-        );
-    }
+// Helper that builds a bare-bones Context for the tests. The returned
+// shared_ptr owns the context; the tests never drive it through the
+// router, so no finalised-state invariant is tripped.
+std::shared_ptr<TestContext>
+make_ctx() {
+    auto session = std::make_shared<SlotTestSession>();
+    return std::make_shared<TestContext>(
+        qb::http::Request{}, qb::http::Response{}, session, [](TestContext &) {}, std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{});
 }
+} // namespace
 
 TEST(ContextSlots, SetThenGetReturnsValue) {
     auto ctx = make_ctx();
@@ -68,13 +68,13 @@ TEST(ContextSlots, GetIfReturnsStablePointer) {
     auto ctx = make_ctx();
     ctx->set(kTraceId, std::string{"req-abc-123"});
 
-    auto* p = ctx->get_if(kTraceId);
+    auto *p = ctx->get_if(kTraceId);
     ASSERT_NE(p, nullptr);
     EXPECT_EQ(*p, "req-abc-123");
 
     // Mutation through the returned pointer must be observable on re-fetch.
     *p += "-mutated";
-    const auto* cp = std::as_const(*ctx).get_if(kTraceId);
+    const auto *cp = std::as_const(*ctx).get_if(kTraceId);
     ASSERT_NE(cp, nullptr);
     EXPECT_EQ(*cp, "req-abc-123-mutated");
 }
@@ -107,14 +107,14 @@ TEST(ContextSlots, GetOrReturnsFallbackWhenAbsent) {
 TEST(ContextSlots, EmplaceConstructsInPlaceAndReturnsReference) {
     auto ctx = make_ctx();
 
-    UserProfile& u = ctx->emplace(kAuthUser, "u-1", "alice@example.com", 3);
+    UserProfile &u = ctx->emplace(kAuthUser, "u-1", "alice@example.com", 3);
     EXPECT_EQ(u.id, "u-1");
     EXPECT_EQ(u.email, "alice@example.com");
     EXPECT_EQ(u.role, 3);
 
     // Mutation via the returned reference must round-trip through get_if.
-    u.role = 5;
-    const auto* stored = std::as_const(*ctx).get_if(kAuthUser);
+    u.role             = 5;
+    const auto *stored = std::as_const(*ctx).get_if(kAuthUser);
     ASSERT_NE(stored, nullptr);
     EXPECT_EQ(stored->role, 5);
 }
@@ -141,7 +141,7 @@ TEST(ContextSlots, InteropWithLegacyStringKeyedApi) {
     EXPECT_EQ(*legacy, 123);
 
     ctx->set<std::string>("trace.id", std::string{"legacy-written"});
-    const auto* typed = ctx->get_if(kTraceId);
+    const auto *typed = ctx->get_if(kTraceId);
     ASSERT_NE(typed, nullptr);
     EXPECT_EQ(*typed, "legacy-written");
 }
@@ -178,4 +178,4 @@ TEST(ContextSlots, GetReturnsNulloptOnLegacyTypeMismatch) {
 // This is not runtime-testable (it would not compile), but we assert the
 // equality contract on Slot's value_type that user code may rely on.
 static_assert(std::is_same_v<qb::http::Slot<UserProfile>::value_type, UserProfile>);
-static_assert(noexcept(std::declval<const TestContext&>().contains(kRequestCount)));
+static_assert(noexcept(std::declval<const TestContext &>().contains(kRequestCount)));

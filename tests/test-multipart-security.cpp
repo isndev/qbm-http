@@ -8,7 +8,7 @@
  * - Memory safety with RAII std::vector (replaces raw pointer)
  *
  * qb - C++ Actor Framework
- * Copyright (C) 2011-2025 isndev (www.qbaf.io). All rights reserved.
+ * Copyright (C) 2011-2026 isndev (www.qbaf.io). All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,10 +24,10 @@
  */
 
 #include <gtest/gtest.h>
-#include "../multipart.h"
-#include "../headers.h"
-#include "../body.h"
 #include <qb/system/allocator/pipe.h>
+#include "../body.h"
+#include "../headers.h"
+#include "../multipart.h"
 
 using namespace qb::http;
 
@@ -37,20 +37,21 @@ using namespace qb::http;
 
 class MultipartSecurityTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
+    void
+    SetUp() override {}
 };
 
 TEST_F(MultipartSecurityTest, ValidBoundaryParsing) {
     // Standard boundary parsing should work
     std::string content_type = "multipart/form-data; boundary=abc123";
-    std::string boundary = parse_boundary(content_type);
+    std::string boundary     = parse_boundary(content_type);
     EXPECT_EQ(boundary, "abc123");
 }
 
 TEST_F(MultipartSecurityTest, ValidBoundaryWithQuotes) {
     // RFC 2046 allows quoted boundaries
     std::string content_type = "multipart/form-data; boundary=\"boundary-with-dashes\"";
-    std::string boundary = parse_boundary(content_type);
+    std::string boundary     = parse_boundary(content_type);
     EXPECT_EQ(boundary, "boundary-with-dashes");
 }
 
@@ -63,7 +64,7 @@ TEST_F(MultipartSecurityTest, BoundaryAtMaxLength) {
     // Boundary at exactly 70 characters (RFC 2046 limit)
     std::string long_boundary(70, 'a');
     std::string content_type = "multipart/form-data; boundary=" + long_boundary;
-    std::string boundary = parse_boundary(content_type);
+    std::string boundary     = parse_boundary(content_type);
     // Should either succeed or throw with appropriate error
     // Behavior depends on implementation
     if (!boundary.empty()) {
@@ -73,12 +74,13 @@ TEST_F(MultipartSecurityTest, BoundaryAtMaxLength) {
 
 TEST_F(MultipartSecurityTest, BodyParsingAcceptsBoundaryAtMaxLength) {
     const std::string boundary(multipart_limits::MAX_BOUNDARY_LENGTH, 'a');
-    const std::string raw =
-        "--" + boundary + "\r\n"
-        "Content-Disposition: form-data; name=\"field\"\r\n"
-        "\r\n"
-        "value\r\n"
-        "--" + boundary + "--";
+    const std::string raw = "--" + boundary
+                            + "\r\n"
+                              "Content-Disposition: form-data; name=\"field\"\r\n"
+                              "\r\n"
+                              "value\r\n"
+                              "--"
+                            + boundary + "--";
 
     Body body;
     body = raw;
@@ -95,39 +97,34 @@ TEST_F(MultipartSecurityTest, BoundaryOverMaxLengthIsRejected) {
     std::string content_type = "multipart/form-data; boundary=" + oversized_boundary;
 
     // Should throw due to security limit
-    EXPECT_THROW({
-        (void)parse_boundary(content_type);
-    }, std::runtime_error);
+    EXPECT_THROW({ (void) parse_boundary(content_type); }, std::runtime_error);
 }
 
 TEST_F(MultipartSecurityTest, ExcessivePartCountIsRejected) {
     // A body with more than MAX_PARTS_COUNT parts must be rejected so a peer
     // cannot exhaust memory with millions of tiny parts.
     const std::string boundary = "bnd";
-    std::string raw;
+    std::string       raw;
     for (std::size_t i = 0; i <= multipart_limits::MAX_PARTS_COUNT; ++i) {
-        raw += "--" + boundary + "\r\n"
-               "Content-Disposition: form-data; name=\"f\"\r\n"
-               "\r\n"
-               "v\r\n";
+        raw += "--" + boundary
+               + "\r\n"
+                 "Content-Disposition: form-data; name=\"f\"\r\n"
+                 "\r\n"
+                 "v\r\n";
     }
     raw += "--" + boundary + "--";
 
     Body body;
     body = raw;
-    EXPECT_THROW({ (void)body.as<Multipart>(); }, std::runtime_error);
+    EXPECT_THROW({ (void) body.as<Multipart>(); }, std::runtime_error);
 }
 
 TEST_F(MultipartSecurityTest, BoundaryWithControlCharactersIsRejected) {
-    EXPECT_THROW({
-        (void)parse_boundary("multipart/form-data; boundary=\"safe\r\nInjected\"");
-    }, std::runtime_error);
+    EXPECT_THROW({ (void) parse_boundary("multipart/form-data; boundary=\"safe\r\nInjected\""); }, std::runtime_error);
 }
 
 TEST_F(MultipartSecurityTest, BoundaryWithTrailingSpaceIsRejected) {
-    EXPECT_THROW({
-        (void)parse_boundary("multipart/form-data; boundary=\"abc \"");
-    }, std::runtime_error);
+    EXPECT_THROW({ (void) parse_boundary("multipart/form-data; boundary=\"abc \""); }, std::runtime_error);
 }
 
 TEST_F(MultipartSecurityTest, BoundaryMuchOverMaxLength) {
@@ -136,29 +133,27 @@ TEST_F(MultipartSecurityTest, BoundaryMuchOverMaxLength) {
     std::string content_type = "multipart/form-data; boundary=" + huge_boundary;
 
     // Should throw immediately without allocating huge memory
-    EXPECT_THROW({
-        (void)parse_boundary(content_type);
-    }, std::runtime_error);
+    EXPECT_THROW({ (void) parse_boundary(content_type); }, std::runtime_error);
 }
 
 TEST_F(MultipartSecurityTest, EmptyBoundary) {
     // Empty boundary should return empty string
     std::string content_type = "multipart/form-data; boundary=";
-    std::string boundary = parse_boundary(content_type);
+    std::string boundary     = parse_boundary(content_type);
     EXPECT_TRUE(boundary.empty());
 }
 
 TEST_F(MultipartSecurityTest, NoBoundaryParameter) {
     // Missing boundary parameter
     std::string content_type = "multipart/form-data";
-    std::string boundary = parse_boundary(content_type);
+    std::string boundary     = parse_boundary(content_type);
     EXPECT_TRUE(boundary.empty());
 }
 
 TEST_F(MultipartSecurityTest, NonMultipartContentType) {
     // Non-multipart content type
     std::string content_type = "application/json";
-    std::string boundary = parse_boundary(content_type);
+    std::string boundary     = parse_boundary(content_type);
     EXPECT_TRUE(boundary.empty());
 }
 
@@ -184,8 +179,8 @@ TEST_F(MultipartSecurityTest, WhitespaceInContentType) {
 
 TEST_F(MultipartSecurityTest, ValidHeaderAttributesParsing) {
     // Normal header attributes parsing
-    std::string attrs = "name=\"file\"; filename=\"document.pdf\"";
-    auto result = parse_header_attributes(attrs.data(), attrs.size());
+    std::string attrs  = "name=\"file\"; filename=\"document.pdf\"";
+    auto        result = parse_header_attributes(attrs.data(), attrs.size());
 
     EXPECT_TRUE(result.find("name") != result.end());
     EXPECT_EQ(result["name"], "file");
@@ -205,10 +200,9 @@ TEST_F(MultipartSecurityTest, HeaderAttributesAtLimit) {
         if (result.find("data") != result.end()) {
             EXPECT_FALSE(result["data"].empty());
         }
-    } catch (const std::runtime_error& e) {
+    } catch (const std::runtime_error &e) {
         // If limit is lower, this is expected
-        EXPECT_TRUE(std::string(e.what()).find("size") != std::string::npos ||
-                    std::string(e.what()).find("exceeds") != std::string::npos);
+        EXPECT_TRUE(std::string(e.what()).find("size") != std::string::npos || std::string(e.what()).find("exceeds") != std::string::npos);
     }
 }
 
@@ -217,22 +211,20 @@ TEST_F(MultipartSecurityTest, HeaderAttributesOverLimitIsRejected) {
     std::string huge_value(70000, 'y');
     std::string attrs = "data=" + huge_value;
 
-    EXPECT_THROW({
-        (void)parse_header_attributes(attrs.data(), attrs.size());
-    }, std::runtime_error);
+    EXPECT_THROW({ (void) parse_header_attributes(attrs.data(), attrs.size()); }, std::runtime_error);
 }
 
 TEST_F(MultipartSecurityTest, EmptyHeaderAttributes) {
     // Empty attributes should return empty map
-    std::string attrs = "";
-    auto result = parse_header_attributes(attrs.data(), attrs.size());
+    std::string attrs  = "";
+    auto        result = parse_header_attributes(attrs.data(), attrs.size());
     EXPECT_TRUE(result.empty());
 }
 
 TEST_F(MultipartSecurityTest, HeaderAttributesWithQuotes) {
     // Quoted values
-    std::string attrs = "name=\"file name with spaces\"; type=\"application/pdf\"";
-    auto result = parse_header_attributes(attrs.data(), attrs.size());
+    std::string attrs  = "name=\"file name with spaces\"; type=\"application/pdf\"";
+    auto        result = parse_header_attributes(attrs.data(), attrs.size());
 
     EXPECT_TRUE(result.find("name") != result.end());
     EXPECT_TRUE(result.find("type") != result.end());
@@ -240,8 +232,8 @@ TEST_F(MultipartSecurityTest, HeaderAttributesWithQuotes) {
 
 TEST_F(MultipartSecurityTest, HeaderAttributesFlagStyle) {
     // Flag-style attributes (no value)
-    std::string attrs = "required; secure; httponly";
-    auto result = parse_header_attributes(attrs.data(), attrs.size());
+    std::string attrs  = "required; secure; httponly";
+    auto        result = parse_header_attributes(attrs.data(), attrs.size());
 
     // Flag-style attributes should be parsed as empty values
     EXPECT_TRUE(result.find("required") != result.end());
@@ -266,43 +258,35 @@ TEST_F(MultipartSecurityTest, MalformedContentTypes) {
     // Malformed content types should not crash
     {
         std::string ct1 = "";
-        EXPECT_NO_THROW((void)parse_boundary(ct1));
+        EXPECT_NO_THROW((void) parse_boundary(ct1));
     }
     {
         std::string ct2 = "boundary=test";
-        EXPECT_NO_THROW((void)parse_boundary(ct2));
+        EXPECT_NO_THROW((void) parse_boundary(ct2));
     }
     {
         std::string ct3 = "multipart/form-data; boundary=";
-        EXPECT_NO_THROW((void)parse_boundary(ct3));
+        EXPECT_NO_THROW((void) parse_boundary(ct3));
     }
     {
         std::string ct4 = "multipart/form-data boundary=test"; // Missing semicolon
-        EXPECT_NO_THROW((void)parse_boundary(ct4));
+        EXPECT_NO_THROW((void) parse_boundary(ct4));
     }
 }
 
 TEST_F(MultipartSecurityTest, SpecialCharactersInBoundary) {
     // Boundaries with special characters
-    std::vector<std::string> test_boundaries = {
-        "boundary-123",
-        "boundary_123",
-        "boundary.123",
-        "boundary:123",
-        "boundary=123"
-    };
+    std::vector<std::string> test_boundaries = {"boundary-123", "boundary_123", "boundary.123", "boundary:123", "boundary=123"};
 
-    for (const auto& b : test_boundaries) {
+    for (const auto &b : test_boundaries) {
         std::string ct = "multipart/form-data; boundary=" + b;
-        EXPECT_NO_THROW({
-            (void)parse_boundary(ct);
-        });
+        EXPECT_NO_THROW({ (void) parse_boundary(ct); });
     }
 }
 
 TEST_F(MultipartSecurityTest, SerializationRejectsPartHeaderNameInjection) {
     Multipart mp;
-    auto &part = mp.create_part();
+    auto     &part = mp.create_part();
     part.set_header("Content-Disposition\r\nInjected", "form-data; name=\"field\"");
     part.body = "payload";
 
@@ -313,7 +297,7 @@ TEST_F(MultipartSecurityTest, SerializationRejectsPartHeaderNameInjection) {
 
 TEST_F(MultipartSecurityTest, SerializationRejectsPartHeaderValueInjection) {
     Multipart mp;
-    auto &part = mp.create_part();
+    auto     &part = mp.create_part();
     part.set_header("Content-Disposition", "form-data; name=\"field\"\r\nInjected: bad");
     part.body = "payload";
 
@@ -324,7 +308,7 @@ TEST_F(MultipartSecurityTest, SerializationRejectsPartHeaderValueInjection) {
 
 TEST_F(MultipartSecurityTest, SerializationRejectsOversizedPartHeaderValue) {
     Multipart mp;
-    auto &part = mp.create_part();
+    auto     &part = mp.create_part();
     part.set_header("X-Large", std::string(multipart_limits::MAX_HEADER_VALUE_LENGTH + 1, 'x'));
     part.body = "payload";
 
@@ -335,7 +319,7 @@ TEST_F(MultipartSecurityTest, SerializationRejectsOversizedPartHeaderValue) {
 
 TEST_F(MultipartSecurityTest, SerializationRejectsBoundaryInjection) {
     Multipart mp("safe\r\nInjected: bad");
-    auto &part = mp.create_part();
+    auto     &part = mp.create_part();
     part.set_header("Content-Disposition", "form-data; name=\"field\"");
     part.body = "payload";
 
@@ -346,7 +330,7 @@ TEST_F(MultipartSecurityTest, SerializationRejectsBoundaryInjection) {
 
 TEST_F(MultipartSecurityTest, SerializationRejectsInvalidBoundaryLength) {
     Multipart mp(std::string(multipart_limits::MAX_BOUNDARY_LENGTH + 1, 'x'));
-    auto &part = mp.create_part();
+    auto     &part = mp.create_part();
     part.set_header("Content-Disposition", "form-data; name=\"field\"");
     part.body = "payload";
 
@@ -355,7 +339,8 @@ TEST_F(MultipartSecurityTest, SerializationRejectsInvalidBoundaryLength) {
     EXPECT_TRUE(out.empty());
 }
 
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

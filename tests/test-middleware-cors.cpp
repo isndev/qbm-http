@@ -1,29 +1,34 @@
 #include <gtest/gtest.h>
 #include "../http.h"
-#include "../middleware/cors.h" // The adapted CorsMiddleware
+#include "../middleware/cors.h"    // The adapted CorsMiddleware
 #include "../routing/middleware.h" // For MiddlewareTask if needed
 
+#include <functional>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <functional>
-#include <sstream>
 
 // --- Mock Session for CorsMiddleware Tests ---
 struct MockCorsSession {
     qb::http::Response _response;
-    std::string _session_id_str = "cors_test_session";
-    bool _final_handler_called = false;
+    std::string        _session_id_str       = "cors_test_session";
+    bool               _final_handler_called = false;
 
-    qb::http::Response &get_response_ref() { return _response; }
+    qb::http::Response &
+    get_response_ref() {
+        return _response;
+    }
 
-    MockCorsSession &operator<<(const qb::http::Response &resp) {
+    MockCorsSession &
+    operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
     }
 
-    void reset() {
-        _response = qb::http::Response();
+    void
+    reset() {
+        _response             = qb::http::Response();
         _final_handler_called = false;
     }
 };
@@ -31,17 +36,18 @@ struct MockCorsSession {
 // --- Test Fixture for CorsMiddleware ---
 class CorsMiddlewareTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockCorsSession> _session;
-    std::unique_ptr<qb::http::Router<MockCorsSession> > _router;
+    std::shared_ptr<MockCorsSession>                   _session;
+    std::unique_ptr<qb::http::Router<MockCorsSession>> _router;
 
-    void SetUp() override {
+    void
+    SetUp() override {
         _session = std::make_shared<MockCorsSession>();
-        _router = std::make_unique<qb::http::Router<MockCorsSession> >();
+        _router  = std::make_unique<qb::http::Router<MockCorsSession>>();
     }
 
-    qb::http::Request create_request(qb::http::method method = qb::http::method::GET,
-                                     const std::string &target_path = "/cors_test",
-                                     const std::string &origin_header = "") {
+    qb::http::Request
+    create_request(qb::http::method method = qb::http::method::GET, const std::string &target_path = "/cors_test",
+                   const std::string &origin_header = "") {
         qb::http::Request req;
         req.method() = method;
         try {
@@ -56,19 +62,21 @@ protected:
         return req;
     }
 
-    qb::http::RouteHandlerFn<MockCorsSession> basic_success_handler() {
-        return [this](std::shared_ptr<qb::http::Context<MockCorsSession> > ctx) {
-            if (_session) _session->_final_handler_called = true;
+    qb::http::RouteHandlerFn<MockCorsSession>
+    basic_success_handler() {
+        return [this](std::shared_ptr<qb::http::Context<MockCorsSession>> ctx) {
+            if (_session)
+                _session->_final_handler_called = true;
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() = "CORS Test Handler Executed";
+            ctx->response().body()   = "CORS Test Handler Executed";
             ctx->complete();
         };
     }
 
-    void configure_router_and_run(std::shared_ptr<qb::http::CorsMiddleware<MockCorsSession> > cors_mw,
-                                  qb::http::Request request) {
+    void
+    configure_router_and_run(std::shared_ptr<qb::http::CorsMiddleware<MockCorsSession>> cors_mw, qb::http::Request request) {
         // Re-initialize router to ensure a clean state for each test run
-        _router = std::make_unique<qb::http::Router<MockCorsSession> >();
+        _router = std::make_unique<qb::http::Router<MockCorsSession>>();
         _router->use(cors_mw);
         _router->get("/cors_test", basic_success_handler());
         _router->options("/cors_test", basic_success_handler()); // For OPTIONS preflight
@@ -78,7 +86,8 @@ protected:
         _router->route(_session, std::move(request));
     }
 
-    [[nodiscard]] bool has_vary_value(const std::string &value) const {
+    [[nodiscard]] bool
+    has_vary_value(const std::string &value) const {
         const auto it = _session->_response.headers().find("Vary");
         if (it == _session->_response.headers().end()) {
             return false;
@@ -108,7 +117,7 @@ TEST_F(CorsMiddlewareTest, OriginNotAllowed) {
 
     configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://other.com"));
 
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK); // Request still goes through
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);                  // Request still goes through
     EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Origin").empty()); // But no CORS headers
     EXPECT_TRUE(_session->_final_handler_called);
 }
@@ -128,9 +137,9 @@ TEST_F(CorsMiddlewareTest, AllowAnyOriginWildcard) {
 TEST_F(CorsMiddlewareTest, PreflightRequest) {
     qb::http::CorsOptions options;
     options.origins({"http://localhost:3000"})
-            .methods({"GET", "POST", "OPTIONS"})
-            .headers({"Content-Type", "Authorization"})
-            .max_age(std::chrono::seconds(3600));
+        .methods({"GET", "POST", "OPTIONS"})
+        .headers({"Content-Type", "Authorization"})
+        .max_age(std::chrono::seconds(3600));
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     auto req = create_request(qb::http::method::OPTIONS, "/cors_test", "http://localhost:3000");
@@ -152,9 +161,7 @@ TEST_F(CorsMiddlewareTest, PreflightRequest) {
 
 TEST_F(CorsMiddlewareTest, PreflightRejectsMethodNotAllowed) {
     qb::http::CorsOptions options;
-    options.origins({"http://localhost:3000"})
-            .methods({"GET", "POST", "OPTIONS"})
-            .headers({"Content-Type"});
+    options.origins({"http://localhost:3000"}).methods({"GET", "POST", "OPTIONS"}).headers({"Content-Type"});
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     auto req = create_request(qb::http::method::OPTIONS, "/cors_test", "http://localhost:3000");
@@ -171,8 +178,7 @@ TEST_F(CorsMiddlewareTest, PreflightRejectsMethodNotAllowed) {
 
 TEST_F(CorsMiddlewareTest, PreflightEmptyMethodAllowListFailsClosed) {
     qb::http::CorsOptions options;
-    options.origins({"http://localhost:3000"})
-            .methods({});
+    options.origins({"http://localhost:3000"}).methods({});
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     auto req = create_request(qb::http::method::OPTIONS, "/cors_test", "http://localhost:3000");
@@ -188,23 +194,20 @@ TEST_F(CorsMiddlewareTest, PreflightEmptyMethodAllowListFailsClosed) {
 
 TEST_F(CorsMiddlewareTest, ActualRequestWithCorsHeaders) {
     qb::http::CorsOptions options;
-    options.origins({"http://example.com"})
-            .expose_headers({"X-My-Custom-Header", "Content-Length"});
+    options.origins({"http://example.com"}).expose_headers({"X-My-Custom-Header", "Content-Length"});
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://example.com"));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "http://example.com");
-    EXPECT_EQ(std::string(_session->_response.header("Access-Control-Expose-Headers")),
-              "X-My-Custom-Header, Content-Length");
+    EXPECT_EQ(std::string(_session->_response.header("Access-Control-Expose-Headers")), "X-My-Custom-Header, Content-Length");
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(CorsMiddlewareTest, CredentialsAllowed) {
     qb::http::CorsOptions options;
-    options.origins({"http://creds.example.com"})
-            .credentials(qb::http::CorsOptions::AllowCredentials::Yes);
+    options.origins({"http://creds.example.com"}).credentials(qb::http::CorsOptions::AllowCredentials::Yes);
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://creds.example.com"));
@@ -226,10 +229,10 @@ TEST_F(CorsMiddlewareTest, NoOriginHeader) {
 TEST_F(CorsMiddlewareTest, PreflightRequestExposedHeaders) {
     qb::http::CorsOptions options;
     options.origins({"http://example.com"})
-            .methods({"GET", "POST", "OPTIONS"})
-            .headers({"X-My-Custom-Header", "Content-Length"})
-            .max_age(std::chrono::seconds(3600))
-            .expose_headers({"X-My-Custom-Header", "Content-Length"});
+        .methods({"GET", "POST", "OPTIONS"})
+        .headers({"X-My-Custom-Header", "Content-Length"})
+        .max_age(std::chrono::seconds(3600))
+        .expose_headers({"X-My-Custom-Header", "Content-Length"});
 
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
@@ -242,8 +245,7 @@ TEST_F(CorsMiddlewareTest, PreflightRequestExposedHeaders) {
     EXPECT_EQ(_session->_response.status(), qb::http::status::NO_CONTENT);
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "http://example.com");
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Methods")), "GET, POST, OPTIONS");
-    EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Headers")),
-              "X-My-Custom-Header, Content-Length");
+    EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Headers")), "X-My-Custom-Header, Content-Length");
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Max-Age")), "3600");
     EXPECT_FALSE(_session->_final_handler_called); // Preflight should be handled by CORS MW
 }
@@ -306,7 +308,7 @@ TEST_F(CorsMiddlewareTest, RegexOriginMatching) {
 
 TEST_F(CorsMiddlewareTest, FunctionOriginMatching) {
     qb::http::CorsOptions options;
-    auto custom_origin_matcher = [](const std::string &origin) -> bool {
+    auto                  custom_origin_matcher = [](const std::string &origin) -> bool {
         if (origin == "http://allowed.by.function.com") {
             return true;
         }
@@ -319,8 +321,7 @@ TEST_F(CorsMiddlewareTest, FunctionOriginMatching) {
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     // Test case 1: Origin allowed by function
-    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test",
-                                                     "http://allowed.by.function.com"));
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://allowed.by.function.com"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "http://allowed.by.function.com");
     EXPECT_TRUE(_session->_final_handler_called);
@@ -328,18 +329,15 @@ TEST_F(CorsMiddlewareTest, FunctionOriginMatching) {
     _session->reset();
 
     // Test case 2: Another origin allowed by function
-    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test",
-                                                     "https://another.functional.match"));
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "https://another.functional.match"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
-    EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")),
-              "https://another.functional.match");
+    EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "https://another.functional.match");
     EXPECT_TRUE(_session->_final_handler_called);
 
     _session->reset();
 
     // Test case 3: Origin not allowed by function
-    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test",
-                                                     "http://denied.by.function.com"));
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://denied.by.function.com"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_response.header("Access-Control-Allow-Origin").empty());
     EXPECT_TRUE(_session->_final_handler_called);
@@ -347,9 +345,7 @@ TEST_F(CorsMiddlewareTest, FunctionOriginMatching) {
 
 TEST_F(CorsMiddlewareTest, ThrowingFunctionMatcherFailsClosedAndRequestContinues) {
     qb::http::CorsOptions options;
-    options.origin_matcher([](const std::string &) -> bool {
-        throw std::runtime_error("matcher failure");
-    });
+    options.origin_matcher([](const std::string &) -> bool { throw std::runtime_error("matcher failure"); });
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://example.com"));
@@ -362,9 +358,9 @@ TEST_F(CorsMiddlewareTest, ThrowingFunctionMatcherFailsClosedAndRequestContinues
 TEST_F(CorsMiddlewareTest, PreflightAllowHeadersDetailed) {
     qb::http::CorsOptions options;
     options.origins({"http://example.com"})
-            .methods({"GET", "POST", "OPTIONS"})
-            .headers({"Content-Type", "Authorization", "X-Custom-Header", "X-Another-Header"})
-            .max_age(std::chrono::seconds(3600));
+        .methods({"GET", "POST", "OPTIONS"})
+        .headers({"Content-Type", "Authorization", "X-Custom-Header", "X-Another-Header"})
+        .max_age(std::chrono::seconds(3600));
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     // Scenario 1: Request asks for a subset of allowed headers
@@ -385,7 +381,7 @@ TEST_F(CorsMiddlewareTest, PreflightAllowHeadersDetailed) {
     std::string allowed_headers_str = std::string(_session->_response.header("Access-Control-Allow-Headers"));
     EXPECT_TRUE(allowed_headers_str.find("Content-Type") != std::string::npos);
     EXPECT_TRUE(allowed_headers_str.find("X-Custom-Header") != std::string::npos);
-    EXPECT_FALSE(allowed_headers_str.find("Authorization") != std::string::npos); // Was not requested
+    EXPECT_FALSE(allowed_headers_str.find("Authorization") != std::string::npos);    // Was not requested
     EXPECT_FALSE(allowed_headers_str.find("X-Another-Header") != std::string::npos); // Was not requested
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Max-Age")), "3600");
     EXPECT_FALSE(_session->_final_handler_called);
@@ -412,9 +408,7 @@ TEST_F(CorsMiddlewareTest, PreflightAllowHeadersDetailed) {
 
     // Scenario 3: CorsOptions.headers() is empty, but request sends Access-Control-Request-Headers
     qb::http::CorsOptions options_no_allowed_headers;
-    options_no_allowed_headers.origins({"http://example.com"})
-            .methods({"GET", "POST", "OPTIONS"})
-            .max_age(std::chrono::seconds(3600));
+    options_no_allowed_headers.origins({"http://example.com"}).methods({"GET", "POST", "OPTIONS"}).max_age(std::chrono::seconds(3600));
     // .headers({}) is default empty
     auto cors_mw_no_headers = qb::http::cors_middleware<MockCorsSession>(options_no_allowed_headers);
 
@@ -433,13 +427,13 @@ TEST_F(CorsMiddlewareTest, PreflightAllowHeadersDetailed) {
 
 TEST_F(CorsMiddlewareTest, WildcardOriginWithCredentials) {
     qb::http::CorsOptions options;
-    options.origins({"*"}) // Wildcard origin
-            .credentials(qb::http::CorsOptions::AllowCredentials::Yes); // Credentials allowed
+    options
+        .origins({"*"})                                             // Wildcard origin
+        .credentials(qb::http::CorsOptions::AllowCredentials::Yes); // Credentials allowed
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     // Request from a specific origin
-    configure_router_and_run(
-        cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://specific.example.com"));
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://specific.example.com"));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     // With credentials, '*' should be replaced by the specific requesting origin
@@ -450,8 +444,7 @@ TEST_F(CorsMiddlewareTest, WildcardOriginWithCredentials) {
 
 TEST_F(CorsMiddlewareTest, PreflightServerNoHeadersClientNoHeaders) {
     qb::http::CorsOptions options;
-    options.origins({"http://example.com"})
-            .methods({"GET", "POST"});
+    options.origins({"http://example.com"}).methods({"GET", "POST"});
     // No .headers() call, so server has no configured allowed headers by default
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
@@ -484,8 +477,8 @@ TEST_F(CorsMiddlewareTest, PreflightServerNoHeadersClientNoHeaders) {
 TEST_F(CorsMiddlewareTest, PreflightCaseInsensitiveRequestHeaders) {
     qb::http::CorsOptions options;
     options.origins({"http://example.com"})
-            .methods({"PUT"})
-            .headers({"CoNtEnT-TyPe", "X-API-KEY", "Authorization"}); // Server configured with mixed case
+        .methods({"PUT"})
+        .headers({"CoNtEnT-TyPe", "X-API-KEY", "Authorization"}); // Server configured with mixed case
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     auto req = create_request(qb::http::method::OPTIONS, "/cors_test", "http://example.com");
@@ -500,13 +493,10 @@ TEST_F(CorsMiddlewareTest, PreflightCaseInsensitiveRequestHeaders) {
     std::string allowed_headers_str = std::string(_session->_response.header("Access-Control-Allow-Headers"));
 
     // Check that the allowed headers are present, potentially echoed in the client's requested case
-    EXPECT_TRUE(
-        allowed_headers_str.find("content-type") != std::string::npos || allowed_headers_str.find("CoNtEnT-TyPe") != std
-        ::string::npos);
-    EXPECT_TRUE(
-        allowed_headers_str.find("x-api-key") != std::string::npos || allowed_headers_str.find("X-API-KEY") != std::
-        string::npos);
-    EXPECT_FALSE(allowed_headers_str.find("Authorization") != std::string::npos); // Was not requested by client
+    EXPECT_TRUE(allowed_headers_str.find("content-type") != std::string::npos
+                || allowed_headers_str.find("CoNtEnT-TyPe") != std ::string::npos);
+    EXPECT_TRUE(allowed_headers_str.find("x-api-key") != std::string::npos || allowed_headers_str.find("X-API-KEY") != std::string::npos);
+    EXPECT_FALSE(allowed_headers_str.find("Authorization") != std::string::npos);        // Was not requested by client
     EXPECT_FALSE(allowed_headers_str.find("X-Non-Allowed-Header") != std::string::npos); // Was not allowed by server
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -539,7 +529,7 @@ TEST_F(CorsMiddlewareTest, MultipleExactOrigins) {
 
     // Test case 4: Different path, but still matching origin
     _session->reset();
-    _router = std::make_unique<qb::http::Router<MockCorsSession> >();
+    _router = std::make_unique<qb::http::Router<MockCorsSession>>();
     _router->use(cors_mw);
     _router->get("/cors_test", basic_success_handler());
     _router->options("/cors_test", basic_success_handler());
@@ -579,16 +569,15 @@ TEST_F(CorsMiddlewareTest, ReDoSProtectionLongOriginRejected) {
 TEST_F(CorsMiddlewareTest, ReDoSProtectionRegexTimeout) {
     // Test regex pattern matching with potentially slow patterns
     // This test documents the ReDoS timeout protection behavior
-    
+
     qb::http::CorsOptions options;
     // Use a regex pattern that could be slow with certain inputs
     options.origin_patterns({"http://[a-z]+\\.example\\.com"});
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     // Normal origin should match quickly
-    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", 
-"http://subdomain.example.com"));
-    
+    configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", "http://subdomain.example.com"));
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     // Should match the regex pattern
     EXPECT_EQ(std::string(_session->_response.header("Access-Control-Allow-Origin")), "http://subdomain.example.com");
@@ -611,8 +600,7 @@ TEST_F(CorsMiddlewareTest, RegexStrategyRejectsOverlongOriginInput) {
 
 TEST_F(CorsMiddlewareTest, OverlongOriginRejectedEvenWithWildcardAndCredentials) {
     qb::http::CorsOptions options;
-    options.origins({"*"})
-            .credentials(qb::http::CorsOptions::AllowCredentials::Yes);
+    options.origins({"*"}).credentials(qb::http::CorsOptions::AllowCredentials::Yes);
     auto cors_mw = qb::http::cors_middleware<MockCorsSession>(options);
 
     std::string long_origin = "http://";
@@ -638,7 +626,7 @@ TEST_F(CorsMiddlewareTest, MaxOriginLengthBoundary) {
 
     // Behavior depends on implementation - test documents current behavior
     configure_router_and_run(cors_mw, create_request(qb::http::method::GET, "/cors_test", boundary_origin));
-    
+
     // Should not crash
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);

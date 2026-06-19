@@ -12,22 +12,22 @@
  * - Priority and dependency management
  *
  * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2025 qb - isndev (cpp.actor)
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http2
  */
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <optional>
-#include <vector> // Required by qb::http::Headers if it uses std::vector for multi-value headers
-#include <unordered_set>
-#include <chrono>
-#include <qb/system/timestamp.h> // for qb::duration (canonical time-span type)
 #include <qb/system/container/unordered_set.h> // for qb::unordered_set (previously picked up transitively via listener.h)
+#include <qb/system/timestamp.h>               // for qb::duration (canonical time-span type)
+#include <string>
+#include <unordered_set>
+#include <vector> // Required by qb::http::Headers if it uses std::vector for multi-value headers
 
 #include "../../request.h"
 #include "../../response.h"
@@ -71,7 +71,8 @@ public:
      * @param max_window Maximum allowed window size
      * @return New window size, or -1 on overflow
      */
-    static int64_t update_window_safe(int64_t current_window, uint32_t increment, int64_t max_window) {
+    static int64_t
+    update_window_safe(int64_t current_window, uint32_t increment, int64_t max_window) {
         int64_t new_window = current_window + static_cast<int64_t>(increment);
         if (new_window > max_window) {
             return -1; // Overflow
@@ -85,7 +86,8 @@ public:
      * @param threshold Threshold for sending update
      * @return true if update should be sent
      */
-    static bool should_send_window_update(uint32_t processed_bytes, uint32_t threshold) {
+    static bool
+    should_send_window_update(uint32_t processed_bytes, uint32_t threshold) {
         return processed_bytes >= threshold && threshold > 0;
     }
 
@@ -95,8 +97,10 @@ public:
      * @param divisor Threshold divisor
      * @return Calculated threshold
      */
-    static uint32_t calculate_window_threshold(int64_t initial_window, int divisor = 2) {
-        if (initial_window <= 0 || divisor <= 0) return 1;
+    static uint32_t
+    calculate_window_threshold(int64_t initial_window, int divisor = 2) {
+        if (initial_window <= 0 || divisor <= 0)
+            return 1;
         uint32_t threshold = static_cast<uint32_t>(initial_window / divisor);
         return threshold == 0 ? 1 : threshold;
     }
@@ -113,34 +117,34 @@ public:
  */
 class Http2StreamBase {
 public:
-    uint32_t id = 0;                                              ///< Stream identifier
+    uint32_t                 id    = 0;                              ///< Stream identifier
     Http2StreamConcreteState state = Http2StreamConcreteState::IDLE; ///< Current stream state
 
     // Flow control windows
-    int64_t local_window_size;  ///< How much data we can receive from peer
-    int64_t peer_window_size;   ///< How much data peer can receive from us
+    int64_t local_window_size; ///< How much data we can receive from peer
+    int64_t peer_window_size;  ///< How much data peer can receive from us
 
-    uint32_t window_update_threshold;              ///< Threshold for sending WINDOW_UPDATE
+    uint32_t window_update_threshold;               ///< Threshold for sending WINDOW_UPDATE
     uint32_t processed_bytes_for_window_update = 0; ///< Bytes processed towards WINDOW_UPDATE
 
     // Stream lifecycle flags
-    bool end_stream_received = false;    ///< Peer has indicated end of stream
-    bool end_stream_sent = false;        ///< We have indicated end of stream
-    bool rst_stream_received = false;    ///< Peer sent RST_STREAM
-    bool rst_stream_sent = false;        ///< We sent RST_STREAM
-    ErrorCode error_code = ErrorCode::NO_ERROR; ///< Error code if stream was reset
+    bool      end_stream_received = false;               ///< Peer has indicated end of stream
+    bool      end_stream_sent     = false;               ///< We have indicated end of stream
+    bool      rst_stream_received = false;               ///< Peer sent RST_STREAM
+    bool      rst_stream_sent     = false;               ///< We sent RST_STREAM
+    ErrorCode error_code          = ErrorCode::NO_ERROR; ///< Error code if stream was reset
 
     // Header processing state
-    bool headers_received_main = false;  ///< Main headers received and processed
-    bool trailers_expected = false;      ///< Expecting trailers from peer
-    bool trailers_received = false;      ///< Trailers received and processed
-    bool expecting_continuation = false; ///< Expecting CONTINUATION frame
-    std::optional<std::uint64_t> expected_content_length; ///< Declared content-length, if present
+    bool                         headers_received_main  = false; ///< Main headers received and processed
+    bool                         trailers_expected      = false; ///< Expecting trailers from peer
+    bool                         trailers_received      = false; ///< Trailers received and processed
+    bool                         expecting_continuation = false; ///< Expecting CONTINUATION frame
+    std::optional<std::uint64_t> expected_content_length;        ///< Declared content-length, if present
 
     std::optional<Http2PriorityData> priority_info; ///< Priority information for stream
 
     // Timing information
-    std::chrono::steady_clock::time_point created_at; ///< Stream creation time
+    std::chrono::steady_clock::time_point created_at;    ///< Stream creation time
     std::chrono::steady_clock::time_point last_activity; ///< Last activity time
 
 protected:
@@ -159,22 +163,22 @@ public:
         , peer_window_size(initial_peer_window)
         , window_update_threshold(FlowControlManager::calculate_window_threshold(initial_local_window))
         , created_at(std::chrono::steady_clock::now())
-        , last_activity(created_at) {
-    }
+        , last_activity(created_at) {}
 
     virtual ~Http2StreamBase() = default;
 
     // Non-copyable, but movable for container usage
-    Http2StreamBase(const Http2StreamBase&) = delete;
-    Http2StreamBase& operator=(const Http2StreamBase&) = delete;
-    Http2StreamBase(Http2StreamBase&&) = default;
-    Http2StreamBase& operator=(Http2StreamBase&&) = default;
+    Http2StreamBase(const Http2StreamBase &)            = delete;
+    Http2StreamBase &operator=(const Http2StreamBase &) = delete;
+    Http2StreamBase(Http2StreamBase &&)                 = default;
+    Http2StreamBase &operator=(Http2StreamBase &&)      = default;
 
     /**
      * @brief Check if stream is in a closed state
      * @return true if stream is closed or reset
      */
-    [[nodiscard]] bool is_closed() const noexcept {
+    [[nodiscard]] bool
+    is_closed() const noexcept {
         return state == Http2StreamConcreteState::CLOSED || rst_stream_received || rst_stream_sent;
     }
 
@@ -182,24 +186,25 @@ public:
      * @brief Check if stream can send data
      * @return true if local endpoint can send data
      */
-    [[nodiscard]] bool can_send_data() const noexcept {
-        return state == Http2StreamConcreteState::OPEN ||
-               state == Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+    [[nodiscard]] bool
+    can_send_data() const noexcept {
+        return state == Http2StreamConcreteState::OPEN || state == Http2StreamConcreteState::HALF_CLOSED_REMOTE;
     }
 
     /**
      * @brief Check if stream can receive data
      * @return true if local endpoint can receive data
      */
-    [[nodiscard]] bool can_receive_data() const noexcept {
-        return state == Http2StreamConcreteState::OPEN ||
-               state == Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+    [[nodiscard]] bool
+    can_receive_data() const noexcept {
+        return state == Http2StreamConcreteState::OPEN || state == Http2StreamConcreteState::HALF_CLOSED_LOCAL;
     }
 
     /**
      * @brief Update last activity timestamp
      */
-    void touch() noexcept {
+    void
+    touch() noexcept {
         last_activity = std::chrono::steady_clock::now();
     }
 
@@ -207,18 +212,18 @@ public:
      * @brief Get stream age in milliseconds
      * @return Age in milliseconds
      */
-    [[nodiscard]] std::chrono::milliseconds get_age() const noexcept {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - created_at);
+    [[nodiscard]] std::chrono::milliseconds
+    get_age() const noexcept {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - created_at);
     }
 
     /**
      * @brief Get time since last activity in milliseconds
      * @return Time since last activity in milliseconds
      */
-    [[nodiscard]] std::chrono::milliseconds get_idle_time() const noexcept {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - last_activity);
+    [[nodiscard]] std::chrono::milliseconds
+    get_idle_time() const noexcept {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - last_activity);
     }
 
     /**
@@ -226,13 +231,13 @@ public:
      * @param data_size Size of received data
      * @return true if WINDOW_UPDATE should be sent
      */
-    bool process_received_data(uint32_t data_size) noexcept {
+    bool
+    process_received_data(uint32_t data_size) noexcept {
         touch();
         local_window_size -= static_cast<int64_t>(data_size);
         processed_bytes_for_window_update += data_size;
 
-        return FlowControlManager::should_send_window_update(
-            processed_bytes_for_window_update, window_update_threshold);
+        return FlowControlManager::should_send_window_update(processed_bytes_for_window_update, window_update_threshold);
     }
 
     /**
@@ -241,11 +246,11 @@ public:
      * @param old_initial_size Old initial window size
      * @return true if update successful, false if overflow
      */
-    bool update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept {
-        int64_t delta = static_cast<int64_t>(new_initial_size) - static_cast<int64_t>(old_initial_size);
-        int64_t new_window = FlowControlManager::update_window_safe(
-            peer_window_size, static_cast<uint32_t>(std::abs(delta)),
-            static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT));
+    bool
+    update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept {
+        int64_t delta      = static_cast<int64_t>(new_initial_size) - static_cast<int64_t>(old_initial_size);
+        int64_t new_window = FlowControlManager::update_window_safe(peer_window_size, static_cast<uint32_t>(std::abs(delta)),
+                                                                    static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT));
 
         if (new_window == -1) {
             return false; // Overflow
@@ -259,7 +264,8 @@ public:
      * @brief Reset window update tracking after sending WINDOW_UPDATE
      * @param increment_sent The increment that was sent
      */
-    void reset_window_update_tracking(uint32_t increment_sent) noexcept {
+    void
+    reset_window_update_tracking(uint32_t increment_sent) noexcept {
         local_window_size += static_cast<int64_t>(increment_sent);
         processed_bytes_for_window_update = 0;
     }
@@ -269,8 +275,10 @@ public:
      * @param end_stream_flag Whether END_STREAM flag was set
      * @param is_sending Whether we are sending (true) or receiving (false)
      */
-    void transition_state(bool end_stream_flag, bool is_sending) noexcept {
-        if (!end_stream_flag) return;
+    void
+    transition_state(bool end_stream_flag, bool is_sending) noexcept {
+        if (!end_stream_flag)
+            return;
 
         if (is_sending) {
             end_stream_sent = true;
@@ -307,9 +315,10 @@ public:
      * @param error_code_param Error code for reset
      * @param is_sending Whether we are sending (true) or receiving (false) the reset
      */
-    void mark_reset(ErrorCode error_code_param, bool is_sending) noexcept {
+    void
+    mark_reset(ErrorCode error_code_param, bool is_sending) noexcept {
         error_code = error_code_param;
-        state = Http2StreamConcreteState::CLOSED;
+        state      = Http2StreamConcreteState::CLOSED;
 
         if (is_sending) {
             rst_stream_sent = true;
@@ -327,21 +336,21 @@ public:
  * the assembled response, request metadata, and push promise handling.
  */
 struct Http2ClientStream : public Http2StreamBase {
-    qb::http::Response assembled_response;      ///< Response being assembled
-    uint64_t application_request_id = 0;        ///< Application-level request ID
-    uint32_t associated_stream_id = 0;          ///< For pushed streams (unused by client sending requests)
-    std::string method;                         ///< HTTP method for this request (from original request)
-    bool response_dispatched = false;           ///< Response has been dispatched
-    bool client_will_send_trailers = false;     ///< Client intends to send trailers for the current request
+    qb::http::Response assembled_response;                ///< Response being assembled
+    uint64_t           application_request_id = 0;        ///< Application-level request ID
+    uint32_t           associated_stream_id   = 0;        ///< For pushed streams (unused by client sending requests)
+    std::string        method;                            ///< HTTP method for this request (from original request)
+    bool               response_dispatched       = false; ///< Response has been dispatched
+    bool               client_will_send_trailers = false; ///< Client intends to send trailers for the current request
 
     // For sending request body
-    bool has_pending_data_to_send = false;      ///< True if original_request_to_send.body() has data remaining.
-    qb::http::Request original_request_to_send; ///< Stores the original request if its body needs to be sent progressively.
-    size_t send_buffer_offset = 0;              ///< Current offset in original_request_to_send.body().raw()
-    std::vector<std::string> _expected_trailer_names; ///< Names of headers expected in the trailer part, parsed from "Trailer" header.
+    bool                     has_pending_data_to_send = false; ///< True if original_request_to_send.body() has data remaining.
+    qb::http::Request        original_request_to_send;         ///< Stores the original request if its body needs to be sent progressively.
+    size_t                   send_buffer_offset = 0;           ///< Current offset in original_request_to_send.body().raw()
+    std::vector<std::string> _expected_trailer_names;          ///< Names of headers expected in the trailer part, parsed from "Trailer" header.
 
     std::vector<qb::protocol::hpack::HeaderField> synthetic_request_headers; ///< For PUSH_PROMISE validation/info by app
-    bool request_sent = false;                  ///< Initial HEADERS frame for the request
+    bool                                          request_sent = false;      ///< Initial HEADERS frame for the request
 
     /**
      * @brief Construct a new client stream
@@ -350,14 +359,13 @@ struct Http2ClientStream : public Http2StreamBase {
      * @param initial_local_window Initial local flow control window size
      */
     explicit Http2ClientStream(uint32_t stream_id, int64_t initial_peer_window, int64_t initial_local_window)
-        : Http2StreamBase(stream_id, initial_peer_window, initial_local_window) {
-    }
+        : Http2StreamBase(stream_id, initial_peer_window, initial_local_window) {}
 
     // Delete copy operations but allow move operations for container usage
-    Http2ClientStream(const Http2ClientStream&) = delete;
-    Http2ClientStream& operator=(const Http2ClientStream&) = delete;
-    Http2ClientStream(Http2ClientStream&&) = default;
-    Http2ClientStream& operator=(Http2ClientStream&&) = default;
+    Http2ClientStream(const Http2ClientStream &)            = delete;
+    Http2ClientStream &operator=(const Http2ClientStream &) = delete;
+    Http2ClientStream(Http2ClientStream &&)                 = default;
+    Http2ClientStream &operator=(Http2ClientStream &&)      = default;
 };
 
 /**
@@ -368,32 +376,33 @@ struct Http2ClientStream : public Http2StreamBase {
  */
 struct Http2ServerStream : public Http2StreamBase {
     // Application-specific members for server side
-    qb::http::Request assembled_request;        ///< Request being assembled
-    bool request_dispatched = false;            ///< Request has been dispatched
-    bool response_sent = false;                 ///< Tracks if initial HEADERS frame for response was sent
-    bool server_will_send_trailers = false;     ///< Server intends to send trailers - REVIEW if needed, might be covered by is_trailers
-    std::string method;                         ///< HTTP method from request
+    qb::http::Request assembled_request;           ///< Request being assembled
+    bool              request_dispatched  = false; ///< Request has been dispatched
+    bool              response_sent       = false; ///< Tracks if initial HEADERS frame for response was sent
+    bool        server_will_send_trailers = false; ///< Server intends to send trailers - REVIEW if needed, might be covered by is_trailers
+    std::string method;                            ///< HTTP method from request
 
     // Response sending state for the current response_to_send
-    size_t send_buffer_offset = 0;              ///< Current offset in response_to_send.body().raw()
+    size_t                         send_buffer_offset = 0;        ///< Current offset in response_to_send.body().raw()
     qb::unordered_set<std::string> headers_sent_in_initial_frame; ///< Headers already sent in the first HEADERS frame for this response
 
     // Push promise support
-    uint32_t parent_stream_id = 0;              ///< If *this* stream *is* a server-pushed stream, this is the ID of the client-initiated stream it's associated with.
+    uint32_t parent_stream_id =
+        0; ///< If *this* stream *is* a server-pushed stream, this is the ID of the client-initiated stream it's associated with.
     // uint32_t associated_stream_id = 0;       ///< REMOVED - Consolidate to parent_stream_id for clarity when this stream IS a pushed stream.
 
     // Fields for header processing (incoming request headers)
-    std::vector<qb::protocol::hpack::HeaderField> decoded_header_fields;         ///< Decoded HPACK fields for current header block
-    std::vector<uint8_t> last_received_header_block_fragment;    ///< Raw bytes of last header block for PUSH_PROMISE validation
-    FrameHeader last_received_frame_header;                      ///< Header of the frame that completed the last header block
+    std::vector<qb::protocol::hpack::HeaderField> decoded_header_fields; ///< Decoded HPACK fields for current header block
+    std::vector<uint8_t> last_received_header_block_fragment;            ///< Raw bytes of last header block for PUSH_PROMISE validation
+    FrameHeader          last_received_frame_header;                     ///< Header of the frame that completed the last header block
 
-    qb::io::uri request_uri;                                     ///< URI assembled from incoming request pseudo-headers
-    uint64_t application_tracking_id = 0;                        ///< For app to track request/response pair
+    qb::io::uri request_uri;                 ///< URI assembled from incoming request pseudo-headers
+    uint64_t    application_tracking_id = 0; ///< For app to track request/response pair
 
     // State for current outgoing response
-    bool has_pending_data_to_send = false; ///< True if response_to_send.body() has data remaining or if trailers are pending after body.
-    qb::http::Response response_to_send;   ///< The complete response object being sent (headers, body, trailers).
-    bool is_trailers = false;              ///< True if response_to_send includes trailers that need to be sent after the body.
+    bool has_pending_data_to_send = false;  ///< True if response_to_send.body() has data remaining or if trailers are pending after body.
+    qb::http::Response response_to_send;    ///< The complete response object being sent (headers, body, trailers).
+    bool               is_trailers = false; ///< True if response_to_send includes trailers that need to be sent after the body.
 
     /**
      * @brief Construct a new server stream
@@ -403,22 +412,22 @@ struct Http2ServerStream : public Http2StreamBase {
      */
     explicit Http2ServerStream(uint32_t stream_id, int64_t initial_peer_window, int64_t initial_local_window)
         : Http2StreamBase(stream_id, initial_peer_window, initial_local_window) {
-         state = Http2StreamConcreteState::IDLE;
+        state = Http2StreamConcreteState::IDLE;
     }
 
     // Delete copy operations but allow move operations for container usage
-    Http2ServerStream(const Http2ServerStream&) = delete;
-    Http2ServerStream& operator=(const Http2ServerStream&) = delete;
-    Http2ServerStream(Http2ServerStream&&) = default;
-    Http2ServerStream& operator=(Http2ServerStream&&) = default;
+    Http2ServerStream(const Http2ServerStream &)            = delete;
+    Http2ServerStream &operator=(const Http2ServerStream &) = delete;
+    Http2ServerStream(Http2ServerStream &&)                 = default;
+    Http2ServerStream &operator=(Http2ServerStream &&)      = default;
 };
 
 /**
  * @brief Event for stream-specific errors
  */
 struct Http2StreamErrorEvent {
-    uint32_t stream_id;     ///< Stream identifier
-    ErrorCode error_code;   ///< Error code
+    uint32_t    stream_id;  ///< Stream identifier
+    ErrorCode   error_code; ///< Error code
     std::string message;    ///< Error description
 
     /**
@@ -428,15 +437,17 @@ struct Http2StreamErrorEvent {
      * @param msg Error message
      */
     Http2StreamErrorEvent(uint32_t sid, ErrorCode ec, std::string msg = "")
-        : stream_id(sid), error_code(ec), message(std::move(msg)) {}
+        : stream_id(sid)
+        , error_code(ec)
+        , message(std::move(msg)) {}
 };
 
 /**
  * @brief Event for GOAWAY frame reception
  */
 struct Http2GoAwayEvent {
-    ErrorCode error_code;       ///< Error code from GOAWAY
-    uint32_t last_stream_id;    ///< Last stream ID processed by sender
+    ErrorCode   error_code;     ///< Error code from GOAWAY
+    uint32_t    last_stream_id; ///< Last stream ID processed by sender
     std::string debug_data;     ///< Additional debug information
 
     /**
@@ -446,16 +457,18 @@ struct Http2GoAwayEvent {
      * @param dbg Debug data
      */
     Http2GoAwayEvent(ErrorCode ec, uint32_t lsid, std::string dbg = "")
-        : error_code(ec), last_stream_id(lsid), debug_data(std::move(dbg)) {}
+        : error_code(ec)
+        , last_stream_id(lsid)
+        , debug_data(std::move(dbg)) {}
 };
 
 /**
  * @brief Event for PUSH_PROMISE frame reception
  */
 struct Http2PushPromiseEvent {
-    uint32_t associated_stream_id;  ///< Client-initiated stream this push relates to
-    uint32_t promised_stream_id;    ///< New stream ID for pushed content
-    qb::http::Headers headers;      ///< Decoded request headers from PUSH_PROMISE
+    uint32_t          associated_stream_id; ///< Client-initiated stream this push relates to
+    uint32_t          promised_stream_id;   ///< New stream ID for pushed content
+    qb::http::Headers headers;              ///< Decoded request headers from PUSH_PROMISE
 
     /**
      * @brief Construct a push promise event
@@ -464,16 +477,18 @@ struct Http2PushPromiseEvent {
      * @param h Request headers
      */
     Http2PushPromiseEvent(uint32_t assoc_sid, uint32_t prom_sid, qb::http::Headers h)
-        : associated_stream_id(assoc_sid), promised_stream_id(prom_sid), headers(std::move(h)) {}
+        : associated_stream_id(assoc_sid)
+        , promised_stream_id(prom_sid)
+        , headers(std::move(h)) {}
 };
 
 /**
  * @brief Event for connection-level errors
  */
 struct Http2ConnectionErrorEvent {
-    ErrorCode error_code;   ///< Error code
+    ErrorCode   error_code; ///< Error code
     std::string message;    ///< Error description
-    bool fatal;            ///< If true, connection must be terminated
+    bool        fatal;      ///< If true, connection must be terminated
 
     /**
      * @brief Construct a connection error event
@@ -482,7 +497,9 @@ struct Http2ConnectionErrorEvent {
      * @param is_fatal Whether the error is fatal
      */
     Http2ConnectionErrorEvent(ErrorCode ec, std::string msg, bool is_fatal)
-        : error_code(ec), message(std::move(msg)), fatal(is_fatal) {}
+        : error_code(ec)
+        , message(std::move(msg))
+        , fatal(is_fatal) {}
 };
 
 /**
@@ -491,7 +508,7 @@ struct Http2ConnectionErrorEvent {
  * Centralizes common stream management operations to reduce duplication
  * between client and server implementations.
  */
-template<typename StreamType>
+template <typename StreamType>
 class StreamManager {
 public:
     using StreamMap = qb::unordered_map<uint32_t, StreamType>;
@@ -500,48 +517,50 @@ public:
      * @brief Stream cleanup criteria
      */
     struct CleanupCriteria {
-        qb::duration max_idle_time{};    ///< Maximum idle time (0 = no limit)
-        qb::duration max_age{};          ///< Maximum stream age (0 = no limit)
-        bool cleanup_closed_streams = true;            ///< Remove closed streams
-        bool cleanup_reset_streams = true;             ///< Remove reset streams
-        uint32_t max_total_streams = 0;                ///< Maximum total streams (0 = no limit)
+        qb::duration max_idle_time{};               ///< Maximum idle time (0 = no limit)
+        qb::duration max_age{};                     ///< Maximum stream age (0 = no limit)
+        bool         cleanup_closed_streams = true; ///< Remove closed streams
+        bool         cleanup_reset_streams  = true; ///< Remove reset streams
+        uint32_t     max_total_streams      = 0;    ///< Maximum total streams (0 = no limit)
     };
 
     /**
      * @brief Stream statistics
      */
     struct StreamStats {
-        std::size_t total_streams = 0;
-        std::size_t active_streams = 0;
-        std::size_t closed_streams = 0;
-        std::size_t reset_streams = 0;
-        std::size_t idle_streams = 0;
+        std::size_t               total_streams  = 0;
+        std::size_t               active_streams = 0;
+        std::size_t               closed_streams = 0;
+        std::size_t               reset_streams  = 0;
+        std::size_t               idle_streams   = 0;
         std::chrono::milliseconds oldest_stream_age{0};
         std::chrono::milliseconds average_stream_age{0};
     };
 
 private:
-    StreamMap& _streams;
+    StreamMap &_streams;
 
 public:
     /**
      * @brief Construct stream manager
      * @param streams Reference to the stream map
      */
-    explicit StreamManager(StreamMap& streams) : _streams(streams) {}
+    explicit StreamManager(StreamMap &streams)
+        : _streams(streams) {}
 
     /**
      * @brief Clean up streams based on criteria
      * @param criteria Cleanup criteria
      * @return Number of streams removed
      */
-    std::size_t cleanup_streams(const CleanupCriteria& criteria) {
+    std::size_t
+    cleanup_streams(const CleanupCriteria &criteria) {
         std::size_t removed_count = 0;
-        auto now = std::chrono::steady_clock::now();
+        auto        now           = std::chrono::steady_clock::now();
 
-        for (auto it = _streams.begin(); it != _streams.end(); ) {
-            const StreamType& stream = it->second;
-            bool should_remove = false;
+        for (auto it = _streams.begin(); it != _streams.end();) {
+            const StreamType &stream        = it->second;
+            bool              should_remove = false;
 
             // Check if stream is closed and should be cleaned up
             if (criteria.cleanup_closed_streams && stream.is_closed()) {
@@ -549,15 +568,13 @@ public:
             }
 
             // Check if stream is reset and should be cleaned up
-            if (criteria.cleanup_reset_streams &&
-                (stream.rst_stream_received || stream.rst_stream_sent)) {
+            if (criteria.cleanup_reset_streams && (stream.rst_stream_received || stream.rst_stream_sent)) {
                 should_remove = true;
             }
 
             // Check idle time
             if (criteria.max_idle_time.count() > 0) {
-                auto idle_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - stream.last_activity);
+                auto idle_time = std::chrono::duration_cast<std::chrono::milliseconds>(now - stream.last_activity);
                 if (idle_time > criteria.max_idle_time) {
                     should_remove = true;
                 }
@@ -565,8 +582,7 @@ public:
 
             // Check age
             if (criteria.max_age.count() > 0) {
-                auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - stream.created_at);
+                auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - stream.created_at);
                 if (age > criteria.max_age) {
                     should_remove = true;
                 }
@@ -592,11 +608,9 @@ public:
 
             // Sort by age (oldest first)
             std::sort(candidates.begin(), candidates.end(),
-                     [](const auto& a, const auto& b) {
-                         return a->second.created_at < b->second.created_at;
-                     });
+                      [](const auto &a, const auto &b) { return a->second.created_at < b->second.created_at; });
 
-            std::size_t to_remove = _streams.size() - criteria.max_total_streams;
+            std::size_t to_remove  = _streams.size() - criteria.max_total_streams;
             std::size_t can_remove = std::min(to_remove, candidates.size());
 
             for (std::size_t i = 0; i < can_remove; ++i) {
@@ -612,7 +626,8 @@ public:
      * @brief Get stream statistics
      * @return Stream statistics
      */
-    [[nodiscard]] StreamStats get_statistics() const {
+    [[nodiscard]] StreamStats
+    get_statistics() const {
         StreamStats stats;
         stats.total_streams = _streams.size();
 
@@ -620,13 +635,12 @@ public:
             return stats;
         }
 
-        auto now = std::chrono::steady_clock::now();
+        auto                      now = std::chrono::steady_clock::now();
         std::chrono::milliseconds total_age{0};
         std::chrono::milliseconds oldest_age{0};
 
-        for (const auto& [stream_id, stream] : _streams) {
-            auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - stream.created_at);
+        for (const auto &[stream_id, stream] : _streams) {
+            auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - stream.created_at);
             total_age += age;
 
             if (age > oldest_age) {
@@ -644,7 +658,7 @@ public:
             }
         }
 
-        stats.oldest_stream_age = oldest_age;
+        stats.oldest_stream_age  = oldest_age;
         stats.average_stream_age = std::chrono::milliseconds(total_age.count() / _streams.size());
 
         return stats;
@@ -656,9 +670,9 @@ public:
      * @param is_server Whether this is server-side (affects stream ID parity check)
      * @return true if all relevant streams are closed
      */
-    [[nodiscard]] bool are_all_relevant_streams_closed(uint32_t last_processed_stream_id,
-                                                       bool is_server) const {
-        for (const auto& [stream_id, stream] : _streams) {
+    [[nodiscard]] bool
+    are_all_relevant_streams_closed(uint32_t last_processed_stream_id, bool is_server) const {
+        for (const auto &[stream_id, stream] : _streams) {
             // Skip streams that are beyond the GOAWAY boundary
             if (last_processed_stream_id > 0) {
                 // For server: only check client-initiated streams (odd IDs)
@@ -685,16 +699,16 @@ public:
      * @param server_initiated_only Whether to count only server-initiated streams
      * @return Number of active streams
      */
-    [[nodiscard]] std::size_t get_active_stream_count(bool server_initiated_only = false) const {
+    [[nodiscard]] std::size_t
+    get_active_stream_count(bool server_initiated_only = false) const {
         std::size_t count = 0;
 
-        for (const auto& [stream_id, stream] : _streams) {
+        for (const auto &[stream_id, stream] : _streams) {
             if (server_initiated_only && (stream_id % 2 == 1)) {
                 continue; // Skip client-initiated streams
             }
 
-            if (!stream.is_closed() &&
-                stream.state != Http2StreamConcreteState::IDLE) {
+            if (!stream.is_closed() && stream.state != Http2StreamConcreteState::IDLE) {
                 count++;
             }
         }
@@ -708,10 +722,11 @@ public:
      * @param old_initial_size Old initial window size
      * @return Number of streams that had overflow errors
      */
-    std::size_t update_all_stream_windows(uint32_t new_initial_size, uint32_t old_initial_size) {
+    std::size_t
+    update_all_stream_windows(uint32_t new_initial_size, uint32_t old_initial_size) {
         std::size_t error_count = 0;
 
-        for (auto& [stream_id, stream] : _streams) {
+        for (auto &[stream_id, stream] : _streams) {
             if (!stream.update_peer_window_size(new_initial_size, old_initial_size)) {
                 error_count++;
                 // Mark stream for reset due to flow control error
@@ -726,12 +741,12 @@ public:
      * @brief Find streams that need WINDOW_UPDATE
      * @return Vector of stream IDs that need updates
      */
-    [[nodiscard]] std::vector<uint32_t> find_streams_needing_window_update() const {
+    [[nodiscard]] std::vector<uint32_t>
+    find_streams_needing_window_update() const {
         std::vector<uint32_t> stream_ids;
 
-        for (const auto& [stream_id, stream] : _streams) {
-            if (stream.processed_bytes_for_window_update >= stream.window_update_threshold &&
-                stream.can_receive_data()) {
+        for (const auto &[stream_id, stream] : _streams) {
+            if (stream.processed_bytes_for_window_update >= stream.window_update_threshold && stream.can_receive_data()) {
                 stream_ids.push_back(stream_id);
             }
         }
