@@ -90,7 +90,7 @@ Inside `initialize_routes()`, a controller exposes the same verb methods as a ro
 | --- | --- |
 | `get`, `post`, `put`, `del`, `patch`, `options`, `head` | `qb::http::method::GET … HEAD` |
 
-`del` (not `delete`) is the spelling for `DELETE` throughout the verb API — `DELETE` collides with a Windows macro. Each verb has three overloads, mirroring [Defining routes](./04-defining-routes.md):
+`del` (not `delete`) is the spelling for `DELETE` throughout the verb API — `delete` is a C++ keyword and cannot be a method name. Each verb has three overloads, mirroring [Defining routes](./04-defining-routes.md):
 
 - `get(path, RouteHandlerFn)` — a lambda or `MEMBER_HANDLER`-wrapped member.
 - `get<MyCustomRoute>(path, ctor_args...)` — constructs an [`ICustomRoute`](./09-custom-middleware.md) in place.

@@ -27,5 +27,5 @@ reassembly limits, an HTTP/3 pending-request queue bound) and rejects malformed 
 padding, control characters in quoted header values). Report any case where these bounds can be bypassed or
 where untrusted input reaches an unsafe path.
 
-TLS-dependent features (HTTPS, secure WebSocket, HTTP/2, HTTP/3, JWT, auth) require an SSL-enabled build
-(`QB_HAS_SSL`); review your build configuration as part of your threat model.
+TLS-dependent features (HTTPS, WebSocket — all of it, even plaintext `ws://`, HTTP/2, HTTP/3, JWT, auth)
+require an SSL-enabled build (`QB_HAS_SSL`); review your build configuration as part of your threat model.
