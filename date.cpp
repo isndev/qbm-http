@@ -18,6 +18,7 @@
 #include <charconv> // For std::from_chars - faster than std::stoi, no exceptions
 #include <ctime>
 #include <iomanip>
+#include <qb/system/time.h> // qb::safe_gmtime / safe_timegm / safe_localtime (portable, thread-safe)
 #include <sstream>
 #include <string_view>
 #include <vector>
@@ -89,25 +90,15 @@ make_time_point_utc(int year, int month, int day, int hour, int minute, int seco
     tm_value.tm_min  = expected_minute;
     tm_value.tm_sec  = expected_second;
 
-#if defined(_MSC_VER) || defined(__MINGW32__)
-    time_t time_value = _mkgmtime(&tm_value);
-#else
-    time_t time_value = timegm(&tm_value);
-#endif
-    if (time_value == static_cast<time_t>(-1)) {
-        return std::nullopt;
-    }
+    // Portable UTC tm <-> time_t (qb core): exact for all dates, incl. pre-1970
+    // which _mkgmtime rejects on Windows. The round-trip below still validates
+    // the calendar date (e.g. rejects Feb 31, which normalizes to a different day).
+    const time_t time_value = qb::safe_timegm(tm_value);
 
     tm normalized{};
-#if defined(_MSC_VER) || defined(__MINGW32__)
-    if (gmtime_s(&normalized, &time_value) != 0) {
+    if (!qb::safe_gmtime(time_value, normalized)) {
         return std::nullopt;
     }
-#else
-    if (gmtime_r(&time_value, &normalized) == nullptr) {
-        return std::nullopt;
-    }
-#endif
 
     if (normalized.tm_year != expected_year || normalized.tm_mon != expected_month || normalized.tm_mday != expected_day
         || normalized.tm_hour != expected_hour || normalized.tm_min != expected_minute || normalized.tm_sec != expected_second) {
@@ -127,13 +118,8 @@ format_http_date(std::chrono::system_clock::time_point const tp) noexcept {
     const auto time_t_value = std::chrono::system_clock::to_time_t(tp);
     tm         tm_value{};
 
-#if defined(_MSC_VER) || defined(__MINGW32__)
-    if (gmtime_s(&tm_value, &time_t_value) != 0)
+    if (!qb::safe_gmtime(time_t_value, tm_value))
         return {};
-#else
-    if (gmtime_r(&time_t_value, &tm_value) == nullptr)
-        return {};
-#endif
 
     std::ostringstream oss;
     oss << DAY_NAMES[tm_value.tm_wday] << ", " << (tm_value.tm_mday < 10 ? "0" : "") << tm_value.tm_mday << " " << MONTH_NAMES[tm_value.tm_mon]
@@ -453,9 +439,12 @@ now() noexcept {
 
 std::string
 format_timestamp(const std::chrono::system_clock::time_point &tp) {
-    auto time = std::chrono::system_clock::to_time_t(tp);
+    auto    time = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm_value{};
+    if (!qb::safe_localtime(time, tm_value)) // thread-safe; std::localtime shares a static tm
+        return {};
     char buf[100];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&time));
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_value);
     return std::string(buf);
 }
 } // namespace qb::http::date

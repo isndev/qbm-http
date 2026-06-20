@@ -405,6 +405,11 @@ Client::arm_request_timeout(std::uint64_t request_id) {
     if (_request_timeout <= qb::duration::zero()) {
         return;
     }
+    schedule_request_timeout(request_id, _request_timeout);
+}
+
+void
+Client::schedule_request_timeout(std::uint64_t request_id, qb::duration delay) {
     auto weak_self = weak_from_this();
     qb::io::async::callback(
         [weak_self, request_id]() {
@@ -412,14 +417,22 @@ Client::arm_request_timeout(std::uint64_t request_id) {
             if (!self) {
                 return;
             }
+            const auto now = std::chrono::steady_clock::now();
             for (auto const &ctx : self->_pending_requests) {
                 if (!ctx || ctx->request_id != request_id) {
                     continue;
                 }
-                auto const elapsed = std::chrono::duration_cast<qb::duration>(std::chrono::steady_clock::now() - ctx->created_at);
+                const auto elapsed = std::chrono::duration_cast<qb::duration>(now - ctx->created_at);
                 if (elapsed >= self->_request_timeout) {
                     self->fail_pending_request(request_id, "HTTP/3 request timeout while pending", qb::http::status::REQUEST_TIMEOUT);
                     self->process_pending_requests();
+                } else {
+                    // The event-loop timer source can wake this callback slightly
+                    // before the steady_clock deadline (the two clocks are not the
+                    // same). Re-arm for the remaining time instead of dropping the
+                    // timeout — otherwise the one-shot fire is lost and the request
+                    // stays queued forever (never completes, never fails).
+                    self->schedule_request_timeout(request_id, self->_request_timeout - elapsed);
                 }
                 return;
             }
@@ -428,8 +441,10 @@ Client::arm_request_timeout(std::uint64_t request_id) {
             if (it == self->_active_requests.end()) {
                 return;
             }
-            auto const elapsed = std::chrono::duration_cast<qb::duration>(std::chrono::steady_clock::now() - it->second->created_at);
+            const auto elapsed = std::chrono::duration_cast<qb::duration>(now - it->second->created_at);
             if (elapsed < self->_request_timeout) {
+                // Woke early (see note above) — re-arm for the remaining time.
+                self->schedule_request_timeout(request_id, self->_request_timeout - elapsed);
                 return;
             }
             const auto stream_id = it->first;
@@ -437,7 +452,7 @@ Client::arm_request_timeout(std::uint64_t request_id) {
             self->reset_stream(0, stream_id, 0x0105);
             self->process_pending_requests();
         },
-        _request_timeout);
+        delay);
 }
 
 qb::http::Response

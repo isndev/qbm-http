@@ -79,16 +79,48 @@ certs_available() {
     return cert.good() && key.good();
 }
 
+// Runs "<curl_cmd> --version" and reports whether that curl was built with
+// HTTP/3 support (its "Features:" line then contains "HTTP3"). curl_cmd is a
+// ready-to-run shell token (a quoted path, or a bare "curl"/"curl.exe" resolved
+// via PATH). Cross-platform: the stock Windows curl uses Schannel (no HTTP/3),
+// so this correctly returns false there.
+bool
+curl_command_has_http3(std::string const &curl_cmd) {
+    const auto        tmp = std::filesystem::temp_directory_path() / "qb-curl-h3-probe.txt";
+    const std::string cmd = curl_cmd + " --version > \"" + tmp.string() + "\" 2>&1";
+    std::system(cmd.c_str()); // rc is unreliable across shells; inspect the output instead
+    std::string content;
+    {
+        std::ifstream in(tmp);
+        content.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    return content.find("HTTP3") != std::string::npos;
+}
+
+// Locates an HTTP/3-capable curl, in priority order: the QB_HTTP3_CURL override,
+// the well-known Homebrew locations (macOS), then any curl on PATH — each
+// verified to actually support HTTP/3. Returns {} when none is available (the
+// interop test then skips cleanly). Replaces the old macOS-only path list.
 std::filesystem::path
-homebrew_curl_path() {
+http3_curl_path() {
     if (auto const *configured = std::getenv("QB_HTTP3_CURL"); configured && *configured) {
         return configured;
     }
     for (auto const &candidate :
          {std::filesystem::path{"/opt/homebrew/opt/curl/bin/curl"}, std::filesystem::path{"/usr/local/opt/curl/bin/curl"}}) {
-        if (std::filesystem::exists(candidate)) {
+        if (std::filesystem::exists(candidate) && curl_command_has_http3("\"" + candidate.string() + "\"")) {
             return candidate;
         }
+    }
+#if defined(_WIN32)
+    const std::filesystem::path on_path{"curl.exe"};
+#else
+    const std::filesystem::path on_path{"curl"};
+#endif
+    if (curl_command_has_http3(on_path.string())) {
+        return on_path;
     }
     return {};
 }
@@ -2451,8 +2483,9 @@ TEST(Http3InteropTest, HomebrewCurlCanCallQbHttp3ServerWhenAvailable) {
     if (!certs_available()) {
         GTEST_SKIP() << "test TLS certificates are unavailable";
     }
-    if (!std::filesystem::exists(homebrew_curl_path())) {
-        GTEST_SKIP() << "Homebrew curl with HTTP/3 support is unavailable";
+    const auto curl = http3_curl_path();
+    if (curl.empty()) {
+        GTEST_SKIP() << "No HTTP/3-capable curl found (set QB_HTTP3_CURL, or install a curl built with HTTP/3)";
     }
 
     qb::io::async::init();
@@ -2474,7 +2507,7 @@ TEST(Http3InteropTest, HomebrewCurlCanCallQbHttp3ServerWhenAvailable) {
     const auto code_path = base.string() + ".code";
     const auto err_path  = base.string() + ".err";
 
-    const auto command = "\"" + homebrew_curl_path().string()
+    const auto command = "\"" + curl.string()
                          + "\""
                            " --http3-only --insecure --silent --show-error --max-time 5"
                            " --output \""

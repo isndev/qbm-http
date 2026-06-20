@@ -26,7 +26,11 @@
  *         limitations under the License.
  */
 
-#include <arpa/inet.h>
+// The RawSocket harness below opens a plain TCP socket to the server. Use qb-io's
+// cross-platform socket layer (platform socket headers + the socket_type alias and
+// closesocket() shim) so it builds on POSIX and Windows; Winsock is initialised by
+// qb-io's global ws2_32 guard, linked in via the qb WebSocket server this test drives.
+#include <qb/io/system/sys__socket.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -34,15 +38,11 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <mutex>
-#include <netinet/in.h>
 #include <qb/io/async.h>
 #include <set>
 #include <stdexcept>
 #include <string_view>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <thread>
-#include <unistd.h>
 #include "../ws/ws.h"
 
 // Utiliser des namespace plus spécifiques pour éviter les ambiguïtés
@@ -262,31 +262,39 @@ public:
 };
 
 class RawSocket {
-    int _fd{-1};
+    socket_type _fd{qb::io::inet::invalid_socket};
 
 public:
     explicit RawSocket(int port) {
         _fd = ::socket(AF_INET6, SOCK_STREAM, 0);
-        if (_fd < 0) {
+        if (_fd == qb::io::inet::invalid_socket) {
             throw std::runtime_error("socket() failed");
         }
 
+        // SO_RCVTIMEO/SO_SNDTIMEO take a struct timeval on POSIX but a DWORD of
+        // milliseconds on Windows — set the right shape for each platform.
+#ifdef _WIN32
+        DWORD timeout = 2000;
+        ::setsockopt(_fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+        ::setsockopt(_fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+#else
         timeval timeout{};
         timeout.tv_sec = 2;
         ::setsockopt(_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
 
         sockaddr_in6 addr{};
         addr.sin6_family = AF_INET6;
         addr.sin6_port   = htons(static_cast<std::uint16_t>(port));
         if (::inet_pton(AF_INET6, "::1", &addr.sin6_addr) != 1) {
-            ::close(_fd);
-            _fd = -1;
+            closesocket(_fd);
+            _fd = qb::io::inet::invalid_socket;
             throw std::runtime_error("inet_pton(::1) failed");
         }
         if (::connect(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
-            ::close(_fd);
-            _fd = -1;
+            closesocket(_fd);
+            _fd = qb::io::inet::invalid_socket;
             throw std::runtime_error("connect(::1) failed");
         }
     }
@@ -295,8 +303,8 @@ public:
     RawSocket &operator=(RawSocket const &) = delete;
 
     ~RawSocket() {
-        if (_fd >= 0) {
-            ::close(_fd);
+        if (_fd != qb::io::inet::invalid_socket) {
+            closesocket(_fd);
         }
     }
 
@@ -305,7 +313,7 @@ public:
         const char *data = bytes.data();
         auto        left = bytes.size();
         while (left > 0) {
-            const auto sent = ::send(_fd, data, left, 0);
+            const auto sent = ::send(_fd, data, static_cast<int>(left), 0);
             if (sent <= 0) {
                 throw std::runtime_error("send() failed");
             }
@@ -318,7 +326,7 @@ public:
     recv_some(std::size_t max_bytes = 4096) {
         std::string out;
         out.resize(max_bytes);
-        const auto n = ::recv(_fd, out.data(), out.size(), 0);
+        const auto n = ::recv(_fd, out.data(), static_cast<int>(out.size()), 0);
         if (n <= 0) {
             out.clear();
             return out;
