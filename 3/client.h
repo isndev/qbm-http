@@ -196,6 +196,7 @@ private:
     void fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     void arm_connect_timeout();
     void arm_request_timeout(std::uint64_t request_id);
+    void schedule_request_timeout(std::uint64_t request_id, qb::duration delay);
     [[nodiscard]] bool               has_pending_or_active_work() const noexcept;
     [[nodiscard]] qb::http::Response create_error_response(qb::http::status status, std::string const &message);
 };

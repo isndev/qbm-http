@@ -20,7 +20,7 @@
 // PERFORMANCE FIX: Removed <sstream> - no longer using std::ostringstream
 #include <charconv>  // PERFORMANCE FIX: For std::from_chars (C++17) - faster than std::stoi
 #include <stdexcept> // For std::runtime_error
-// #include <qb/system/timestamp.h> // Not directly used here, date.h handles conversions
+// #include <qb/system/time.h> // Not directly used here, date.h handles conversions
 // <chrono>, <string>, <vector> are included via cookie.h or other headers above
 
 namespace qb::http {

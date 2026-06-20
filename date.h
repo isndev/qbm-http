@@ -20,7 +20,7 @@
 #include <string_view> // For std::string_view
 #include <utility>     // For std::pair (though not directly used in this header, often related)
 
-#include <qb/system/timestamp.h> // For qb::wall_time
+#include <qb/system/time.h> // For qb::wall_time
 #include "./utility.h"
 
 namespace qb::http {

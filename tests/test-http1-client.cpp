@@ -8,10 +8,13 @@
 #include <thread>
 #include <vector>
 
-#include <arpa/inet.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <unistd.h>
+// The raw_socket harness below talks to the server over a plain TCP socket.
+// Use qb-io's cross-platform socket layer instead of the POSIX headers directly:
+// <qb/io/system/sys__socket.h> pulls in the right platform socket headers, the
+// `socket_type` alias and the `closesocket()` shim, so the harness builds on POSIX
+// and Windows alike. Winsock is initialised by qb-io's global ws2_32 guard, which
+// is linked in here because the test drives a qb HTTP server (qb-io sockets).
+#include <qb/io/system/sys__socket.h>
 
 #include "../http.h"
 
@@ -164,12 +167,12 @@ lowercase(std::string value) {
 }
 
 class raw_socket {
-    int _fd = -1;
+    socket_type _fd = qb::io::inet::invalid_socket;
 
 public:
     explicit raw_socket(int port) {
         _fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (_fd < 0) {
+        if (_fd == qb::io::inet::invalid_socket) {
             throw std::runtime_error("socket failed");
         }
         sockaddr_in addr{};
@@ -184,8 +187,8 @@ public:
     }
 
     ~raw_socket() {
-        if (_fd >= 0) {
-            ::close(_fd);
+        if (_fd != qb::io::inet::invalid_socket) {
+            closesocket(_fd);
         }
     }
 
@@ -197,7 +200,7 @@ public:
         const char *data      = wire.data();
         std::size_t remaining = wire.size();
         while (remaining) {
-            const auto sent = ::send(_fd, data, remaining, 0);
+            const auto sent = ::send(_fd, data, static_cast<int>(remaining), 0);
             if (sent <= 0) {
                 throw std::runtime_error("send failed");
             }
@@ -216,7 +219,7 @@ public:
             FD_ZERO(&fds);
             FD_SET(_fd, &fds);
             timeval    tv{0, 50 * 1000};
-            const auto ready = ::select(_fd + 1, &fds, nullptr, nullptr, &tv);
+            const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
             if (ready < 0 && errno == EINTR) {
                 continue;
             }
@@ -226,7 +229,7 @@ public:
             if (ready == 0) {
                 continue;
             }
-            const auto n = ::recv(_fd, buffer, sizeof(buffer), 0);
+            const auto n = ::recv(_fd, buffer, static_cast<int>(sizeof(buffer)), 0);
             if (n <= 0) {
                 break;
             }
@@ -244,7 +247,7 @@ public:
             FD_ZERO(&fds);
             FD_SET(_fd, &fds);
             timeval    tv{0, 50 * 1000};
-            const auto ready = ::select(_fd + 1, &fds, nullptr, nullptr, &tv);
+            const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
             if (ready > 0) {
                 const auto n = ::recv(_fd, &c, 1, MSG_PEEK);
                 return n == 0;

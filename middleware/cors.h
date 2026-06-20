@@ -22,7 +22,7 @@
 #include <chrono> // For regex timeout protection
 #include <functional>
 #include <memory>
-#include <qb/system/timestamp.h>
+#include <qb/system/time.h>
 #include <regex>
 #include <stdexcept>
 #include <string>
