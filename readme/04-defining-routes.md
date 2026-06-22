@@ -65,7 +65,7 @@ The fastest way to define a route is a lambda. It conforms to `RouteHandlerFn` a
 
 class ApiServer : public qb::Actor, public qb::http::Server<> {
 public:
-    bool onInit() override {
+    qb::io::async::task<bool> onInit() override {
         // GET /health — no body, just a status helper.
         router().get("/health", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
             ctx->no_content();  // 204; finalizes the context for you
@@ -79,7 +79,7 @@ public:
         });
 
         router().compile();  // mandatory before serving — see Routing overview
-        return listen({"tcp://0.0.0.0:8080"}) && (start(), true);
+        co_return listen({"tcp://0.0.0.0:8080"}) && (start(), true);
     }
 };
 ```
