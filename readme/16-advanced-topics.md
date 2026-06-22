@@ -151,7 +151,7 @@ The HTTP server is an ordinary qb actor. You make one by mixing `qb::http::Serve
 
 class ApiServer : public qb::Actor, public qb::http::Server<> {
 public:
-    bool onInit() override {
+    qb::io::async::task<bool> onInit() override {
         router().get("/health", [](auto ctx) {
             ctx->response().body() = "ok";
             ctx->complete();
@@ -159,9 +159,9 @@ public:
         router().compile();                       // once, before serving
         if (listen({"tcp://0.0.0.0:8080"})) {     // qb::io::uri; returns "is listening"
             start();
-            return true;
+            co_return true;
         }
-        return false;
+        co_return false;
     }
 };
 

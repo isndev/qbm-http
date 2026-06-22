@@ -75,7 +75,7 @@ An HTTP/1.1 server is an actor that mixes in `qb::http::Server<>`, defines route
 
 class ApiServer : public qb::Actor, public qb::http::Server<> {
 public:
-    bool onInit() override {
+    qb::io::async::task<bool> onInit() override {
         router().get("/", [](auto ctx) {
             ctx->response().body() = "Hello from qbm-http";
             ctx->complete();
@@ -92,9 +92,9 @@ public:
         if (listen({"tcp://0.0.0.0:8080"})) {    // qb::io::uri
             start();
             std::cout << "listening on http://localhost:8080\n";
-            return true;
+            co_return true;
         }
-        return false;
+        co_return false;
     }
 };
 
@@ -123,7 +123,7 @@ The one-shot client free functions (`GET`, `POST`, `REQUEST`, ...) heap-allocate
 
 class FetchActor : public qb::Actor {
 public:
-    bool onInit() override {
+    qb::io::async::task<bool> onInit() override {
         qb::http::Request req{{"http://localhost:8080/users/42"}};
         req.add_header("User-Agent", "qbm-http/1.0");
 
@@ -132,7 +132,7 @@ public:
                 qb::io::cout() << "body: " << reply.response.body().as<std::string>() << "\n";
             kill();
         });
-        return true;
+        co_return true;
     }
 };
 ```
