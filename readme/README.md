@@ -57,10 +57,10 @@ Read top to bottom for a first pass. Each row links the page and gives its one-l
 | 03 | [Routing overview](./03-routing-overview.md) | The `Router`, path matching, path parameters, and the compiled handler tree. | — |
 | 04 | [Defining routes](./04-defining-routes.md) | `get`/`post`/`put`/`del`/…, lambda handlers, and `ICustomRoute` class-based routes. | — |
 | 05 | [Route groups](./05-route-groups.md) | `RouteGroup`: shared path prefixes and group-scoped middleware. | — |
-| 06 | [Controllers](./06-controllers.md) | `Controller<Session>` and `MEMBER_HANDLER` for class-based route organization. | — |
+| 06 | [Controllers](./06-controllers.md) | `Controller<Session>` for class-based route organization; bind member functions with the unified verb API. | — |
 | 07 | [Middleware overview](./07-middleware.md) | The middleware concept, the task chain, and execution flow through a request. | — |
 | 08 | [Standard middleware](./08-standard-middleware.md) | The shipped middleware set: CORS, compression, logging, rate-limit, security headers, and more. | — |
-| 09 | [Custom middleware](./09-custom-middleware.md) | Writing your own functional or class-based middleware and coroutine middleware. | — |
+| 09 | [Custom middleware](./09-custom-middleware.md) | Writing your own functional, coroutine, or class-based middleware. | — |
 | 10 | [The request context](./10-request-context.md) | `Context<Session>`: request/response access, response helpers, typed data slots, lifecycle hooks, `complete`/`cancel`. | — |
 | 11 | [Authentication system](./11-authentication.md) | `auth::Options`/`User`/`Manager` for JWT issue and verify; the auth and JWT middleware. | SSL |
 | 12 | [Validation system](./12-validation.md) | `RequestValidator`, `SchemaValidator`, parameter rules, and sanitizers. | — |

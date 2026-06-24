@@ -173,7 +173,7 @@ The server session and protocol handler enforce limits that protect against reso
 ### Concurrency limit
 
 The server advertises `SETTINGS_MAX_CONCURRENT_STREAMS = 50` to clients (reduced from 100 for DDoS resistance) and refuses new client streams with `RST_STREAM(REFUSED_STREAM)` once active client streams reach that cap. The persistent client caps its own outbound concurrency at 100 by default; configure it with `set_max_concurrent_streams`.
-<!-- src: qbm/http/2/protocol/server.h:392-397,1318; qbm/http/2/http2.h:58; qbm/http/2/client.h:174,331 -->
+<!-- src: qbm/http/2/protocol/server.h:408-412,1369; qbm/http/2/http2.h:56; qbm/http/2/client.h:178,353 -->
 
 ### Session timeout and stream cleanup
 
@@ -251,7 +251,20 @@ client->push_request(std::move(req), [](qb::http::Response res) {
 ```
 
 `push_request` triggers an implicit connect when needed, so you do not have to call `connect()` first; queued requests flush once the handshake completes. To run several requests as one batch with a single callback that fires when all responses are in (order preserved), use `push_requests(std::vector<Request>, BatchResponseCallback)` — each request travels on its own stream concurrently.
-<!-- src: qbm/http/2/client.h:266,290; qbm/http/tests/test-coro-http2-client.cpp:469 -->
+<!-- src: qbm/http/2/client.h:277,300; qbm/http/tests/test-coro-http2-client.cpp:469 -->
+
+### Bounding outstanding work
+
+Beyond the stream-concurrency cap, the client bounds the **total outstanding request set** (queued + in-flight). The limit is `set_max_pending_requests(size_t)` (default `_max_pending_requests = 1024`); once the combined count of pending and active requests reaches it, `push_request()` and `push_requests()` **reject immediately with `503 Service Unavailable`** rather than growing the queue without bound. This is a DoS guard that matches the HTTP/1.1 and HTTP/3 clients — a disconnected or saturated client cannot accumulate work indefinitely. The callback (or the per-element responses for a batch) receives the synthesized 503; the coroutine overloads surface the same 503 as their resolved `Response`.
+
+```cpp
+// src: qbm/http/2/client.h:359-366; qbm/http/2/client.cpp:189-194,245-250
+client->set_max_pending_requests(256);       // tighten the outstanding-work bound
+if (!client->push_request(std::move(req), cb)) {
+    // false return == rejected; cb already fired with a 503 response
+}
+```
+<!-- src: qbm/http/2/client.h:277,300,359-366 -->
 
 ### Coroutine API
 
@@ -310,8 +323,10 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
   <!-- src: qbm/http/2/http2.h:177-185 -->
 - **The idle-stream sweep is opportunistic.** It runs only on write activity and no more than once per `CLEANUP_INTERVAL` (5 s). A fully idle connection relies on the 60 s session timeout instead — do not assume `STREAM_IDLE_TIMEOUT` fires on a silent connection.
   <!-- src: qbm/http/2/http2.h:284-304 -->
-- **Server concurrency defaults to 50, client to 100.** They are independent: the server's `SETTINGS_MAX_CONCURRENT_STREAMS = 50` bounds inbound client streams (excess gets `REFUSED_STREAM`); `client->set_max_concurrent_streams(...)` bounds the client's outbound streams. Raise the server limit only if you have measured headroom.
-  <!-- src: qbm/http/2/protocol/server.h:1318; qbm/http/2/client.h:174 -->
+- **Server concurrency defaults to 50, client to 100.** They are independent: the server's `SETTINGS_MAX_CONCURRENT_STREAMS = 50` bounds inbound client streams (excess gets `REFUSED_STREAM`); `client->set_max_concurrent_streams(...)` bounds the client's outbound *in-flight* streams (default 100). Raise the server limit only if you have measured headroom.
+  <!-- src: qbm/http/2/protocol/server.h:1369; qbm/http/2/client.h:178,353 -->
+- **The client also caps total outstanding requests.** Separate from stream concurrency, `set_max_pending_requests(...)` (default 1024) bounds queued + active requests; past it `push_request()`/`push_requests()` reject with `503 Service Unavailable` instead of queuing without limit. Tune it down for tighter backpressure, not up without a reason.
+  <!-- src: qbm/http/2/client.h:179,359-366; qbm/http/2/client.cpp:189-194 -->
 - **The client is non-movable; keep the `shared_ptr`.** Constructing one on the stack or trying to move it will not compile. Use `make_client(...)` and store the returned `std::shared_ptr`.
   <!-- src: qbm/http/2/client.h:201-204,483 -->
 - **`set_verify_peer` must precede `connect`.** Changing it after the handshake has no effect. Leave it `true` in production; flip to `false` only for trusted self-signed test endpoints.

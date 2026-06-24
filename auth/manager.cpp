@@ -349,7 +349,9 @@ Manager::verify_token(const std::string &token) const {
                 return std::nullopt;
             }
             const int64_t exp = *exp_opt;
-            if (now > exp + skew) {
+            // Keep skew on the bounded wall-clock `now`, never on the attacker-controlled `exp`
+            // (`exp + skew` overflows for exp near INT64_MAX → signed UB). Mirrors crypto_jwt.cpp.
+            if (now - skew > exp) {
                 return std::nullopt;
             }
         }

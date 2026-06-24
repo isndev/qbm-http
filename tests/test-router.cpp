@@ -178,7 +178,7 @@ TEST_F(RouterTest, RouteWithMiddleware) {
 
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     ASSERT_TRUE(mock_session->_response.has_header("X-Middleware-Applied"));
-    ASSERT_EQ(mock_session->_response.header("X-Middleware-Applied", 0, ""), "true");
+    ASSERT_EQ(mock_session->_response.header("X-Middleware-Applied", 0), "true");
     ASSERT_EQ(mock_session->_response.body().as<std::string>(), "Protected content");
     mock_session->verify_response_write_count();
 }
@@ -417,9 +417,9 @@ TEST_F(RouterTest, MultipleMiddleware) {
 
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     ASSERT_TRUE(mock_session->_response.has_header("X-Middleware-One"));
-    ASSERT_EQ(mock_session->_response.header("X-Middleware-One", 0, ""), "AppliedOne");
+    ASSERT_EQ(mock_session->_response.header("X-Middleware-One", 0), "AppliedOne");
     ASSERT_TRUE(mock_session->_response.has_header("X-Middleware-Two"));
-    ASSERT_EQ(mock_session->_response.header("X-Middleware-Two", 0, ""), "AppliedTwo");
+    ASSERT_EQ(mock_session->_response.header("X-Middleware-Two", 0), "AppliedTwo");
     ASSERT_EQ(mock_session->_response.body().as<std::string>(), "Multi-middleware content");
     mock_session->verify_response_write_count();
 
@@ -510,7 +510,7 @@ TEST_F(RouterTest, AddAndMatchSimpleHeadRoute) {
 
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     ASSERT_TRUE(mock_session->_response.has_header("X-Info-Detail"));
-    ASSERT_EQ(mock_session->_response.header("X-Info-Detail", 0, ""), "SomeDetail");
+    ASSERT_EQ(mock_session->_response.header("X-Info-Detail", 0), "SomeDetail");
     ASSERT_TRUE(mock_session->_response.body().raw().empty()); // Crucial for HEAD
     mock_session->verify_response_write_count();
 }
@@ -529,7 +529,7 @@ TEST_F(RouterTest, AddAndMatchSimpleOptionsRoute) {
 
     ASSERT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
     ASSERT_TRUE(mock_session->_response.has_header("Allow"));
-    ASSERT_EQ(mock_session->_response.header("Allow", 0, ""), "GET, POST, OPTIONS");
+    ASSERT_EQ(mock_session->_response.header("Allow", 0), "GET, POST, OPTIONS");
     mock_session->verify_response_write_count();
 }
 

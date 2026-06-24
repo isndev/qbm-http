@@ -310,28 +310,39 @@ public:
      * @tparam HeaderNameType The type of the header name (e.g., `const char*`, `std::string`, `std::string_view`).
      * @param name The name of the header to retrieve.
      * @param index The 0-based index for headers with multiple values. Defaults to 0 (the first value).
-     * @param not_found_value The value to return (as a `std::string` reference) if the header is not found or the index is out of bounds.
-     *                        Defaults to a static empty `std::string`.
-     * @return A constant reference to the header value string if found. If not found or index is invalid,
-     *         returns a stable fallback string containing `not_found_value`.
+     * @return A constant reference to the header value if present, otherwise to a process-wide static
+     *         empty string. The reference is always safe to keep for the message's lifetime — it is
+     *         never a reference to a temporary. For a custom fallback, use `header_or()`.
      */
     template <typename HeaderNameType>
     [[nodiscard]] const std::string &
-    header(HeaderNameType &&name, std::size_t index = 0, const std::string &not_found_value = std::string{}) const {
-        // Use a static empty string to return a reference to for the default case
-        // (avoids dangling references to the temporary default argument).
-        static const std::string        static_empty_string_value{};
-        static thread_local std::string static_not_found_value;
-
+    header(HeaderNameType &&name, std::size_t index = 0) const {
         const auto it = _headers.find(std::forward<HeaderNameType>(name));
         if (it != _headers.cend() && index < it->second.size()) {
             return it->second[index];
         }
-        if (not_found_value.empty()) {
-            return static_empty_string_value;
+        return detail::empty_string_value;
+    }
+
+    /**
+     * @brief Retrieves a header value, or `fallback` if the header is absent / `index` is out of bounds.
+     *
+     * Returns BY VALUE, so the fallback (literal, temporary, or lvalue) is always safe — no lifetime
+     * caveat. A present header (even with an empty value) yields the header's value, not the fallback.
+     *
+     * @tparam HeaderNameType The type of the header name.
+     * @param name The name of the header to retrieve.
+     * @param fallback Returned when the header is absent (taken by value, moved out on a miss).
+     * @param index The 0-based index for headers with multiple values. Defaults to 0.
+     */
+    template <typename HeaderNameType>
+    [[nodiscard]] std::string
+    header_or(HeaderNameType &&name, std::string fallback, std::size_t index = 0) const {
+        const auto it = _headers.find(std::forward<HeaderNameType>(name));
+        if (it != _headers.cend() && index < it->second.size()) {
+            return it->second[index];
         }
-        static_not_found_value = not_found_value;
-        return static_not_found_value;
+        return fallback;
     }
 
     /**
@@ -340,16 +351,17 @@ public:
      * @tparam HeaderNameType The type of the header name.
      * @param name The name of the header whose value's attributes are to be parsed.
      * @param index The 0-based index if the header has multiple values. Defaults to 0.
-     * @param default_value_for_parsing A `std::string_view` to parse if the header itself is not found.
-     *                                   Defaults to an empty string_view, resulting in an empty attribute map.
+     * @param default_to_parse A `std::string_view` to parse instead when the header is absent or empty.
+     *                         Defaults to empty (→ an empty attribute map).
      * @return A `qb::icase_unordered_map<std::string>` of attribute names to values.
-     *         Returns an empty map if the header is not found and `default_value_for_parsing` is empty.
      */
     template <typename HeaderNameType>
     [[nodiscard]] qb::icase_unordered_map<std::string>
-    attributes(HeaderNameType &&name, std::size_t index = 0, std::string_view default_value_for_parsing = "") const {
-        const std::string &header_value = header(std::forward<HeaderNameType>(name), index, std::string(default_value_for_parsing));
-        return parse_header_attributes(std::string_view(header_value));
+    attributes(HeaderNameType &&name, std::size_t index = 0, std::string_view default_to_parse = "") const {
+        // `header()` returns a stable reference (the stored value, or the static empty on a miss);
+        // `default_to_parse` is a view valid for this call. Both are safe to hand to the parser.
+        const std::string &value = header(std::forward<HeaderNameType>(name), index);
+        return parse_header_attributes(!value.empty() ? std::string_view(value) : default_to_parse);
     }
 
     /**
@@ -390,9 +402,9 @@ public:
      * @brief Adds a header name-value pair. If a header with the same name already exists,
      * this new value is appended to its list of values (supporting multi-value headers).
      * @tparam HeaderNameType Type of the header name (string-like).
-     * @tparam HeaderValueType Type of the header value (convertible to `StringType`).
+     * @tparam HeaderValueType Type of the header value (convertible to `std::string`).
      * @param name The name of the header. Forwarded to map key construction.
-     * @param value The value for the header. Forwarded to `StringType` construction and pushed into vector.
+     * @param value The value for the header. Forwarded to `std::string` construction and pushed into vector.
      */
     template <typename HeaderNameType, typename HeaderValueType>
     void
@@ -427,9 +439,9 @@ public:
      * If a header with the same name exists, all its current values are cleared, and the new
      * `value` becomes its only value.
      * @tparam HeaderNameType Type of the header name.
-     * @tparam HeaderValueType Type of the header value (convertible to `StringType`).
+     * @tparam HeaderValueType Type of the header value (convertible to `std::string`).
      * @param name The name of the header. Forwarded to map key construction.
-     * @param value The value to set for the header. Forwarded to `StringType` construction.
+     * @param value The value to set for the header. Forwarded to `std::string` construction.
      */
     template <typename HeaderNameType, typename HeaderValueType>
     void

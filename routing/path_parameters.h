@@ -184,12 +184,12 @@ public:
      * @return A reference to the parameter's value (`std::string&`).
      * @throws std::out_of_range if the key is not found.
      */
-    [[nodiscard]] auto
+    [[nodiscard]] decltype(auto)
     at(std::string_view key) {
-        return _params.at(key);
+        return _params.at(key); // preserve reference (bare `auto` would copy the std::string)
     }
     /** @copydoc at(std::string_view) */
-    [[nodiscard]] auto
+    [[nodiscard]] decltype(auto)
     at(std::string_view key) const {
         return _params.at(key);
     }

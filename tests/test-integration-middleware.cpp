@@ -308,7 +308,7 @@ TEST_F(MiddlewareHttpIntegrationTest, TimingMiddlewareTest) {
     EXPECT_EQ("Timed route content", response.body().as<std::string>());
     mid_request_count_client++;
 
-    std::string response_time_header_str = response.header("X-Response-Time");
+    std::string response_time_header_str{response.header("X-Response-Time")};
     EXPECT_FALSE(response_time_header_str.empty()) << "X-Response-Time header not found.";
     if (!response_time_header_str.empty()) {
         try {
@@ -381,7 +381,7 @@ TEST_F(MiddlewareHttpIntegrationTest, DISABLED_SecurityHeadersMiddlewareTest) {
     EXPECT_EQ("no-referrer", response.header("Referrer-Policy"));
     EXPECT_EQ("microphone=(), geolocation=()", response.header("Permissions-Policy"));
 
-    std::string csp_header = response.header("Content-Security-Policy");
+    std::string csp_header{response.header("Content-Security-Policy")};
     EXPECT_FALSE(csp_header.empty()) << "Content-Security-Policy header is missing.";
     EXPECT_NE(csp_header.find("script-src 'self' 'nonce-"), std::string::npos)
         << "CSP nonce placeholder not found or incorrect in script-src: " << csp_header;
@@ -602,7 +602,7 @@ TEST_F(MiddlewareHttpIntegrationTest, CorsMiddlewareTest) {
         EXPECT_EQ("http://allowed.example.com", response.header("Access-Control-Allow-Origin"));
         EXPECT_NE(response.header("Access-Control-Allow-Methods").find("POST"), std::string::npos);
         EXPECT_NE(response.header("Access-Control-Allow-Methods").find("GET"), std::string::npos);
-        std::string allow_headers = response.header("Access-Control-Allow-Headers");
+        std::string allow_headers{response.header("Access-Control-Allow-Headers")};
         EXPECT_NE(allow_headers.find("X-Custom-Header"), std::string::npos);
         EXPECT_NE(allow_headers.find("Content-Type"), std::string::npos);
         EXPECT_EQ("true", response.header("Access-Control-Allow-Credentials"));
@@ -686,7 +686,7 @@ TEST_F(MiddlewareHttpIntegrationTest, RateLimitMiddlewareTest) {
         EXPECT_FALSE(response.header("X-RateLimit-Reset").empty());
         long reset_time_sec = 0;
         try {
-            reset_time_sec = std::stol(response.header("X-RateLimit-Reset"));
+            reset_time_sec = std::stol(std::string(response.header("X-RateLimit-Reset")));
         } catch (...) {
         }
         EXPECT_LE(reset_time_sec, 2);
@@ -994,11 +994,11 @@ TEST_F(MiddlewareHttpIntegrationTest, AuthMiddlewareTest) {
     auth_options_for_mw.secret_key(JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST);
     // Algorithm defaults to HMAC_SHA256 in auth::Options, matching our JWT helper.
 
-    auto auth_mw = qb::http::create_jwt_auth_middleware<MiddlewareIntegrationSession>(
+    auto auth_mw = qb::http::jwt_auth_middleware<MiddlewareIntegrationSession>(
         JWT_TEST_SECRET_SIMPLE_FOR_MID_TEST, JWT_TEST_ALGORITHM_SIMPLE_FOR_MID_TEST, "TestAuthMiddlewareInstance");
     // Apply the auth_options to the middleware instance if its constructor doesn't take full options
     // Or, ensure the factory/constructor used correctly sets up the underlying AuthManager.
-    // The create_jwt_auth_middleware factory above takes secret and algorithm string,
+    // The jwt_auth_middleware factory above takes secret and algorithm string,
     // it should internally create appropriate auth::Options for its AuthManager.
 
     auth_mw->with_roles({"editor"}, true); // Require "editor" role.

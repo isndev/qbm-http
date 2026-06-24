@@ -30,7 +30,7 @@ The *route table* is the set of top-level handler nodes registered with the core
 
 - **`Route`** — a terminal node binding one HTTP method and one path segment to a handler (a `RouteHandlerFn` lambda or an `ICustomRoute`).
 - **`RouteGroup`** — a prefix container. Its middleware is inherited by every descendant route, group, and controller.
-- **`Controller`** — a class-based group; you subclass `Controller<Session>`, override `initialize_routes()`, and bind member functions with `MEMBER_HANDLER`.
+- **`Controller`** — a class-based group; you subclass `Controller<Session>`, override `initialize_routes()`, and bind member functions with the unified verb API (`this->get(path, this, &MyController::method)`).
 
 These are described in [Defining routes](./04-defining-routes.md), [Route groups](./05-route-groups.md), and [Controllers](./06-controllers.md). This page covers the model that holds them together.
 
@@ -151,7 +151,7 @@ Parameter and wildcard captures are exposed through the `Context`:
 server->router().get("/files/:bucket/*path", [](auto ctx) {
     // :bucket captures one segment; *path captures the rest, slashes included.
     const std::string bucket = ctx->path_param("bucket");           // e.g. "images"
-    const std::string rel    = ctx->path_param("path", "");         // e.g. "2024/cover.png"
+    const std::string& rel   = ctx->path_param("path");             // e.g. "2024/cover.png"
 
     // Or take the whole set:
     const qb::http::PathParameters& params = ctx->path_parameters();

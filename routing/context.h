@@ -17,12 +17,14 @@
 #pragma once
 
 #include <any>        // For std::any (custom_data)
+#include <charconv>   // For std::from_chars (typed path/query params)
 #include <cstdint>    // For std::uint64_t
 #include <functional> // For std::function (LifecycleHook, _on_finalized_callback)
 #include <memory>     // For std::shared_ptr, std::weak_ptr, std::enable_shared_from_this
 #include <optional>   // For std::optional
 #include <stdexcept>  // For std::bad_any_cast, std::runtime_error (potentially from user code)
 #include <string>     // For std::string
+#include <type_traits> // For std::is_arithmetic_v, std::is_same_v (typed accessors)
 #include <utility>    // For std::move
 #include <vector>     // For std::vector (task_chain, lifecycle_hooks)
 
@@ -118,8 +120,10 @@ private:
     std::optional<std::string> _cancellation_reason_internal;
     ///< Stores the reason if context processing is cancelled.
 
-    std::vector<std::shared_ptr<IAsyncTask<SessionType>>> _task_chain;
-    ///< The current chain of tasks to be executed.
+    /// The current chain of tasks to be executed. Held by `shared_ptr<const ...>` so the immutable,
+    /// shared compiled chain is referenced — not deep-copied — per request (a route's task list is
+    /// built once at compile time and reused across requests). Null == no chain.
+    std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> _task_chain;
     size_t      _current_task_index          = 0; ///< Index of the next task to be executed in `_task_chain`.
     std::size_t _finalization_deferral_depth = 0;
     bool        _finalization_pending        = false;
@@ -243,8 +247,11 @@ private:
             return;
         }
 
-        if (_current_task_index < _task_chain.size()) {
-            auto task_to_execute = _task_chain[_current_task_index];
+        if (_task_chain && _current_task_index < _task_chain->size()) {
+            // Pin the list alive across execute(): the error path may reseat `_task_chain`, which would
+            // otherwise free the vector this task reference points into. One refcount bump, not a copy.
+            const auto  chain_pin       = _task_chain;
+            const auto &task_to_execute = (*chain_pin)[_current_task_index];
             if (task_to_execute) {
                 _lc.task_in_flight = true;
                 try {
@@ -276,11 +283,11 @@ private:
      * Otherwise, the context's internal task chain is replaced with `chain`, the task index is reset,
      * and `proceed_to_next_task_internal()` is called to start processing the first task.
      *
-     * @param chain A `std::vector` of `std::shared_ptr<IAsyncTask<SessionType>>` representing the new task chain.
-     *              The vector is moved into the context.
+     * @param chain A `shared_ptr` to the (immutable, shared) compiled task chain for this request.
+     *              The pointer is moved in — the underlying vector is referenced, never copied.
      */
     void
-    set_task_chain_and_start(std::vector<std::shared_ptr<IAsyncTask<SessionType>>> chain) {
+    set_task_chain_and_start(std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> chain) {
         if (is_cancelled_or_done_internal()) {
             return;
         }
@@ -288,7 +295,7 @@ private:
         _current_task_index = 0;
         _lc.state           = State::Running;
 
-        if (_task_chain.empty()) {
+        if (!_task_chain || _task_chain->empty()) {
             complete(AsyncTaskResult::COMPLETE);
             return;
         }
@@ -491,15 +498,122 @@ public:
     }
 
     /**
-     * @brief Retrieves a specific path parameter by name.
+     * @brief Retrieves a specific path parameter by name (zero-copy).
      * @param name The name of the path parameter (e.g., "id" from "/users/:id").
-     * @param not_found_value The value to return if the parameter is not found. Defaults to an empty string.
-     * @return The string value of the path parameter, or `not_found_value` if it doesn't exist.
+     * @return A constant reference to the parameter's value if present, otherwise to a process-wide
+     *         static empty string (always safe to keep). For a custom fallback use
+     *         `path_param_or<std::string>(name, fallback)`; for a typed value use `path_param<T>(name)`.
      */
-    [[nodiscard]] std::string
-    path_param(const std::string &name, const std::string &not_found_value = "") const {
-        auto value_opt = _path_parameters.get(name);
-        return value_opt ? std::string(*value_opt) : not_found_value;
+    [[nodiscard]] const std::string &
+    path_param(std::string_view name) const {
+        const auto it = _path_parameters.find(name);
+        return it != _path_parameters.end() ? it->second : detail::empty_string_value;
+    }
+
+    // --- Typed accessors (C++20) ----------------------------------------------
+    // Parse a captured value into T without exceptions: integral/floating via
+    // std::from_chars (whole-string match required), bool from true/false/1/0,
+    // string/string_view pass through. Returns nullopt on absence OR parse error.
+
+    /**
+     * @brief Parse a raw captured value into `T` (no throw). Used by the typed
+     *        `path_param<T>` / `query_param<T>` accessors.
+     */
+    template <typename T>
+    [[nodiscard]] static std::optional<T>
+    parse_value(std::string_view sv) noexcept {
+        if constexpr (std::is_same_v<T, std::string>) {
+            return std::string(sv);
+        } else if constexpr (std::is_same_v<T, std::string_view>) {
+            return sv;
+        } else if constexpr (std::is_same_v<T, bool>) {
+            if (sv == "true" || sv == "1") return true;
+            if (sv == "false" || sv == "0") return false;
+            return std::nullopt;
+        } else if constexpr (std::is_arithmetic_v<T>) {
+            T          out{};
+            const auto first = sv.data();
+            const auto last  = sv.data() + sv.size();
+            auto [ptr, ec]   = std::from_chars(first, last, out);
+            if (ec == std::errc{} && ptr == last)
+                return out;
+            return std::nullopt;
+        } else {
+            static_assert(sizeof(T) == 0,
+                          "path_param<T>/query_param<T>: T must be string, string_view, bool, "
+                          "or an arithmetic type");
+            return std::nullopt;
+        }
+    }
+
+    /**
+     * @brief Typed path parameter: `ctx->path_param<int>("id")` → `std::optional<int>`.
+     * @return The parsed value, or `std::nullopt` if the parameter is absent or unparseable.
+     */
+    template <typename T>
+    [[nodiscard]] std::optional<T>
+    path_param(std::string_view name) const {
+        auto v = _path_parameters.get(name);
+        return v ? parse_value<T>(*v) : std::nullopt;
+    }
+
+    /** @brief Typed path parameter with a fallback: never fails, returns `fallback` on absence/parse error. */
+    template <typename T>
+    [[nodiscard]] T
+    path_param_or(std::string_view name, T fallback) const {
+        return path_param<T>(name).value_or(std::move(fallback));
+    }
+
+    /**
+     * @brief Typed query parameter: `ctx->query_param<int>("page")` → `std::optional<int>`.
+     * @return The parsed value, or `std::nullopt` if absent/empty or unparseable.
+     */
+    template <typename T = std::string>
+    [[nodiscard]] std::optional<T>
+    query_param(std::string_view name) const {
+        // Zero-copy: Request::query() returns a stable reference (the stored value, or a static empty
+        // string on a miss), so binding a const-ref here is safe.
+        const std::string &raw = _request.query(name);
+        if (raw.empty())
+            return std::nullopt;
+        return parse_value<T>(raw);
+    }
+
+    /** @brief Typed query parameter with a fallback. */
+    template <typename T>
+    [[nodiscard]] T
+    query_param_or(std::string_view name, T fallback) const {
+        return query_param<T>(name).value_or(std::move(fallback));
+    }
+
+    /**
+     * @brief Deserialize the request body into `T` (no throw).
+     * @details `bind<qb::json>()` parses JSON; `bind<std::string>()` returns the raw body; any other
+     *          `T` is parsed as JSON then converted via `qb::json::get<T>()` (e.g. a
+     *          `NLOHMANN_DEFINE_TYPE` model). Returns `std::nullopt` on any parse/convert failure.
+     * @code
+     * auto dto = ctx->bind<CreateTask>();
+     * if (!dto) { ctx->bad_request("invalid body"); return; }
+     * use(*dto);
+     * @endcode
+     */
+    template <typename T>
+    [[nodiscard]] std::optional<T>
+    bind() const {
+        static_assert(!std::is_same_v<T, std::string_view>,
+                      "bind<std::string_view> would dangle (view into a temporary qb::json); "
+                      "use bind<std::string>()");
+        try {
+            if constexpr (std::is_same_v<T, std::string>) {
+                return _request.body().template as<std::string>();
+            } else if constexpr (std::is_same_v<T, qb::json>) {
+                return _request.body().template as<qb::json>();
+            } else {
+                return _request.body().template as<qb::json>().template get<T>();
+            }
+        } catch (...) {
+            return std::nullopt;
+        }
     }
 
     // --- Lifecycle Hooks ---
@@ -578,7 +692,7 @@ public:
      */
     template <typename T>
     [[nodiscard]] T *
-    get_ptr(const std::string &key) noexcept {
+    get_if(const std::string &key) noexcept {
         auto it = _custom_data.find(key);
         if (it != _custom_data.end()) {
             return std::any_cast<T>(&(it->second));
@@ -596,7 +710,7 @@ public:
      */
     template <typename T>
     [[nodiscard]] const T *
-    get_ptr(const std::string &key) const noexcept {
+    get_if(const std::string &key) const noexcept {
         auto it = _custom_data.find(key);
         if (it != _custom_data.end()) {
             return std::any_cast<const T>(&(it->second));
@@ -648,7 +762,7 @@ public:
     //   ctx->remove(kUser);
     //
     // The compile-time type check fires at `set` / `get` sites. Reads stay as
-    // fast as the existing `get_ptr<T>(key)` since `any_cast<T>(&any)` is the
+    // fast as the string-keyed `get_if<T>(key)` since `any_cast<T>(&any)` is the
     // same operation &mdash; what you gain is the impossibility of writing
     // `int` and reading `std::size_t` into a silent `nullopt`.
 
@@ -808,14 +922,15 @@ public:
      * Sets Content-Type to "application/json; charset=utf-8", then calls
      * `complete(AsyncTaskResult::COMPLETE)`. Set all headers first if you need custom fields.
      *
-     * @param json_data The qb::json object to send.
+     * @param json_data The qb::json object to send (by-value sink: moved into the body, so a
+     *                  temporary is consumed without a copy; an lvalue is copied once as before).
      * @param status_code The HTTP status code. Defaults to 200 OK (`qb::http::status::OK`).
      */
     void
-    json(const qb::json &json_data, qb::http::status status_code = qb::http::status::OK) {
+    json(qb::json json_data, qb::http::status status_code = qb::http::status::OK) {
         _response.status() = status_code;
         _response.set_content_type("application/json; charset=utf-8");
-        _response.body() = json_data;
+        _response.body() = std::move(json_data);
         complete(AsyncTaskResult::COMPLETE);
     }
 
@@ -824,16 +939,16 @@ public:
      *
      * Ends with `complete(AsyncTaskResult::COMPLETE)`; add headers before calling.
      *
-     * @param text_data The string to send.
+     * @param text_data The string to send (by-value sink: moved into the body).
      * @param status_code The HTTP status code. Defaults to 200 OK (`qb::http::status::OK`).
      * @param content_type The Content-Type header value. Defaults to "text/plain; charset=utf-8".
      */
     void
-    text(const std::string &text_data, qb::http::status status_code = qb::http::status::OK,
+    text(std::string text_data, qb::http::status status_code = qb::http::status::OK,
          const std::string &content_type = "text/plain; charset=utf-8") {
         _response.status() = status_code;
         _response.set_content_type(content_type);
-        _response.body() = text_data;
+        _response.body() = std::move(text_data);
         complete(AsyncTaskResult::COMPLETE);
     }
 
@@ -842,14 +957,14 @@ public:
      *
      * Sets Content-Type to "text/html; charset=utf-8", then `complete(AsyncTaskResult::COMPLETE)`.
      *
-     * @param html_data The HTML string to send.
+     * @param html_data The HTML string to send (by-value sink: moved into the body).
      * @param status_code The HTTP status code. Defaults to 200 OK (`qb::http::status::OK`).
      */
     void
-    html(const std::string &html_data, qb::http::status status_code = qb::http::status::OK) {
+    html(std::string html_data, qb::http::status status_code = qb::http::status::OK) {
         _response.status() = status_code;
         _response.set_content_type("text/html; charset=utf-8");
-        _response.body() = html_data;
+        _response.body() = std::move(html_data);
         complete(AsyncTaskResult::COMPLETE);
     }
 
@@ -1002,7 +1117,7 @@ public:
                         auto router_core_shared = _router_core_wptr.lock();
                         if (router_core_shared && router_core_shared->is_error_chain_set()) {
                             auto error_chain_tasks = router_core_shared->get_compiled_error_tasks();
-                            if (!error_chain_tasks.empty()) {
+                            if (error_chain_tasks && !error_chain_tasks->empty()) {
                                 set_processing_phase(ProcessingPhase::ERROR_CHAIN);
                                 _task_chain         = std::move(error_chain_tasks);
                                 _current_task_index = 0;
@@ -1040,8 +1155,8 @@ public:
         _lc.is_cancelled              = true;
         _cancellation_reason_internal = reason;
 
-        if (_lc.task_in_flight && !_task_chain.empty() && _current_task_index < _task_chain.size()) {
-            auto current_task_shared_ptr = _task_chain[_current_task_index];
+        if (_lc.task_in_flight && _task_chain && _current_task_index < _task_chain->size()) {
+            auto current_task_shared_ptr = (*_task_chain)[_current_task_index];
             if (current_task_shared_ptr) {
                 try {
                     current_task_shared_ptr->cancel();

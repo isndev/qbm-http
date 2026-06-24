@@ -69,11 +69,11 @@ Key accessors, each verified against `request.h`:
 |---|---|---|
 | `method()` | `const Method&` / `Method&` | the HTTP verb; see [methods and statuses](#methods-and-statuses) |
 | `uri()` | `const qb::io::uri&` / `qb::io::uri&` | scheme, host, path, query, fragment — a qb-io type |
-| `query(name, index = 0, default = "")` | `const std::string&` | a single query parameter; `index` selects among repeated keys |
+| `query(name, index = 0)` | `const std::string&` | a single query parameter; `index` selects among repeated keys. On a miss returns a process-wide static empty string (never a temporary). For a custom fallback use `query_or(name, fallback, index = 0)`, which returns `std::string` by value. Delegates to `uri().query(...)` |
 | `queries()` | the URI's query map | `qb::icase_unordered_map<std::vector<std::string>>` |
 | `parse_cookie_header()` | `void` | parses the `Cookie` header into the jar; call it before reading cookies |
 | `cookie(name)` | `const Cookie*` | `nullptr` if absent (case-insensitive name) |
-| `cookie_value(name, default = "")` | `std::string` | the value, or the default |
+| `cookie_value(name)` | `const std::string&` | the value, or a static empty string on a miss. For a custom fallback use `cookie_value_or(name, fallback)`, which returns `std::string` by value |
 | `has_cookie(name)` | `bool` | presence test |
 
 Request cookies are not parsed automatically — call `parse_cookie_header()` once the headers are present, then read from the jar.
@@ -153,16 +153,17 @@ const std::string &enc1 = req.header("Accept-Encoding", 1); // "deflate"
 
 | Member | Behavior |
 |---|---|
-| `header(name, index = 0, default = "")` | value at `index`; returns a stable reference to the default if missing |
+| `header(name, index = 0)` | value at `index`; on a miss returns a reference to a process-wide static empty string (never a temporary). For a custom fallback use `header_or(name, fallback, index = 0)`, which returns `std::string` by value |
 | `set_header(name, value)` | replace all values for `name` with this one |
 | `add_header(name, value)` | append a value (multi-value support) |
 | `has_header(name)` | presence test (case-insensitive) |
 | `remove_header(name)` | erase all values for `name` |
 | `headers()` | the underlying `headers_map` (direct mutation) |
+| `attributes(name, index = 0, default_to_parse = "")` | parse the header value's parameters into a `qb::icase_unordered_map<std::string>` (e.g. `Content-Disposition` fields) |
 | `header_count()` | number of distinct header names |
 | `exceeds_header_limit(max = 100)` | DoS guard; the parser caps inbound headers at `protocol_limits::MAX_HEADERS_COUNT` (100) |
 
-`header(...)` returns a reference, not a copy, and never throws on a missing name — it returns a stable reference to the supplied default. If you mutate the map directly through `headers()`, call `refresh_content_type()` so the cached `Content-Type` helper stays correct; the typed setters keep it in sync automatically.
+`header(...)` returns a reference, not a copy, and never throws on a missing name — it returns a stable reference to a process-wide static empty string. There is no fallback argument; for a custom default use `header_or(name, fallback)`, which returns `std::string` by value. If you mutate the map directly through `headers()`, call `refresh_content_type()` so the cached `Content-Type` helper stays correct; the typed setters keep it in sync automatically.
 
 ### The `Content-Type` helper
 

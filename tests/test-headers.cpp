@@ -45,12 +45,21 @@ TEST(HeadersUtility, SetHeaderSynchronizesContentTypeHelper) {
     EXPECT_EQ(headers.content_type().charset(), qb::http::Headers::default_charset);
 }
 
-TEST(HeadersUtility, HeaderDefaultValueReferenceIsStableForTemporaryFallback) {
+TEST(HeadersUtility, HeaderMissReturnsStableEmptyReference) {
     qb::http::Headers headers;
 
-    const std::string &fallback = headers.header("X-Missing", 0, std::string("fallback-value"));
+    // Default fallback: the returned reference is to a process-wide static empty string, so it is
+    // safe to hold across statements (no dangling temporary).
+    const std::string &missing = headers.header("X-Missing");
+    EXPECT_TRUE(missing.empty());
+    EXPECT_EQ(&missing, &qb::http::detail::empty_string_value);
+}
 
-    EXPECT_EQ(fallback, "fallback-value");
+TEST(HeadersUtility, HeaderOrReturnsFallbackByValue) {
+    qb::http::Headers headers;
+
+    // header_or() returns the fallback BY VALUE on a miss — always safe, no lifetime caveat.
+    EXPECT_EQ(headers.header_or("X-Missing", "fallback-value"), "fallback-value");
 }
 
 TEST(HeadersUtility, AddHeaderSynchronizesContentTypeHelperWithFirstValue) {

@@ -316,7 +316,7 @@ public:
         });
 
         // Member handler route (async)
-        this->post("/member_async", MEMBER_HANDLER(&AllInOneController::asyncMemberHandler));
+        this->post("/member_async", this, &AllInOneController::asyncMemberHandler);
 
         // Custom Route (sync)
         this->get<AllInOneCustomRoute>("/custom_sync", _id_prefix + "CtrlCustomSync", nullptr, _session_ptr, false);
@@ -713,7 +713,7 @@ TEST_F(RouterAllInOneTest, ErrorInControllerMiddleware) {
         }
     };
 
-    _router->template controller<ControllerWithErrorMw>("/ctrl_err_mw", _session.get(), &_task_executor);
+    (void)_router->template controller<ControllerWithErrorMw>("/ctrl_err_mw", _session.get(), &_task_executor);
 
     // Setup a main error handler for the router
     std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession>>> error_chain;

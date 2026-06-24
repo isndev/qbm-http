@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <charconv> // For std::from_chars (C++17) - PERFORMANCE FIX
 #include <chrono>
+#include <cmath>   // For std::isfinite (reject inf/nan numeric claims)
 #include <cstdlib> // For std::strtod - PERFORMANCE FIX (exception-free parsing)
 #include <functional>
 #include <limits>
@@ -279,7 +280,7 @@ private:
     std::optional<std::string>
     extract_token(const Request &req) const {
         if (_options.token_location == JwtTokenLocation::HEADER) {
-            std::string header_value = req.header(_options.token_name, 0, "");
+            std::string header_value = req.header(_options.token_name);
             if (header_value.empty()) {
                 return std::nullopt;
             }
@@ -338,6 +339,15 @@ private:
                     return std::nullopt;
                 }
                 return static_cast<int64_t>(v);
+            }
+            if (claim.is_number_float()) {
+                // RFC 7519 NumericDate allows non-integer values; truncate toward zero
+                // (sub-second precision is irrelevant for exp/nbf/iat checks).
+                const double d = claim.get<double>();
+                if (!std::isfinite(d) || d < -9223372036854775808.0 || d >= 9223372036854775808.0) {
+                    return std::nullopt;
+                }
+                return static_cast<int64_t>(d);
             }
             if (claim.is_string()) {
                 const auto &s        = claim.get_ref<const std::string &>();
@@ -408,7 +418,18 @@ private:
                         errno                 = 0; // Clear errno before call
                         double double_val     = std::strtod(str_begin, &end_ptr);
 
-                        if (end_ptr == str_begin + pair.second.size() && errno == 0) {
+                        // Accept only a finite, JSON-number-shaped decimal. strtod also parses
+                        // "inf"/"nan" and hex-floats ("0x1p4"); those must remain strings rather
+                        // than silently become float claims.
+                        const std::string &num_str    = pair.second;
+                        bool               json_number = !num_str.empty() && (num_str[0] == '-' || (num_str[0] >= '0' && num_str[0] <= '9'));
+                        for (char c : num_str) {
+                            if (!((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E')) {
+                                json_number = false;
+                                break;
+                            }
+                        }
+                        if (end_ptr == str_begin + num_str.size() && errno == 0 && json_number && std::isfinite(double_val)) {
                             // Successfully parsed entire string as double
                             payload_json[pair.first] = double_val;
                         } else {

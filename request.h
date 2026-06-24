@@ -50,7 +50,7 @@ public:
     /**
      * @brief Default constructor.
      *
-     * Creates an empty HTTP request. The method defaults to `HTTP_GET`.
+     * Creates an empty HTTP request. The method defaults to `UNINITIALIZED`.
      * The URI, headers, body, and cookies are default-initialized (empty).
      * HTTP version defaults to 1.1 via `MessageBase`.
      */
@@ -127,14 +127,27 @@ public:
      * @tparam QueryNameType The type of the query parameter name (e.g., `const char*`, `std::string_view`).
      * @param name The name of the query parameter.
      * @param index The 0-based index for multi-value parameters. Defaults to 0.
-     * @param not_found_value The string to return if the parameter is not found or index is out of bounds.
-     * @return A constant reference to the query parameter's value if found; otherwise, `not_found_value`.
+     * @return A constant reference to the query parameter's value if present, otherwise to a process-wide
+     *         static empty string. Always safe to keep for the request's lifetime (never a temporary).
+     *         For a custom fallback, use `query_or()`.
      */
     template <typename QueryNameType>
     [[nodiscard]] const std::string &
-    query(QueryNameType &&name, std::size_t index = 0, const std::string &not_found_value = "") const noexcept {
-        // Assumes _uri.query() is noexcept or handles exceptions appropriately to fit this noexcept.
-        return _uri.query(std::forward<QueryNameType>(name), index, not_found_value);
+    query(QueryNameType &&name, std::size_t index = 0) const {
+        return _uri.query(std::forward<QueryNameType>(name), index);
+    }
+
+    /**
+     * @brief Retrieves a query parameter value, or `fallback` if absent / `index` is out of bounds.
+     *
+     * Returns BY VALUE, so the fallback is always safe (no lifetime caveat). A present-but-empty
+     * parameter yields the empty value, not the fallback.
+     * @param fallback Returned when the parameter is absent (taken by value, moved out on a miss).
+     */
+    template <typename QueryNameType>
+    [[nodiscard]] std::string
+    query_or(QueryNameType &&name, std::string fallback, std::size_t index = 0) const {
+        return _uri.query_or(std::forward<QueryNameType>(name), std::move(fallback), index);
     }
 
     /**
@@ -189,15 +202,27 @@ public:
     }
 
     /**
-     * @brief Retrieves the value of a cookie by its name.
+     * @brief Retrieves the value of a cookie by its name (zero-copy).
      * @param name The name of the cookie (case-insensitive lookup).
-     * @param default_value The value to return if the cookie is not found.
-     * @return The cookie's value if found, otherwise `default_value`.
+     * @return A constant reference to the cookie's value if present, otherwise to a process-wide static
+     *         empty string (always safe to keep). For a custom fallback, use `cookie_value_or()`.
+     */
+    [[nodiscard]] const std::string &
+    cookie_value(const std::string &name) const noexcept {
+        const Cookie *c = _cookies.get(name);
+        return c ? c->value() : detail::empty_string_value;
+    }
+
+    /**
+     * @brief Retrieves a cookie value, or `fallback` if the cookie is absent.
+     * @param name The name of the cookie (case-insensitive lookup).
+     * @param fallback Returned when the cookie is absent (taken by value, moved out on a miss).
+     * @return The cookie's value (by value) if present, otherwise `fallback`.
      */
     [[nodiscard]] std::string
-    cookie_value(const std::string &name, const std::string &default_value = "") const noexcept {
+    cookie_value_or(const std::string &name, std::string fallback) const {
         const Cookie *c = _cookies.get(name);
-        return c ? c->value() : default_value;
+        return c ? c->value() : fallback;
     }
 
     /**

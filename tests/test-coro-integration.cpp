@@ -8,8 +8,8 @@
  * an *upstream* HTTP/1.1 server via `co_await qb::http::GET(...)` /
  * `qb::http::POST(...)`. The goal is to validate the full loop:
  *
- *  1. The gateway's `qb::http::coro_handler` runs on its listener's
- *     coroutine scheduler.
+ *  1. The gateway's coroutine route handler (a `task<void>(ctx)` lambda
+ *     passed directly to the router) runs on its listener's coroutine scheduler.
  *  2. Inside that handler, an outbound HTTP/1.1 awaiter suspends the
  *     coroutine, drives a real client request, resumes with the upstream
  *     response.
@@ -59,29 +59,28 @@ public:
 class UpstreamServer : public qb::http::use<UpstreamServer>::server<UpstreamSession> {
 public:
     UpstreamServer() {
-        using Session = UpstreamSession;
         using namespace std::chrono_literals;
 
-        router().get("/profile/:id", qb::http::coro_handler<Session>([](auto ctx) -> qb::io::async::task<void> {
+        router().get("/profile/:id", [](auto ctx) -> qb::io::async::task<void> {
                          co_await qb::io::async::sleep(1ms);
                          ctx->response().status() = qb::http::status::OK;
                          ctx->response().set_header("X-Source", "upstream");
                          ctx->response().body() = "profile:" + std::string{ctx->path_param("id")};
                          co_return;
-                     }));
+                     });
 
-        router().get("/stats/:id", qb::http::coro_handler<Session>([](auto ctx) -> qb::io::async::task<void> {
+        router().get("/stats/:id", [](auto ctx) -> qb::io::async::task<void> {
                          co_await qb::io::async::sleep(1ms);
                          ctx->response().status() = qb::http::status::OK;
                          ctx->response().body()   = "stats:" + std::string{ctx->path_param("id")};
                          co_return;
-                     }));
+                     });
 
-        router().get("/broken", qb::http::coro_handler<Session>([](auto ctx) -> qb::io::async::task<void> {
+        router().get("/broken", [](auto ctx) -> qb::io::async::task<void> {
                          ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                          ctx->response().body()   = "upstream-on-fire";
                          co_return;
-                     }));
+                     });
 
         router().compile();
     }
@@ -105,10 +104,8 @@ class GatewayServer : public qb::http::use<GatewayServer>::server<GatewaySession
 public:
     explicit GatewayServer(std::string upstream_base)
         : _upstream_base(std::move(upstream_base)) {
-        using Session = GatewaySession;
-
         // ---- /proxy/:id -> upstream /profile/:id ----
-        router().get("/proxy/:id", qb::http::coro_handler<Session>([base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+        router().get("/proxy/:id", [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
                          const auto target = base + "/profile/" + std::string{ctx->path_param("id")};
                          auto       reply  = co_await qb::http::GET(qb::http::Request{{target}});
 
@@ -117,10 +114,10 @@ public:
                          ctx->response().set_header("X-Upstream-Source", std::string{reply.response.header("X-Source")});
                          ctx->response().body() = reply.response.body().template as<std::string>();
                          co_return;
-                     }));
+                     });
 
         // ---- /aggregate/:id -> upstream /profile/:id + /stats/:id ----
-        router().get("/aggregate/:id", qb::http::coro_handler<Session>([base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+        router().get("/aggregate/:id", [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
                          const auto id       = std::string{ctx->path_param("id")};
                          const auto prof_url = base + "/profile/" + id;
                          const auto stat_url = base + "/stats/" + id;
@@ -141,10 +138,10 @@ public:
                          ctx->response().body() =
                              prof.response.body().template as<std::string>() + "|" + stat.response.body().template as<std::string>();
                          co_return;
-                     }));
+                     });
 
         // ---- /fallback -> upstream is broken, degrade to 503 ----
-        router().get("/fallback", qb::http::coro_handler<Session>([base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+        router().get("/fallback", [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
                          auto reply = co_await qb::http::GET(qb::http::Request{{base + "/broken"}});
 
                          if (reply.response.status() != qb::http::status::OK) {
@@ -156,7 +153,7 @@ public:
                          ctx->response().status() = qb::http::status::OK;
                          ctx->response().body()   = reply.response.body().template as<std::string>();
                          co_return;
-                     }));
+                     });
 
         router().compile();
     }

@@ -258,16 +258,18 @@ public:
 
     /**
      * @brief Retrieves the compiled, user-defined error handling task chain.
-     * @return A vector of `IAsyncTask` shared pointers. Returns an empty vector if no user-defined error chain was set.
-     * @note This vector contains only the tasks explicitly set via `set_error_task_chain`.
+     * @return A `std::shared_ptr` to the immutable (const) user-defined error chain vector,
+     *         or `nullptr` if no error chain was explicitly set (see `is_error_chain_set()`).
+     * @note The returned vector contains only the tasks explicitly set via `set_error_task_chain`.
      *       Global middleware is not automatically prepended here.
      */
-    [[nodiscard]] std::vector<std::shared_ptr<IAsyncTask<SessionType>>>
+    [[nodiscard]] std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>
     get_compiled_error_tasks() const {
         if (!_user_error_chain_explicitly_set) {
-            return {};
+            return nullptr;
         }
-        return _user_defined_error_chain;
+        // Error path is rare; wrap the user chain in a shared, immutable list for the Context to adopt.
+        return std::make_shared<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>(_user_defined_error_chain);
     }
 
     /**
@@ -351,9 +353,12 @@ public:
 
         auto matched_info_opt = _radix_tree.match(request_path_sv, request_method);
 
-        std::vector<std::shared_ptr<IAsyncTask<SessionType>>> tasks_to_execute_vec;
+        // The task chain is held by shared pointer (immutable, compiled once, shared across requests).
+        // The matched-route case shares the radix tree's list directly — no per-request copy (hot path).
+        // The rare 404/405/error cases wrap their compiled vector in a shared list at point of use.
+        std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> tasks_to_execute;
 
-        if (matched_info_opt && matched_info_opt->route_tasks && matched_info_opt->route_tasks.value()) {
+        if (matched_info_opt && matched_info_opt->route_tasks) {
             PathParameters decoded_params = std::move(matched_info_opt->path_parameters);
             // Decode URI-encoded path parameters in place.
             // `RadixTree::match()` stores raw (non-decoded) segments in `PathParameters`;
@@ -366,10 +371,7 @@ public:
             }
             ctx->set_path_parameters(std::move(decoded_params));
 
-            const auto &task_list_sptr = matched_info_opt->route_tasks.value();
-            if (task_list_sptr) {
-                tasks_to_execute_vec = *task_list_sptr;
-            }
+            tasks_to_execute = matched_info_opt->route_tasks; // share the compiled list (zero-copy)
 
             LOG_HTTP_DEBUG("Route matched: " << std::to_string(request_method) << " " << request_path_sv);
             LOG_HTTP_TRACE("Route matched with " << decoded_params.size() << " path parameters");
@@ -385,7 +387,7 @@ public:
             const auto allow         = allowed_header_value(allowed_info->methods);
             ctx->response().status() = qb::http::status::METHOD_NOT_ALLOWED;
             ctx->response().set_header("Allow", allow);
-            tasks_to_execute_vec = _compiled_method_not_allowed_tasks;
+            tasks_to_execute = std::make_shared<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>(_compiled_method_not_allowed_tasks);
 
             LOG_HTTP_DEBUG("Route path matched but method is not allowed for: " << std::to_string(request_method) << " " << request_path_sv
                                                                                 << " (405; Allow: " << allow << ")");
@@ -393,14 +395,14 @@ public:
             ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::METHOD_NOT_ALLOWED_CHAIN);
         } else {
             // No route matched, use the compiled 404 tasks
-            tasks_to_execute_vec = _compiled_not_found_tasks;
+            tasks_to_execute = std::make_shared<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>(_compiled_not_found_tasks);
 
             LOG_HTTP_DEBUG("No route matched for: " << std::to_string(request_method) << " " << request_path_sv << " (404)");
 
             ctx->set_processing_phase(Context<SessionType>::ProcessingPhase::NOT_FOUND_CHAIN);
         }
 
-        if (tasks_to_execute_vec.empty()) {
+        if (!tasks_to_execute || tasks_to_execute->empty()) {
             // This is a critical state: no tasks for a matched route or even for 404.
             // Should ideally not happen if compile_default_not_found_handler ensures a task.
             LOG_HTTP_ERROR("Router critical error: No task chain available for " << std::to_string(request_method) << " " << request_path_sv);
@@ -411,10 +413,10 @@ public:
             return ctx;
         }
 
-        // Context<SessionType>::log_task_chain_snapshot(tasks_to_execute_vec, "Initial routing decision", 0); // Removed debug log
+        // Context<SessionType>::log_task_chain_snapshot(*tasks_to_execute, "Initial routing decision", 0); // Removed debug log
 
         ctx->execute_hook(qb::http::HookPoint::PRE_HANDLER_EXECUTION);
-        ctx->set_task_chain_and_start(std::move(tasks_to_execute_vec));
+        ctx->set_task_chain_and_start(std::move(tasks_to_execute));
         return ctx;
     }
 
@@ -424,7 +426,7 @@ public:
      * The router must be recompiled (via `compile_all_routes()`) after clearing if it is to be used again.
      */
     void
-    clear() noexcept {
+    clear() { // not noexcept: compile_default_*_handler below allocate (make_shared/reserve)
         _radix_tree.clear();
         _top_level_nodes.clear();
         _custom_not_found_handler_set = false;

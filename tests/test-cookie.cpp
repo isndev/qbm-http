@@ -416,7 +416,7 @@ TEST(CookieIntegration, RequestParsing) {
     EXPECT_EQ("value2", request.cookie_value("name2"));
 
     // Test default value for non-existent cookie
-    EXPECT_EQ("default", request.cookie_value("nonexistent", "default"));
+    EXPECT_EQ("default", request.cookie_value_or("nonexistent", "default"));
 
     // Test case insensitivity
     EXPECT_TRUE(request.has_cookie("NAME1"));

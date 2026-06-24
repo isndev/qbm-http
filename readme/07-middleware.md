@@ -10,12 +10,13 @@ Middleware is the cross-cutting layer of the router: a chain of tasks that run b
 
 A request that matches a route does not call your handler directly. The router executes a **compiled chain of tasks** — every applicable middleware, in order, followed by the route handler. Each task drives the chain forward by calling `ctx->complete(AsyncTaskResult)` (or, for `(ctx, next)`-style functional middleware, by calling `next()`). A task can let the request continue, finalize a response and stop the chain, or divert to the error chain. This page covers the interface, how chains are built and ordered, how short-circuiting works, and the synchronous-versus-asynchronous contract.
 
-Middleware comes in two forms that resolve to the same runtime type:
+Middleware comes in three forms that resolve to the same runtime type:
 
 - **Object middleware** — a class implementing `qb::http::IMiddleware<Session>` (this is what every standard middleware in `middleware/` is).
-- **Functional middleware** — a `(ctx, next)` lambda, wrapped automatically by `qb::http::FunctionalMiddleware<Session>` when you pass it to `use()`.
+- **Functional middleware** — a synchronous `(ctx, next)` lambda, wrapped automatically by `qb::http::FunctionalMiddleware<Session>` when you pass it to `use()`.
+- **Coroutine middleware** — a `qb::io::async::task<void>(ctx)` lambda (no `next` parameter), auto-detected and wrapped when you pass it to `use()`. The chain advances on normal coroutine completion unless the body called `ctx->complete(...)` itself.
 
-Both are adapted to the router's unit-of-work interface, `qb::http::IAsyncTask<Session>`, via `qb::http::MiddlewareTask<Session>`.
+All are adapted to the router's unit-of-work interface, `qb::http::IAsyncTask<Session>`, via `qb::http::MiddlewareTask<Session>`.
 
 ## Concepts
 
@@ -24,7 +25,7 @@ Both are adapted to the router's unit-of-work interface, `qb::http::IAsyncTask<S
 `qb::http::IMiddleware<Session>` is the contract every object middleware implements.
 
 ```cpp
-// src: qbm/http/routing/middleware.h:36-59
+// src: qbm/http/routing/middleware.h:37-59
 template <typename SessionType>
 class IMiddleware {
 public:
@@ -55,12 +56,20 @@ You rarely construct `MiddlewareTask` yourself — `use()` does it. But the wrap
 
 ### Registering middleware: `use()`
 
-You attach middleware with `use()`, available at three levels with the same three overloads. All return a reference for chaining.
+You attach middleware with `use()`, available at three levels with the same four overloads. All return a reference for chaining. Each form is concept-gated, so the right overload resolves automatically with no disambiguation tags.
 
 ```cpp
-// src: qbm/http/routing/router.h:198-218, route_group.h:234-278
-// Functional form — a (ctx, next) lambda:
+// src: qbm/http/routing/router.h:143-149,224-252; route_group.h:147-153,252-302; controller.h:208-211,317-364
+// Functional form — a synchronous (ctx, next) lambda (SyncMiddleware concept):
 router.use(mw_fn, "OptionalName");
+
+// Coroutine form — a task<void>(ctx) lambda, no next (CoroMiddlewareHandler concept):
+router.use(
+    [](std::shared_ptr<qb::http::Context<Session>> ctx) -> qb::io::async::task<void> {
+        // co_await ...; falls through to the next task on return
+        co_return;
+    },
+    "OptionalName");
 
 // Object form — a shared_ptr to an IMiddleware:
 router.use(std::make_shared<MyMiddleware<Session>>(...));
@@ -75,7 +84,7 @@ router.use<MyMiddleware<Session>>(arg1, arg2);
 | Group | `group->use(...)` on a `RouteGroup` | Every route nested under that group |
 | Controller | `use(...)` inside a controller's `initialize_routes()` | Every route on that controller |
 
-`RouteGroup::use` and `Controller::use` carry the same three overloads (both ultimately feed `IHandlerNode::add_middleware`); group middleware is inherited by *all* descendant routes, groups, and controllers. <!-- src: qbm/http/routing/route_group.h:234-281, controller.h:314-358 -->
+`RouteGroup::use` and `Controller::use` carry the same four overloads (all ultimately feed `IHandlerNode::add_middleware`); group middleware is inherited by *all* descendant routes, groups, and controllers. <!-- src: qbm/http/routing/route_group.h:147-302, controller.h:208-364 -->
 
 ### Chaining and order
 
@@ -113,12 +122,12 @@ enum class AsyncTaskResult {
 - **`ERROR`** — an unrecoverable failure. The router abandons the normal chain and runs the configured error task chain (see [Error handling](./13-error-handling.md)). You generally do not throw and call this yourself unless you want a specific status; an uncaught exception is converted to `ERROR` for you by `MiddlewareTask`.
 - **`CANCELLED`** — propagates a cancellation. Prefer `ctx->cancel(reason)`, which sets the cancellation flag and finalizes; do not call `complete(CANCELLED)` from a `cancel()` override.
 
-The `Context` enforces single-completion: once finalized or cancelled, further `complete()` calls (other than `CANCELLED`) are ignored, so a stray second call cannot corrupt the chain. <!-- src: qbm/http/routing/context.h:882-903 -->
+The `Context` enforces single-completion: once finalized or cancelled, further `complete()` calls (other than `CANCELLED`) are ignored, so a stray second call cannot corrupt the chain. <!-- src: qbm/http/routing/context.h:1067-1111 (complete(): is_finalised_internal / is_cancelled early-out) -->
 
 This is what "short-circuit" means in practice — a middleware that calls `complete(COMPLETE)` ends the chain:
 
 ```cpp
-// src: qbm/http/tests/test-integration-middleware.cpp:1141-1152
+// src: qbm/http/tests/test-integration-middleware.cpp:1087-1098 (ResponseHeaderMiddleware::process)
 void process(std::shared_ptr<MidCtx> ctx) override {
     ctx->response().set_header(_header_name, _header_value);
     if (_complete_request) {
@@ -138,18 +147,20 @@ void process(std::shared_ptr<MidCtx> ctx) override {
 When you pass a `(ctx, next)` lambda to `use()`, it is wrapped in `qb::http::FunctionalMiddleware<Session>`. The signature is `MiddlewareHandlerFn<Session>`:
 
 ```cpp
-// src: qbm/http/routing/types.h:107-109
+// src: qbm/http/routing/types.h:108
 template <typename SessionType>
 using MiddlewareHandlerFn =
     std::function<void(std::shared_ptr<Context<SessionType>> ctx,
                        std::function<void()> next)>;
 ```
 
+This `(ctx, next)` form is the **synchronous** functional middleware. A **coroutine** functional middleware has no `next`: it is a `qb::io::async::task<void>(ctx)` lambda, and the chain advances automatically when the coroutine returns (unless the body called `ctx->complete(...)` first). See [Custom middleware](./09-custom-middleware.md) for the coroutine form end to end.
+
 Inside the lambda:
 
 - Call **`next()`** to continue the chain. The wrapper translates this into `complete(CONTINUE)` for you. To short-circuit instead, set `ctx->response()` and call `ctx->complete(AsyncTaskResult::COMPLETE)` — do not call `next()`.
-- Calling `next()` **more than once** is detected (atomic exchange) and the duplicate is ignored with a warning, so accidental double-advance cannot happen. <!-- src: qbm/http/routing/middleware.h:151-164 -->
-- Like object middleware, exceptions out of the lambda are caught and turned into a `500` + `ERROR`. <!-- src: qbm/http/routing/middleware.h:165-194 -->
+- Calling `next()` **more than once** is detected (atomic exchange) and the duplicate is ignored with a warning, so accidental double-advance cannot happen. <!-- src: qbm/http/routing/middleware.h:158-169 -->
+- Like object middleware, exceptions out of the lambda are caught and turned into a `500` + `ERROR`. <!-- src: qbm/http/routing/middleware.h:170-199 -->
 
 ```cpp
 #include <http/http.h>
@@ -165,7 +176,7 @@ router.use(
 
 #### Post-`next()` mutation: synchronous only
 
-For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/routing/middleware.h:149-150, context.h:311-368 -->
+For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/routing/middleware.h:155-156, context.h:337-385 -->
 
 ```cpp
 router.use(
@@ -178,7 +189,7 @@ router.use(
     "ResponseStamper");
 ```
 
-This deferral only spans **synchronous** downstream work. If anything downstream is asynchronous (a `qb::io::async::callback`, an actor round-trip, a DB query), the lambda returns before that work finishes and the deferral has already closed — code after `next()` would run too early. For mutations that must happen at final send time regardless of downstream timing, register a **`HookPoint::PRE_RESPONSE_SEND`** lifecycle hook instead. <!-- src: qbm/http/routing/types.h:90-97 -->
+This deferral only spans **synchronous** downstream work. If anything downstream is asynchronous (a `qb::io::async::callback`, an actor round-trip, a DB query), the lambda returns before that work finishes and the deferral has already closed — code after `next()` would run too early. For mutations that must happen at final send time regardless of downstream timing, register a **`HookPoint::PRE_RESPONSE_SEND`** lifecycle hook instead. <!-- src: qbm/http/routing/types.h:38-46 -->
 
 ### Synchronous versus asynchronous middleware
 
@@ -239,7 +250,7 @@ There is one more asymmetry worth knowing: a router-level lifecycle hook is the 
 
 ### Conditional middleware
 
-You do not need a hand-rolled `if` inside a middleware to run one branch per request. `qb::http::conditional_middleware<Session>(predicate, if_mw[, else_mw])` wraps a predicate over the context and dispatches to one of two child middlewares; when the predicate is false and there is no else branch, the chain simply continues. The predicate is `std::function<bool(const std::shared_ptr<Context<Session>>&)>`. <!-- src: qbm/http/middleware/conditional.h:41-101, 138-143 -->
+You do not need a hand-rolled `if` inside a middleware to run one branch per request. `qb::http::conditional_middleware<Session>(predicate, if_mw[, else_mw])` wraps a predicate over the context and dispatches to one of two child middlewares; when the predicate is false and there is no else branch, the chain simply continues. The predicate is `std::function<bool(const std::shared_ptr<Context<Session>>&)>`. <!-- src: qbm/http/middleware/conditional.h:51, 146-153 -->
 
 ```cpp
 #include <http/http.h>

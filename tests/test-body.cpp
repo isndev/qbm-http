@@ -213,6 +213,33 @@ TEST_F(BodyTest, JsonAssignmentAndConversion) {
     EXPECT_EQ(qb::json({{"moved", true}}).dump(), j_parsed.dump());
 }
 
+// Regression: assigning a json body serializes through qb::allocator::pipe::put<json>,
+// which previously narrowed numbers (get<int>/get<unsigned int>/get<float>) so a
+// 64-bit integer came out as a wrong 32-bit value (e.g. an epoch-ms timestamp went
+// negative) and doubles lost precision. Verify full 64-bit / double fidelity by
+// parsing the serialized body back.
+TEST_F(BodyTest, JsonSerializationPreserves64BitAndDouble) {
+    qb::json j;
+    j["i64"]   = 1782214248072LL;        // > 2^31
+    j["neg64"] = -5000000000LL;          // < -2^31
+    j["u64"]   = 9000000000ULL;          // > 2^32
+    j["dbl"]   = 0.1;                     // not representable as float
+    j["dmax"]  = 1.7976931348623157e308; // double max
+    j["small"] = 7;
+    j["str"]   = "hello";
+
+    body = j;
+    const qb::json parsed = qb::json::parse(body.as<std::string>());
+
+    EXPECT_EQ(parsed["i64"].get<std::int64_t>(), 1782214248072LL);
+    EXPECT_EQ(parsed["neg64"].get<std::int64_t>(), -5000000000LL);
+    EXPECT_EQ(parsed["u64"].get<std::uint64_t>(), 9000000000ULL);
+    EXPECT_DOUBLE_EQ(parsed["dbl"].get<double>(), 0.1);
+    EXPECT_DOUBLE_EQ(parsed["dmax"].get<double>(), 1.7976931348623157e308);
+    EXPECT_EQ(parsed["small"].get<int>(), 7);
+    EXPECT_EQ(parsed["str"].get<std::string>(), "hello");
+}
+
 TEST_F(BodyTest, FormAssignmentAndConversion) {
     Form original_form = create_simple_form();
     body               = original_form;
@@ -242,6 +269,33 @@ TEST_F(BodyTest, FormAssignmentAndConversion) {
     Form parsed_moved_form = body.as<Form>();
     EXPECT_EQ(original_size, parsed_moved_form.fields().size());
     EXPECT_EQ("move_val", parsed_moved_form.get_first("extra").value_or(""));
+}
+
+// Concept honesty: Form has no `pipe<char>::put<Form>` serializer, only
+// `operator=<Form>`. It must therefore be excluded from `is_body_appendable`
+// so that `body << form` / `Body{form}` are rejected cleanly at the concept
+// gate (instead of hard-erroring deep inside `pipe::put`). Assignment is the
+// only supported path and must keep round-tripping.
+template <typename T>
+concept BodyLeftShiftable = requires(Body b, T v) { b << v; };
+
+TEST_F(BodyTest, FormIsAssignmentOnlyNotAppendable) {
+    // Form is not advertised as appendable...
+    static_assert(!Body::is_body_appendable_v<Form>, "Form must not be appendable: no pipe::put<Form> exists");
+    // ...so `body << form` does not compile, while genuinely-appendable
+    // types (with a matching pipe::put<>) still do.
+    static_assert(!BodyLeftShiftable<Form>, "`body << form` must be rejected at the concept gate");
+    static_assert(BodyLeftShiftable<std::string>, "string remains appendable");
+    static_assert(BodyLeftShiftable<Chunk>, "Chunk remains appendable");
+    static_assert(BodyLeftShiftable<Multipart>, "Multipart remains appendable");
+    static_assert(BodyLeftShiftable<qb::json>, "json remains appendable");
+
+    // The documented path — assignment — works and round-trips.
+    Form form = create_simple_form();
+    body      = form;
+    Form parsed = body.as<Form>();
+    EXPECT_EQ(form.fields().size(), parsed.fields().size());
+    EXPECT_EQ("test_user", parsed.get_first("name").value_or(""));
 }
 
 TEST_F(BodyTest, MultipartAssignmentAndConversion) {
@@ -612,6 +666,31 @@ TEST_F(BodyTest, DecompressionMultipleEncodingsError) {
     EXPECT_THROW(body.uncompress("deflate, gzip"), std::runtime_error);
 }
 #endif // QB_HAS_COMPRESSION
+
+TEST(BodyTryAs, StringConversionAlwaysSucceeds) {
+    qb::http::Body b;
+    b           = std::string("hello");
+    auto result = b.try_as<std::string>();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "hello");
+}
+
+TEST(BodyTryAs, ValidJsonParses) {
+    qb::http::Body b;
+    b           = std::string(R"({"k":42})");
+    auto result = b.try_as<qb::json>();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ((*result)["k"].get<int>(), 42);
+}
+
+TEST(BodyTryAs, MalformedJsonReturnsNulloptInsteadOfThrowing) {
+    qb::http::Body b;
+    b = std::string("{not valid json");
+    EXPECT_NO_THROW({
+        auto result = b.try_as<qb::json>();
+        EXPECT_FALSE(result.has_value());
+    });
+}
 
 int
 main(int argc, char **argv) {

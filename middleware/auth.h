@@ -380,7 +380,7 @@ private:
  */
 template <typename SessionType>
 [[nodiscard]] std::shared_ptr<AuthMiddleware<SessionType>>
-create_auth_middleware(const auth::Options &options = auth::Options(), const std::string &name = "AuthMiddleware") {
+auth_middleware(const auth::Options &options = auth::Options(), const std::string &name = "AuthMiddleware") {
     return std::make_shared<AuthMiddleware<SessionType>>(options, name);
 }
 
@@ -397,22 +397,32 @@ create_auth_middleware(const auth::Options &options = auth::Options(), const std
  */
 template <typename SessionType>
 [[nodiscard]] std::shared_ptr<AuthMiddleware<SessionType>>
-create_jwt_auth_middleware(const std::string &secret,
+jwt_auth_middleware(const std::string &secret,
                            const std::string &algorithm_str = "HS256", // String representation of algorithm
                            const std::string &name          = "JwtAuthMiddleware") {
     auth::Options options;
-    // HMAC ("HS*") needs a symmetric secret, asymmetric algorithms expect a public key.
-    if (std::string_view(algorithm_str).starts_with("HS")) {
-        options.secret_key(secret);
-    } else {
-        options.public_key(secret);
+
+    // Resolve the algorithm first via the centralised (case-insensitive) parser
+    // (see F51); fall back to the constructor default (`HMAC_SHA256`) for unknown
+    // strings so the middleware stays usable with legacy config.
+    const auto resolved = auth::Options::algorithm_from_string(algorithm_str);
+    const auto alg      = resolved.value_or(auth::Options::Algorithm::HMAC_SHA256);
+    if (resolved) {
+        options.algorithm(*resolved);
     }
 
-    // Centralised parsing lives on `auth::Options` (see F51); fall back to the
-    // constructor default (`HMAC_SHA256`) for unknown strings so the middleware
-    // remains usable with legacy config.
-    if (const auto resolved = auth::Options::algorithm_from_string(algorithm_str)) {
-        options.algorithm(*resolved);
+    // Choose the key slot off the resolved enum (not a raw string prefix): HMAC
+    // families need a symmetric secret, asymmetric algorithms expect a public key.
+    // This keeps the decision consistent with the parser for any casing/aliasing.
+    switch (alg) {
+        case auth::Options::Algorithm::HMAC_SHA256:
+        case auth::Options::Algorithm::HMAC_SHA384:
+        case auth::Options::Algorithm::HMAC_SHA512:
+            options.secret_key(secret);
+            break;
+        default:
+            options.public_key(secret);
+            break;
     }
 
     return std::make_shared<AuthMiddleware<SessionType>>(options, name);
@@ -430,7 +440,7 @@ create_jwt_auth_middleware(const std::string &secret,
  */
 template <typename SessionType>
 [[nodiscard]] std::shared_ptr<AuthMiddleware<SessionType>>
-create_role_auth_middleware(const std::vector<std::string> &roles, bool require_all = false, const std::string &name = "RoleAuthMiddleware") {
+role_auth_middleware(const std::vector<std::string> &roles, bool require_all = false, const std::string &name = "RoleAuthMiddleware") {
     // Uses default auth::Options, as token verification might not be its primary role if user is pre-populated.
     auto middleware = std::make_shared<AuthMiddleware<SessionType>>(auth::Options{}, name);
     middleware->with_roles(roles, require_all);
@@ -453,7 +463,7 @@ create_role_auth_middleware(const std::vector<std::string> &roles, bool require_
  */
 template <typename SessionType>
 [[nodiscard]] std::shared_ptr<AuthMiddleware<SessionType>>
-create_optional_auth_middleware(const auth::Options &options = auth::Options(), const std::string &name = "OptionalAuthMiddleware") {
+optional_auth_middleware(const auth::Options &options = auth::Options(), const std::string &name = "OptionalAuthMiddleware") {
     auto middleware = std::make_shared<AuthMiddleware<SessionType>>(options, name);
     middleware->with_auth_required(false); // Key change for optional authentication
     return middleware;

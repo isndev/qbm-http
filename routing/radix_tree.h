@@ -46,18 +46,18 @@ struct MatchedRouteInfo {
     /** @brief Extracted path parameters from the URI for this matched route. */
     PathParameters path_parameters;
     /**
-     * @brief An optional shared pointer to the compiled list of asynchronous tasks for this route.
-     *        The tasks include all applicable middleware and the final route handler.
-     *        It's optional because a tree node might exist without a handler for a specific HTTP method.
+     * @brief Shared pointer to the compiled list of asynchronous tasks for this route (middleware +
+     *        final handler). A null pointer means the node has no handler for the requested method —
+     *        no separate `std::optional` wrapper is needed (a `shared_ptr` is already nullable).
      */
-    std::optional<std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>> route_tasks;
+    std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> route_tasks;
 
     /**
      * @brief Constructs `MatchedRouteInfo`.
      * @param params Extracted path parameters.
-     * @param tasks Optional shared pointer to the task chain.
+     * @param tasks Shared pointer to the task chain (may be null).
      */
-    MatchedRouteInfo(PathParameters params, std::optional<std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>> tasks)
+    MatchedRouteInfo(PathParameters params, std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> tasks)
         : path_parameters(std::move(params))
         , route_tasks(std::move(tasks)) {}
 
@@ -409,107 +409,101 @@ public:
      */
     [[nodiscard]] std::optional<MatchedRouteInfo<SessionType>>
     match(std::string_view path_sv, qb::http::method method) const {
-        PathParameters                params;
-        std::vector<std::string_view> segments = split_path_to_segments(path_sv);
-
         const std::size_t slot = method_slot(method);
         if (slot >= METHOD_SLOT_COUNT) {
             return std::nullopt; // unknown / uninitialised method -> cannot match anything
         }
+        const std::vector<std::string_view> segments = split_path_to_segments(path_sv);
+        return match_recursive(_root.get(), segments, slot, 0, PathParameters{});
+    }
 
-        // For wildcard capture: reconstructing the slice joined by '/' is
-        // a single substring of the original `path_sv`. This avoids the
-        // per-request string copy / byte-wise concatenation the legacy
-        // implementation performed.
-
-        // Recursive lambda for matching. Nodes are borrowed via raw pointers:
-        // the tree owns them through `std::unique_ptr`, so for the duration of
-        // this call `const Node*` is guaranteed to outlive the recursion frame.
-        std::function<std::optional<MatchedRouteInfo<SessionType>>(const Node *, size_t, PathParameters)> find_match_recursive =
-            [&](const Node *current_node_ptr, size_t segment_idx,
-                PathParameters current_params) -> std::optional<MatchedRouteInfo<SessionType>> {
-            if (!current_node_ptr) {
-                return std::nullopt;
-            }
+private:
+    /**
+     * @brief Recursive route matcher (private). A real member function rather than a per-request
+     *        `std::function` lambda — no heap allocation per `match()` call and the recursion is a
+     *        direct, inlinable call. Nodes are borrowed via raw pointers (the tree owns them through
+     *        `std::unique_ptr`, so a `const Node*` outlives the recursion). `current_params` is taken
+     *        by value so a branch that fails to match discards its captures (correct backtracking).
+     */
+    [[nodiscard]] std::optional<MatchedRouteInfo<SessionType>>
+    match_recursive(const Node *current_node_ptr, const std::vector<std::string_view> &segments, std::size_t slot,
+                    std::size_t segment_idx, PathParameters current_params) const {
+        if (!current_node_ptr) {
+            return std::nullopt;
+        }
 
 #ifndef NDEBUG
-            // Debug assertions: Verify tree structure integrity
-            // These checks help detect corruption during development
-            if (current_node_ptr->param_child) {
-                assert(current_node_ptr->param_child->type == NodeType::PARAMETER && "param_child must be of type PARAMETER");
-            }
-            if (current_node_ptr->wildcard_child) {
-                assert(current_node_ptr->wildcard_child->type == NodeType::WILDCARD && "wildcard_child must be of type WILDCARD");
-            }
+        // Debug assertions: Verify tree structure integrity (detect corruption during development).
+        if (current_node_ptr->param_child) {
+            assert(current_node_ptr->param_child->type == NodeType::PARAMETER && "param_child must be of type PARAMETER");
+        }
+        if (current_node_ptr->wildcard_child) {
+            assert(current_node_ptr->wildcard_child->type == NodeType::WILDCARD && "wildcard_child must be of type WILDCARD");
+        }
 #endif
 
-            // Base case: All path segments have been consumed
-            if (segment_idx == segments.size()) {
-                const auto &handler_here = current_node_ptr->handlers[slot];
-                if (handler_here) {
-                    return MatchedRouteInfo<SessionType>(current_params, handler_here);
-                }
-                // Special case for routes like /foo/* that can match /foo/ (wildcard captures empty)
-                if (current_node_ptr->wildcard_child) {
-                    const auto &wc_handler = current_node_ptr->wildcard_child->handlers[slot];
-                    if (wc_handler) {
-                        PathParameters final_params_for_wc = current_params;
-                        final_params_for_wc.set(current_node_ptr->wildcard_child->segment_match, "");
-                        // Wildcard value is empty
-                        return MatchedRouteInfo<SessionType>(final_params_for_wc, wc_handler);
-                    }
-                }
-                return std::nullopt;
-                // No handler for this method at this path, or no wildcard for empty remainder
+        // Base case: All path segments have been consumed
+        if (segment_idx == segments.size()) {
+            const auto &handler_here = current_node_ptr->handlers[slot];
+            if (handler_here) {
+                return MatchedRouteInfo<SessionType>(current_params, handler_here);
             }
-
-            const std::string_view &current_path_segment_view = segments[segment_idx];
-
-            // 1. Try static child match (highest priority)
-            auto static_child_it = current_node_ptr->static_children.find(current_path_segment_view);
-            if (static_child_it != current_node_ptr->static_children.end()) {
-                auto res = find_match_recursive(static_child_it->second.get(), segment_idx + 1, current_params);
-                // Pass params by value for fork
-                if (res)
-                    return res;
-            }
-
-            // 2. Try parameter child match (second priority)
-            if (current_node_ptr->param_child) {
-                PathParameters params_for_param_branch = current_params;
-                params_for_param_branch.set(current_node_ptr->param_name, current_path_segment_view);
-                auto res = find_match_recursive(current_node_ptr->param_child.get(), segment_idx + 1, std::move(params_for_param_branch));
-                if (res)
-                    return res;
-            }
-
-            // 3. Try wildcard child match (lowest priority, and it consumes all remaining segments)
+            // Special case for routes like /foo/* that can match /foo/ (wildcard captures empty)
             if (current_node_ptr->wildcard_child) {
-                // Zero-copy wildcard slice: segments are views into `path_sv`, so
-                // the span "/segments[idx]/.../segments[last]" is a single
-                // contiguous substring. Compute it without allocations and let
-                // `PathParameters::set` do the sole owning copy.
-                const auto      &first_seg   = segments[segment_idx];
-                const auto      &last_seg    = segments.back();
-                const char      *slice_begin = first_seg.data();
-                const char      *slice_end   = last_seg.data() + last_seg.size();
-                std::string_view wildcard_captured_view{slice_begin, static_cast<std::size_t>(slice_end - slice_begin)};
-
-                PathParameters params_for_wildcard_branch = current_params;
-                params_for_wildcard_branch.set(current_node_ptr->wildcard_child->segment_match, wildcard_captured_view);
-
-                // Wildcard consumes all remaining segments, so we must find the handler on the wildcard_child itself.
                 const auto &wc_handler = current_node_ptr->wildcard_child->handlers[slot];
                 if (wc_handler) {
-                    return MatchedRouteInfo<SessionType>(params_for_wildcard_branch, wc_handler);
+                    PathParameters final_params_for_wc = current_params;
+                    final_params_for_wc.set(current_node_ptr->wildcard_child->segment_match, ""); // wildcard value is empty
+                    return MatchedRouteInfo<SessionType>(final_params_for_wc, wc_handler);
                 }
             }
+            return std::nullopt; // No handler for this method at this path, or no wildcard for empty remainder
+        }
 
-            return std::nullopt; // No match found down any path from this node
-        };
+        const std::string_view &current_path_segment_view = segments[segment_idx];
 
-        return find_match_recursive(_root.get(), 0, params);
+        // 1. Try static child match (highest priority)
+        auto static_child_it = current_node_ptr->static_children.find(current_path_segment_view);
+        if (static_child_it != current_node_ptr->static_children.end()) {
+            auto res = match_recursive(static_child_it->second.get(), segments, slot, segment_idx + 1, current_params);
+            if (res)
+                return res;
+        }
+
+        // 2. Try parameter child match (second priority)
+        if (current_node_ptr->param_child) {
+            PathParameters params_for_param_branch = current_params;
+            params_for_param_branch.set(current_node_ptr->param_name, current_path_segment_view);
+            auto res = match_recursive(current_node_ptr->param_child.get(), segments, slot, segment_idx + 1,
+                                       std::move(params_for_param_branch));
+            if (res)
+                return res;
+        }
+
+        // 3. Try wildcard child match (lowest priority; it consumes all remaining segments)
+        if (current_node_ptr->wildcard_child) {
+            // Zero-copy wildcard slice: segments are views into the request path, so
+            // "segments[idx]/.../segments[last]" is a single contiguous substring. Compute it
+            // without allocations and let `PathParameters::set` do the sole owning copy.
+            const auto      &first_seg   = segments[segment_idx];
+            const auto      &last_seg    = segments.back();
+            const char      *slice_begin = first_seg.data();
+            const char      *slice_end   = last_seg.data() + last_seg.size();
+            std::string_view wildcard_captured_view{slice_begin, static_cast<std::size_t>(slice_end - slice_begin)};
+
+            PathParameters params_for_wildcard_branch = current_params;
+            params_for_wildcard_branch.set(current_node_ptr->wildcard_child->segment_match, wildcard_captured_view);
+
+            const auto &wc_handler = current_node_ptr->wildcard_child->handlers[slot];
+            if (wc_handler) {
+                return MatchedRouteInfo<SessionType>(params_for_wildcard_branch, wc_handler);
+            }
+        }
+
+        return std::nullopt; // No match found down any path from this node
     }
+
+public:
 
     /**
      * @brief Matches only the request path and returns methods registered

@@ -47,7 +47,7 @@
 
 #include "../ws/coro.h"
 
-namespace {
+namespace ws_framing_edge_test {
 
 using namespace std::chrono_literals;
 

@@ -20,7 +20,7 @@ Groups are part of the routing tree, so they obey the same compile rule as route
 
 You create a top-level group from the router with `group(path_prefix)`, and a nested group from another group with the same method. Both return a `std::shared_ptr<RouteGroup<SessionType>>` — the result is `[[nodiscard]]`, so capture it and define routes against the pointer.
 
-<!-- src: qbm/http/routing/router.h:171-176, route_group.h:196-205 -->
+<!-- src: qbm/http/routing/router.h:201, route_group.h:216-221 -->
 ```cpp
 #include <http/http.h>   // Router, RouteGroup, Context, method
 
@@ -52,7 +52,7 @@ When `compile()` runs, the router walks the tree from the root. Each node calls 
 - The result always starts with `"/"` and never contains a double slash.
 - An empty segment contributes nothing; the root group's prefix is `""`, which is why a route declared directly on the router keeps its own path.
 
-<!-- src: qbm/http/routing/handler_node.h:47-114, 258-260 -->
+<!-- src: qbm/http/routing/handler_node.h:84-114, 262-264 -->
 ```cpp
 #include <http/http.h>
 
@@ -74,7 +74,7 @@ The reason groups matter beyond tidiness is shared middleware. Call `use()` on a
 
 `RouteGroup::use()` has the same three overloads as the router:
 
-<!-- src: qbm/http/routing/route_group.h:234-281 -->
+<!-- src: qbm/http/routing/route_group.h:251-303 -->
 ```cpp
 // 1. Lambda middleware (ctx, next) -> void; second arg names it for logs.
 group->use([](auto ctx, auto next) { /* ... */ next(); }, "trace");
@@ -92,7 +92,7 @@ The lambda form takes `(ctx, next)` — invoke `next()` to pass control down the
 
 Middleware composes top-down. At compile time each node runs `combine_tasks(inherited)`: it copies the tasks inherited from its parent, then appends its own. The resulting chain for any route is **parent middleware first, then this node's middleware, then the route handler** — in declaration order at each level.
 
-<!-- src: qbm/http/routing/handler_node.h:262-274, route_group.h:65-77 -->
+<!-- src: qbm/http/routing/handler_node.h:272-279, route_group.h:65-77 -->
 ```cpp
 #include <http/http.h>
 
@@ -111,7 +111,7 @@ v1->get("/status", h_status);
 
 This ordering is enforced by the framework, not by chance — a router-middleware test asserts the exact trace `"router_mw;g1_mw;g2_mw;g2_handler"` for a route nested two groups deep. Middleware applies to descendants only: a sibling group does **not** inherit another sibling's middleware.
 
-<!-- src: qbm/http/tests/test-router-middleware.cpp:594-608 -->
+<!-- src: qbm/http/tests/test-router-middleware.cpp:627-639 -->
 ```cpp
 auto api = router().group("/api");
 api->use(api_auth_mw);                          // shared by v1 and v2 below
@@ -130,7 +130,7 @@ v2->get("/info", h_info);                        // no v1_logging_mw here
 
 A group can host a [`Controller`](./06-controllers.md) the same way the router can, with `controller<C>(path_prefix, ctor_args...)`. The controller's own routes are prefixed by the group's full path, and requests into them pass through the group's middleware stack in addition to the controller's own middleware.
 
-<!-- src: qbm/http/routing/route_group.h:207-223 -->
+<!-- src: qbm/http/routing/route_group.h:232-240 -->
 ```cpp
 #include <http/http.h>
 
@@ -178,7 +178,7 @@ Path prefixes accumulate as you descend; middleware chains build up the same way
 ## See also
 
 - [Defining routes](./04-defining-routes.md) — the per-route API that groups reuse, and path parameters.
-- [Controllers](./06-controllers.md) — class-based grouping with `MEMBER_HANDLER`, mountable inside a group.
+- [Controllers](./06-controllers.md) — class-based grouping, mountable inside a group.
 - [Middleware overview](./07-middleware.md) — the `(ctx, next)` contract and lifecycle, and [Standard middleware](./08-standard-middleware.md) for built-ins.
 - [Routing overview](./03-routing-overview.md) — the compile step, the radix match algorithm, and dispatch.
 

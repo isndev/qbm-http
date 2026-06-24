@@ -25,7 +25,7 @@
 #include "../request.h"    // For qb::http::Request
 #include "../types.h"      // For qb::http::method enum
 #include "./controller.h"  // For Controller class
-#include "./coro_task.h"   // Coroutine adapters (qb::http::coro_handler / coro_middleware)
+#include "./coro_task.h"   // Routing concepts (RouteHandlerLike / CoroRouteHandler / SyncMiddleware) + coro adapters
 #include "./middleware.h"  // For IMiddleware interface
 #include "./route.h"       // For Route class (used indirectly via RouteGroup)
 #include "./route_group.h" // For RouteGroup functionality
@@ -78,26 +78,11 @@ public:
     /** @brief Adds a route directly to the router (root level). @see RouteGroup::add_route */
     Router<SessionType> &add_route(std::string path, qb::http::method method, RouteHandlerFn<SessionType> handler_fn);
 
-    /** @brief Adds a GET route directly to the router. @see RouteGroup::get */
-    Router<SessionType> &get(std::string path, RouteHandlerFn<SessionType> handler_fn);
-
-    /** @brief Adds a POST route directly to the router. @see RouteGroup::post */
-    Router<SessionType> &post(std::string path, RouteHandlerFn<SessionType> handler_fn);
-
-    /** @brief Adds a PUT route directly to the router. @see RouteGroup::put */
-    Router<SessionType> &put(std::string path, RouteHandlerFn<SessionType> handler_fn);
-
-    /** @brief Adds a DELETE route directly to the router. @see RouteGroup::del */
-    Router<SessionType> &del(std::string path, RouteHandlerFn<SessionType> handler_fn);
-
-    /** @brief Adds a PATCH route directly to the router. @see RouteGroup::patch */
-    Router<SessionType> &patch(std::string path, RouteHandlerFn<SessionType> handler_fn);
-
-    /** @brief Adds an OPTIONS route directly to the router. @see RouteGroup::options */
-    Router<SessionType> &options(std::string path, RouteHandlerFn<SessionType> handler_fn);
-
-    /** @brief Adds a HEAD route directly to the router. @see RouteGroup::head */
-    Router<SessionType> &head(std::string path, RouteHandlerFn<SessionType> handler_fn);
+    // Per-verb route registration (get/post/put/del/patch/options/head) is provided by the unified,
+    // concept-gated overloads in the QB_HTTP_ROUTER_VERB macro block below: one template accepts a
+    // synchronous OR coroutine handler (RouteHandlerLike) and a second binds a member function. The
+    // separate `RouteHandlerFn` (std::function) verb overloads were removed — the macro overload
+    // subsumes them (a sync lambda / function pointer / std::function all satisfy RouteHandlerLike).
 
     // --- Overloads for ICustomRoute shared_ptr at root level ---
     /** @brief Adds a GET route with an `ICustomRoute` handler directly to the router. @see RouteGroup::get */
@@ -120,6 +105,48 @@ public:
 
     /** @brief Adds a HEAD route with an `ICustomRoute` handler directly to the router. @see RouteGroup::head */
     Router<SessionType> &head(std::string path, std::shared_ptr<ICustomRoute<SessionType>> custom_route);
+
+    // --- Unified per-verb route API (sync OR coroutine handler, or a member function) ----------
+    //   router.get("/x", [](auto ctx) { ... });                                  // sync lambda
+    //   router.get("/x", [](auto ctx) -> qb::io::async::task<void> { ... });     // coroutine lambda
+    //   router.get("/x", this, &MyActor::handle_x);                              // (sync or coro) member fn
+    // One concept-gated overload (RouteHandlerLike) accepts both flavours; the coroutine branch is
+    // selected via `if constexpr (CoroRouteHandler<...>)`. No wrappers, no repeated session type.
+#define QB_HTTP_ROUTER_VERB(NAME, METHOD)                                                               \
+    template <typename H>                                                                                \
+        requires RouteHandlerLike<std::remove_cvref_t<H>, SessionType>                                   \
+    Router<SessionType> &NAME(std::string path, H &&handler) {                                            \
+        if constexpr (CoroRouteHandler<std::remove_cvref_t<H>, SessionType>) {                           \
+            return add_route(std::move(path), qb::http::method::METHOD,                                   \
+                             detail::wrap_coro_route_handler<SessionType>(std::forward<H>(handler)));     \
+        } else {                                                                                          \
+            return add_route(std::move(path), qb::http::method::METHOD,                                   \
+                             RouteHandlerFn<SessionType>(std::forward<H>(handler)));                      \
+        }                                                                                                 \
+    }                                                                                                     \
+    template <typename Obj, typename M>                                                                   \
+        requires std::is_member_function_pointer_v<M>                                                     \
+    Router<SessionType> &NAME(std::string path, Obj *obj, M member) {                                     \
+        return NAME(std::move(path), [obj, member](std::shared_ptr<qb::http::Context<SessionType>> ctx) { \
+            return (obj->*member)(std::move(ctx));                                                        \
+        });                                                                                               \
+    }
+    QB_HTTP_ROUTER_VERB(get, GET)
+    QB_HTTP_ROUTER_VERB(post, POST)
+    QB_HTTP_ROUTER_VERB(put, PUT)
+    QB_HTTP_ROUTER_VERB(del, DEL)
+    QB_HTTP_ROUTER_VERB(patch, PATCH)
+    QB_HTTP_ROUTER_VERB(options, OPTIONS)
+    QB_HTTP_ROUTER_VERB(head, HEAD)
+#undef QB_HTTP_ROUTER_VERB
+
+    /** @brief Adds global **coroutine** middleware (pass the `task<void>(ctx)` lambda directly). */
+    template <typename H>
+        requires CoroMiddlewareHandler<std::remove_cvref_t<H>, SessionType>
+    Router<SessionType> &
+    use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
+        return use(detail::wrap_coro_middleware_handler<SessionType>(std::forward<H>(handler)), std::move(name));
+    }
 
     // --- Typed ICustomRoute support at root level ---
     /**
@@ -183,17 +210,27 @@ public:
      */
     template <typename C, typename... Args>
     requires DerivedFrom<C, Controller<SessionType>>
-    std::shared_ptr<C> controller(std::string path_prefix, Args &&...args);
+    [[nodiscard]] std::shared_ptr<C> controller(std::string path_prefix, Args &&...args);
 
     // --- Middleware methods (apply to the root group, effectively global) ---
     /**
-     * @brief Adds global middleware using a `MiddlewareHandlerFn` (lambda/function pointer).
-     * This middleware applies to all routes handled by this router.
-     * @param mw_fn The middleware handler function.
+     * @brief Adds global **synchronous** middleware (lambda / function pointer / `MiddlewareHandlerFn`).
+     * Concept-gated on `SyncMiddleware` (callable with `(ctx, next)`), symmetric with the coroutine
+     * `use()` overload above. Applies to all routes handled by this router.
+     * @param mw_fn The middleware handler (`void(ctx, next)`).
      * @param name An optional name for this middleware instance. Defaults to "UnnamedGlobalFunctionalMiddleware".
      * @return Reference to this `Router` for chaining.
      */
-    Router<SessionType> &use(MiddlewareHandlerFn<SessionType> mw_fn, std::string name = "UnnamedGlobalFunctionalMiddleware");
+    template <typename H>
+        requires SyncMiddleware<std::remove_cvref_t<H>, SessionType>
+    Router<SessionType> &
+    use(H &&mw_fn, std::string name = "UnnamedGlobalFunctionalMiddleware") {
+        if (_root_group) {
+            _root_group->use(std::forward<H>(mw_fn), std::move(name));
+        }
+        _is_compiled = false;
+        return *this;
+    }
 
     /**
      * @brief Adds global middleware using a shared pointer to an `IMiddleware` object.
@@ -270,7 +307,7 @@ public:
      * Resets the router to its initial state. After clearing, `compile()` must be called again
      * if new routes are defined before the router can process requests.
      */
-    void clear() noexcept;
+    void clear(); // not noexcept: re-creates the root group / default handlers (allocates)
 };
 } // namespace qb::http
 

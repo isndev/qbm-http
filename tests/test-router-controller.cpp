@@ -113,9 +113,9 @@ public:
         add_controller_route("/get_data", qb::http::method::GET,
                              [this](std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) { this->get_data_handler(ctx); });
 
-        // Using MEMBER_HANDLER macro
-        add_controller_route("/post_data", qb::http::method::POST, MEMBER_HANDLER(&SyncTestController::post_data_handler));
-        add_controller_route("/item/:id", qb::http::method::GET, MEMBER_HANDLER(&SyncTestController::get_item_handler));
+        // Member-function route form
+        post("/post_data", this, &SyncTestController::post_data_handler);
+        get("/item/:id", this, &SyncTestController::get_item_handler);
     }
 
     void
@@ -170,7 +170,7 @@ public:
     initialize_routes() override {
         add_controller_route("/async_get", qb::http::method::GET,
                              [this](std::shared_ptr<qb::http::Context<MockControllerSession>> ctx) { this->async_get_handler(ctx); });
-        add_controller_route("/async_post", qb::http::method::POST, MEMBER_HANDLER(&AsyncTestController::async_post_handler));
+        post("/async_post", this, &AsyncTestController::async_post_handler);
     }
 
     void
@@ -361,21 +361,19 @@ public:
     void
     initialize_routes() override {
         // Route with controller-specific sync middleware
-        add_controller_route("/sync_mw_route", qb::http::method::GET, MEMBER_HANDLER(&ControllerWithAdvancedFeatures::basic_handler));
+        get("/sync_mw_route", this, &ControllerWithAdvancedFeatures::basic_handler);
 
         // Route with controller-specific async middleware
-        add_controller_route("/async_mw_route", qb::http::method::GET, MEMBER_HANDLER(&ControllerWithAdvancedFeatures::basic_handler));
+        get("/async_mw_route", this, &ControllerWithAdvancedFeatures::basic_handler);
 
         // Route for sync error
-        add_controller_route("/sync_error", qb::http::method::GET, MEMBER_HANDLER(&ControllerWithAdvancedFeatures::sync_error_handler));
+        get("/sync_error", this, &ControllerWithAdvancedFeatures::sync_error_handler);
 
         // Route for async error (error in deferred task)
-        add_controller_route("/async_error_deferred", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::async_error_deferred_handler));
+        get("/async_error_deferred", this, &ControllerWithAdvancedFeatures::async_error_deferred_handler);
 
         // Route for async error (error in handle method before deferring)
-        add_controller_route("/async_error_immediate", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::async_error_immediate_handler));
+        get("/async_error_immediate", this, &ControllerWithAdvancedFeatures::async_error_immediate_handler);
 
         // Route using a synchronous ICustomRoute
         auto sync_custom_route = std::make_shared<MyCustomControllerRoute>(_marker + "SyncCustomRouteImpl");
@@ -386,12 +384,9 @@ public:
         add_controller_route("/custom_async", qb::http::method::GET, async_custom_route);
 
         // Add routes for throwing handlers
-        add_controller_route("/throw_sync_direct", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::sync_throwing_handler_direct));
-        add_controller_route("/throw_async_in_task", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::async_throwing_in_task_handler));
-        add_controller_route("/throw_async_before_task", qb::http::method::GET,
-                             MEMBER_HANDLER(&ControllerWithAdvancedFeatures::async_throwing_before_task_handler));
+        get("/throw_sync_direct", this, &ControllerWithAdvancedFeatures::sync_throwing_handler_direct);
+        get("/throw_async_in_task", this, &ControllerWithAdvancedFeatures::async_throwing_in_task_handler);
+        get("/throw_async_before_task", this, &ControllerWithAdvancedFeatures::async_throwing_before_task_handler);
     }
 
     void
@@ -538,8 +533,8 @@ public:
 
     void
     initialize_routes() override {
-        add_controller_route("/ping_and_set/:modifier", qb::http::method::GET, MEMBER_HANDLER(&StatefulController::ping_and_set_handler));
-        add_controller_route("/get_state", qb::http::method::GET, MEMBER_HANDLER(&StatefulController::get_state_handler));
+        get("/ping_and_set/:modifier", this, &StatefulController::ping_and_set_handler);
+        get("/get_state", this, &StatefulController::get_state_handler);
     }
 
     void

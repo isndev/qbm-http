@@ -147,7 +147,7 @@ client->push_request(std::move(request), [](qb::http::Response res) {
 });
 ```
 
-`push_request(request, callback)` returns `false` only when the callback is null. Errors are delivered *through* the callback as a synthesized `Response`: a missing host or wrong scheme yields `400`, an exceeded pending-request cap yields `503`, transport failures yield `502 Bad Gateway`.
+`push_request(request, callback)` returns `false` only when the callback is null. Errors are delivered *through* the callback as a synthesized `Response`: a missing host or wrong scheme yields `400`, an exceeded pending-request cap yields `503`, and connection-establishment / transport failures also yield `503 Service Unavailable` (`handle_connection_failure` → `fail_all_requests` synthesize `SERVICE_UNAVAILABLE` for every outstanding request).
 
 ### Coroutine request
 
@@ -196,7 +196,7 @@ auto id = client->push_request_with_id(request, callback);
 client->cancel_request(id, "cancelled by application");
 ```
 
-Cancellation of an active request sends a QUIC stream reset with the HTTP/3 application error code `0x0105` (`NGHTTP3_H3_REQUEST_CANCELLED`) and completes the callback with status `CLIENT_CLOSED_REQUEST` (499). `cancel_request` returns `false` if the id is unknown.
+Cancellation of an active request sends a QUIC stream reset with the HTTP/3 application error code `NGHTTP3_H3_REQUEST_CANCELLED` (`0x010c`) and completes the callback with status `CLIENT_CLOSED_REQUEST` (499). `cancel_request` returns `false` if the id is unknown. The same `REQUEST_CANCELLED` reset is used when the client abandons a request stream for any other reason — a request that fails to submit, or one that hits its timeout (`3/client.cpp`), per RFC 9114 §4.1.
 
 ### Tuning
 
