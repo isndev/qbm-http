@@ -1,5 +1,5 @@
 /**
- * @file http/ws/coro.h
+ * @file qbm/http/ws/coro.h
  * @brief Coroutine-first client for the qb::http::ws module.
  *
  * This header is the WebSocket equivalent of `qbm/http/coro.h`:
@@ -60,13 +60,8 @@
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *         http://www.apache.org/licenses/LICENSE-2.0
- *
- * @ingroup WebSocket
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
 #pragma once
 
@@ -140,6 +135,13 @@ struct CloseResult {
 // -----------------------------------------------------------------------------
 
 /**
+ * @brief Coroutine-first WebSocket client.
+ *
+ * Exposes `co_await`-able entry points (`connect`, `receive`, `close_async`)
+ * over the shared CRTP protocol state machine. At most one awaiter may be
+ * parked per operation at a time; inbound frames that arrive with no parked
+ * `receive()` awaiter are buffered up to the configured cap.
+ *
  * @tparam Transport Either `qb::io::transport::tcp` (ws://) or
  *                   `qb::io::transport::stcp` (wss://).
  *

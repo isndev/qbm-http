@@ -10,7 +10,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Middleware
+ * @ingroup Http
  */
 #pragma once
 
@@ -33,15 +33,20 @@
 
 namespace qb::http {
 namespace detail {
-[[nodiscard]] inline std::string
-build_recaptcha_verification_body(std::string_view secret, std::string_view response,
-                                  std::optional<std::string_view> remote_ip = std::nullopt) {
-    std::string request_body = "secret=" + qb::io::uri::encode(secret) + "&response=" + qb::io::uri::encode(response);
-    if (remote_ip && !remote_ip->empty()) {
-        request_body += "&remoteip=" + qb::io::uri::encode(*remote_ip);
-    }
-    return request_body;
-}
+/**
+ * @brief Builds the URL-encoded request body for Google's siteverify endpoint.
+ *
+ * Produces an @c application/x-www-form-urlencoded payload of the form
+ * @c "secret=...&response=..." with an optional trailing @c "&remoteip=...".
+ * All components are percent-encoded via @c qb::io::uri::encode.
+ *
+ * @param secret    The reCAPTCHA secret key.
+ * @param response  The reCAPTCHA token to verify.
+ * @param remote_ip Optional client IP address; appended only when present and non-empty.
+ * @return The fully encoded request body string.
+ */
+[[nodiscard]] std::string build_recaptcha_verification_body(std::string_view secret, std::string_view response,
+                                                            std::optional<std::string_view> remote_ip = std::nullopt);
 } // namespace detail
 
 /**

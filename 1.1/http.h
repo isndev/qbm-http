@@ -809,46 +809,19 @@ using HTTPS = session<Func, qb::io::transport::stcp>;
 
 } // namespace async
 
-namespace {
-/// @brief @p scheme equals @p lower_ascii (fixed), ASCII case-insensitive.
-[[nodiscard]] inline bool
-scheme_eq_ignore_case(std::string_view scheme, std::string_view lower) noexcept {
-    if (scheme.size() != lower.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < scheme.size(); ++i) {
-        if (static_cast<char>(::tolower(static_cast<unsigned char>(scheme[i]))) != lower[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-} // namespace
-
-/// Value for the HTTP @c Host header derived from @p uri (bracketed IPv6, default ports omitted for @c http:80 and @c https:443). Scheme is
-/// compared case-insensitively.
-[[nodiscard]] inline std::string
-host_header_value(const qb::io::uri &uri) {
-    std::string host_value             = std::string(uri.host());
-    const bool  already_bracketed_ipv6 = host_value.size() >= 2 && host_value.front() == '[' && host_value.back() == ']';
-    if (!already_bracketed_ipv6 && host_value.find(':') != std::string::npos) {
-        host_value = "[" + host_value + "]";
-    }
-
-    const std::string_view port = uri.port();
-    if (port.empty()) {
-        return host_value;
-    }
-
-    const std::string_view scheme                = uri.scheme();
-    const bool             is_default_http_port  = scheme_eq_ignore_case(scheme, std::string_view{"http", 4u}) && port == "80";
-    const bool             is_default_https_port = scheme_eq_ignore_case(scheme, std::string_view{"https", 5u}) && port == "443";
-    if (!is_default_http_port && !is_default_https_port) {
-        host_value += ":";
-        host_value += port;
-    }
-    return host_value;
-}
+/**
+ * @brief Compute the value for the HTTP @c Host header derived from @p uri.
+ *
+ * The host is bracketed when it is an unbracketed IPv6 literal, and the port is
+ * appended only when it is non-default for the URI scheme (the @c http:80 and
+ * @c https:443 default ports are omitted). The scheme is compared
+ * case-insensitively (ASCII).
+ *
+ * @param uri The source URI to derive the @c Host header value from.
+ * @return The @c Host header value (host, optionally bracketed, with a
+ *         non-default port appended).
+ */
+[[nodiscard]] std::string host_header_value(const qb::io::uri &uri);
 
 namespace detail {
 template <typename _Func>

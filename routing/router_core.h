@@ -11,7 +11,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Routing
+ * @ingroup Http
  */
 #pragma once
 
@@ -78,6 +78,12 @@ private:
     std::function<void(Context<SessionType> &)>               _on_request_finalized_callback;
     std::vector<typename Context<SessionType>::LifecycleHook> _router_lifecycle_hooks;
 
+    /**
+     * @brief Builds the value for the RFC `Allow` response header from a set of methods.
+     * @param methods The HTTP methods permitted on a matched path (used for 405 responses).
+     * @return A comma-separated list of method names (e.g. "GET, POST"), or an empty
+     *         string when @p methods is empty.
+     */
     [[nodiscard]] static std::string
     allowed_header_value(const std::vector<qb::http::method> &methods) {
         std::string allow;
@@ -90,6 +96,12 @@ private:
         return allow;
     }
 
+    /**
+     * @brief Decodes URI-encoded path parameter values in place.
+     * Each parameter value is replaced by its percent-decoded form (e.g. "%20" -> " ").
+     * Path components keep '+' literal; only query/form decoding maps '+' to a space.
+     * @param params The path parameters to decode (modified in place).
+     */
     static void
     decode_path_parameters(PathParameters &params) {
         for (auto &param_pair : params) {
@@ -121,6 +133,12 @@ private:
             std::make_shared<RouteLambdaTask<SessionType>>(_default_not_found_handler, "DefaultOrCustomNotFoundHandler"));
     }
 
+    /**
+     * @brief (Private) Compiles the task chain for the "405 Method Not Allowed" handler.
+     * It prepends any specified @p global_prefix_tasks (typically global middleware) to a
+     * built-in handler that emits a plain-text 405 response.
+     * @param global_prefix_tasks A vector of tasks (usually global middleware) to execute before the 405 handler.
+     */
     void
     compile_default_method_not_allowed_handler(const std::vector<std::shared_ptr<IAsyncTask<SessionType>>> &global_prefix_tasks) {
         _compiled_method_not_allowed_tasks.clear();
@@ -249,6 +267,11 @@ public:
         _user_error_chain_explicitly_set = true;
     }
 
+    /**
+     * @brief Registers a lifecycle hook to be attached to every `Context` created by this router.
+     * Hooks are invoked at defined `HookPoint`s during request processing.
+     * @param hook_fn The lifecycle hook callable. Null callables are ignored.
+     */
     void
     add_lifecycle_hook(typename Context<SessionType>::LifecycleHook hook_fn) {
         if (hook_fn) {

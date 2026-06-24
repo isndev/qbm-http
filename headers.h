@@ -1,6 +1,7 @@
 /**
  * @file qbm/http/headers.h
  * @brief Defines HTTP header management classes, including `Headers` and `ContentType`,
+ *
  *        and utility functions for header attribute parsing and content encoding negotiation.
  *
  * This file provides the `Headers` class for managing collections of HTTP headers,
@@ -157,32 +158,7 @@ public:
          * @return A `std::pair` containing the MIME type (as `std::string`) as the first element
          *         and the charset (as `std::string`) as the second.
          */
-        [[nodiscard]] static std::pair<std::string, std::string>
-        parse(std::string_view content_type_str) {
-            std::pair<std::string, std::string> ret{std::string(default_content_type), std::string(default_charset)};
-
-            const auto semicolon_pos = content_type_str.find(';');
-            const auto media_type    = utility::trim_http_whitespace(
-                semicolon_pos == std::string_view::npos ? content_type_str : content_type_str.substr(0, semicolon_pos));
-            if (media_type.empty()) {
-                return ret;
-            }
-            ret.first = std::string(media_type);
-
-            if (semicolon_pos != std::string_view::npos) {
-                try {
-                    auto attrs      = parse_header_attributes(content_type_str.substr(semicolon_pos + 1));
-                    auto charset_it = attrs.find("charset");
-                    if (charset_it != attrs.end() && !charset_it->second.empty()) {
-                        ret.second = charset_it->second;
-                    }
-                } catch (...) {
-                    ret.second = std::string(default_charset);
-                }
-            }
-
-            return ret;
-        }
+        [[nodiscard]] static std::pair<std::string, std::string> parse(std::string_view content_type_str);
 
     private:
         /** @brief Pair storing the MIME type (`.first`) and charset (`.second`). */
@@ -291,15 +267,7 @@ public:
      * (`set_content_type`, `set_header`, `add_header`, `remove_header`) keep it
      * synchronized automatically.
      */
-    void
-    refresh_content_type() noexcept {
-        const auto it = _headers.find("Content-Type");
-        if (it != _headers.end() && !it->second.empty()) {
-            _content_type = ContentType{it->second.front()};
-        } else {
-            _content_type = ContentType{default_content_type};
-        }
-    }
+    void refresh_content_type() noexcept;
 
     /**
      * @brief Retrieves the value of a specific header.

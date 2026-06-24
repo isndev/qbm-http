@@ -9,7 +9,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Auth
+ * @ingroup Http
  */
 #pragma once
 
@@ -56,19 +56,7 @@ struct User {
      * @return `true` if the user has at least one of the roles in `required_roles_list`, `false` otherwise.
      *         Returns `false` if `required_roles_list` is empty.
      */
-    [[nodiscard]] bool
-    has_any_role(const std::vector<std::string> &required_roles_list) const noexcept {
-        if (required_roles_list.empty()) {
-            return false; // Or true, depending on desired semantics for empty list. False seems safer.
-        }
-        for (const auto &role_to_check : required_roles_list) {
-            if (has_role(role_to_check)) {
-                // Calls this->has_role
-                return true;
-            }
-        }
-        return false;
-    }
+    [[nodiscard]] bool has_any_role(const std::vector<std::string> &required_roles_list) const noexcept;
 
     /**
      * @brief Checks if the user possesses all roles from a given list.
@@ -76,19 +64,7 @@ struct User {
      * @return `true` if the user has every role specified in `required_roles_list`.
      *         Returns `true` if `required_roles_list` is empty (vacuously true).
      */
-    [[nodiscard]] bool
-    has_all_roles(const std::vector<std::string> &required_roles_list) const noexcept {
-        if (required_roles_list.empty()) {
-            return true; // User has all roles if no roles are required.
-        }
-        for (const auto &role_to_check : required_roles_list) {
-            if (!has_role(role_to_check)) {
-                // Calls this->has_role
-                return false;
-            }
-        }
-        return true;
-    }
+    [[nodiscard]] bool has_all_roles(const std::vector<std::string> &required_roles_list) const noexcept;
 };
 
 /** @brief Type alias for `qb::http::auth::User`, provided for backward compatibility or alternative naming preference. */

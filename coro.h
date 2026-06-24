@@ -167,6 +167,7 @@ using awaiter = http_awaiter<T, std::function<void(std::function<void(T &&)>)>>;
  * @tparam T    Type yielded by the operation.
  * @tparam Func Operation type; deducible from the argument.
  * @param  op   The operation to drive.
+ * @return An `awaiter<T>` wrapping @p op, ready to be `co_await`ed.
  */
 template <typename T, typename Func>
 [[nodiscard]] auto

@@ -19,9 +19,8 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Http2
+ * @ingroup Http
  */
-
 #pragma once
 
 #include <array>

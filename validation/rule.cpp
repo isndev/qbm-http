@@ -9,7 +9,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Validaton
+ * @ingroup Http
  */
 #include "./rule.h"
 #include <algorithm>
@@ -19,13 +19,7 @@
 #include "./schema_validator.h"
 
 namespace qb::http::validation {
-// Implementations for TypeRule, RequiredRule, MinLengthRule, MaxLengthRule,
-// PatternRule, MinimumRule, MaximumRule, EnumRule, UniqueItemsRule,
-// MinItemsRule, MaxItemsRule, MinPropertiesRule, MaxPropertiesRule, PropertyNamesRule
-// need to use Result instead of ValidationResult in their method signatures
-// and refer to other types within qb::http::validation if necessary.
 
-// Example for TypeRule:
 std::string
 TypeRule::data_type_to_string(DataType dt) noexcept {
     switch (dt) {

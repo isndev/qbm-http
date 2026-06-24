@@ -1,6 +1,29 @@
 /**
  * @file qbm/http/3/protocol/connection.h
  * @brief HTTP/3 connection adapter backed by nghttp3.
+ *
+ * This header-only template layer adapts the libnghttp3 HTTP/3 engine onto the
+ * qbm/http message model (`qb::http::Request` / `qb::http::Response`). It is the
+ * protocol core shared by the HTTP/3 server (`3/http3.h`) and client
+ * (`3/client.h`):
+ *   - `qb::protocol::http3::connection<Owner>` is a CRTP adapter. It owns one
+ *     `nghttp3_conn`, tracks per-stream state, bridges every nghttp3 C callback
+ *     back into the `Owner` (the QUIC transport), and materializes inbound
+ *     header/trailer blocks into typed messages. All callbacks run under an
+ *     exception guard so a throwing handler never unwinds through C frames.
+ *   - The `detail` namespace holds the HTTP/3 framing helpers consumed from the
+ *     `connection` template body: header validation/sanitization (RFC 9114),
+ *     content-length reconciliation, pseudo-header ordering, and request /
+ *     response / trailer field-block construction.
+ *
+ * Because every definition here is either a template, a member of the
+ * `connection<Owner>` template, or a helper invoked from those template bodies,
+ * the unit is header-only by design and has no companion translation unit.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
 #pragma once
 
@@ -36,8 +59,21 @@
 
 namespace qb::protocol::http3 {
 
+/**
+ * @brief HTTP/3 framing helpers shared by the `connection` template.
+ *
+ * These functions implement the RFC 9114 / RFC 7230 field-validation and
+ * field-block construction rules. They are consumed exclusively from the
+ * `connection<Owner>` template body (and from one another), which is why they
+ * live in the header rather than a separate translation unit.
+ */
 namespace detail {
 
+/**
+ * @brief ASCII-lowercase a header name.
+ * @param value Header name to fold.
+ * @return Lowercased copy of @p value (ASCII only; non-ASCII bytes untouched).
+ */
 inline std::string
 lower_header_name(std::string_view value) {
     std::string out(value);
@@ -45,6 +81,13 @@ lower_header_name(std::string_view value) {
     return out;
 }
 
+/**
+ * @brief Test whether a header is a connection-specific field banned in HTTP/3.
+ * @param name Header name (case-insensitive).
+ * @return @c true if @p name is one of the hop-by-hop / connection-management
+ *         fields prohibited by RFC 9114 section 4.2 (e.g. @c connection,
+ *         @c transfer-encoding, @c upgrade).
+ */
 inline bool
 is_forbidden_h3_header(std::string_view name) {
     const auto lower = lower_header_name(name);
@@ -52,12 +95,24 @@ is_forbidden_h3_header(std::string_view name) {
            || lower == "proxy-authorization" || lower == "transfer-encoding" || lower == "upgrade";
 }
 
+/**
+ * @brief Test whether a name is disallowed as an HTTP/3 trailer field.
+ * @param name Trailer field name (case-insensitive).
+ * @return @c true if @p name is empty, a pseudo-header, @c content-length,
+ *         @c trailer, or any field forbidden by ::is_forbidden_h3_header.
+ */
 inline bool
 is_forbidden_h3_trailer(std::string_view name) {
     const auto lower = lower_header_name(name);
     return lower.empty() || lower.front() == ':' || lower == "content-length" || lower == "trailer" || is_forbidden_h3_header(lower);
 }
 
+/**
+ * @brief Parse a @c content-length field value as an unsigned 64-bit integer.
+ * @param value Raw field value.
+ * @return The parsed length, or @c std::nullopt if @p value is not a single
+ *         well-formed decimal integer that consumes the entire string.
+ */
 inline std::optional<std::uint64_t>
 parse_content_length(std::string_view value) {
     std::uint64_t parsed = 0;
@@ -70,12 +125,24 @@ parse_content_length(std::string_view value) {
     return parsed;
 }
 
+/**
+ * @brief Outcome of reconciling all @c content-length fields on a message.
+ * @tparam Message Message type (@c qb::http::Request or @c qb::http::Response).
+ */
 template <typename Message>
 struct declared_content_length_result {
-    bool                         ok = true;
-    std::optional<std::uint64_t> value;
+    bool                         ok = true; ///< False if any value is malformed or values disagree.
+    std::optional<std::uint64_t> value;     ///< The single agreed length, if declared.
 };
 
+/**
+ * @brief Collapse a message's @c content-length field(s) into one value.
+ * @tparam Message Message type exposing @c headers().
+ * @param msg Message to inspect.
+ * @return A result whose @c ok is false when a value fails to parse or two
+ *         declared values disagree; otherwise @c value holds the declared
+ *         length (absent when no @c content-length is present).
+ */
 template <typename Message>
 declared_content_length_result<Message>
 declared_content_length(Message const &msg) {
@@ -95,10 +162,23 @@ declared_content_length(Message const &msg) {
     return result;
 }
 
+/**
+ * @brief A stable-storage HTTP/3 header field block ready for nghttp3.
+ *
+ * @c storage owns the name/value byte buffers; @c nva holds the
+ * @c nghttp3_nv view array that points into that storage. A @c std::deque is
+ * used so existing entries keep stable addresses as more fields are appended,
+ * which is required because @c nva aliases the stored bytes.
+ */
 struct header_block {
-    std::deque<std::pair<std::string, std::string>> storage;
-    std::vector<nghttp3_nv>                         nva;
+    std::deque<std::pair<std::string, std::string>> storage; ///< Owning name/value byte buffers.
+    std::vector<nghttp3_nv>                         nva;     ///< nghttp3 field views into @c storage.
 
+    /**
+     * @brief Append a field, copying ownership into @c storage and adding its view.
+     * @param name  Field name (moved into the block).
+     * @param value Field value (moved into the block).
+     */
     void
     add(std::string name, std::string value) {
         storage.emplace_back(std::move(name), std::move(value));
@@ -110,6 +190,12 @@ struct header_block {
     }
 };
 
+/**
+ * @brief Verify pseudo-headers precede all regular headers in a block.
+ * @param block Field block to check (inspected in insertion order).
+ * @return @c true if no pseudo-header (name starting with ':') appears after a
+ *         regular header, as mandated by RFC 9114 section 4.3.
+ */
 inline bool
 pseudo_headers_before_regular_headers(header_block const &block) noexcept {
     bool regular_headers_started = false;
@@ -126,18 +212,39 @@ pseudo_headers_before_regular_headers(header_block const &block) noexcept {
     return true;
 }
 
+/**
+ * @brief Check that all mandatory request pseudo-headers are present and non-empty.
+ * @param method    Value of @c :method, if seen.
+ * @param scheme    Value of @c :scheme, if seen.
+ * @param authority Value of @c :authority, if seen.
+ * @param path      Value of @c :path, if seen.
+ * @return @c true only when every one of the four is present and non-empty.
+ */
 inline bool
 has_required_request_pseudo_headers(std::optional<std::string> const &method, std::optional<std::string> const &scheme,
                                     std::optional<std::string> const &authority, std::optional<std::string> const &path) noexcept {
     return method && !method->empty() && scheme && !scheme->empty() && authority && !authority->empty() && path && !path->empty();
 }
 
+/**
+ * @brief Test whether a byte is a valid HTTP token character for a header name.
+ * @param c Byte to test.
+ * @return @c true if @p c is a lowercase token character per RFC 7230 (uppercase
+ *         letters are intentionally excluded; HTTP/3 names must be lowercase).
+ */
 inline bool
 is_header_name_char(unsigned char c) noexcept {
     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*'
            || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
 }
 
+/**
+ * @brief Validate an outgoing (regular) header field's name and value.
+ * @param name  Field name; must be a non-empty lowercase token within length limits.
+ * @param value Field value; must be within limits and free of NUL/CR/LF and
+ *              other control characters (TAB allowed).
+ * @return @c true if the field is safe to emit on the wire.
+ */
 inline bool
 is_valid_header_field(std::string_view name, std::string_view value) noexcept {
     if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
@@ -163,6 +270,13 @@ is_valid_header_field(std::string_view name, std::string_view value) noexcept {
     return true;
 }
 
+/**
+ * @brief Validate an incoming header field's name and value.
+ * @param name  Field name; may be a pseudo-header (leading ':') but the part
+ *              after any leading colon must be a non-empty lowercase token.
+ * @param value Field value; same control-character rules as outgoing fields.
+ * @return @c true if the received field is well-formed and within limits.
+ */
 inline bool
 is_valid_incoming_header_field(std::string_view name, std::string_view value) noexcept {
     if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
@@ -192,6 +306,13 @@ is_valid_incoming_header_field(std::string_view name, std::string_view value) no
     return true;
 }
 
+/**
+ * @brief Collect the lowercased field names announced in a @c trailer header.
+ * @tparam Message Message type exposing @c has_header() and @c headers().
+ * @param msg Message to inspect.
+ * @return The set of trailer field names declared by the @c trailer header
+ *         (empty when none is present).
+ */
 template <typename Message>
 std::vector<std::string>
 announced_trailers(Message const &msg) {
@@ -212,17 +333,34 @@ announced_trailers(Message const &msg) {
     return trailers;
 }
 
+/**
+ * @brief Test whether a field name appears in the announced trailer set.
+ * @param name     Field name (case-insensitive).
+ * @param trailers Lowercased trailer names from ::announced_trailers.
+ * @return @c true if @p name was announced as a trailer.
+ */
 inline bool
 is_announced_trailer(std::string_view name, std::vector<std::string> const &trailers) noexcept {
     return std::find(trailers.begin(), trailers.end(), lower_header_name(name)) != trailers.end();
 }
 
+/**
+ * @brief Copy an nghttp3 reference-counted buffer into a @c std::string.
+ * @param buf nghttp3 buffer handle.
+ * @return A copy of the buffer's bytes.
+ */
 inline std::string
 rcbuf_to_string(nghttp3_rcbuf *buf) {
     const auto view = nghttp3_rcbuf_get_buf(buf);
     return {reinterpret_cast<const char *>(view.base), view.len};
 }
 
+/**
+ * @brief Build the @c :path origin-form target (path plus optional query).
+ * @param uri Request URI.
+ * @return The path (defaulting to "/" when empty), with @c ?query appended when
+ *         the URI carries encoded queries.
+ */
 inline std::string
 request_target(qb::io::uri const &uri) {
     std::string path = uri.path().empty() ? "/" : std::string(uri.path());
@@ -233,6 +371,11 @@ request_target(qb::io::uri const &uri) {
     return path;
 }
 
+/**
+ * @brief Build the @c :authority value (host plus optional ":port").
+ * @param uri Request URI.
+ * @return The host, with @c :port appended when the URI specifies one.
+ */
 inline std::string
 authority(qb::io::uri const &uri) {
     std::string value(uri.host());
@@ -243,6 +386,18 @@ authority(qb::io::uri const &uri) {
     return value;
 }
 
+/**
+ * @brief Append a message's regular (non-pseudo, non-trailer) headers to a block.
+ * @tparam Message Message type exposing @c headers().
+ * @param block  Destination field block.
+ * @param msg    Source message.
+ * @param fields Running field count, enforced against
+ *               @c protocol_limits::MAX_HEADERS_COUNT and updated in place.
+ * @return @c false (leaving @p block partially populated) if a forbidden field,
+ *         an invalid field, or the field-count limit is encountered; @c true on
+ *         success. @c host is dropped (folded into @c :authority) and announced
+ *         trailers are skipped.
+ */
 template <typename Message>
 bool
 add_regular_headers(header_block &block, Message const &msg, std::size_t &fields) {
@@ -268,6 +423,14 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
     return true;
 }
 
+/**
+ * @brief Build the trailer field block for a message, if any are announced.
+ * @tparam Message Message type exposing @c headers().
+ * @param msg Source message.
+ * @return The trailer field block, or @c std::nullopt when no trailers are
+ *         announced or none resolve to non-empty fields. Returns @c std::nullopt
+ *         on the first forbidden trailer, invalid field, or count-limit breach.
+ */
 template <typename Message>
 std::optional<header_block>
 make_trailers(Message const &msg) {
@@ -295,6 +458,14 @@ make_trailers(Message const &msg) {
     return block.nva.empty() ? std::nullopt : std::optional<header_block>{std::move(block)};
 }
 
+/**
+ * @brief Build the request header field block (pseudo-headers + regular headers).
+ * @param request Request to serialize.
+ * @return The field block, or @c std::nullopt if the target exceeds
+ *         @c MAX_URL_LENGTH, the declared @c content-length disagrees with the
+ *         body size, or regular-header assembly fails. A @c content-length is
+ *         synthesized when the body is non-empty and none was supplied.
+ */
 inline std::optional<header_block>
 make_request_headers(qb::http::Request const &request) {
     header_block block;
@@ -323,6 +494,14 @@ make_request_headers(qb::http::Request const &request) {
     return block;
 }
 
+/**
+ * @brief Decide whether a response body must satisfy its declared content-length.
+ * @param response       Response being sent.
+ * @param request_method Method of the request being answered.
+ * @return @c false for responses with no payload semantics (HEAD requests, 1xx,
+ *         204, 304), where a declared content-length need not equal the body
+ *         size; @c true otherwise.
+ */
 inline bool
 response_body_length_must_match(qb::http::Response const &response, qb::http::Method request_method) noexcept {
     if (request_method == qb::http::method::HEAD) {
@@ -332,6 +511,13 @@ response_body_length_must_match(qb::http::Response const &response, qb::http::Me
     return !((status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304);
 }
 
+/**
+ * @brief Build the response header field block (@c :status + regular headers).
+ * @param response Response to serialize.
+ * @return The field block, or @c std::nullopt if regular-header assembly fails
+ *         or the field-count limit is hit. A @c content-length is synthesized
+ *         when the body is non-empty and none was supplied.
+ */
 inline std::optional<header_block>
 make_response_headers(qb::http::Response const &response) {
     header_block block;
@@ -351,9 +537,31 @@ make_response_headers(qb::http::Response const &response) {
 
 } // namespace detail
 
+/**
+ * @brief CRTP HTTP/3 connection adapter over a single @c nghttp3_conn.
+ *
+ * One instance maps a QUIC connection onto the HTTP/3 application layer for one
+ * direction of use (client or server). It owns the nghttp3 connection object,
+ * keeps per-stream state, feeds inbound QUIC stream bytes into nghttp3, drains
+ * outbound frames back to the transport, and materializes received header /
+ * trailer / data into typed @c qb::http::Request / @c qb::http::Response objects.
+ *
+ * The @p Owner is the QUIC transport; the adapter calls back into it for stream
+ * I/O (e.g. @c open_http3_unidirectional_stream, @c send_http3_stream_data,
+ * @c extend_http3_stream_credit), flow-control and lifecycle events, and request
+ * / response delivery. Optional @c Owner hooks are detected with @c requires and
+ * skipped when absent, so an owner only implements the callbacks it needs.
+ *
+ * @tparam Owner Transport type providing the HTTP/3 owner interface.
+ *
+ * @note Every nghttp3 C callback body runs under ::guard_callback so a thrown
+ *       exception becomes @c NGHTTP3_ERR_CALLBACK_FAILURE instead of unwinding
+ *       through C frames (undefined behaviour).
+ */
 template <typename Owner>
 class connection {
 public:
+    /// @brief Direction of the connection: outbound client or inbound server.
     enum class role { client, server };
 
 private:
@@ -783,6 +991,13 @@ private:
     }
 
 public:
+    /**
+     * @brief Create the HTTP/3 connection and its underlying @c nghttp3_conn.
+     * @param owner         Transport that owns this connection (stored by reference).
+     * @param connection_id Identifier passed back on every owner callback.
+     * @param r             Client or server role.
+     * @throws std::runtime_error if the nghttp3 connection cannot be created.
+     */
     connection(Owner &owner, std::uint64_t connection_id, role r)
         : _owner(owner)
         , _role(r)
@@ -800,12 +1015,18 @@ public:
         }
     }
 
+    /// @brief Destroy the connection, releasing the underlying @c nghttp3_conn.
     ~connection() {
         nghttp3_conn_del(_conn);
     }
 
     connection(connection const &)            = delete;
     connection &operator=(connection const &) = delete;
+
+    /**
+     * @brief Move-construct, transferring ownership of the nghttp3 connection.
+     * @param rhs Source connection; its @c _conn is reset to null.
+     */
     connection(connection &&rhs) noexcept
         : _owner(rhs._owner)
         , _role(rhs._role)
@@ -813,11 +1034,24 @@ public:
         , _conn(std::exchange(rhs._conn, nullptr))
         , _streams(std::move(rhs._streams)) {}
 
+    /**
+     * @brief Whether the underlying nghttp3 connection is live.
+     * @return @c true unless the connection has been moved-from.
+     */
     [[nodiscard]] bool
     ok() const noexcept {
         return _conn != nullptr;
     }
 
+    /**
+     * @brief Open and bind the HTTP/3 control and QPACK encoder/decoder streams.
+     *
+     * Idempotent: a no-op once the local streams are bound. On first success the
+     * pending control/QPACK output is drained to the transport.
+     *
+     * @return @c true on success (or if already bound); @c false if any stream
+     *         fails to bind.
+     */
     bool
     bind_local_streams() {
         if (_local_streams_bound) {
@@ -835,6 +1069,16 @@ public:
         return true;
     }
 
+    /**
+     * @brief Feed inbound QUIC stream bytes into the HTTP/3 engine.
+     * @param stream_id QUIC stream the bytes arrived on.
+     * @param data      Received bytes.
+     * @param fin       Whether this completes the stream (QUIC FIN).
+     * @return @c true on success; @c false after a protocol read error (which
+     *         also closes the connection via the owner). On success the consumed
+     *         byte count is returned to the owner as flow-control credit and any
+     *         resulting output is drained.
+     */
     bool
     read_stream(std::uint64_t stream_id, std::string_view data, bool fin) {
         (void) state_for(stream_id);
@@ -849,6 +1093,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Acknowledge that the peer received @p bytes of stream output.
+     * @param stream_id Stream whose output was acknowledged.
+     * @param bytes     Number of newly acknowledged bytes (a zero count is a no-op).
+     */
     void
     add_ack_offset(std::uint64_t stream_id, std::uint64_t bytes) {
         if (bytes != 0) {
@@ -856,6 +1105,11 @@ public:
         }
     }
 
+    /**
+     * @brief Send a GOAWAY shutdown notice without closing the connection.
+     * @return @c true on success (output is drained); @c false if nghttp3 rejects
+     *         the notice.
+     */
     bool
     submit_shutdown_notice() {
         if (nghttp3_conn_submit_shutdown_notice(_conn) != 0) {
@@ -865,6 +1119,14 @@ public:
         return true;
     }
 
+    /**
+     * @brief Begin graceful shutdown of the connection (GOAWAY).
+     *
+     * Marks the connection as shutting down so ::is_drained can later report
+     * completion, then drains any resulting output.
+     *
+     * @return @c true on success; @c false if nghttp3 rejects the shutdown.
+     */
     bool
     shutdown() {
         _shutdown_started = true;
@@ -875,11 +1137,27 @@ public:
         return true;
     }
 
+    /**
+     * @brief Whether a started shutdown has fully drained.
+     * @return @c true only after ::shutdown was called and nghttp3 reports the
+     *         connection drained (safe to close the transport).
+     */
     [[nodiscard]] bool
     is_drained() const noexcept {
         return _shutdown_started && nghttp3_conn_is_drained(_conn) != 0;
     }
 
+    /**
+     * @brief Submit a response (server role) on a request stream.
+     * @param stream_id Stream the request arrived on.
+     * @param response  Response to send.
+     * @return @c true on success; @c false if the declared @c content-length is
+     *         malformed or (where it must match) disagrees with the body, header
+     *         assembly fails, nghttp3 rejects the submission, or a @c trailer
+     *         header is present but no valid trailer block can be built. On
+     *         success the body is captured, trailers are submitted when present,
+     *         per-stream user data is registered, and output is drained.
+     */
     bool
     submit_response(std::uint64_t stream_id, qb::http::Response const &response) {
         auto      &st              = state_for(stream_id);
@@ -912,6 +1190,15 @@ public:
         return true;
     }
 
+    /**
+     * @brief Submit a request (client role) on a freshly opened stream.
+     * @param stream_id Stream to send the request on.
+     * @param request   Request to send (copied into per-stream state).
+     * @return @c true on success; @c false if header assembly fails, nghttp3
+     *         rejects the submission, or a @c trailer header is present but no
+     *         valid trailer block can be built. On success the body is captured,
+     *         trailers are submitted when present, and output is drained.
+     */
     bool
     submit_request(std::uint64_t stream_id, qb::http::Request const &request) {
         auto &st     = state_for(stream_id);
@@ -938,6 +1225,15 @@ public:
         return true;
     }
 
+    /**
+     * @brief Pump pending HTTP/3 output to the transport.
+     *
+     * Repeatedly asks nghttp3 for stream frames (bounded by a per-call budget),
+     * forwards each chunk to the owner via @c send_http3_stream_data, advances
+     * the write offset, and, when a stream's output reaches FIN, notifies the
+     * owner once via the optional @c on_http3_stream_output_drained hook. A write
+     * error closes the connection through the owner.
+     */
     void
     drain() {
         nghttp3_vec                vec[16];

@@ -10,7 +10,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Routing
+ * @ingroup Http
  */
 #pragma once
 
@@ -201,7 +201,17 @@ public:
     QB_HTTP_CTRL_VERB(head, HEAD)
 #undef QB_HTTP_CTRL_VERB
 
-    /** @brief Adds **coroutine** middleware to this controller (auto-wrapped). */
+    /**
+     * @brief Adds **coroutine** middleware to this controller (auto-wrapped).
+     *
+     * The coroutine handler is wrapped into a synchronous `MiddlewareHandlerFn` via
+     * `detail::wrap_coro_middleware_handler` and then registered through the
+     * `SyncMiddleware` `use()` overload.
+     * @tparam H A coroutine middleware handler type satisfying `CoroMiddlewareHandler`.
+     * @param handler The coroutine middleware handler.
+     * @param name An optional name for this middleware instance, useful for logging or debugging.
+     * @return Reference to this `Controller` for chaining.
+     */
     template <typename H>
     requires CoroMiddlewareHandler<std::remove_cvref_t<H>, Session>
     Controller<Session> &

@@ -11,7 +11,6 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
-
 #include "./cookie.h"
 #include "./date.h"    // For qb::http::date::parse_http_date, format_http_date
 #include "./utility.h" // For qb::http::utility::iequals, is_control
@@ -501,4 +500,15 @@ Cookie::Cookie(std::string &&name, std::string &&value) noexcept
     , _secure(false)
     , _http_only(false)
     , _same_site(std::nullopt) {}
+
+Cookie &
+CookieJar::add(std::string name, std::string value) {
+    Cookie cookie(name, std::move(value));
+    auto   it = _cookies.find(name);
+    if (it != _cookies.end()) {
+        it->second = std::move(cookie);
+        return it->second;
+    }
+    return _cookies.emplace(std::move(name), std::move(cookie)).first->second;
+}
 } // namespace qb::http

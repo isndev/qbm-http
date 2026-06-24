@@ -1,6 +1,22 @@
 /**
  * @file qbm/http/3/http3.h
  * @brief Native HTTP/3 server integration for qbm/http.
+ *
+ * This header provides the server-side HTTP/3 stack built on top of the QUIC
+ * endpoint (`qb::io::async::quic::endpoint`). It wires the QUIC stream lifecycle
+ * to the HTTP/3 protocol layer (`qb::protocol::http3::connection`) and the shared
+ * routing engine (`qb::http::Router`), exposing a CRTP server/session pair:
+ *   - `internal::session` maps a single HTTP/3 request stream onto the routing
+ *     `Context`, response serialization, and HEAD handling.
+ *   - `internal::server` owns per-connection HTTP/3 state, sessions, graceful
+ *     shutdown bookkeeping, and dispatch of QUIC events.
+ * The `use`, `Server`, `DefaultSession`, and `make_server` facilities provide the
+ * ready-to-use, default-instantiated entry points.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
 #pragma once
 
@@ -27,14 +43,28 @@ namespace qb::http3 {
 
 namespace internal {
 
+/**
+ * @brief Composite key identifying a single HTTP/3 request stream.
+ *
+ * Pairs the owning QUIC connection id with the stream id; used to index the
+ * per-stream session map. Equality is member-wise (defaulted).
+ */
 struct stream_key {
-    std::uint64_t connection_id = 0;
-    std::uint64_t stream_id     = 0;
+    std::uint64_t connection_id = 0; ///< Owning QUIC connection identifier.
+    std::uint64_t stream_id     = 0; ///< Stream identifier within the connection.
 
     friend bool operator==(stream_key const &, stream_key const &) = default;
 };
 
+/**
+ * @brief Hash functor for @ref stream_key, suitable for unordered containers.
+ */
 struct stream_key_hash {
+    /**
+     * @brief Combine the two key fields into a single hash value.
+     * @param key Stream key to hash.
+     * @return Combined hash of the connection and stream identifiers.
+     */
     std::size_t
     operator()(stream_key const &key) const noexcept {
         auto h1 = std::hash<std::uint64_t>{}(key.connection_id);
@@ -43,6 +73,17 @@ struct stream_key_hash {
     }
 };
 
+/**
+ * @brief Per-stream HTTP/3 session bound to the routing engine.
+ *
+ * Represents a single HTTP/3 request stream. Holds the routing @ref ContextType
+ * for the in-flight request, serializes responses back through the owning
+ * @p Handler (the HTTP/3 server), applies HEAD semantics, and runs the
+ * post-response hook once the response has been flushed.
+ *
+ * @tparam Derived  Concrete session type (CRTP), enabling shared_from_this.
+ * @tparam Handler  HTTP/3 server type providing routing and response transport.
+ */
 template <typename Derived, typename Handler>
 class session : public std::enable_shared_from_this<Derived> {
 public:
@@ -90,17 +131,34 @@ public:
         return _server->router();
     }
 
+    /**
+     * @brief Associate this session with its QUIC connection and stream ids.
+     * @param connection_id Owning QUIC connection identifier.
+     * @param stream_id     Request stream identifier.
+     */
     void
     bind_http3_stream(std::uint64_t connection_id, std::uint64_t stream_id) noexcept {
         _connection_id = connection_id;
         _stream_id     = stream_id;
     }
 
+    /**
+     * @brief Record the request method, used to apply HEAD response semantics.
+     * @param method HTTP method of the in-flight request.
+     */
     void
     bind_http3_request_method(qb::http::Method method) noexcept {
         _request_method = method;
     }
 
+    /**
+     * @brief Attach the routing context for the in-flight request.
+     *
+     * If the response was already sent before the context arrived, the
+     * post-response-send hook is executed immediately and the context released.
+     *
+     * @param context Routing context to take ownership of.
+     */
     void
     attach_context(std::shared_ptr<ContextType> context) noexcept {
         _context = std::move(context);
@@ -110,6 +168,10 @@ public:
         }
     }
 
+    /**
+     * @brief Cancel the in-flight routing context and release it.
+     * @param reason Human-readable cancellation reason forwarded to the context.
+     */
     void
     cancel_context(std::string const &reason) noexcept {
         if (_context) {
@@ -118,6 +180,12 @@ public:
         }
     }
 
+    /**
+     * @brief Mark the response as fully sent.
+     *
+     * Idempotent. On the first call, runs the post-response-send hook on the
+     * attached context (if any) and releases it.
+     */
     void
     mark_response_sent() {
         if (_response_sent) {
@@ -130,11 +198,25 @@ public:
         }
     }
 
+    /**
+     * @brief Whether a routing context is currently attached.
+     * @return True while a context is in flight, false otherwise.
+     */
     [[nodiscard]] bool
     has_active_context() const noexcept {
         return static_cast<bool>(_context);
     }
 
+    /**
+     * @brief Serialize and send an HTTP response on this stream.
+     *
+     * Stamps the response with this stream id, fills in @c content-length when
+     * missing and a body is present, and applies HEAD semantics (sends headers
+     * with an empty body while still advertising the would-be content length).
+     *
+     * @param response Response to send; its @c stream_id is overwritten.
+     * @return Reference to the session's output pipe.
+     */
     auto &
     operator<<(qb::http::Response &response) {
         response.stream_id = _stream_id;
@@ -155,6 +237,18 @@ public:
     }
 };
 
+/**
+ * @brief CRTP HTTP/3 server bound to a QUIC endpoint.
+ *
+ * Owns the per-connection HTTP/3 protocol state, the per-stream sessions, and
+ * the shared routing engine. Translates QUIC events (connect, stream data,
+ * stream/connection close, acknowledgements) into HTTP/3 protocol operations
+ * and routed requests, and serializes responses back onto the matching streams.
+ * Also implements HTTP/3 graceful shutdown bookkeeping.
+ *
+ * @tparam Derived     Concrete server type (CRTP), allowing optional user hooks.
+ * @tparam SessionType Per-stream session type instantiated for each request.
+ */
 template <typename Derived, typename SessionType>
 class server : public qb::io::async::quic::endpoint {
 public:
@@ -235,6 +329,9 @@ private:
     }
 
 protected:
+    // QUIC event dispatch overrides: translate endpoint events into HTTP/3
+    // connection/session lifecycle operations. User-provided `Derived::on(ev)`
+    // hooks are invoked when present (detected via `requires`).
     void
     dispatch(qb::io::async::quic::event::connected const &ev) override {
         if (ev.negotiated_alpn != "h3") {
@@ -310,25 +407,53 @@ public:
         return _router;
     }
 
+    /**
+     * @brief Set the maximum accepted request body size.
+     * @param value Maximum body size in bytes.
+     */
     void
     set_max_body_size(std::size_t value) noexcept {
         _max_body_size = value;
     }
+    /**
+     * @brief Current maximum accepted request body size, in bytes.
+     */
     [[nodiscard]] std::size_t
     max_http3_body_size() const noexcept {
         return _max_body_size;
     }
 
+    /**
+     * @brief Start listening for HTTP/3 (QUIC) connections.
+     * @param uri       Bind URI (scheme/host/port).
+     * @param cert_file Path to the TLS certificate (PEM).
+     * @param key_file  Path to the TLS private key (PEM).
+     * @return True if the endpoint is now listening, false on failure.
+     */
     bool
     listen(qb::io::uri const &uri, std::filesystem::path const &cert_file, std::filesystem::path const &key_file) {
         return qb::io::async::quic::endpoint::listen(uri, cert_file, key_file, {"h3"});
     }
 
+    /**
+     * @brief Start listening for HTTP/3 connections from a string URI.
+     * @param uri       Bind URI string, parsed into a @c qb::io::uri.
+     * @param cert_file Path to the TLS certificate (PEM).
+     * @param key_file  Path to the TLS private key (PEM).
+     * @return True if the endpoint is now listening, false on failure.
+     */
     bool
     listen(std::string const &uri, std::filesystem::path const &cert_file, std::filesystem::path const &key_file) {
         return listen(qb::io::uri(uri), cert_file, key_file);
     }
 
+    /**
+     * @brief Begin HTTP/3 graceful shutdown of all connections.
+     *
+     * Submits a shutdown notice on each connection and closes immediately those
+     * already drained or with no active request contexts; the remainder are
+     * closed later as their contexts complete.
+     */
     void
     graceful_shutdown() {
         std::vector<std::uint64_t> connection_ids;
@@ -350,39 +475,89 @@ public:
         }
     }
 
+    /**
+     * @brief Open a new unidirectional stream on a connection.
+     * @param connection_id Target QUIC connection.
+     * @return Identifier of the newly opened unidirectional stream.
+     */
     std::uint64_t
     open_http3_unidirectional_stream(std::uint64_t connection_id) {
         return this->open_unidirectional_stream(connection_id).id();
     }
 
+    /**
+     * @brief Send raw bytes on a stream.
+     * @param connection_id Target QUIC connection.
+     * @param stream_id     Target stream.
+     * @param data          Payload to write.
+     * @param fin           Whether this write closes the stream's write side.
+     */
     void
     send_http3_stream_data(std::uint64_t connection_id, std::uint64_t stream_id, std::string_view data, bool fin) {
         this->send_stream_data(connection_id, stream_id, data, fin);
     }
 
+    /**
+     * @brief Grant additional flow-control credit to a stream.
+     * @param connection_id Target QUIC connection.
+     * @param stream_id     Target stream.
+     * @param bytes         Extra credit to extend, in bytes.
+     */
     void
     extend_http3_stream_credit(std::uint64_t connection_id, std::uint64_t stream_id, std::uint64_t bytes) {
         this->extend_stream_credit(connection_id, stream_id, bytes);
     }
 
+    /**
+     * @brief Reset (abort the write side of) a stream.
+     * @param connection_id  Target QUIC connection.
+     * @param stream_id      Target stream.
+     * @param app_error_code Application error code to signal on the stream.
+     */
     void
     reset_http3_stream(std::uint64_t connection_id, std::uint64_t stream_id, std::uint64_t app_error_code) {
         this->reset_stream(connection_id, stream_id, app_error_code);
     }
 
+    /**
+     * @brief Request the peer stop sending on a stream (abort the read side).
+     * @param connection_id  Target QUIC connection.
+     * @param stream_id      Target stream.
+     * @param app_error_code Application error code to signal on the stream.
+     */
     void
     stop_http3_stream(std::uint64_t connection_id, std::uint64_t stream_id, std::uint64_t app_error_code) {
         this->stop_stream(connection_id, stream_id, app_error_code);
     }
 
+    /**
+     * @brief Close a connection with an application error code.
+     * @param connection_id  Target QUIC connection.
+     * @param app_error_code Application error code (0 for a clean close).
+     * @param reason         Human-readable close reason.
+     */
     void
     close_http3_connection(std::uint64_t connection_id, std::uint64_t app_error_code, std::string_view reason) {
         this->close_connection(connection_id, app_error_code, reason);
     }
 
+    /**
+     * @brief Protocol callback: stream data acknowledged by the peer.
+     *
+     * Default no-op; provided as a customization point.
+     */
     void
     on_http3_stream_acked(std::uint64_t, std::uint64_t) {}
 
+    /**
+     * @brief Protocol callback: a stream has been closed.
+     *
+     * Flushes any pending response-sent bookkeeping, erases the session, and
+     * advances graceful shutdown if it is in progress.
+     *
+     * @param connection_id Owning QUIC connection.
+     * @param stream_id     Closed stream.
+     */
     void
     on_http3_stream_closed(std::uint64_t connection_id, std::uint64_t stream_id, std::uint64_t) {
         on_http3_stream_output_drained(connection_id, stream_id);
@@ -391,6 +566,15 @@ public:
         maybe_finish_graceful_shutdown(connection_id);
     }
 
+    /**
+     * @brief Protocol callback: a stream's output buffer has fully drained.
+     *
+     * Marks the matching session's response as sent and advances graceful
+     * shutdown if it is in progress.
+     *
+     * @param connection_id Owning QUIC connection.
+     * @param stream_id     Drained stream.
+     */
     void
     on_http3_stream_output_drained(std::uint64_t connection_id, std::uint64_t stream_id) {
         stream_key key{connection_id, stream_id};
@@ -400,9 +584,24 @@ public:
         maybe_finish_graceful_shutdown(connection_id);
     }
 
+    /**
+     * @brief Protocol callback: peer-initiated shutdown notice.
+     *
+     * Default no-op; provided as a customization point.
+     */
     void
     on_http3_shutdown(std::uint64_t, std::uint64_t) {}
 
+    /**
+     * @brief Protocol callback: a complete HTTP/3 request was received.
+     *
+     * Resolves (or creates) the session for the stream, routes the request, and
+     * either attaches the produced context or sends a 404 when no route matches.
+     *
+     * @param connection_id Owning QUIC connection.
+     * @param stream_id     Request stream.
+     * @param request       Parsed HTTP request (consumed by routing).
+     */
     void
     on_http3_request(std::uint64_t connection_id, std::uint64_t stream_id, qb::http::Request request) {
         auto session      = ensure_session(connection_id, stream_id);
@@ -418,6 +617,17 @@ public:
         session->attach_context(context);
     }
 
+    /**
+     * @brief Encode and submit an HTTP response onto a stream.
+     *
+     * On submission failure the stream is reset; on success, graceful shutdown
+     * progress is re-evaluated.
+     *
+     * @param connection_id Owning QUIC connection.
+     * @param stream_id     Target stream.
+     * @param response      Response to encode and send.
+     * @return True if the response was submitted, false if the stream was reset.
+     */
     bool
     send_response(std::uint64_t connection_id, std::uint64_t stream_id, qb::http::Response const &response) {
         auto &conn = ensure_connection(connection_id);
@@ -432,11 +642,21 @@ public:
 
 } // namespace internal
 
+/**
+ * @brief CRTP helper exposing the session/server templates for a user type.
+ *
+ * Lets a user-defined @p Derived type select the HTTP/3 session and server base
+ * classes via convenient member aliases.
+ *
+ * @tparam Derived User type deriving the HTTP/3 server or session.
+ */
 template <typename Derived>
 struct use {
+    /// HTTP/3 session base bound to @p Derived and the given server handler.
     template <typename ServerHandler>
     using session = internal::session<Derived, ServerHandler>;
 
+    /// HTTP/3 server base bound to @p Derived and the given session type.
     template <typename SessionType>
     using server = internal::server<Derived, SessionType>;
 };
@@ -444,6 +664,9 @@ struct use {
 template <typename SessionType>
 class Server;
 
+/**
+ * @brief Default HTTP/3 session used by @ref Server when none is supplied.
+ */
 class DefaultSession : public qb::http3::use<DefaultSession>::session<Server<DefaultSession>> {
 public:
     using Base = qb::http3::use<DefaultSession>::session<Server<DefaultSession>>;
@@ -452,6 +675,10 @@ public:
         : Base(server) {}
 };
 
+/**
+ * @brief Ready-to-use HTTP/3 server.
+ * @tparam SessionType Per-stream session type (defaults to @ref DefaultSession).
+ */
 template <typename SessionType = DefaultSession>
 class Server : public qb::http3::internal::server<Server<SessionType>, SessionType> {
 public:
@@ -459,12 +686,18 @@ public:
     Server()      = default;
 };
 
+/**
+ * @brief Construct a default-configured HTTP/3 server.
+ * @tparam Session Per-stream session type (defaults to @ref DefaultSession).
+ * @return Owning pointer to a new @ref Server instance.
+ */
 template <typename Session = DefaultSession>
 [[nodiscard]] std::unique_ptr<Server<Session>>
 make_server() {
     return std::make_unique<Server<Session>>();
 }
 
+/// Convenience lowercase alias for @ref Server.
 template <typename Session = DefaultSession>
 using server = Server<Session>;
 

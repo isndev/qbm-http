@@ -1,3 +1,16 @@
+/**
+ * @file qbm/http/response.cpp
+ * @brief Out-of-line definitions for the HTTP Response message class.
+ *
+ * Provides the non-template member function bodies of `qb::http::Response`
+ * (cookie management) and the `qb::allocator::pipe<char>::put<Response>`
+ * serialization specialization.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include "./response.h"
 #include "./1.1/protocol/base.h" // For protocol_limits - SECURITY FIX: DoS protection
 #include "./chunk.h"
@@ -5,11 +18,75 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace qb::http {
+
+void
+Response::parse_set_cookie_headers() {
+    _cookies.clear();
+    const auto &set_cookie_iter = this->_headers.find("Set-Cookie");
+    if (set_cookie_iter == this->_headers.end()) {
+        return;
+    }
+    for (const std::string &header_value_str : set_cookie_iter->second) {
+        if (auto cookie_opt = parse_set_cookie(std::string_view(header_value_str))) {
+            _cookies.add(std::move(*cookie_opt));
+        }
+    }
+}
+
+void
+Response::remove_cookie(const std::string &name) {
+    Cookie removal_cookie(name, "");
+    removal_cookie.expires_in(std::chrono::seconds(EXPIRED_COOKIE_OFFSET_SECONDS));
+    removal_cookie.max_age(qb::duration::zero());
+    add_cookie(std::move(removal_cookie));
+}
+
+void
+Response::remove_cookie(const std::string &name, const std::string &domain, const std::string &path) {
+    Cookie removal_cookie(name, "");
+    removal_cookie.expires_in(std::chrono::seconds(EXPIRED_COOKIE_OFFSET_SECONDS));
+    removal_cookie.max_age(qb::duration::zero());
+    removal_cookie.domain(domain);
+    removal_cookie.path(path);
+    add_cookie(std::move(removal_cookie));
+}
+
+void
+Response::update_cookie_header(const std::string &name) {
+    Cookie *modified_cookie = _cookies.get(name);
+    if (!modified_cookie) {
+        return;
+    }
+    auto &set_cookie_headers = this->_headers["Set-Cookie"];
+    set_cookie_headers.erase(std::remove_if(set_cookie_headers.begin(), set_cookie_headers.end(),
+                                            [&](const std::string &header_val) {
+                                                const auto eq_pos = header_val.find('=');
+                                                if (eq_pos == std::string::npos) {
+                                                    return false;
+                                                }
+                                                return utility::iequals(std::string_view(header_val.data(), eq_pos), modified_cookie->name());
+                                            }),
+                             set_cookie_headers.end());
+    this->add_header("Set-Cookie", modified_cookie->to_header());
+}
+
+void
+Response::update_cookie_headers() {
+    this->_headers.erase("Set-Cookie"); // Remove all current Set-Cookie headers
+    for (const auto &pair : _cookies.all()) {
+        this->add_header("Set-Cookie", pair.second.to_header());
+    }
+}
+
+} // namespace qb::http
 
 namespace qb::allocator {
 namespace {

@@ -20,9 +20,8 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Http2
+ * @ingroup Http
  */
-
 #pragma once
 
 #include <charconv>
@@ -783,7 +782,19 @@ public:
         }
     }
 
-    // Public method for application to reject a push explicitly
+    /**
+     * @brief Explicitly reject a server-promised (pushed) stream.
+     *
+     * Intended to be called by the application from its @c Http2PushPromiseEvent
+     * handler. Sends @c RST_STREAM(REFUSED_STREAM) for the promised stream and
+     * tears down its context, but only when the stream is still in the
+     * @c RESERVED_REMOTE state; once the server has begun delivering the pushed
+     * response (HEADERS/DATA) it is too late to reject this way and the call is a
+     * no-op. Unknown or already-closed stream IDs are ignored. No effect if the
+     * protocol is not OK or the connection is inactive.
+     *
+     * @param promised_stream_id The even-numbered stream ID promised by the peer.
+     */
     void
     application_reject_push(uint32_t promised_stream_id) {
         if (!this->ok() || !_connection_active)

@@ -1,5 +1,5 @@
 /**
- * @file ws.h
+ * @file qbm/http/ws/ws.h
  * @brief WebSocket protocol implementation for the qb Actor Framework
  *
  * This module provides WebSocket capabilities conforming to RFC 6455 including:
@@ -14,19 +14,9 @@
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *         http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
-
 #pragma once
 
 // WebSocket protocol requires OpenSSL crypto library
@@ -304,31 +294,7 @@ struct MessageClose : Message {
      *
      * @throws std::invalid_argument if @p status is reserved or out of range.
      */
-    explicit MessageClose(std::uint16_t status, std::string_view reason) {
-        if (!is_sendable_close_code(status)) {
-            throw std::invalid_argument("qb::http::ws::MessageClose: close code " + std::to_string(static_cast<unsigned>(status))
-                                        + " is reserved or out of range and must not be sent");
-        }
-
-        fin_rsv_opcode = static_cast<unsigned char>(opcode::Close);
-
-        // Clip reason if the resulting payload would exceed the control-frame
-        // limit (125 bytes = 2 status + 123 reason). Keep the truncated
-        // prefix UTF-8 clean: cutting through a multi-byte sequence would
-        // otherwise generate an invalid close reason on the wire.
-        if (reason.length() > 123) {
-            reason = reason.substr(0, 123);
-            while (!reason.empty() && !is_utf8(reason)) {
-                reason.remove_suffix(1);
-            }
-        }
-        if (!reason.empty() && !is_utf8(reason)) {
-            throw std::invalid_argument("qb::http::ws::MessageClose: close reason must be valid UTF-8");
-        }
-
-        _data.reserve(2 + reason.size());
-        _data << static_cast<unsigned char>((status >> 8) & 0xFF) << static_cast<unsigned char>(status & 0xFF) << reason;
-    }
+    explicit MessageClose(std::uint16_t status, std::string_view reason);
 };
 
 /**

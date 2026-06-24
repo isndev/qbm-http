@@ -178,18 +178,7 @@ public:
      * If the `Cookie` header is not present or empty, the cookie jar remains empty.
      * @throws std::runtime_error if `parse_cookies` encounters a parsing error.
      */
-    void
-    parse_cookie_header() {
-        _cookies.clear();
-        const std::string &cookie_header_value = this->header("Cookie", 0);
-        if (cookie_header_value.empty()) {
-            return;
-        }
-        auto cookies_map = parse_cookies(std::string_view(cookie_header_value), false);
-        for (const auto &[name, value] : cookies_map) {
-            _cookies.add(name, value);
-        }
-    }
+    void parse_cookie_header();
 
     /**
      * @brief Retrieves a cookie by its name from the parsed request cookies.

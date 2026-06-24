@@ -142,16 +142,7 @@ struct MessageBase
      * Resets transport/protocol metadata to the default HTTP/1.1 message state.
      * Derived classes may override or extend this to reset their specific fields.
      */
-    void
-    reset() noexcept {
-        this->Headers::_headers.clear();
-        this->Headers::_content_type = typename Headers::ContentType{};
-        major_version                = 1;
-        minor_version                = 1;
-        upgrade                      = false;
-        stream_id                    = 0;
-        keep_alive                   = false;
-    }
+    void reset() noexcept;
 
 public:
     /**

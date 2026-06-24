@@ -47,7 +47,12 @@ constexpr uint32_t COOKIE_VALUE_MAX = 4096;
  * Defines the possible values for the SameSite attribute of a cookie
  * according to RFC 6265bis.
  */
-enum class SameSite { None, Lax, Strict, NOT_SET };
+enum class SameSite {
+    None,   ///< Cookie is sent on all requests (requires the Secure attribute).
+    Lax,    ///< Cookie is withheld on cross-site subrequests but sent on top-level navigation.
+    Strict, ///< Cookie is sent only on same-site requests.
+    NOT_SET ///< Sentinel meaning the SameSite attribute is unset; clears the policy when assigned.
+};
 
 /**
  * @brief Individual HTTP cookie with attributes
@@ -270,12 +275,18 @@ public:
     }
 
     /**
-     * @brief Convert cookie to Set-Cookie header value
+     * @brief Convert cookie to a Set-Cookie header value (name=value plus attributes).
+     * @return The serialized Set-Cookie value, RFC 6265 compliant.
+     * @throws std::runtime_error If the name, value, Domain, or Path contains
+     *         characters that are invalid for the Set-Cookie syntax.
+     * @note Definition is in `cookie.cpp`.
      */
     [[nodiscard]] std::string to_header() const;
 
     /**
-     * @brief Serialize the cookie to a string (name=value format)
+     * @brief Serialize the cookie as a Cookie-header pair (name=value, no attributes).
+     * @return The "name=value" string.
+     * @note Definition is in `cookie.cpp`.
      */
     [[nodiscard]] std::string serialize() const;
 };
@@ -315,21 +326,13 @@ public:
     }
 
     /**
-     * @brief Create and add a new cookie
-     * @param name Cookie name
-     * @param value Cookie value
-     * @return Reference to the created cookie
+     * @brief Create and add a new cookie, replacing any existing one with the same name.
+     * @param name  Cookie name. Used as the (case-insensitive) jar key.
+     * @param value Cookie value.
+     * @return Reference to the stored cookie (newly inserted or replaced in place).
+     * @note Definition is in `cookie.cpp`.
      */
-    Cookie &
-    add(std::string name, std::string value) {
-        Cookie cookie(name, std::move(value));
-        auto   it = _cookies.find(name);
-        if (it != _cookies.end()) {
-            it->second = std::move(cookie);
-            return it->second;
-        }
-        return _cookies.emplace(std::move(name), std::move(cookie)).first->second;
-    }
+    Cookie &add(std::string name, std::string value);
 
     /**
      * @brief Remove a cookie

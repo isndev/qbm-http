@@ -8,11 +8,6 @@
  * that exceed a configured maximum, responding with a customizable status code and message.
  * It also adds standard `X-RateLimit-*` headers to responses.
  *
- * @author qb - C++ Actor Framework
- * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
- * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Middleware
- *
  * @note Threading model:
  * Each qb listener / VirtualCore is strictly mono-thread; HTTP sessions
  * registered on a given listener are never accessed concurrently. The
@@ -21,6 +16,11 @@
  * listeners (e.g. a multi-core server), each listener must own its own
  * instance &mdash; use the `make_rate_limit_middleware` factory per
  * `io_handler` rather than as a static singleton.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
 #pragma once
 
@@ -158,13 +158,7 @@ public:
      * Defaults: 1000 requests per minute.
      * @return A `RateLimitOptions` instance with permissive settings.
      */
-    [[nodiscard]] static RateLimitOptions
-    permissive() noexcept {
-        return RateLimitOptions()
-            .max_requests(1000) // Higher limit
-            .window(std::chrono::minutes(1))
-            .message("You have reached the rate limit. Please try again later.");
-    }
+    [[nodiscard]] static RateLimitOptions permissive() noexcept;
 
     /**
      * @brief Provides a pre-configured `RateLimitOptions` instance with more restrictive, secure defaults.
@@ -172,13 +166,7 @@ public:
      * Defaults: 60 requests per minute.
      * @return A `RateLimitOptions` instance with secure settings.
      */
-    [[nodiscard]] static RateLimitOptions
-    secure() noexcept {
-        return RateLimitOptions()
-            .max_requests(60) // Stricter limit
-            .window(std::chrono::minutes(1))
-            .message("Rate limit exceeded. Please try again later.");
-    }
+    [[nodiscard]] static RateLimitOptions secure() noexcept;
 
     // --- Getters ---
     [[nodiscard]] size_t

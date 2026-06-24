@@ -10,13 +10,13 @@
  *
  * This file defines fundamental types used throughout the qb-http routing module,
  * including lifecycle hook points (`HookPoint`), asynchronous task outcomes (`AsyncTaskResult`),
- * and function signatures for route and middleware handlers (`RouteHandlerFn`, `MiddlewareHandlerFn`).
- * It also provides a utility function to convert HTTP method enums to strings.
+ * function signatures for route and middleware handlers (`RouteHandlerFn`, `MiddlewareHandlerFn`),
+ * and the `DerivedFrom` concept used to constrain custom route and middleware types.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Routing
+ * @ingroup Http
  */
 #pragma once
 

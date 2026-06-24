@@ -10,7 +10,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Auth
+ * @ingroup Http
  */
 #pragma once
 
@@ -261,66 +261,82 @@ public:
     }
 
     // --- Getters ---
+
+    /** @brief Returns the secret key used for HMAC-based algorithms. */
     [[nodiscard]] const std::vector<unsigned char> &
     get_secret_key() const noexcept {
         return _secret_key;
     }
+    /** @brief Returns the public key (PEM) used to verify asymmetric signatures. */
     [[nodiscard]] const std::string &
     get_public_key() const noexcept {
         return _public_key;
     }
+    /** @brief Returns the private key (PEM) used to sign asymmetric tokens. */
     [[nodiscard]] const std::string &
     get_private_key() const noexcept {
         return _private_key;
     }
+    /** @brief Returns the configured signing/verification algorithm. */
     [[nodiscard]] Algorithm
     get_algorithm() const noexcept {
         return _algorithm;
     }
+    /** @brief Returns the default token validity duration. */
     [[nodiscard]] std::chrono::seconds
     get_token_expiration() const noexcept {
         return _token_expiration;
     }
 
+    /** @brief Returns the clock skew tolerance applied to time-based claims. */
     [[nodiscard]] std::chrono::seconds
     get_clock_skew_tolerance() const noexcept {
         return _clock_skew_tolerance;
     }
 
+    /** @brief Returns the expected token issuer (`iss` claim). */
     [[nodiscard]] const std::string &
     get_token_issuer() const noexcept {
         return _token_issuer;
     }
+    /** @brief Returns the expected token audience (`aud` claim). */
     [[nodiscard]] const std::string &
     get_token_audience() const noexcept {
         return _token_audience;
     }
+    /** @brief Returns the HTTP header name used to extract the token. */
     [[nodiscard]] const std::string &
     get_auth_header_name() const noexcept {
         return _auth_header_name;
     }
+    /** @brief Returns the authentication scheme prefix (e.g. "Bearer"). */
     [[nodiscard]] const std::string &
     get_auth_scheme() const noexcept {
         return _auth_scheme;
     }
 
+    /** @brief Returns whether signature verification is required. */
     [[nodiscard]] bool
     get_require_signature_verification() const noexcept {
         return _require_signature_verification;
     }
 
+    /** @brief Returns whether the `exp` (expiration) claim is verified. */
     [[nodiscard]] bool
     get_verify_expiration() const noexcept {
         return _verify_expiration;
     }
+    /** @brief Returns whether the `nbf` (not-before) claim is verified. */
     [[nodiscard]] bool
     get_verify_not_before() const noexcept {
         return _verify_not_before;
     }
+    /** @brief Returns whether the `iss` (issuer) claim is verified. */
     [[nodiscard]] bool
     get_verify_issuer() const noexcept {
         return _verify_issuer;
     }
+    /** @brief Returns whether the `aud` (audience) claim is verified. */
     [[nodiscard]] bool
     get_verify_audience() const noexcept {
         return _verify_audience;
@@ -339,30 +355,7 @@ public:
      * @return The matching `Algorithm` value, or `std::nullopt` if the string
      *         does not correspond to a supported algorithm.
      */
-    [[nodiscard]] static std::optional<Algorithm>
-    algorithm_from_string(std::string_view algorithm_str) noexcept {
-        if (qb::http::utility::iequals(algorithm_str, "HS256"))
-            return Algorithm::HMAC_SHA256;
-        if (qb::http::utility::iequals(algorithm_str, "HS384"))
-            return Algorithm::HMAC_SHA384;
-        if (qb::http::utility::iequals(algorithm_str, "HS512"))
-            return Algorithm::HMAC_SHA512;
-        if (qb::http::utility::iequals(algorithm_str, "RS256"))
-            return Algorithm::RSA_SHA256;
-        if (qb::http::utility::iequals(algorithm_str, "RS384"))
-            return Algorithm::RSA_SHA384;
-        if (qb::http::utility::iequals(algorithm_str, "RS512"))
-            return Algorithm::RSA_SHA512;
-        if (qb::http::utility::iequals(algorithm_str, "ES256"))
-            return Algorithm::ECDSA_SHA256;
-        if (qb::http::utility::iequals(algorithm_str, "ES384"))
-            return Algorithm::ECDSA_SHA384;
-        if (qb::http::utility::iequals(algorithm_str, "ES512"))
-            return Algorithm::ECDSA_SHA512;
-        if (qb::http::utility::iequals(algorithm_str, "EdDSA"))
-            return Algorithm::ED25519;
-        return std::nullopt;
-    }
+    [[nodiscard]] static std::optional<Algorithm> algorithm_from_string(std::string_view algorithm_str) noexcept;
 };
 
 /** @brief Type alias for `qb::http::auth::Options` for backward compatibility or conciseness. */
