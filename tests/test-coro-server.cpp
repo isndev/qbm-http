@@ -52,25 +52,25 @@ public:
         });
 
         router().get("/coro/hello", [](auto ctx) -> qb::io::async::task<void> {
-                         co_await qb::io::async::sleep(1ms);
-                         ctx->response().status() = qb::http::status::OK;
-                         ctx->response().body()   = std::string{"hi:"} + std::string(ctx->request().header("X-Seen-By-Coro-MW"));
-                         co_return;
-                     });
+            co_await qb::io::async::sleep(1ms);
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string{"hi:"} + std::string(ctx->request().header("X-Seen-By-Coro-MW"));
+            co_return;
+        });
 
         router().get("/coro/explicit", [](auto ctx) -> qb::io::async::task<void> {
-                         ctx->response().status() = qb::http::status::ACCEPTED;
-                         ctx->response().body()   = "explicit-ok";
-                         // Short-circuit: the wrapper must NOT overwrite the outcome.
-                         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-                         co_return;
-                     });
+            ctx->response().status() = qb::http::status::ACCEPTED;
+            ctx->response().body()   = "explicit-ok";
+            // Short-circuit: the wrapper must NOT overwrite the outcome.
+            ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+            co_return;
+        });
 
         router().get("/coro/boom", [](auto /*ctx*/) -> qb::io::async::task<void> {
-                         co_await qb::io::async::sleep(1ms);
-                         throw std::runtime_error("coro handler failed on purpose");
-                         co_return;
-                     });
+            co_await qb::io::async::sleep(1ms);
+            throw std::runtime_error("coro handler failed on purpose");
+            co_return;
+        });
 
         // Dedicated group to test middleware chaining + short-circuit
         // without impacting the other tests.
@@ -88,10 +88,10 @@ public:
             co_return;
         });
         group->get("/chain", [](auto ctx) -> qb::io::async::task<void> {
-                       ctx->response().status() = qb::http::status::OK;
-                       ctx->response().body()   = std::string{ctx->request().header("X-Step")};
-                       co_return;
-                   });
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string{ctx->request().header("X-Step")};
+            co_return;
+        });
 
         // Short-circuit middleware: responds directly and declares COMPLETE.
         group->use([](auto ctx) -> qb::io::async::task<void> {
@@ -103,10 +103,10 @@ public:
             co_return;
         });
         group->get("/gate", [](auto ctx) -> qb::io::async::task<void> {
-                       ctx->response().status() = qb::http::status::OK;
-                       ctx->response().body()   = "should-not-be-reached";
-                       co_return;
-                   });
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "should-not-be-reached";
+            co_return;
+        });
 
         // Manual CONTINUE path: MW1 explicitly continues early, then resumes later.
         // The wrapper must not emit a second implicit CONTINUE when MW1 returns.
@@ -125,10 +125,10 @@ public:
             co_return;
         });
         group->get("/manual-continue", [](auto ctx) -> qb::io::async::task<void> {
-                       ctx->response().status() = qb::http::status::OK;
-                       ctx->response().body()   = std::string{ctx->request().header("X-MW2")};
-                       co_return;
-                   });
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string{ctx->request().header("X-MW2")};
+            co_return;
+        });
 
         router().compile();
     }

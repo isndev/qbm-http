@@ -16,11 +16,11 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <qb/json.h>
 #include <regex>
 #include <string>
 #include <variant>
 #include <vector>
+#include <qb/json.h>
 #include "./error.h" // Updated include path
 
 namespace qb::http::validation {

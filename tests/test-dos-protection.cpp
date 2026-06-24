@@ -27,8 +27,8 @@
  */
 
 #include <gtest/gtest.h>
-#include <qb/system/allocator/pipe.h>
 #include <stdexcept>
+#include <qb/system/allocator/pipe.h>
 #include "../1.1/protocol/base.h"
 #include "../http.h"
 

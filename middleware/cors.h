@@ -22,12 +22,12 @@
 #include <chrono> // For regex timeout protection
 #include <functional>
 #include <memory>
-#include <qb/system/time.h>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <thread> // For regex timeout
 #include <vector>
+#include <qb/system/time.h>
 
 #include "../request.h"
 #include "../response.h"

@@ -398,8 +398,8 @@ auth_middleware(const auth::Options &options = auth::Options(), const std::strin
 template <typename SessionType>
 [[nodiscard]] std::shared_ptr<AuthMiddleware<SessionType>>
 jwt_auth_middleware(const std::string &secret,
-                           const std::string &algorithm_str = "HS256", // String representation of algorithm
-                           const std::string &name          = "JwtAuthMiddleware") {
+                    const std::string &algorithm_str = "HS256", // String representation of algorithm
+                    const std::string &name          = "JwtAuthMiddleware") {
     auth::Options options;
 
     // Resolve the algorithm first via the centralised (case-insensitive) parser

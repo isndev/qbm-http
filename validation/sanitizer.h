@@ -14,10 +14,10 @@
 #pragma once
 
 #include <functional>
-#include <qb/json.h>
-#include <qb/system/container/unordered_map.h> // For _rules member
 #include <string>
 #include <vector>
+#include <qb/json.h>
+#include <qb/system/container/unordered_map.h> // For _rules member
 
 namespace qb::http::validation {
 /**

@@ -111,11 +111,10 @@ public:
     template <typename T>
     struct is_body_appendable
         : std::disjunction<std::is_same<std::remove_cvref_t<T>, Body>, std::is_same<std::remove_cvref_t<T>, Chunk>,
-                           std::is_same<std::remove_cvref_t<T>, Multipart>,
-                           std::is_same<std::remove_cvref_t<T>, qb::json>, std::is_same<std::remove_cvref_t<T>, std::string>,
-                           std::is_same<std::remove_cvref_t<T>, std::string_view>, std::is_same<std::remove_cvref_t<T>, std::vector<char>>,
-                           std::is_arithmetic<std::remove_cvref_t<T>>, std::bool_constant<_is_char_array<T>>,
-                           std::bool_constant<_is_char_pointer<T>>> {};
+                           std::is_same<std::remove_cvref_t<T>, Multipart>, std::is_same<std::remove_cvref_t<T>, qb::json>,
+                           std::is_same<std::remove_cvref_t<T>, std::string>, std::is_same<std::remove_cvref_t<T>, std::string_view>,
+                           std::is_same<std::remove_cvref_t<T>, std::vector<char>>, std::is_arithmetic<std::remove_cvref_t<T>>,
+                           std::bool_constant<_is_char_array<T>>, std::bool_constant<_is_char_pointer<T>>> {};
 
     template <typename T>
     static constexpr bool is_body_appendable_v = is_body_appendable<T>::value;

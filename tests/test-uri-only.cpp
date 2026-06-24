@@ -29,8 +29,8 @@
 #include <algorithm>
 #include <chrono>
 #include <gtest/gtest.h>
-#include <qb/io/uri.h>
 #include <vector>
+#include <qb/io/uri.h>
 
 // ====================================================================
 // Basic URI Component Tests

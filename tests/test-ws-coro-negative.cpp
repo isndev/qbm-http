@@ -319,4 +319,4 @@ TEST_F(CoroNegativeTest, CoroClientPendingCapZeroDropsWithoutCrash) {
     SUCCEED();
 }
 
-} // namespace
+} // namespace ws_coro_negative_test

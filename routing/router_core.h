@@ -387,7 +387,8 @@ public:
             const auto allow         = allowed_header_value(allowed_info->methods);
             ctx->response().status() = qb::http::status::METHOD_NOT_ALLOWED;
             ctx->response().set_header("Allow", allow);
-            tasks_to_execute = std::make_shared<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>(_compiled_method_not_allowed_tasks);
+            tasks_to_execute =
+                std::make_shared<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>(_compiled_method_not_allowed_tasks);
 
             LOG_HTTP_DEBUG("Route path matched but method is not allowed for: " << std::to_string(request_method) << " " << request_path_sv
                                                                                 << " (405; Allow: " << allow << ")");
