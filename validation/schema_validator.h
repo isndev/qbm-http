@@ -9,7 +9,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Validaton
+ * @ingroup Http
  */
 #pragma once
 
@@ -79,11 +79,19 @@ public:
      */
     SchemaValidator &set_error_value_policy(ErrorValuePolicy policy, std::size_t preview_bytes = 256) noexcept;
 
+    /**
+     * @brief Returns the currently active offending-value capture policy (F48).
+     * @return The configured ErrorValuePolicy (defaults to `Full`).
+     */
     [[nodiscard]] ErrorValuePolicy
     error_value_policy() const noexcept {
         return _error_value_policy;
     }
 
+    /**
+     * @brief Returns the preview cap applied when the policy is `Preview` (F48).
+     * @return Maximum number of bytes of the serialised value kept per error.
+     */
     [[nodiscard]] std::size_t
     offending_value_preview_bytes() const noexcept {
         return _offending_value_preview_bytes;

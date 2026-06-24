@@ -1,5 +1,5 @@
 /**
- * @file qbm/http/date.h
+ * @file qbm/http/date.cpp
  * @brief HTTP-compliant date and time formatting and parsing utilities.
  *
  * This file provides functions within the `qb::http::date` namespace for converting

@@ -14,9 +14,8 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Http2
+ * @ingroup Http
  */
-
 #pragma once
 
 #include <chrono>
@@ -246,19 +245,7 @@ public:
      * @param old_initial_size Old initial window size
      * @return true if update successful, false if overflow
      */
-    bool
-    update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept {
-        int64_t delta      = static_cast<int64_t>(new_initial_size) - static_cast<int64_t>(old_initial_size);
-        int64_t new_window = FlowControlManager::update_window_safe(peer_window_size, static_cast<uint32_t>(std::abs(delta)),
-                                                                    static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT));
-
-        if (new_window == -1) {
-            return false; // Overflow
-        }
-
-        peer_window_size = delta >= 0 ? new_window : peer_window_size + delta;
-        return peer_window_size >= 0;
-    }
+    bool update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept;
 
     /**
      * @brief Reset window update tracking after sending WINDOW_UPDATE
@@ -275,58 +262,14 @@ public:
      * @param end_stream_flag Whether END_STREAM flag was set
      * @param is_sending Whether we are sending (true) or receiving (false)
      */
-    void
-    transition_state(bool end_stream_flag, bool is_sending) noexcept {
-        if (!end_stream_flag)
-            return;
-
-        if (is_sending) {
-            end_stream_sent = true;
-            switch (state) {
-                case Http2StreamConcreteState::OPEN:
-                    state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
-                    break;
-                case Http2StreamConcreteState::HALF_CLOSED_REMOTE:
-                    state = Http2StreamConcreteState::CLOSED;
-                    break;
-                default:
-                    // Invalid transition, but don't crash
-                    break;
-            }
-        } else {
-            end_stream_received = true;
-            switch (state) {
-                case Http2StreamConcreteState::OPEN:
-                    state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
-                    break;
-                case Http2StreamConcreteState::HALF_CLOSED_LOCAL:
-                    state = Http2StreamConcreteState::CLOSED;
-                    break;
-                default:
-                    // Invalid transition, but don't crash
-                    break;
-            }
-        }
-        touch();
-    }
+    void transition_state(bool end_stream_flag, bool is_sending) noexcept;
 
     /**
      * @brief Mark stream as reset
      * @param error_code_param Error code for reset
      * @param is_sending Whether we are sending (true) or receiving (false) the reset
      */
-    void
-    mark_reset(ErrorCode error_code_param, bool is_sending) noexcept {
-        error_code = error_code_param;
-        state      = Http2StreamConcreteState::CLOSED;
-
-        if (is_sending) {
-            rst_stream_sent = true;
-        } else {
-            rst_stream_received = true;
-        }
-        touch();
-    }
+    void mark_reset(ErrorCode error_code_param, bool is_sending) noexcept;
 };
 
 /**

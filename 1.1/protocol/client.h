@@ -28,6 +28,18 @@
 #include "./base.h"
 
 namespace qb::protocol::http {
+
+/**
+ * @brief HTTP/1.1 client-side protocol handler.
+ * @tparam IO_Handler qb-io handler type that owns the underlying socket and
+ *                    receives parsed responses via its @c on() overloads.
+ *
+ * Specializes the shared HTTP/1.1 @ref base parser for @ref qb::http::Response,
+ * driving response parsing for an outbound connection. Each completed response
+ * has its Set-Cookie headers parsed before being handed to the IO handler.
+ *
+ * @ingroup Http
+ */
 template <typename IO_Handler>
 class client : public base<IO_Handler, qb::http::Response> {
     using base_t = base<IO_Handler, qb::http::Response>;

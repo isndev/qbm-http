@@ -10,7 +10,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Routing
+ * @ingroup Http
  */
 #pragma once
 
@@ -65,15 +65,32 @@ struct MatchedRouteInfo {
     MatchedRouteInfo() = default;
 };
 
+/**
+ * @brief (Internal) Holds the methods registered at a path-resolved route node.
+ *
+ * Returned by `RadixTree::allowed_methods()` to let the router distinguish a
+ * missing resource (404) from an existing one reached with an unsupported
+ * method (405).
+ *
+ * @tparam SessionType The session type used by the `RadixTree`.
+ */
 template <typename SessionType>
 struct PathAllowedMethodsInfo {
-    PathParameters                path_parameters;
+    /** @brief Path parameters captured while resolving the matched path. */
+    PathParameters path_parameters;
+    /** @brief HTTP methods that have a handler registered at the matched node. */
     std::vector<qb::http::method> methods;
 
+    /**
+     * @brief Constructs `PathAllowedMethodsInfo`.
+     * @param params Captured path parameters.
+     * @param allowed_methods Methods registered at the matched node.
+     */
     PathAllowedMethodsInfo(PathParameters params, std::vector<qb::http::method> allowed_methods)
         : path_parameters(std::move(params))
         , methods(std::move(allowed_methods)) {}
 
+    /** @brief Default constructor. */
     PathAllowedMethodsInfo() = default;
 };
 
@@ -130,6 +147,11 @@ private:
         return static_cast<std::size_t>(raw);
     }
 
+    /**
+     * @brief Maps a handler-array slot back to its `qb::http::method`.
+     * @param slot A slot index in `[0, METHOD_SLOT_COUNT)`.
+     * @return The `qb::http::method` corresponding to @p slot.
+     */
     [[nodiscard]] static constexpr qb::http::method
     slot_method(std::size_t slot) noexcept {
         return qb::http::method(static_cast<::http_method>(slot));
@@ -189,6 +211,11 @@ private:
             , segment_match(seg) {}
     };
 
+    /**
+     * @brief Tests whether a node has at least one method handler registered.
+     * @param node The node to inspect.
+     * @return `true` if any handler slot is non-null, `false` otherwise.
+     */
     [[nodiscard]] static bool
     has_any_handler(const Node &node) noexcept {
         for (const auto &handler : node.handlers) {
@@ -199,6 +226,12 @@ private:
         return false;
     }
 
+    /**
+     * @brief Collects the methods that have a handler registered at a node.
+     * @param node The node to inspect.
+     * @return The list of `qb::http::method` values with non-null handler slots,
+     *         in ascending slot order.
+     */
     [[nodiscard]] static std::vector<qb::http::method>
     collect_allowed_methods(const Node &node) {
         std::vector<qb::http::method> methods;
@@ -211,6 +244,12 @@ private:
         return methods;
     }
 
+    /**
+     * @brief Merges @p src into @p dst, then sorts and de-duplicates by method slot.
+     * @param dst Destination list, mutated in place to hold the merged, sorted,
+     *            unique set of methods.
+     * @param src Source list whose methods are appended to @p dst.
+     */
     static void
     merge_allowed_methods(std::vector<qb::http::method> &dst, const std::vector<qb::http::method> &src) {
         dst.insert(dst.end(), src.begin(), src.end());

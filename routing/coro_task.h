@@ -1,6 +1,7 @@
 /**
  * @file qbm/http/routing/coro_task.h
  * @brief Wrapper helpers that adapt coroutine-returning lambdas into the
+ *
  *        classical `RouteHandlerFn` / `MiddlewareHandlerFn` signatures.
  *
  * These wrappers are the entry point for the coroutine server-side API:
@@ -39,7 +40,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Routing
+ * @ingroup Http
  */
 #pragma once
 

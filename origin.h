@@ -1,84 +1,81 @@
 /**
  * @file qbm/http/origin.h
- * @brief Shared HTTP origin helpers.
+ * @brief Shared HTTP origin comparison helpers.
+ *
+ * Provides case-insensitive scheme/host comparison and effective-port
+ * resolution used to determine whether two URIs share the same web origin
+ * (scheme + host + effective port), as defined by RFC 6454.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
 #pragma once
 
-#include <charconv>
 #include <cstdint>
 #include <optional>
 #include <string_view>
 
 #include <qb/io/uri.h>
 
-#include "./utility.h"
-
 namespace qb::http::origin {
 
-[[nodiscard]] inline bool
-scheme_eq(std::string_view lhs, std::string_view rhs) noexcept {
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if (qb::http::utility::ascii_to_lower(lhs[i]) != qb::http::utility::ascii_to_lower(rhs[i])) {
-            return false;
-        }
-    }
-    return true;
-}
+/**
+ * @brief Compares two URI schemes for equality, case-insensitively (ASCII).
+ *
+ * @param lhs First scheme.
+ * @param rhs Second scheme.
+ * @return `true` if both schemes are equal ignoring ASCII case, `false`
+ *         otherwise.
+ */
+[[nodiscard]] bool scheme_eq(std::string_view lhs, std::string_view rhs) noexcept;
 
-[[nodiscard]] inline bool
-host_eq(std::string_view lhs, std::string_view rhs) noexcept {
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if (qb::http::utility::ascii_to_lower(lhs[i]) != qb::http::utility::ascii_to_lower(rhs[i])) {
-            return false;
-        }
-    }
-    return true;
-}
+/**
+ * @brief Compares two hosts for equality, case-insensitively (ASCII).
+ *
+ * @param lhs First host.
+ * @param rhs Second host.
+ * @return `true` if both hosts are equal ignoring ASCII case, `false`
+ *         otherwise.
+ */
+[[nodiscard]] bool host_eq(std::string_view lhs, std::string_view rhs) noexcept;
 
-[[nodiscard]] inline std::string_view
-effective_port(qb::io::uri const &uri) noexcept {
-    if (!uri.port().empty()) {
-        return uri.port();
-    }
-    if (scheme_eq(uri.scheme(), "http")) {
-        return "80";
-    }
-    if (scheme_eq(uri.scheme(), "https")) {
-        return "443";
-    }
-    return {};
-}
+/**
+ * @brief Resolves the effective port string of a URI.
+ *
+ * Returns the URI's explicit port when present; otherwise falls back to the
+ * well-known default for the scheme ("80" for `http`, "443" for `https`).
+ *
+ * @param uri URI to inspect.
+ * @return The effective port as a string view, or an empty view when neither an
+ *         explicit port nor a known default applies.
+ */
+[[nodiscard]] std::string_view effective_port(qb::io::uri const &uri) noexcept;
 
-[[nodiscard]] inline std::optional<std::uint32_t>
-effective_port_number(qb::io::uri const &uri) noexcept {
-    auto const port = effective_port(uri);
-    if (port.empty()) {
-        return std::nullopt;
-    }
+/**
+ * @brief Resolves the effective port of a URI as a numeric value.
+ *
+ * Parses the result of @ref effective_port and validates it is a well-formed,
+ * fully-consumed decimal integer within the valid port range [0, 65535].
+ *
+ * @param uri URI to inspect.
+ * @return The effective port number, or `std::nullopt` when no effective port
+ *         applies or the port string is malformed / out of range.
+ */
+[[nodiscard]] std::optional<std::uint32_t> effective_port_number(qb::io::uri const &uri) noexcept;
 
-    std::uint32_t     value  = 0;
-    auto const *const begin  = port.data();
-    auto const *const end    = begin + port.size();
-    auto              result = std::from_chars(begin, end, value);
-    if (result.ec != std::errc{} || result.ptr != end || value > 65535u) {
-        return std::nullopt;
-    }
-    return value;
-}
-
-[[nodiscard]] inline bool
-same(qb::io::uri const &lhs, qb::io::uri const &rhs) noexcept {
-    auto const lhs_port = effective_port_number(lhs);
-    auto const rhs_port = effective_port_number(rhs);
-
-    return scheme_eq(lhs.scheme(), rhs.scheme()) && host_eq(lhs.host(), rhs.host()) && lhs_port.has_value() && rhs_port.has_value()
-           && *lhs_port == *rhs_port;
-}
+/**
+ * @brief Determines whether two URIs share the same web origin.
+ *
+ * Two URIs are same-origin when their schemes match (case-insensitively),
+ * their hosts match (case-insensitively), and both resolve to the same,
+ * well-formed effective port.
+ *
+ * @param lhs First URI.
+ * @param rhs Second URI.
+ * @return `true` if both URIs share the same origin, `false` otherwise.
+ */
+[[nodiscard]] bool same(qb::io::uri const &lhs, qb::io::uri const &rhs) noexcept;
 
 } // namespace qb::http::origin

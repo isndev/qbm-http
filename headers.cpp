@@ -13,7 +13,6 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
-
 #include "./headers.h" // Includes utility, types, icase_unordered_map, string, string_view, etc.
 #include <charconv>    // For std::to_chars (used in accept_encoding)
 #include <optional>
@@ -423,5 +422,42 @@ content_encoding(std::string_view accept_encoding_header) {
     (void) accept_encoding_header;
 #endif
     return ""; // No suitable encoding found or compression disabled
+}
+
+std::pair<std::string, std::string>
+Headers::ContentType::parse(std::string_view content_type_str) {
+    std::pair<std::string, std::string> ret{std::string(default_content_type), std::string(default_charset)};
+
+    const auto semicolon_pos = content_type_str.find(';');
+    const auto media_type =
+        utility::trim_http_whitespace(semicolon_pos == std::string_view::npos ? content_type_str : content_type_str.substr(0, semicolon_pos));
+    if (media_type.empty()) {
+        return ret;
+    }
+    ret.first = std::string(media_type);
+
+    if (semicolon_pos != std::string_view::npos) {
+        try {
+            auto attrs      = parse_header_attributes(content_type_str.substr(semicolon_pos + 1));
+            auto charset_it = attrs.find("charset");
+            if (charset_it != attrs.end() && !charset_it->second.empty()) {
+                ret.second = charset_it->second;
+            }
+        } catch (...) {
+            ret.second = std::string(default_charset);
+        }
+    }
+
+    return ret;
+}
+
+void
+Headers::refresh_content_type() noexcept {
+    const auto it = _headers.find("Content-Type");
+    if (it != _headers.end() && !it->second.empty()) {
+        _content_type = ContentType{it->second.front()};
+    } else {
+        _content_type = ContentType{default_content_type};
+    }
 }
 } // namespace qb::http

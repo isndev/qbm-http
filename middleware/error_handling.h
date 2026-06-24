@@ -11,7 +11,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Middleware
+ * @ingroup Http
  */
 #pragma once
 
@@ -19,7 +19,7 @@
 #include <memory>     // For std::shared_ptr, std::make_shared
 #include <string>     // For std::string, std::to_string
 #include <utility>    // For std::move
-#include <vector>     // For std::vector (though not directly used in this class members)
+#include <vector>     // For std::vector
 
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
 

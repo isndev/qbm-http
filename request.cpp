@@ -1,3 +1,11 @@
+/**
+ * @file qbm/http/request.cpp
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include "./request.h"
 #include "./1.1/protocol/base.h" // For protocol_limits - SECURITY FIX: DoS protection
 #include "./chunk.h"
@@ -10,6 +18,23 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace qb::http {
+
+void
+Request::parse_cookie_header() {
+    _cookies.clear();
+    const std::string &cookie_header_value = this->header("Cookie", 0);
+    if (cookie_header_value.empty()) {
+        return;
+    }
+    auto cookies_map = parse_cookies(std::string_view(cookie_header_value), false);
+    for (const auto &[name, value] : cookies_map) {
+        _cookies.add(name, value);
+    }
+}
+
+} // namespace qb::http
 
 namespace qb::allocator {
 namespace {

@@ -20,26 +20,33 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Http2
+ * @ingroup Http
  */
-
 #pragma once
 
 #include "./base.h" // For qb::protocol::http2::Http2Protocol and frame types
 
 namespace qb::http::well_known {
-constexpr std::string_view COLON_METHOD_SV      = ":method";
-constexpr std::string_view COLON_PATH_SV        = ":path";
-constexpr std::string_view COLON_SCHEME_SV      = ":scheme";
-constexpr std::string_view COLON_AUTHORITY_SV   = ":authority";
-constexpr std::string_view CONTENT_LENGTH_SV    = "content-length";
+/// HTTP/2 ":method" request pseudo-header name.
+constexpr std::string_view COLON_METHOD_SV = ":method";
+/// HTTP/2 ":path" request pseudo-header name.
+constexpr std::string_view COLON_PATH_SV = ":path";
+/// HTTP/2 ":scheme" request pseudo-header name.
+constexpr std::string_view COLON_SCHEME_SV = ":scheme";
+/// HTTP/2 ":authority" request pseudo-header name.
+constexpr std::string_view COLON_AUTHORITY_SV = ":authority";
+/// "content-length" header name.
+constexpr std::string_view CONTENT_LENGTH_SV = "content-length";
+/// "transfer-encoding" header name (forbidden in HTTP/2).
 constexpr std::string_view TRANSFER_ENCODING_SV = "transfer-encoding";
-constexpr std::string_view TRAILER_SV           = "trailer";
+/// "trailer" header name.
+constexpr std::string_view TRAILER_SV = "trailer";
 
 /**
  * @brief Check if a header is hop-by-hop
- * @param header_name Header name to check
- * @return true if header is hop-by-hop
+ * @param header_name Header name to check (compared case-insensitively)
+ * @return true if @p header_name names a hop-by-hop header that must not be
+ *         forwarded across an HTTP/2 boundary, false otherwise
  */
 inline bool
 is_hop_by_hop(const std::string &header_name) {
@@ -54,7 +61,7 @@ is_hop_by_hop(const std::string &header_name) {
 
 namespace qb::protocol::http2 {
 
-// Constants for readability
+/// HTTP/2 ":status" response pseudo-header name.
 constexpr std::string_view STATUS_HEADER_NAME_SV = ":status";
 
 /**
@@ -107,6 +114,12 @@ private:
     //    bool _debug_send_padded_data = false; // Set to true to test sending padded DATA frames
 
 public:
+    /**
+     * @brief Check whether a stream is closed or unknown
+     * @param stream_id Stream identifier to query
+     * @return true if the stream has no active context or its context is in the
+     *         CLOSED state, false if it is still open/active
+     */
     [[nodiscard]] bool
     is_stream_closed(uint32_t stream_id) const {
         auto it = _server_streams.find(stream_id);

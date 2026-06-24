@@ -11,7 +11,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Middleware
+ * @ingroup Http
  */
 #pragma once
 
@@ -114,24 +114,14 @@ public:
      * if available (e.g., Brotli, if the underlying compression library supports it and it's added here).
      * @return A `CompressionOptions` instance with settings for maximum compression.
      */
-    [[nodiscard]] static CompressionOptions
-    max_compression() noexcept {
-        return CompressionOptions()
-            .min_size_to_compress(256)                 // Compress smaller files
-            .preferred_encodings({"gzip", "deflate"}); // "br" would need Brotli support
-    }
+    [[nodiscard]] static CompressionOptions max_compression() noexcept;
 
     /**
      * @brief Provides a pre-configured `CompressionOptions` instance optimized for faster compression speed.
      * This typically means compressing only larger bodies and preferring algorithms known for speed.
      * @return A `CompressionOptions` instance with settings for fast compression.
      */
-    [[nodiscard]] static CompressionOptions
-    fast_compression() noexcept {
-        return CompressionOptions()
-            .min_size_to_compress(2048)                // Compress only larger files
-            .preferred_encodings({"deflate", "gzip"}); // Deflate is often faster than gzip
-    }
+    [[nodiscard]] static CompressionOptions fast_compression() noexcept;
 
     // --- Getters ---
     [[nodiscard]] bool

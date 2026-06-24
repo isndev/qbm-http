@@ -12,7 +12,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Routing
+ * @ingroup Http
  */
 #pragma once
 
@@ -32,6 +32,8 @@ namespace qb::http {
  * @brief Interface for middleware.
  * Middleware processes a request, potentially modifies it or the response,
  * and then typically calls ctx->complete() to pass control to the next task in the chain.
+ *
+ * @tparam SessionType The session type carried by the request context.
  */
 template <typename SessionType>
 class IMiddleware {
@@ -48,6 +50,7 @@ public:
 
     /**
      * @brief Returns the name of the middleware instance, for logging/debugging.
+     * @return The middleware name.
      */
     virtual std::string name() const = 0;
 
@@ -60,6 +63,13 @@ public:
 
 /**
  * @brief Adapts an IMiddleware instance to the IAsyncTask interface.
+ *
+ * Wraps an @ref IMiddleware so it can participate in an @ref IAsyncTask chain.
+ * Exceptions escaping the middleware's `process()` are caught, logged, and (when
+ * the context is still pending) converted into an `INTERNAL_SERVER_ERROR`
+ * completion so the chain does not stall.
+ *
+ * @tparam SessionType The session type carried by the request context.
  */
 template <typename SessionType>
 class MiddlewareTask final : public IAsyncTask<SessionType> {
@@ -68,6 +78,12 @@ private:
     std::string                               _name;
 
 public:
+    /**
+     * @brief Constructs a task wrapping the given middleware.
+     * @param middleware The middleware instance to adapt; must not be null.
+     * @param name A human-readable name used for logging/debugging.
+     * @throws std::invalid_argument If @p middleware is null.
+     */
     explicit MiddlewareTask(std::shared_ptr<IMiddleware<SessionType>> middleware, std::string name = "MiddlewareTask")
         : _middleware(std::move(middleware))
         , _name(std::move(name)) {
@@ -76,6 +92,15 @@ public:
         }
     }
 
+    /**
+     * @brief Executes the wrapped middleware against the given context.
+     *
+     * Delegates to the middleware's `process()`. Any exception thrown is caught
+     * and logged; if the context is neither completed nor cancelled, the response
+     * status is set to `INTERNAL_SERVER_ERROR` and the context is completed with
+     * @ref AsyncTaskResult::ERROR.
+     * @param ctx The shared context for the request.
+     */
     void
     execute(std::shared_ptr<Context<SessionType>> ctx) override {
         try {
@@ -113,6 +138,12 @@ public:
         }
     }
 
+    /**
+     * @brief Forwards cancellation to the wrapped middleware.
+     *
+     * Any exception thrown by the middleware's `cancel()` is caught and logged
+     * as a warning; cancellation never propagates an exception.
+     */
     void
     cancel() override {
         if (_middleware) {
@@ -126,15 +157,28 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the configured name of this task.
+     * @return The task name supplied at construction.
+     */
     std::string
     name() const override {
-        // If IMiddleware had a get_middleware_name(), we could use it:
-        // return _middleware ? _middleware->get_middleware_name() : "UnnamedMiddlewareTask";
         return _name;
     }
 };
 
-// Renaming Adapter Class to FunctionalMiddleware
+/**
+ * @brief Middleware implementation backed by a user-supplied handler function.
+ *
+ * Adapts a @ref MiddlewareHandlerFn (taking the context and a `next` callback)
+ * to the @ref IMiddleware interface. Invoking the `next` callback completes the
+ * context with @ref AsyncTaskResult::CONTINUE exactly once; subsequent calls are
+ * ignored with a warning. If the handler neither calls `next` nor completes the
+ * context itself, it is responsible for completing the context with an
+ * appropriate result.
+ *
+ * @tparam SessionType The session type carried by the request context.
+ */
 template <typename SessionType>
 class FunctionalMiddleware : public IMiddleware<SessionType> {
 private:
@@ -142,6 +186,12 @@ private:
     std::string                      _name; // For potential use if IMiddleware gets a name(), or for debugging
 
 public:
+    /**
+     * @brief Constructs a functional middleware from a handler.
+     * @param handler_fn The handler invoked for each request; must not be null.
+     * @param name A human-readable name used for logging/debugging.
+     * @throws std::invalid_argument If @p handler_fn is null.
+     */
     FunctionalMiddleware(MiddlewareHandlerFn<SessionType> handler_fn, std::string name)
         : _handler_fn(std::move(handler_fn))
         , _name(std::move(name)) {
@@ -150,6 +200,16 @@ public:
         }
     }
 
+    /**
+     * @brief Invokes the handler, supplying a one-shot `next` continuation.
+     *
+     * The `next` callback, when called the first time, completes the context with
+     * @ref AsyncTaskResult::CONTINUE (unless already completed/cancelled); further
+     * calls are ignored with a warning. Exceptions escaping the handler are caught
+     * and logged; if the context is still pending, the response is set to
+     * `INTERNAL_SERVER_ERROR` and completed with @ref AsyncTaskResult::ERROR.
+     * @param ctx The shared context for the request.
+     */
     void
     process(std::shared_ptr<Context<SessionType>> ctx) override {
         auto finalization_deferral = ctx->defer_finalization_scope();
@@ -202,12 +262,21 @@ public:
         // (e.g., COMPLETE or ERROR).
     }
 
-    // This name is primarily for debugging or if IMiddleware evolves to have name()
+    /**
+     * @brief Returns the configured name of this middleware.
+     * @return The name supplied at construction.
+     */
     std::string
     name() const override {
         return _name;
     }
 
+    /**
+     * @brief No-op cancellation hook for functional middleware.
+     *
+     * Functional middleware holds no async state to release; override is provided
+     * to satisfy the @ref IMiddleware interface.
+     */
     void
     cancel() override {
         /* Optional: Implement cancellation logic if needed */

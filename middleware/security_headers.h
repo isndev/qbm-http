@@ -8,7 +8,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Middleware
+ * @ingroup Http
  */
 #pragma once
 
@@ -43,21 +43,7 @@ namespace internal {
  *        clamped). Defaults to 32 hex chars (128 bits of entropy).
  * @return Hex-encoded random string of the requested length.
  */
-[[nodiscard]] inline std::string
-generate_random_nonce(size_t length = 32) {
-    constexpr size_t MIN_NONCE_LENGTH = 16;
-    constexpr size_t MAX_NONCE_LENGTH = 128;
-    if (length < MIN_NONCE_LENGTH) {
-        length = MIN_NONCE_LENGTH;
-    } else if (length > MAX_NONCE_LENGTH) {
-        length = MAX_NONCE_LENGTH;
-    }
-#ifdef QB_HAS_SSL
-    return qb::crypto::generate_secure_random_string(length, qb::crypto::range_hex_lower);
-#else
-    throw std::logic_error("CSP nonce generation requires QB_HAS_SSL");
-#endif
-}
+[[nodiscard]] std::string generate_random_nonce(size_t length = 32);
 } // namespace internal
 
 /**
@@ -276,23 +262,17 @@ public:
 
     /**
      * @brief Provides a set of secure default header values.
-     * These defaults are generally recommended for enhancing security.
+     *
+     * These defaults are generally recommended for enhancing security: a 1-year
+     * HSTS policy with subdomains, `X-Content-Type-Options: nosniff`, a
+     * `SAMEORIGIN` frame policy, a restrictive baseline CSP,
+     * `strict-origin-when-cross-origin` referrer policy, `same-origin` COOP and
+     * `X-Permitted-Cross-Domain-Policies: none`. COEP and Permissions-Policy are
+     * intentionally left unset (application-specific / prone to breakage).
+     *
+     * @return A SecurityHeadersOptions populated with the secure defaults.
      */
-    static SecurityHeadersOptions
-    secure_defaults() {
-        SecurityHeadersOptions opts;
-        opts._hsts_value                         = "max-age=31536000; includeSubDomains"; // 1 year
-        opts._set_x_content_type_options_nosniff = true;
-        opts._x_frame_options_value              = "SAMEORIGIN";
-        opts._content_security_policy_value = "default-src 'self';object-src 'none';frame-ancestors 'self';base-uri 'self';form-action 'self';";
-        opts._referrer_policy_value         = "strict-origin-when-cross-origin";
-        opts._coop_value                    = "same-origin";
-        // COEP can break sites if not carefully configured with cross-origin resources, so not enabled by default here.
-        // opts._coep_value = "require-corp";
-        opts._x_permitted_cross_domain_policies_value = "none";
-        // Permissions-Policy is complex and highly application-specific, so no default value is set.
-        return opts;
-    }
+    static SecurityHeadersOptions secure_defaults();
 };
 
 /**

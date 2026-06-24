@@ -64,12 +64,37 @@ public:
 
     Body(Body &&rhs) noexcept = default;
 
+    /**
+     * @brief Copy constructor
+     * @param rhs Body to copy from
+     *
+     * Copies the underlying pipe buffer from @p rhs.
+     */
     Body(Body const &rhs);
 
     Body &operator=(Body &&rhs) noexcept = default;
 
+    /**
+     * @brief Copy assignment operator
+     * @param rhs Body to copy from
+     * @return Reference to this body
+     *
+     * Copies the underlying pipe buffer from @p rhs. Self-assignment safe.
+     */
     Body &operator=(Body const &rhs);
 
+private:
+    /// @brief True when @p T (after reference removal) is a `char[N]` array type.
+    template <typename T>
+    static constexpr bool _is_char_array = std::is_array_v<std::remove_reference_t<T>>
+                                           && std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<std::remove_reference_t<T>>>, char>;
+
+    /// @brief True when @p T (after reference removal) is a `char *` pointer type.
+    template <typename T>
+    static constexpr bool _is_char_pointer = std::is_pointer_v<std::remove_reference_t<T>>
+                                             && std::is_same_v<std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<T>>>, char>;
+
+public:
     /**
      * @brief Compile-time predicate: can @p T be safely appended to a
      *        HTTP body via `pipe<char>::operator<<`?
@@ -97,17 +122,6 @@ public:
      * rejected at this concept gate rather than failing deep inside
      * `pipe::put`.
      */
-
-private:
-    template <typename T>
-    static constexpr bool _is_char_array = std::is_array_v<std::remove_reference_t<T>>
-                                           && std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<std::remove_reference_t<T>>>, char>;
-
-    template <typename T>
-    static constexpr bool _is_char_pointer = std::is_pointer_v<std::remove_reference_t<T>>
-                                             && std::is_same_v<std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<T>>>, char>;
-
-public:
     template <typename T>
     struct is_body_appendable
         : std::disjunction<std::is_same<std::remove_cvref_t<T>, Body>, std::is_same<std::remove_cvref_t<T>, Chunk>,
@@ -116,6 +130,7 @@ public:
                            std::is_same<std::remove_cvref_t<T>, std::vector<char>>, std::is_arithmetic<std::remove_cvref_t<T>>,
                            std::bool_constant<_is_char_array<T>>, std::bool_constant<_is_char_pointer<T>>> {};
 
+    /// @brief Convenience value alias for `is_body_appendable<T>::value`.
     template <typename T>
     static constexpr bool is_body_appendable_v = is_body_appendable<T>::value;
 

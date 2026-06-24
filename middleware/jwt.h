@@ -8,7 +8,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Middleware
+ * @ingroup Http
  */
 #pragma once
 
@@ -66,20 +66,20 @@ struct JwtOptions {
 
 /** @brief Enumerates specific JWT processing errors. */
 enum class JwtError {
-    NONE,
-    MISSING_TOKEN,
-    INVALID_TOKEN,
-    TOKEN_EXPIRED,
-    TOKEN_NOT_ACTIVE,
-    INVALID_SIGNATURE,
-    INVALID_CLAIM,
-    ALGORITHM_MISMATCH
+    NONE,              ///< No error; the token was processed successfully.
+    MISSING_TOKEN,     ///< No token was found in the configured location.
+    INVALID_TOKEN,     ///< The token is malformed or otherwise unparseable.
+    TOKEN_EXPIRED,     ///< The 'exp' claim is in the past (accounting for leeway).
+    TOKEN_NOT_ACTIVE,  ///< The 'nbf'/'iat' claim is in the future (not yet active).
+    INVALID_SIGNATURE, ///< The token signature failed verification.
+    INVALID_CLAIM,     ///< A required, custom, or standard claim check failed.
+    ALGORITHM_MISMATCH ///< The configured algorithm is unsupported or unrecognized.
 };
 
-/** @brief Structure to hold JWT error code and a descriptive message. */
+/** @brief Structure to hold a JWT error code and a descriptive message. */
 struct JwtErrorInfo {
-    JwtError    code = JwtError::NONE;
-    std::string message;
+    JwtError    code = JwtError::NONE; ///< The specific JWT processing error code.
+    std::string message;               ///< Human-readable description of the error.
 };
 
 /**
@@ -249,21 +249,37 @@ public:
         ctx->complete(AsyncTaskResult::CONTINUE);
     }
 
+    /**
+     * @brief Returns the human-readable name of this middleware.
+     * @return The middleware name ("JwtMiddleware").
+     */
     std::string
     name() const override {
         return _name;
     }
 
+    /** @brief Cancels processing. No-op for this synchronous middleware. */
     void
     cancel() override {
         // No-op for this synchronous middleware.
     }
 
+    /**
+     * @brief Factory creating a shared JwtMiddleware from a secret and algorithm.
+     * @param secret Secret or public key.
+     * @param algorithm JWT signing algorithm (default "HS256").
+     * @return A shared pointer to the newly created middleware.
+     */
     static std::shared_ptr<JwtMiddleware<SessionType>>
     create(const std::string &secret, const std::string &algorithm = "HS256") {
         return std::make_shared<JwtMiddleware<SessionType>>(JwtOptions{secret, algorithm});
     }
 
+    /**
+     * @brief Factory creating a shared JwtMiddleware from detailed options.
+     * @param options JwtOptions struct.
+     * @return A shared pointer to the newly created middleware.
+     */
     static std::shared_ptr<JwtMiddleware<SessionType>>
     create_with_options(const JwtOptions &options) {
         return std::make_shared<JwtMiddleware<SessionType>>(options);
@@ -513,12 +529,25 @@ private:
     }
 };
 
+/**
+ * @brief Convenience factory creating a JwtMiddleware from a secret and algorithm.
+ * @tparam SessionType The type of the session object.
+ * @param secret Secret or public key.
+ * @param algorithm JWT signing algorithm (default "HS256").
+ * @return A shared pointer to the newly created middleware.
+ */
 template <typename SessionType>
 std::shared_ptr<JwtMiddleware<SessionType>>
 jwt_middleware(const std::string &secret, const std::string &algorithm = "HS256") {
     return JwtMiddleware<SessionType>::create(secret, algorithm);
 }
 
+/**
+ * @brief Convenience factory creating a JwtMiddleware from detailed options.
+ * @tparam SessionType The type of the session object.
+ * @param options JwtOptions struct.
+ * @return A shared pointer to the newly created middleware.
+ */
 template <typename SessionType>
 std::shared_ptr<JwtMiddleware<SessionType>>
 jwt_middleware_with_options(const JwtOptions &options) {

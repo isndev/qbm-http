@@ -9,7 +9,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Validaton
+ * @ingroup Http
  */
 #pragma once
 
@@ -110,26 +110,26 @@ public:
      *        validators. Callers can still override the policy on the
      *        `Result` after `validate()` returns (but that only affects
      *        future errors; the errors already stored keep their shape).
+     * @param policy The error-value policy to store and forward.
+     * @param preview_bytes Maximum length of any retained offending value
+     *        preview; clamped to the same [16, 64 KiB] bounds `Result` uses.
+     * @return Reference to this RequestValidator for chaining.
      */
-    RequestValidator &
-    set_error_value_policy(Result::ErrorValuePolicy policy, std::size_t preview_bytes = 256) noexcept {
-        _error_value_policy = policy;
-        // Clamp to the same bounds `Result` uses to keep behaviour identical.
-        constexpr std::size_t kMinPreview = 16;
-        constexpr std::size_t kMaxPreview = 64 * 1024;
-        if (preview_bytes < kMinPreview)
-            preview_bytes = kMinPreview;
-        if (preview_bytes > kMaxPreview)
-            preview_bytes = kMaxPreview;
-        _error_value_preview_bytes = preview_bytes;
-        return *this;
-    }
+    RequestValidator &set_error_value_policy(Result::ErrorValuePolicy policy, std::size_t preview_bytes = 256) noexcept;
 
+    /**
+     * @brief Returns the currently configured error-value policy.
+     * @return The stored Result::ErrorValuePolicy.
+     */
     [[nodiscard]] Result::ErrorValuePolicy
     error_value_policy() const noexcept {
         return _error_value_policy;
     }
 
+    /**
+     * @brief Returns the configured maximum offending-value preview length.
+     * @return The clamped preview byte count applied to retained values.
+     */
     [[nodiscard]] std::size_t
     offending_value_preview_bytes() const noexcept {
         return _error_value_preview_bytes;

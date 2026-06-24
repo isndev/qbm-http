@@ -11,7 +11,7 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Routing
+ * @ingroup Http
  */
 #pragma once
 
@@ -138,7 +138,16 @@ public:
     QB_HTTP_ROUTER_VERB(head, HEAD)
 #undef QB_HTTP_ROUTER_VERB
 
-    /** @brief Adds global **coroutine** middleware (pass the `task<void>(ctx)` lambda directly). */
+    /**
+     * @brief Adds global **coroutine** middleware (pass the `task<void>(ctx)` lambda directly).
+     *
+     * Concept-gated on `CoroMiddlewareHandler`; the handler is wrapped into a synchronous
+     * middleware via `detail::wrap_coro_middleware_handler` and then forwarded to the
+     * `SyncMiddleware` `use()` overload, so it applies to all routes handled by this router.
+     * @param handler The coroutine middleware handler (`qb::io::async::task<void>(ctx)`).
+     * @param name An optional name for this middleware instance. Defaults to "UnnamedCoroMiddleware".
+     * @return Reference to this `Router` for chaining.
+     */
     template <typename H>
     requires CoroMiddlewareHandler<std::remove_cvref_t<H>, SessionType>
     Router<SessionType> &

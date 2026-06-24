@@ -42,6 +42,10 @@ if(QB_HAS_SSL)
         ws/ws.cpp
         2/http2.cpp
         2/client.cpp
+        2/protocol/base.cpp
+        2/protocol/hpack.cpp
+        2/protocol/hpack_huffman.cpp
+        2/protocol/stream.cpp
     )
     list(APPEND QBM_HTTP_EXTRA_DEFINES QBM_HTTP_HAS_SSL=1)
 endif()
@@ -86,12 +90,28 @@ qb_register_module(
         body.cpp
         1.1/http.cpp
         1.1/client.cpp
+        # Core (decl/def split)
+        message_base.cpp
+        types.cpp
+        utility.cpp
+        origin.cpp
+        # Auth
+        auth/options.cpp
+        auth/user.cpp
         # Validation
+        validation/error.cpp
         validation/parameter_validator.cpp
         validation/request_validator.cpp
         validation/rule.cpp
         validation/sanitizer.cpp
         validation/schema_validator.cpp
+        # Middleware (non-template helpers split out of headers)
+        middleware/cors.cpp
+        middleware/compression.cpp
+        middleware/rate_limit.cpp
+        middleware/recaptcha.cpp
+        middleware/security_headers.cpp
+        middleware/static_files.cpp
         ${QBM_HTTP_EXTRA_SOURCES}
     DEFINES
         QBM_HTTP_VERSION="1.0.0"

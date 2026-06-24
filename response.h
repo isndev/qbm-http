@@ -106,19 +106,7 @@ public:
      * It clears the internal `_cookies` jar before parsing.
      * @note This can throw if `parse_set_cookie` or `CookieJar::add` throws.
      */
-    void
-    parse_set_cookie_headers() {
-        _cookies.clear();
-        const auto &set_cookie_iter = this->_headers.find("Set-Cookie");
-        if (set_cookie_iter == this->_headers.end()) {
-            return;
-        }
-        for (const std::string &header_value_str : set_cookie_iter->second) {
-            if (auto cookie_opt = parse_set_cookie(std::string_view(header_value_str))) {
-                _cookies.add(std::move(*cookie_opt));
-            }
-        }
-    }
+    void parse_set_cookie_headers();
 
     /**
      * @brief Adds a cookie to be sent with the response.
@@ -172,13 +160,7 @@ public:
     /** `Max-Age` value used by `remove_cookie()`. */
     static constexpr int EXPIRED_COOKIE_MAX_AGE = 0;
 
-    void
-    remove_cookie(const std::string &name) {
-        Cookie removal_cookie(name, "");
-        removal_cookie.expires_in(std::chrono::seconds(EXPIRED_COOKIE_OFFSET_SECONDS));
-        removal_cookie.max_age(qb::duration::zero());
-        add_cookie(std::move(removal_cookie));
-    }
+    void remove_cookie(const std::string &name);
 
     /**
      * @brief Instructs the client to remove a cookie by name, considering its domain and path.
@@ -188,15 +170,7 @@ public:
      * @param domain The domain of the cookie to remove.
      * @param path The path of the cookie to remove. Defaults to "/".
      */
-    void
-    remove_cookie(const std::string &name, const std::string &domain, const std::string &path = "/") {
-        Cookie removal_cookie(name, "");
-        removal_cookie.expires_in(std::chrono::seconds(EXPIRED_COOKIE_OFFSET_SECONDS));
-        removal_cookie.max_age(qb::duration::zero());
-        removal_cookie.domain(domain);
-        removal_cookie.path(path);
-        add_cookie(std::move(removal_cookie));
-    }
+    void remove_cookie(const std::string &name, const std::string &domain, const std::string &path = "/");
 
     /**
      * @brief Retrieves a constant pointer to a cookie intended to be set by this response.
@@ -232,25 +206,7 @@ public:
      * cookie name and adds the new one.
      * @param name The name of the cookie whose `Set-Cookie` header needs to be updated.
      */
-    void
-    update_cookie_header(const std::string &name) {
-        Cookie *modified_cookie = _cookies.get(name);
-        if (!modified_cookie) {
-            return;
-        }
-        auto &set_cookie_headers = this->_headers["Set-Cookie"];
-        set_cookie_headers.erase(std::remove_if(set_cookie_headers.begin(), set_cookie_headers.end(),
-                                                [&](const std::string &header_val) {
-                                                    const auto eq_pos = header_val.find('=');
-                                                    if (eq_pos == std::string::npos) {
-                                                        return false;
-                                                    }
-                                                    return utility::iequals(std::string_view(header_val.data(), eq_pos),
-                                                                            modified_cookie->name());
-                                                }),
-                                 set_cookie_headers.end());
-        this->add_header("Set-Cookie", modified_cookie->to_header());
-    }
+    void update_cookie_header(const std::string &name);
 
     /**
      * @brief Checks if a cookie with the given name is scheduled to be set by this response.
@@ -293,13 +249,7 @@ public:
      * to ensure the raw `Set-Cookie` headers in `this->_headers` are synchronized.
      * It clears all existing `Set-Cookie` headers and re-adds them based on the jar.
      */
-    void
-    update_cookie_headers() {
-        this->_headers.erase("Set-Cookie"); // Remove all current Set-Cookie headers
-        for (const auto &pair : _cookies.all()) {
-            this->add_header("Set-Cookie", pair.second.to_header());
-        }
-    }
+    void update_cookie_headers();
 
     /**
      * @brief Sets the HTTP status for the response.

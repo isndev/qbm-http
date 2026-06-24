@@ -1,3 +1,18 @@
+/**
+ * @file qbm/http/1.1/client.cpp
+ * @brief Implementation of the persistent HTTP/1.1 client.
+ *
+ * Contains the out-of-line definitions for `qb::http1::Client` (connection
+ * lifecycle, request queueing/dispatch, timeout and reconnection handling,
+ * batch coordination, and the coroutine awaiter factories) together with the
+ * private `connection<Transport>` adapter that bridges the client to qb-io's
+ * asynchronous TCP/TLS transports.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include "./client.h"
 
 #include <algorithm>

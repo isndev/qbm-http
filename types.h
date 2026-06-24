@@ -113,18 +113,9 @@ public:
     constexpr Method(::http_method m)
         : _value(static_cast<Value>(m)) {}
 
-    /// Construct from std::string_view (case-insensitive).
-    explicit Method(std::string_view sv)
-        : _value(Value::UNINITIALIZED) {
-        // `icase_unordered_map::find` accepts any string-like key and performs
-        // the lowercase conversion internally, so passing the view directly
-        // avoids the double-allocation of wrapping it in a temporary `std::string`.
-        const auto &map = get_string_to_method_map();
-        const auto  it  = map.find(sv);
-        if (it != map.end()) {
-            _value = it->second;
-        }
-    }
+    /// Construct from std::string_view (case-insensitive). Unrecognized names
+    /// leave the method at UNINITIALIZED.
+    explicit Method(std::string_view sv);
 
     /// Assign from qb::http::Method::Value enum.
     constexpr Method &
@@ -271,67 +262,11 @@ private:
     /// with `default: abort()`, so any value not in its map — including the
     /// default-constructed `UNINITIALIZED` (-1) — would terminate the process. Guard
     /// the unmapped state here and return a readable placeholder instead.
-    [[nodiscard]] std::string_view
-    name_view() const {
-        if (_value == Value::UNINITIALIZED)
-            return "UNINITIALIZED";
-        return ::http_method_name(static_cast<::http_method>(_value));
-    }
+    [[nodiscard]] std::string_view name_view() const;
 
-    // Static map for string to Method::Value conversion
-    static const qb::icase_unordered_map<Value> &
-    get_string_to_method_map() {
-        static qb::icase_unordered_map<Value> string_to_method_map = {
-            {"DELETE", Value::DEL},
-            {"GET", Value::GET},
-            {"HEAD", Value::HEAD},
-            {"POST", Value::POST},
-            {"PUT", Value::PUT},
-            {"CONNECT", Value::CONNECT},
-            {"OPTIONS", Value::OPTIONS},
-            {"TRACE", Value::TRACE},
-            {"COPY", Value::COPY},
-            {"LOCK", Value::LOCK},
-            {"MKCOL", Value::MKCOL},
-            {"MOVE", Value::MOVE},
-            {"PROPFIND", Value::PROPFIND},
-            {"PROPPATCH", Value::PROPPATCH},
-            {"SEARCH", Value::SEARCH},
-            {"UNLOCK", Value::UNLOCK},
-            {"BIND", Value::BIND},
-            {"REBIND", Value::REBIND},
-            {"UNBIND", Value::UNBIND},
-            {"ACL", Value::ACL},
-            {"REPORT", Value::REPORT},
-            {"MKACTIVITY", Value::MKACTIVITY},
-            {"CHECKOUT", Value::CHECKOUT},
-            {"MERGE", Value::MERGE},
-            {"M-SEARCH", Value::MSEARCH},
-            {"NOTIFY", Value::NOTIFY},
-            {"SUBSCRIBE", Value::SUBSCRIBE},
-            {"UNSUBSCRIBE", Value::UNSUBSCRIBE},
-            {"PATCH", Value::PATCH},
-            {"PURGE", Value::PURGE},
-            {"MKCALENDAR", Value::MKCALENDAR},
-            {"LINK", Value::LINK},
-            {"UNLINK", Value::UNLINK},
-            {"SOURCE", Value::SOURCE},
-            {"PRI", Value::PRI},
-            {"DESCRIBE", Value::DESCRIBE},
-            {"ANNOUNCE", Value::ANNOUNCE},
-            {"SETUP", Value::SETUP},
-            {"PLAY", Value::PLAY},
-            {"PAUSE", Value::PAUSE},
-            {"TEARDOWN", Value::TEARDOWN},
-            {"GET_PARAMETER", Value::GET_PARAMETER},
-            {"SET_PARAMETER", Value::SET_PARAMETER},
-            {"REDIRECT", Value::REDIRECT},
-            {"RECORD", Value::RECORD},
-            {"FLUSH", Value::FLUSH},
-            {"QUERY", Value::QUERY}
-        };
-        return string_to_method_map;
-    }
+    /// Process-wide, lazily-initialized case-insensitive map from canonical HTTP
+    /// method name to `Value`. Used by the `std::string_view` constructor.
+    static const qb::icase_unordered_map<Value> &get_string_to_method_map();
 };
 
 using method = Method;

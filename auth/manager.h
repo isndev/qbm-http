@@ -10,15 +10,13 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Auth
+ * @ingroup Http
  */
 #pragma once
 
-#include <functional> // For std::function (if used by future extensions)
-#include <optional>   // For std::optional
+#include <optional> // For std::optional
 #include <string>
 
-// #include <qb/io/crypto.h> // General crypto, crypto_jwt is more specific if only JWTs are handled here
 #include <qb/io/crypto_jwt.h> // For qb::jwt::* types and functions used by Manager
 
 #include "./options.h" // For qb::http::auth::Options

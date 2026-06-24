@@ -9,13 +9,25 @@
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
- * @ingroup Validaton
+ * @ingroup Http
  */
 #include "./request_validator.h"
-// #include "../utility.h" // Not directly used now
 
 namespace qb::http::validation {
-// Changed namespace
+
+RequestValidator &
+RequestValidator::set_error_value_policy(Result::ErrorValuePolicy policy, std::size_t preview_bytes) noexcept {
+    _error_value_policy = policy;
+    // Clamp to the same bounds `Result` uses to keep behaviour identical.
+    constexpr std::size_t kMinPreview = 16;
+    constexpr std::size_t kMaxPreview = 64 * 1024;
+    if (preview_bytes < kMinPreview)
+        preview_bytes = kMinPreview;
+    if (preview_bytes > kMaxPreview)
+        preview_bytes = kMaxPreview;
+    _error_value_preview_bytes = preview_bytes;
+    return *this;
+}
 
 RequestValidator &
 RequestValidator::for_body(const qb::json &schema_definition) {
