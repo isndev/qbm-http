@@ -7,13 +7,13 @@
 #include <chrono>    // For time-based tests
 #include <functional>
 #include <memory>
-#include <optional>           // For std::optional
-#include <qb/io/crypto_jwt.h> // For qb::jwt::create and options
-#include <qb/json.h>          // For qb::json
-#include <sstream>            // For ostringstream in session mock
-#include <stdexcept>          // For std::runtime_error
+#include <optional>  // For std::optional
+#include <sstream>   // For ostringstream in session mock
+#include <stdexcept> // For std::runtime_error
 #include <string>
 #include <vector>
+#include <qb/io/crypto_jwt.h> // For qb::jwt::create and options
+#include <qb/json.h>          // For qb::json
 
 // --- Mock Session for AuthMiddleware Tests ---
 struct MockAuthSession {

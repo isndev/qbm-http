@@ -196,7 +196,7 @@ public:
         // mis-flags as a -Wfree-nonheap-object false positive).
         std::vector<char> frame(2 + 4 + payload.size());
         std::size_t       n = 0;
-        frame[n++]          = static_cast<char>(0x81);             // FIN + text
+        frame[n++]          = static_cast<char>(0x81);                  // FIN + text
         frame[n++]          = static_cast<char>(0x80 | payload.size()); // MASK bit set (invalid for server->client)
         for (unsigned char b : mask) {
             frame[n++] = static_cast<char>(b);

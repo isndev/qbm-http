@@ -29,8 +29,8 @@
 
 #include <atomic>
 #include <gtest/gtest.h>
-#include <qb/io/async.h>
 #include <thread>
+#include <qb/io/async.h>
 #include "../ws/ws.h"
 
 using namespace qb::io;

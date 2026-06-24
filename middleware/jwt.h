@@ -421,7 +421,7 @@ private:
                         // Accept only a finite, JSON-number-shaped decimal. strtod also parses
                         // "inf"/"nan" and hex-floats ("0x1p4"); those must remain strings rather
                         // than silently become float claims.
-                        const std::string &num_str    = pair.second;
+                        const std::string &num_str     = pair.second;
                         bool               json_number = !num_str.empty() && (num_str[0] == '-' || (num_str[0] >= '0' && num_str[0] <= '9'));
                         for (char c : num_str) {
                             if (!((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E')) {

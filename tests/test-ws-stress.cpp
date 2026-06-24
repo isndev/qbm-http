@@ -34,10 +34,10 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <mutex>
-#include <qb/io/async.h>
 #include <random>
 #include <thread>
 #include <vector>
+#include <qb/io/async.h>
 #include "../ws/ws.h"
 
 /**

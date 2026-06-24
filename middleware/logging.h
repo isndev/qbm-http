@@ -70,10 +70,10 @@ public:
      *                      or when multiple logging middlewares are used. Defaults to "LoggingMiddleware".
      * @throws std::invalid_argument if `log_fn` is null.
      */
-    LoggingMiddleware(LogFunction log_fn, LogLevel req_level = LogLevel::Info, LogLevel res_level = LogLevel::Debug,
-                      std::string instance_name =
-                          "LoggingMiddleware") noexcept(false) // std::function move constructor is noexcept, std::string move is noexcept.
-                                                               // std::invalid_argument can be thrown.
+    LoggingMiddleware(
+        LogFunction log_fn, LogLevel req_level = LogLevel::Info, LogLevel res_level = LogLevel::Debug,
+        std::string instance_name = "LoggingMiddleware") noexcept(false) // std::function move constructor is noexcept, std::string move is
+                                                                         // noexcept. std::invalid_argument can be thrown.
         : _log_function(std::move(log_fn))
         , _request_level(req_level)
         , _response_level(res_level)

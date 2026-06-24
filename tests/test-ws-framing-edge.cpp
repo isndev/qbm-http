@@ -678,4 +678,4 @@ TEST_F(FramingEdgeTest, ThrowingMessageHandlerDoesNotTerminate) {
         << "unexpected frame kind " << static_cast<int>(frame.kind);
 }
 
-} // namespace
+} // namespace ws_framing_edge_test

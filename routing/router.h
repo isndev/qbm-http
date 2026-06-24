@@ -112,24 +112,22 @@ public:
     //   router.get("/x", this, &MyActor::handle_x);                              // (sync or coro) member fn
     // One concept-gated overload (RouteHandlerLike) accepts both flavours; the coroutine branch is
     // selected via `if constexpr (CoroRouteHandler<...>)`. No wrappers, no repeated session type.
-#define QB_HTTP_ROUTER_VERB(NAME, METHOD)                                                               \
-    template <typename H>                                                                                \
-        requires RouteHandlerLike<std::remove_cvref_t<H>, SessionType>                                   \
-    Router<SessionType> &NAME(std::string path, H &&handler) {                                            \
-        if constexpr (CoroRouteHandler<std::remove_cvref_t<H>, SessionType>) {                           \
-            return add_route(std::move(path), qb::http::method::METHOD,                                   \
-                             detail::wrap_coro_route_handler<SessionType>(std::forward<H>(handler)));     \
-        } else {                                                                                          \
-            return add_route(std::move(path), qb::http::method::METHOD,                                   \
-                             RouteHandlerFn<SessionType>(std::forward<H>(handler)));                      \
-        }                                                                                                 \
-    }                                                                                                     \
-    template <typename Obj, typename M>                                                                   \
-        requires std::is_member_function_pointer_v<M>                                                     \
-    Router<SessionType> &NAME(std::string path, Obj *obj, M member) {                                     \
-        return NAME(std::move(path), [obj, member](std::shared_ptr<qb::http::Context<SessionType>> ctx) { \
-            return (obj->*member)(std::move(ctx));                                                        \
-        });                                                                                               \
+#define QB_HTTP_ROUTER_VERB(NAME, METHOD)                                                                                           \
+    template <typename H>                                                                                                           \
+    requires RouteHandlerLike<std::remove_cvref_t<H>, SessionType>                                                                  \
+    Router<SessionType> &NAME(std::string path, H &&handler) {                                                                      \
+        if constexpr (CoroRouteHandler<std::remove_cvref_t<H>, SessionType>) {                                                      \
+            return add_route(std::move(path), qb::http::method::METHOD,                                                             \
+                             detail::wrap_coro_route_handler<SessionType>(std::forward<H>(handler)));                               \
+        } else {                                                                                                                    \
+            return add_route(std::move(path), qb::http::method::METHOD, RouteHandlerFn<SessionType>(std::forward<H>(handler)));     \
+        }                                                                                                                           \
+    }                                                                                                                               \
+    template <typename Obj, typename M>                                                                                             \
+    requires std::is_member_function_pointer_v<M>                                                                                   \
+    Router<SessionType> &NAME(std::string path, Obj *obj, M member) {                                                               \
+        return NAME(std::move(path),                                                                                                \
+                    [obj, member](std::shared_ptr<qb::http::Context<SessionType>> ctx) { return (obj->*member)(std::move(ctx)); }); \
     }
     QB_HTTP_ROUTER_VERB(get, GET)
     QB_HTTP_ROUTER_VERB(post, POST)
@@ -142,7 +140,7 @@ public:
 
     /** @brief Adds global **coroutine** middleware (pass the `task<void>(ctx)` lambda directly). */
     template <typename H>
-        requires CoroMiddlewareHandler<std::remove_cvref_t<H>, SessionType>
+    requires CoroMiddlewareHandler<std::remove_cvref_t<H>, SessionType>
     Router<SessionType> &
     use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
         return use(detail::wrap_coro_middleware_handler<SessionType>(std::forward<H>(handler)), std::move(name));
@@ -222,7 +220,7 @@ public:
      * @return Reference to this `Router` for chaining.
      */
     template <typename H>
-        requires SyncMiddleware<std::remove_cvref_t<H>, SessionType>
+    requires SyncMiddleware<std::remove_cvref_t<H>, SessionType>
     Router<SessionType> &
     use(H &&mw_fn, std::string name = "UnnamedGlobalFunctionalMiddleware") {
         if (_root_group) {

@@ -16,10 +16,10 @@
 #include <functional> // For std::function
 #include <memory>
 #include <optional>
-#include <qb/json.h>
-#include <qb/system/container/unordered_map.h>
 #include <string>
 #include <vector>
+#include <qb/json.h>
+#include <qb/system/container/unordered_map.h>
 #include "./error.h"
 #include "./rule.h"
 

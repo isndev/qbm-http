@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 #include <memory>
-#include <optional>  // For std::optional, if used by PathParameters or Context
-#include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
+#include <optional> // For std::optional, if used by PathParameters or Context
 #include <string>
 #include <utility>   // For std::move
+#include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
 #include "../http.h" // Provides qb::http::Router, Request, Response, Context, PathParameters, etc.
 
 // Minimal Mock Session for match testing

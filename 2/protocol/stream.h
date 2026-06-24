@@ -23,11 +23,11 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <qb/system/container/unordered_set.h> // for qb::unordered_set (previously picked up transitively via listener.h)
-#include <qb/system/time.h>               // for qb::duration (canonical time-span type)
 #include <string>
 #include <unordered_set>
-#include <vector> // Required by qb::http::Headers if it uses std::vector for multi-value headers
+#include <vector>                              // Required by qb::http::Headers if it uses std::vector for multi-value headers
+#include <qb/system/container/unordered_set.h> // for qb::unordered_set (previously picked up transitively via listener.h)
+#include <qb/system/time.h>                    // for qb::duration (canonical time-span type)
 
 #include "../../request.h"
 #include "../../response.h"

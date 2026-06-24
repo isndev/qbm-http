@@ -88,8 +88,7 @@ concept CoroMiddlewareHandler = requires(F f, std::shared_ptr<Context<SessionTyp
  *        `RouteHandlerFn`), so existing handlers keep compiling.
  */
 template <typename F, typename SessionType>
-concept SyncRouteHandler =
-    requires(F f, std::shared_ptr<Context<SessionType>> ctx) { f(ctx); } && !CoroRouteHandler<F, SessionType>;
+concept SyncRouteHandler = requires(F f, std::shared_ptr<Context<SessionType>> ctx) { f(ctx); } && !CoroRouteHandler<F, SessionType>;
 
 /**
  * @brief Either flavour of route handler — synchronous (`void`-ish) or coroutine (`task<void>`).
@@ -106,9 +105,8 @@ concept RouteHandlerLike = SyncRouteHandler<F, SessionType> || CoroRouteHandler<
  *        (which is invoked with `(Context)` only) so `use(...)` resolves sync vs coro unambiguously.
  */
 template <typename F, typename SessionType>
-concept SyncMiddleware =
-    requires(F f, std::shared_ptr<Context<SessionType>> ctx, std::function<void()> next) { f(ctx, next); }
-    && !CoroMiddlewareHandler<F, SessionType>;
+concept SyncMiddleware = requires(F f, std::shared_ptr<Context<SessionType>> ctx, std::function<void()> next) { f(ctx, next); }
+                         && !CoroMiddlewareHandler<F, SessionType>;
 
 namespace detail {
 
@@ -135,8 +133,8 @@ make_coro_task_runner(CoroFn handler, DefaultCoroOutcome default_outcome, const 
                                                                                            : AsyncTaskResult::CONTINUE);
                 }
             } catch (const std::exception &e) {
-                LOG_HTTP_ERROR("Coro " << kind << " exception: method=" << ctx->request().method()
-                                       << " path=" << ctx->request().uri().path() << " what=" << e.what());
+                LOG_HTTP_ERROR("Coro " << kind << " exception: method=" << ctx->request().method() << " path=" << ctx->request().uri().path()
+                                       << " what=" << e.what());
                 if (!ctx->is_completed() && !ctx->is_cancelled()) {
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body()   = "Internal server error in coroutine handler.";

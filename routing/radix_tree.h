@@ -20,13 +20,13 @@
 #include <list>                                // For std::list (task chains, _path_segment_storage)
 #include <memory>                              // For std::shared_ptr, std::make_shared, std::unique_ptr (used by Node)
 #include <optional>                            // For std::optional (match result)
-#include <qb/system/container/unordered_map.h> // For qb::unordered_map (ska::flat_hash_map, cache-friendly O(1) lookup for static_children)
 #include <stdexcept>                           // For std::runtime_error, std::invalid_argument
 #include <string>                              // For std::string
 #include <string_view>                         // For std::string_view
 #include <unordered_set>                       // For duplicate capture name validation
 #include <utility>                             // For std::move
 #include <vector>                              // For std::vector
+#include <qb/system/container/unordered_map.h> // For qb::unordered_map (ska::flat_hash_map, cache-friendly O(1) lookup for static_children)
 
 #include "../types.h"          // For qb::http::method enum
 #include "./async_task.h"      // For IAsyncTask
@@ -426,8 +426,8 @@ private:
      *        by value so a branch that fails to match discards its captures (correct backtracking).
      */
     [[nodiscard]] std::optional<MatchedRouteInfo<SessionType>>
-    match_recursive(const Node *current_node_ptr, const std::vector<std::string_view> &segments, std::size_t slot,
-                    std::size_t segment_idx, PathParameters current_params) const {
+    match_recursive(const Node *current_node_ptr, const std::vector<std::string_view> &segments, std::size_t slot, std::size_t segment_idx,
+                    PathParameters current_params) const {
         if (!current_node_ptr) {
             return std::nullopt;
         }
@@ -474,8 +474,8 @@ private:
         if (current_node_ptr->param_child) {
             PathParameters params_for_param_branch = current_params;
             params_for_param_branch.set(current_node_ptr->param_name, current_path_segment_view);
-            auto res = match_recursive(current_node_ptr->param_child.get(), segments, slot, segment_idx + 1,
-                                       std::move(params_for_param_branch));
+            auto res =
+                match_recursive(current_node_ptr->param_child.get(), segments, slot, segment_idx + 1, std::move(params_for_param_branch));
             if (res)
                 return res;
         }
@@ -504,7 +504,6 @@ private:
     }
 
 public:
-
     /**
      * @brief Matches only the request path and returns methods registered
      *        at the resolved route node.

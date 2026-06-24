@@ -13,9 +13,9 @@
  */
 #include "./rule.h"
 #include <algorithm>
-#include <qb/system/container/unordered_set.h>
 #include <stdexcept>
 #include <string>
+#include <qb/system/container/unordered_set.h>
 #include "./schema_validator.h"
 
 namespace qb::http::validation {

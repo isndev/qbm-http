@@ -40,10 +40,10 @@
 #include <iomanip> // pour std::setw, std::setfill, etc.
 #include <iostream>
 #include <mutex>
-#include <qb/io/async.h>
 #include <random>
 #include <set>
 #include <thread>
+#include <qb/io/async.h>
 #include "../ws/ws.h"
 
 // Use the proper namespace to avoid qualification issues

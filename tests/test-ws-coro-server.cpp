@@ -445,4 +445,4 @@ TEST_F(CoroServerTest, CoroSessionClosesGracefully) {
     }
 }
 
-} // namespace
+} // namespace ws_coro_server_test

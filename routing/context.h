@@ -16,17 +16,17 @@
  */
 #pragma once
 
-#include <any>        // For std::any (custom_data)
-#include <charconv>   // For std::from_chars (typed path/query params)
-#include <cstdint>    // For std::uint64_t
-#include <functional> // For std::function (LifecycleHook, _on_finalized_callback)
-#include <memory>     // For std::shared_ptr, std::weak_ptr, std::enable_shared_from_this
-#include <optional>   // For std::optional
-#include <stdexcept>  // For std::bad_any_cast, std::runtime_error (potentially from user code)
-#include <string>     // For std::string
+#include <any>         // For std::any (custom_data)
+#include <charconv>    // For std::from_chars (typed path/query params)
+#include <cstdint>     // For std::uint64_t
+#include <functional>  // For std::function (LifecycleHook, _on_finalized_callback)
+#include <memory>      // For std::shared_ptr, std::weak_ptr, std::enable_shared_from_this
+#include <optional>    // For std::optional
+#include <stdexcept>   // For std::bad_any_cast, std::runtime_error (potentially from user code)
+#include <string>      // For std::string
 #include <type_traits> // For std::is_arithmetic_v, std::is_same_v (typed accessors)
-#include <utility>    // For std::move
-#include <vector>     // For std::vector (task_chain, lifecycle_hooks)
+#include <utility>     // For std::move
+#include <vector>      // For std::vector (task_chain, lifecycle_hooks)
 
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
 #include "../request.h"                        // For qb::http::Request
@@ -527,8 +527,10 @@ public:
         } else if constexpr (std::is_same_v<T, std::string_view>) {
             return sv;
         } else if constexpr (std::is_same_v<T, bool>) {
-            if (sv == "true" || sv == "1") return true;
-            if (sv == "false" || sv == "0") return false;
+            if (sv == "true" || sv == "1")
+                return true;
+            if (sv == "false" || sv == "0")
+                return false;
             return std::nullopt;
         } else if constexpr (std::is_arithmetic_v<T>) {
             T          out{};
@@ -539,9 +541,8 @@ public:
                 return out;
             return std::nullopt;
         } else {
-            static_assert(sizeof(T) == 0,
-                          "path_param<T>/query_param<T>: T must be string, string_view, bool, "
-                          "or an arithmetic type");
+            static_assert(sizeof(T) == 0, "path_param<T>/query_param<T>: T must be string, string_view, bool, "
+                                          "or an arithmetic type");
             return std::nullopt;
         }
     }
@@ -600,9 +601,8 @@ public:
     template <typename T>
     [[nodiscard]] std::optional<T>
     bind() const {
-        static_assert(!std::is_same_v<T, std::string_view>,
-                      "bind<std::string_view> would dangle (view into a temporary qb::json); "
-                      "use bind<std::string>()");
+        static_assert(!std::is_same_v<T, std::string_view>, "bind<std::string_view> would dangle (view into a temporary qb::json); "
+                                                            "use bind<std::string>()");
         try {
             if constexpr (std::is_same_v<T, std::string>) {
                 return _request.body().template as<std::string>();

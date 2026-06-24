@@ -16,10 +16,10 @@
 #include <functional>                          // For std::hash
 #include <llhttp.h>                            // For http_method, http_status, http_method_name, http_status_name
 #include <ostream>                             // For std::ostream
+#include <string>                              // For std::string, std::to_string
+#include <string_view>                         // For std::string_view
 #include <qb/system/container/unordered_map.h> // For qb::icase_unordered_map
 #include <qb/utility/compat.h>
-#include <string>      // For std::string, std::to_string
-#include <string_view> // For std::string_view
 #include "./logger.h"
 
 namespace qb::http {

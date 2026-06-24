@@ -30,7 +30,6 @@
 // cross-platform socket layer (platform socket headers + the socket_type alias and
 // closesocket() shim) so it builds on POSIX and Windows; Winsock is initialised by
 // qb-io's global ws2_32 guard, linked in via the qb WebSocket server this test drives.
-#include <qb/io/system/sys__socket.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -38,11 +37,12 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <mutex>
-#include <qb/io/async.h>
 #include <set>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <qb/io/async.h>
+#include <qb/io/system/sys__socket.h>
 #include "../ws/ws.h"
 
 // Utiliser des namespace plus spécifiques pour éviter les ambiguïtés

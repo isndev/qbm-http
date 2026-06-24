@@ -176,8 +176,9 @@ private:
     qb::duration _request_timeout        = std::chrono::seconds(60);
     bool         _verify_peer            = true; /**< Verify the server TLS certificate (h2 is TLS-only). */
     size_t       _max_concurrent_streams = 100;
-    size_t       _max_pending_requests   = 1024; /**< Bound on outstanding (pending + active) requests; rejects with 503 past this (DoS guard, matches http1/http3). */
-    bool         _auto_reconnect         = true;
+    size_t       _max_pending_requests =
+        1024; /**< Bound on outstanding (pending + active) requests; rejects with 503 past this (DoS guard, matches http1/http3). */
+    bool _auto_reconnect = true;
 
     // Callbacks
     std::vector<ConnectionCallback> _connection_callbacks;

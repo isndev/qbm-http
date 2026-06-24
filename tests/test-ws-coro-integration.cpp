@@ -226,4 +226,4 @@ TEST_F(CoroIntegrationTest, PersistentHttp1ClientCanReuseConnectionBeforeUpgrade
     EXPECT_TRUE(client->is_connected());
 }
 
-} // namespace
+} // namespace ws_coro_integration_test

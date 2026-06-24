@@ -14,10 +14,10 @@
 #pragma once
 
 #include <memory>
-#include <qb/json.h>
 #include <string>
 #include <unordered_map> // Node-based map: stable references to cached rule vectors (see member note).
 #include <vector>
+#include <qb/json.h>
 #include "./error.h"
 #include "./rule.h"
 

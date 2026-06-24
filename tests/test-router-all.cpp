@@ -713,7 +713,7 @@ TEST_F(RouterAllInOneTest, ErrorInControllerMiddleware) {
         }
     };
 
-    (void)_router->template controller<ControllerWithErrorMw>("/ctrl_err_mw", _session.get(), &_task_executor);
+    (void) _router->template controller<ControllerWithErrorMw>("/ctrl_err_mw", _session.get(), &_task_executor);
 
     // Setup a main error handler for the router
     std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession>>> error_chain;

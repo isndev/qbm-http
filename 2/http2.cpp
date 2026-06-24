@@ -308,8 +308,7 @@ pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::GoAwayF
 
     // Optional debug data, streamed directly from the frame.
     if (!payload.additional_debug_data.empty()) {
-        this->put(reinterpret_cast<const char *>(payload.additional_debug_data.data()),
-                  payload.additional_debug_data.size());
+        this->put(reinterpret_cast<const char *>(payload.additional_debug_data.data()), payload.additional_debug_data.size());
     }
     return *this;
 }

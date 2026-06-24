@@ -223,12 +223,12 @@ TEST_F(BodyTest, JsonSerializationPreserves64BitAndDouble) {
     j["i64"]   = 1782214248072LL;        // > 2^31
     j["neg64"] = -5000000000LL;          // < -2^31
     j["u64"]   = 9000000000ULL;          // > 2^32
-    j["dbl"]   = 0.1;                     // not representable as float
+    j["dbl"]   = 0.1;                    // not representable as float
     j["dmax"]  = 1.7976931348623157e308; // double max
     j["small"] = 7;
     j["str"]   = "hello";
 
-    body = j;
+    body                  = j;
     const qb::json parsed = qb::json::parse(body.as<std::string>());
 
     EXPECT_EQ(parsed["i64"].get<std::int64_t>(), 1782214248072LL);
@@ -291,8 +291,8 @@ TEST_F(BodyTest, FormIsAssignmentOnlyNotAppendable) {
     static_assert(BodyLeftShiftable<qb::json>, "json remains appendable");
 
     // The documented path — assignment — works and round-trips.
-    Form form = create_simple_form();
-    body      = form;
+    Form form   = create_simple_form();
+    body        = form;
     Form parsed = body.as<Form>();
     EXPECT_EQ(form.fields().size(), parsed.fields().size());
     EXPECT_EQ("test_user", parsed.get_first("name").value_or(""));
