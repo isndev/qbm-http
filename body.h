@@ -17,6 +17,7 @@
 #include <concepts>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -85,10 +86,16 @@ public:
      *    `std::string`, `std::string_view`, `qb::string<N>`,
      *    `std::vector<char>`, `std::array<char, N>`).
      *  - existing `Body` (copy / move).
-     *  - `Chunk` / `Multipart` / `Form` / `qb::json` (via the
-     *    specialised `operator=`).
+     *  - `Chunk` / `Multipart` / `qb::json` (each has a matching
+     *    `pipe<char>::put<>` serializer, so they genuinely append).
      *  - arithmetic types (explicitly, so the behaviour remains
      *    predictable: they are stringified).
+     *
+     * `Form` is deliberately NOT appendable: it has no
+     * `pipe<char>::put<Form>` serializer, only `operator=<Form>`.
+     * Assign a form wholesale (`body = form`); `body << form` is
+     * rejected at this concept gate rather than failing deep inside
+     * `pipe::put`.
      */
 
 private:
@@ -104,7 +111,7 @@ public:
     template <typename T>
     struct is_body_appendable
         : std::disjunction<std::is_same<std::remove_cvref_t<T>, Body>, std::is_same<std::remove_cvref_t<T>, Chunk>,
-                           std::is_same<std::remove_cvref_t<T>, Multipart>, std::is_same<std::remove_cvref_t<T>, Form>,
+                           std::is_same<std::remove_cvref_t<T>, Multipart>,
                            std::is_same<std::remove_cvref_t<T>, qb::json>, std::is_same<std::remove_cvref_t<T>, std::string>,
                            std::is_same<std::remove_cvref_t<T>, std::string_view>, std::is_same<std::remove_cvref_t<T>, std::vector<char>>,
                            std::is_arithmetic<std::remove_cvref_t<T>>, std::bool_constant<_is_char_array<T>>,
@@ -367,6 +374,25 @@ public:
                                                  "Supported specialisations: std::string_view, std::string, "
                                                  "qb::json, Multipart, Form.");
         return T{};
+    }
+
+    /**
+     * @brief Non-throwing variant of `as<T>()` for untrusted input.
+     * @tparam T One of the `as<T>()` specialisations (qb::json / Multipart / Form / std::string[_view]).
+     * @return The converted value, or `std::nullopt` if conversion threw (e.g. malformed JSON /
+     *         multipart in an untrusted request body). The string conversions never fail.
+     *
+     * Prefer this over `as<T>()` when parsing client-supplied bodies so a malformed payload yields
+     * a clean `std::nullopt` (→ 400) instead of an exception that must be caught at the call site.
+     */
+    template <typename T>
+    [[nodiscard]] std::optional<T>
+    try_as() const noexcept {
+        try {
+            return as<T>();
+        } catch (...) {
+            return std::nullopt;
+        }
     }
 
     /**

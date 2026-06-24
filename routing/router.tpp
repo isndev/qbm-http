@@ -52,47 +52,10 @@ Router<SessionType>::add_route(std::string path, qb::http::method method, RouteH
     return *this;
 }
 
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::get(std::string path, RouteHandlerFn<SessionType> handler_fn) {
-    return add_route(std::move(path), qb::http::method::GET, std::move(handler_fn));
-}
-
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::post(std::string path, RouteHandlerFn<SessionType> handler_fn) {
-    return add_route(std::move(path), qb::http::method::POST, std::move(handler_fn));
-}
-
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::put(std::string path, RouteHandlerFn<SessionType> handler_fn) {
-    return add_route(std::move(path), qb::http::method::PUT, std::move(handler_fn));
-}
-
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::del(std::string path, RouteHandlerFn<SessionType> handler_fn) {
-    return add_route(std::move(path), qb::http::method::DEL, std::move(handler_fn));
-}
-
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::patch(std::string path, RouteHandlerFn<SessionType> handler_fn) {
-    return add_route(std::move(path), qb::http::method::PATCH, std::move(handler_fn));
-}
-
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::options(std::string path, RouteHandlerFn<SessionType> handler_fn) {
-    return add_route(std::move(path), qb::http::method::OPTIONS, std::move(handler_fn));
-}
-
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::head(std::string path, RouteHandlerFn<SessionType> handler_fn) {
-    return add_route(std::move(path), qb::http::method::HEAD, std::move(handler_fn));
-}
+// NOTE: the synchronous per-verb methods (get/post/put/del/patch/options/head taking a
+// RouteHandlerFn) were removed — they are now subsumed by the unified, concept-gated verb
+// overloads defined inline in router.h (QB_HTTP_ROUTER_VERB), which accept any sync OR coroutine
+// handler. `add_route()` above remains the shared primitive they all funnel through.
 
 // --- Overloads for ICustomRoute shared_ptr at root level ---
 template <typename SessionType>
@@ -252,16 +215,8 @@ Router<SessionType>::controller(std::string path_prefix, Args &&...args) {
 }
 
 // --- Middleware methods (apply to _root_group) ---
-template <typename SessionType>
-Router<SessionType> &
-Router<SessionType>::use(MiddlewareHandlerFn<SessionType> mw_fn, std::string name) {
-    if (_root_group) {
-        _root_group->use(std::move(mw_fn), std::move(name));
-    }
-    _is_compiled = false;
-    return *this;
-}
-
+// NOTE: the synchronous `use(MiddlewareHandlerFn, name)` overload is now an inline, concept-gated
+// (`SyncMiddleware`) template in router.h. The shared_ptr<IMiddleware> overload remains here.
 template <typename SessionType>
 Router<SessionType> &
 Router<SessionType>::use(std::shared_ptr<IMiddleware<SessionType>> mw_ptr, std::string name_override) {
@@ -345,7 +300,7 @@ Router<SessionType>::get_router_core_weak_ptr() noexcept {
 
 template <typename SessionType>
 void
-Router<SessionType>::clear() noexcept {
+Router<SessionType>::clear() {
     if (_router_core) {
         _router_core->clear();
     }

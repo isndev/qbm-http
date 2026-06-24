@@ -600,6 +600,6 @@ make_server() {
 
 // Type alias for the default server type for easier use.
 template <typename Session = DefaultSession>
-using server = Server<DefaultSession>;
+using server = Server<Session>;
 
 } // namespace qb::http2

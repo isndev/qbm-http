@@ -210,10 +210,10 @@ Four factories cover the common shapes — all `<Session>`-templated:
 
 | Factory | Behavior |
 | --- | --- |
-| `create_auth_middleware<S>(options, name)` | Required auth from `options`. |
-| `create_jwt_auth_middleware<S>(secret, algo = "HS256", name)` | Required auth; `secret` is an HMAC secret for `HS*` or a public key otherwise. |
-| `create_role_auth_middleware<S>(roles, require_all = false, name)` | Pure role gate; assumes an upstream middleware already populated the user. |
-| `create_optional_auth_middleware<S>(options, name)` | Auth optional — proceeds when no credentials are sent, but still rejects an *invalid* token. |
+| `auth_middleware<S>(options, name)` | Required auth from `options`. |
+| `jwt_auth_middleware<S>(secret, algo = "HS256", name)` | Required auth; `secret` is an HMAC secret for `HS*` or a public key otherwise. |
+| `role_auth_middleware<S>(roles, require_all = false, name)` | Pure role gate; assumes an upstream middleware already populated the user. |
+| `optional_auth_middleware<S>(options, name)` | Auth optional — proceeds when no credentials are sent, but still rejects an *invalid* token. |
 
 <!-- src: qbm/http/middleware/auth.h:371-462 -->
 
@@ -228,7 +228,7 @@ qb::http::Router<MySession> router;
 qb::http::auth::Options opts;
 opts.secret_key("a-strong-hmac-secret").token_issuer("my-api");
 
-auto admin_gate = qb::http::create_auth_middleware<MySession>(opts);
+auto admin_gate = qb::http::auth_middleware<MySession>(opts);
 admin_gate->with_auth_required(true)
           .with_user_context_key("user")
           .with_roles({"administrator"});   // any-of by default; pass true for all-of
@@ -249,7 +249,7 @@ Reach for the equivalent tag dispatch when you prefer the unified entry point. W
 
 ### JwtMiddleware — raw payload, no User
 
-`qb::http::JwtMiddleware<Session>` (`<http/middleware/jwt.h>`) verifies a JWT and stores the decoded payload as a `qb::json` under `"jwt_payload"` — it does not build an `auth::User`. Use it when you want the raw claims, when the token can sit in a cookie or query parameter (`from_header`/`from_cookie`/`from_query`), or as the verification stage in front of a `create_role_auth_middleware` gate.
+`qb::http::JwtMiddleware<Session>` (`<http/middleware/jwt.h>`) verifies a JWT and stores the decoded payload as a `qb::json` under `"jwt_payload"` — it does not build an `auth::User`. Use it when you want the raw claims, when the token can sit in a cookie or query parameter (`from_header`/`from_cookie`/`from_query`), or as the verification stage in front of a `role_auth_middleware` gate.
 
 ```cpp
 #include <http/http.h>
@@ -282,7 +282,7 @@ router.get("/data", [](auto ctx) {
 
 - Want a typed `auth::User` and role helpers in your handlers? Use `AuthMiddleware`.
 - Want the raw JWT payload, a non-header token location, or a custom validator over arbitrary claims? Use `JwtMiddleware`.
-- Want both — verify once, then gate by role? Run `JwtMiddleware` first (it writes `"jwt_payload"`), then `create_role_auth_middleware`, which builds an `auth::User` from that payload before checking roles.
+- Want both — verify once, then gate by role? Run `JwtMiddleware` first (it writes `"jwt_payload"`), then `role_auth_middleware`, which builds an `auth::User` from that payload before checking roles.
 
 ## Pitfalls
 

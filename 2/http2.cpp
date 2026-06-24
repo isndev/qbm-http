@@ -289,33 +289,27 @@ pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::GoAwayF
     const qb::protocol::http2::Http2FrameData<qb::protocol::http2::GoAwayFrame> &frame_to_send) {
     qb::protocol::http2::FrameHeader header  = frame_to_send.header;
     const auto                      &payload = frame_to_send.payload;
-    std::vector<uint8_t>             payload_bytes;
-    payload_bytes.reserve(8 + payload.additional_debug_data.size());
 
-    // Last stream ID with reserved bit cleared
-    uint32_t last_sid = payload.last_stream_id & 0x7FFFFFFF;
-    payload_bytes.push_back(static_cast<uint8_t>((last_sid >> 24) & 0xFF));
-    payload_bytes.push_back(static_cast<uint8_t>((last_sid >> 16) & 0xFF));
-    payload_bytes.push_back(static_cast<uint8_t>((last_sid >> 8) & 0xFF));
-    payload_bytes.push_back(static_cast<uint8_t>(last_sid & 0xFF));
+    // Fixed 8-byte GOAWAY prefix: last stream id (reserved bit cleared) + error code.
+    // Built in a fixed std::array (no heap vector) so the optional debug data can be
+    // streamed directly afterwards.
+    const uint32_t               last_sid       = payload.last_stream_id & 0x7FFFFFFF;
+    const uint32_t               error_code_val = static_cast<uint32_t>(payload.error_code);
+    const std::array<uint8_t, 8> prefix{
+        static_cast<uint8_t>((last_sid >> 24) & 0xFF),       static_cast<uint8_t>((last_sid >> 16) & 0xFF),
+        static_cast<uint8_t>((last_sid >> 8) & 0xFF),        static_cast<uint8_t>(last_sid & 0xFF),
+        static_cast<uint8_t>((error_code_val >> 24) & 0xFF), static_cast<uint8_t>((error_code_val >> 16) & 0xFF),
+        static_cast<uint8_t>((error_code_val >> 8) & 0xFF),  static_cast<uint8_t>(error_code_val & 0xFF),
+    };
 
-    // Error code
-    uint32_t error_code_val = static_cast<uint32_t>(payload.error_code);
-    payload_bytes.push_back(static_cast<uint8_t>((error_code_val >> 24) & 0xFF));
-    payload_bytes.push_back(static_cast<uint8_t>((error_code_val >> 16) & 0xFF));
-    payload_bytes.push_back(static_cast<uint8_t>((error_code_val >> 8) & 0xFF));
-    payload_bytes.push_back(static_cast<uint8_t>(error_code_val & 0xFF));
-
-    // Optional debug data
-    if (!payload.additional_debug_data.empty()) {
-        payload_bytes.insert(payload_bytes.end(), payload.additional_debug_data.begin(), payload.additional_debug_data.end());
-    }
-
-    header.set_payload_length(static_cast<uint32_t>(payload_bytes.size()));
+    header.set_payload_length(static_cast<uint32_t>(prefix.size() + payload.additional_debug_data.size()));
     this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+    this->put(reinterpret_cast<const char *>(prefix.data()), prefix.size());
 
-    if (!payload_bytes.empty()) {
-        this->put(reinterpret_cast<const char *>(payload_bytes.data()), payload_bytes.size());
+    // Optional debug data, streamed directly from the frame.
+    if (!payload.additional_debug_data.empty()) {
+        this->put(reinterpret_cast<const char *>(payload.additional_debug_data.data()),
+                  payload.additional_debug_data.size());
     }
     return *this;
 }

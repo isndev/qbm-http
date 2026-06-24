@@ -184,6 +184,14 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
         return true;
     }
 
+    // Bound the outstanding (pending + active) request set so a disconnected or saturated
+    // client cannot grow the pending queue without limit (DoS guard; matches http1/http3).
+    if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
+        ++_failed_requests;
+        callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/2 client pending request limit reached"));
+        return false;
+    }
+
     // Create request context
     auto context        = std::make_unique<RequestContext>();
     context->request    = std::move(request);
@@ -230,6 +238,18 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     batch_context->callback   = callback;
     batch_context->created_at = std::chrono::steady_clock::now();
     batch_context->responses.resize(batch_context->requests.size());
+
+    // Reject the whole batch up-front if it would exceed the outstanding-request bound (DoS guard).
+    if (_pending_requests.size() + _active_requests.size() + batch_context->requests.size() > _max_pending_requests) {
+        _failed_requests += batch_context->requests.size();
+        std::vector<qb::http::Response> responses;
+        responses.reserve(batch_context->requests.size());
+        for (size_t i = 0; i < batch_context->requests.size(); ++i) {
+            responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/2 client pending request limit reached"));
+        }
+        callback(std::move(responses));
+        return false;
+    }
 
     uint64_t batch_id = _next_batch_id++;
 

@@ -100,9 +100,9 @@ public:
 
         // 5. Route with query parameters
         router().get("/query", [](std::shared_ptr<SessionContext> ctx) {
-            std::string name = ctx->request().query("name");
-            std::string age  = ctx->request().query("age");
-            std::string sort = ctx->request().query("sort", 0, "default"); // Query with default
+            std::string name{ctx->request().query("name")};
+            std::string age{ctx->request().query("age")};
+            std::string sort{ctx->request().query_or("sort", "default")}; // Query with default
 
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body()   = "Query params - name: " + name + ", age: " + age + ", sort: " + sort;

@@ -41,7 +41,7 @@
 
 #include "../ws/coro.h"
 
-namespace {
+namespace ws_coro_server_test {
 
 using namespace std::chrono_literals;
 

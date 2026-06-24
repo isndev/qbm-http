@@ -3,7 +3,7 @@
  * @brief Unified factory entry point for standard HTTP middleware.
  *
  * Historically, each middleware shipped its own set of free factory helpers
- * (`create_auth_middleware`, `cors_middleware`, `rate_limit_dev_middleware`,
+ * (`auth_middleware`, `cors_middleware`, `rate_limit_dev_middleware`,
  * &hellip;). The names and argument conventions drifted over time, which made it
  * hard to discover the canonical way to build a middleware for a given purpose.
  *
@@ -117,25 +117,25 @@ namespace detail {
 template <typename SessionType, typename... Args>
 [[nodiscard]] auto
 make_dispatch(tags::auth, Args &&...args) {
-    return qb::http::create_auth_middleware<SessionType>(std::forward<Args>(args)...);
+    return qb::http::auth_middleware<SessionType>(std::forward<Args>(args)...);
 }
 
 template <typename SessionType, typename... Args>
 [[nodiscard]] auto
 make_dispatch(tags::jwt_auth, Args &&...args) {
-    return qb::http::create_jwt_auth_middleware<SessionType>(std::forward<Args>(args)...);
+    return qb::http::jwt_auth_middleware<SessionType>(std::forward<Args>(args)...);
 }
 
 template <typename SessionType, typename... Args>
 [[nodiscard]] auto
 make_dispatch(tags::role_auth, Args &&...args) {
-    return qb::http::create_role_auth_middleware<SessionType>(std::forward<Args>(args)...);
+    return qb::http::role_auth_middleware<SessionType>(std::forward<Args>(args)...);
 }
 
 template <typename SessionType, typename... Args>
 [[nodiscard]] auto
 make_dispatch(tags::optional_auth, Args &&...args) {
-    return qb::http::create_optional_auth_middleware<SessionType>(std::forward<Args>(args)...);
+    return qb::http::optional_auth_middleware<SessionType>(std::forward<Args>(args)...);
 }
 #endif
 

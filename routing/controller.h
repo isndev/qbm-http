@@ -16,6 +16,7 @@
 
 #include "../types.h" // For qb::http::method
 #include "./context.h"
+#include "./coro_task.h" // Coroutine adapters + CoroRouteHandler / CoroMiddlewareHandler concepts
 #include "./handler_node.h"
 #include "./middleware.h"
 #include "./route.h"
@@ -156,8 +157,8 @@ public:
      * class MyUserController : public qb::http::Controller<MySession> {
      * public:
      *     void initialize_routes() override {
-     *         get("/:id", MEMBER_HANDLER(&MyUserController::getUserById));
-     *         post("/", MEMBER_HANDLER(&MyUserController::createUser));
+     *         get("/:id", this, &MyUserController::getUserById);
+     *         post("/", this, &MyUserController::createUser);
      *         use(std::make_shared<MyUserAuthMiddleware>());
      *     }
      *     // ... handler methods ...
@@ -167,48 +168,47 @@ public:
     virtual void initialize_routes() = 0;
 
     // --- Public Route Definition API for use within initialize_routes() ---
-
-    // --- Lambda-based routes ---
-    /** @brief Defines a GET route with a lambda handler. @see add_controller_route */
-    Controller<Session> &
-    get(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::GET, std::move(handler_fn));
+    //
+    // Unified per-verb registration accepting a sync OR coroutine handler, or a member function:
+    //   get("/:id", [](auto ctx) { ... });                                  // sync lambda
+    //   get("/:id", [this](auto ctx) -> qb::io::async::task<void> { ... });  // coroutine lambda
+    //   get("/:id", this, &MyController::get_user);                         // (sync or coro) member fn
+    // One concept-gated overload (RouteHandlerLike) handles sync + coroutine (coroutine branch via
+    // `if constexpr (CoroRouteHandler<...>)`). This is the single modern route-registration API.
+#define QB_HTTP_CTRL_VERB(NAME, METHOD)                                                                  \
+    template <typename H>                                                                                \
+        requires RouteHandlerLike<std::remove_cvref_t<H>, Session>                                       \
+    Controller<Session> &NAME(std::string path, H &&handler) {                                            \
+        if constexpr (CoroRouteHandler<std::remove_cvref_t<H>, Session>) {                               \
+            return add_controller_route(std::move(path), qb::http::method::METHOD,                        \
+                                        detail::wrap_coro_route_handler<Session>(std::forward<H>(handler))); \
+        } else {                                                                                          \
+            return add_controller_route(std::move(path), qb::http::method::METHOD,                        \
+                                        RouteHandlerFn<Session>(std::forward<H>(handler)));               \
+        }                                                                                                 \
+    }                                                                                                     \
+    template <typename Obj, typename M>                                                                   \
+        requires std::is_member_function_pointer_v<M>                                                     \
+    Controller<Session> &NAME(std::string path, Obj *obj, M member) {                                     \
+        return NAME(std::move(path), [obj, member](std::shared_ptr<qb::http::Context<Session>> ctx) {     \
+            return (obj->*member)(std::move(ctx));                                                         \
+        });                                                                                               \
     }
+    QB_HTTP_CTRL_VERB(get, GET)
+    QB_HTTP_CTRL_VERB(post, POST)
+    QB_HTTP_CTRL_VERB(put, PUT)
+    QB_HTTP_CTRL_VERB(del, DEL)
+    QB_HTTP_CTRL_VERB(patch, PATCH)
+    QB_HTTP_CTRL_VERB(options, OPTIONS)
+    QB_HTTP_CTRL_VERB(head, HEAD)
+#undef QB_HTTP_CTRL_VERB
 
-    /** @brief Defines a POST route with a lambda handler. @see add_controller_route */
+    /** @brief Adds **coroutine** middleware to this controller (auto-wrapped). */
+    template <typename H>
+        requires CoroMiddlewareHandler<std::remove_cvref_t<H>, Session>
     Controller<Session> &
-    post(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::POST, std::move(handler_fn));
-    }
-
-    /** @brief Defines a PUT route with a lambda handler. @see add_controller_route */
-    Controller<Session> &
-    put(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::PUT, std::move(handler_fn));
-    }
-
-    /** @brief Defines a DELETE route with a lambda handler. @see add_controller_route */
-    Controller<Session> &
-    del(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::DEL, std::move(handler_fn));
-    }
-
-    /** @brief Defines a PATCH route with a lambda handler. @see add_controller_route */
-    Controller<Session> &
-    patch(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::PATCH, std::move(handler_fn));
-    }
-
-    /** @brief Defines an OPTIONS route with a lambda handler. @see add_controller_route */
-    Controller<Session> &
-    options(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::OPTIONS, std::move(handler_fn));
-    }
-
-    /** @brief Defines a HEAD route with a lambda handler. @see add_controller_route */
-    Controller<Session> &
-    head(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_controller_route(std::move(path), qb::http::method::HEAD, std::move(handler_fn));
+    use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
+        return use(detail::wrap_coro_middleware_handler<Session>(std::forward<H>(handler)), std::move(name));
     }
 
     // --- Typed ICustomRoute routes (constructs CustomRouteType in-place) ---
@@ -303,19 +303,6 @@ public:
         return add_controller_route(std::move(path), qb::http::method::HEAD, std::move(custom_route_ptr));
     }
 
-    /**
-     * @def MEMBER_HANDLER(handler_ptr)
-     * @brief A convenience macro for binding a controller's member function as a route handler.
-     * Captures `this` pointer to call the member function.
-     * Usage within `initialize_routes()`:
-     * @code get("/path", MEMBER_HANDLER(&MyController::handler_method)); @endcode
-     * where `handler_method` has a signature like `void handler_method(std::shared_ptr<Context<SessionType>> ctx);`.
-     */
-#define MEMBER_HANDLER(handler_ptr)              \
-    [this](std::shared_ptr<Context> ctx_param) { \
-        (this->*handler_ptr)(ctx_param);         \
-    }
-
 public:
     // --- Middleware for this controller ---
 
@@ -326,10 +313,13 @@ public:
      * @param name An optional name for this middleware instance, useful for logging or debugging.
      * @return Reference to this `Controller` for chaining.
      */
+    template <typename H>
+        requires SyncMiddleware<std::remove_cvref_t<H>, Session>
     Controller<Session> &
-    use(MiddlewareHandlerFn<Session> mw_fn, std::string name = "UnnamedFunctionalMiddleware") {
-        auto functional_middleware = std::make_shared<FunctionalMiddleware<Session>>(std::move(mw_fn), name);
-        auto middleware_task       = std::make_shared<MiddlewareTask<Session>>(std::move(functional_middleware), std::move(name));
+    use(H &&mw_fn, std::string name = "UnnamedFunctionalMiddleware") {
+        auto functional_middleware =
+            std::make_shared<FunctionalMiddleware<Session>>(MiddlewareHandlerFn<Session>(std::forward<H>(mw_fn)), name);
+        auto middleware_task = std::make_shared<MiddlewareTask<Session>>(std::move(functional_middleware), std::move(name));
         this->add_middleware(std::move(middleware_task)); // From IHandlerNode
         return *this;
     }
@@ -389,14 +379,13 @@ private:
     void
     compile_tasks_and_register(RouterCore<Session> &router_core, const std::string &current_built_path,
                                const std::vector<std::shared_ptr<IAsyncTask<Session>>> &inherited_tasks) override {
-        // Ensure routes are defined by calling initialize_routes() once.
-        // If a derived controller already called initialize_routes() manually
-        // (e.g. in its constructor), routes and/or middleware are already
-        // populated and we must not run it again.
+        // Contract: routes/middleware are declared exclusively inside the overridden
+        // initialize_routes(), which the router invokes exactly once at compile time.
+        // (Do NOT add routes in the controller constructor — they would combine
+        // unpredictably with initialize_routes(); the previous "_controller_routes.empty()"
+        // guard silently DROPPED initialize_routes() routes whenever the ctor added any.)
         if (!_routes_initialized) {
-            if (_controller_routes.empty()) {
-                initialize_routes();
-            }
+            initialize_routes();
             _routes_initialized = true;
         }
 

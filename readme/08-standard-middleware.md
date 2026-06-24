@@ -35,7 +35,7 @@ qb::http::Router<MySession> router;
 router.use(qb::http::cors_dev_middleware<MySession>());
 router.compile();
 ```
-<!-- src: qbm/http/middleware/cors.h:576 -->
+<!-- src: qbm/http/middleware/cors.h:597 -->
 
 `Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the three overloads.
 
@@ -75,7 +75,7 @@ opts.origins({"https://app.example.com"})
 
 router.use(qb::http::cors_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/middleware/cors.h:237 -->
+<!-- src: qbm/http/middleware/cors.h:243 -->
 
 **Presets and factories:**
 
@@ -135,7 +135,7 @@ jwt->require_claims({"sub", "role"})
    });
 router.use(jwt);
 ```
-<!-- src: qbm/http/middleware/jwt.h:48 -->
+<!-- src: qbm/http/middleware/jwt.h:49 -->
 
 **Factories:** `jwt_middleware<S>(secret, algorithm = "HS256")` for the common case, and `jwt_middleware_with_options<S>(JwtOptions)` for the full surface. Fluent setters on the instance — `from_header`, `from_cookie`, `from_query`, `require_claims`, `with_validator`, `with_error_handler`, `with_success_handler`, `with_options` — return `*this` for chaining.
 
@@ -172,7 +172,7 @@ opts.max_requests(100)
 
 router.use(qb::http::rate_limit_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/middleware/rate_limit.h:103 -->
+<!-- src: qbm/http/middleware/rate_limit.h:104 -->
 
 **Presets:** `RateLimitOptions::permissive()` (1000 req/min) and `RateLimitOptions::secure()` (60 req/min) are the option presets; `rate_limit_dev_middleware<S>()` and `rate_limit_secure_middleware<S>()` build the middleware directly from them. `rate_limit_middleware<S>(opts)` takes explicit options.
 
@@ -312,21 +312,21 @@ opts.secret_key("your-app-secret")
     .token_expiration(std::chrono::seconds(3600))   // std::chrono::seconds
     .clock_skew_tolerance(std::chrono::seconds(30));
 
-auto auth = qb::http::create_auth_middleware<MySession>(opts);
+auto auth = qb::http::auth_middleware<MySession>(opts);
 auth->with_roles({"admin", "editor"})   // any of these roles
     .with_auth_required(true);
 router.use(auth);
 ```
-<!-- src: qbm/http/middleware/auth.h:373; qbm/http/auth/options.h:154 -->
+<!-- src: qbm/http/middleware/auth.h:383; qbm/http/auth/options.h:161 -->
 
 **Factories:**
 
 | Factory | Use |
 |---|---|
-| `create_auth_middleware<S>(opts = auth::Options{})` | general case from options |
-| `create_jwt_auth_middleware<S>(secret, algorithm = "HS256")` | JWT-configured; `HS*` uses `secret_key`, otherwise `public_key` |
-| `create_role_auth_middleware<S>(roles, require_all = false)` | role check assuming a user is already in context; sets `auth_required(true)` |
-| `create_optional_auth_middleware<S>(opts = auth::Options{})` | authentication optional: missing credentials pass, but malformed or invalid credentials are still rejected |
+| `auth_middleware<S>(opts = auth::Options{})` | general case from options |
+| `jwt_auth_middleware<S>(secret, algorithm = "HS256")` | JWT-configured; `HS*` uses `secret_key`, otherwise `public_key` |
+| `role_auth_middleware<S>(roles, require_all = false)` | role check assuming a user is already in context; sets `auth_required(true)` |
+| `optional_auth_middleware<S>(opts = auth::Options{})` | authentication optional: missing credentials pass, but malformed or invalid credentials are still rejected |
 
 ## Security headers
 
@@ -365,6 +365,37 @@ router.use(sec);
 
 > **CSP nonce gate.** `with_csp_nonce(true)` requires `QB_HAS_SSL` — the per-request nonce comes from the framework CSPRNG. In a plain-HTTP build, leave nonce generation off; constructing the middleware with it enabled throws `std::logic_error`. The middleware itself remains available without SSL as long as you do not request nonces.
 
+## Structural and observability middleware
+
+Four more middleware ship for flow control and instrumentation. They take callables rather than option structs, so there is no duration surface; each has both a class template and a free factory.
+
+| Middleware | Header · Class | Factory | Purpose |
+|---|---|---|---|
+| Conditional | `<http/middleware/conditional.h>` · `ConditionalMiddleware<S>` | `conditional_middleware<S>(predicate, if_mw, else_mw = nullptr)` | Run one of two child middleware on a `bool(Context)` predicate — the `if_` branch when true, the optional `else_` branch when false (continue otherwise). Throws `std::invalid_argument` if the predicate or `if_` middleware is null. |
+| Transform | `<http/middleware/transform.h>` · `TransformMiddleware<S>` | `transform_middleware<S>(request_transformer = nullptr)` | Apply a `RequestTransformer` to `ctx->request()` before the chain proceeds; a null transformer is a pass-through. |
+| Logging | `<http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
+| Error handling | `<http/middleware/error_handling.h>` · `ErrorHandlingMiddleware<S>` | `error_handling_middleware<S>(name = "ErrorHandlingMiddleware")` | Centralised error-to-response translation; register handlers for specific status codes / exception types with fluent setters. |
+
+<!-- src: qbm/http/middleware/conditional.h:147, transform.h:128, logging.h:213, error_handling.h:217 -->
+
+## reCAPTCHA
+
+- **Header:** `<http/middleware/recaptcha.h>` · **Class:** `qb::http::RecaptchaMiddleware<SessionType>`
+- **Requires:** `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE` (the whole family, including its `make` tags, is gated behind this define).
+- **Purpose:** verify a Google reCAPTCHA v2/v3 token (via an outbound verification call) before the chain proceeds.
+
+Configuration is `qb::http::RecaptchaOptions` (secret key, minimum score, etc.). Three factories cover the common presets:
+
+| Factory | Use |
+|---|---|
+| `recaptcha_middleware<S>(options)` / `recaptcha_middleware<S>(secret_key, min_score = 0.5f)` | full options, or v3 with a secret + score |
+| `recaptcha_v3_middleware<S>(secret_key, min_score = 0.5f)` | reCAPTCHA v3 preset |
+| `recaptcha_strict_middleware<S>(secret_key)` | strict preset |
+
+<!-- src: qbm/http/middleware/recaptcha.h:579-626 -->
+
+Construction throws `std::invalid_argument` if the secret key is empty. These factories and their `make` tags only exist when the module is built with `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
+
 ## The unified `make` entry point
 
 `<http/middleware/make.h>` (pulled in by `all.h`) exposes one tag-dispatched factory over every standard middleware, so you can build any of them through a single call:
@@ -380,9 +411,20 @@ auto rl   = mw::make<mw::tags::rate_limit_dev, MySession>();
 router.use(cors);
 router.use(rl);
 ```
-<!-- src: qbm/http/middleware/make.h:262 -->
+<!-- src: qbm/http/middleware/make.h:287 (make<>); tags at make.h:62-109 -->
 
-The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to the matching free factory. Tags mirror the factories above — for example `tags::cors`, `tags::cors_dev`, `tags::cors_secure`, `tags::jwt`, `tags::auth`, `tags::jwt_auth`, `tags::role_auth`, `tags::optional_auth`, `tags::rate_limit`, `tags::compression`, `tags::timing`, `tags::security_headers`, `tags::static_files`. The legacy `*_middleware` / `create_*_middleware` helpers remain exported verbatim, so existing code does not change.
+The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to the matching free factory. Tags mirror the factories above and live in `qb::http::middleware::tags`:
+
+- **CORS:** `cors`, `cors_dev`, `cors_secure`
+- **Compression:** `compression`, `compression_fast`, `compression_max`
+- **Rate limiting:** `rate_limit`, `rate_limit_dev`, `rate_limit_secure`
+- **Security & delivery:** `security_headers`, `static_files`
+- **Observability:** `logging`, `timing`
+- **Structural:** `transform`, `conditional`, `error_handling`
+- **SSL-gated (`QB_HAS_SSL`):** `jwt`, `auth`, `jwt_auth`, `role_auth`, `optional_auth`
+- **reCAPTCHA-gated (`QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`):** `recaptcha`, `recaptcha_v3`, `recaptcha_strict`
+
+The `jwt`/`auth`/`jwt_auth`/`role_auth`/`optional_auth` tags are compiled only under `QB_HAS_SSL`, and the `recaptcha*` tags only under `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE` — referencing a tag the build did not compile is a compile error, exactly as for an unknown tag. The factories are all spelled `*_middleware` (for example `cors_middleware`, `jwt_middleware`, `rate_limit_middleware`); the earlier `create_*_middleware` free functions were renamed to this form and no longer exist, so call the `*_middleware` factory (or `make<Tag, S>(...)`) directly.
 
 ## Feature gates and includes
 
@@ -391,11 +433,16 @@ The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to th
 | CORS | `<http/middleware/cors.h>` | none |
 | Rate limiting | `<http/middleware/rate_limit.h>` | none |
 | Timing | `<http/middleware/timing.h>` | none |
+| Logging | `<http/middleware/logging.h>` | none |
+| Conditional | `<http/middleware/conditional.h>` | none |
+| Transform | `<http/middleware/transform.h>` | none |
+| Error handling | `<http/middleware/error_handling.h>` | none |
 | Static files | `<http/middleware/static_files.h>` | none |
 | Security headers | `<http/middleware/security_headers.h>` | none; CSP nonce needs `QB_HAS_SSL` |
 | Compression | `<http/middleware/compression.h>` | codec work needs `QB_HAS_COMPRESSION` |
 | JWT | `<http/middleware/jwt.h>` | `QB_HAS_SSL` |
 | Authentication | `<http/middleware/auth.h>` | `QB_HAS_SSL` |
+| reCAPTCHA | `<http/middleware/recaptcha.h>` | `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE` |
 
 Because module dependencies are linked `PUBLIC`, the upstream `QB_HAS_SSL` and `QB_HAS_COMPRESSION` defines reach your translation units, so these `#ifdef` gates resolve correctly in your code. Guard SSL-only middleware accordingly:
 

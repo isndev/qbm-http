@@ -132,7 +132,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        ctx->response().set_header("X-MW-Order", ctx->response().header("X-MW-Order") + "MW1;");
+        ctx->response().set_header("X-MW-Order", std::string(ctx->response().header("X-MW-Order")) + "MW1;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 };
@@ -150,7 +150,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        ctx->response().set_header("X-MW-Order", ctx->response().header("X-MW-Order") + "MW2;");
+        ctx->response().set_header("X-MW-Order", std::string(ctx->response().header("X-MW-Order")) + "MW2;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 };
@@ -168,7 +168,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        ctx->response().set_header("X-MW-Order", ctx->response().header("X-MW-Order") + "MW3SC;");
+        ctx->response().set_header("X-MW-Order", std::string(ctx->response().header("X-MW-Order")) + "MW3SC;");
         ctx->response().status() = qb::http::status::OK;
         ctx->response().body()   = "Short-circuited by Middleware3!";
         ctx->complete();
@@ -238,7 +238,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++; // Assertion for middleware invocation
-        std::string condition = ctx->request().header("X-Test-Condition");
+        std::string condition{ctx->request().header("X-Test-Condition")};
 
         if (condition == "pass") {
             qb::io::cout() << "[ConditionalContinueMiddleware] Condition met. Continuing chain." << std::endl;
@@ -267,7 +267,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        std::string current_order = ctx->response().header("X-Nested-Order");
+        std::string current_order{ctx->response().header("X-Nested-Order")};
         ctx->response().set_header("X-Nested-Order", current_order + "NestedMW1;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
@@ -286,7 +286,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        std::string current_order = ctx->response().header("X-Nested-Order");
+        std::string current_order{ctx->response().header("X-Nested-Order")};
         ctx->response().set_header("X-Nested-Order", current_order + "NestedMW2;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
@@ -305,7 +305,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        std::string current_order = ctx->response().header("X-Nested-Order");
+        std::string current_order{ctx->response().header("X-Nested-Order")};
         ctx->response().set_header("X-Nested-Order", current_order + "NestedSC;");
         ctx->response().status() = qb::http::status::OK;
         ctx->response().body()   = "Short-circuited by NestedShortCircuitMW";
@@ -327,7 +327,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        ctx->response().set_header("X-MW-Trace", ctx->response().header("X-MW-Trace") + "L0;");
+        ctx->response().set_header("X-MW-Trace", std::string(ctx->response().header("X-MW-Trace")) + "L0;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 };
@@ -345,7 +345,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        ctx->response().set_header("X-MW-Trace", ctx->response().header("X-MW-Trace") + "L1G;");
+        ctx->response().set_header("X-MW-Trace", std::string(ctx->response().header("X-MW-Trace")) + "L1G;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 };
@@ -363,7 +363,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        ctx->response().set_header("X-MW-Trace", ctx->response().header("X-MW-Trace") + "L2NG;");
+        ctx->response().set_header("X-MW-Trace", std::string(ctx->response().header("X-MW-Trace")) + "L2NG;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 };
@@ -381,7 +381,7 @@ public:
     void
     process(std::shared_ptr<AdvCtx> ctx) override {
         adv_server_side_assertions++;
-        ctx->response().set_header("X-MW-Trace", ctx->response().header("X-MW-Trace") + "L3C;");
+        ctx->response().set_header("X-MW-Trace", std::string(ctx->response().header("X-MW-Trace")) + "L3C;");
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 };
@@ -848,10 +848,10 @@ public:
             adv_request_count_server++;
             adv_server_side_assertions++;
 
-            std::string q_name  = ctx->request().uri().query("name", 0, "not_found");
-            std::string q_name1 = ctx->request().uri().query("name1", 0, "not_found");
-            std::string q_name2 = ctx->request().uri().query("name2", 0, "not_found");
-            std::string q_enc   = ctx->request().uri().query("encoded_name", 0, "not_found");
+            std::string q_name  = ctx->request().uri().query_or("name", "not_found");
+            std::string q_name1 = ctx->request().uri().query_or("name1", "not_found");
+            std::string q_name2 = ctx->request().uri().query_or("name2", "not_found");
+            std::string q_enc   = ctx->request().uri().query_or("encoded_name", "not_found");
 
             std::string body_str   = "name=" + q_name + ";name1=" + q_name1 + ";name2=" + q_name2 + ";encoded_name=" + q_enc;
             ctx->response().body() = body_str;
@@ -899,7 +899,7 @@ public:
         mw_chain_group->get("/passthrough", [](std::shared_ptr<AdvCtx> ctx) {
             adv_request_count_server++;
             adv_server_side_assertions++;
-            ctx->response().set_header("X-MW-Order", ctx->response().header("X-MW-Order") + "Handler;");
+            ctx->response().set_header("X-MW-Order", std::string(ctx->response().header("X-MW-Order")) + "Handler;");
             ctx->response().body() = "Middleware chain passthrough complete";
             ctx->complete();
         });
@@ -957,7 +957,7 @@ public:
                 nested_mw_outer_group->get("/inner/resource", [](std::shared_ptr<AdvCtx> ctx) {
                     adv_request_count_server++;
                     adv_server_side_assertions++; // Handler assertion
-                    std::string current_order = ctx->response().header("X-Nested-Order");
+                    std::string current_order{ctx->response().header("X-Nested-Order")};
                     ctx->response().set_header("X-Nested-Order", current_order + "Handler;");
                     ctx->response().status() = qb::http::status::OK;
                     ctx->response().body()   = "Nested middleware passthrough successful!";
@@ -1099,7 +1099,7 @@ public:
                 this->get("/endpoint", [](std::shared_ptr<AdvCtx> ctx) {
                     adv_request_count_server++;
                     adv_server_side_assertions++; // Handler assertion
-                    ctx->response().set_header("X-MW-Trace", ctx->response().header("X-MW-Trace") + "Handler;");
+                    ctx->response().set_header("X-MW-Trace", std::string(ctx->response().header("X-MW-Trace")) + "Handler;");
                     ctx->response().body() = "Deeply nested endpoint reached!";
                     ctx->complete();
                 });
@@ -1606,7 +1606,7 @@ TEST_F(AdvancedHttpIntegrationTest, RootMountedControllerAndMiddlewareChain) {
                 EXPECT_EQ("Short-circuited by Middleware3!", response.body().as<std::string>());
                 EXPECT_EQ("Applied", response.header("X-Global-Middleware"));
                 EXPECT_EQ("L0;", response.header("X-MW-Trace"));
-                std::string order_check_val = response.header("X-MW-Order");
+                std::string order_check_val{response.header("X-MW-Order")};
                 EXPECT_TRUE(order_check_val.find("MW1;") != std::string::npos);
                 EXPECT_TRUE(order_check_val.find("MW2;") != std::string::npos);
                 EXPECT_TRUE(order_check_val.find("MW3SC;") != std::string::npos);

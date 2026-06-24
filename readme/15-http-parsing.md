@@ -39,7 +39,7 @@ llhttp is event-driven: you feed it bytes with `http_execute`, and it invokes ca
 
 `Parser` is templated on the message type and lives in `namespace qb::http`:
 
-<!-- src: 1.1/protocol/base.h:110-111,484-580 -->
+<!-- src: 1.1/protocol/base.h:110-111,482-578 -->
 
 ```cpp
 #include <http/http.h>
@@ -66,7 +66,7 @@ struct qb::http::Parser : public http_t {
 
 Here is the contract exercised directly, taken from the test suite:
 
-<!-- src: tests/test-dos-protection.cpp:558-566 -->
+<!-- src: tests/test-dos-protection.cpp:547-555 -->
 
 ```cpp
 #include <http/http.h>
@@ -83,7 +83,7 @@ assert(parser.content_length == 0u);   // normalized — see "Body framing" belo
 
 And fragmented input — the case the framing layer is built around — reassembles correctly:
 
-<!-- src: tests/test-dos-protection.cpp:617-637 -->
+<!-- src: tests/test-dos-protection.cpp:603-620 -->
 
 ```cpp
 Parser<Request> parser;
@@ -138,7 +138,7 @@ Both are wired in by the server/client session types as `using protocol = qb::pr
 
 `getMessageSize()` is called on the hot path every time bytes arrive. It runs the parser against the *unconsumed* portion of the I/O input pipe (`_io.in()`) and returns the size of one complete message, or `0` (`IProtocol::kNoMessage`) when more data is needed.
 
-<!-- src: 1.1/protocol/base.h:647-732 -->
+<!-- src: 1.1/protocol/base.h:644-726 -->
 
 **Phase 1 — headers.** While `headers_completed()` is false, it parses the whole current buffer. If that returns `HPE_OK` (headers still incomplete), it **resets the parser and returns 0**, so the next call re-parses the full buffer from scratch. This is the deliberate consequence of the header-callback overwrite rule: each header must be seen in a single `http_execute` call, so the parser is re-fed the entire buffer on every pass until the header block is complete. It is O(n²) in header bytes for slowly-arriving headers — an intentional correctness-over-speed tradeoff, documented inline. Once the parser pauses (`HPE_PAUSED`), `body_offset` is computed from `error_pos` (llhttp's "where I stopped" pointer) relative to `begin()`.
 
@@ -155,7 +155,7 @@ When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that man
 
 `server::onMessage` and `client::onMessage` are the dispatch step. Both are `noexcept` (they sit on a noexcept `AProtocol` boundary), so each wraps cookie parsing in a `try/catch` — a malformed `Cookie` / `Set-Cookie` header is logged and ignored rather than escaping to `std::terminate`. They then **move** the parsed message into the I/O handler and reset the parser:
 
-<!-- src: 1.1/protocol/server.h:77-94 -->
+<!-- src: 1.1/protocol/server.h:76-93 -->
 
 ```cpp
 void onMessage(std::size_t) noexcept final {
@@ -180,7 +180,7 @@ After `_io.on(...)`, server sessions apply pipelining and keep-alive: while a re
 
 `on_headers_complete` normalizes the body length so downstream framing never waits for an impossible body:
 
-<!-- src: 1.1/protocol/base.h:332-353 -->
+<!-- src: 1.1/protocol/base.h:331-351 -->
 
 - **Header-only requests.** llhttp reports `ULLONG_MAX` ("unknown length") when neither `Content-Length` nor `Transfer-Encoding` is present. For requests this is normalized to `content_length = 0` (RFC 9112 framing — a request with no framing headers has an empty body).
 - **Bodyless responses.** Responses with a `1xx`, `204`, or `304` status force `content_length = 0` regardless of any declared `Content-Length` header (RFC 9112 §6.3). The test suite asserts this for both `304 Not Modified` and `204 No Content`.
@@ -205,7 +205,7 @@ The parser is hardened against framing attacks. The limits live in `namespace qb
 
 Two framing defenses go beyond size limits, both in `on_headers_complete`:
 
-<!-- src: 1.1/protocol/base.h:120-138,324-330 -->
+<!-- src: 1.1/protocol/base.h:121-139,323-330 -->
 
 - **Request smuggling.** A message carrying both `Transfer-Encoding` and `Content-Length` is rejected (`"HTTP Transfer-Encoding with Content-Length is forbidden"`). This is the classic TE.CL / CL.TE smuggling vector.
 - **Transfer-Encoding allowlist.** Only a single `chunked` token is accepted. Any other value — `gzip, chunked`, a second encoding, anything non-`chunked` — is rejected (`"Unsupported HTTP Transfer-Encoding"`).
@@ -237,7 +237,7 @@ assert(err != HPE_OK && err != HPE_PAUSED);
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: request.h:359-360; response.h:386-387; request.cpp:134; response.cpp:150 -->
+<!-- src: request.h:394-395; response.h:406-407; request.cpp:134-136; response.cpp:149-151 -->
 
 ```cpp
 template <>

@@ -79,7 +79,7 @@ protected:
         _router  = std::make_unique<qb::http::Router<MockAuthSession>>();
         _auth_options.secret_key(_test_secret);
         // Default auth middleware instance, can be replaced in tests
-        _auth_mw = qb::http::create_auth_middleware<MockAuthSession>(_auth_options);
+        _auth_mw = qb::http::auth_middleware<MockAuthSession>(_auth_options);
     }
 
     qb::http::Request
@@ -300,7 +300,7 @@ TEST_F(AuthMiddlewareTest, InvalidRoleAuthorization) {
 }
 
 TEST_F(AuthMiddlewareTest, RoleMiddlewareUsesPreAuthenticatedContextUser) {
-    auto role_mw = qb::http::create_role_auth_middleware<MockAuthSession>({"admin"});
+    auto role_mw = qb::http::role_auth_middleware<MockAuthSession>({"admin"});
 
     _router = std::make_unique<qb::http::Router<MockAuthSession>>();
     _router->use(std::make_shared<qb::http::FunctionalMiddleware<MockAuthSession>>(
@@ -352,7 +352,7 @@ TEST_F(AuthMiddlewareTest, JwtPayloadStringRolesAuthorizeRoleChecks) {
 
 TEST_F(AuthMiddlewareTest, OptionalAuthentication) {
     // Create a new AuthMiddleware instance configured for optional auth
-    auto optional_auth_mw = qb::http::create_optional_auth_middleware<MockAuthSession>(_auth_options);
+    auto optional_auth_mw = qb::http::optional_auth_middleware<MockAuthSession>(_auth_options);
     configure_router_with_auth_mw(optional_auth_mw);
 
     // Scenario 1: No token provided, should still allow access
@@ -1196,7 +1196,7 @@ TEST_F(AuthMiddlewareTest, CaseInsensitiveAuthScheme) {
 
 TEST_F(AuthMiddlewareTest, OptionalAuthRejectsProvidedInvalidToken) {
     // Configure middleware for optional authentication
-    auto optional_auth_mw = qb::http::create_optional_auth_middleware<MockAuthSession>(_auth_options);
+    auto optional_auth_mw = qb::http::optional_auth_middleware<MockAuthSession>(_auth_options);
     // Use default roles (none specified), default user context key ("user")
     configure_router_with_auth_mw(optional_auth_mw);
 

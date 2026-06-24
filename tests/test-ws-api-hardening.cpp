@@ -192,15 +192,17 @@ public:
 
         const std::string                      payload = "evil";
         constexpr std::array<unsigned char, 4> mask{{0x11, 0x22, 0x33, 0x44}};
-        std::vector<char>                      frame;
-        frame.reserve(2 + 4 + payload.size());
-        frame.push_back(static_cast<char>(0x81));                  // FIN + text
-        frame.push_back(static_cast<char>(0x80 | payload.size())); // MASK bit set (invalid for server->client)
+        // Built at full size + index-assigned (no push_back/realloc path, which GCC -O2
+        // mis-flags as a -Wfree-nonheap-object false positive).
+        std::vector<char> frame(2 + 4 + payload.size());
+        std::size_t       n = 0;
+        frame[n++]          = static_cast<char>(0x81);             // FIN + text
+        frame[n++]          = static_cast<char>(0x80 | payload.size()); // MASK bit set (invalid for server->client)
         for (unsigned char b : mask) {
-            frame.push_back(static_cast<char>(b));
+            frame[n++] = static_cast<char>(b);
         }
         for (std::size_t i = 0; i < payload.size(); ++i) {
-            frame.push_back(static_cast<char>(static_cast<unsigned char>(payload[i]) ^ mask[i % 4]));
+            frame[n++] = static_cast<char>(static_cast<unsigned char>(payload[i]) ^ mask[i % 4]);
         }
         this->transport().write(frame.data(), static_cast<int>(frame.size()));
         this->disconnect();

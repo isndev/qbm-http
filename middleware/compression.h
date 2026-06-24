@@ -298,9 +298,7 @@ private:
     void
     decompress_request_body(RequestType &request) {
 #ifdef QB_HAS_COMPRESSION
-        // `request.header()` now always returns `const std::string&` – the template
-        // dance around `std::string_view` headers was retired along with the owning
-        // purge. Just borrow the reference and hand it off to `Body::uncompress`.
+        // `request.header()` returns `const std::string&`; borrow it for `Body::uncompress`.
         const std::string &encoding_str = request.header("Content-Encoding");
 
         if (request.body().empty() || encoding_str.empty()) {
@@ -377,7 +375,6 @@ private:
      */
     [[nodiscard]] static std::string
     select_best_encoding(const RequestType &request, const CompressionOptions &options) noexcept {
-        // After the string_view purge, `request.header()` always returns `const std::string&`.
         const std::string &accept_encoding_header_str = request.header("Accept-Encoding");
 
         if (accept_encoding_header_str.empty()) {

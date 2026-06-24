@@ -150,7 +150,7 @@ TEST(URI_Queries, BasicQueryParsing) {
     // Query with no parameters
     qb::io::uri uri3{"http://example.com/path"};
     EXPECT_TRUE(uri3.queries().empty());
-    EXPECT_EQ(uri3.query("missing", 0, "default"), "default");
+    EXPECT_EQ(uri3.query_or("missing", "default"), "default");
 }
 
 TEST(URI_Queries, CaseInsensitiveAccess) {
@@ -172,7 +172,7 @@ TEST(URI_Queries, MultipleValues) {
     EXPECT_EQ(uri.query("param", 2), "value3");
 
     // Out of bounds index should return the default
-    EXPECT_EQ(uri.query("param", 3, "default"), "default");
+    EXPECT_EQ(uri.query_or("param", "default", 3), "default");
 
     // Verify that we have correct count of parameters
     const auto &queries = uri.queries();

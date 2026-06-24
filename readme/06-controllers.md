@@ -47,9 +47,10 @@ public:
 
     // Required override: declare the controller's routes and middleware here.
     void initialize_routes() override {
-        // Member functions become handlers via MEMBER_HANDLER.
-        this->get("/:id", MEMBER_HANDLER(&UserController::get_user));
-        this->post("/",   MEMBER_HANDLER(&UserController::create_user));
+        // Bind a member function directly: pass `this` and the method pointer.
+        // (The method may be synchronous or return qb::io::async::task<void>.)
+        this->get("/:id", this, &UserController::get_user);
+        this->post("/",   this, &UserController::create_user);
 
         // A plain lambda works too, when no member state is needed.
         this->get("/health", [](std::shared_ptr<Context> ctx) {
@@ -90,26 +91,27 @@ Inside `initialize_routes()`, a controller exposes the same verb methods as a ro
 | --- | --- |
 | `get`, `post`, `put`, `del`, `patch`, `options`, `head` | `qb::http::method::GET … HEAD` |
 
-`del` (not `delete`) is the spelling for `DELETE` throughout the verb API — `delete` is a C++ keyword and cannot be a method name. Each verb has three overloads, mirroring [Defining routes](./04-defining-routes.md):
+`del` (not `delete`) is the spelling for `DELETE` throughout the verb API — `delete` is a C++ keyword and cannot be a method name. Each verb has these overloads, mirroring [Defining routes](./04-defining-routes.md):
 
-- `get(path, RouteHandlerFn)` — a lambda or `MEMBER_HANDLER`-wrapped member.
+- `get(path, handler)` — any handler satisfying `RouteHandlerLike`: a **synchronous** lambda (`void(ctx)`) **or** a **coroutine** lambda (`qb::io::async::task<void>(ctx)`). One concept-gated overload accepts both; the coroutine form is detected automatically.
+- `get(path, this, &Class::method)` — binds a member function (sync **or** coroutine) without writing a lambda.
 - `get<MyCustomRoute>(path, ctor_args...)` — constructs an [`ICustomRoute`](./09-custom-middleware.md) in place.
 - `get(path, std::shared_ptr<ICustomRoute<MySession>>)` — a pre-built custom route.
 
 Every verb method returns `Controller<MySession>&`, so calls chain. Paths are relative to the controller's mount point — a leading `/` is normalized, so `"/users"` and `"users"` behave identically.
 
-### The `MEMBER_HANDLER` macro
+### Member-function handlers
 
-<!-- src: qbm/http/routing/controller.h:301-302 -->
+<!-- src: qbm/http/routing/controller.h (QB_HTTP_CTRL_VERB) -->
 
-`MEMBER_HANDLER(&Class::method)` expands to a lambda that captures `this` and forwards the `Context` to the named member:
+Pass the controller instance and a pointer-to-member to bind a method as the handler — no lambda, no wrapper:
 
 ```cpp
-#define MEMBER_HANDLER(handler_ptr) \
-    [this](std::shared_ptr<Context> ctx_param) { (this->*handler_ptr)(ctx_param); }
+this->get("/:id", this, &UserController::get_user);   // void get_user(std::shared_ptr<Context>)
+this->post("/",   this, &UserController::create);     // task<void> create(std::shared_ptr<Context>)  ← coroutine also OK
 ```
 
-The bound member must have the signature `void method(std::shared_ptr<Context>)`. Because the macro captures `this`, it is valid only inside a controller method (it is defined as a member-scope macro), and the captured `this` must outlive every request — which it does, since the router owns the controller for the router's lifetime. If you prefer not to use the macro, an explicit `[this](std::shared_ptr<Context> ctx){ this->method(ctx); }` is exactly equivalent — the controller tests use both spellings interchangeably.
+The bound member takes `std::shared_ptr<Context>` and returns either `void` (synchronous) or `qb::io::async::task<void>` (coroutine); the framework picks the right path automatically. The captured `this` must outlive every request — it does, since the router owns the controller for its lifetime. An explicit `[this](std::shared_ptr<Context> ctx){ return this->method(ctx); }` is exactly equivalent if you prefer a lambda.
 
 ## Mounting a controller
 
@@ -131,7 +133,7 @@ std::shared_ptr<UserController> users =
 router.compile();   // flatten the tree — required before serving
 ```
 
-- `C` is your controller type. The signature is constrained — on `Router` by `requires DerivedFrom<C, Controller<SessionType>>`, on `RouteGroup` by an equivalent `enable_if` — so a non-controller type fails to compile.
+- `C` is your controller type. The signature is constrained — on both `Router` and `RouteGroup` by `requires DerivedFrom<C, Controller<SessionType>>` — so a non-controller type fails to compile.
 - `path_prefix` is the controller's base path segment. It combines with the parent's path: a controller mounted at `"/users"` on the router answers at `/users/...`; the same controller mounted at `"/users"` inside a group created with `group("/api/v1")` answers at `/api/v1/users/...`.
 - `ctor_args...` are forwarded to `C`'s constructor. The `controller<>()` call constructs the instance immediately, so a throwing constructor throws out of `controller<>()`, before `compile()`.
 
@@ -183,7 +185,7 @@ public:
         // 2) An IMiddleware instance, constructed in place from ctor args.
         this->use<RateLimitMiddleware>(/* ctor args */);
 
-        this->get("/stats", MEMBER_HANDLER(&AdminController::stats));
+        this->get("/stats", this, &AdminController::stats);
     }
 private:
     void stats(std::shared_ptr<Context> ctx) { /* ... */ }
@@ -212,7 +214,7 @@ public:
     explicit CounterController(std::string label) : _label(std::move(label)) {}
 
     void initialize_routes() override {
-        this->get("/hit", MEMBER_HANDLER(&CounterController::hit));
+        this->get("/hit", this, &CounterController::hit);
     }
 private:
     void hit(std::shared_ptr<Context> ctx) {
@@ -237,7 +239,7 @@ That shared mutable state is exactly why controllers carry a concurrency contrac
 
 You rarely touch this, but the mechanics explain a few behaviors worth knowing. During `router.compile()`, each controller's `compile_tasks_and_register` runs once:
 
-1. If routes were not already populated, it calls `initialize_routes()` exactly once and marks the controller initialized. If the controller already populated its route list (for example, by calling `initialize_routes()` from its own constructor), the compile step does **not** call it again — guarding against double registration. A controller that declares only middleware and no routes still has `initialize_routes()` invoked exactly once.
+1. If the controller has not been initialized yet, it calls `initialize_routes()` exactly once and sets the internal `_routes_initialized` flag. The guard is keyed solely on that flag — **not** on whether the route list is empty — so `initialize_routes()` always runs once, even for a controller that declares only middleware and no routes. (The earlier `_controller_routes.empty()` guard was removed: it silently *dropped* the routes declared in `initialize_routes()` whenever the constructor had already pushed any, so declaring routes in both the constructor and the override now combines them unpredictably rather than skipping the override.)
 2. It computes the controller's full base path from the parent path plus its own segment.
 3. It combines inherited middleware with the controller's own middleware into one task list.
 4. It compiles each declared route against that base path and task list, registering the flattened chains in the radix tree.
@@ -246,10 +248,10 @@ You rarely touch this, but the mechanics explain a few behaviors worth knowing. 
 
 ## Pitfalls
 
-- **Define routes in `initialize_routes()`, not in the constructor — unless you mean to.** The compile step calls `initialize_routes()` only when the controller's route list is still empty. If your constructor already declared routes, the override is skipped. Pick one location; declaring in both means the constructor wins and the override silently never runs.
+- **Define routes in `initialize_routes()`, not in the constructor.** The compile step always calls `initialize_routes()` exactly once (it is gated on the `_routes_initialized` flag, not on whether the route list is empty). If your constructor *also* declared routes, both sets are kept and combine unpredictably — there is no longer a guard that skips the override. Pick one location, and prefer `initialize_routes()`; it is the contract the framework is built around.
 - **`del`, not `delete`.** The DELETE verb method is `del()`. `delete` is a C++ keyword and cannot be a method name.
 - **Handlers must call `complete()` (or `cancel()`).** Each handler must signal terminal status on its `Context`, exactly as standalone route handlers do. A handler that returns without completing leaves the request hanging. For deferred work, capture the `std::shared_ptr<Context>` into the async task and call `complete()` from the continuation — the controller test suite drives precisely this pattern.
-- **`MEMBER_HANDLER` is member-scope only.** It expands to a `this`-capturing lambda, so it compiles only inside a controller method. Outside the class, write the explicit lambda.
+- **Member-function binding is controller-scoped.** `get(path, this, &Class::method)` captures `this`, so it is written inside `initialize_routes()` (or another controller method). The pointed-to method may be synchronous or a coroutine.
 - **Compile after every controller is mounted.** Mount all controllers, groups, and global middleware first, then call `compile()` once. Mounting a controller after `compile()` invalidates the compiled tree; you must compile again before those routes resolve.
 - **A throwing controller constructor throws from `controller<>()`.** The instance is built eagerly at mount time. Wrap the `controller<>()` call, not `compile()`, if construction can fail.
 

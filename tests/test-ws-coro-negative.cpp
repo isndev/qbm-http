@@ -45,7 +45,7 @@
 
 #include "../ws/coro.h"
 
-namespace {
+namespace ws_coro_negative_test {
 
 using namespace std::chrono_literals;
 

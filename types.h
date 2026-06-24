@@ -23,6 +23,19 @@
 #include "./logger.h"
 
 namespace qb::http {
+namespace detail {
+/**
+ * @brief Process-wide empty string, used as the safe default for by-reference "not found" returns
+ *        (`Headers::header()`, `Request::query()`).
+ *
+ * Being a single static object, a reference to it never dangles. A naive `const std::string& = ""`
+ * default would instead materialize a fresh `std::string` temporary at each call site (the `""`
+ * literal is `const char[1]`, not a `std::string`), so returning that default by reference on a miss
+ * would dangle once the call's full-expression ends. Defaulting to this static avoids that entirely.
+ */
+inline const std::string empty_string_value{};
+} // namespace detail
+
 /**
  * @brief HTTP method type alias for the underlying enum `http_method_t`.
  *
@@ -184,13 +197,13 @@ public:
     /// Convert to std::string (e.g., "GET", "POST").
     [[nodiscard]]
     operator std::string() const {
-        return ::http_method_name(static_cast<::http_method>(_value));
+        return std::string(name_view());
     }
 
     /// Convert to std::string_view (e.g., "GET", "POST").
     [[nodiscard]]
     operator std::string_view() const {
-        return ::http_method_name(static_cast<::http_method>(_value));
+        return name_view();
     }
 
     /// Output stream operator (writes method name).
@@ -253,6 +266,17 @@ public:
 
 private:
     Value _value;
+
+    /// Safe method-name lookup. Vendored llhttp's `http_method_name()` runs a switch
+    /// with `default: abort()`, so any value not in its map — including the
+    /// default-constructed `UNINITIALIZED` (-1) — would terminate the process. Guard
+    /// the unmapped state here and return a readable placeholder instead.
+    [[nodiscard]] std::string_view
+    name_view() const {
+        if (_value == Value::UNINITIALIZED)
+            return "UNINITIALIZED";
+        return ::http_method_name(static_cast<::http_method>(_value));
+    }
 
     // Static map for string to Method::Value conversion
     static const qb::icase_unordered_map<Value> &

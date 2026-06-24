@@ -274,10 +274,8 @@ class TestSimpleController : public qb::http::Controller<MockRouteGroupSession> 
 public:
     TestSimpleController()
         : qb::http::Controller<MockRouteGroupSession>() {
-        // Call default Controller ctor
-        // The actual base path segment will be set by RouteGroup::controller using set_base_path_segment.
-        // This controller defines routes relative to that future base path.
-        initialize_routes();
+        // Routes are declared in initialize_routes(), which the router calls once at compile time.
+        // (Must not call initialize_routes() here — that would double-register.)
     }
 
     void

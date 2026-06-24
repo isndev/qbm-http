@@ -82,6 +82,34 @@ concept CoroMiddlewareHandler = requires(F f, std::shared_ptr<Context<SessionTyp
     { f(ctx) } -> std::same_as<qb::io::async::task<void>>;
 };
 
+/**
+ * @brief A synchronous route handler: any callable invocable with the request `Context` that is
+ *        NOT a coroutine handler. The return is otherwise unconstrained (discarded, like the legacy
+ *        `RouteHandlerFn`), so existing handlers keep compiling.
+ */
+template <typename F, typename SessionType>
+concept SyncRouteHandler =
+    requires(F f, std::shared_ptr<Context<SessionType>> ctx) { f(ctx); } && !CoroRouteHandler<F, SessionType>;
+
+/**
+ * @brief Either flavour of route handler — synchronous (`void`-ish) or coroutine (`task<void>`).
+ *        The single concept that gates the unified verb overloads; the implementation selects the
+ *        branch with `if constexpr (CoroRouteHandler<...>)`. This is what makes `router.get(path, h)`
+ *        accept a plain lambda OR a coroutine lambda with one coherent, concept-checked signature.
+ */
+template <typename F, typename SessionType>
+concept RouteHandlerLike = SyncRouteHandler<F, SessionType> || CoroRouteHandler<F, SessionType>;
+
+/**
+ * @brief A synchronous middleware: any callable invocable with `(Context, next)` that is NOT a
+ *        coroutine middleware. Mirrors `MiddlewareHandlerFn`; disjoint from `CoroMiddlewareHandler`
+ *        (which is invoked with `(Context)` only) so `use(...)` resolves sync vs coro unambiguously.
+ */
+template <typename F, typename SessionType>
+concept SyncMiddleware =
+    requires(F f, std::shared_ptr<Context<SessionType>> ctx, std::function<void()> next) { f(ctx, next); }
+    && !CoroMiddlewareHandler<F, SessionType>;
+
 namespace detail {
 
 /// Policy selector: where to land when the coroutine body returns normally
@@ -107,7 +135,7 @@ make_coro_task_runner(CoroFn handler, DefaultCoroOutcome default_outcome, const 
                                                                                            : AsyncTaskResult::CONTINUE);
                 }
             } catch (const std::exception &e) {
-                LOG_HTTP_ERROR("Coro " << kind << " exception: method=" << std::to_string(ctx->request().method())
+                LOG_HTTP_ERROR("Coro " << kind << " exception: method=" << ctx->request().method()
                                        << " path=" << ctx->request().uri().path() << " what=" << e.what());
                 if (!ctx->is_completed() && !ctx->is_cancelled()) {
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -116,7 +144,7 @@ make_coro_task_runner(CoroFn handler, DefaultCoroOutcome default_outcome, const 
                     ctx->complete(AsyncTaskResult::ERROR);
                 }
             } catch (...) {
-                LOG_HTTP_ERROR("Coro " << kind << " unknown exception: method=" << std::to_string(ctx->request().method())
+                LOG_HTTP_ERROR("Coro " << kind << " unknown exception: method=" << ctx->request().method()
                                        << " path=" << ctx->request().uri().path());
                 if (!ctx->is_completed() && !ctx->is_cancelled()) {
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -158,76 +186,10 @@ wrap_coro_middleware_handler(CoroFn &&handler) {
 
 } // namespace detail
 
-/**
- * @brief Adapt a coroutine-returning lambda into a classical `RouteHandlerFn`.
- *
- * Expected signature of @p handler:
- * @code
- * qb::io::async::task<void> (std::shared_ptr<qb::http::Context<Session>>);
- * @endcode
- *
- * Usage:
- * @code
- * router.get("/search", qb::http::coro_handler<MySession>(
- *     [](auto ctx) -> qb::io::async::task<void> {
- *         auto reply = co_await qb::http::GET(build_upstream(ctx));
- *         ctx->response() = std::move(reply.response);
- *         co_return;
- *     }));
- * @endcode
- *
- * On normal coroutine return, the wrapper calls
- * `ctx->complete(AsyncTaskResult::COMPLETE)` unless the body already
- * completed or cancelled the context. Exceptions escape the body are
- * caught, logged, and translated into `500 Internal Server Error`.
- *
- * @tparam SessionType The session type of the router the handler targets.
- * @tparam CoroFn      Deduced type of the coroutine lambda.
- * @param  handler     The coroutine-returning callable to wrap.
- * @return A `RouteHandlerFn<SessionType>` suitable for `router.get(...)`,
- *         `router.post(...)`, etc.
- */
-template <typename SessionType, typename CoroFn>
-requires CoroRouteHandler<CoroFn, SessionType>
-[[nodiscard]] inline RouteHandlerFn<SessionType>
-coro_handler(CoroFn &&handler) {
-    return detail::wrap_coro_route_handler<SessionType>(std::forward<CoroFn>(handler));
-}
-
-/**
- * @brief Adapt a coroutine-returning lambda into a classical `MiddlewareHandlerFn`.
- *
- * Expected signature of @p handler:
- * @code
- * qb::io::async::task<void> (std::shared_ptr<qb::http::Context<Session>>);
- * @endcode
- *
- * The coroutine body does **not** receive a `next` callback; the
- * framework proceeds to the next task when the coroutine completes
- * normally (default outcome: `AsyncTaskResult::CONTINUE`). To
- * short-circuit the chain, call `ctx->complete(AsyncTaskResult::COMPLETE)`
- * (or any other outcome) before `co_return`.
- *
- * Usage:
- * @code
- * router.use(qb::http::coro_middleware<MySession>(
- *     [](auto ctx) -> qb::io::async::task<void> {
- *         co_await qb::io::async::sleep(0.010); // e.g. rate-limit window
- *         ctx->request().set_header("X-Seen", "true");
- *         co_return;
- *     }));
- * @endcode
- *
- * @tparam SessionType The session type of the router the middleware targets.
- * @tparam CoroFn      Deduced type of the coroutine lambda.
- * @param  handler     The coroutine-returning callable to wrap.
- * @return A `MiddlewareHandlerFn<SessionType>` suitable for `router.use(...)`.
- */
-template <typename SessionType, typename CoroFn>
-requires CoroMiddlewareHandler<CoroFn, SessionType>
-[[nodiscard]] inline MiddlewareHandlerFn<SessionType>
-coro_middleware(CoroFn &&handler) {
-    return detail::wrap_coro_middleware_handler<SessionType>(std::forward<CoroFn>(handler));
-}
+// NOTE: the explicit `qb::http::coro_handler<S>(...)` / `coro_middleware<S>(...)` wrappers were
+// removed. A coroutine lambda is now passed DIRECTLY to the router — `router.get(path, lambda)` /
+// `router.use(lambda)` auto-detect a `task<void>` handler via the RouteHandlerLike / CoroMiddlewareHandler
+// concepts (see router.h / route_group.h / controller.h). `detail::wrap_coro_*` above remain the
+// internal adapters those overloads call.
 
 } // namespace qb::http

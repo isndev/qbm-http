@@ -15,13 +15,13 @@
 #pragma once
 
 #include "../types.h" // For qb::http::method
+#include "./coro_task.h" // Coroutine adapters + CoroRouteHandler / CoroMiddlewareHandler concepts
 #include "./handler_node.h"
 #include "./middleware.h"
 #include "./route.h"
 #include "./types.h" // For RouteHandlerFn, MiddlewareHandlerFn
 
 #include <functional>
-#include <iostream>
 #include <memory>
 #include <string>
 #include <type_traits> // For std::enable_if_t, std::is_base_of_v
@@ -109,46 +109,47 @@ public:
         return *this;
     }
 
-    /** @brief Adds a GET route. @see add_route */
-    RouteGroup<Session> &
-    get(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::GET, std::move(handler_fn));
+    // --- Unified per-verb route API (sync OR coroutine handler, or a member function) ----------
+    //   grp->get("/x", [](auto ctx) { ... });                                  // sync lambda
+    //   grp->get("/x", [](auto ctx) -> qb::io::async::task<void> { ... });     // coroutine lambda
+    //   grp->get("/x", this, &MyActor::handle_x);                              // (sync or coro) member fn
+    // One concept-gated overload (RouteHandlerLike) accepts both flavours; the coroutine branch is
+    // selected via `if constexpr (CoroRouteHandler<...>)`. The legacy `RouteHandlerFn` verb overloads
+    // were folded into this — a sync lambda / function pointer / std::function all satisfy RouteHandlerLike.
+#define QB_HTTP_GROUP_VERB(NAME, METHOD)                                                                 \
+    template <typename H>                                                                                \
+        requires RouteHandlerLike<std::remove_cvref_t<H>, Session>                                       \
+    RouteGroup<Session> &NAME(std::string path, H &&handler) {                                            \
+        if constexpr (CoroRouteHandler<std::remove_cvref_t<H>, Session>) {                               \
+            return add_route(std::move(path), qb::http::method::METHOD,                                   \
+                             detail::wrap_coro_route_handler<Session>(std::forward<H>(handler)));         \
+        } else {                                                                                          \
+            return add_route(std::move(path), qb::http::method::METHOD,                                   \
+                             RouteHandlerFn<Session>(std::forward<H>(handler)));                          \
+        }                                                                                                 \
+    }                                                                                                     \
+    template <typename Obj, typename M>                                                                   \
+        requires std::is_member_function_pointer_v<M>                                                     \
+    RouteGroup<Session> &NAME(std::string path, Obj *obj, M member) {                                     \
+        return NAME(std::move(path), [obj, member](std::shared_ptr<qb::http::Context<Session>> ctx) {     \
+            return (obj->*member)(std::move(ctx));                                                         \
+        });                                                                                               \
     }
+    QB_HTTP_GROUP_VERB(get, GET)
+    QB_HTTP_GROUP_VERB(post, POST)
+    QB_HTTP_GROUP_VERB(put, PUT)
+    QB_HTTP_GROUP_VERB(del, DEL)
+    QB_HTTP_GROUP_VERB(patch, PATCH)
+    QB_HTTP_GROUP_VERB(options, OPTIONS)
+    QB_HTTP_GROUP_VERB(head, HEAD)
+#undef QB_HTTP_GROUP_VERB
 
-    /** @brief Adds a POST route. @see add_route */
+    /** @brief Adds **coroutine** middleware to this group (auto-wrapped). */
+    template <typename H>
+        requires CoroMiddlewareHandler<std::remove_cvref_t<H>, Session>
     RouteGroup<Session> &
-    post(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::POST, std::move(handler_fn));
-    }
-
-    /** @brief Adds a PUT route. @see add_route */
-    RouteGroup<Session> &
-    put(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::PUT, std::move(handler_fn));
-    }
-
-    /** @brief Adds a DELETE route. @see add_route */
-    RouteGroup<Session> &
-    del(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::DEL, std::move(handler_fn));
-    }
-
-    /** @brief Adds a PATCH route. @see add_route */
-    RouteGroup<Session> &
-    patch(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::PATCH, std::move(handler_fn));
-    }
-
-    /** @brief Adds an OPTIONS route. @see add_route */
-    RouteGroup<Session> &
-    options(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::OPTIONS, std::move(handler_fn));
-    }
-
-    /** @brief Adds a HEAD route. @see add_route */
-    RouteGroup<Session> &
-    head(std::string path, RouteHandlerFn<Session> handler_fn) {
-        return add_route(std::move(path), qb::http::method::HEAD, std::move(handler_fn));
+    use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
+        return use(detail::wrap_coro_middleware_handler<Session>(std::forward<H>(handler)), std::move(name));
     }
 
     /**
@@ -228,7 +229,8 @@ public:
      * @param args Constructor arguments to be forwarded to the controller `C`.
      * @return A `std::shared_ptr<C>` to the created and mounted controller instance.
      */
-    template <typename C, typename... Args, typename = std::enable_if_t<std::is_base_of_v<Controller<Session>, C>>>
+    template <typename C, typename... Args>
+        requires DerivedFrom<C, Controller<Session>>
     [[nodiscard]] std::shared_ptr<C>
     controller(std::string path_prefix, Args &&...args) {
         auto controller_node = std::make_shared<C>(std::forward<Args>(args)...);
@@ -246,10 +248,13 @@ public:
      * @param name An optional name for this middleware instance, useful for logging or debugging.
      * @return Reference to this `RouteGroup` for chaining.
      */
+    template <typename H>
+        requires SyncMiddleware<std::remove_cvref_t<H>, Session>
     RouteGroup<Session> &
-    use(MiddlewareHandlerFn<Session> mw_fn, std::string name = "UnnamedFunctionalMiddleware") {
-        auto functional_middleware = std::make_shared<FunctionalMiddleware<Session>>(std::move(mw_fn), name);
-        auto middleware_task       = std::make_shared<MiddlewareTask<Session>>(std::move(functional_middleware), std::move(name));
+    use(H &&mw_fn, std::string name = "UnnamedFunctionalMiddleware") {
+        auto functional_middleware =
+            std::make_shared<FunctionalMiddleware<Session>>(MiddlewareHandlerFn<Session>(std::forward<H>(mw_fn)), name);
+        auto middleware_task = std::make_shared<MiddlewareTask<Session>>(std::move(functional_middleware), std::move(name));
         this->add_middleware(std::move(middleware_task)); // From IHandlerNode
         return *this;
     }
@@ -289,7 +294,8 @@ public:
      * @param args Constructor arguments to be forwarded to `MiddlewareType`.
      * @return Reference to this `RouteGroup` for chaining.
      */
-    template <typename MiddlewareType, typename... Args, typename = std::enable_if_t<std::is_base_of_v<IMiddleware<Session>, MiddlewareType>>>
+    template <typename MiddlewareType, typename... Args>
+        requires DerivedFrom<MiddlewareType, IMiddleware<Session>>
     RouteGroup<Session> &
     use(Args &&...args) {
         auto mw_instance = std::make_shared<MiddlewareType>(std::forward<Args>(args)...);
@@ -320,8 +326,8 @@ public:
      * @param ctor_args Constructor arguments for `CustomRouteType`.
      * @return Reference to this `RouteGroup` for chaining.
      */
-    template <typename CustomRouteType, typename... Args,
-              typename = std::enable_if_t<std::is_base_of_v<ICustomRoute<Session>, CustomRouteType>>>
+    template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     add_custom_route(std::string path, qb::http::method method, Args &&...ctor_args) {
         auto custom_route_obj = std::make_shared<CustomRouteType>(std::forward<Args>(ctor_args)...);
@@ -332,6 +338,7 @@ public:
 
     /** @brief Adds a GET route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     get(std::string path, Args &&...ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::GET, std::forward<Args>(ctor_args)...);
@@ -339,6 +346,7 @@ public:
 
     /** @brief Adds a POST route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     post(std::string path, Args &&...ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::POST, std::forward<Args>(ctor_args)...);
@@ -346,6 +354,7 @@ public:
 
     /** @brief Adds a PUT route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     put(std::string path, Args &&...ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::PUT, std::forward<Args>(ctor_args)...);
@@ -353,6 +362,7 @@ public:
 
     /** @brief Adds a DELETE route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     del(std::string path, Args &&...ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::DEL, std::forward<Args>(ctor_args)...);
@@ -360,6 +370,7 @@ public:
 
     /** @brief Adds a PATCH route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     patch(std::string path, Args &&...ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::PATCH, std::forward<Args>(ctor_args)...);
@@ -367,6 +378,7 @@ public:
 
     /** @brief Adds an OPTIONS route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     options(std::string path, Args &&...ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::OPTIONS, std::forward<Args>(ctor_args)...);
@@ -374,6 +386,7 @@ public:
 
     /** @brief Adds a HEAD route with a typed `ICustomRoute` handler. @see add_custom_route */
     template <typename CustomRouteType, typename... Args>
+        requires DerivedFrom<CustomRouteType, ICustomRoute<Session>>
     RouteGroup<Session> &
     head(std::string path, Args &&...ctor_args) {
         return add_custom_route<CustomRouteType>(std::move(path), qb::http::method::HEAD, std::forward<Args>(ctor_args)...);

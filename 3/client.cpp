@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <nghttp3/nghttp3.h>
+
 #include "../origin.h"
 
 namespace qb::http3 {
@@ -172,7 +174,8 @@ Client::cancel_request(request_id id, std::string const &reason) {
     }
     const auto stream_id = active->first;
     fail_request(stream_id, reason, qb::http::status::CLIENT_CLOSED_REQUEST);
-    reset_stream(0, stream_id, 0x0105);
+    // Client-initiated cancellation of an active request stream (RFC 9114 §4.1).
+    reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
     process_pending_requests();
     return true;
 }
@@ -269,7 +272,9 @@ Client::process_pending_requests() {
         ctx->stream_id       = stream.id();
         const auto stream_id = ctx->stream_id;
         if (!_h3->submit_request(stream_id, ctx->request)) {
-            reset_stream(0, stream_id, 0x0105);
+            // Request never made it onto the wire; abandon the just-opened
+            // stream the same way the client cancels any request (RFC 9114 §4.1).
+            reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
             ++_failed_requests;
             ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request"));
             continue;
@@ -449,7 +454,8 @@ Client::schedule_request_timeout(std::uint64_t request_id, qb::duration delay) {
             }
             const auto stream_id = it->first;
             self->fail_request(stream_id, "HTTP/3 request timeout", qb::http::status::REQUEST_TIMEOUT);
-            self->reset_stream(0, stream_id, 0x0105);
+            // Timeout aborts the in-flight request stream (RFC 9114 §4.1).
+            self->reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
             self->process_pending_requests();
         },
         delay);

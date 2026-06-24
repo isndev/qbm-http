@@ -13,7 +13,7 @@ The standard middleware set covers logging, CORS, compression, rate limiting, au
 There are three ways to write one, in increasing order of ceremony:
 
 - **Functional** — a `(ctx, next)` lambda. Call `next()` to continue; don't call it to short-circuit. Best for stateless, single-purpose logic.
-- **Coroutine** — a `task<void>(ctx)` lambda wrapped with `coro_middleware`. Use `co_await` for asynchronous work; the framework auto-continues on normal return.
+- **Coroutine** — a `task<void>(ctx)` lambda passed **directly** to `router.use(...)`. Use `co_await` for asynchronous work; the framework auto-continues on normal return.
 - **Class-based** — a type deriving from `qb::http::IMiddleware<SessionType>`. Best for stateful, configurable, or dependency-injected middleware that you register by value or by `shared_ptr`.
 
 All three reduce to the same contract: every middleware **must eventually call `ctx->complete(AsyncTaskResult)` exactly once** (the functional form may instead call `next()`, which completes with `CONTINUE` on your behalf). Miss that call and the request hangs until the connection times out.
@@ -42,7 +42,7 @@ Every task in the chain — middleware, route handler, error handler — reports
 
 The least-ceremony middleware is a lambda matching `MiddlewareHandlerFn<SessionType>`:
 
-<!-- src: qbm/http/routing/types.h:107-109 -->
+<!-- src: qbm/http/routing/types.h:107-108 -->
 
 ```cpp
 namespace qb::http {
@@ -85,7 +85,7 @@ The string second argument to `use()` names the task for logs and diagnostics. I
 
 When you register a `(ctx, next)` lambda, the router wraps it in a `FunctionalMiddleware<SessionType>` adapter (an `IMiddleware` itself). The adapter, not you, owns the completion call:
 
-<!-- src: qbm/http/routing/middleware.h:149-198 -->
+<!-- src: qbm/http/routing/middleware.h:153-203 -->
 
 1. The adapter opens a `defer_finalization_scope()` for the duration of your lambda. While that scope is open, the response is **not** published even if a downstream task completes.
 2. Your lambda runs. If you call `next()`, the adapter checks an atomic `next_called` flag, then — if the context is neither completed nor cancelled — calls `ctx->complete(AsyncTaskResult::CONTINUE)` to advance the chain.
@@ -136,33 +136,32 @@ Lifecycle hooks are covered in [The request context](./10-request-context.md); `
 
 ## Form 2 — Coroutine middleware
 
-If your middleware does asynchronous work, the coroutine form expresses it directly. Wrap a `task<void>(ctx)` lambda with `qb::http::coro_middleware<Session>`:
+If your middleware does asynchronous work, the coroutine form expresses it directly. Pass a `task<void>(ctx)` lambda **directly** to `router.use(...)` — the router auto-detects the coroutine return type via the `CoroMiddlewareHandler` concept and wraps it automatically. No separate wrapper call is needed:
 
-<!-- src: qbm/http/routing/coro_task.h:243-248 -->
+<!-- src: qbm/http/routing/coro_task.h:75-82, qbm/http/routing/router.h:143-149 -->
 
 ```cpp
-#include <http/http.h>   // pulls in coro_middleware / coro_handler via routing/coro_task.h
+#include <http/http.h>
 
-router.use(qb::http::coro_middleware<Session>(
-    [this](std::shared_ptr<qb::http::Context<Session>> ctx)
-        -> qb::io::async::task<void> {
-        // co_await any qb-io awaitable: outbound request, DB lookup, timer.
-        auto user = co_await auth_lookup(ctx->request().header("Authorization"));
-        if (!user) {
-            ctx->response().status() = qb::http::status::UNAUTHORIZED;
-            ctx->complete(qb::http::AsyncTaskResult::COMPLETE);   // short-circuit
-            co_return;
-        }
-        ctx->set("user", std::move(*user));   // share with downstream tasks
-        co_return;                            // default outcome: CONTINUE
-    }));
+router.use([this](std::shared_ptr<qb::http::Context<Session>> ctx)
+    -> qb::io::async::task<void> {
+    // co_await any qb-io awaitable: outbound request, DB lookup, timer.
+    auto user = co_await auth_lookup(ctx->request().header("Authorization"));
+    if (!user) {
+        ctx->response().status() = qb::http::status::UNAUTHORIZED;
+        ctx->complete(qb::http::AsyncTaskResult::COMPLETE);   // short-circuit
+        co_return;
+    }
+    ctx->set("user", std::move(*user));   // share with downstream tasks
+    co_return;                            // default outcome: CONTINUE
+});
 ```
 
-Notice the coroutine signature is `task<void>(ctx)` — there is **no `next` parameter**. The framework drives chaining itself when the coroutine finishes:
+The coroutine signature is `task<void>(ctx)` — there is **no `next` parameter**. The framework drives chaining itself when the coroutine finishes:
 
-<!-- src: qbm/http/routing/coro_task.h:13-28,102-141 -->
+<!-- src: qbm/http/routing/coro_task.h:113-185 -->
 
-- On **normal return** (`co_return` without having called `complete()`/`cancel()`), `coro_middleware` completes the context with `AsyncTaskResult::CONTINUE`. To short-circuit, set the response and call `ctx->complete(AsyncTaskResult::COMPLETE)` before `co_return`.
+- On **normal return** (`co_return` without having called `complete()`/`cancel()`), the wrapper completes the context with `AsyncTaskResult::CONTINUE`. To short-circuit, set the response and call `ctx->complete(AsyncTaskResult::COMPLETE)` before `co_return`.
 - If your body **already called** `ctx->complete(...)` or `ctx->cancel()`, the wrapper does **not** override it — the outcome you chose wins. (The wrapper compares `completion_count()` before and after to detect this.)
 - Exceptions escaping the body are caught, logged with method/path context, and translated into `500 Internal Server Error` with `AsyncTaskResult::ERROR`.
 
@@ -171,7 +170,7 @@ Two safety properties matter:
 - The body receives a `std::shared_ptr<Context<Session>>`, which **outlives every suspension point** the body hits. Capturing `ctx` across `co_await` is safe.
 - The coroutine is spawned on `qb::io::async::coro_scheduler()` — the thread-local scheduler the rest of qb-io uses — so the mono-thread-per-listener contract holds.
 
-The sibling `coro_handler<Session>` adapts a route handler the same way; its default outcome on normal return is `AsyncTaskResult::COMPLETE`, because a handler is the leaf of the chain. See [WebSocket coroutines](./21-websocket-coroutines.md) for the same model applied to message handlers.
+Coroutine route handlers follow the same pattern — pass a `task<void>(ctx)` lambda directly to the verb method (e.g. `router.get(path, lambda)`) and the router auto-detects it via `CoroRouteHandler`; its default outcome on normal return is `AsyncTaskResult::COMPLETE`, because a handler is the leaf of the chain. See [WebSocket coroutines](./21-websocket-coroutines.md) for the same model applied to message handlers.
 
 ## Form 3 — Class-based middleware (`IMiddleware`)
 
@@ -266,7 +265,7 @@ Middleware communicates with downstream middleware and the route handler through
 
 **String-keyed** access — quick, untyped:
 
-<!-- src: qbm/http/routing/context.h:508-581 -->
+<!-- src: qbm/http/routing/context.h:659-747 -->
 
 ```cpp
 ctx->set("request_id", std::string("abc-123"));        // store
@@ -275,7 +274,7 @@ ctx->set<qb::json>("payload", parsed);                 // explicit any tag
 if (auto id = ctx->get<std::string>("request_id"))     // std::optional<T>
     log(*id);
 
-const std::string* p = ctx->get_ptr<std::string>("request_id");  // T* or nullptr
+const std::string* p = ctx->get_if<std::string>("request_id");  // T* or nullptr
 bool present = ctx->has("payload");                    // contains() is an alias
 ```
 
@@ -283,7 +282,7 @@ bool present = ctx->has("payload");                    // contains() is an alias
 
 **Typed slots** — compile-time keys, the safer choice for state that crosses module boundaries:
 
-<!-- src: qbm/http/routing/slot.h:78-95, qbm/http/routing/context.h:615-731 -->
+<!-- src: qbm/http/routing/slot.h:79-95, qbm/http/routing/context.h:782-894 -->
 
 ```cpp
 // Declare once, in a shared header.
@@ -305,7 +304,7 @@ A `Slot<T>` binds a string name to a static type, so producers and consumers agr
 
 You register middleware with `use()` on a `Router`, `RouteGroup`, or `Controller`. Three overloads exist:
 
-<!-- src: qbm/http/routing/router.h:198-218 -->
+<!-- src: qbm/http/routing/router.h:224-252 -->
 
 ```cpp
 // 1. Functional (ctx, next) lambda, with an optional task name.

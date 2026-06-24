@@ -64,8 +64,9 @@ public:
     // Initial HTTP request: try the upgrade.
     void on(Protocol::request &&request) {
         // The request-only overload validates the handshake, queues the 101
-        // response, and installs the framer. It returns false (and leaves the
-        // protocol not_ok) when the request is not a valid upgrade.
+        // response, and installs the framer. It returns a ws_protocol* — and
+        // yields nullptr (leaving the protocol not_ok) when the request is not
+        // a valid upgrade.
         if (!this->switch_protocol<ws_protocol>(*this, request))
             disconnect();
     }
@@ -96,7 +97,7 @@ public:
 - **`switch_protocol<ws_protocol>(*this, request)`** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the one-call form shown above. <!-- src: ws/ws.h:1042-1057 -->
 - **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: ws/ws.h:1059-1068, examples/qbm/ws/01_chat_server.cpp:537-555 -->
 
-Either overload returns `false` and marks the protocol `not_ok` when the request is not a valid RFC 6455 upgrade. On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes.
+`switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/include/qb/io/async/io.h:1994-2005 -->
 
 ### What the handshake validator enforces
 
@@ -254,7 +255,7 @@ Server-side WSS follows the HTTPS server pattern: build the session on a secure 
 
 - **The subsystem is SSL-gated, not just WSS.** Plaintext `ws://` still needs `QB_HAS_SSL`; `ws/ws.h` `#error`s without OpenSSL because the handshake hash and masking CSPRNG come from `qb::crypto`. Build with `QB_WITH_SSL=ON`. <!-- src: ws/ws.h:33-35 -->
 - **Do not pre-mask or pre-unmask by hand.** `WebSocket::operator<<` forces `masked = true` on every outbound frame; setting `masked` yourself has no effect on the client send path. The receive path validates masking per direction and fails the connection on a violation. <!-- src: ws/ws.h:1562-1566, ws/ws.h:729-739 -->
-- **`MessageClose` throws on reserved/out-of-range codes.** `1005` and `1006` are synthetic "no status / abnormal" codes that must never go on the wire; passing them (or anything outside `[1000, 4999]`) throws. Receiving a 1-byte Close payload, or a reserved code on the wire, is itself a `ProtocolError`. <!-- src: ws/ws.h:308-338, ws/ws.h:441-457, ws/ws.h:532-537 -->
+- **`MessageClose` throws on reserved/out-of-range codes.** `is_sendable_close_code` forbids the full reserved set — `1004` (reserved), `1005` ("no status received"), `1006` ("abnormal closure"), and `1015` ("TLS handshake failure") — none of which may appear on the wire, plus anything outside `[1000, 4999]`. Passing any of those to `MessageClose` throws `std::invalid_argument`. Receiving a 1-byte Close payload, or a reserved code on the wire, is itself a `ProtocolError`. <!-- src: ws/ws.h:263-276 (is_sendable_close_code), ws/ws.h:308-338, ws/ws.h:441-457, ws/ws.h:532-537 -->
 - **`set_max_payload_size(0)` removes the memory guard.** The default cap (`MAX_BODY_SIZE`) is what stops a peer from exhausting memory with unbounded continuation fragments. Lift it only when you have an independent bound. <!-- src: ws/ws.h:476-478 -->
 - **Transfer ownership cleanly.** When you move a session's transport to another actor for the upgrade, call `ctx->suppress_response()` so the routing context destructor does not send a moved-from HTTP response over the transferred socket. <!-- src: qbm/http/routing/context.h:1019-1033 -->
 - **Frame events are views, not owners.** `event.data` / `event.size` point into the framer's reassembly buffer and are valid only during the `on(...)` call; copy out anything you need to keep. The owning `event.ws` (`qb::http::ws::Message`) is what you forward when echoing. <!-- src: ws/ws.h:415-437 -->
