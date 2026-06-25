@@ -259,6 +259,8 @@ Configuration is `qb::http::StaticFilesOptions`, constructed with the root direc
 
 The freshness lifetime is **not** a duration type: `with_cache_control` takes a literal `Cache-Control` header *string* (`"public, max-age=3600"`), so the `max-age` token is whatever you write into that string. Directory listing defaults to off for safety, and the middleware normalizes paths to reject directory traversal.
 
+`root_directory` is a `std::filesystem::path`, and a **relative** root is resolved through `qb::io::sys::resolve_resource` when the middleware is constructed: it is looked up against the current working directory first (historical behaviour), then against the executable's own directory, before being canonicalised. A binary shipped next to its asset directory therefore serves them from **any** working directory — no `cd`, no environment setup. An **absolute** root is used unchanged. The root must exist and be a directory at construction time, or the constructor throws.
+
 ```cpp
 #include <http/http.h>
 #include <http/middleware/static_files.h>

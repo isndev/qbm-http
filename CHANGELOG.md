@@ -59,6 +59,12 @@ and hardens the request-stringify, http2 back-pressure, and JWT/auth paths.
 - Removed the per-verb explicit `RouteHandlerFn` / `std::function` sync overloads, the `MEMBER_HANDLER`
   macro, and the explicit `coro_handler<S>(...)` / `coro_middleware<S>(...)` wrappers — all folded into
   the concept-driven verb template and the `(path, obj, member)` overload.
+- `StaticFilesOptions::root_directory` is now `std::filesystem::path` and is resolved through
+  `qb::io::sys::resolve_resource` when the middleware is constructed: a relative root is anchored
+  against the cwd first then the executable's own directory, so a static-file server serves its
+  bundled assets from **any** working directory (absolute roots unchanged).
+- `http::listen` takes `std::filesystem::path cert_file` / `key_file` (HTTP/1.1 with `{}` defaults,
+  HTTP/2 and HTTP/3) instead of `std::string`, matching the framework's filesystem-path policy.
 
 ### Fixed
 
