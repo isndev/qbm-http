@@ -836,18 +836,31 @@ public:
 
         // Mark streams with IDs greater than last_stream_id as effectively closed or failed.
         // Iterate over _client_streams and _pending_pushed_streams.
-        for (auto it = _client_streams.begin(); it != _client_streams.end();) {
-            if (it->first > goaway_event.payload.last_stream_id && it->second.id % 2 != 0) { // Client-initiated
-                // LOG_WARN_PA("ClientHttp2Protocol", "[HTTP/2 Client] Stream " << it->first << " was active but is now implicitly closed by
-                // GOAWAY.");
-                it->second.error_code          = goaway_event.payload.error_code;  // Or a more specific "closed_by_goaway"
-                it->second.rst_stream_received = true;                             // Simulate RST for purpose of closure and error reporting
-                it->second.state               = Http2StreamConcreteState::CLOSED; // Mark as closed
-                process_complete_response_if_ready(it->second);                    // Dispatch whatever we have with an error
-                it = _client_streams.erase(it);                                    // Or use try_close_stream_context if events needed for each
-            } else {
-                ++it;
-            }
+        //
+        // Collect the IDs to close FIRST, then dispatch + erase outside the
+        // iteration. process_complete_response_if_ready() can dispatch a ready
+        // response and, because we just marked the stream CLOSED +
+        // rst_stream_received, immediately erase that same element via
+        // try_close_stream_context_by_id(). Erasing inside the loop would then
+        // operate on an already-invalidated iterator (use-after-free).
+        std::vector<uint32_t> ids_to_close;
+        for (auto &entry : _client_streams) {
+            if (entry.first > goaway_event.payload.last_stream_id && entry.second.id % 2 != 0) // Client-initiated
+                ids_to_close.push_back(entry.first);
+        }
+        for (uint32_t stream_id : ids_to_close) {
+            auto it = _client_streams.find(stream_id);
+            if (it == _client_streams.end())
+                continue;
+            it->second.error_code          = goaway_event.payload.error_code;  // Or a more specific "closed_by_goaway"
+            it->second.rst_stream_received = true;                             // Simulate RST for purpose of closure and error reporting
+            it->second.state               = Http2StreamConcreteState::CLOSED; // Mark as closed
+            process_complete_response_if_ready(it->second);                    // Dispatch whatever we have with an error; may erase the entry
+            // process_complete_response_if_ready() may already have erased the
+            // entry (dispatched + closed). Erase only if it is still present.
+            it = _client_streams.find(stream_id);
+            if (it != _client_streams.end())
+                _client_streams.erase(it);
         }
         for (auto it = _pending_pushed_streams.begin(); it != _pending_pushed_streams.end();) {
             if (it->first > goaway_event.payload.last_stream_id) {

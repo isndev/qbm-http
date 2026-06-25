@@ -854,9 +854,21 @@ public:
                 return;
             }
             this->_connection_send_window += window_increment;
+            // Snapshot candidate stream ids first: try_send_pending_data_for_stream
+            // may flush a stream to CLOSED and erase it from _server_streams, which
+            // would invalidate a live iterator into the map mid-loop (UAF).
+            std::vector<uint32_t> pending_ids;
+            pending_ids.reserve(_server_streams.size());
             for (auto &pair : _server_streams) {
-                if (pair.second.has_pending_data_to_send) {
-                    try_send_pending_data_for_stream(pair.first, pair.second);
+                if (pair.second.has_pending_data_to_send)
+                    pending_ids.push_back(pair.first);
+            }
+            for (uint32_t pending_id : pending_ids) {
+                auto it = _server_streams.find(pending_id);
+                if (it == _server_streams.end())
+                    continue; // erased by an earlier flush in this loop
+                if (it->second.has_pending_data_to_send) {
+                    try_send_pending_data_for_stream(it->first, it->second);
                     if (!this->_connection_active)
                         break;
                 }
@@ -2002,8 +2014,19 @@ private:
         int64_t delta             = static_cast<int64_t>(new_size) - static_cast<int64_t>(_initial_peer_window_size);
         _initial_peer_window_size = new_size;
 
-        for (auto &pair : _server_streams) {
-            Http2ServerStream &stream = pair.second;
+        // Snapshot stream ids first: try_send_pending_data_for_stream may flush a
+        // stream to CLOSED and erase it from _server_streams, invalidating a live
+        // iterator into the map mid-loop (UAF). Re-find each id before use.
+        std::vector<uint32_t> stream_ids;
+        stream_ids.reserve(_server_streams.size());
+        for (auto &pair : _server_streams)
+            stream_ids.push_back(pair.first);
+
+        for (uint32_t sid : stream_ids) {
+            auto it = _server_streams.find(sid);
+            if (it == _server_streams.end())
+                continue; // erased by an earlier flush in this loop
+            Http2ServerStream &stream = it->second;
             // Affects streams where server is sending data: OPEN, HALF_CLOSED_LOCAL (server sending, client receiving), RESERVED_LOCAL (for
             // PUSH)
             if (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL

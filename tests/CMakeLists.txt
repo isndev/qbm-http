@@ -22,6 +22,7 @@ set(HTTP_TESTS
         cookie
         headers
         validation
+        utility
         router
         router-api
         router-match
@@ -58,12 +59,17 @@ set(HTTP_TESTS
 
 if(QB_HAS_SSL)
     list(APPEND HTTP_TESTS
+        auth-manager
         middleware-auth
         middleware-jwt
         integration-middleware
         integration-make-server
         http2-header-validator
         http2-hpack
+        http2-hpack-lowlevel
+        http2-frame-layer
+        http2-server-protocol
+        http2-client-protocol
         integration-http2-client
         coro-http2-client
         ws-session
