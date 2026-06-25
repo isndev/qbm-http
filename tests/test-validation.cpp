@@ -1607,6 +1607,367 @@ TEST_F(ValidationLogicTest, ParameterValidatorPropagatesErrorValuePolicyToChildR
     EXPECT_FALSE(out.errors().front().offending_value.has_value());
 }
 
+// ============================================================================
+// Coverage-extension cases for schema_validator.cpp and request_validator.cpp
+// ============================================================================
+
+// --- SchemaValidator: constructor rejects non-object schema definitions. ---
+TEST_F(ValidationLogicTest, SchemaValidatorCtorRejectsNonObjectSchemas) {
+    EXPECT_THROW({ SchemaValidator v(qb::json::array({1, 2, 3})); }, std::invalid_argument);
+    EXPECT_THROW({ SchemaValidator v(qb::json(42)); }, std::invalid_argument);
+}
+
+// --- SchemaValidator: an unknown single type string -> rule "type", "Unknown type" message. ---
+TEST_F(ValidationLogicTest, SchemaValidatorUnknownSingleTypeString) {
+    qb::json        schema = {{"type", "mystery"}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json("anything"), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+    EXPECT_NE(result.errors()[0].message.find("Unknown type"), std::string::npos);
+}
+
+// --- SchemaValidator: type keyword that is neither string nor array. ---
+TEST_F(ValidationLogicTest, SchemaValidatorTypeKeywordWrongJsonType) {
+    qb::json        schema = {{"type", 123}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json("anything"), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+    EXPECT_NE(result.errors()[0].message.find("must be a string or an array"), std::string::npos);
+}
+
+// --- SchemaValidator: malformed keyword shapes each surface a distinct schemaError.* rule. ---
+TEST_F(ValidationLogicTest, SchemaValidatorMalformedSchemaKeywords) {
+    // required must be an array of strings.
+    {
+        qb::json        schema = {{"type", "object"}, {"required", "name"}};
+        SchemaValidator validator(schema);
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json::object({{"name", "x"}}), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1);
+        EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.required");
+    }
+
+    // properties must be an object.
+    {
+        qb::json        schema = {{"type", "object"}, {"properties", qb::json::array({1, 2})}};
+        SchemaValidator validator(schema);
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json::object({{"k", "v"}}), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1);
+        EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.properties");
+    }
+
+    // items must be an object (schema) or an array of schemas.
+    {
+        qb::json        schema = {{"type", "array"}, {"items", 42}};
+        SchemaValidator validator(schema);
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json::array({1, 2}), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1);
+        EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.items");
+    }
+
+    // additionalProperties must be a boolean or a schema object.
+    {
+        qb::json        schema = {{"type", "object"}, {"properties", {{"id", {{"type", "integer"}}}}}, {"additionalProperties", 42}};
+        SchemaValidator validator(schema);
+        result.clear();
+        // 'extra' is an undefined (additional) property, so additionalProperties is consulted.
+        EXPECT_FALSE(validator.validate(qb::json::object({{"id", 1}, {"extra", "x"}}), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1);
+        EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.additionalProperties");
+    }
+}
+
+// --- SchemaValidator: a non-string element inside the 'required' array. ---
+TEST_F(ValidationLogicTest, SchemaValidatorRequiredNonStringElement) {
+    qb::json        schema = {{"type", "object"}, {"required", qb::json::array({"name", 123})}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::object({{"name", "x"}}), result));
+    ASSERT_FALSE(result.success());
+    bool found = false;
+    for (const auto &err : result.errors()) {
+        if (err.rule_violated == "schemaError.required")
+            found = true;
+    }
+    EXPECT_TRUE(found);
+}
+
+// --- SchemaValidator: allOf must be a non-empty array; items must be schema objects. ---
+TEST_F(ValidationLogicTest, SchemaValidatorAllOfMalformed) {
+    // Empty allOf array.
+    {
+        qb::json        schema = {{"allOf", qb::json::array()}};
+        SchemaValidator validator(schema);
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json("x"), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1);
+        EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.allOf");
+    }
+
+    // Non-object item inside allOf.
+    {
+        qb::json        schema = {{"allOf", qb::json::array({{{"type", "string"}}, 42})}};
+        SchemaValidator validator(schema);
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json("x"), result));
+        ASSERT_FALSE(result.success());
+        bool item_error = false;
+        for (const auto &err : result.errors()) {
+            if (err.rule_violated == "schemaError.allOf.item")
+                item_error = true;
+        }
+        EXPECT_TRUE(item_error);
+    }
+}
+
+// --- SchemaValidator: oneOf with a non-object item, and oneOf ambiguous (matched > 1). ---
+TEST_F(ValidationLogicTest, SchemaValidatorOneOfNonObjectItemAndAmbiguous) {
+    // Non-object item is skipped with a schemaError.oneOf.item error; the remaining
+    // single string schema still matches, so the overall match count is 1, but the
+    // schema error itself is still recorded on the result.
+    {
+        qb::json        schema = {{"oneOf", qb::json::array({42, {{"type", "string"}}})}};
+        SchemaValidator validator(schema);
+        result.clear();
+        validator.validate(qb::json("hello"), result);
+        bool item_error = false;
+        for (const auto &err : result.errors()) {
+            if (err.rule_violated == "schemaError.oneOf.item")
+                item_error = true;
+        }
+        EXPECT_TRUE(item_error);
+    }
+
+    // Ambiguous oneOf: value validates against two schemas -> "matched 2".
+    {
+        qb::json schema = {{"oneOf", qb::json::array({{{"type", "string"}, {"minLength", 1}}, {{"type", "string"}, {"maxLength", 100}}})}};
+        SchemaValidator validator(schema);
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json("hello"), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1);
+        EXPECT_EQ(result.errors()[0].rule_violated, "oneOf");
+        EXPECT_NE(result.errors()[0].message.find("matched 2"), std::string::npos);
+    }
+}
+
+// --- SchemaValidator: 'not' keyword that is not a schema object. ---
+TEST_F(ValidationLogicTest, SchemaValidatorNotKeywordNonObject) {
+    qb::json        schema = {{"not", 42}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json("anything"), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.not");
+}
+
+// --- SchemaValidator: additionalItems expressed as a schema validates the tuple overflow. ---
+TEST_F(ValidationLogicTest, SchemaValidatorAdditionalItemsAsSchema) {
+    qb::json schema = {{"type", "array"}, {"items", qb::json::array({{{"type", "string"}}})}, {"additionalItems", {{"type", "integer"}}}};
+    SchemaValidator validator(schema);
+
+    // Overflow item [1] is a string, but additionalItems requires integer -> error at [1].
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::array({"head", "not-an-int"}), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].field_path, "[1]");
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+
+    // Valid overflow integers pass.
+    result.clear();
+    EXPECT_TRUE(validator.validate(qb::json::array({"head", 1, 2}), result));
+    EXPECT_TRUE(result.success());
+}
+
+// --- SchemaValidator: a nested property schema node that is not an object. ---
+TEST_F(ValidationLogicTest, SchemaValidatorNestedSchemaNodeNotObject) {
+    qb::json        schema = {{"type", "object"}, {"properties", {{"x", 42}}}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::object({{"x", "value"}}), result));
+    ASSERT_FALSE(result.success());
+    bool found = false;
+    for (const auto &err : result.errors()) {
+        if (err.rule_violated == "invalidSchemaType")
+            found = true;
+    }
+    EXPECT_TRUE(found);
+}
+
+// --- SchemaValidator: Preview policy truncates a large offending value on a schema error. ---
+TEST_F(ValidationLogicTest, SchemaValidatorPreviewPolicyTruncatesOffendingValue) {
+    qb::json        schema = {{"type", "integer"}};
+    SchemaValidator validator(schema);
+    validator.set_error_value_policy(SchemaValidator::ErrorValuePolicy::Preview, 32);
+
+    result.clear();
+    qb::json huge_string = std::string(1024, 'a'); // not an integer -> type error
+    EXPECT_FALSE(validator.validate(huge_string, result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+    ASSERT_TRUE(result.errors()[0].offending_value.has_value());
+    ASSERT_TRUE(result.errors()[0].offending_value->is_string());
+    EXPECT_EQ(result.errors()[0].offending_value->get<std::string>().size(), 32u);
+}
+
+// --- RequestValidator: an empty body against a schema yields contentRequired. ---
+TEST_F(ValidationLogicTest, RequestValidatorEmptyBodyYieldsContentRequired) {
+    // A scalar (non object/array/null) type means validating the empty body as JSON
+    // null produces a type error whose message does not mention null/object/array,
+    // so the validator substitutes a synthetic "contentRequired" error.
+    RequestValidator validator;
+    validator.for_body(qb::json{{"type", "integer"}});
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/submit");
+    // body intentionally left empty
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "body");
+    EXPECT_EQ(out.errors().front().rule_violated, "contentRequired");
+}
+
+// --- RequestValidator: an empty body against an object-typed schema reports a type error. ---
+TEST_F(ValidationLogicTest, RequestValidatorEmptyBodyObjectSchemaReportsType) {
+    // When the schema expects an object, validating null produces a "type" error whose
+    // message mentions "object" -> the validator keeps it rather than substituting.
+    RequestValidator validator;
+    validator.for_body(qb::json{{"type", "object"}, {"required", qb::json::array({"name"})}});
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/submit");
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    // The TypeRule reports the error at the root schema path (empty string), not "body".
+    EXPECT_EQ(out.errors().front().field_path, "");
+    EXPECT_EQ(out.errors().front().rule_violated, "type");
+}
+
+// --- RequestValidator: a non-empty but malformed JSON body -> invalidFormat.validate. ---
+TEST_F(ValidationLogicTest, RequestValidatorInvalidJsonBodyValidate) {
+    RequestValidator validator;
+    validator.for_body(qb::json{{"type", "object"}});
+
+    qb::http::Request req;
+    req.uri()  = qb::io::uri("/submit");
+    req.body() = "{not valid json";
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "body");
+    EXPECT_EQ(out.errors().front().rule_violated, "invalidFormat.validate");
+}
+
+// --- RequestValidator: header sanitizer success path mutates the value and passes. ---
+TEST_F(ValidationLogicTest, RequestValidatorHeaderSanitizerSuccess) {
+    RequestValidator validator;
+    validator.add_header_sanitizer("X-Test", [](const std::string &v) -> std::string { return v + "-sanitized"; });
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/submit");
+    req.set_header("X-Test", std::string("raw"));
+
+    Result out;
+    EXPECT_TRUE(validator.validate(req, out, nullptr));
+    EXPECT_TRUE(out.success());
+    // The sanitizer mutated the header value in place.
+    auto it = req.headers().find("X-Test");
+    ASSERT_NE(it, req.headers().end());
+    ASSERT_FALSE(it->second.empty());
+    EXPECT_EQ(it->second.front(), "raw-sanitized");
+}
+
+// --- RequestValidator: a throwing header sanitizer -> sanitizeException.header. ---
+TEST_F(ValidationLogicTest, RequestValidatorHeaderSanitizerExceptionIsCaptured) {
+    RequestValidator validator;
+    validator.add_header_sanitizer("X-Test", [](const std::string &) -> std::string { throw std::runtime_error("header sanitizer crash"); });
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/submit");
+    req.set_header("X-Test", std::string("raw"));
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    // Header names are stored case-insensitively (lowercased) in the headers map.
+    EXPECT_EQ(out.errors().front().field_path, "header.x-test");
+    EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.header");
+}
+
+// --- RequestValidator: a body sanitizer over a malformed JSON body -> invalidFormat.sanitize. ---
+TEST_F(ValidationLogicTest, RequestValidatorBodySanitizerInvalidJson) {
+    RequestValidator validator;
+    validator.add_body_sanitizer("name", [](const std::string &v) -> std::string { return v; });
+
+    qb::http::Request req;
+    req.uri()  = qb::io::uri("/submit");
+    req.body() = "{not valid json";
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "body");
+    EXPECT_EQ(out.errors().front().rule_violated, "invalidFormat.sanitize");
+}
+
+// --- RequestValidator: a path parameter validated with a supplied PathParameters context. ---
+TEST_F(ValidationLogicTest, RequestValidatorPathParamWithContext) {
+    RequestValidator validator;
+    validator.for_path_param("userId", ParameterRuleSet("userId").set_type(DataType::INTEGER));
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/users/123");
+
+    qb::http::PathParameters pp;
+    pp.set("userId", "123");
+
+    // Present and valid -> passes.
+    Result out_ok;
+    EXPECT_TRUE(validator.validate(req, out_ok, &pp));
+    EXPECT_TRUE(out_ok.success());
+
+    // Present but non-integer -> type error.
+    qb::http::PathParameters pp_bad;
+    pp_bad.set("userId", "abc");
+    Result out_bad;
+    EXPECT_FALSE(validator.validate(req, out_bad, &pp_bad));
+    ASSERT_FALSE(out_bad.success());
+    ASSERT_EQ(out_bad.errors().size(), 1);
+    EXPECT_EQ(out_bad.errors().front().field_path, "path.userId");
+    EXPECT_EQ(out_bad.errors().front().rule_violated, "type");
+}
+
 int
 main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

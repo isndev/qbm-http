@@ -741,6 +741,152 @@ TEST_F(DoSEdgeCasesTest, URLJustOverBoundaryIsRejected) {
     EXPECT_EQ(pipe.size(), 0);
 }
 
+// ====================================================================
+// Incoming Parser Happy-Path Tests
+//
+// These tests exercise the HTTP/1.1 Parser<> success branches in
+// qbm/http/1.1/protocol/base.h that the IncomingParserLimitsTest suite
+// above does not reach: Content-Length body capture, multi-value header
+// accumulation, keep-alive / upgrade flag derivation, and response status
+// extraction. They drive qb::http::Parser<> directly (not the IO-bound
+// protocol::http::base) using the same parse()/resume()/get_parsed_message()
+// idiom as the limit tests.
+//
+// Behaviour confirmed against base.h and verified empirically:
+//   - on_headers_complete() always returns HPE_PAUSED (the parser pauses at
+//     end-of-headers), so a body must be parsed in a second resume()+parse()
+//     pass. error_pos points at the first unparsed (body) byte.
+//   - The body is captured into the parser's _chunked buffer via on_body and
+//     moved into msg.body() by on_message_complete (returns 1 ->
+//     HPE_CB_MESSAGE_COMPLETE).
+//   - Multiple values for one field name are stored as a vector
+//     (msg.headers()[name] is std::vector<std::string>; header(name, index)).
+//   - keep_alive / upgrade are derived in on_headers_complete and live on the
+//     parsed message (msg.keep_alive / msg.upgrade), not on the parser.
+//   - on_status stores only the numeric status_code; the reason phrase is NOT
+//     retained (base.h:224 is commented out), so only status() is asserted.
+// ====================================================================
+
+class IncomingParserHappyPathTest : public ::testing::Test {};
+
+TEST_F(IncomingParserHappyPathTest, ContentLengthBodyIsCapturedAndMessageCompletes) {
+    qb::http::Parser<Request> parser;
+    const std::string         raw = "POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+
+    // First pass parses up to end-of-headers and pauses.
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+    EXPECT_EQ(parser.content_length, 5u);
+
+    // error_pos marks the first unparsed (body) byte.
+    const std::size_t body_offset = static_cast<std::size_t>(parser.error_pos - raw.data());
+    ASSERT_LT(body_offset, raw.size());
+
+    // Resume and feed the remaining bytes (the body) to drive completion.
+    parser.resume();
+    EXPECT_EQ(parser.parse(raw.data() + body_offset, raw.size() - body_offset), HPE_CB_MESSAGE_COMPLETE);
+
+    auto &msg = parser.get_parsed_message();
+    EXPECT_EQ(msg.method(), HTTP_POST);
+    EXPECT_EQ(msg.body().size(), 5u);
+    EXPECT_EQ(msg.body().as<std::string>(), "hello");
+    EXPECT_EQ(msg.body().as<std::string_view>(), std::string_view("hello"));
+}
+
+TEST_F(IncomingParserHappyPathTest, RepeatedHeaderFieldIsStoredAsMultipleValues) {
+    qb::http::Parser<Request> parser;
+    const std::string         raw = "GET / HTTP/1.1\r\n"
+                                    "X-Multi: alpha\r\n"
+                                    "X-Multi: beta\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    EXPECT_TRUE(parser.headers_completed());
+
+    auto      &msg = parser.get_parsed_message();
+    const auto it  = msg.headers().find("X-Multi");
+    ASSERT_NE(it, msg.headers().end());
+    ASSERT_EQ(it->second.size(), 2u);
+    EXPECT_EQ(it->second[0], "alpha");
+    EXPECT_EQ(it->second[1], "beta");
+    // Indexed accessor exposes each stored value.
+    EXPECT_EQ(msg.header("X-Multi", 0), "alpha");
+    EXPECT_EQ(msg.header("X-Multi", 1), "beta");
+}
+
+TEST_F(IncomingParserHappyPathTest, KeepAliveDefaultsTrueForHttp11) {
+    qb::http::Parser<Request> parser;
+    const std::string         raw = "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    ASSERT_TRUE(parser.headers_completed());
+
+    auto &msg = parser.get_parsed_message();
+    EXPECT_EQ(msg.major_version, 1u);
+    EXPECT_EQ(msg.minor_version, 1u);
+    EXPECT_TRUE(msg.keep_alive);
+}
+
+TEST_F(IncomingParserHappyPathTest, ConnectionCloseDisablesKeepAliveOnHttp11) {
+    qb::http::Parser<Request> parser;
+    const std::string         raw = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    ASSERT_TRUE(parser.headers_completed());
+    EXPECT_FALSE(parser.get_parsed_message().keep_alive);
+}
+
+TEST_F(IncomingParserHappyPathTest, KeepAliveDefaultsFalseForHttp10) {
+    qb::http::Parser<Request> parser;
+    const std::string         raw = "GET / HTTP/1.0\r\nHost: example.test\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    ASSERT_TRUE(parser.headers_completed());
+
+    auto &msg = parser.get_parsed_message();
+    EXPECT_EQ(msg.major_version, 1u);
+    EXPECT_EQ(msg.minor_version, 0u);
+    EXPECT_FALSE(msg.keep_alive);
+}
+
+TEST_F(IncomingParserHappyPathTest, ConnectionKeepAliveEnablesKeepAliveOnHttp10) {
+    qb::http::Parser<Request> parser;
+    const std::string         raw = "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    ASSERT_TRUE(parser.headers_completed());
+    EXPECT_TRUE(parser.get_parsed_message().keep_alive);
+}
+
+TEST_F(IncomingParserHappyPathTest, UpgradeFlagIsSetForConnectionUpgrade) {
+    qb::http::Parser<Request> parser;
+    const std::string         raw = "GET / HTTP/1.1\r\n"
+                                    "Connection: Upgrade\r\n"
+                                    "Upgrade: h2c\r\n\r\n";
+
+    // on_headers_complete pauses (HPE_PAUSED) before llhttp would surface the
+    // upgrade pause, so the parse returns HPE_PAUSED with the flag already set.
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    ASSERT_TRUE(parser.headers_completed());
+
+    auto &msg = parser.get_parsed_message();
+    EXPECT_TRUE(msg.upgrade);
+    EXPECT_EQ(msg.header("Upgrade"), "h2c");
+}
+
+TEST_F(IncomingParserHappyPathTest, ResponseStatusCodeIsCaptured) {
+    qb::http::Parser<Response> parser;
+    const std::string          raw = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
+    ASSERT_TRUE(parser.headers_completed());
+
+    auto &msg = parser.get_parsed_message();
+    EXPECT_EQ(msg.status(), 404);
+    // Reason phrase is intentionally not retained by on_status (base.h:224),
+    // so only the numeric status code is asserted here.
+    EXPECT_EQ(parser.content_length, 0u);
+}
+
 int
 main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

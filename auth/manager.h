@@ -38,17 +38,6 @@ private:
     /** @brief Configuration options for authentication behavior. */
     Options _options;
 
-    /**
-     * @brief (Private) Generates the JSON payload string for a new token.
-     * This method is responsible for constructing the claims that will be included
-     * in the token, based on the provided `User` object and the current `_options`
-     * (e.g., issuer, audience, expiration).
-     * @param user The `User` object for whom the token payload is being generated.
-     * @return A JSON string representing the token payload.
-     * @note The definition of this method is in `manager.cpp`.
-     */
-    [[nodiscard]] std::string generate_token_payload(const User &user) const;
-
 public:
     /**
      * @brief Constructs an `Manager` with specified authentication options.
@@ -57,6 +46,18 @@ public:
      */
     explicit Manager(const Options &options = Options()) noexcept
         : _options(options) {}
+
+    /**
+     * @brief Builds the (unsigned) JWT claims payload for a user as a JSON string.
+     * Constructs the claims that a token would carry — `sub`, `iat`, `exp`, and the
+     * configured `iss`/`aud`/`username`/`roles`/`metadata` — based on the `User`
+     * object and the current `_options`, without signing. Useful for inspecting or
+     * logging the claim set a token would contain.
+     * @param user The `User` object for whom the payload is generated.
+     * @return A JSON string representing the token payload.
+     * @note The definition of this method is in `manager.cpp`.
+     */
+    [[nodiscard]] std::string generate_token_payload(const User &user) const;
 
     /**
      * @brief Generates an authentication token for the given user.
