@@ -23,6 +23,7 @@
 #include <system_error> // For std::error_code
 #include <vector>
 
+#include <qb/io/system/file.h> // qb::io::sys::resolve_resource (working-dir-independent root)
 #include <qb/system/container/unordered_map.h>
 #include "../date.h"
 #include "../request.h"
@@ -287,6 +288,11 @@ public:
         if (_options.root_directory.empty()) {
             throw std::invalid_argument("StaticFilesOptions::root_directory cannot be empty.");
         }
+        // Anchor a relative root so the server finds its assets regardless of the working
+        // directory: resolved against the cwd first (historical behaviour), then against the
+        // executable's own directory (a binary shipped next to its assets is self-contained).
+        // Absolute roots are returned unchanged.
+        _options.root_directory = qb::io::sys::resolve_resource(_options.root_directory);
         std::error_code ec;
         if (!std::filesystem::exists(_options.root_directory, ec) || !std::filesystem::is_directory(_options.root_directory, ec)) {
             if (ec) {

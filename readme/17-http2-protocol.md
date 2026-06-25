@@ -109,7 +109,7 @@ int main(int argc, char *argv[]) {
 ```
 
 `listen` does three things for you: it creates the server SSL context from your cert/key, sets the ALPN list to `{"h2", "http/1.1"}`, and binds the listening socket. Routing is identical to HTTP/1.1 — groups, controllers, middleware, path parameters, and validation all work unchanged because the HTTP/2 session feeds the same `qb::http::Router`.
-<!-- src: qbm/http/2/http2.h:474-482,392-394 -->
+<!-- src: qbm/http/2/http2.h:491-500,392-394 -->
 
 ### Custom sessions with the CRTP `use<>` template
 
@@ -316,7 +316,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 ## Pitfalls
 
 - **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
-  <!-- src: qbm/http/http.h:45-48; qbm/http/2/http2.h:474-482 -->
+  <!-- src: qbm/http/http.h:45-48; qbm/http/2/http2.h:491-500 -->
 - **The module is a compiled library, not header-only.** `2/http2.cpp` and `2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<http/http.h>`; do not `find_package` the headers alone.
   <!-- src: qbm/http/CMakeLists.txt:39-47,77-95 -->
 - **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).

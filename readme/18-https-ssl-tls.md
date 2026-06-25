@@ -31,7 +31,9 @@ Gate your own SSL-dependent code on `QB_HAS_SSL`, never on `QBM_HTTP_HAS_SSL` �
 
 ## Certificates
 
-A TLS server needs a certificate chain and the matching private key, both PEM-encoded. `create_server_context` loads them from files by path.
+A TLS server needs a certificate chain and the matching private key, both PEM-encoded. `create_server_context` loads them from files by path (a `std::filesystem::path` — the same type `listen(uri, cert, key)` forwards). Each path is resolved through `qb::io::sys::resolve_resource()` before OpenSSL opens it: an absolute path is used unchanged, while a relative path is looked up against the current working directory first, then against the running executable's own directory. A server shipped next to its `cert.pem` / `key.pem` therefore loads them regardless of the cwd it was launched from — the same resolution applies to the CA, client-certificate, and DH-parameter helpers below.
+
+<!-- src: qb/source/io/src/tcp/ssl/socket.cpp:186-204; qb/include/qb/io/system/file.h:377-387 -->
 
 - **Production** — obtain a certificate from a trusted CA (Let's Encrypt, your internal PKI, a commercial CA). Deploy the leaf certificate (concatenated with any intermediates) and the private key as PEM files.
 - **Development** — a self-signed certificate is fine for local testing. Browsers and verifying clients reject it unless you add it to a trust store or disable verification (see [Peer verification](#peer-verification-and-trust)).
@@ -77,7 +79,7 @@ Pass `TLS_server_method()` / `TLS_client_method()` (negotiate the highest mutual
 
 The secure HTTP/1.1 server is `qb::http::ssl::Server<Session>`, defaulting to `qb::http::ssl::DefaultSecureSession`. Use the `qb::http::ssl::make_server()` factory and the server's `listen(uri, cert, key)` overload — that one call builds the `SSL_CTX`, installs it on the `saccept` transport, sets ALPN to `{"http/1.1"}`, and starts listening.
 
-<!-- src: qbm/http/1.1/http.h:1302-1314, 591-607 -->
+<!-- src: qbm/http/1.1/http.h:583-601 -->
 ```cpp
 #include <http/http.h>
 #include <qb/io/async.h>
@@ -158,7 +160,7 @@ The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the conn
 
 HTTP/2 in qbm-http is **TLS-only with ALPN** — there is no plaintext `h2c`. `qb::http2::Server::listen` mirrors the HTTP/1.1 overload but advertises `{"h2", "http/1.1"}`, so a client that negotiates `h2` gets HTTP/2 and one that does not falls back to HTTP/1.1 on the same port.
 
-<!-- src: qbm/http/2/http2.h:474-481 -->
+<!-- src: qbm/http/2/http2.h:491-500 -->
 ```cpp
 #include <http/http.h>   // pulls in <http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
