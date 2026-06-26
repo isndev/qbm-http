@@ -174,6 +174,115 @@ TEST(ContextSlots, GetReturnsNulloptOnLegacyTypeMismatch) {
     EXPECT_TRUE(ctx->contains(kRequestCount));
 }
 
+// --- Same name, different type --------------------------------------------
+//
+// Two slots that share the *same* underlying `CustomDataMap` key but declare a
+// different value_type are distinct C++ types (slot.h documents this). They are
+// NOT prevented from aliasing the same map entry, so the *last* write under that
+// key wins and a typed read for the other type fails its `std::any_cast` and
+// returns absent. This pins that deliberately-aliasing contract.
+namespace {
+inline constexpr qb::http::Slot<int>         kAliasAsInt{"alias.key"};
+inline constexpr qb::http::Slot<std::string> kAliasAsString{"alias.key"};
+} // namespace
+
+TEST(ContextSlots, SameNameDifferentTypeAliasesOneEntry) {
+    auto ctx = make_ctx();
+
+    // Distinct C++ types — different template instantiations of Slot<>.
+    static_assert(!std::is_same_v<decltype(kAliasAsInt), decltype(kAliasAsString)>);
+    static_assert(std::is_same_v<decltype(kAliasAsInt)::value_type, int>);
+    static_assert(std::is_same_v<decltype(kAliasAsString)::value_type, std::string>);
+
+    // Write through the int-typed slot.
+    ctx->set(kAliasAsInt, 7);
+    EXPECT_EQ(ctx->get_or(kAliasAsInt, -1), 7);
+    // Same key, mismatched type: the any_cast fails, so the typed reads report absent.
+    EXPECT_FALSE(ctx->get(kAliasAsString).has_value());
+    EXPECT_EQ(ctx->get_if(kAliasAsString), nullptr);
+    // ...but both slots share the one map entry, so name-only contains() is true.
+    EXPECT_TRUE(ctx->contains(kAliasAsString));
+
+    // Overwrite the same entry through the string-typed slot: last write wins.
+    ctx->set(kAliasAsString, std::string{"now-a-string"});
+    ASSERT_NE(ctx->get_if(kAliasAsString), nullptr);
+    EXPECT_EQ(*ctx->get_if(kAliasAsString), "now-a-string");
+    // The int view now fails to cast — the stored type changed under it.
+    EXPECT_FALSE(ctx->get(kAliasAsInt).has_value());
+    EXPECT_EQ(ctx->get_if(kAliasAsInt), nullptr);
+    // A single removal clears the shared entry for both slot views.
+    EXPECT_TRUE(ctx->remove(kAliasAsInt));
+    EXPECT_FALSE(ctx->contains(kAliasAsString));
+}
+
+// --- Move-into / in-place (emplace) slot -----------------------------------
+//
+// NOTE on framework behavior: the slot store is `qb::unordered_map<std::string,
+// std::any>`, and `std::any` requires its contained type to be *copy*-
+// constructible — a genuinely non-copyable (unique_ptr-holding) type cannot be
+// stored. So "move-only T" here means a heavy, move-aware type that we exercise
+// through the two no-needless-copy paths the typed API promises:
+//   * emplace(slot, args...) constructs in place: ZERO copies, ZERO moves.
+//   * set(slot, std::move(v)) moves the prvalue in: ZERO copies, exactly the
+//     moves std::any performs internally.
+// A static copy/move counter makes those promises observable.
+namespace {
+struct CopyMoveProbe {
+    static inline int copies = 0;
+    static inline int moves  = 0;
+    int               payload = 0;
+
+    explicit CopyMoveProbe(int v) : payload(v) {}
+    CopyMoveProbe(const CopyMoveProbe &o) : payload(o.payload) { ++copies; }
+    CopyMoveProbe(CopyMoveProbe &&o) noexcept : payload(o.payload) {
+        o.payload = -1;
+        ++moves;
+    }
+    CopyMoveProbe &operator=(const CopyMoveProbe &) = delete;
+    CopyMoveProbe &operator=(CopyMoveProbe &&)      = delete;
+
+    static void reset() { copies = moves = 0; }
+};
+
+inline constexpr qb::http::Slot<CopyMoveProbe> kProbe{"probe.slot"};
+} // namespace
+
+TEST(ContextSlots, EmplaceMoveOnlyTypeConstructsInPlaceWithoutCopy) {
+    auto ctx = make_ctx();
+    CopyMoveProbe::reset();
+
+    // Construct directly inside the slot from raw ctor args: no copy, no move.
+    CopyMoveProbe &ref = ctx->emplace(kProbe, 41);
+    EXPECT_EQ(ref.payload, 41);
+    EXPECT_EQ(CopyMoveProbe::copies, 0);
+    EXPECT_EQ(CopyMoveProbe::moves, 0);
+
+    // Mutation via the returned reference round-trips through get_if — same object.
+    ref.payload = 99;
+    auto *fetched = ctx->get_if(kProbe);
+    ASSERT_NE(fetched, nullptr);
+    EXPECT_EQ(fetched->payload, 99);
+    EXPECT_EQ(fetched, &ref);
+
+    // Still no copies were ever made of the stored object.
+    EXPECT_EQ(CopyMoveProbe::copies, 0);
+}
+
+TEST(ContextSlots, SetMovesRvalueInWithoutCopying) {
+    auto ctx = make_ctx();
+    CopyMoveProbe::reset();
+
+    CopyMoveProbe local{7};
+    ctx->set(kProbe, std::move(local)); // by-value sink + move into std::any
+    EXPECT_EQ(CopyMoveProbe::copies, 0); // never copied
+    EXPECT_GE(CopyMoveProbe::moves, 1);  // moved at least once
+    EXPECT_EQ(local.payload, -1);        // moved-from sentinel
+
+    auto *stored = ctx->get_if(kProbe);
+    ASSERT_NE(stored, nullptr);
+    EXPECT_EQ(stored->payload, 7);
+}
+
 // Compile-time check: a Slot<int> cannot be used to set a std::string.
 // This is not runtime-testable (it would not compile), but we assert the
 // equality contract on Slot's value_type that user code may rely on.

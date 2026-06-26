@@ -65,6 +65,11 @@ qhttp_test(unit router-middleware-chain     unit/routing/router-middleware-chain
 qhttp_test(unit router-controller           unit/routing/router-controller.cpp        EXTRA_LABELS routing)
 qhttp_test(unit router-group                unit/routing/router-group.cpp             EXTRA_LABELS routing)
 qhttp_test(unit router-pipeline-integration unit/routing/router-pipeline-integration.cpp EXTRA_LABELS routing)
+# routing-* : four concern-split files dissolved from the legacy test-router.cpp monolith
+qhttp_test(unit routing-match      unit/routing/routing-match.cpp      EXTRA_LABELS routing)
+qhttp_test(unit routing-methods    unit/routing/routing-methods.cpp    EXTRA_LABELS routing)
+qhttp_test(unit routing-middleware unit/routing/routing-middleware.cpp EXTRA_LABELS routing)
+qhttp_test(unit routing-compile    unit/routing/routing-compile.cpp    EXTRA_LABELS routing)
 
 # --- middleware (pure) ---
 qhttp_test(unit middleware-conditional      unit/middleware/middleware-conditional.cpp      EXTRA_LABELS middleware)
@@ -117,7 +122,6 @@ qhttp_test(unit   _pending-utility           test-utility.cpp)
 qhttp_test(unit   _pending-uri-only          test-uri-only.cpp)
 qhttp_test(unit   _pending-dos-protection    test-dos-protection.cpp)
 qhttp_test(unit   _pending-validation        test-validation.cpp)
-qhttp_test(unit   _pending-router            test-router.cpp            EXTRA_LABELS routing)
 qhttp_test(unit   _pending-middleware-rate-limit test-middleware-rate_limit.cpp EXTRA_LABELS middleware)
 qhttp_test(unit   _pending-http2-header-validator test-http2-header-validator.cpp EXTRA_LABELS http2)
 qhttp_test(unit   _pending-coro-http2-client test-coro-http2-client.cpp REQUIRES ssl EXTRA_LABELS http2 ssl)
@@ -138,3 +142,4 @@ endif()
 
 # SSL resources are copied by qb_setup_test_resources() (qb/CMakeLists.txt); tests find them in CWD.
 qb_status_message("Configured qbm-http tests (tiered backbone: unit/system + 16 split-pending monoliths)")
+

@@ -1,63 +1,53 @@
-#include <functional>
+/**
+ * @file qbm/http/tests/unit/routing/router-pipeline-integration.cpp
+ * @brief End-to-end composition smoke for the qb-http routing pipeline.
+ *
+ * Composes every routing primitive at once — global middleware, nested groups,
+ * controllers (mounted at top level and inside groups), sync/async lambda and
+ * member handlers, custom routes, the 404 handler, and the error-task chain — then
+ * drives requests through @ref qb::http::Router<Session> with the shared synchronous
+ * @ref qb::http::test::TaskExecutor pump. Deterministic unit tier: no `qb::Main`, no
+ * event loop, no socket.
+ *
+ * The legacy single 160-line `ComprehensiveScenario` was split here into one
+ * `TEST_F` per scenario so a failure pinpoints the offending composition path
+ * rather than failing the whole monolith. Full-trace equality is retained ONLY
+ * where execution ORDER is the property under test; where the point is the matched
+ * handler / status / body, those are asserted directly and the trace is left to the
+ * order-focused cases.
+ *
+ * Static/param/wildcard precedence is NOT re-proven here — that is owned by
+ * router-match.cpp (StaticOverParameter / StaticOverWildcard / ParameterOverWildcard).
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include <gtest/gtest.h>
-#include <list>
+
+#include <functional>
 #include <memory>
 #include <sstream>
-#include <stdexcept> // For std::runtime_error
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include "../http.h" // Main include for all qb::http components
 
-// --- Helper: TaskExecutor ---
-class TaskExecutor {
-public:
-    void
-    addTask(std::function<void()> task) {
-        _tasks.push_back(std::move(task));
-    }
+#include "../http.h"
+#include "../../shared/router_test_support.h" // qb::http::test::TaskExecutor
 
-    void
-    processAllTasks() {
-        while (!_tasks.empty()) {
-            // Keep processing as long as tasks are being added
-            std::vector<std::function<void()>> tasks_to_process = _tasks;
-            _tasks.clear(); // Clear before processing to allow new tasks to be queued cleanly
-            for (auto &task : tasks_to_process) {
-                if (task)
-                    task();
-            }
-        }
-    }
+using qb::http::test::TaskExecutor;
 
-    size_t
-    getPendingTaskCount() const {
-        return _tasks.size();
-    }
+namespace {
 
-    void
-    clearTasks() {
-        _tasks.clear();
-    }
-
-private:
-    std::vector<std::function<void()>> _tasks;
-};
-
-// --- Helper: MockAllInOneSession ---
+// --- Mock session: captures the finalized Response + an execution trace. --------
 struct MockAllInOneSession {
     qb::http::Response       _response;
-    std::string              _session_id_str = "session_all_in_one_"; // Placeholder, qb::uuid might not be in http.h
     std::ostringstream       _execution_trace;
     bool                     _final_handler_called = false;
     qb::http::PathParameters _captured_params;
     std::string              _last_handler_id_executed;
     qb::http::status         _last_status_code_before_error_handler = qb::http::status::OK;
-
-    MockAllInOneSession() {
-        // Simple unique ID generation if qb::uuid is not available/problematic
-        static int instance_count = 0;
-        _session_id_str += std::to_string(++instance_count);
-    }
 
     qb::http::Response &
     get_response_ref() {
@@ -69,11 +59,6 @@ struct MockAllInOneSession {
         _response = resp;
         return *this;
     }
-
-    [[nodiscard]] const std::string &
-    id_str() const {
-        return _session_id_str;
-    } // Changed from id()
 
     void
     reset() {
@@ -94,13 +79,13 @@ struct MockAllInOneSession {
         _execution_trace << id;
     }
 
-    std::string
+    [[nodiscard]] std::string
     get_trace() const {
         return _execution_trace.str();
     }
 };
 
-// --- Base Helper for Tasks (Middleware/CustomRoute) ---
+// --- Base helper for composable tasks (middleware / custom route). --------------
 template <typename SessionType>
 class BaseAllInOneTask {
 public:
@@ -111,15 +96,15 @@ public:
 
     virtual ~BaseAllInOneTask() = default;
 
-    std::string
+    [[nodiscard]] std::string
     get_id() const {
         return _id;
     }
 
 protected:
     std::string          _id;
-    TaskExecutor        *_executor;    // Nullable for sync tasks
-    MockAllInOneSession *_session_ptr; // To trace
+    TaskExecutor        *_executor;    ///< Nullable for sync tasks.
+    MockAllInOneSession *_session_ptr; ///< To trace.
 
     void
     trace_exec(const std::string &point = "") {
@@ -129,7 +114,7 @@ protected:
     }
 };
 
-// --- Helper: AllInOneMiddleware ---
+// --- Composable middleware: CONTINUE / SHORT_CIRCUIT / SIGNAL_ERROR, sync/async. -
 class AllInOneMiddleware
     : public BaseAllInOneTask<MockAllInOneSession>
     , public qb::http::IMiddleware<MockAllInOneSession> {
@@ -146,7 +131,7 @@ public:
         , _header_key(std::move(header_key))
         , _header_val(std::move(header_val)) {}
 
-    std::string
+    [[nodiscard]] std::string
     name() const override {
         return _id;
     }
@@ -197,10 +182,11 @@ private:
                 ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
                 break;
             case Behavior::SIGNAL_ERROR:
-                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR; // Default error status
+                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body()   = _id + " signaled error.";
-                if (_session_ptr)
+                if (_session_ptr) {
                     _session_ptr->_last_status_code_before_error_handler = ctx->response().status();
+                }
                 ctx->complete(qb::http::AsyncTaskResult::ERROR);
                 break;
             case Behavior::CONTINUE:
@@ -211,7 +197,7 @@ private:
     }
 };
 
-// --- Helper: AllInOneCustomRoute ---
+// --- Composable custom route: success/error, sync/async, captures params. -------
 class AllInOneCustomRoute
     : public BaseAllInOneTask<MockAllInOneSession>
     , public qb::http::ICustomRoute<MockAllInOneSession> {
@@ -224,7 +210,7 @@ public:
         , _success_status(success_status)
         , _response_body_prefix(std::move(response_body_prefix)) {}
 
-    std::string
+    [[nodiscard]] std::string
     name() const override {
         return _id;
     }
@@ -240,7 +226,7 @@ public:
             if (!_executor) {
                 trace_exec("handle_NO_EXECUTOR_ERROR");
                 if (_session_ptr) {
-                    _session_ptr->_final_handler_called     = true; // mark attempt
+                    _session_ptr->_final_handler_called     = true;
                     _session_ptr->_last_handler_id_executed = _id + "_NO_EXECUTOR_ERROR";
                 }
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -270,12 +256,12 @@ private:
             _session_ptr->_last_handler_id_executed = _id;
             _session_ptr->_captured_params          = ctx->path_parameters();
         }
-
         ctx->response().body() = _response_body_prefix + _id;
         if (_signal_error) {
-            ctx->response().status() = qb::http::status::EXPECTATION_FAILED; // Default error status for custom route
-            if (_session_ptr)
+            ctx->response().status() = qb::http::status::EXPECTATION_FAILED;
+            if (_session_ptr) {
                 _session_ptr->_last_status_code_before_error_handler = ctx->response().status();
+            }
             ctx->complete(qb::http::AsyncTaskResult::ERROR);
         } else {
             ctx->response().status() = _success_status;
@@ -284,28 +270,28 @@ private:
     }
 };
 
-// --- Helper: AllInOneController ---
+// --- Composable controller: sync/async lambda + member + custom routes. ---------
 class AllInOneController : public qb::http::Controller<MockAllInOneSession> {
 public:
     AllInOneController(std::string id_prefix, TaskExecutor *executor, MockAllInOneSession *session_ptr)
         : _id_prefix(std::move(id_prefix))
         , _executor(executor)
         , _session_ptr(session_ptr) {
-        if (!_executor)
+        if (!_executor) {
             throw std::runtime_error("AllInOneController requires a non-null TaskExecutor.");
-        if (!_session_ptr)
+        }
+        if (!_session_ptr) {
             throw std::runtime_error("AllInOneController requires a non-null MockAllInOneSession pointer.");
+        }
     }
 
     void
     initialize_routes() override {
-        // Controller-specific middleware
         this->use(std::make_shared<AllInOneMiddleware>(_id_prefix + "CtrlMwSync", nullptr, _session_ptr, false,
                                                        AllInOneMiddleware::Behavior::CONTINUE));
         this->use(std::make_shared<AllInOneMiddleware>(_id_prefix + "CtrlMwAsync", _executor, _session_ptr, true,
                                                        AllInOneMiddleware::Behavior::CONTINUE));
 
-        // Lambda route (sync)
         this->get("/lambda_sync", [this](auto ctx) {
             _session_ptr->trace(_id_prefix + "LambdaSyncHandler");
             _session_ptr->_final_handler_called     = true;
@@ -315,23 +301,20 @@ public:
             ctx->complete();
         });
 
-        // Member handler route (async)
         this->post("/member_async", this, &AllInOneController::asyncMemberHandler);
 
-        // Custom Route (sync)
         this->get<AllInOneCustomRoute>("/custom_sync", _id_prefix + "CtrlCustomSync", nullptr, _session_ptr, false);
 
-        // Custom Route (async with param)
         this->put<AllInOneCustomRoute>("/custom_async/:id", _id_prefix + "CtrlCustomAsyncWithParam", _executor, _session_ptr, true);
 
-        // Route that signals error (sync)
         this->get("/error_sync", [this](auto ctx) {
             _session_ptr->trace(_id_prefix + "ErrorSyncHandler");
-            _session_ptr->_final_handler_called     = true; // it was called
+            _session_ptr->_final_handler_called     = true;
             _session_ptr->_last_handler_id_executed = _id_prefix + "ErrorSyncHandler";
-            ctx->response().status()                = qb::http::status::BAD_REQUEST; // status before error
-            if (_session_ptr)
+            ctx->response().status()                = qb::http::status::BAD_REQUEST;
+            if (_session_ptr) {
                 _session_ptr->_last_status_code_before_error_handler = ctx->response().status();
+            }
             ctx->complete(qb::http::AsyncTaskResult::ERROR);
         });
     }
@@ -350,7 +333,7 @@ public:
         });
     }
 
-    std::string
+    [[nodiscard]] std::string
     get_node_name() const override {
         return "AllInOneController_" + _id_prefix;
     }
@@ -361,8 +344,8 @@ private:
     MockAllInOneSession *_session_ptr;
 };
 
-// --- Test Fixture ---
-class RouterAllInOneTest : public ::testing::Test {
+// --- Fixture -------------------------------------------------------------------
+class RouterPipelineTest : public ::testing::Test {
 protected:
     std::shared_ptr<MockAllInOneSession>                   _session;
     std::unique_ptr<qb::http::Router<MockAllInOneSession>> _router;
@@ -395,159 +378,172 @@ protected:
         _session->reset();
         _task_executor.clearTasks();
         _router->route(_session, create_request(method_val, path_str));
-        _task_executor.processAllTasks(); // Process all tasks until the queue is empty
+        while (_task_executor.hasTasks()) {
+            _task_executor.processAllTasks();
+        }
+    }
+
+    // Mounts the full composition shared by the per-scenario tests: global MWs,
+    // groupA (+ async custom route), nested groupB with controllerB, a top-level
+    // controllerTop, a custom 404 handler, and an error chain. Returns nothing —
+    // the router is left compiled and ready.
+    void
+    build_full_pipeline() {
+        // 1. Global middleware (sync + async).
+        _router->use(
+            std::make_shared<AllInOneMiddleware>("GlobalSyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
+        _router->use(
+            std::make_shared<AllInOneMiddleware>("GlobalAsyncMw", &_task_executor, _session.get(), true, AllInOneMiddleware::Behavior::CONTINUE));
+
+        // 2. groupA + its middleware.
+        auto groupA = _router->group("/groupA");
+        groupA->use(
+            std::make_shared<AllInOneMiddleware>("GroupASyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
+        groupA->use(
+            std::make_shared<AllInOneMiddleware>("GroupAAsyncMw", &_task_executor, _session.get(), true, AllInOneMiddleware::Behavior::CONTINUE));
+
+        groupA->get("/direct_sync", [this](auto ctx) {
+            _session->trace("GroupADirectSyncHandler");
+            _session->_final_handler_called     = true;
+            _session->_last_handler_id_executed = "GroupADirectSyncHandler";
+            ctx->response().body()              = "Response: GroupADirectSyncHandler";
+            ctx->response().status()            = qb::http::status::OK;
+            ctx->complete();
+        });
+        groupA->get<AllInOneCustomRoute>("/custom_async_in_A", "GroupACustomAsync", &_task_executor, _session.get(), true);
+
+        // 3. Nested groupB + controllerB.
+        auto groupB = groupA->group("/groupB");
+        groupB->use(
+            std::make_shared<AllInOneMiddleware>("GroupBSyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
+        (void) groupB->template controller<AllInOneController>("/controllerB", "CtrlB_", &_task_executor, _session.get());
+
+        // 4. Top-level controller.
+        (void) _router->template controller<AllInOneController>("/controllerTop", "CtrlTop_", &_task_executor, _session.get());
+
+        // 5. 404 + error chain.
+        _router->set_not_found_handler([this](auto ctx) {
+            _session->trace("CustomRouter404Handler");
+            ctx->response().status() = qb::http::status::NOT_FOUND;
+            ctx->response().body()   = "Custom Router 404 Page";
+            ctx->complete();
+        });
+
+        std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession>>> error_chain;
+        error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession>>(
+            std::make_shared<AllInOneMiddleware>("ErrorChainMwSync", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE,
+                                                 qb::http::status::OK, "X-Error-Chain", "Processed")));
+        error_chain.push_back(std::make_shared<qb::http::CustomRouteAdapterTask<MockAllInOneSession>>(std::make_shared<AllInOneCustomRoute>(
+            "ErrorChainFinalHandler", nullptr, _session.get(), false, false, qb::http::status::INTERNAL_SERVER_ERROR, "Error Handled By: ")));
+        _router->set_error_task_chain(error_chain);
+
+        ASSERT_NO_THROW(_router->compile());
     }
 };
 
-// --- Comprehensive Test Case ---
-TEST_F(RouterAllInOneTest, ComprehensiveScenario) {
-    // 1. Router-level (Global) Middleware
-    _router->use(std::make_shared<AllInOneMiddleware>("GlobalSyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
-    _router->use(
-        std::make_shared<AllInOneMiddleware>("GlobalAsyncMw", &_task_executor, _session.get(), true, AllInOneMiddleware::Behavior::CONTINUE));
+// --- Per-scenario composition smoke (was: ComprehensiveScenario, split). --------
 
-    // 2. Top-level Group: groupA
-    auto groupA = _router->group("/groupA");
-    ASSERT_NE(groupA, nullptr);
-    groupA->use(std::make_shared<AllInOneMiddleware>("GroupASyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
-    groupA->use(
-        std::make_shared<AllInOneMiddleware>("GroupAAsyncMw", &_task_executor, _session.get(), true, AllInOneMiddleware::Behavior::CONTINUE));
-
-    // Direct route in groupA
-    groupA->get("/direct_sync", [this](auto ctx) {
-        _session->trace("GroupADirectSyncHandler");
-        _session->_final_handler_called     = true;
-        _session->_last_handler_id_executed = "GroupADirectSyncHandler";
-        ctx->response().body()              = "Response: GroupADirectSyncHandler";
-        ctx->response().status()            = qb::http::status::OK;
-        ctx->complete();
-    });
-
-    // Custom async route in groupA
-    groupA->get<AllInOneCustomRoute>("/custom_async_in_A", "GroupACustomAsync", &_task_executor, _session.get(), true);
-
-    // 3. Nested Group: groupB in groupA
-    auto groupB = groupA->group("/groupB");
-    ASSERT_NE(groupB, nullptr);
-    groupB->use(std::make_shared<AllInOneMiddleware>("GroupBSyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
-
-    // Mount AllInOneController in groupB
-    auto controllerB = groupB->template controller<AllInOneController>("/controllerB", "CtrlB_", &_task_executor, _session.get());
-    ASSERT_NE(controllerB, nullptr);
-
-    // 4. Top-level Controller: controllerTop
-    auto controllerTop = _router->template controller<AllInOneController>("/controllerTop", "CtrlTop_", &_task_executor, _session.get());
-    ASSERT_NE(controllerTop, nullptr);
-
-    // 5. Router-level 404 and Error Handlers
-    _router->set_not_found_handler([this](auto ctx) {
-        _session->trace("CustomRouter404Handler");
-        ctx->response().status() = qb::http::status::NOT_FOUND;
-        ctx->response().body()   = "Custom Router 404 Page";
-        ctx->complete();
-    });
-
-    std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession>>> error_chain;
-    error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession>>(
-        std::make_shared<AllInOneMiddleware>("ErrorChainMwSync", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE,
-                                             qb::http::status::OK, "X-Error-Chain", "Processed")));
-    error_chain.push_back(std::make_shared<qb::http::CustomRouteAdapterTask<MockAllInOneSession>>(std::make_shared<AllInOneCustomRoute>(
-        "ErrorChainFinalHandler", nullptr, _session.get(), false, false, qb::http::status::INTERNAL_SERVER_ERROR, "Error Handled By: ")));
-    _router->set_error_task_chain(error_chain);
-
-    // Compile all routes
-    ASSERT_NO_THROW(_router->compile());
-
-    // --- Test Executions ---
-
-    // Test 1: groupA direct sync route
+TEST_F(RouterPipelineTest, GroupADirectSyncRouteFullChainOrder) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::GET, "/groupA/direct_sync");
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: GroupADirectSyncHandler");
-    EXPECT_EQ(_session->get_trace(), "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;GroupASyncMw_handle_entry;"
-                                     "GroupAAsyncMw_handle_entry;GroupAAsyncMw_task_exec;GroupADirectSyncHandler");
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->_last_handler_id_executed, "GroupADirectSyncHandler");
+    // Order IS the property here: global (sync, async) -> groupA (sync, async) -> handler.
+    EXPECT_EQ(_session->get_trace(), "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;GroupASyncMw_handle_entry;"
+                                     "GroupAAsyncMw_handle_entry;GroupAAsyncMw_task_exec;GroupADirectSyncHandler");
+}
 
-    // Test 2: groupA custom async route
+TEST_F(RouterPipelineTest, GroupAAsyncCustomRoute) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::GET, "/groupA/custom_async_in_A");
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: GroupACustomAsync");
-    EXPECT_EQ(_session->get_trace(),
-              "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;GroupASyncMw_handle_entry;GroupAAsyncMw_handle_"
-              "entry;GroupAAsyncMw_task_exec;GroupACustomAsync_handle_entry;GroupACustomAsync_task_exec");
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->_last_handler_id_executed, "GroupACustomAsync");
+}
 
-    // Test 3: ControllerB sync lambda route
+TEST_F(RouterPipelineTest, NestedControllerSyncLambdaRouteFullChainOrder) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::GET, "/groupA/groupB/controllerB/lambda_sync");
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: CtrlB_LambdaSyncHandler");
+    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_EQ(_session->_last_handler_id_executed, "CtrlB_LambdaSyncHandler");
+    // Order through 4 layers: globals -> groupA -> groupB -> controllerB MWs -> handler.
     EXPECT_EQ(_session->get_trace(), "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;GroupASyncMw_handle_entry;"
                                      "GroupAAsyncMw_handle_entry;GroupAAsyncMw_task_exec;GroupBSyncMw_handle_entry;CtrlB_CtrlMwSync_handle_"
                                      "entry;CtrlB_CtrlMwAsync_handle_entry;CtrlB_CtrlMwAsync_task_exec;CtrlB_LambdaSyncHandler");
-    EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_last_handler_id_executed, "CtrlB_LambdaSyncHandler");
+}
 
-    // Test 4: ControllerB async member handler route
+TEST_F(RouterPipelineTest, NestedControllerAsyncMemberHandler) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::POST, "/groupA/groupB/controllerB/member_async");
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::ACCEPTED);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: CtrlB_AsyncMemberHandler");
-    EXPECT_EQ(_session->get_trace(),
-              "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;GroupASyncMw_handle_entry;GroupAAsyncMw_handle_"
-              "entry;GroupAAsyncMw_task_exec;GroupBSyncMw_handle_entry;CtrlB_CtrlMwSync_handle_entry;CtrlB_CtrlMwAsync_handle_entry;CtrlB_"
-              "CtrlMwAsync_task_exec;CtrlB_AsyncMemberHandler_entry;CtrlB_AsyncMemberHandler_task");
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->_last_handler_id_executed, "CtrlB_AsyncMemberHandler");
+}
 
-    // Test 5: ControllerB custom async route with param
+TEST_F(RouterPipelineTest, NestedControllerAsyncCustomRouteCapturesPathParam) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::PUT, "/groupA/groupB/controllerB/custom_async/p123");
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: CtrlB_CtrlCustomAsyncWithParam");
-    EXPECT_EQ(_session->get_trace(),
-              "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;GroupASyncMw_handle_entry;GroupAAsyncMw_handle_"
-              "entry;GroupAAsyncMw_task_exec;GroupBSyncMw_handle_entry;CtrlB_CtrlMwSync_handle_entry;CtrlB_CtrlMwAsync_handle_entry;CtrlB_"
-              "CtrlMwAsync_task_exec;CtrlB_CtrlCustomAsyncWithParam_handle_entry;CtrlB_CtrlCustomAsyncWithParam_task_exec");
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->_last_handler_id_executed, "CtrlB_CtrlCustomAsyncWithParam");
     ASSERT_TRUE(_session->_captured_params.get("id").has_value());
     EXPECT_EQ(_session->_captured_params.get("id").value(), "p123");
+}
 
-    // Test 6: ControllerTop sync custom route
+TEST_F(RouterPipelineTest, TopLevelControllerSyncCustomRoute) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::GET, "/controllerTop/custom_sync");
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: CtrlTop_CtrlCustomSync");
-    EXPECT_EQ(_session->get_trace(),
-              "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;CtrlTop_CtrlMwSync_handle_entry;CtrlTop_"
-              "CtrlMwAsync_handle_entry;CtrlTop_CtrlMwAsync_task_exec;CtrlTop_CtrlCustomSync_handle_entry");
-    // Sync custom route, task_exec not part of ID for sync custom route
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->_last_handler_id_executed, "CtrlTop_CtrlCustomSync");
+}
 
-    // Test 7: Not Found
+TEST_F(RouterPipelineTest, NotFoundRunsGlobalMiddlewareThenCustom404) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::GET, "/this/path/does/not/exist");
+
     EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_FOUND);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Custom Router 404 Page");
-    // Global middleware runs before 404 handler is determined
+    EXPECT_FALSE(_session->_final_handler_called);
+    // Global middleware runs before the 404 handler is dispatched; group MWs do not.
     EXPECT_EQ(_session->get_trace(), "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;CustomRouter404Handler");
-    EXPECT_FALSE(_session->_final_handler_called); // Our specific flag for main handlers
+}
 
-    // Test 8: Error in a controller handler, caught by router error chain
+TEST_F(RouterPipelineTest, ControllerHandlerErrorRoutedThroughErrorChain) {
+    build_full_pipeline();
     make_request_and_process(qb::http::method::GET, "/controllerTop/error_sync");
-    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR); // From ErrorChainFinalHandler
+
+    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Error Handled By: ErrorChainFinalHandler");
     EXPECT_EQ(_session->_last_status_code_before_error_handler, qb::http::status::BAD_REQUEST);
-    // Status set by CtrlTop_ErrorSyncHandler
-    // Trace: Globals -> CtrlTop Mws -> Handler (signals error) -> ErrorChainMw -> ErrorChainFinalHandler
+    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_EQ(_session->_last_handler_id_executed, "ErrorChainFinalHandler");
+    // The error-chain middleware's response header survives to the final response.
+    EXPECT_EQ(_session->_response.header("X-Error-Chain"), "Processed");
+    // Order: globals -> controllerTop MWs -> erroring handler -> error chain.
     EXPECT_EQ(_session->get_trace(), "GlobalSyncMw_handle_entry;GlobalAsyncMw_handle_entry;GlobalAsyncMw_task_exec;CtrlTop_CtrlMwSync_handle_"
                                      "entry;CtrlTop_CtrlMwAsync_handle_entry;CtrlTop_CtrlMwAsync_task_exec;CtrlTop_ErrorSyncHandler;"
                                      "ErrorChainMwSync_handle_entry;ErrorChainFinalHandler_handle_entry");
-    EXPECT_TRUE(_session->_final_handler_called); // ErrorChainFinalHandler sets this
-    EXPECT_EQ(_session->_last_handler_id_executed, "ErrorChainFinalHandler");
-    EXPECT_EQ(_session->_response.header("X-Error-Chain"), "Processed");
+}
 
-    // Test 9: Short-circuit by a global middleware
-    _router = std::make_unique<qb::http::Router<MockAllInOneSession>>(); // Re-initialize the router
+// Short-circuit by a global middleware: standalone composition (the legacy
+// ComprehensiveScenario rebuilt the router mid-test for this — now its own fixture
+// instance keeps it isolated).
+TEST_F(RouterPipelineTest, GlobalMiddlewareShortCircuitSkipsHandler) {
     _router->use(std::make_shared<AllInOneMiddleware>("GlobalShortCircuitMw", nullptr, _session.get(), false,
                                                       AllInOneMiddleware::Behavior::SHORT_CIRCUIT, qb::http::status::ACCEPTED));
     _router->get("/should_not_be_reached", [this](auto ctx) {
@@ -555,6 +551,7 @@ TEST_F(RouterAllInOneTest, ComprehensiveScenario) {
         ctx->complete();
     });
     _router->compile();
+
     make_request_and_process(qb::http::method::GET, "/should_not_be_reached");
     EXPECT_EQ(_session->_response.status(), qb::http::status::ACCEPTED);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "GlobalShortCircuitMw short-circuited.");
@@ -562,16 +559,15 @@ TEST_F(RouterAllInOneTest, ComprehensiveScenario) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(RouterAllInOneTest, WildcardParametersInGroupsAndControllers) {
-    // Ensure _router is reset at the very beginning of this test case for isolation
-    _router = std::make_unique<qb::http::Router<MockAllInOneSession>>();
+// --- Wildcard capture through groups and controllers ---------------------------
+// (Precedence — static>param>wildcard — is owned by router-match.cpp; this case
+//  only proves that a wildcard segment is captured correctly through a controller
+//  and through a group, including a multi-segment tail.)
 
-    // Controller with wildcard route
+TEST_F(RouterPipelineTest, WildcardCaptureInControllerAndGroup) {
     class WildcardController : public qb::http::Controller<MockAllInOneSession> {
     public:
-        MockAllInOneSession *_session_ptr_wc;
-
-        WildcardController(MockAllInOneSession *session_ptr)
+        explicit WildcardController(MockAllInOneSession *session_ptr)
             : _session_ptr_wc(session_ptr) {}
 
         void
@@ -589,20 +585,17 @@ TEST_F(RouterAllInOneTest, WildcardParametersInGroupsAndControllers) {
             });
         }
 
-        std::string
+        [[nodiscard]] std::string
         get_node_name() const override {
             return "WildcardController";
         }
-    };
-    // Create a fresh router for this specific test section to avoid interference
-    auto wc_ctrl = _router->template controller<WildcardController>("/wc_ctrl", _session.get());
-    ASSERT_NE(wc_ctrl, nullptr);
 
-    // Test 2: Group with a static path, route inside has wildcard.
-    // Group path: /data. Route in group: /content/*filepath
-    // Effective registered path: /data/content/*filepath (VALID)
+        MockAllInOneSession *_session_ptr_wc;
+    };
+
+    (void) _router->template controller<WildcardController>("/wc_ctrl", _session.get());
+
     auto data_group = _router->group("/data");
-    ASSERT_NE(data_group, nullptr);
     data_group->use(
         std::make_shared<AllInOneMiddleware>("DataGroupMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
     data_group->get("/content/*filepath", [this](auto ctx) {
@@ -615,107 +608,89 @@ TEST_F(RouterAllInOneTest, WildcardParametersInGroupsAndControllers) {
         ctx->complete();
     });
 
-    ASSERT_NO_THROW(_router->compile()); // This should now pass.
+    ASSERT_NO_THROW(_router->compile());
 
-    // Test 1: Controller Wildcard (uses the _router configured above)
+    // Controller wildcard captures a multi-segment tail.
     make_request_and_process(qb::http::method::GET, "/wc_ctrl/content/folder/file.txt");
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "CtrlWildcardPath: folder/file.txt");
-    EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_last_handler_id_executed, "WildcardController_content_path");
     EXPECT_EQ(_session->_captured_params.get("path").value(), "folder/file.txt");
-    // Trace for Test 1 - this will only include middleware/handlers for this specific router config
-    // No global middleware were added to _this_ _router instance for this specific test section.
     EXPECT_EQ(_session->get_trace(), "WildcardController_content_path");
 
-    // Test 2 (Revised): Accessing the valid wildcard route in data_group
-    // This uses the same _router instance configured above with wc_ctrl and data_group
+    // Group wildcard captures its own multi-segment tail, with group MW running first.
     make_request_and_process(qb::http::method::GET, "/data/content/reports/annual.pdf");
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "DataGroup File: reports/annual.pdf");
-    EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->_last_handler_id_executed, "DataGroup_content_handler");
     ASSERT_TRUE(_session->_captured_params.get("filepath").has_value());
     EXPECT_EQ(_session->_captured_params.get("filepath").value(), "reports/annual.pdf");
     EXPECT_EQ(_session->get_trace(), "DataGroupMw_handle_entry;DataGroup_content_handler");
 }
 
-TEST_F(RouterAllInOneTest, MultipleControllersAndMiddlewareInteraction) {
-    // Controller 1
+// --- Two same-type controllers + global MW isolation ---------------------------
+
+TEST_F(RouterPipelineTest, MultipleControllersIsolatedWithSharedGlobalMiddleware) {
     auto controller1 = _router->template controller<AllInOneController>("/serviceA", "SvcA_", &_task_executor, _session.get());
-    ASSERT_NE(controller1, nullptr);
     controller1->use(std::make_shared<AllInOneMiddleware>("SvcACtrlSpecificMw", nullptr, _session.get(), false,
                                                           AllInOneMiddleware::Behavior::CONTINUE, qb::http::status::OK, "X-SvcA-Ctrl",
                                                           "SetBySvcACtrlMw"));
 
-    // Controller 2 (different instance of same type)
     auto controller2 = _router->template controller<AllInOneController>("/serviceB", "SvcB_", &_task_executor, _session.get());
-    ASSERT_NE(controller2, nullptr);
     controller2->use(std::make_shared<AllInOneMiddleware>("SvcBCtrlSpecificMw", nullptr, _session.get(), false,
                                                           AllInOneMiddleware::Behavior::CONTINUE, qb::http::status::OK, "X-SvcB-Ctrl",
                                                           "SetBySvcBCtrlMw"));
 
-    // Global middleware for this test
     _router->use(
         std::make_shared<AllInOneMiddleware>("MultiCtrlTestGlobalMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
 
     ASSERT_NO_THROW(_router->compile());
 
-    // Test 1: Request to Service A controller (sync lambda)
+    // Request to A: only A's controller-specific MW header appears.
     make_request_and_process(qb::http::method::GET, "/serviceA/lambda_sync");
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: SvcA_LambdaSyncHandler");
     EXPECT_EQ(_session->_response.header("X-SvcA-Ctrl"), "SetBySvcACtrlMw");
-    EXPECT_TRUE(_session->_response.header("X-SvcB-Ctrl").empty()); // Ensure SvcB middleware didn't run
-    EXPECT_EQ(_session->get_trace(), "MultiCtrlTestGlobalMw_handle_entry;SvcACtrlSpecificMw_handle_entry;SvcA_CtrlMwSync_handle_entry;SvcA_"
-                                     "CtrlMwAsync_handle_entry;SvcA_CtrlMwAsync_task_exec;SvcA_LambdaSyncHandler");
-    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_TRUE(_session->_response.header("X-SvcB-Ctrl").empty());
     EXPECT_EQ(_session->_last_handler_id_executed, "SvcA_LambdaSyncHandler");
 
-    // Test 2: Request to Service B controller (async member handler)
+    // Request to B: only B's controller-specific MW header appears.
     make_request_and_process(qb::http::method::POST, "/serviceB/member_async");
     EXPECT_EQ(_session->_response.status(), qb::http::status::ACCEPTED);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Response: SvcB_AsyncMemberHandler");
     EXPECT_EQ(_session->_response.header("X-SvcB-Ctrl"), "SetBySvcBCtrlMw");
-    EXPECT_TRUE(_session->_response.header("X-SvcA-Ctrl").empty()); // Ensure SvcA middleware didn't run
-    EXPECT_EQ(_session->get_trace(),
-              "MultiCtrlTestGlobalMw_handle_entry;SvcBCtrlSpecificMw_handle_entry;SvcB_CtrlMwSync_handle_entry;SvcB_CtrlMwAsync_handle_entry;"
-              "SvcB_CtrlMwAsync_task_exec;SvcB_AsyncMemberHandler_entry;SvcB_AsyncMemberHandler_task");
-    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_TRUE(_session->_response.header("X-SvcA-Ctrl").empty());
     EXPECT_EQ(_session->_last_handler_id_executed, "SvcB_AsyncMemberHandler");
 }
 
-TEST_F(RouterAllInOneTest, ErrorInControllerMiddleware) {
-    // Controller that has a middleware which will signal an error
+// --- Error in a controller's own middleware → router error chain ----------------
+
+TEST_F(RouterPipelineTest, ErrorInControllerMiddlewareRoutedToRouterErrorChain) {
     class ControllerWithErrorMw : public qb::http::Controller<MockAllInOneSession> {
     public:
-        MockAllInOneSession *_session_ptr_err_mw_ctrl;
-
         ControllerWithErrorMw(MockAllInOneSession *session_ptr, TaskExecutor *executor)
-            : _session_ptr_err_mw_ctrl(session_ptr) {
-            this->use(std::make_shared<AllInOneMiddleware>("CtrlErrorMw", executor, _session_ptr_err_mw_ctrl, false,
+            : _session_ptr_err(session_ptr) {
+            this->use(std::make_shared<AllInOneMiddleware>("CtrlErrorMw", executor, _session_ptr_err, false,
                                                            AllInOneMiddleware::Behavior::SIGNAL_ERROR));
             this->get("/path", [this](auto ctx) {
-                if (_session_ptr_err_mw_ctrl)
-                    _session_ptr_err_mw_ctrl->trace("CtrlErrorMw_PathHandlerNeverReached");
+                if (_session_ptr_err) {
+                    _session_ptr_err->trace("CtrlErrorMw_PathHandlerNeverReached");
+                }
                 ctx->complete();
             });
         }
 
         void
-        initialize_routes() override {
-            /* Routes added in constructor for this example */
-        }
+        initialize_routes() override {}
 
-        std::string
+        [[nodiscard]] std::string
         get_node_name() const override {
             return "ControllerWithErrorMw";
         }
+
+        MockAllInOneSession *_session_ptr_err;
     };
 
     (void) _router->template controller<ControllerWithErrorMw>("/ctrl_err_mw", _session.get(), &_task_executor);
 
-    // Setup a main error handler for the router
     std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession>>> error_chain;
     error_chain.push_back(std::make_shared<qb::http::CustomRouteAdapterTask<MockAllInOneSession>>(
         std::make_shared<AllInOneCustomRoute>("MainRouterErrorHandlerForCtrlMwError", nullptr, _session.get(), false, false,
@@ -730,14 +705,15 @@ TEST_F(RouterAllInOneTest, ErrorInControllerMiddleware) {
     make_request_and_process(qb::http::method::GET, "/ctrl_err_mw/path");
     EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "RouterHandledCtrlMwError: MainRouterErrorHandlerForCtrlMwError");
+    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_EQ(_session->_last_handler_id_executed, "MainRouterErrorHandlerForCtrlMwError");
     EXPECT_EQ(_session->get_trace(),
               "GlobalMwForCtrlErrTest_handle_entry;CtrlErrorMw_handle_entry;MainRouterErrorHandlerForCtrlMwError_handle_entry");
-    // CtrlErrorMw signals error, then main error handler runs.
-    EXPECT_TRUE(_session->_final_handler_called); // The error handler is the 'final' handler in this case
-    EXPECT_EQ(_session->_last_handler_id_executed, "MainRouterErrorHandlerForCtrlMwError");
 }
 
-TEST_F(RouterAllInOneTest, ErrorInErrorChainIsFatal) {
+// --- Error WITHIN the error chain is fatal (default 500) ------------------------
+
+TEST_F(RouterPipelineTest, ErrorWithinErrorChainIsFatal) {
     _router->get("/trigger_initial_error", [this](auto ctx) {
         _session->trace("InitialErrorHandler");
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
@@ -746,10 +722,8 @@ TEST_F(RouterAllInOneTest, ErrorInErrorChainIsFatal) {
     std::vector<std::shared_ptr<qb::http::IAsyncTask<MockAllInOneSession>>> faulty_error_chain;
     faulty_error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession>>(
         std::make_shared<AllInOneMiddleware>("FaultyErrorChainMw1", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE)));
-    faulty_error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession>>(
-        std::make_shared<AllInOneMiddleware>("FaultyErrorChainMw2_SignalsError", nullptr, _session.get(), false,
-                                             AllInOneMiddleware::Behavior::SIGNAL_ERROR) // This one errors
-        ));
+    faulty_error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession>>(std::make_shared<AllInOneMiddleware>(
+        "FaultyErrorChainMw2_SignalsError", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::SIGNAL_ERROR)));
     faulty_error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<MockAllInOneSession>>(std::make_shared<AllInOneMiddleware>(
         "FaultyErrorChainMw3_NeverReached", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE)));
     _router->set_error_task_chain(faulty_error_chain);
@@ -760,55 +734,25 @@ TEST_F(RouterAllInOneTest, ErrorInErrorChainIsFatal) {
     ASSERT_NO_THROW(_router->compile());
 
     make_request_and_process(qb::http::method::GET, "/trigger_initial_error");
-    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR); // Final fallback status
-    // The body might be what FaultyErrorChainMw2_SignalsError set, or empty if status changed late.
+    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "FaultyErrorChainMw2_SignalsError signaled error.");
+    EXPECT_FALSE(_session->_final_handler_called);
+    EXPECT_EQ(_session->get_trace().find("FaultyErrorChainMw3_NeverReached"), std::string::npos)
+        << "The chain task after the fatal one must not run.";
+    // Order matters here: the chain ran up to and including the erroring MW, no further.
     EXPECT_EQ(_session->get_trace(), "GlobalMwForFaultyErrorChainTest_handle_entry;InitialErrorHandler;FaultyErrorChainMw1_handle_entry;"
                                      "FaultyErrorChainMw2_SignalsError_handle_entry");
-    EXPECT_FALSE(_session->_final_handler_called);
-    // No *normal* final handler, and error chain didn't complete successfully.
 }
 
-TEST_F(RouterAllInOneTest, StaticParamWildcardPriorityExplicit) {
-    _router->get("/priority/static", [this](auto ctx) {
-        _session->trace("StaticRoute");
-        ctx->complete();
-    });
-    _router->get("/priority/:param", [this](auto ctx) {
-        _session->trace("ParamRoute:" + std::string(ctx->path_param("param")));
-        ctx->complete();
-    });
-    _router->get("/priority/*wildcard", [this](auto ctx) {
-        _session->trace("WildcardRoute:" + std::string(ctx->path_param("wildcard")));
-        ctx->complete();
-    });
-    _router->compile();
+// --- Middleware mutates the request for downstream tasks ------------------------
 
-    make_request_and_process(qb::http::method::GET, "/priority/static");
-    EXPECT_EQ(_session->get_trace(), "StaticRoute");
-
-    make_request_and_process(qb::http::method::GET, "/priority/param_value");
-    EXPECT_EQ(_session->get_trace(), "ParamRoute:param_value");
-
-    make_request_and_process(qb::http::method::GET, "/priority/wild/card/value");
-    EXPECT_EQ(_session->get_trace(), "WildcardRoute:wild/card/value");
-
-    // Test what /priority/ matches - should be wildcard consuming empty string if that's the tree behavior
-    make_request_and_process(qb::http::method::GET, "/priority/");
-    EXPECT_EQ(_session->get_trace(), "WildcardRoute:");
-}
-
-TEST_F(RouterAllInOneTest, MiddlewareModifiesRequestForSubsequentTasks) {
+TEST_F(RouterPipelineTest, MiddlewareModifiesRequestForSubsequentTasks) {
     _router->use(std::make_shared<AllInOneMiddleware>("MwSetsHeader", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE,
                                                       qb::http::status::OK, "X-Test-Data", "SetByMw"));
 
     _router->use(
         [this](std::shared_ptr<qb::http::Context<MockAllInOneSession>> ctx, std::function<void()> next) {
-            auto val           = ctx->request().header("X-Test-Data");
-            bool condition_met = (std::string(val) == "SetByMw"); // Explicitly convert val to std::string for comparison
-            // Temporary trace for debugging
-            _session->trace("FunctionalMw_Check_Header_Val:[" + std::string(val) + "]_CondMet:" + (condition_met ? "T" : "F"));
-
+            const bool condition_met = (std::string(ctx->request().header("X-Test-Data")) == "SetByMw");
             if (condition_met) {
                 _session->trace("MwReadsHeaderCorrectly");
                 ctx->response().set_header("X-Mw-Confirmation", "HeaderRead");
@@ -827,8 +771,10 @@ TEST_F(RouterAllInOneTest, MiddlewareModifiesRequestForSubsequentTasks) {
     _router->compile();
     make_request_and_process(qb::http::method::GET, "/mw_data_flow");
 
-    EXPECT_EQ(_session->get_trace(),
-              "MwSetsHeader_handle_entry;FunctionalMw_Check_Header_Val:[SetByMw]_CondMet:T;MwReadsHeaderCorrectly;FinalHandlerForDataFlow");
+    // The downstream MW saw the header the first MW set on the REQUEST.
+    EXPECT_EQ(_session->get_trace(), "MwSetsHeader_handle_entry;MwReadsHeaderCorrectly;FinalHandlerForDataFlow");
     EXPECT_EQ(_session->_response.header("X-Mw-Confirmation"), "HeaderRead");
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 }
+
+} // namespace

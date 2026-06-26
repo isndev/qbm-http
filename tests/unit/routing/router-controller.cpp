@@ -1,39 +1,28 @@
+/**
+ * @file qbm/http/tests/unit/routing/router-controller.cpp
+ * @brief Controller mounting, async-defer, statefulness, and ctor-throw behavior.
+ *
+ * Drives @ref qb::http::Router<Session> + @ref qb::http::Controller directly via
+ * `route()` and the shared synchronous @ref qb::http::test::TaskExecutor pump. No
+ * `qb::Main`, no event loop, no socket — deterministic unit tier.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include <functional> // For std::function
 #include <gtest/gtest.h>
-#include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
 #include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
 #include "../http.h" // Provides qb::http::Router, Request, Response, Context, Controller, etc.
+#include "../../shared/router_test_support.h" // qb::http::test::TaskExecutor
+
+using qb::http::test::TaskExecutor;
 
 // --- Helper Classes for Controller Router Tests ---
-
-// Simple Task Executor for testing deferred execution (copied from test-router-async.cpp)
-class TaskExecutor {
-public:
-    void
-    addTask(std::function<void()> task) {
-        _tasks.push_back(std::move(task));
-    }
-
-    void
-    processAllTasks() {
-        std::vector<std::function<void()>> tasks_to_process = _tasks;
-        _tasks.clear();
-        for (auto &task : tasks_to_process) {
-            task();
-        }
-    }
-
-    size_t
-    getPendingTaskCount() const {
-        return _tasks.size();
-    }
-
-private:
-    std::vector<std::function<void()>> _tasks;
-};
 
 // Mock Session for Controller Router Tests (adapted from MockAsyncSession)
 struct MockControllerSession {
@@ -350,13 +339,7 @@ class ControllerWithAdvancedFeatures : public qb::http::Controller<MockControlle
 public:
     ControllerWithAdvancedFeatures(TaskExecutor *executor, const std::string &marker)
         : _executor(executor)
-        , _marker(marker) {
-        if (!_executor && marker.find("async") != std::string::npos) {
-            // Basic check
-            // Only throw if executor is needed for an async-prefixed marker test.
-            // Some tests might use this controller for sync features only.
-        }
-    }
+        , _marker(marker) {}
 
     void
     initialize_routes() override {
@@ -478,14 +461,12 @@ public:
                 throw std::runtime_error("Intentional async exception from " + marker + "_async_throwing_in_task");
                 // The following line would be unreachable, but shown for pattern
                 // shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-            } catch (const std::exception &e) {
-                // Log or handle exception e if necessary, then signal error to context
-                std::cerr << "Async task for " << marker << " caught exception: " << e.what() << std::endl;
+            } catch (const std::exception &) {
+                // Caught the intentional async exception; signal error to the context.
                 if (!shared_ctx->is_cancelled() && !shared_ctx->is_completed()) {
                     shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
                 }
             } catch (...) {
-                std::cerr << "Async task for " << marker << " caught unknown exception." << std::endl;
                 if (!shared_ctx->is_cancelled() && !shared_ctx->is_completed()) {
                     shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
                 }
@@ -672,19 +653,9 @@ TEST_F(RouterControllerTest, MountAndCallAsyncControllerPostMethodDeferred) {
 }
 
 TEST_F(RouterControllerTest, ControllerConstructorThrows) {
-    // Expect the router.controller call itself to throw if the controller constructor fails.
-    // The router should not store a partially constructed or invalid controller.
-    EXPECT_THROW(
-        {
-            auto controller = _router.controller<ThrowingConstructorController>("/throwing_ctrl", "ThrowingMarker");
-            // If controller() doesn't throw, we might want to fail or check if controller is null,
-            // but the expectation is that it re-throws the constructor exception.
-            if (controller) {
-                // This part should ideally not be reached if EXPECT_THROW works as intended for constructor exceptions.
-                // If it is reached, it implies the exception wasn't propagated by controller() as expected.
-            }
-        },
-        std::runtime_error);
+    // The router.controller() call itself must re-throw the controller's constructor
+    // exception; the router must not store a partially constructed controller.
+    EXPECT_THROW((void) _router.controller<ThrowingConstructorController>("/throwing_ctrl", "ThrowingMarker"), std::runtime_error);
 
     // Ensure no routes were inadvertently compiled or that the router is still in a sane state.
     _router.compile(); // Should still work or be a no-op if nothing was added.
@@ -737,6 +708,45 @@ TEST_F(RouterControllerTest, ControllerInstanceReusabilityAndState) {
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Current Count: 2, Last Modifier ID: mod2");
     EXPECT_EQ(_mock_session->_handler_id_executed, "StatefulCtrl_get_state");
+}
+
+// Mounting the SAME controller TYPE at two different prefixes yields two
+// independent instances: each has its own state, and a request to one prefix must
+// not touch the other's instance. Proves controller mounting is per-mount, not a
+// shared singleton.
+TEST_F(RouterControllerTest, SameControllerTypeAtTwoPrefixesIsIsolated) {
+    auto alpha = _router.controller<StatefulController>("/alpha", "Alpha");
+    auto beta  = _router.controller<StatefulController>("/beta", "Beta");
+    ASSERT_NE(alpha, nullptr);
+    ASSERT_NE(beta, nullptr);
+    ASSERT_NE(alpha, beta) << "Each mount must be a distinct controller instance.";
+    _router.compile();
+
+    // Hit /alpha three times, /beta once. Their per-instance request counts must
+    // be independent (alpha=3, beta=1), not shared.
+    for (int i = 0; i < 3; ++i) {
+        _mock_session->reset();
+        auto req = create_request(HTTP_GET, "/alpha/ping_and_set/mA");
+        _router.route(_mock_session, std::move(req));
+        _task_executor.processAllTasks();
+    }
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Count: 3, Last Modifier: mA");
+    EXPECT_EQ(_mock_session->_handler_id_executed, "Alpha_ping_set_mA");
+
+    _mock_session->reset();
+    auto req_beta = create_request(HTTP_GET, "/beta/ping_and_set/mB");
+    _router.route(_mock_session, std::move(req_beta));
+    _task_executor.processAllTasks();
+    // Beta's own counter is 1 — it was not incremented by the three /alpha hits.
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Count: 1, Last Modifier: mB");
+    EXPECT_EQ(_mock_session->_handler_id_executed, "Beta_ping_set_mB");
+
+    // Re-confirm alpha's state is intact (still 3, now reads via get_state).
+    _mock_session->reset();
+    auto req_alpha_state = create_request(HTTP_GET, "/alpha/get_state");
+    _router.route(_mock_session, std::move(req_alpha_state));
+    _task_executor.processAllTasks();
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Current Count: 3, Last Modifier ID: mA");
 }
 
 TEST_F(RouterControllerTest, ControllerInitializeRoutesRunsOnlyOnceWithoutRoutes) {
