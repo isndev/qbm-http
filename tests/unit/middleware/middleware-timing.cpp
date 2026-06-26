@@ -1,482 +1,261 @@
+/**
+ * @file qbm/http/tests/unit/middleware/middleware-timing.cpp
+ * @brief Unit tests for qb::http::TimingMiddleware (request-duration flow-control).
+ *
+ * TimingMiddleware records a steady_clock start in the context on process(), then
+ * registers a PRE_RESPONSE_SEND hook that computes the elapsed duration, reports it
+ * to a user callback, and stamps an `X-Response-Time` header. The clock is internal
+ * (steady_clock) and not injectable, so to keep the duration assertions deterministic
+ * we drive the hook directly against a Context whose seeded start time we control: by
+ * overwriting the start-time context key with a known past timestamp before firing the
+ * hook, the elapsed duration has an exact floor with a generous, race-free ceiling —
+ * no wall-clock `sleep_for`, no brittle EXPECT_NEAR/EXPECT_NE between two live runs.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include <gtest/gtest.h>
-#include <optional> // Added for std::optional
-#include "../http.h"
-#include "../middleware/timing.h"  // The adapted TimingMiddleware
-#include "../routing/middleware.h" // For MiddlewareTask if needed
 
 #include <chrono>
-#include <functional>
 #include <memory>
-#include <sstream>
+#include <optional>
 #include <string>
-#include <thread> // For std::this_thread::sleep_for
-#include <vector>
 
-// --- Mock Session for TimingMiddleware Tests ---
-struct MockTimingSession {
-    qb::http::Response                       _response;
-    std::string                              _session_id_str = "timing_test_session";
-    std::optional<std::chrono::milliseconds> _last_duration_logged;
-    bool                                     _final_handler_called = false;
+#include "../http.h"
+#include "../middleware/timing.h"
+#include "../routing/middleware.h"
 
-    qb::http::Response &
-    get_response_ref() {
-        return _response;
+#include "../../shared/middleware_test_fixture.h"
+
+using namespace std::chrono_literals;
+
+namespace {
+
+using TimingMW    = qb::http::TimingMiddleware<qb::http::test::MockMiddlewareSession>;
+using SessionT    = qb::http::test::MockMiddlewareSession;
+using TimePoint   = TimingMW::Clock::time_point;
+using Ctx         = qb::http::Context<SessionT>;
+
+/** @brief Parses an `X-Response-Time` header value of the form "<double>ms" into milliseconds. */
+std::optional<double>
+parse_response_time_ms(const std::string &header_value) {
+    if (header_value.size() < 3 || header_value.substr(header_value.size() - 2) != "ms")
+        return std::nullopt;
+    try {
+        return std::stod(header_value.substr(0, header_value.size() - 2));
+    } catch (...) {
+        return std::nullopt;
     }
+}
 
-    MockTimingSession &
-    operator<<(const qb::http::Response &resp) {
-        _response = resp;
-        return *this;
-    }
+} // namespace
 
-    void
-    reset() {
-        _response = qb::http::Response();
-        _last_duration_logged.reset();
-        _final_handler_called = false;
-    }
-};
-
-// --- Test Fixture for TimingMiddleware ---
-class TimingMiddlewareTest : public ::testing::Test {
+/**
+ * @brief Fixture for TimingMiddleware: owns a session and a callback that records the last duration.
+ */
+class TimingMiddlewareTest : public qb::http::test::MiddlewareTestFixture<SessionT> {
 protected:
-    std::shared_ptr<MockTimingSession>                   _session;
-    std::unique_ptr<qb::http::Router<MockTimingSession>> _router;
-    // TaskExecutor generally not needed for these tests as the core logic of TimingMiddleware
-    // and its hook are synchronous once triggered by the router's lifecycle.
-
-    qb::http::TimingMiddleware<MockTimingSession>::TimingCallback _test_timing_callback;
+    std::optional<std::chrono::milliseconds> _last_duration;
+    TimingMW::TimingCallback                  _record_cb;
 
     void
     SetUp() override {
-        _session              = std::make_shared<MockTimingSession>();
-        _router               = std::make_unique<qb::http::Router<MockTimingSession>>();
-        _test_timing_callback = [this](const std::chrono::milliseconds &duration) {
-            if (_session) {
-                _session->_last_duration_logged = duration;
-            }
-        };
+        MiddlewareTestFixture<SessionT>::SetUp();
+        _last_duration.reset();
+        _record_cb = [this](const std::chrono::milliseconds &d) { _last_duration = d; };
     }
 
-    qb::http::Request
-    create_request(const std::string &target_path = "/timed_route") {
-        qb::http::Request req;
-        req.method() = qb::http::method::GET;
-        try {
-            req.uri() = qb::io::uri(target_path);
-        } catch (const std::exception &e) {
-            ADD_FAILURE() << "URI parse failure: " << target_path << " (" << e.what() << ")";
-            req.uri() = qb::io::uri("/_ERROR_URI_");
-        }
-        return req;
-    }
-
-    qb::http::RouteHandlerFn<MockTimingSession>
-    simple_handler(std::chrono::milliseconds delay = std::chrono::milliseconds(0)) {
-        return [this, delay](std::shared_ptr<qb::http::Context<MockTimingSession>> ctx) {
-            if (delay > std::chrono::milliseconds(0)) {
-                std::this_thread::sleep_for(delay);
-            }
-            if (_session)
-                _session->_final_handler_called = true;
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().body()   = "Handler Executed";
-            ctx->complete();
-        };
-    }
-
-    void
-    configure_router_and_run(std::shared_ptr<qb::http::TimingMiddleware<MockTimingSession>> timing_mw, qb::http::Request request,
-                             std::chrono::milliseconds handler_delay = std::chrono::milliseconds(0)) {
-        _router->use(timing_mw);
-        _router->get("/timed_route", simple_handler(handler_delay));
-        _router->compile();
-
-        _session->reset();
-        _router->route(_session, std::move(request));
-        // The lifecycle hook for timing will be executed by the router as part of route processing.
+    /** @brief Builds a standalone Context (no router) suitable for direct hook driving. */
+    std::shared_ptr<Ctx>
+    make_ctx() {
+        return std::make_shared<Ctx>(create_request(qb::http::method::GET, "/timed"), qb::http::Response{}, _session,
+                                     [](Ctx &) {}, std::weak_ptr<qb::http::RouterCore<SessionT>>{});
     }
 };
 
-// --- Test Cases ---
+// --- Deterministic duration via controlled start-time seeding ----------------
 
-TEST_F(TimingMiddlewareTest, BasicTiming) {
-    auto timing_mw = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, "BasicTimer");
-    configure_router_and_run(timing_mw, create_request());
+TEST_F(TimingMiddlewareTest, BasicTimingStampsHeaderAndReportsCallback) {
+    auto mw  = qb::http::timing_middleware<SessionT>(_record_cb, "BasicTimer");
+    auto ctx = make_ctx();
 
-    EXPECT_TRUE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_last_duration_logged.has_value());
-    // Check if duration is non-negative. Exact duration is hard to assert reliably.
-    EXPECT_GE(_session->_last_duration_logged->count(), 0);
-    // Further checks could be for a reasonable upper bound if the handler was instant.
+    mw->process(ctx); // registers hook, seeds start = Clock::now()
+    ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
+
+    ASSERT_TRUE(_last_duration.has_value());
+    EXPECT_GE(_last_duration->count(), 0);
+
+    // The X-Response-Time header must be present, well-formed, and agree with the callback
+    // duration to integer-millisecond resolution.
+    const std::string header = std::string(ctx->response().header(std::string("X-Response-Time")));
+    ASSERT_FALSE(header.empty());
+    auto parsed = parse_response_time_ms(header);
+    ASSERT_TRUE(parsed.has_value()) << "X-Response-Time not '<double>ms': " << header;
+    EXPECT_GE(*parsed, 0.0);
+    EXPECT_EQ(static_cast<long>(*parsed), _last_duration->count());
 }
 
-TEST_F(TimingMiddlewareTest, TimingWithHandlerDelay) {
-    auto                      timing_mw = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, "DelayedTimer");
-    std::chrono::milliseconds expected_delay(50); // 50ms delay
-    configure_router_and_run(timing_mw, create_request(), expected_delay);
+TEST_F(TimingMiddlewareTest, ElapsedDurationMatchesSeededStart) {
+    const std::string timer_name  = "SeededTimer";
+    const std::string context_key = "__TimingMiddleware_StartTime_" + timer_name;
 
-    EXPECT_TRUE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_last_duration_logged.has_value());
-    // Check if the logged duration is at least the delay, allowing for some overhead.
-    EXPECT_GE(_session->_last_duration_logged->count(), expected_delay.count());
-    // Add a reasonable upper bound, e.g., delay + 50ms overhead for test environment
-    EXPECT_LT(_session->_last_duration_logged->count(), (expected_delay + std::chrono::milliseconds(50)).count());
-}
+    auto mw  = qb::http::timing_middleware<SessionT>(_record_cb, timer_name);
+    auto ctx = make_ctx();
+    mw->process(ctx); // hook registered; start seeded to now
 
-TEST_F(TimingMiddlewareTest, CustomNaming) {
-    auto timing_mw_custom_name = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, "MyCustomTimerName");
-    EXPECT_EQ(timing_mw_custom_name->name(), "MyCustomTimerName");
-
-    // Run a quick request to ensure it works with custom name (duration check is secondary here)
-    configure_router_and_run(timing_mw_custom_name, create_request());
-    EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_TRUE(_session->_last_duration_logged.has_value());
-}
-
-TEST_F(TimingMiddlewareTest, CallbackIsActuallyCalled) {
-    bool                                                          callback_was_invoked = false;
-    qb::http::TimingMiddleware<MockTimingSession>::TimingCallback custom_cb =
-        [&callback_was_invoked](const std::chrono::milliseconds & /*duration*/) {
-            callback_was_invoked = true;
-        };
-    auto timing_mw = qb::http::timing_middleware<MockTimingSession>(custom_cb);
-    configure_router_and_run(timing_mw, create_request());
-
-    EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_TRUE(callback_was_invoked);
-}
-
-TEST_F(TimingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
-    bool callback_was_invoked = false;
-    auto timing_mw            = qb::http::timing_middleware<MockTimingSession>(
-        [&callback_was_invoked](const std::chrono::milliseconds &duration) {
-            callback_was_invoked = true;
-            EXPECT_GE(duration.count(), 0);
-        },
-        "DetachedTimer");
-    auto ctx = std::make_shared<qb::http::Context<MockTimingSession>>(
-        create_request(), qb::http::Response{}, _session, [](qb::http::Context<MockTimingSession> &) {},
-        std::weak_ptr<qb::http::RouterCore<MockTimingSession>>{});
-
-    timing_mw->process(ctx);
-    timing_mw.reset();
+    // Steppable-clock equivalent: rewind the recorded start by a known offset so the
+    // hook measures a deterministic minimum elapsed time (end is captured at hook time,
+    // immediately after — the ceiling is generous and cannot race).
+    constexpr auto offset = 50ms;
+    ctx->set(context_key, TimingMW::Clock::now() - offset);
 
     ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
 
-    EXPECT_TRUE(callback_was_invoked);
-    EXPECT_FALSE(ctx->response().header("X-Response-Time").empty());
+    ASSERT_TRUE(_last_duration.has_value());
+    EXPECT_GE(_last_duration->count(), 50);
+    EXPECT_LT(_last_duration->count(), 5000); // generous ceiling: never races
+
+    auto parsed = parse_response_time_ms(std::string(ctx->response().header(std::string("X-Response-Time"))));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_GE(*parsed, 50.0);
 }
 
-TEST_F(TimingMiddlewareTest, TimingCallbackReceivesCorrectDuration) {
-    std::optional<std::chrono::milliseconds> secondary_callback_duration;
-    bool                                     secondary_callback_invoked = false;
+TEST_F(TimingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
+    bool callback_invoked = false;
+    auto mw               = qb::http::timing_middleware<SessionT>(
+        [&callback_invoked](const std::chrono::milliseconds &d) {
+            callback_invoked = true;
+            EXPECT_GE(d.count(), 0);
+        },
+        "DetachedTimer");
+    auto ctx = make_ctx();
 
-    qb::http::TimingMiddleware<MockTimingSession>::TimingCallback secondary_cb = [&](const std::chrono::milliseconds &duration) {
-        secondary_callback_duration = duration;
-        secondary_callback_invoked  = true;
+    mw->process(ctx);
+    mw.reset(); // destroy the middleware; the hook closure must outlive it
+
+    ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
+
+    EXPECT_TRUE(callback_invoked);
+    EXPECT_FALSE(ctx->response().header(std::string("X-Response-Time")).empty());
+}
+
+// --- Callback contract -------------------------------------------------------
+
+TEST_F(TimingMiddlewareTest, CallbackIsInvokedThroughRouter) {
+    bool callback_invoked = false;
+    auto mw               = qb::http::timing_middleware<SessionT>(
+        [&callback_invoked](const std::chrono::milliseconds &) { callback_invoked = true; }, "RouterTimer");
+
+    configure_router_and_run(mw, create_request(qb::http::method::GET, "/mw_test"), qb::http::status::OK, "/mw_test");
+
+    EXPECT_TRUE(_session->_final_handler_called);
+    EXPECT_TRUE(callback_invoked);
+}
+
+TEST_F(TimingMiddlewareTest, CustomNaming) {
+    auto mw = qb::http::timing_middleware<SessionT>(_record_cb, "MyCustomTimerName");
+    EXPECT_EQ(mw->name(), "MyCustomTimerName");
+}
+
+TEST_F(TimingMiddlewareTest, ConstructorAndFactoryThrowOnNullCallback) {
+    EXPECT_THROW({ TimingMW bad_mw(nullptr, "NullCbTimer"); }, std::invalid_argument);
+    EXPECT_THROW({ (void) qb::http::timing_middleware<SessionT>(nullptr, "NullCbFactory"); }, std::invalid_argument);
+}
+
+// --- Two middlewares with distinct names keep independent start keys ----------
+
+TEST_F(TimingMiddlewareTest, DistinctNamesYieldIndependentTiming) {
+    std::optional<std::chrono::milliseconds> d1, d2;
+    auto mw1 = qb::http::timing_middleware<SessionT>([&](const std::chrono::milliseconds &d) { d1 = d; }, "Timer1");
+    auto mw2 = qb::http::timing_middleware<SessionT>([&](const std::chrono::milliseconds &d) { d2 = d; }, "Timer2");
+
+    auto ctx = make_ctx();
+    mw1->process(ctx);
+    mw2->process(ctx);
+
+    // Seed Timer1's key 30ms in the past, Timer2's key 10ms in the past: the two callbacks
+    // must report distinct, deterministic minimum durations — no live-run NEAR/NE coupling.
+    const auto now = TimingMW::Clock::now();
+    ctx->set(std::string("__TimingMiddleware_StartTime_Timer1"), now - 30ms);
+    ctx->set(std::string("__TimingMiddleware_StartTime_Timer2"), now - 10ms);
+
+    ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
+
+    ASSERT_TRUE(d1.has_value());
+    ASSERT_TRUE(d2.has_value());
+    EXPECT_GE(d1->count(), 30);
+    EXPECT_GE(d2->count(), 10);
+    EXPECT_GT(d1->count(), d2->count());
+}
+
+// --- Same name twice: second process() overwrites the shared key -------------
+
+TEST_F(TimingMiddlewareTest, DuplicateNameSharesStartKeyBothHooksFire) {
+    int  invocations = 0;
+    auto cb          = [&](const std::chrono::milliseconds &d) {
+        ++invocations;
+        EXPECT_GE(d.count(), 20);
     };
+    auto mw1 = qb::http::timing_middleware<SessionT>(cb, "DuplicateNameTimer");
+    auto mw2 = qb::http::timing_middleware<SessionT>(cb, "DuplicateNameTimer");
 
-    // We use two different timing middlewares to ensure their context keys don't clash
-    // and to simulate a more complex scenario. One uses the fixture's callback, one uses secondary_cb.
-    auto timing_mw1 = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, "Timer1");
-    auto timing_mw2 = qb::http::timing_middleware<MockTimingSession>(secondary_cb, "Timer2");
+    auto ctx = make_ctx();
+    mw1->process(ctx);
+    mw2->process(ctx); // overwrites the shared start key with its own now()
 
-    _router->use(timing_mw1); // This will log to _session->_last_duration_logged
-    _router->use(timing_mw2); // This will log to secondary_callback_duration
-    _router->get("/timed_route", simple_handler(std::chrono::milliseconds(10)));
-    _router->compile();
+    // Both hooks read the SAME (last-written) start key; seed it deterministically.
+    ctx->set(std::string("__TimingMiddleware_StartTime_DuplicateNameTimer"), TimingMW::Clock::now() - 20ms);
+    ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
 
-    _session->reset();
-    _router->route(_session, create_request());
-
-    EXPECT_TRUE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_last_duration_logged.has_value());
-    ASSERT_TRUE(secondary_callback_invoked);
-    ASSERT_TRUE(secondary_callback_duration.has_value());
-
-    // Check that the durations are very close. Allow a small difference (e.g., 5ms) for overhead.
-    EXPECT_GE(_session->_last_duration_logged->count(), 10);
-    EXPECT_GE(secondary_callback_duration->count(), 10);
-    EXPECT_NEAR(_session->_last_duration_logged->count(), secondary_callback_duration->count(), 5);
+    EXPECT_EQ(invocations, 2);
 }
 
-TEST_F(TimingMiddlewareTest, TimingMultipleRequestsSequentially) {
-    auto timing_mw = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, "SequentialTimer");
+// --- Robustness: missing / wrong-typed start key, throwing callback ----------
 
-    // Configure router once with the middleware
-    _router->use(timing_mw);
-    _router->get("/timed_route", simple_handler(std::chrono::milliseconds(10)));   // Handler with 10ms delay
-    _router->get("/timed_route_2", simple_handler(std::chrono::milliseconds(20))); // Handler with 20ms delay
-    _router->compile();
-
-    // Request 1
-    _session->reset();
-    _router->route(_session, create_request("/timed_route"));
-    EXPECT_TRUE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_last_duration_logged.has_value());
-    EXPECT_GE(_session->_last_duration_logged->count(), 10);
-    EXPECT_LT(_session->_last_duration_logged->count(), 60); // 10ms + 50ms buffer
-    std::chrono::milliseconds duration1 = *_session->_last_duration_logged;
-
-    // Request 2 - should be independent
-    _session->reset();
-    _router->route(_session, create_request("/timed_route_2"));
-    EXPECT_TRUE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_last_duration_logged.has_value());
-    EXPECT_GE(_session->_last_duration_logged->count(), 20);
-    EXPECT_LT(_session->_last_duration_logged->count(), 70); // 20ms + 50ms buffer
-    std::chrono::milliseconds duration2 = *_session->_last_duration_logged;
-
-    // Ensure durations are somewhat distinct as per handler delays
-    EXPECT_NE(duration1.count(), duration2.count());
-    // A more robust check might be that duration2 is roughly duration1 + 10ms, but that's too fragile.
-    // Simply checking they are roughly what we expect for each handler is sufficient.
-}
-
-TEST_F(TimingMiddlewareTest, TimingMiddlewareAddedMultipleTimesSameName) {
-    int                                                           callback_invocation_count = 0;
-    std::vector<std::chrono::milliseconds>                        durations_logged;
-    qb::http::TimingMiddleware<MockTimingSession>::TimingCallback multi_cb = [&](const std::chrono::milliseconds &duration) {
-        callback_invocation_count++;
-        durations_logged.push_back(duration);
-    };
-
-    // Add two instances with the SAME name and callback
-    auto timing_mw1 = qb::http::timing_middleware<MockTimingSession>(multi_cb, "DuplicateNameTimer");
-    auto timing_mw2 = qb::http::timing_middleware<MockTimingSession>(multi_cb, "DuplicateNameTimer");
-
-    // Re-initialize router for this specific test setup in configure_router_and_run
-    _router = std::make_unique<qb::http::Router<MockTimingSession>>();
-    _router->use(timing_mw1);
-    _router->use(timing_mw2);
-    _router->get("/timed_route", simple_handler(std::chrono::milliseconds(5)));
-    _router->compile();
-
-    _session->reset();
-    _router->route(_session, create_request());
-
-    EXPECT_TRUE(_session->_final_handler_called);
-    // Because both middlewares use the same context key ("__TimingMiddleware_StartTime_DuplicateNameTimer"),
-    // the second middleware's process() call will overwrite the start time set by the first.
-    // When the REQUEST_COMPLETE hook runs, both lifecycle hooks (one for each middleware instance)
-    // will be triggered. Both will read the SAME start time (the one set by mw2).
-    // Thus, both will calculate and report roughly the same duration: (end_time - start_time_mw2).
-    // The callback will be invoked twice.
-    EXPECT_EQ(callback_invocation_count, 2);
-    ASSERT_EQ(durations_logged.size(), 2);
-
-    if (durations_logged.size() == 2) {
-        EXPECT_GE(durations_logged[0].count(), 5);
-        EXPECT_GE(durations_logged[1].count(), 5);
-        // The durations should be very close as they measure from mw2's start time to hook execution time.
-        EXPECT_NEAR(durations_logged[0].count(), durations_logged[1].count(), 5);
-    }
-}
-
-TEST_F(TimingMiddlewareTest, TimingWhenHandlerThrowsException) {
-    auto timing_mw = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, "ExceptionTimer");
-
-    qb::http::RouteHandlerFn<MockTimingSession> throwing_handler = [](std::shared_ptr<qb::http::Context<MockTimingSession>> ctx) {
-        // This handler will complete the context with an error, but also throw.
-        // Or, it could just throw and rely on a higher-level error handler to call ctx->complete(ERROR).
-        // For TimingMiddleware, what matters is if REQUEST_COMPLETE hook is run by Context/RouterCore.
-        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-        ctx->response().body()   = "Handler threw intentionally";
-        // No explicit ctx->complete() here, to simulate a raw throw or an error handler doing it.
-        // If RouterCore ensures finalize_processing (and thus REQUEST_COMPLETE hooks) on exceptions, timing should work.
-        throw std::runtime_error("Intentional exception from handler");
-    };
-
-    // Define a simple middleware for error finalization
-    class SimpleErrorFinalizerMiddleware : public qb::http::IMiddleware<MockTimingSession> {
-    public:
-        std::string
-        name() const override {
-            return "SimpleErrorFinalizerMiddleware";
-        }
-
-        // Corrected handle signature
-        void
-        process(std::shared_ptr<qb::http::Context<MockTimingSession>> ctx) override {
-            // Assuming status_code_type defaults to 0 or an equivalent state if not explicitly set.
-            // If there's a specific "unset" enum member, that should be used.
-            // For now, checking against a default-constructed qb::http::status (often 0 for enums).
-            if (ctx->response().status() == qb::http::status{}) {
-                ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-            }
-            ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Ensure completion
-        }
-
-        // Added missing cancel method
-        void
-        cancel() override {
-            // Default empty implementation
-        }
-    };
-
-    _router = std::make_unique<qb::http::Router<MockTimingSession>>();
-    _router->use(timing_mw);
-    _router->get("/timed_route_throws", throwing_handler);
-
-    auto error_finalizer_mw = std::make_shared<SimpleErrorFinalizerMiddleware>();
-    auto error_task         = std::make_shared<qb::http::MiddlewareTask<MockTimingSession>>(error_finalizer_mw, "SimpleErrorFinalizerTask");
-
-    _router->set_error_task_chain({error_task});
-    _router->compile();
-
-    _session->reset();
-    // We need to catch the exception that might propagate from router->route()
-    // depending on how RouterCore handles it internally versus its error chain.
-    try {
-        _router->route(_session, create_request("/timed_route_throws"));
-    } catch (const std::runtime_error &e) {
-        // Expected if error chain doesn't fully suppress it from propagating from route() call
-        EXPECT_STREQ(e.what(), "Intentional exception from handler");
-    } catch (...) {
-        FAIL() << "Unexpected exception type thrown from router->route()";
-    }
-
-    // Crucially, check if the timing callback was invoked, even if an exception occurred.
-    // This relies on RouterCore/Context to call REQUEST_COMPLETE hooks in its finalization path.
-    ASSERT_TRUE(_session->_last_duration_logged.has_value());
-    EXPECT_GE(_session->_last_duration_logged->count(), 0);
-    // final_handler_called will be false as the normal handler didn't complete due to exception
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-// Note on "CompletedRequest": The current TimingMiddleware uses HookPoint::REQUEST_COMPLETE,
-// so it inherently times the completed request. This is implicitly tested by other tests.
-
-// Note on "ConcurrentTiming": Testing true concurrency effects on timing would require a more
-// complex setup with multiple threads and a way to interleave requests, which is beyond
-// the scope of typical unit tests for the middleware logic itself. The current design
-// stores start time in context, which is per-request, so it should be safe for concurrency.
-
-// Note on "IntegrationWithComplete": TimingMiddleware relies on the router's complete lifecycle
-// to trigger its hook. The existing tests verify it by checking _last_duration_logged.
-
-// --- Additional Test Cases ---
-
-TEST_F(TimingMiddlewareTest, ConstructorThrowsOnNullCallback) {
-    // Attempt to create TimingMiddleware directly with a null callback
-    // The constructor is expected to throw std::invalid_argument
-    EXPECT_THROW({ qb::http::TimingMiddleware<MockTimingSession> bad_mw(nullptr, "NullCbTimer"); }, std::invalid_argument);
-
-    // Also test the factory function
-    EXPECT_THROW(
-        { auto bad_mw_factory = qb::http::timing_middleware<MockTimingSession>(nullptr, "NullCbFactoryTimer"); }, std::invalid_argument);
-}
-
-TEST_F(TimingMiddlewareTest, TimingFor404NotFound) {
-    auto timing_mw = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, "NotFoundTimer");
-
-    // Re-initialize router and add only the timing middleware
-    _router = std::make_unique<qb::http::Router<MockTimingSession>>();
-    _router->use(timing_mw);
-    // NO routes are added that would match "/non_existent_route"
-    _router->compile();
-
-    _session->reset();
-    _router->route(_session, create_request("/non_existent_route"));
-
-    // Even for a 404, the REQUEST_COMPLETE hook should run, and thus timing should occur.
-    EXPECT_TRUE(_session->_last_duration_logged.has_value());
-    EXPECT_GE(_session->_last_duration_logged->count(), 0);
-    // The final handler (if any is configured for 404s) might or might not set _final_handler_called.
-    // For this test, we primarily care that timing happened.
-    // The default router behavior should result in a 404 status code.
-    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::NOT_FOUND);
-}
-
-TEST_F(TimingMiddlewareTest, CallbackThrowsException) {
-    bool                                                          main_callback_invoked = false;
-    qb::http::TimingMiddleware<MockTimingSession>::TimingCallback throwing_cb =
-        [&main_callback_invoked](const std::chrono::milliseconds & /*duration*/) {
-            main_callback_invoked = true;
-            throw std::runtime_error("Intentional exception from timing callback");
-        };
-
-    auto timing_mw_throws = qb::http::timing_middleware<MockTimingSession>(throwing_cb, "ThrowingCallbackTimer");
-
-    // We can also add a regular timing middleware to see if its hook is still called
-    // if the throwing one executes first (hook order might matter).
-    // For simplicity, let's first ensure the app doesn't crash with just the throwing one.
-
-    _router = std::make_unique<qb::http::Router<MockTimingSession>>();
-    _router->use(timing_mw_throws);
-    _router->get("/timed_route", simple_handler());
-    _router->compile();
-
-    _session->reset();
-
-    // The expectation is that the router and middleware handle the callback's exception gracefully
-    // and do not let it propagate unhandled out of the route() call, crashing the test/app.
-    // The request should still complete, possibly with an internal server error if the hook exception is severe,
-    // or simply with the hook being skipped/logged internally.
-    EXPECT_NO_THROW({ _router->route(_session, create_request("/timed_route")); });
-
-    // Check if the response was set as expected by the simple_handler, indicating request processing continued
-    // somewhat normally past the point where the timing hook would have thrown.
-    // This depends on how the router's hook execution handles exceptions from individual hooks.
-    // If a hook throwing prevents subsequent processing or sets an error status, this might change.
-    // For now, let's assume the simple_handler still completes.
-    EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::OK);
-    // Verify that the callback was invoked before throwing
-    EXPECT_TRUE(main_callback_invoked) << "Timing callback should have been invoked even though it threw";
-    // _last_duration_logged will not be set by the throwing_cb. If we had another non-throwing
-    // timing callback, we could check that.
-}
-
-TEST_F(TimingMiddlewareTest, ContextKeyCollisionWrongType) {
+TEST_F(TimingMiddlewareTest, WrongTypedStartKeyIsOverwrittenAndTimingStillRuns) {
     const std::string timer_name  = "CollisionTimer";
     const std::string context_key = "__TimingMiddleware_StartTime_" + timer_name;
 
-    // 1. Custom middleware that sets the key to a wrong type (int)
-    class WrongTypeSetterMiddleware : public qb::http::IMiddleware<MockTimingSession> {
-    public:
-        std::string _key_to_set;
+    auto ctx = make_ctx();
+    ctx->set(context_key, 12345); // wrong type set before the middleware
 
-        WrongTypeSetterMiddleware(std::string key)
-            : _key_to_set(std::move(key)) {}
+    auto mw = qb::http::timing_middleware<SessionT>(_record_cb, timer_name);
+    mw->process(ctx); // overwrites with a proper TimePoint
+    ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
 
-        std::string
-        name() const override {
-            return "WrongTypeSetter";
-        }
+    ASSERT_TRUE(_last_duration.has_value());
+    EXPECT_GE(_last_duration->count(), 0);
+}
 
-        void
-        process(std::shared_ptr<qb::http::Context<MockTimingSession>> ctx) override {
-            ctx->set(_key_to_set, 12345); // Set an int, TimingMiddleware expects TimePoint
-            ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
-        }
+TEST_F(TimingMiddlewareTest, ThrowingCallbackIsSuppressedResponseStillStamped) {
+    bool callback_invoked = false;
+    auto mw               = qb::http::timing_middleware<SessionT>(
+        [&callback_invoked](const std::chrono::milliseconds &) {
+            callback_invoked = true;
+            throw std::runtime_error("callback boom");
+        },
+        "ThrowingTimer");
+    auto ctx = make_ctx();
+    mw->process(ctx);
 
-        void
-        cancel() override {}
-    };
+    EXPECT_NO_THROW(ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND));
+    EXPECT_TRUE(callback_invoked);
+    // Header is stamped before the callback runs, so it survives the suppressed throw.
+    EXPECT_FALSE(ctx->response().header(std::string("X-Response-Time")).empty());
+}
 
-    auto wrong_type_setter_mw = std::make_shared<WrongTypeSetterMiddleware>(context_key);
-    auto timing_mw            = qb::http::timing_middleware<MockTimingSession>(_test_timing_callback, timer_name);
+TEST_F(TimingMiddlewareTest, TimingForNotFoundRoute) {
+    auto mw = qb::http::timing_middleware<SessionT>(_record_cb, "NotFoundTimer");
 
-    _router = std::make_unique<qb::http::Router<MockTimingSession>>();
-    _router->use(wrong_type_setter_mw); // This runs first
-    _router->use(timing_mw);            // This runs second
-    _router->get("/timed_route", simple_handler());
-    _router->compile();
-
+    _router = std::make_unique<qb::http::Router<SessionT>>();
+    _router->use(mw);
+    _router->compile(); // no routes
     _session->reset();
-    _router->route(_session, create_request("/timed_route"));
+    _router->route(_session, create_request(qb::http::method::GET, "/no_such_route"));
 
-    // The TimingMiddleware should successfully overwrite the incorrect type and proceed with timing.
-    // Therefore, the _test_timing_callback (which sets _last_duration_logged) SHOULD be called.
-    EXPECT_TRUE(_session->_last_duration_logged.has_value());
-    if (_session->_last_duration_logged.has_value()) {
-        EXPECT_GE(_session->_last_duration_logged->count(), 0);
-    }
-
-    // The request should still complete normally via simple_handler.
-    EXPECT_TRUE(_session->_final_handler_called);
-    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::OK);
+    EXPECT_TRUE(_last_duration.has_value());
+    EXPECT_GE(_last_duration->count(), 0);
+    EXPECT_EQ(_session->get_response_ref().status(), qb::http::status::NOT_FOUND);
 }

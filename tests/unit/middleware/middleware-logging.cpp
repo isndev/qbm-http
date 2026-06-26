@@ -1,24 +1,42 @@
+/**
+ * @file qbm/http/tests/unit/middleware/middleware-logging.cpp
+ * @brief Unit tests for qb::http::LoggingMiddleware (request/response log emission).
+ *
+ * LoggingMiddleware logs one Info "Request: <METHOD> <path>" line on process() and one
+ * "Response: <status>" line from a PRE_RESPONSE_SEND hook. These tests pin the exact
+ * entry count, levels, path formatting (query deliberately excluded; trailing slash
+ * preserved verbatim by qb::io::uri::path()), the lifecycle-hook survival across
+ * middleware destruction, the null-logger guard, naming, and relative ordering when
+ * the logging middleware sits ahead of another middleware in the chain.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include <gtest/gtest.h>
-#include "../http.h"
-#include "../middleware/logging.h" // The adapted LoggingMiddleware
-#include "../request.h"
-#include "../response.h"
-#include "../routing/context.h"
-#include "../routing/middleware.h" // For MiddlewareTask if needed
-#include "../routing/router.h"
-#include "../routing/types.h"
 
-#include <functional>
 #include <memory>
-#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
-// --- Mock Session for LoggingMiddleware Tests ---
-struct MockLoggingSession {
+#include "../http.h"
+#include "../middleware/logging.h"
+#include "../routing/middleware.h"
+
+#include "../../shared/middleware_test_fixture.h"
+
+namespace {
+
+/**
+ * @brief Capturing session for logging tests: records (level, message) pairs plus an
+ *        ordered event trace for multi-middleware ordering assertions.
+ */
+struct LoggingSession {
     qb::http::Response                                      _response;
-    std::string                                             _session_id_str = "logging_test_session";
     std::vector<std::pair<qb::http::LogLevel, std::string>> _log_entries;
+    std::vector<std::string>                                _order_trace;
     bool                                                    _final_handler_called = false;
 
     qb::http::Response &
@@ -26,7 +44,7 @@ struct MockLoggingSession {
         return _response;
     }
 
-    MockLoggingSession &
+    LoggingSession &
     operator<<(const qb::http::Response &resp) {
         _response = resp;
         return *this;
@@ -36,296 +54,244 @@ struct MockLoggingSession {
     reset() {
         _response = qb::http::Response();
         _log_entries.clear();
+        _order_trace.clear();
         _final_handler_called = false;
-    }
-
-    void
-    add_log_entry(qb::http::LogLevel level, const std::string &message) {
-        _log_entries.push_back({level, message});
     }
 };
 
-// --- Test Fixture for LoggingMiddleware ---
-class LoggingMiddlewareTest : public ::testing::Test {
-protected:
-    std::shared_ptr<MockLoggingSession>                   _session;
-    std::unique_ptr<qb::http::Router<MockLoggingSession>> _router;
-    // TaskExecutor not needed as LoggingMiddleware and its hooks are synchronous in nature for logging.
+using LoggingMW = qb::http::LoggingMiddleware<LoggingSession>;
 
-    // The LogFunction for tests will append to _session->_log_entries
-    qb::http::LoggingMiddleware<MockLoggingSession>::LogFunction _test_logger_func;
+/** @brief Trivial middleware recording a marker into the session order trace, then CONTINUEs. */
+class OrderTracerMiddleware : public qb::http::IMiddleware<LoggingSession> {
+public:
+    explicit OrderTracerMiddleware(std::string marker)
+        : _marker(std::move(marker)) {}
+
+    void
+    process(std::shared_ptr<qb::http::Context<LoggingSession>> ctx) override {
+        if (ctx->session())
+            ctx->session()->_order_trace.push_back(_marker);
+        ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+    }
+
+    [[nodiscard]] std::string
+    name() const override {
+        return _marker;
+    }
+
+    void
+    cancel() override {}
+
+private:
+    std::string _marker;
+};
+
+} // namespace
+
+/**
+ * @brief Fixture for LoggingMiddleware: provides a logger capturing into the session.
+ */
+class LoggingMiddlewareTest : public qb::http::test::MiddlewareTestFixture<LoggingSession> {
+protected:
+    LoggingMW::LogFunction _logger;
 
     void
     SetUp() override {
-        _session          = std::make_shared<MockLoggingSession>();
-        _router           = std::make_unique<qb::http::Router<MockLoggingSession>>();
-        _test_logger_func = [this](qb::http::LogLevel level, const std::string &message) {
-            if (_session) {
-                _session->add_log_entry(level, message);
-            }
-        };
-    }
-
-    qb::http::Request
-    create_request(qb::http::method method_val = qb::http::method::GET, const std::string &target_path = "/log_test",
-                   const std::string &query_params = "") {
-        qb::http::Request req;
-        req.method()          = method_val;
-        std::string full_path = target_path;
-        if (!query_params.empty()) {
-            full_path += "?" + query_params;
-        }
-        try {
-            req.uri() = qb::io::uri(full_path);
-        } catch (const std::exception &e) {
-            ADD_FAILURE() << "URI parse failure: " << full_path << " (" << e.what() << ")";
-            req.uri() = qb::io::uri("/_ERROR_URI_");
-        }
-        return req;
-    }
-
-    qb::http::RouteHandlerFn<MockLoggingSession>
-    basic_handler(qb::http::status status_to_return = qb::http::status::OK) {
-        return [this, status_to_return](std::shared_ptr<qb::http::Context<MockLoggingSession>> ctx) {
+        MiddlewareTestFixture<LoggingSession>::SetUp();
+        _logger = [this](qb::http::LogLevel level, const std::string &message) {
             if (_session)
-                _session->_final_handler_called = true;
-            ctx->response().status() = status_to_return;
-            ctx->response().body()   = "HandlerResponse";
-            ctx->complete();
+                _session->_log_entries.push_back({level, message});
         };
     }
 
+    /** @brief Mounts the logging middleware ahead of a basic handler on @p path, compiles, routes one request. */
     void
-    configure_router_and_run(std::shared_ptr<qb::http::LoggingMiddleware<MockLoggingSession>> logging_mw, qb::http::Request request,
-                             qb::http::status handler_status = qb::http::status::OK) {
-        _router->use(logging_mw);
-        _router->get("/log_test", basic_handler(handler_status));
-        _router->post("/log_test", basic_handler(handler_status)); // Add for different methods
+    run_single_route(std::shared_ptr<LoggingMW> mw, qb::http::Request request, const std::string &path,
+                     qb::http::status handler_status = qb::http::status::OK) {
+        _router = std::make_unique<qb::http::Router<LoggingSession>>();
+        _router->use(std::move(mw));
+        _router->get(path, basic_handler(handler_status));
+        _router->post(path, basic_handler(handler_status));
+        _router->del(path, basic_handler(handler_status));
         _router->compile();
-
         _session->reset();
         _router->route(_session, std::move(request));
-        // Lifecycle hooks for response logging will be triggered by the router's processing.
     }
 };
 
-// --- Test Cases ---
+// --- Basic emission ----------------------------------------------------------
 
 TEST_F(LoggingMiddlewareTest, BasicRequestAndResponseLogging) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-    configure_router_and_run(logging_mw, create_request(qb::http::method::GET, "/log_test"));
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/log_test"),
+                     "/log_test");
 
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Info); // Default request level
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Info);
     EXPECT_NE(_session->_log_entries[0].second.find("Request: GET /log_test"), std::string::npos);
-
-    EXPECT_EQ(_session->_log_entries[1].first, qb::http::LogLevel::Debug); // Default response level
+    EXPECT_EQ(_session->_log_entries[1].first, qb::http::LogLevel::Debug);
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 200"), std::string::npos);
-    // Assuming 200 OK from basic_handler
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(LoggingMiddlewareTest, CustomLogLevels) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func,
-                                                                       qb::http::LogLevel::Debug,  // Request level
-                                                                       qb::http::LogLevel::Warning // Response level
-    );
-    configure_router_and_run(logging_mw, create_request(), qb::http::status::NOT_FOUND);
+    run_single_route(
+        qb::http::logging_middleware<LoggingSession>(_logger, qb::http::LogLevel::Debug, qb::http::LogLevel::Warning),
+        create_request(qb::http::method::GET, "/log_test"), "/log_test", qb::http::status::NOT_FOUND);
 
-    ASSERT_EQ(_session->_log_entries.size(), 2);
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Debug);
     EXPECT_EQ(_session->_log_entries[1].first, qb::http::LogLevel::Warning);
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 404"), std::string::npos);
 }
 
-TEST_F(LoggingMiddlewareTest, DifferentHttpMethodsLogging) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-    configure_router_and_run(logging_mw, create_request(qb::http::method::POST, "/log_test"));
-
-    ASSERT_EQ(_session->_log_entries.size(), 2);
+TEST_F(LoggingMiddlewareTest, DifferentHttpMethodsLogged) {
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::POST, "/log_test"),
+                     "/log_test");
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_NE(_session->_log_entries[0].second.find("Request: POST /log_test"), std::string::npos);
 }
 
-TEST_F(LoggingMiddlewareTest, LoggingWithPathAndQueryParameters) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-    // Test path parameters by defining a route that would extract them, though logging format might not show them by default.
-    // The current format_request only logs method and path.
-    // For query parameters, they are part of the URI path.
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>();
-    _router->use(logging_mw);
-    _router->get("/log_test/item/:id", basic_handler());
-    _router->compile();
-
-    _session->reset();
-    _router->route(_session, create_request(qb::http::method::GET, "/log_test/item/123", "param1=val1&param2=val2"));
-
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    // Current format_request only includes path, not full URI with query.
-    // To test query params in log, format_request would need to use request.uri().full_path() or similar.
-    // For now, we test that path part is logged.
-    EXPECT_NE(_session->_log_entries[0].second.find("Request: GET /log_test/item/123"), std::string::npos);
-    // If format_request were to include query:
-    // EXPECT_NE(_session->_log_entries[0].second.find("param1=val1&param2=val2"), std::string::npos);
-}
-
-TEST_F(LoggingMiddlewareTest, ErrorResponseLogging) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-    configure_router_and_run(logging_mw, create_request(), qb::http::status::INTERNAL_SERVER_ERROR);
-
-    ASSERT_EQ(_session->_log_entries.size(), 2);
+TEST_F(LoggingMiddlewareTest, ErrorResponseLogged) {
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/log_test"),
+                     "/log_test", qb::http::status::INTERNAL_SERVER_ERROR);
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 500"), std::string::npos);
 }
 
-TEST_F(LoggingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-    auto ctx        = std::make_shared<qb::http::Context<MockLoggingSession>>(
-        create_request(qb::http::method::GET, "/log_test"), qb::http::Response{}, _session, [](qb::http::Context<MockLoggingSession> &) {},
-        std::weak_ptr<qb::http::RouterCore<MockLoggingSession>>{});
+TEST_F(LoggingMiddlewareTest, VariousStatusCodesRendered) {
+    struct Case {
+        qb::http::method method;
+        std::string      path;
+        qb::http::status status;
+        std::string      expect;
+    };
+    const Case cases[] = {
+        {qb::http::method::GET, "/path101", qb::http::status::SWITCHING_PROTOCOLS, "Response: 101"},
+        {qb::http::method::POST, "/path201", qb::http::status::CREATED, "Response: 201"},
+        {qb::http::method::DEL, "/path204", qb::http::status::NO_CONTENT, "Response: 204"},
+        {qb::http::method::GET, "/path302", qb::http::status::FOUND, "Response: 302"},
+    };
+    for (const auto &c : cases) {
+        run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(c.method, c.path), c.path, c.status);
+        ASSERT_EQ(_session->_log_entries.size(), 2u) << c.path;
+        EXPECT_NE(_session->_log_entries[1].second.find(c.expect), std::string::npos) << c.path;
+    }
+}
 
-    logging_mw->process(ctx);
-    logging_mw.reset();
+// --- Path formatting contract ------------------------------------------------
+
+TEST_F(LoggingMiddlewareTest, QueryParametersExcludedFromRequestLog) {
+    auto mw = qb::http::logging_middleware<LoggingSession>(_logger);
+    _router = std::make_unique<qb::http::Router<LoggingSession>>();
+    _router->use(mw);
+    _router->get("/log_test_query", basic_handler());
+    _router->compile();
+    _session->reset();
+    _router->route(_session, create_request(qb::http::method::GET, "/log_test_query", "param1=value1&param2=value2"));
+
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    const std::string &msg = _session->_log_entries[0].second;
+    EXPECT_NE(msg.find("Request: GET /log_test_query"), std::string::npos);
+    EXPECT_EQ(msg.find("param1=value1"), std::string::npos);
+    EXPECT_EQ(msg.find("param2=value2"), std::string::npos);
+    EXPECT_EQ(msg.find('?'), std::string::npos);
+}
+
+TEST_F(LoggingMiddlewareTest, RootPathLogged) {
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/"), "/");
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    EXPECT_NE(_session->_log_entries[0].second.find("Request: GET /"), std::string::npos);
+}
+
+TEST_F(LoggingMiddlewareTest, TrailingSlashPreservedVerbatim) {
+    // qb::io::uri::path() returns the path component unmodified, so format_request_info()
+    // logs the trailing slash exactly as supplied — deterministic, not normalization-dependent.
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger),
+                     create_request(qb::http::method::GET, "/trailing/"), "/trailing/");
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    const std::string &with_slash = _session->_log_entries[0].second;
+    EXPECT_NE(with_slash.find("Request: GET /trailing/"), std::string::npos);
+    // Contrast: the non-trailing form logs WITHOUT the slash — proving verbatim, not collapsed.
+    EXPECT_EQ(with_slash.find("Request: GET /trailing "), std::string::npos);
+    EXPECT_EQ(with_slash.find("Request: GET /trailing\n"), std::string::npos);
+
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger),
+                     create_request(qb::http::method::GET, "/trailing"), "/trailing");
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    const std::string &no_slash = _session->_log_entries[0].second;
+    EXPECT_NE(no_slash.find("Request: GET /trailing"), std::string::npos);
+    EXPECT_EQ(no_slash.find("Request: GET /trailing/"), std::string::npos);
+}
+
+// --- Lifecycle-hook survival -------------------------------------------------
+
+TEST_F(LoggingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
+    auto mw  = qb::http::logging_middleware<LoggingSession>(_logger);
+    auto ctx = std::make_shared<qb::http::Context<LoggingSession>>(
+        create_request(qb::http::method::GET, "/log_test"), qb::http::Response{}, _session,
+        [](qb::http::Context<LoggingSession> &) {}, std::weak_ptr<qb::http::RouterCore<LoggingSession>>{});
+
+    mw->process(ctx);
+    mw.reset(); // destroy middleware; the response-log hook closure must survive
 
     ctx->response().status() = qb::http::status::CREATED;
     ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
 
-    ASSERT_EQ(_session->_log_entries.size(), 2);
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 201"), std::string::npos);
 }
 
-TEST_F(LoggingMiddlewareTest, ConstructorThrowsOnNullLogFunction) {
-    qb::http::LoggingMiddleware<MockLoggingSession>::LogFunction null_logger = nullptr;
-    EXPECT_THROW(qb::http::LoggingMiddleware<MockLoggingSession> logging_mw(null_logger), std::invalid_argument);
+// --- Guards & naming ---------------------------------------------------------
 
-    // Also test factory function
-    EXPECT_THROW((void) qb::http::logging_middleware<MockLoggingSession>(null_logger), std::invalid_argument);
+TEST_F(LoggingMiddlewareTest, ConstructorAndFactoryThrowOnNullLogFunction) {
+    LoggingMW::LogFunction null_logger = nullptr;
+    EXPECT_THROW(LoggingMW logging_mw(null_logger), std::invalid_argument);
+    EXPECT_THROW((void) qb::http::logging_middleware<LoggingSession>(null_logger), std::invalid_argument);
 }
 
 TEST_F(LoggingMiddlewareTest, MiddlewareNameIsCorrect) {
-    // Test default name
-    auto logging_mw_default_name = qb::http::LoggingMiddleware<MockLoggingSession>(_test_logger_func);
-    EXPECT_EQ(logging_mw_default_name.name(), "LoggingMiddleware");
+    LoggingMW default_ctor(_logger);
+    EXPECT_EQ(default_ctor.name(), "LoggingMiddleware");
 
-    // Test custom name via constructor
-    auto logging_mw_custom_name_ctor = qb::http::LoggingMiddleware<MockLoggingSession>(_test_logger_func, qb::http::LogLevel::Info,
-                                                                                       qb::http::LogLevel::Info, "MyCustomLogger");
-    EXPECT_EQ(logging_mw_custom_name_ctor.name(), "MyCustomLogger");
+    LoggingMW custom_ctor(_logger, qb::http::LogLevel::Info, qb::http::LogLevel::Info, "MyCustomLogger");
+    EXPECT_EQ(custom_ctor.name(), "MyCustomLogger");
 
-    // Test default name via factory
-    auto logging_mw_default_name_factory = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-    EXPECT_EQ(logging_mw_default_name_factory->name(), "LoggingMiddleware");
-
-    // Test custom name via factory
-    auto logging_mw_custom_name_factory = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func, qb::http::LogLevel::Info,
-                                                                                           qb::http::LogLevel::Info, "MyFactoryLogger");
-    EXPECT_EQ(logging_mw_custom_name_factory->name(), "MyFactoryLogger");
+    EXPECT_EQ(qb::http::logging_middleware<LoggingSession>(_logger)->name(), "LoggingMiddleware");
+    EXPECT_EQ(qb::http::logging_middleware<LoggingSession>(_logger, qb::http::LogLevel::Info, qb::http::LogLevel::Info, "MyFactoryLogger")
+                  ->name(),
+              "MyFactoryLogger");
 }
 
-TEST_F(LoggingMiddlewareTest, QueryParametersExcludedFromRequestLog) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
+// --- Multi-middleware ordering ----------------------------------------------
 
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>(); // Reset router for this specific test
+TEST_F(LoggingMiddlewareTest, RequestLoggedOnceBeforeDownstreamMiddleware) {
+    // Logging middleware first, then a tracer: the request line is emitted exactly once,
+    // BEFORE the downstream middleware runs; the response line is emitted once after.
+    auto logging_mw = qb::http::logging_middleware<LoggingSession>(_logger);
+    auto tracer     = std::make_shared<OrderTracerMiddleware>("downstream");
+
+    _router = std::make_unique<qb::http::Router<LoggingSession>>();
     _router->use(logging_mw);
-    _router->get("/log_test_query", basic_handler()); // Use a unique path for this test
+    _router->use(tracer);
+    _router->get("/ordered", [this](std::shared_ptr<qb::http::Context<LoggingSession>> ctx) {
+        _session->_final_handler_called = true;
+        _session->_order_trace.push_back("handler");
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "ok";
+        ctx->complete();
+    });
     _router->compile();
-
     _session->reset();
-    // Create request with query parameters
-    _router->route(_session, create_request(qb::http::method::GET, "/log_test_query", "param1=value1&param2=value2"));
+    _router->route(_session, create_request(qb::http::method::GET, "/ordered"));
 
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Info);
-
-    const std::string &request_log_message = _session->_log_entries[0].second;
-    // Check that the base path is logged
-    EXPECT_NE(request_log_message.find("Request: GET /log_test_query"), std::string::npos);
-    // Check that query parameters are NOT logged
-    EXPECT_EQ(request_log_message.find("param1=value1"), std::string::npos);
-    EXPECT_EQ(request_log_message.find("param2=value2"), std::string::npos);
-    EXPECT_EQ(request_log_message.find("?"), std::string::npos); // Ensure the query string separator '?' is not present
-}
-
-TEST_F(LoggingMiddlewareTest, LogsRequestToRootPath) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>();
-    _router->use(logging_mw);
-    _router->get("/", basic_handler()); // Route for root path
-    _router->compile();
-
-    _session->reset();
-    _router->route(_session, create_request(qb::http::method::GET, "/"));
-
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Info);
-    EXPECT_NE(_session->_log_entries[0].second.find("Request: GET /"), std::string::npos);
-
-    EXPECT_EQ(_session->_log_entries[1].first, qb::http::LogLevel::Debug);
+    // Exactly two log entries (one request, one response): no double-emission.
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    EXPECT_NE(_session->_log_entries[0].second.find("Request: GET /ordered"), std::string::npos);
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 200"), std::string::npos);
+
+    // The downstream tracer and handler ran in order after the logging middleware.
+    ASSERT_EQ(_session->_order_trace.size(), 2u);
+    EXPECT_EQ(_session->_order_trace[0], "downstream");
+    EXPECT_EQ(_session->_order_trace[1], "handler");
+    EXPECT_TRUE(_session->_final_handler_called);
 }
-
-TEST_F(LoggingMiddlewareTest, LogsRequestPathWithTrailingSlash) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>();
-    _router->use(logging_mw);
-    _router->get("/test_trailing_slash/", basic_handler());
-    _router->compile();
-
-    _session->reset();
-    _router->route(_session, create_request(qb::http::method::GET, "/test_trailing_slash/"));
-
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Info);
-    // The uri().path() method used in format_request_info typically normalizes paths,
-    // so whether the trailing slash is present in the log might depend on qb::io::uri behavior.
-    // We'll expect it to be present as per the input for now and adjust if qb::io::uri normalizes it away.
-    EXPECT_NE(_session->_log_entries[0].second.find("Request: GET /test_trailing_slash/"), std::string::npos);
-}
-
-TEST_F(LoggingMiddlewareTest, LogsVariousStatusCodes) {
-    auto logging_mw = qb::http::logging_middleware<MockLoggingSession>(_test_logger_func);
-
-    // Test Case 1: 101 Switching Protocols
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>();
-    _router->use(logging_mw);
-    _router->get("/path101", basic_handler(qb::http::status::SWITCHING_PROTOCOLS));
-    _router->compile();
-    _session->reset();
-    _router->route(_session, create_request(qb::http::method::GET, "/path101"));
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_NE(_session->_log_entries[1].second.find("Response: 101"), std::string::npos);
-
-    // Test Case 2: 201 Created
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>();
-    _router->use(logging_mw);
-    _router->post("/path201", basic_handler(qb::http::status::CREATED));
-    _router->compile();
-    _session->reset();
-    _router->route(_session, create_request(qb::http::method::POST, "/path201"));
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_NE(_session->_log_entries[1].second.find("Response: 201"), std::string::npos);
-
-    // Test Case 3: 204 No Content
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>();
-    _router->use(logging_mw);
-    _router->del("/path204", basic_handler(qb::http::status::NO_CONTENT));
-    _router->compile();
-    _session->reset();
-    _router->route(_session, create_request(qb::http::method::DEL, "/path204"));
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_NE(_session->_log_entries[1].second.find("Response: 204"), std::string::npos);
-
-    // Test Case 4: 302 Found (Redirection)
-    _router = std::make_unique<qb::http::Router<MockLoggingSession>>();
-    _router->use(logging_mw);
-    _router->get("/path302", basic_handler(qb::http::status::FOUND));
-    _router->compile();
-    _session->reset();
-    _router->route(_session, create_request(qb::http::method::GET, "/path302"));
-    ASSERT_EQ(_session->_log_entries.size(), 2);
-    EXPECT_NE(_session->_log_entries[1].second.find("Response: 302"), std::string::npos);
-}
-
-// Note:
-// - RequestBodyLogging and RequestTimingLogging are not features of this basic LoggingMiddleware.
-//   Timing would be a separate TimingMiddleware. Body logging would require specific options and logic.
