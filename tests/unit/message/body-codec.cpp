@@ -623,8 +623,7 @@ TEST_F(BodyTest, ExplicitBodyConstructorsAndAssignments) {
 }
 
 TEST_F(BodyTest, BodyWithEmbeddedNulls) {
-    std::string data_with_nulls = "Hello\0World";
-    data_with_nulls.resize(11); // Ensure size includes the null
+    const std::string data_with_nulls("Hello\0World", 11); // explicit (ptr,len) ctor keeps "World" after the NUL
     body = data_with_nulls;
 
     EXPECT_EQ(11, body.size());
