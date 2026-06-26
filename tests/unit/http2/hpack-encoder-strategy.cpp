@@ -1,8 +1,8 @@
 /**
- * @file test-http2-hpack-lowlevel.cpp
+ * @file qbm/http/tests/unit/http2/hpack-encoder-strategy.cpp
  * @brief Low-level unit tests for the HPACK codec (RFC 7541).
  *
- * Companion to test-http2-hpack.cpp. This file deliberately targets the code
+ * Companion to hpack-codec.cpp. This file deliberately targets the code
  * paths that the existing suite leaves uncovered, with an emphasis on:
  *
  * - The Encoder's per-header representation-selection strategy
@@ -82,6 +82,8 @@ ll_bytes_to_hex(const std::vector<uint8_t> &data) {
 
 // Round-trip a single encoded header through a fresh Decoder, asserting the
 // decode succeeds, is not flagged incomplete, and yields exactly one header.
+// Uses ASSERT_EQ on the count so a wrong-cardinality decode fails hard at the
+// fixture (rather than dereferencing a defaulted HeaderField on the caller).
 HeaderField
 roundtrip_single(const std::vector<uint8_t> &encoded) {
     Decoder                  decoder;
@@ -89,7 +91,7 @@ roundtrip_single(const std::vector<uint8_t> &encoded) {
     bool                     incomplete = false;
     EXPECT_TRUE(decoder.decode(encoded, out, incomplete)) << "decode failed: " << ll_bytes_to_hex(encoded);
     EXPECT_FALSE(incomplete);
-    EXPECT_EQ(out.size(), 1u);
+    EXPECT_EQ(out.size(), 1u) << "expected exactly one header: " << ll_bytes_to_hex(encoded);
     return out.empty() ? HeaderField{} : out.front();
 }
 
@@ -740,10 +742,92 @@ TEST(HPACK_LL_RFC7541, AppendixC5_ResponseSequenceWithEviction) {
         EXPECT_EQ(out[3].value, "https://www.example.com");
         EXPECT_EQ(decoder.get_dynamic_table_entry_count(), 4u);
     }
+
+    // --- C.5.3 Third response ---
+    // :status 200 (indexed) / cache-control private (indexed) / date Mon, 21
+    // Oct 2013 20:13:22 GMT (literal, NEW value) / location (indexed) /
+    // content-encoding gzip (literal, new value) / set-cookie foo=... (literal,
+    // new value). Inserting "date" and "set-cookie" forces the 256-octet table
+    // to evict down to 3 live entries.
+    {
+        const auto block = ll_hex_to_bytes(
+            "88c1611d4d6f6e2c203231204f637420323031332032303a31333a323220474d54c05a04677a69707738666f6f3d4153444a4b48"
+            "514b425a584f5157454f50495541585157454f49553b206d61782d6167653d333630303b2076657273696f6e3d31");
+        std::vector<HeaderField> out;
+        bool                     incomplete = false;
+        ASSERT_TRUE(decoder.decode(block, out, incomplete));
+        EXPECT_FALSE(incomplete);
+        ASSERT_EQ(out.size(), 6u);
+        EXPECT_EQ(out[0].name, ":status");
+        EXPECT_EQ(out[0].value, "200");
+        EXPECT_EQ(out[1].name, "cache-control");
+        EXPECT_EQ(out[1].value, "private");
+        EXPECT_EQ(out[2].name, "date");
+        EXPECT_EQ(out[2].value, "Mon, 21 Oct 2013 20:13:22 GMT");
+        EXPECT_EQ(out[3].name, "location");
+        EXPECT_EQ(out[3].value, "https://www.example.com");
+        EXPECT_EQ(out[4].name, "content-encoding");
+        EXPECT_EQ(out[4].value, "gzip");
+        EXPECT_EQ(out[5].name, "set-cookie");
+        EXPECT_EQ(out[5].value, "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1");
+        // The two large new entries evicted the older ones; 3 remain resident.
+        EXPECT_EQ(decoder.get_dynamic_table_entry_count(), 3u);
+    }
 }
 
-int
-main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+// ====================================================================
+// RFC 7541 Appendix C.4 / C.6 — Huffman gold-vector DECODE
+// ====================================================================
+
+// C.4.1 — a literal-with-incremental-indexing whose NAME and VALUE are both
+// Huffman-coded (H bit set in each string-length prefix). The exact byte
+// sequence is the RFC worked example; decoding must reproduce the ascii pair.
+TEST(HPACK_LL_RFC7541, AppendixC4_1_HuffmanNameAndValueDecode) {
+    Decoder decoder;
+    // 0x40, H-name "custom-key" (len 8), H-value "custom-header" (len 9).
+    const auto block = ll_hex_to_bytes("408825a849e95ba97d7f8925a849e95a728e42d9");
+    std::vector<HeaderField> out;
+    bool                     incomplete = false;
+    ASSERT_TRUE(decoder.decode(block, out, incomplete));
+    EXPECT_FALSE(incomplete);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].name, "custom-key");
+    EXPECT_EQ(out[0].value, "custom-header");
+    // Incrementally indexed -> resident in the dynamic table.
+    EXPECT_EQ(decoder.get_dynamic_table_entry_count(), 1u);
+}
+
+// C.6.1 first field — :status 302 carried as literal-with-incremental-indexing
+// using the static name index 8 (0x48) and a Huffman value "302" (0x82 6402).
+// Decode must yield (:status, 302) exactly, NOT result||incomplete.
+TEST(HPACK_LL_RFC7541, AppendixC6_1_HuffmanStatusValueDecode) {
+    Decoder decoder;
+    // 0x48 = literal-with-incremental-indexing, name index 8 (:status);
+    // 0x82 = string-literal H=1, len 2; 0x6402 = Huffman("302").
+    const auto               block = ll_hex_to_bytes("48826402");
+    std::vector<HeaderField> out;
+    bool                     incomplete = false;
+    ASSERT_TRUE(decoder.decode(block, out, incomplete));
+    EXPECT_FALSE(incomplete);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].name, ":status");
+    EXPECT_EQ(out[0].value, "302");
+}
+
+// ====================================================================
+// Decoder: Huffman NAME-length truncation flags incomplete
+// ====================================================================
+
+// A literal whose NAME declares 8 Huffman bytes but only 4 are present is a
+// truncation, not a hard error: decode() must report possibly-incomplete.
+// Complements the value-side / non-Huffman truncation cases above.
+TEST(HPACK_LL_Decoder, HuffmanNameLengthTruncationFlagsIncomplete) {
+    Decoder                  decoder;
+    std::vector<HeaderField> out;
+    bool                     incomplete = false;
+
+    // 0x40 incremental indexing, H-name length 8 (0x88) but only 4 bytes.
+    std::vector<uint8_t> block = {0x40, 0x88, 0x25, 0xa8, 0x49, 0xe9};
+    EXPECT_FALSE(decoder.decode(block, out, incomplete));
+    EXPECT_TRUE(incomplete);
 }
