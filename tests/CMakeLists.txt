@@ -55,6 +55,7 @@ qhttp_test(unit utility-chars  unit/utility/utility-chars.cpp  EXTRA_LABELS util
 qhttp_test(unit uri-parse      unit/uri/uri-parse.cpp          EXTRA_LABELS uri)
 qhttp_test(unit http1-serialize-limits unit/http1/http1-serialize-limits.cpp EXTRA_LABELS http1)
 qhttp_test(unit http1-parse-limits     unit/http1/http1-parse-limits.cpp     EXTRA_LABELS http1)
+qhttp_test(unit http1-serialization unit/http1/http1-serialization.cpp EXTRA_LABELS http1)
 qhttp_test(unit validation-rules     unit/validation/validation-rules.cpp     EXTRA_LABELS validation)
 qhttp_test(unit validation-schema    unit/validation/validation-schema.cpp    EXTRA_LABELS validation)
 qhttp_test(unit validation-parameter unit/validation/validation-parameter.cpp EXTRA_LABELS validation)
@@ -122,10 +123,13 @@ qhttp_test(unit ws-key-crypto             unit/ws/ws-key-crypto.cpp             
 # =============================================================================
 qhttp_test(system http1-client         system/http1/http1-client.cpp         REQUIRES live EXTRA_LABELS http1)
 qhttp_test(system http1-loopback-basic system/http1/http1-loopback-basic.cpp REQUIRES live EXTRA_LABELS http1)
+qhttp_test(system http1-loopback system/http1/http1-loopback.cpp REQUIRES ssl live EXTRA_LABELS http1)
 qhttp_test(system router-e2e-advanced  system/routing/router-e2e-advanced.cpp REQUIRES live EXTRA_LABELS http1 routing)
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
 qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
 qhttp_test(system make-server-factory  system/server/make-server-factory.cpp REQUIRES ssl live EXTRA_LABELS http1 http2 ssl)
+qhttp_test(system middleware-pipeline-system system/middleware/middleware-pipeline-system.cpp REQUIRES live EXTRA_LABELS middleware)
+qhttp_test(system middleware-auth-jwt-system system/middleware/middleware-auth-jwt-system.cpp REQUIRES ssl live EXTRA_LABELS middleware ssl)
 qhttp_test(system coro-client-http1    system/coro/coro-client-http1.cpp     REQUIRES live EXTRA_LABELS http1 coro)
 qhttp_test(system coro-server-http1    system/coro/coro-server-http1.cpp     REQUIRES live EXTRA_LABELS http1 coro)
 qhttp_test(system coro-gateway-e2e     system/coro/coro-gateway-e2e.cpp      REQUIRES live EXTRA_LABELS http1 coro)
@@ -145,14 +149,14 @@ qhttp_test(system ws-client-hardening      system/ws/ws-client-hardening.cpp    
 # SPLIT-PENDING — legacy monoliths still flat; dissolved + removed by the split waves.
 # Registered transitionally with the REQUIRES they currently need to BUILD (SSL-on).
 # =============================================================================
-qhttp_test(system _pending-session-http      test-session-http.cpp      REQUIRES ssl live EXTRA_LABELS http1 ssl)
-qhttp_test(system _pending-integration-middleware test-integration-middleware.cpp REQUIRES ssl live EXTRA_LABELS middleware ssl)
 
 # =============================================================================
 # HTTP/3 — gated on QBM_HTTP_HAS_HTTP3 (ngtcp2). Still a SPLIT-PENDING monolith.
 # =============================================================================
 if(QBM_HTTP_HAS_HTTP3)
-    qhttp_test(system _pending-http3-client test-http3-client.cpp REQUIRES quic ssl live EXTRA_LABELS http3 quic ssl)
+    qhttp_test(unit   http3-validation unit/http3/http3-validation.cpp EXTRA_LABELS http3)
+    qhttp_test(system http3-loopback   system/http3/http3-loopback.cpp REQUIRES quic ssl live EXTRA_LABELS http3 quic ssl)
+    qhttp_test(system http3-interop    system/http3/http3-interop.cpp  REQUIRES quic ssl live EXTRA_LABELS http3 interop)
 endif()
 
 # SSL resources are copied by qb_setup_test_resources() (qb/CMakeLists.txt); tests find them in CWD.

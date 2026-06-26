@@ -1,36 +1,48 @@
 /**
- * @file qbm/http/tests/test-coro-client.cpp
- * @brief Coroutine HTTP/1.1 and HTTP/2 client API tests.
+ * @file qbm/http/tests/system/coro/coro-client-http1.cpp
+ * @brief System tier: coroutine HTTP/1.1 client awaiters over a real loopback server.
  *
- * These tests exercise the coroutine-friendly public entry points
- * introduced by `qbm/http/coro.h`:
+ * Exercises the coroutine-friendly public client entry points declared in
+ * `qbm/http/1.1/http.h` (re-exported through `coro.h` / `http.h`):
  *
- *   - `qb::http::{REQUEST,GET,POST,PUT,DEL,HEAD,OPTIONS,PATCH}(Request, double)`
+ *   - `qb::http::{REQUEST,GET,POST,PUT,DEL,HEAD,OPTIONS,PATCH}(Request, qb::duration)`
  *     returning `async::awaiter<async::Reply>`.
- *   - `qb::http::run_sync(awaitable)` convenience alias over
- *     `qb::io::async::run_sync`.
- *   - `qb::http2::Client::connect()` returning `awaiter<ConnectResult>`.
- *   - `qb::http2::Client::push_request(Request)` returning `awaiter<Response>`.
- *   - `qb::http2::Client::push_requests(std::vector<Request>)` returning
- *     `awaiter<std::vector<Response>>`.
+ *   - `qb::http::run_sync(awaitable)` — drive the awaitable to completion on the
+ *     calling thread's event loop.
+ *   - direct `co_await` from inside a `qb::io::async::task<void>`.
+ *   - the legacy callback-style `qb::http::GET(Request, cb)` overload (interop).
+ *   - the awaiter completion-callback one-shot contract.
  *
- * Pattern / topology:
- *   - An HTTP/1.1 server runs on its own thread on localhost.
- *   - Each test spawns client work from the gtest thread, driving the
- *     awaitables through either `qb::http::run_sync` (for the blocking-test
- *     ergonomy) or a locally-spawned `qb::io::async::task<void>` (to verify
- *     the actual `co_await` path).
+ * Topology: a single fixed-route HTTP/1.1 server runs on its own worker thread
+ * via the shared `ServerThread<>` RAII harness (readiness barrier, NO sleep_for
+ * warmup, NO magic port). The test body drives the client on the main thread's
+ * event loop. All assertions are on observable response state.
+ *
+ * De-flake notes (vs the pre-restructure `test-coro-client.cpp`):
+ *   - magic port 29879 + `sleep_for(40ms)` warmup -> `ephemeral_port()` + the
+ *     condition-variable readiness barrier inside `ServerThread`.
+ *   - busy-spin callback poll -> bounded `pump_until(pred, budget)` that fails
+ *     loud on timeout instead of looping with a 3s wall deadline.
+ *   - `TimeoutYieldsGatewayTimeout` previously asserted only `status != OK`
+ *     against a closed port (race between refused/timeout). It now hits a
+ *     deterministic NEVER-COMPLETE route with a bounded client timeout, so the
+ *     HTTP/1.1 client's timeout mapping yields EXACTLY 504 Gateway Timeout.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
  */
 
 #include <atomic>
 #include <chrono>
-#include <gtest/gtest.h>
-#include <thread>
+#include <memory>
+#include <string>
 #include <vector>
+
+#include <gtest/gtest.h>
+
+#include "../../shared/loopback_server.h"
 
 #include "../coro.h"
 #include "../http.h"
@@ -38,8 +50,6 @@
 using namespace std::chrono_literals;
 
 namespace {
-
-using SessionCtx = qb::http::Context<class CoroTestSession>;
 
 class CoroTestServer;
 
@@ -49,7 +59,7 @@ public:
         : session(server) {}
 };
 
-/// Tiny fixed-route HTTP/1.1 server used by every test in this file.
+/// Fixed-route HTTP/1.1 server used by every test in this file.
 class CoroTestServer : public qb::http::use<CoroTestServer>::server<CoroTestSession> {
 public:
     CoroTestServer() {
@@ -109,56 +119,79 @@ public:
             ctx->complete();
         });
 
+        // A deterministic 4xx route for error-status round-trips.
+        router().get("/missing", [](auto ctx) {
+            ctx->response().status() = qb::http::status::NOT_FOUND;
+            ctx->response().body()   = "no-such-thing";
+            ctx->complete();
+        });
+
+        // A deterministic 5xx route (server-side application failure).
+        router().get("/explode", [](auto ctx) {
+            ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+            ctx->response().body()   = "kaboom";
+            ctx->complete();
+        });
+
+        // Large-body echo to exercise the chunked/large-buffer parse path.
+        router().post("/bulk", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = ctx->request().body().template as<std::string>();
+            ctx->complete();
+        });
+
+        // A route that NEVER completes: the handler suspends forever (the
+        // captured context is dropped without `complete()`), so the only way
+        // the client awaiter resolves is via its own request timeout. This
+        // pins the framework's timeout->504 mapping deterministically.
+        router().get("/blackhole", [](auto ctx) {
+            // Intentionally retain the context but never complete it.
+            auto held = ctx;
+            (void) held;
+        });
+
         router().compile();
     }
 };
 
-/// Shared fixture: boots the server on a dedicated thread, tears it down cleanly.
+using ServerThread = qb::http::test::ServerThread<CoroTestServer>;
+
+/// Boots the loopback server on a worker thread; the client runs on the main loop.
 class CoroClientTest : public ::testing::Test {
 protected:
-    static constexpr int kPort = 29879;
-
-    std::thread       _server_thread;
-    std::atomic<bool> _server_ready{false};
-    std::atomic<bool> _keep_server_alive{true};
+    std::uint16_t                 _port{0};
+    std::unique_ptr<ServerThread> _server;
 
     void
     SetUp() override {
         qb::io::async::init();
-        _server_thread = std::thread([this] {
-            qb::io::async::init();
-            CoroTestServer server;
-            server.transport().listen_v4(kPort);
-            server.start();
-            _server_ready.store(true, std::memory_order_release);
-            while (_keep_server_alive.load(std::memory_order_acquire)) {
-                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
+        _port = qb::http::test::ephemeral_port();
+
+        const std::uint16_t port = _port;
+        _server                  = std::make_unique<ServerThread>([port](CoroTestServer &srv) -> bool {
+            if (srv.transport().listen_v4(port) != 0) {
+                return false;
             }
+            srv.start();
+            return true;
         });
-        while (!_server_ready.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        ASSERT_TRUE(_server->ready())
+            << "coro HTTP/1.1 loopback server failed to start on port " << _port;
     }
 
     void
     TearDown() override {
-        _keep_server_alive.store(false, std::memory_order_release);
-        if (_server_thread.joinable()) {
-            _server_thread.join();
-        }
+        _server.reset();
     }
 
-    [[nodiscard]] static std::string
-    url(const std::string &path) {
-        return "http://localhost:" + std::to_string(kPort) + path;
+    [[nodiscard]] std::string
+    url(const std::string &path) const {
+        return "http://localhost:" + std::to_string(_port) + path;
     }
 };
 
 // ---------------------------------------------------------------------------
-// HTTP/1.1 coroutine client tests
+// Happy-path awaiters
 // ---------------------------------------------------------------------------
 
 TEST_F(CoroClientTest, GetReturnsAwaiterWithReply) {
@@ -190,15 +223,25 @@ TEST_F(CoroClientTest, PostWithBodyRoundTrips) {
 TEST_F(CoroClientTest, AllVerbsReachTheServer) {
     using qb::http::Request;
 
-    EXPECT_EQ(qb::http::run_sync(qb::http::GET(Request{{url("/ping")}})).response.status(), qb::http::status::OK);
-    EXPECT_EQ(qb::http::run_sync(qb::http::PUT(Request{qb::http::method::PUT, {url("/resource/7")}})).response.status(), qb::http::status::OK);
-    EXPECT_EQ(qb::http::run_sync(qb::http::DEL(Request{qb::http::method::DEL, {url("/resource/7")}})).response.status(),
+    EXPECT_EQ(qb::http::run_sync(qb::http::GET(Request{{url("/ping")}})).response.status(),
+              qb::http::status::OK);
+    EXPECT_EQ(qb::http::run_sync(qb::http::PUT(Request{qb::http::method::PUT, {url("/resource/7")}}))
+                  .response.status(),
+              qb::http::status::OK);
+    EXPECT_EQ(qb::http::run_sync(qb::http::DEL(Request{qb::http::method::DEL, {url("/resource/7")}}))
+                  .response.status(),
               qb::http::status::NO_CONTENT);
-    EXPECT_EQ(qb::http::run_sync(qb::http::PATCH(Request{qb::http::method::PATCH, {url("/resource/7")}})).response.status(),
+    EXPECT_EQ(qb::http::run_sync(
+                  qb::http::PATCH(Request{qb::http::method::PATCH, {url("/resource/7")}}))
+                  .response.status(),
               qb::http::status::OK);
-    EXPECT_EQ(qb::http::run_sync(qb::http::HEAD(Request{qb::http::method::HEAD, {url("/ping")}})).response.status(), qb::http::status::OK);
-    EXPECT_EQ(qb::http::run_sync(qb::http::OPTIONS(Request{qb::http::method::OPTIONS, {url("/ping")}})).response.status(),
+    EXPECT_EQ(qb::http::run_sync(qb::http::HEAD(Request{qb::http::method::HEAD, {url("/ping")}}))
+                  .response.status(),
               qb::http::status::OK);
+    EXPECT_EQ(
+        qb::http::run_sync(qb::http::OPTIONS(Request{qb::http::method::OPTIONS, {url("/ping")}}))
+            .response.status(),
+        qb::http::status::OK);
 }
 
 TEST_F(CoroClientTest, HeadResponseWithContentLengthCompletesWithoutBody) {
@@ -210,10 +253,42 @@ TEST_F(CoroClientTest, HeadResponseWithContentLengthCompletesWithoutBody) {
     EXPECT_TRUE(reply.response.body().empty());
 }
 
+// ---------------------------------------------------------------------------
+// Error-status round-trips (4xx / 5xx bodies travel back intact)
+// ---------------------------------------------------------------------------
+
+TEST_F(CoroClientTest, NotFoundStatusAndBodyRoundTrip) {
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{url("/missing")}}));
+    EXPECT_EQ(reply.response.status(), qb::http::status::NOT_FOUND);
+    EXPECT_EQ(reply.response.body().template as<std::string>(), "no-such-thing");
+}
+
+TEST_F(CoroClientTest, ServerErrorStatusAndBodyRoundTrip) {
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{url("/explode")}}));
+    EXPECT_EQ(reply.response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(reply.response.body().template as<std::string>(), "kaboom");
+}
+
+// ---------------------------------------------------------------------------
+// Large POST body — exercises the large-buffer / chunked parse path
+// ---------------------------------------------------------------------------
+
+TEST_F(CoroClientTest, LargePostBodyRoundTrips) {
+    const std::string payload(256 * 1024, 'Z'); // 256 KiB
+    qb::http::Request req{qb::http::method::POST, {url("/bulk")}};
+    req.body() = payload;
+
+    auto reply = qb::http::run_sync(qb::http::POST(std::move(req), 5s));
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.response.body().template as<std::string>().size(), payload.size());
+    EXPECT_EQ(reply.response.body().template as<std::string>(), payload);
+}
+
+// ---------------------------------------------------------------------------
+// Real co_await suspension / resume
+// ---------------------------------------------------------------------------
+
 TEST_F(CoroClientTest, CoAwaitFromInsideCoroutine) {
-    // Drives the same awaitable through `co_await`, exercising the real
-    // coroutine suspension / resume path (rather than `run_sync` which
-    // pumps the loop manually).
     qb::http::Response captured;
     bool               done = false;
 
@@ -230,13 +305,12 @@ TEST_F(CoroClientTest, CoAwaitFromInsideCoroutine) {
 }
 
 TEST_F(CoroClientTest, SequentialAwaitsShareLoop) {
-    // Verifies that a single coroutine may issue several HTTP calls in
-    // sequence without interference from the event loop.
     std::vector<int> statuses;
 
     qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
         for (int i = 0; i < 3; ++i) {
-            auto reply = co_await qb::http::GET(qb::http::Request{{url("/echo/" + std::to_string(i))}});
+            auto reply =
+                co_await qb::http::GET(qb::http::Request{{url("/echo/" + std::to_string(i))}});
             statuses.push_back(reply.response.status());
         }
         co_return;
@@ -247,18 +321,23 @@ TEST_F(CoroClientTest, SequentialAwaitsShareLoop) {
         EXPECT_EQ(s, static_cast<int>(qb::http::status::OK));
 }
 
+// ---------------------------------------------------------------------------
+// Timeout mapping: a never-completing route yields a deterministic 504
+// ---------------------------------------------------------------------------
+
 TEST_F(CoroClientTest, TimeoutYieldsGatewayTimeout) {
-    // Send a request to a closed port with a tight timeout; the awaitable
-    // must resolve (not hang) with the framework's "connection failure" mapping.
-    qb::http::Request req{{"http://127.0.0.1:1/unused"}};
+    // The server accepts the request but its handler never calls complete(),
+    // so the response can only arrive via the client's request timeout. The
+    // HTTP/1.1 client maps that timeout to 504 Gateway Timeout (client.cpp /
+    // 1.1/http.h on(event::timeout) -> Response{GATEWAY_TIMEOUT}).
+    qb::http::Request req{{url("/blackhole")}};
     auto              reply = qb::http::run_sync(qb::http::GET(std::move(req), 250ms));
-    // The exact failure status depends on the platform (connection refused
-    // vs timeout), but it must never be 200 OK.
-    EXPECT_NE(reply.response.status(), qb::http::status::OK);
+
+    EXPECT_EQ(reply.response.status(), qb::http::status::GATEWAY_TIMEOUT);
 }
 
 // ---------------------------------------------------------------------------
-// Interop with the untouched callback-style API (must still work)
+// Interop with the untouched callback-style API
 // ---------------------------------------------------------------------------
 
 TEST_F(CoroClientTest, CallbackApiStillWorks) {
@@ -270,24 +349,22 @@ TEST_F(CoroClientTest, CallbackApiStillWorks) {
         callback_fired = true;
     });
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (!callback_fired.load() && std::chrono::steady_clock::now() < deadline) {
-        qb::io::async::run(EVRUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    ASSERT_TRUE(ServerThread::pump_until([&] { return callback_fired.load(); }))
+        << "callback-style GET never fired";
 
-    ASSERT_TRUE(callback_fired.load());
     EXPECT_EQ(received.status(), qb::http::status::OK);
     EXPECT_EQ(received.body().template as<std::string>(), "pong");
 }
 
 } // namespace
 
+// The awaiter's completion callback is one-shot: a second complete() is ignored.
 TEST(HttpCoroAwaiterTest, CompletionCallbackIsOneShot) {
-    auto value = qb::http::run_sync(qb::http::async::make_awaiter<int>([](std::function<void(int &&)> complete) {
-        complete(1);
-        complete(2); // Must be ignored.
-    }));
+    auto value = qb::http::run_sync(
+        qb::http::async::make_awaiter<int>([](std::function<void(int &&)> complete) {
+            complete(1);
+            complete(2); // Must be ignored.
+        }));
 
     EXPECT_EQ(value, 1);
 }
