@@ -254,6 +254,14 @@ protected:
         _gateway_port  = qb::http::test::ephemeral_port();
         _dead_port     = qb::http::test::ephemeral_port(); // reserved + released = refused target
 
+        // The three probes are independent draws and could (rarely) collide. The
+        // UpstreamRefusedFallback test only proves anything if _dead_port really is
+        // a refused target distinct from the live upstream/gateway — otherwise it
+        // would pass for the wrong reason. Pin all three distinct up front.
+        ASSERT_NE(_dead_port, _upstream_port);
+        ASSERT_NE(_dead_port, _gateway_port);
+        ASSERT_NE(_upstream_port, _gateway_port);
+
         const std::uint16_t up_port = _upstream_port;
         _upstream                   = std::make_unique<UpstreamThread>([up_port](UpstreamServer &srv) -> bool {
             if (srv.transport().listen_v4(up_port) != 0) {

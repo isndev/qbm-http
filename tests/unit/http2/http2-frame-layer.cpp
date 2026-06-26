@@ -1,5 +1,5 @@
 /**
- * @file qbm/http/tests/test-http2-frame-layer.cpp
+ * @file qbm/http/tests/unit/http2/http2-frame-layer.cpp
  * @brief Pure unit tests for the HTTP/2 frame-layer static helpers
  *
  * These tests exercise the non-template, socket-free helpers of the HTTP/2

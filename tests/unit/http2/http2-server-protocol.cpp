@@ -2512,14 +2512,10 @@ TEST(HTTP2ServerProtocol, SecondPushPromiseCountsExistingPushedStream) {
 // generic-idle branches plus the closed-stream skip.
 // ---------------------------------------------------------------------------
 
-// Note: the "force every live stream to be cleaned up" path of
-// cleanup_idle_streams is NOT exercised here. When a stream actually crosses the
-// idle threshold, cleanup_idle_streams calls send_rst_stream(... close_context=
-// true), which itself erases the stream via try_close_stream_context; the
-// subsequent `it = _server_streams.erase(it)` in cleanup_idle_streams then
-// operates on an already-invalidated iterator (double-erase UB / hang). Driving
-// the should_cleanup==true branch is therefore unsafe with the current code; only
-// the no-cleanup (++it) path below is covered. See the flagged follow-up task.
+// This test covers the no-cleanup (++it) path: a fresh stream within the
+// thresholds is left alone. The force-cleanup (should_cleanup==true) path —
+// including the no-double-erase contract — is covered by the regression test
+// CleanupIdleStreamsReclaimsStaleStreamsNoDoubleErase above.
 
 TEST(HTTP2ServerProtocol, CleanupIdleStreamsLeavesFreshStreamsAlone) {
     using namespace std::chrono_literals;

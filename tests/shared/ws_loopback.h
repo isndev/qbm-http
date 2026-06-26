@@ -48,10 +48,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -74,19 +77,22 @@ using namespace std::chrono_literals;
  *
  * The ctor initializes the async loop, constructs the server, applies an
  * optional @p config callback (e.g. to set per-server limits before it accepts
- * connections), binds @p port_ on IPv4, starts it, then pumps the loop until the
- * dtor flips @c running. It blocks until the listener is ready (plus a short
- * settle delay) so a client connecting right after construction won't race the
- * bind.
+ * connections), binds @p port_ on IPv4, and starts it. Readiness is signalled
+ * through a condition variable the instant the listener is bound + listening +
+ * started (mirrors @c shared/loopback_server.h ServerThread) — the ctor blocks on
+ * that cv, NOT a busy-poll + fixed settle sleep, so there is no sleep-based race
+ * with the bind and no wasted warmup time.
  *
  * @tparam ServerT a @c qb::io::use<...>::tcp::server<...> session host.
  */
 template <typename ServerT>
 struct WsServerThread {
-    std::thread       thread;
-    std::atomic<bool> ready{false};
-    std::atomic<bool> running{true};
-    int               port{0};
+    std::thread             thread;
+    std::atomic<bool>       ready{false};
+    std::atomic<bool>       running{true};
+    int                     port{0};
+    std::mutex              mutex;
+    std::condition_variable cv;
 
     explicit WsServerThread(int port_, std::function<void(ServerT &)> config = {})
         : port(port_) {
@@ -99,21 +105,24 @@ struct WsServerThread {
             server.transport().listen_v4(static_cast<std::uint16_t>(port));
             // When the caller asked for an ephemeral port (port == 0), read the
             // kernel-assigned port back from the now-bound listener and publish it
-            // BEFORE flipping `ready`, so the main thread (which reads `port`
-            // only after observing `ready`) sees the real port instead of 0.
-            port = static_cast<int>(server.transport().local_endpoint().port());
+            // under the lock BEFORE notifying, so the main thread (which reads
+            // `port` only after observing `ready`) sees the real port, not 0.
+            const int bound_port = static_cast<int>(server.transport().local_endpoint().port());
             server.start();
-            ready.store(true, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                port = bound_port;
+                ready.store(true, std::memory_order_release);
+            }
+            cv.notify_all();
             while (running.load(std::memory_order_acquire)) {
                 if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(5ms);
+                    std::this_thread::sleep_for(1ms);
                 }
             }
         });
-        while (!ready.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(5ms);
-        }
-        std::this_thread::sleep_for(30ms);
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this] { return ready.load(std::memory_order_acquire); });
     }
 
     ~WsServerThread() {
@@ -214,7 +223,12 @@ make_client_frame(std::uint8_t opcode_with_flags, std::string_view payload) {
     out.reserve(payload.size() + 14);
     out.push_back(opcode_with_flags);
 
-    EXPECT_LE(payload.size(), 125u);
+    // Builder precondition (NOT a test outcome): this helper only emits the 7-bit
+    // length form, so a payload over 125 bytes would silently corrupt the frame.
+    // Fail hard at the build site rather than producing a malformed frame.
+    if (payload.size() > 125u) {
+        throw std::invalid_argument("make_client_frame: payload exceeds the 125-byte 7-bit length form");
+    }
     out.push_back(static_cast<std::uint8_t>(0x80u | payload.size()));
 
     const std::array<std::uint8_t, 4> mask{{0xAA, 0x55, 0x01, 0xFE}};

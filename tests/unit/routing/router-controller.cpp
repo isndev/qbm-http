@@ -956,7 +956,13 @@ TEST_F(RouterControllerTest, ControllerSyncMethodThrowsException) {
     EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);
 }
 
-TEST_F(RouterControllerTest, ControllerAsyncMethodThrowsExceptionInTask) {
+// NOTE: the handler under test (async_throwing_in_task_handler) throws INSIDE its
+// deferred task but CATCHES the exception there and signals complete(ERROR) — the
+// same recover-and-signal path as ControllerAsyncMethodSignalsErrorInDeferredTask.
+// A genuinely-uncaught async throw is out of scope: it would propagate out of the
+// task pump (TaskExecutor::processAllTasks) and std::terminate, so it cannot be
+// asserted from a gtest body. This test only verifies the catch-and-signal-500 path.
+TEST_F(RouterControllerTest, ControllerAsyncTaskCatchesAndSignalsError) {
     auto controller = _router.controller<ControllerWithAdvancedFeatures>("/adv_api", &_task_executor, "AsyncThrowTaskTest");
     ASSERT_NE(controller, nullptr);
     // Routes are now added in ControllerWithAdvancedFeatures::initialize_routes
