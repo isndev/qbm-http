@@ -311,8 +311,10 @@ public:
         }
 
         if (stream.state != Http2StreamConcreteState::OPEN && stream.state != Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
+            // send_rst_stream() already closes (and erases) the stream context; a follow-up
+            // try_close_stream_context_by_id(stream.id, ...) would read the freed `stream`
+            // reference (heap-use-after-free) and double-close. Do not re-close here.
             send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA in invalid state");
-            try_close_stream_context_by_id(stream.id, ErrorCode::STREAM_CLOSED, "DATA in invalid state for stream."); // Pass stream.id
             return;
         }
 
@@ -320,10 +322,9 @@ public:
         const uint32_t payload_size = data_payload.size();
 
         if (stream.local_window_size < payload_size) {
+            // send_rst_stream() closes the stream context (do not re-close via the now-freed
+            // `stream` reference). As per RFC 9113 Section 5.2.2, this is also a connection error.
             send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR, "Stream flow control violation");
-            try_close_stream_context_by_id(stream.id, ErrorCode::FLOW_CONTROL_ERROR,
-                                           "Stream flow control violation on receive."); // Pass stream.id
-            // As per RFC 9113 Section 5.2.2, this is also a connection error.
             this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR, "Stream flow control violation by peer.");
             return;
         }
@@ -341,13 +342,12 @@ public:
             stream.assembled_response.body().raw().write(reinterpret_cast<const char *>(data_payload.data()), data_payload.size());
             const auto body_size = stream.assembled_response.body().raw().size();
             if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
+                // send_rst_stream() already closes/erases the stream context.
                 send_rst_stream(stream_id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
-                try_close_stream_context_by_id(stream.id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
                 return;
             }
             if (stream.expected_content_length && body_size > *stream.expected_content_length) {
                 send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response body exceeds content-length");
-                try_close_stream_context_by_id(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response body exceeds content-length");
                 return;
             }
         }
@@ -371,8 +371,8 @@ public:
             if (!stream.trailers_expected) { // Only process if not expecting trailers
                 if (should_enforce_response_content_length(stream) && stream.expected_content_length
                     && stream.assembled_response.body().raw().size() != *stream.expected_content_length) {
+                    // send_rst_stream() already closes/erases the stream context.
                     send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response content-length mismatch");
-                    try_close_stream_context_by_id(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response content-length mismatch");
                     return;
                 }
                 process_complete_response_if_ready(stream);
@@ -2427,11 +2427,9 @@ private:
             if (!trailer_fields_to_send.empty()) {
                 if (!_hpack_encoder.encode(trailer_fields_to_send, trailers_frame_data.payload.header_block_fragment)) {
                     // QB_LOG_ERROR_PA(this->getName(), "Client Stream " << active_stream.id << ": HPACK encoding failed for trailers.");
+                    // send_rst_stream() closes/erases the stream context; the `active_stream`
+                    // reference is dangling afterward, so do not re-inspect or re-close it.
                     send_rst_stream(active_stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
-                    if (active_stream.state == Http2StreamConcreteState::CLOSED || active_stream.rst_stream_sent) {
-                        try_close_stream_context_by_id(active_stream.id, ErrorCode::COMPRESSION_ERROR,
-                                                       "DATA in invalid state for stream."); // Pass stream.id
-                    }
                     return;
                 }
             }

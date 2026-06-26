@@ -11,7 +11,7 @@
  * The route tables and request shapes are lifted verbatim from the matcher's
  * canonical specs so the benchmark exercises exactly the code those tests pin:
  *   - static / parameter / wildcard precedence (static > param > wildcard) and the
- *     mixed `/data/:user/details/*itemPath` shape  ......  router-match.cpp
+ *     mixed param + wildcard-tail shape (`:user` then `*itemPath`)  ..  router-match.cpp
  *   - the global-middleware + per-request task-chain pump  ..  router-pipeline-integration.cpp
  *
  * Dimensions swept:

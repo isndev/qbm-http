@@ -1310,8 +1310,13 @@ public:
             }
 
             if (should_cleanup) {
+                // send_rst_stream() (close_context defaults to true) closes and ERASES this
+                // stream's context, invalidating `it`. Capture the successor first, then resume
+                // from it — erasing the already-invalidated `it` again was undefined behaviour.
+                auto next = std::next(it);
                 this->send_rst_stream(stream_id, ErrorCode::CANCEL, "Stream idle timeout (" + std::to_string(idle_time_seconds) + "s)");
-                it = _server_streams.erase(it);
+                _server_streams.erase(stream_id); // idempotent safety net (reclaims if send_rst_stream didn't, e.g. !ok())
+                it = next;
                 cleaned_count++;
             } else {
                 ++it;

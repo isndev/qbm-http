@@ -210,9 +210,9 @@ BM_Body_JsonRoundTrip(benchmark::State &state) {
     for (auto _ : state) {
         Body body;
         body                  = j;                         // serialize via pipe::put<json>
-        const qb::json parsed = body.as<qb::json>();       // parse back
-        bytes                 = static_cast<std::int64_t>(body.size());
-        benchmark::DoNotOptimize(parsed);
+        qb::json parsed = body.as<qb::json>();             // parse back
+        bytes           = static_cast<std::int64_t>(body.size());
+        benchmark::DoNotOptimize(parsed);                  // non-const lvalue (avoids deprecated const-ref overload)
     }
 
     state.SetBytesProcessed(state.iterations() * bytes);
