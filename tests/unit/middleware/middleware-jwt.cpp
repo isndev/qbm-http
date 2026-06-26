@@ -681,4 +681,108 @@ TEST_F(JwtMiddlewareTest, WhitespaceToleranceInAuthHeader) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+// ---------------------------------------------------------------------------
+// Empty auth_scheme on a HEADER token: the raw header value IS the token.
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, EmptyAuthSchemeHeaderUsesRawHeaderValueAsToken) {
+    JwtOptions opts;
+    opts.secret         = kSecret;
+    opts.algorithm      = "HS256";
+    opts.token_location = JwtTokenLocation::HEADER;
+    opts.token_name     = "X-Token";
+    opts.auth_scheme    = ""; // no scheme → whole (trimmed) header value is the token
+    auto mw             = qb::http::jwt_middleware_with_options<MockJwtSession>(opts);
+
+    auto req = create_request(qb::http::method::GET, "/protected");
+    req.set_header("X-Token", "  " + make_token({{"sub", "raw_header_user"}}) + "  "); // surrounding WS trimmed
+    run(mw, std::move(req));
+
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    EXPECT_TRUE(_session->_final_handler_called);
+}
+
+TEST_F(JwtMiddlewareTest, EmptyAuthSchemeHeaderWhitespaceOnlyIsMissingToken) {
+    JwtOptions opts;
+    opts.secret         = kSecret;
+    opts.algorithm      = "HS256";
+    opts.token_location = JwtTokenLocation::HEADER;
+    opts.token_name     = "X-Token";
+    opts.auth_scheme    = "";
+    auto mw             = qb::http::jwt_middleware_with_options<MockJwtSession>(opts);
+
+    auto req = create_request(qb::http::method::GET, "/protected");
+    req.set_header("X-Token", "    "); // all whitespace → first_non_ws == npos
+    run(mw, std::move(req));
+
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(JwtMiddlewareTest, BearerSchemeWithOnlyWhitespaceAfterIsMissingToken) {
+    // Scheme present + only whitespace after it → token_sv first_non_ws == npos.
+    run(_jwt_mw, req_with_header(_scheme + "    "));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// ---------------------------------------------------------------------------
+// Non-std (non-exception) throw from a custom validator → 401, not crash.
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, NonStdThrowingValidatorIsConvertedToUnauthorized) {
+    _jwt_mw->with_validator([](const qb::json &, JwtErrorInfo &) -> bool { throw 1234; });
+
+    EXPECT_NO_THROW(run(_jwt_mw, bearer(make_token({{"sub", "x"}}))));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// ---------------------------------------------------------------------------
+// Claim value coercion: "true"/"false" -> bool, decimal -> double.
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, BooleanAndDecimalClaimsAreCoercedToNativeJsonTypes) {
+    // qb::jwt stringifies claims; the middleware re-coerces "true"/"false" back
+    // to JSON booleans and JSON-number-shaped decimals back to doubles.
+    const std::string token = make_token({{"sub", "coerce"}, {"is_admin", "true"}, {"is_guest", "false"}, {"ratio", "3.14"}});
+    run(_jwt_mw, bearer(token));
+
+    ASSERT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
+    const auto &payload = *_session->_jwt_payload_in_context;
+    ASSERT_TRUE(payload.at("is_admin").is_boolean());
+    EXPECT_TRUE(payload.at("is_admin").get<bool>());
+    ASSERT_TRUE(payload.at("is_guest").is_boolean());
+    EXPECT_FALSE(payload.at("is_guest").get<bool>());
+    ASSERT_TRUE(payload.at("ratio").is_number_float());
+    EXPECT_DOUBLE_EQ(payload.at("ratio").get<double>(), 3.14);
+}
+
+// ---------------------------------------------------------------------------
+// cancel() is a no-op on this synchronous middleware.
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, CancelIsNoop) {
+    EXPECT_NO_THROW(_jwt_mw->cancel());
+}
+
+// ---------------------------------------------------------------------------
+// Error handler that sets a response but does NOT complete → middleware
+// completes the context for it (the handle_error fallback completion).
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, ErrorHandlerThatDoesNotCompleteIsCompletedByMiddleware) {
+    _jwt_mw->with_error_handler([](std::shared_ptr<qb::http::Context<MockJwtSession>> ctx, const JwtErrorInfo &) {
+        ctx->response().status() = qb::http::status::FORBIDDEN;
+        ctx->response().body()   = "denied (no explicit complete)";
+        // Intentionally NOT calling ctx->complete() — middleware must finalise.
+    });
+
+    run(_jwt_mw, create_request(qb::http::method::GET, "/protected"));
+    EXPECT_EQ(status(), qb::http::status::FORBIDDEN);
+    EXPECT_EQ(body(), "denied (no explicit complete)");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
 } // namespace

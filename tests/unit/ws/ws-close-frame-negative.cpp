@@ -163,6 +163,64 @@ TEST(WsCloseFrameNegative, IsUtf8AcceptsAndRejects) {
     EXPECT_FALSE(is_utf8(std::string_view{"\xC0\x80"}));            // overlong NUL
 }
 
+// Exhaustive per-class coverage of is_utf8 (ws.cpp:108-199): every leading-byte
+// range gets a valid sequence (continue branch), a continuation/range error,
+// and a truncation (i+k >= n) error. Drives every range arm and the final
+// `return false` for invalid lead bytes.
+TEST(WsCloseFrameNegative, IsUtf8AllByteClasses) {
+    using qb::http::ws::is_utf8;
+
+    // --- 2-byte: 0xC2..0xDF ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xC2\xA9"}));   // © valid
+    EXPECT_TRUE(is_utf8(std::string_view{"\xDF\xBF"}));   // upper bound valid
+    EXPECT_FALSE(is_utf8(std::string_view{"\xC2", 1}));   // truncated (i+1>=n)
+    EXPECT_FALSE(is_utf8(std::string_view{"\xC2\x20"}));  // 2nd byte not continuation
+
+    // --- 3-byte 0xE0: 2nd byte must be 0xA0..0xBF (no overlong) ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xE0\xA4\xB9"}));  // valid (U+0939)
+    EXPECT_FALSE(is_utf8(std::string_view{"\xE0\xA4", 2})); // truncated (i+2>=n)
+    EXPECT_FALSE(is_utf8(std::string_view{"\xE0\x80\x80"})); // overlong: b1 < 0xA0
+    EXPECT_FALSE(is_utf8(std::string_view{"\xE0\xA4\x20"})); // 3rd byte not continuation
+
+    // --- 3-byte 0xE1..0xEC: both trailing must be continuation ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xE1\x80\x80"}));  // valid
+    EXPECT_FALSE(is_utf8(std::string_view{"\xE1\x80", 2})); // truncated
+    EXPECT_FALSE(is_utf8(std::string_view{"\xE1\x20\x80"})); // b1 not continuation
+
+    // --- 3-byte 0xED: 2nd byte 0x80..0x9F (surrogates excluded) ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xED\x9F\xBF"}));  // U+D7FF valid
+    EXPECT_FALSE(is_utf8(std::string_view{"\xED\x9F", 2})); // truncated
+    EXPECT_FALSE(is_utf8(std::string_view{"\xED\x80\x20"})); // 3rd byte not continuation
+
+    // --- 3-byte 0xEE..0xEF ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xEE\x80\x80"}));  // valid
+    EXPECT_TRUE(is_utf8(std::string_view{"\xEF\xBF\xBD"}));  // U+FFFD replacement char
+    EXPECT_FALSE(is_utf8(std::string_view{"\xEE\x80", 2})); // truncated
+    EXPECT_FALSE(is_utf8(std::string_view{"\xEE\x20\x80"})); // b1 not continuation
+
+    // --- 4-byte 0xF0: 2nd byte 0x90..0xBF (no overlong) ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xF0\x90\x80\x80"}));  // U+10000 valid
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF0\x90\x80", 3})); // truncated (i+3>=n)
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF0\x80\x80\x80"})); // overlong: b1 < 0x90
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF0\x90\x80\x20"})); // 4th byte not continuation
+
+    // --- 4-byte 0xF1..0xF3 ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xF1\x80\x80\x80"}));  // valid
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF3\x80\x80", 3})); // truncated
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF1\x20\x80\x80"})); // b1 not continuation
+
+    // --- 4-byte 0xF4: 2nd byte 0x80..0x8F (cap at U+10FFFF) ---
+    EXPECT_TRUE(is_utf8(std::string_view{"\xF4\x8F\xBF\xBF"}));  // U+10FFFF valid
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF4\x80\x80", 3})); // truncated
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF4\x90\x80\x80"})); // b1 > 0x8F (out of range)
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF4\x80\x80\x20"})); // 4th byte not continuation
+
+    // --- invalid lead bytes that fall through to the final return false ---
+    EXPECT_FALSE(is_utf8(std::string_view{"\xC1\x80"}));   // 0xC1 (< 0xC2)
+    EXPECT_FALSE(is_utf8(std::string_view{"\xF5\x80\x80\x80"})); // 0xF5 (> 0xF4)
+    EXPECT_FALSE(is_utf8(std::string_view{"\xFF"}));       // 0xFF never valid
+}
+
 // ---------------------------------------------------------------------------
 // 4. pending-cap == 0 frame-drop — pure delivery-path logic with no socket.
 //    Prior to the fix this could `pop_front()` an empty deque; the guard must

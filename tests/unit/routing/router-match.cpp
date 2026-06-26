@@ -670,3 +670,61 @@ TEST_F(RouterMatchTest, PathIsExtensionOfParameterRoute) {
     EXPECT_FALSE(mock_session->_handler_executed);
     EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
 }
+
+// ===========================================================================
+// RouterCore guard rails: oversize path + clear()/recompile recovery
+// ===========================================================================
+
+TEST_F(RouterMatchTest, OversizePathYields400BadRequest) {
+    // RouterCore caps the request path at 4096 chars to bound allocations; a
+    // longer path short-circuits to 400 before the radix walk (no handler runs).
+    router.get("/files/*rest", make_verifying_handler<MockSession>("files_handler"));
+    router.compile();
+
+    std::string long_path = "/files/" + std::string(5000, 'a');
+    route(HTTP_GET, long_path);
+
+    EXPECT_FALSE(mock_session->_handler_executed);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_BAD_REQUEST);
+    EXPECT_EQ(mock_session->_response.body().as<std::string>(), "Path too long");
+}
+
+TEST_F(RouterMatchTest, PathAtMaxLengthBoundaryStillRoutes) {
+    // A path exactly at the 4096-char boundary is still served (the guard is a
+    // strict `> MAX_PATH_LENGTH`).
+    router.get("/files/*rest", make_verifying_handler<MockSession>("files_handler_ok"));
+    router.compile();
+
+    // "/files/" is 7 chars; pad to exactly 4096 total.
+    std::string at_limit = "/files/" + std::string(4096 - 7, 'b');
+    ASSERT_EQ(at_limit.size(), 4096u);
+    route(HTTP_GET, at_limit);
+
+    EXPECT_TRUE(mock_session->_handler_executed);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
+}
+
+TEST_F(RouterMatchTest, ClearRemovesRoutesAndRecompileServesAgain) {
+    router.get("/old", make_verifying_handler<MockSession>("old_handler"));
+    router.compile();
+    route(HTTP_GET, "/old");
+    EXPECT_TRUE(mock_session->_handler_executed);
+
+    // clear() drops all routes + resets special handlers to defaults.
+    router.clear();
+    router.compile();
+
+    mock_session = std::make_shared<MockSession>();
+    route(HTTP_GET, "/old");
+    EXPECT_FALSE(mock_session->_handler_executed);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
+
+    // Router remains usable: register + compile + serve a fresh route.
+    router.get("/new", make_verifying_handler<MockSession>("new_handler"));
+    router.compile();
+    mock_session = std::make_shared<MockSession>();
+    route(HTTP_GET, "/new");
+    EXPECT_TRUE(mock_session->_handler_executed);
+    EXPECT_EQ(mock_session->_handler_id, "new_handler");
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_OK);
+}

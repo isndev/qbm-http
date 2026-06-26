@@ -152,6 +152,28 @@ TEST(Http1Serialization, HostValueDefaultPortsSchemeCaseInsensitive) {
     EXPECT_EQ(qb::http::host_header_value(b), std::string(b.host()));
 }
 
+// A URI whose scheme has no registered default port leaves uri.port() empty, so
+// host_header_value returns the bare host via the empty-port early return
+// (http.cpp:48-50). "http"/"https"/"ws" all inject a default port, so a custom
+// scheme is used to keep the port genuinely absent.
+TEST(Http1Serialization, HostValueWithoutPortReturnsBareHost) {
+    const qb::io::uri u{"custom-scheme://api.example.com/path"};
+    EXPECT_TRUE(u.port().empty());
+    EXPECT_EQ(qb::http::host_header_value(u), "api.example.com");
+}
+
+// A scheme that has the SAME length as "http" but differs in a character makes
+// scheme_eq_ignore_case take the char-mismatch branch (http.cpp:30-33 return
+// false), so the non-default port is appended even though it is 80.
+TEST(Http1Serialization, HostValueAppendsPortWhenSchemeLengthMatchesButDiffers) {
+    // "ftp" is length 3 (vs "http" length 4) — pick a 4-char non-http scheme so
+    // the length guard passes and the per-char compare runs to a mismatch.
+    const qb::io::uri u{"htxp://api.example.com:80/path"};
+    EXPECT_EQ(u.port(), "80");
+    // Not recognised as the http default => :80 is retained.
+    EXPECT_EQ(qb::http::host_header_value(u), "api.example.com:80");
+}
+
 TEST(Http1Serialization, RequestRejectsContentLengthMismatch) {
     qb::http::Request request{qb::http::method::POST, {"http://example.test/upload"}};
     request.set_header("Content-Length", "1");

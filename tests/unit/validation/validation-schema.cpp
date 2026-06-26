@@ -522,6 +522,36 @@ TEST_F(ValidationSchemaTest, TypeKeywordWrongJsonType) {
     EXPECT_NE(result.errors()[0].message.find("must be a string or an array"), std::string::npos);
 }
 
+TEST_F(ValidationSchemaTest, SingleTypeNumberAcceptsFloatAndInteger) {
+    qb::json        schema = {{"type", "number"}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_TRUE(validator.validate(qb::json(2.5), result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_TRUE(validator.validate(qb::json(7), result)); // integers are numbers
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json("not-a-number"), result));
+    ASSERT_FALSE(result.success());
+}
+
+TEST_F(ValidationSchemaTest, SingleTypeNullAcceptsOnlyNull) {
+    qb::json        schema = {{"type", "null"}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_TRUE(validator.validate(qb::json(nullptr), result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json(0), result));
+    ASSERT_FALSE(result.success());
+}
+
 TEST_F(ValidationSchemaTest, MalformedSchemaKeywords) {
     // required must be an array of strings.
     {
@@ -682,4 +712,153 @@ TEST_F(ValidationSchemaTest, PreviewPolicyTruncatesOffendingValue) {
     ASSERT_TRUE(result.errors()[0].offending_value.has_value());
     ASSERT_TRUE(result.errors()[0].offending_value->is_string());
     EXPECT_EQ(result.errors()[0].offending_value->get<std::string>().size(), 32u);
+}
+
+// ===========================================================================
+// Multi-type `type` arrays: success path for every keyword + non-string entry
+// ===========================================================================
+
+TEST_F(ValidationSchemaTest, TypeArrayAcceptsAnyListedType) {
+    // Drives the full string→DataType mapping inside the `type`-array branch
+    // (integer/number/boolean/object/array/null) and the success short-circuit
+    // once a candidate type matches.
+    qb::json        schema = {{"type", qb::json::array({"integer", "number", "boolean", "object", "array", "null", "string"})}};
+    SchemaValidator validator(schema);
+
+    for (const qb::json &v : {qb::json(7), qb::json(3.5), qb::json(true), qb::json(qb::json::object()), qb::json(qb::json::array()),
+                              qb::json(nullptr), qb::json("text")}) {
+        result.clear();
+        EXPECT_TRUE(validator.validate(v, result)) << "value: " << v.dump();
+        EXPECT_TRUE(result.success());
+    }
+}
+
+TEST_F(ValidationSchemaTest, TypeArrayRejectsValueMatchingNoneOfTheTypes) {
+    qb::json        schema = {{"type", qb::json::array({"integer", "boolean"})}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json("a string"), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+    EXPECT_NE(result.errors()[0].message.find("does not match any"), std::string::npos);
+}
+
+TEST_F(ValidationSchemaTest, TypeArrayRejectsNonStringEntry) {
+    // A non-string element in the `type` array is a schema error.
+    qb::json        schema = {{"type", qb::json::array({"string", 123})}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json("hello"), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.type");
+    EXPECT_NE(result.errors()[0].message.find("must be strings"), std::string::npos);
+}
+
+// ===========================================================================
+// Array constraints: maxItems + uniqueItems
+// ===========================================================================
+
+TEST_F(ValidationSchemaTest, MaxItemsRejectsTooManyElements) {
+    qb::json        schema = {{"type", "array"}, {"maxItems", 2}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_TRUE(validator.validate(qb::json::array({1, 2}), result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::array({1, 2, 3}), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "maxItems");
+}
+
+TEST_F(ValidationSchemaTest, MinItemsRejectsTooFewElements) {
+    qb::json        schema = {{"type", "array"}, {"minItems", 2}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::array({1}), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "minItems");
+}
+
+TEST_F(ValidationSchemaTest, UniqueItemsRejectsDuplicates) {
+    qb::json        schema = {{"type", "array"}, {"uniqueItems", true}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_TRUE(validator.validate(qb::json::array({1, 2, 3}), result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::array({1, 2, 2}), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    EXPECT_EQ(result.errors()[0].rule_violated, "uniqueItems");
+}
+
+// ===========================================================================
+// preview_bytes clamping in set_error_value_policy (min 16, max 64K)
+// ===========================================================================
+
+TEST_F(ValidationSchemaTest, PreviewBytesClampedToMinimum) {
+    qb::json        schema = {{"type", "integer"}};
+    SchemaValidator validator(schema);
+    // A requested preview below the 16-byte floor is clamped UP to 16.
+    validator.set_error_value_policy(SchemaValidator::ErrorValuePolicy::Preview, 1);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json(std::string(1024, 'z')), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    ASSERT_TRUE(result.errors()[0].offending_value.has_value());
+    ASSERT_TRUE(result.errors()[0].offending_value->is_string());
+    EXPECT_EQ(result.errors()[0].offending_value->get<std::string>().size(), 16u);
+}
+
+TEST_F(ValidationSchemaTest, PreviewBytesClampedToMaximum) {
+    qb::json        schema = {{"type", "integer"}};
+    SchemaValidator validator(schema);
+    // A requested preview beyond the 64K ceiling is clamped DOWN; a short value
+    // is unaffected (we assert the policy still applies and the value survives).
+    validator.set_error_value_policy(SchemaValidator::ErrorValuePolicy::Preview, 1024u * 1024u);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json(std::string(100, 'q')), result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1);
+    ASSERT_TRUE(result.errors()[0].offending_value.has_value());
+    EXPECT_EQ(result.errors()[0].offending_value->get<std::string>().size(), 100u);
+}
+
+// ===========================================================================
+// additionalProperties as a SUB-SCHEMA (nested validator + path-merge)
+// ===========================================================================
+
+TEST_F(ValidationSchemaTest, AdditionalPropertiesSchemaValidatesDynamicValues) {
+    // additionalProperties bound to a schema: each non-declared property is run
+    // through a nested SchemaValidator and its errors are re-pathed under the key.
+    qb::json schema = {
+        {"type", "object"},
+        {"properties", {{"id", {{"type", "integer"}}}}},
+        {"additionalProperties", {{"type", "string"}, {"minLength", 3}}}
+    };
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_TRUE(validator.validate(qb::json{{"id", 1}, {"name", "abcd"}}, result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    // "tag" is too short → nested validator fails → error re-pathed under "tag".
+    EXPECT_FALSE(validator.validate(qb::json{{"id", 1}, {"tag", "ab"}}, result));
+    ASSERT_FALSE(result.success());
+    ASSERT_GE(result.errors().size(), 1u);
+    EXPECT_NE(result.errors()[0].field_path.find("tag"), std::string::npos);
 }

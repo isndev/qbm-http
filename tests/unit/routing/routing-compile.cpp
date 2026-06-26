@@ -166,4 +166,206 @@ TEST_F(RoutingCompileTest, ValidMixedPatternsCompileCleanly) {
     EXPECT_NO_THROW(router.compile());
 }
 
+// --------------------------------------------------------------------------
+// Adapter task unit-tests: RouteLambdaTask / CustomRouteAdapterTask / Route
+//
+// These drive the route.h IAsyncTask adapters DIRECTLY (no router), pinning the
+// null-argument guards, the catch(...) / no-context exception-logging arms, the
+// custom-route cancel() delegation, and Route::get_node_name(). The catch(...)
+// arms (a non-std throw escaping a handler) and the `ctx == nullptr` log arms are
+// only reachable by constructing the adapter by hand, so they live here.
+// --------------------------------------------------------------------------
+
+namespace {
+
+// A bare context factory mirroring context-slots.cpp: never driven through the
+// router, so no finalised-state invariant is tripped by manual completion.
+std::shared_ptr<qb::http::Context<MockSession>>
+make_bare_ctx(std::shared_ptr<MockSession> sess) {
+    return std::make_shared<qb::http::Context<MockSession>>(
+        qb::http::Request{}, qb::http::Response{}, sess, [](qb::http::Context<MockSession> &) {},
+        std::weak_ptr<qb::http::RouterCore<MockSession>>{});
+}
+
+// Minimal ICustomRoute whose process()/cancel() behaviour is configurable.
+class ConfigurableCustomRoute : public qb::http::ICustomRoute<MockSession> {
+public:
+    enum class Mode { CompleteOk, ThrowStd, ThrowNonStd };
+
+    explicit ConfigurableCustomRoute(Mode mode, std::string name = "ConfigurableCustomRoute")
+        : _mode(mode)
+        , _name(std::move(name)) {}
+
+    void
+    process(std::shared_ptr<qb::http::Context<MockSession>> ctx) override {
+        switch (_mode) {
+            case Mode::CompleteOk:
+                ctx->response().status() = qb::http::status::OK;
+                ctx->complete();
+                break;
+            case Mode::ThrowStd:
+                throw std::runtime_error("custom-route std throw");
+            case Mode::ThrowNonStd:
+                throw 7777; // non-std → drives catch(...) arm
+        }
+    }
+
+    void
+    cancel() override {
+        ++cancel_calls;
+        if (_cancel_throws) {
+            throw std::runtime_error("custom-route cancel throw");
+        }
+    }
+
+    [[nodiscard]] std::string
+    name() const override {
+        return _name;
+    }
+
+    void
+    set_cancel_throws(bool v) {
+        _cancel_throws = v;
+    }
+
+    int cancel_calls = 0;
+
+private:
+    Mode        _mode;
+    std::string _name;
+    bool        _cancel_throws = false;
+};
+
+} // namespace
+
+// --- Null-argument constructor guards --------------------------------------
+
+TEST(RouteAdapters, RouteLambdaTaskNullHandlerThrows) {
+    qb::http::RouteHandlerFn<MockSession> null_fn;
+    EXPECT_THROW((qb::http::RouteLambdaTask<MockSession>(null_fn)), std::invalid_argument);
+}
+
+TEST(RouteAdapters, CustomRouteAdapterTaskNullPointerThrows) {
+    std::shared_ptr<qb::http::ICustomRoute<MockSession>> null_ptr;
+    EXPECT_THROW((qb::http::CustomRouteAdapterTask<MockSession>(null_ptr)), std::invalid_argument);
+}
+
+TEST(RouteAdapters, RouteCtorRejectsNullLambda) {
+    qb::http::RouteHandlerFn<MockSession> null_fn;
+    EXPECT_THROW((qb::http::Route<MockSession>("/p", qb::http::method::GET, null_fn)), std::invalid_argument);
+}
+
+TEST(RouteAdapters, RouteCtorRejectsNullCustomRoute) {
+    std::shared_ptr<qb::http::ICustomRoute<MockSession>> null_ptr;
+    EXPECT_THROW((qb::http::Route<MockSession>("/p", qb::http::method::GET, null_ptr)), std::invalid_argument);
+}
+
+// --- get_node_name() formats method + handler name -------------------------
+
+TEST(RouteAdapters, RouteNodeNameForLambda) {
+    qb::http::Route<MockSession> route("seg", qb::http::method::GET, [](auto ctx) { ctx->complete(); });
+    const std::string            name = route.get_node_name();
+    EXPECT_NE(name.find("Route:"), std::string::npos);
+    EXPECT_NE(name.find("Lambda@seg"), std::string::npos);
+    EXPECT_EQ(route.get_http_method(), qb::http::method::GET);
+}
+
+TEST(RouteAdapters, RouteNodeNameForCustomRoute) {
+    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::CompleteOk, "MyCustom");
+    qb::http::Route<MockSession> route("seg", qb::http::method::POST, custom);
+    EXPECT_NE(route.get_node_name().find("MyCustom"), std::string::npos);
+}
+
+// --- RouteLambdaTask::execute exception handling ---------------------------
+
+TEST(RouteAdapters, RouteLambdaTaskCatchesStdExceptionAndSets500) {
+    auto sess = std::make_shared<MockSession>();
+    auto ctx  = make_bare_ctx(sess);
+    qb::http::RouteLambdaTask<MockSession> task([](auto /*c*/) { throw std::runtime_error("boom"); }, "ThrowingLambda");
+    EXPECT_EQ(task.name(), "ThrowingLambda");
+    task.execute(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(RouteAdapters, RouteLambdaTaskCatchesNonStdExceptionAndSets500) {
+    auto sess = std::make_shared<MockSession>();
+    auto ctx  = make_bare_ctx(sess);
+    qb::http::RouteLambdaTask<MockSession> task([](auto /*c*/) { throw 99; }, "NonStdLambda");
+    task.execute(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(ctx->response().body().as<std::string>(), "Unknown internal server error in route handler.");
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(RouteAdapters, RouteLambdaTaskNullCtxStdExceptionDoesNotCrash) {
+    // The `ctx == nullptr` logging arm: execute with a null context. The handler
+    // throws, and the adapter must log-without-ctx and NOT dereference the null.
+    qb::http::RouteLambdaTask<MockSession> task([](auto /*c*/) { throw std::runtime_error("no-ctx"); }, "NullCtxLambda");
+    EXPECT_NO_THROW(task.execute(nullptr));
+}
+
+TEST(RouteAdapters, RouteLambdaTaskNullCtxNonStdExceptionDoesNotCrash) {
+    qb::http::RouteLambdaTask<MockSession> task([](auto /*c*/) { throw 1; }, "NullCtxNonStdLambda");
+    EXPECT_NO_THROW(task.execute(nullptr));
+}
+
+TEST(RouteAdapters, RouteLambdaTaskCancelIsNoop) {
+    qb::http::RouteLambdaTask<MockSession> task([](auto c) { c->complete(); });
+    EXPECT_NO_THROW(task.cancel());
+}
+
+// --- CustomRouteAdapterTask::execute exception handling --------------------
+
+TEST(RouteAdapters, CustomRouteAdapterCatchesStdExceptionAndSets500) {
+    auto sess   = std::make_shared<MockSession>();
+    auto ctx    = make_bare_ctx(sess);
+    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::ThrowStd, "StdThrower");
+    qb::http::CustomRouteAdapterTask<MockSession> task(custom);
+    EXPECT_EQ(task.name(), "StdThrower");
+    task.execute(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(RouteAdapters, CustomRouteAdapterCatchesNonStdExceptionAndSets500) {
+    auto sess   = std::make_shared<MockSession>();
+    auto ctx    = make_bare_ctx(sess);
+    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::ThrowNonStd, "NonStdThrower");
+    qb::http::CustomRouteAdapterTask<MockSession> task(custom);
+    task.execute(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(ctx->response().body().as<std::string>(), "Unknown internal server error in custom route handler.");
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(RouteAdapters, CustomRouteAdapterNullCtxStdExceptionDoesNotCrash) {
+    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::ThrowStd);
+    qb::http::CustomRouteAdapterTask<MockSession> task(custom);
+    EXPECT_NO_THROW(task.execute(nullptr));
+}
+
+TEST(RouteAdapters, CustomRouteAdapterNullCtxNonStdExceptionDoesNotCrash) {
+    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::ThrowNonStd);
+    qb::http::CustomRouteAdapterTask<MockSession> task(custom);
+    EXPECT_NO_THROW(task.execute(nullptr));
+}
+
+// --- CustomRouteAdapterTask::cancel delegation -----------------------------
+
+TEST(RouteAdapters, CustomRouteAdapterCancelDelegatesToCustomRoute) {
+    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::CompleteOk);
+    qb::http::CustomRouteAdapterTask<MockSession> task(custom);
+    task.cancel();
+    EXPECT_EQ(custom->cancel_calls, 1);
+}
+
+TEST(RouteAdapters, CustomRouteAdapterCancelSwallowsCustomRouteException) {
+    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::CompleteOk);
+    custom->set_cancel_throws(true);
+    qb::http::CustomRouteAdapterTask<MockSession> task(custom);
+    EXPECT_NO_THROW(task.cancel());
+    EXPECT_EQ(custom->cancel_calls, 1);
+}
+
 } // namespace

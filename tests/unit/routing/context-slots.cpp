@@ -13,6 +13,7 @@
 #include "../routing/slot.h"
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -288,3 +289,149 @@ TEST(ContextSlots, SetMovesRvalueInWithoutCopying) {
 // equality contract on Slot's value_type that user code may rely on.
 static_assert(std::is_same_v<qb::http::Slot<UserProfile>::value_type, UserProfile>);
 static_assert(noexcept(std::declval<const TestContext &>().contains(kRequestCount)));
+
+// ===========================================================================
+// Direct Context lifecycle / accessor coverage (no router)
+//
+// Drives the publicly-reachable Context branches that the router-level tests do
+// not exercise on a stand-alone instantiation: complete(CANCELLED/FATAL), the
+// already-finalised / already-cancelled guards in complete()/cancel(), the
+// untyped get<T>() bad_any_cast arm, the const session() overload, the
+// finalization-deferral path, and the destructor's REQUEST_COMPLETE hook
+// swallowing a thrown exception.
+// ===========================================================================
+
+namespace {
+
+std::shared_ptr<TestContext>
+make_ctx_with_finalize(bool &finalized_flag) {
+    auto session = std::make_shared<SlotTestSession>();
+    return std::make_shared<TestContext>(qb::http::Request{}, qb::http::Response{}, session,
+                                         [&finalized_flag](TestContext &) { finalized_flag = true; },
+                                         std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{});
+}
+
+} // namespace
+
+TEST(ContextLifecycle, CompleteCompletedFinalizesAndInvokesCallback) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+    EXPECT_TRUE(ctx->is_completed());
+    EXPECT_TRUE(finalized);
+}
+
+TEST(ContextLifecycle, CompleteCancelledMarksCancelledAndFinalizes) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->complete(qb::http::AsyncTaskResult::CANCELLED);
+    EXPECT_TRUE(ctx->is_cancelled());
+    EXPECT_TRUE(ctx->is_completed());
+    EXPECT_TRUE(finalized);
+}
+
+TEST(ContextLifecycle, CompleteFatalSpecialHandlerErrorSets500) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->complete(qb::http::AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(ContextLifecycle, CompleteErrorWithoutRouterCoreFallsBackTo500) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    // No RouterCore wired (empty weak_ptr) → ERROR cannot find an error chain
+    // and falls back to a default 500 finalisation.
+    ctx->complete(qb::http::AsyncTaskResult::ERROR);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(ContextLifecycle, CompleteAfterFinalisedIsNoop) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+    ctx->response().status() = qb::http::status::OK;
+    // A second non-CANCELLED complete on a finalised context is ignored.
+    ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::OK);
+}
+
+TEST(ContextLifecycle, CancelSetsServiceUnavailableAndReason) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->cancel("user aborted");
+    EXPECT_TRUE(ctx->is_cancelled());
+    EXPECT_EQ(ctx->response().status(), qb::http::status::SERVICE_UNAVAILABLE);
+    ASSERT_TRUE(ctx->cancellation_reason().has_value());
+    EXPECT_EQ(*ctx->cancellation_reason(), "user aborted");
+}
+
+TEST(ContextLifecycle, CancelAfterDoneIsNoop) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+    // Already finalised → cancel() early-returns (is_cancelled_or_done_internal).
+    EXPECT_NO_THROW(ctx->cancel());
+}
+
+TEST(ContextLifecycle, CompleteContinueOnCancelledContextFinalises) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->complete(qb::http::AsyncTaskResult::CANCELLED);
+    // A CONTINUE arriving after cancellation must finalise rather than advance.
+    EXPECT_NO_THROW(ctx->complete(qb::http::AsyncTaskResult::CONTINUE));
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(ContextLifecycle, FinalizationDeferralPostponesCompletion) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    {
+        auto guard = ctx->defer_finalization_scope();
+        ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+        // Inside the deferral scope, finalisation is pending, not done.
+        EXPECT_FALSE(finalized);
+    }
+    // Guard release resumes the deferred finalisation.
+    EXPECT_TRUE(finalized);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(ContextLifecycle, UntypedGetReturnsNulloptOnTypeMismatch) {
+    auto ctx = make_ctx();
+    ctx->set(std::string("k"), 123); // store an int under the untyped string key
+    // Wrong type request → bad_any_cast is caught internally → nullopt.
+    auto wrong = ctx->get<std::string>("k");
+    EXPECT_FALSE(wrong.has_value());
+    auto right = ctx->get<int>("k");
+    ASSERT_TRUE(right.has_value());
+    EXPECT_EQ(*right, 123);
+}
+
+TEST(ContextLifecycle, ConstSessionAccessorReturnsSession) {
+    // Hold the session alive: Context stores a weak_ptr, so the const session()
+    // overload only returns non-null while an external owner exists.
+    auto session = std::make_shared<SlotTestSession>();
+    auto ctx     = std::make_shared<TestContext>(qb::http::Request{}, qb::http::Response{}, session, [](TestContext &) {},
+                                                 std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{});
+    const auto &cref = *ctx;
+    auto        s    = cref.session(); // const overload
+    EXPECT_NE(s, nullptr);
+    // Also exercise the non-const overload's reachable line for parity.
+    EXPECT_NE(ctx->session(), nullptr);
+}
+
+TEST(ContextLifecycle, DestructorSwallowsThrowingRequestCompleteHook) {
+    bool finalized = false;
+    auto ctx       = make_ctx_with_finalize(finalized);
+    ctx->add_lifecycle_hook([](TestContext &, qb::http::HookPoint point) {
+        if (point == qb::http::HookPoint::REQUEST_COMPLETE) {
+            throw std::runtime_error("hook throws during teardown");
+        }
+    });
+    // Dropping the last reference runs the destructor, which fires the
+    // REQUEST_COMPLETE hook inside a try/catch and must not propagate.
+    EXPECT_NO_THROW(ctx.reset());
+}

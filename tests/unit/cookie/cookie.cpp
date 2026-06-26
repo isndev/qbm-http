@@ -963,3 +963,118 @@ TEST_F(CookieTest, MaxAgeRoundTrip) {
     EXPECT_TRUE(reparsed->max_age().has_value());
     EXPECT_EQ(3600, reparsed->max_age().value());
 }
+
+//////////////////////////////////////////////////
+// Coverage Wave-2: parse_cookies / parse_set_cookie edge branches
+//////////////////////////////////////////////////
+
+// parse_cookies with set_cookie_header=true exercises is_cookie_attribute's
+// Set-Cookie attribute filtering (cookie.cpp:81-90). Known attributes (Path,
+// Domain, Secure, ...) must be dropped, real name=value pairs kept.
+TEST_F(CookieTest, ParseCookiesSetCookieHeaderFiltersKnownAttributes) {
+    auto cookies = parse_cookies(std::string("sid=xyz; Path=/; Domain=example.com; Secure; HttpOnly; SameSite=Lax"), true);
+    // Only the real cookie pair survives; every attribute name is filtered.
+    EXPECT_EQ(1u, cookies.size());
+    ASSERT_TRUE(cookies.find("sid") != cookies.end());
+    EXPECT_EQ("xyz", cookies["sid"]);
+    EXPECT_TRUE(cookies.find("Path") == cookies.end());
+    EXPECT_TRUE(cookies.find("Domain") == cookies.end());
+    EXPECT_TRUE(cookies.find("Secure") == cookies.end());
+    EXPECT_TRUE(cookies.find("SameSite") == cookies.end());
+}
+
+// is_cookie_attribute's legacy/empty branch (cookie.cpp:77-80): a name that
+// begins with '$' (RFC 2109 legacy) is treated as an attribute and dropped.
+TEST_F(CookieTest, ParseCookiesDropsDollarPrefixedLegacyAttributes) {
+    // $Version / $Path are legacy attributes; "real" must survive in both modes.
+    auto cookies = parse_cookies(std::string("$Version=1; real=ok; $Path=/"), true);
+    EXPECT_TRUE(cookies.find("$Version") == cookies.end());
+    EXPECT_TRUE(cookies.find("$Path") == cookies.end());
+    ASSERT_TRUE(cookies.find("real") != cookies.end());
+    EXPECT_EQ("ok", cookies["real"]);
+}
+
+// parse_cookies enforces the 16KB DoS guard (cookie.cpp:125-127).
+TEST_F(CookieTest, ParseCookiesRejectsOver16KBHeader) {
+    std::string huge = "a=" + std::string(16 * 1024 + 1, 'x');
+    EXPECT_THROW((void) parse_cookies(huge, false), std::runtime_error);
+}
+
+// Separator (';'/',') encountered in NAME state with a buffered name but no '='
+// emits an empty-value cookie (cookie.cpp:151-160). e.g. "flag; k=v".
+TEST_F(CookieTest, ParseCookiesNameWithoutEqualsBeforeSeparatorYieldsEmptyValue) {
+    auto cookies = parse_cookies(std::string("flag; k=v"), false);
+    ASSERT_TRUE(cookies.find("flag") != cookies.end());
+    EXPECT_EQ("", cookies["flag"]); // empty value emitted for the bare name
+    ASSERT_TRUE(cookies.find("k") != cookies.end());
+    EXPECT_EQ("v", cookies["k"]);
+}
+
+// In set_cookie_header mode, a bare attribute name before a separator is
+// recognised and dropped rather than emitted (cookie.cpp:155 false branch).
+TEST_F(CookieTest, ParseCookiesBareAttributeNameBeforeSeparatorIsDropped) {
+    auto cookies = parse_cookies(std::string("Secure; real=v"), true);
+    EXPECT_TRUE(cookies.find("Secure") == cookies.end());
+    ASSERT_TRUE(cookies.find("real") != cookies.end());
+    EXPECT_EQ("v", cookies["real"]);
+}
+
+// Quoted value exceeding COOKIE_VALUE_MAX via a plain quoted char throws
+// (cookie.cpp:215-218).
+TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxPlainCharRejected) {
+    // Open quote, then COOKIE_VALUE_MAX+1 plain chars => length check trips.
+    std::string header = "big=\"" + std::string(COOKIE_VALUE_MAX + 1, 'a') + "\"";
+    EXPECT_THROW((void) parse_cookies(header, false), std::runtime_error);
+}
+
+// Quoted value exceeding COOKIE_VALUE_MAX via an escaped char throws
+// (cookie.cpp:194-197). Fill to the limit with plain chars, then an escape.
+TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxEscapedCharRejected) {
+    // COOKIE_VALUE_MAX plain chars bring length to the limit, then "\\q" appends
+    // an escaped char while at capacity => the escaped-branch length check trips.
+    std::string header = "big=\"" + std::string(COOKIE_VALUE_MAX, 'a') + "\\q\"";
+    EXPECT_THROW((void) parse_cookies(header, false), std::runtime_error);
+}
+
+// parse_set_cookie with no ';' separator: the whole header is the cookie-pair
+// and the attribute string stays empty (cookie.cpp:280-283).
+TEST_F(CookieTest, ParseSetCookieNoSemicolonWholeHeaderIsPair) {
+    auto result = parse_set_cookie("only=pair");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ("only", result->name());
+    EXPECT_EQ("pair", result->value());
+    EXPECT_FALSE(result->secure());
+    EXPECT_FALSE(result->same_site().has_value());
+}
+
+// parse_set_cookie returns nullopt when the cookie-pair has no '=' or an empty
+// name (cookie.cpp:292-295).
+TEST_F(CookieTest, ParseSetCookieInvalidPairReturnsNullopt) {
+    EXPECT_FALSE(parse_set_cookie("novalue; Path=/").has_value());   // no '='
+    EXPECT_FALSE(parse_set_cookie("=emptyname; Path=/").has_value()); // eq_pos == 0
+}
+
+// Quoted attribute value is unquoted (cookie.cpp:325-327): Path="/x" -> /x.
+TEST_F(CookieTest, ParseSetCookieUnquotesAttributeValue) {
+    auto result = parse_set_cookie("test=value; Path=\"/quoted/path\"; Domain=\"ex.com\"");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ("/quoted/path", result->path());
+    EXPECT_EQ("ex.com", result->domain());
+}
+
+// parse_set_cookie SameSite=Strict and SameSite=None branches
+// (cookie.cpp:360-366); the Lax branch is already covered elsewhere.
+TEST_F(CookieTest, ParseSetCookieSameSiteStrictAndNone) {
+    {
+        auto result = parse_set_cookie("test=value; SameSite=Strict");
+        ASSERT_TRUE(result.has_value());
+        ASSERT_TRUE(result->same_site().has_value());
+        EXPECT_EQ(SameSite::Strict, result->same_site().value());
+    }
+    {
+        auto result = parse_set_cookie("test=value; SameSite=None");
+        ASSERT_TRUE(result.has_value());
+        ASSERT_TRUE(result->same_site().has_value());
+        EXPECT_EQ(SameSite::None, result->same_site().value());
+    }
+}

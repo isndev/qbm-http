@@ -461,6 +461,145 @@ TEST(HTTP2FrameLayerHeaderValidator, ParseContentLengthInvalid) {
 }
 
 // ---------------------------------------------------------------------------
+// HeaderValidator::is_valid_header_field — name/value character rules (base.cpp)
+// The validate_request_pseudo_headers / validate_response_pseudo_headers wire
+// paths are exercised through the server/client protocols, but the lowest-level
+// per-character name/value checks have rejection branches reachable only with a
+// direct call carrying out-of-range octets.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2FrameLayerHeaderValidator, ValidHeaderFieldAcceptsLowercaseTokenChars) {
+    // The full RFC 7230 token character set plus digits, lowercase.
+    EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("x-custom_header.9", "value"));
+    EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("!#$%&'*+-.^_`|~", "v"));
+    EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("content-type", "text/plain"));
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, HeaderFieldEmptyNameRejected) {
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("", "value"));
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, HeaderFieldUppercaseNameRejected) {
+    // RFC 9113 §8.2: header field names must be lowercase. An uppercase letter in
+    // the name hits the (c >= 'A' && c <= 'Z') reject branch.
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("Content-Type", "text/plain"));
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("X", "v"));
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, HeaderFieldControlCharInNameRejected) {
+    // NUL / CR / LF and any non-token character in the name are rejected via the
+    // is_valid_char == false branch.
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field(std::string("bad\x00name", 8), "v"));
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad name", "v"));     // space is not a token char
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad\tname", "v"));    // TAB is not a token char
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad:colon", "v"));    // ':' not a token char (mid-name)
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, HeaderFieldControlCharInValueRejected) {
+    // is_valid_header_value rejects NUL, CR, LF, other C0 controls (except TAB)
+    // and DEL (0x7F).
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x00", 2))); // NUL
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", "v\r"));                    // CR
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", "v\n"));                    // LF
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x01", 2)));  // SOH (C0)
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x7F", 2)));  // DEL
+    // TAB (0x09) and ordinary printable bytes ARE allowed in a value.
+    EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("name", "v\tw"));
+    EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("name", "a normal value"));
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, IsValidHeaderValueDirect) {
+    EXPECT_TRUE(h2::HeaderValidator::is_valid_header_value("plain"));
+    EXPECT_TRUE(h2::HeaderValidator::is_valid_header_value("")); // empty value is valid
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_value("x\ny"));
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_value(std::string("x\x7F", 2)));
+}
+
+// ---------------------------------------------------------------------------
+// HeaderValidator::validate_request_pseudo_headers (base.cpp)
+// All duplicate / empty / unknown / missing branches via direct calls.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersValid) {
+    std::vector<qb::protocol::hpack::HeaderField> ok{
+        {":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}, {"accept", "*/*"}
+    };
+    EXPECT_TRUE(h2::HeaderValidator::validate_request_pseudo_headers(ok).is_valid);
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersDuplicateBranches) {
+    using h2::HeaderValidator;
+    auto dup = [](const char *n, const char *v) {
+        return std::vector<qb::protocol::hpack::HeaderField>{
+            {":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}, {n, v}
+        };
+    };
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":method", "POST")).is_valid);
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":path", "/a")).is_valid);
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":scheme", "http")).is_valid);
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":authority", "y")).is_valid);
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersEmptyValueBranches) {
+    using h2::HeaderValidator;
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
+                     {{":method", ""}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}})
+                     .is_valid);
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
+                     {{":method", "GET"}, {":path", ""}, {":scheme", "https"}, {":authority", "x"}})
+                     .is_valid);
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
+                     {{":method", "GET"}, {":path", "/"}, {":scheme", ""}, {":authority", "x"}})
+                     .is_valid);
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
+                     {{":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", ""}})
+                     .is_valid);
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersUnknownAndMissing) {
+    using h2::HeaderValidator;
+    // Unknown pseudo-header.
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
+                     {{":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}, {":bogus", "v"}})
+                     .is_valid);
+    // Missing a mandatory one (no :authority).
+    const auto missing = HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", "/"}, {":scheme", "https"}});
+    EXPECT_FALSE(missing.is_valid);
+    EXPECT_EQ(missing.error_code, h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// ---------------------------------------------------------------------------
+// HeaderValidator::validate_response_pseudo_headers (base.cpp) — full function.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2FrameLayerHeaderValidator, ResponsePseudoHeadersValid) {
+    std::vector<qb::protocol::hpack::HeaderField> ok{{":status", "200"}, {"content-type", "text/html"}};
+    EXPECT_TRUE(h2::HeaderValidator::validate_response_pseudo_headers(ok).is_valid);
+}
+
+TEST(HTTP2FrameLayerHeaderValidator, ResponsePseudoHeadersInvalidBranches) {
+    using h2::HeaderValidator;
+    // Duplicate :status.
+    EXPECT_FALSE(HeaderValidator::validate_response_pseudo_headers({{":status", "200"}, {":status", "404"}}).is_valid);
+    // Wrong-length :status (must be exactly 3 digits).
+    EXPECT_FALSE(HeaderValidator::validate_response_pseudo_headers({{":status", "20"}}).is_valid);
+    EXPECT_FALSE(HeaderValidator::validate_response_pseudo_headers({{":status", ""}}).is_valid);
+    // Non-numeric :status.
+    EXPECT_FALSE(HeaderValidator::validate_response_pseudo_headers({{":status", "2x0"}}).is_valid);
+    // A request pseudo-header (:path) is invalid in a response.
+    EXPECT_FALSE(HeaderValidator::validate_response_pseudo_headers({{":status", "200"}, {":path", "/"}}).is_valid);
+    // Missing :status entirely.
+    const auto missing = HeaderValidator::validate_response_pseudo_headers({{"content-type", "text/html"}});
+    EXPECT_FALSE(missing.is_valid);
+    EXPECT_EQ(missing.error_code, h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// Note: StreamIdValidator::get_frame_type_name (base.cpp ~434-460) is a PRIVATE
+// static member, reachable only from internal logging paths inside the validator
+// — it has no public caller and cannot be exercised by a unit test without
+// changing visibility, so its switch arms are left uncovered by design.
+
+// ---------------------------------------------------------------------------
 // Http2ErrorHandler (base.cpp)
 // ---------------------------------------------------------------------------
 
