@@ -124,7 +124,7 @@ public:
         router().get("/api/reset-stream", [](auto ctx) {
             auto session = ctx->session();
             if (session) {
-                session->reset_stream(static_cast<uint32_t>(ctx->request().stream_id),
+                (void) session->reset_stream(static_cast<uint32_t>(ctx->request().stream_id),
                                       qb::protocol::http2::ErrorCode::CANCEL, "test initiated stream reset");
             }
         });

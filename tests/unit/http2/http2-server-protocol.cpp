@@ -342,6 +342,41 @@ TEST(HTTP2ServerProtocol, HeadersOnDecreasingStreamIdIsStreamClosedRst) {
     EXPECT_TRUE(rst_on_1);
 }
 
+// Regression: cleanup_idle_streams() must reclaim stale streams WITHOUT a double-erase.
+// send_rst_stream() (close_context defaults to true) already closes and erases the stream
+// context, so the old `it = _server_streams.erase(it)` ran erase() on an iterator the RST had
+// already invalidated -- undefined behaviour that manifested as a hang. The loop now captures
+// the successor before sending the RST and resumes from it.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsReclaimsStaleStreamsNoDoubleErase) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Two incomplete client streams (POST headers, body never sent) -> resident + idle.
+    open_post_stream_open(protocol, io, 1, "/upload-a");
+    open_post_stream_open(protocol, io, 3, "/upload-b");
+    ASSERT_TRUE(protocol.ok());
+    ASSERT_FALSE(protocol.is_stream_closed(1));
+    ASSERT_FALSE(protocol.is_stream_closed(3));
+
+    const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
+
+    // Negative budget forces the timeout path deterministically (any idle_time exceeds it) without
+    // a flaky wall-clock sleep: both streams are stale and must be reclaimed in a single sweep.
+    const uint32_t cleaned = protocol.cleanup_idle_streams(/*max_idle=*/-1h, /*max_incomplete=*/-1h);
+    EXPECT_EQ(cleaned, 2u);
+
+    // One RST_STREAM(CANCEL) emitted per reclaimed stream; the connection survives.
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(count_frames(io.output, FrameType::RST_STREAM) - rst_before, std::size_t{2});
+    EXPECT_EQ(io.last_stream_error, ErrorCode::CANCEL);
+
+    // The map is fully drained: a second sweep finds nothing and must not hang / re-erase.
+    EXPECT_EQ(protocol.cleanup_idle_streams(-1h, -1h), 0u);
+}
+
 // ---------------------------------------------------------------------------
 // CONTINUATION arriving without a preceding (incomplete) HEADERS is a
 // connection-level PROTOCOL_ERROR (RFC 9113 §6.10).
