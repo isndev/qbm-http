@@ -1389,6 +1389,27 @@ public:
     }
 
     /**
+     * @brief Handles protocol-error events raised by the frame parser.
+     * @param event Error event (raised when the parser fails the connection).
+     *
+     * The WebSocket frame parser (`qb::http::ws::protocol`) is parameterized on
+     * this CRTP base (`WebSocket<T, Transport>`), so when it rejects a malformed
+     * frame it dispatches the error through `_io.on(error{})` — i.e. to *this*
+     * handler, not directly to the most-derived session. Without this forwarder
+     * the parser's `notify_protocol_error()` would find no `on(error)` on the
+     * base, be gated out, and the error would be silently dropped (the Close
+     * frame would still go out, but the user's `on_error` callback would never
+     * fire). Forward to the derived handler when it has one, mirroring the
+     * handshake-time `derived().on(error{})` paths above.
+     */
+    void
+    on(error &&event) {
+        if constexpr (qb::has_on<T, error>) {
+            derived().on(std::forward<error>(event));
+        }
+    }
+
+    /**
      * @brief Handles message events
      * @param event Message event containing the data payload
      *

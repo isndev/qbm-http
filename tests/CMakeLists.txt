@@ -112,6 +112,10 @@ qhttp_test(unit hpack-encoder-strategy unit/http2/hpack-encoder-strategy.cpp EXT
 qhttp_test(unit http2-header-validation unit/http2/http2-header-validation.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-state    unit/http2/http2-protocol-state.cpp    EXTRA_LABELS http2)
 qhttp_test(unit http2-client-validation unit/http2/http2-client-validation.cpp EXTRA_LABELS http2)
+# ws units (crypto-link ssl: ws.h #errors without qb::io::crypto; pure-logic, no socket)
+qhttp_test(unit ws-close-frame-negative   unit/ws/ws-close-frame-negative.cpp   REQUIRES ssl EXTRA_LABELS ws)
+qhttp_test(unit ws-frame-encode-validation unit/ws/ws-frame-encode-validation.cpp REQUIRES ssl EXTRA_LABELS ws)
+qhttp_test(unit ws-key-crypto             unit/ws/ws-key-crypto.cpp             REQUIRES ssl EXTRA_LABELS ws)
 
 # =============================================================================
 # SYSTEM — in-process loopback client+server (REQUIRES live). Local TLS = +ssl.
@@ -132,6 +136,10 @@ qhttp_test(system ws-coro-client   system/ws/ws-coro-client.cpp   REQUIRES ssl l
 qhttp_test(system ws-coro-server   system/ws/ws-coro-server.cpp   REQUIRES ssl live EXTRA_LABELS ws coro)
 qhttp_test(system ws-coro-handoff  system/ws/ws-coro-handoff.cpp  REQUIRES ssl live EXTRA_LABELS ws coro)
 qhttp_test(system ws-framing-edge  system/ws/ws-framing-edge.cpp  REQUIRES ssl live EXTRA_LABELS ws)
+qhttp_test(system ws-lifecycle             system/ws/ws-lifecycle.cpp             REQUIRES ssl live EXTRA_LABELS ws)
+qhttp_test(system ws-handshake-security    system/ws/ws-handshake-security.cpp    REQUIRES ssl live EXTRA_LABELS ws)
+qhttp_test(system ws-coro-handshake-negative system/ws/ws-coro-handshake-negative.cpp REQUIRES ssl live EXTRA_LABELS ws coro)
+qhttp_test(system ws-client-hardening      system/ws/ws-client-hardening.cpp      REQUIRES ssl live EXTRA_LABELS ws)
 
 # =============================================================================
 # SPLIT-PENDING — legacy monoliths still flat; dissolved + removed by the split waves.
@@ -139,11 +147,6 @@ qhttp_test(system ws-framing-edge  system/ws/ws-framing-edge.cpp  REQUIRES ssl l
 # =============================================================================
 qhttp_test(system _pending-session-http      test-session-http.cpp      REQUIRES ssl live EXTRA_LABELS http1 ssl)
 qhttp_test(system _pending-integration-middleware test-integration-middleware.cpp REQUIRES ssl live EXTRA_LABELS middleware ssl)
-qhttp_test(system _pending-ws-security       test-ws-security.cpp       REQUIRES ssl live EXTRA_LABELS ws)
-qhttp_test(system _pending-ws-coro-negative  test-ws-coro-negative.cpp  REQUIRES ssl live EXTRA_LABELS ws coro)
-qhttp_test(system _pending-ws-api-hardening  test-ws-api-hardening.cpp  REQUIRES ssl live EXTRA_LABELS ws)
-qhttp_test(system _pending-ws-session        test-ws-session.cpp        REQUIRES ssl live EXTRA_LABELS ws)
-qhttp_test(system _pending-ws-stress         test-ws-stress.cpp         REQUIRES ssl live EXTRA_LABELS ws)
 
 # =============================================================================
 # HTTP/3 — gated on QBM_HTTP_HAS_HTTP3 (ngtcp2). Still a SPLIT-PENDING monolith.
