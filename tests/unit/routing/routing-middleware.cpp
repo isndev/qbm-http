@@ -329,4 +329,177 @@ TEST_F(RoutingMiddlewareTest, GlobalMiddlewareRunsOnMethodNotAllowedPath) {
     EXPECT_EQ(session->response_write_count(), 1u);
 }
 
+// --------------------------------------------------------------------------
+// Adapter task unit-tests: MiddlewareTask / FunctionalMiddleware
+//
+// Drives the middleware.h IAsyncTask adapters DIRECTLY (no router), pinning the
+// null-argument guards, the catch(...) / no-context exception arms, the
+// MiddlewareTask::cancel() delegation (incl. exception-swallow), and name().
+// The catch(...) arms (a non-std throw escaping process()) and the
+// `ctx == nullptr` log arms are only reachable by hand-driving the adapter.
+// --------------------------------------------------------------------------
+
+namespace {
+
+std::shared_ptr<qb::http::Context<MockSession>>
+make_bare_mw_ctx(std::shared_ptr<MockSession> sess) {
+    return std::make_shared<qb::http::Context<MockSession>>(
+        qb::http::Request{}, qb::http::Response{}, sess, [](qb::http::Context<MockSession> &) {},
+        std::weak_ptr<qb::http::RouterCore<MockSession>>{});
+}
+
+// IMiddleware whose process()/cancel() behaviour is configurable.
+class ConfigurableMiddleware : public qb::http::IMiddleware<MockSession> {
+public:
+    enum class Mode { Continue, ThrowStd, ThrowNonStd };
+
+    explicit ConfigurableMiddleware(Mode mode)
+        : _mode(mode) {}
+
+    void
+    process(std::shared_ptr<qb::http::Context<MockSession>> ctx) override {
+        switch (_mode) {
+            case Mode::Continue:
+                ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+                break;
+            case Mode::ThrowStd:
+                throw std::runtime_error("mw std throw");
+            case Mode::ThrowNonStd:
+                throw 4242;
+        }
+    }
+
+    void
+    cancel() override {
+        ++cancel_calls;
+        if (_cancel_throws) {
+            throw std::runtime_error("mw cancel throw");
+        }
+    }
+
+    [[nodiscard]] std::string
+    name() const override {
+        return "ConfigurableMiddleware";
+    }
+
+    void
+    set_cancel_throws(bool v) {
+        _cancel_throws = v;
+    }
+
+    int cancel_calls = 0;
+
+private:
+    Mode _mode;
+    bool _cancel_throws = false;
+};
+
+} // namespace
+
+// --- Null-argument constructor guards --------------------------------------
+
+TEST(MiddlewareAdapters, MiddlewareTaskNullPointerThrows) {
+    std::shared_ptr<qb::http::IMiddleware<MockSession>> null_mw;
+    EXPECT_THROW((qb::http::MiddlewareTask<MockSession>(null_mw)), std::invalid_argument);
+}
+
+TEST(MiddlewareAdapters, FunctionalMiddlewareNullHandlerThrows) {
+    qb::http::MiddlewareHandlerFn<MockSession> null_fn;
+    EXPECT_THROW((qb::http::FunctionalMiddleware<MockSession>(null_fn, "n")), std::invalid_argument);
+}
+
+// --- MiddlewareTask::execute exception handling ----------------------------
+
+TEST(MiddlewareAdapters, MiddlewareTaskCatchesStdExceptionAndSets500) {
+    auto sess = std::make_shared<MockSession>();
+    auto ctx  = make_bare_mw_ctx(sess);
+    auto mw   = std::make_shared<ConfigurableMiddleware>(ConfigurableMiddleware::Mode::ThrowStd);
+    qb::http::MiddlewareTask<MockSession> task(mw, "StdThrowMw");
+    EXPECT_EQ(task.name(), "StdThrowMw");
+    task.execute(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(MiddlewareAdapters, MiddlewareTaskCatchesNonStdExceptionAndSets500) {
+    auto sess = std::make_shared<MockSession>();
+    auto ctx  = make_bare_mw_ctx(sess);
+    auto mw   = std::make_shared<ConfigurableMiddleware>(ConfigurableMiddleware::Mode::ThrowNonStd);
+    qb::http::MiddlewareTask<MockSession> task(mw, "NonStdThrowMw");
+    task.execute(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(MiddlewareAdapters, MiddlewareTaskNullCtxStdExceptionDoesNotCrash) {
+    auto mw = std::make_shared<ConfigurableMiddleware>(ConfigurableMiddleware::Mode::ThrowStd);
+    qb::http::MiddlewareTask<MockSession> task(mw, "NullCtxStd");
+    EXPECT_NO_THROW(task.execute(nullptr));
+}
+
+TEST(MiddlewareAdapters, MiddlewareTaskNullCtxNonStdExceptionDoesNotCrash) {
+    auto mw = std::make_shared<ConfigurableMiddleware>(ConfigurableMiddleware::Mode::ThrowNonStd);
+    qb::http::MiddlewareTask<MockSession> task(mw, "NullCtxNonStd");
+    EXPECT_NO_THROW(task.execute(nullptr));
+}
+
+// --- MiddlewareTask::cancel delegation -------------------------------------
+
+TEST(MiddlewareAdapters, MiddlewareTaskCancelDelegates) {
+    auto mw = std::make_shared<ConfigurableMiddleware>(ConfigurableMiddleware::Mode::Continue);
+    qb::http::MiddlewareTask<MockSession> task(mw);
+    task.cancel();
+    EXPECT_EQ(mw->cancel_calls, 1);
+}
+
+TEST(MiddlewareAdapters, MiddlewareTaskCancelSwallowsException) {
+    auto mw = std::make_shared<ConfigurableMiddleware>(ConfigurableMiddleware::Mode::Continue);
+    mw->set_cancel_throws(true);
+    qb::http::MiddlewareTask<MockSession> task(mw);
+    EXPECT_NO_THROW(task.cancel());
+    EXPECT_EQ(mw->cancel_calls, 1);
+}
+
+// --- FunctionalMiddleware::process exception handling ----------------------
+
+TEST(MiddlewareAdapters, FunctionalMiddlewareCatchesStdExceptionAndSets500) {
+    auto sess = std::make_shared<MockSession>();
+    auto ctx  = make_bare_mw_ctx(sess);
+    qb::http::FunctionalMiddleware<MockSession> fm(
+        [](std::shared_ptr<qb::http::Context<MockSession>> /*c*/, std::function<void()> /*next*/) { throw std::runtime_error("fm std throw"); },
+        "FmStd");
+    EXPECT_EQ(fm.name(), "FmStd");
+    fm.process(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(MiddlewareAdapters, FunctionalMiddlewareCatchesNonStdExceptionAndSets500) {
+    auto sess = std::make_shared<MockSession>();
+    auto ctx  = make_bare_mw_ctx(sess);
+    qb::http::FunctionalMiddleware<MockSession> fm(
+        [](std::shared_ptr<qb::http::Context<MockSession>> /*c*/, std::function<void()> /*next*/) { throw 3.14; }, "FmNonStd");
+    fm.process(ctx);
+    EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(ctx->is_completed());
+}
+
+TEST(MiddlewareAdapters, FunctionalMiddlewareNextCalledTwiceIgnoresSecond) {
+    auto sess = std::make_shared<MockSession>();
+    auto ctx  = make_bare_mw_ctx(sess);
+    qb::http::FunctionalMiddleware<MockSession> fm(
+        [](std::shared_ptr<qb::http::Context<MockSession>> /*c*/, std::function<void()> next) {
+            next();
+            next(); // second call must be ignored (one-shot guard)
+        },
+        "FmTwice");
+    EXPECT_NO_THROW(fm.process(ctx));
+}
+
+TEST(MiddlewareAdapters, FunctionalMiddlewareCancelIsNoop) {
+    qb::http::FunctionalMiddleware<MockSession> fm(
+        [](std::shared_ptr<qb::http::Context<MockSession>> /*c*/, std::function<void()> next) { next(); }, "FmCancel");
+    EXPECT_NO_THROW(fm.cancel());
+}
+
 } // namespace

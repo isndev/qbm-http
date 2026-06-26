@@ -536,3 +536,157 @@ TEST_F(MultipartSecurityTest, SerializationRejectsInvalidBoundaryLength) {
     EXPECT_THROW(out.put(mp), std::length_error);
     EXPECT_TRUE(out.empty());
 }
+
+// ====================================================================
+// Coverage Wave-2: MultipartParser::feed malformed/state error branches.
+// Each case drives a distinct setError() guard that the higher-level Body
+// fixtures (which only feed well-formed payloads) never reach.
+// ====================================================================
+
+// START_BOUNDARY: a byte other than CR where the trailing CR is expected
+// (multipart.cpp:295-299).
+TEST_F(MultipartSecurityTest, ParserFeedMalformedExpectedCrAfterBoundary) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+    // "--bnd" matched, then 'X' where CR (\r) must appear.
+    const std::string raw      = "--bndX";
+    const size_t      consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_LT(consumed, raw.size());
+    EXPECT_TRUE(parser.hasError());
+    EXPECT_FALSE(parser.succeeded());
+}
+
+// START_BOUNDARY: CR present but the following byte is not LF
+// (multipart.cpp:302-306).
+TEST_F(MultipartSecurityTest, ParserFeedMalformedExpectedLfAfterBoundaryCr) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+    // "--bnd\r" then 'X' where LF (\n) must appear.
+    const std::string raw      = "--bnd\rX";
+    const size_t      consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_LT(consumed, raw.size());
+    EXPECT_TRUE(parser.hasError());
+}
+
+// HEADER_FIELD: ':' as the very first header character => empty field name
+// (multipart.cpp:331-336).
+TEST_F(MultipartSecurityTest, ParserFeedMalformedEmptyHeaderFieldName) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+    // Valid first boundary, then a header line starting with ':'.
+    const std::string raw      = "--bnd\r\n:value\r\n\r\nbody\r\n--bnd--";
+    const size_t      consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_LT(consumed, raw.size());
+    EXPECT_TRUE(parser.hasError());
+}
+
+// HEADER_FIELD: a non-token byte in the header name (multipart.cpp:342-345).
+TEST_F(MultipartSecurityTest, ParserFeedMalformedHeaderFieldCharacter) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+    // A space inside the header name is not a valid header-field character.
+    const std::string raw      = "--bnd\r\nBad Name: v\r\n\r\nbody\r\n--bnd--";
+    const size_t      consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_LT(consumed, raw.size());
+    EXPECT_TRUE(parser.hasError());
+}
+
+// HEADER_VALUE_ALMOST_DONE: CR in the header value not followed by LF
+// (multipart.cpp:361-365).
+TEST_F(MultipartSecurityTest, ParserFeedMalformedHeaderValueLf) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+    // "K:v\r" then 'X' instead of LF terminates the header value badly.
+    const std::string raw      = "--bnd\r\nK:v\rX";
+    const size_t      consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_LT(consumed, raw.size());
+    EXPECT_TRUE(parser.hasError());
+}
+
+// HEADERS_ALMOST_DONE: the blank-line CR not followed by LF
+// (multipart.cpp:369-373). After a complete header, CR then a non-LF byte.
+TEST_F(MultipartSecurityTest, ParserFeedMalformedHeadersEndingLf) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+    // header "K:v\r\n" then a bare CR (start of the blank line) then 'X'.
+    const std::string raw      = "--bnd\r\nK:v\r\n\rX";
+    const size_t      consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_LT(consumed, raw.size());
+    EXPECT_TRUE(parser.hasError());
+}
+
+// Mid-stream flush: feeding a partial part body (no closing boundary) leaves
+// partDataMark open, so the post-loop dataCallback(..., clear=false) path
+// flushes it to the consumer (multipart.cpp:113-115, 391). A second feed of the
+// closing boundary then completes the parse and the reassembled body matches.
+TEST_F(MultipartSecurityTest, ParserFeedFlushesOpenPartDataOnChunkBoundary) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+
+    CaptureCtx ctx;
+    parser.userData   = &ctx;
+    parser.onPartData = &capture_part_data;
+    parser.onEnd      = &capture_end;
+
+    // First chunk: headers + start of body, NO closing boundary => mark stays open.
+    const std::string chunk1 = "--bnd\r\nK:v\r\n\r\nHELLO";
+    const std::string chunk2 = "WORLD\r\n--bnd--";
+
+    parser.feed(chunk1.data(), chunk1.size());
+    EXPECT_FALSE(parser.hasError());
+    parser.feed(chunk2.data(), chunk2.size());
+
+    EXPECT_TRUE(parser.succeeded());
+    EXPECT_TRUE(ctx.ended);
+    EXPECT_EQ(ctx.data, "HELLOWORLD");
+}
+
+// End boundary with a stray byte where the second terminal '-' is expected:
+// the first '-' sets LAST_BOUNDARY, then a non-'-' byte hits the
+// LAST_BOUNDARY else-branch reset (multipart.cpp:173-180). The sequence
+// "\r\n--bnd-X" is therefore treated as data, not a clean terminator, so the
+// parse does not succeed.
+TEST_F(MultipartSecurityTest, ParserFeedLastBoundaryWrongSecondHyphenDoesNotSucceed) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+
+    CaptureCtx ctx;
+    parser.userData   = &ctx;
+    parser.onPartData = &capture_part_data;
+    parser.onEnd      = &capture_end;
+
+    // "...--bnd-" sets LAST_BOUNDARY, then 'X' (not the second '-') => reset.
+    const std::string raw = "--bnd\r\nK:v\r\n\r\nbody\r\n--bnd-X more";
+    parser.feed(raw.data(), raw.size());
+
+    EXPECT_FALSE(parser.succeeded());
+    EXPECT_FALSE(ctx.ended);
+}
+
+// A part body whose bytes are all outside the boundary alphabet drives the
+// Boyer-Moore fast-skip loop until it lands exactly on the buffer end
+// (multipart.cpp:129-138, the `i == len` early return) when the buffer ends
+// mid-body. The follow-up feed completes the message intact.
+TEST_F(MultipartSecurityTest, ParserFeedBoyerMooreSkipLandsOnBufferEnd) {
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+
+    CaptureCtx ctx;
+    parser.userData   = &ctx;
+    parser.onPartData = &capture_part_data;
+    parser.onEnd      = &capture_end;
+
+    // Body of non-boundary chars ('7' is absent from "\r\n--bnd"); the first
+    // feed ends inside the body so the skip loop reaches i == len and returns.
+    const std::string body(40, '7');
+    const std::string chunk1 = "--bnd\r\nK:v\r\n\r\n" + body;
+    const std::string chunk2 = "\r\n--bnd--";
+
+    parser.feed(chunk1.data(), chunk1.size());
+    EXPECT_FALSE(parser.hasError());
+    parser.feed(chunk2.data(), chunk2.size());
+
+    EXPECT_TRUE(parser.succeeded());
+    EXPECT_TRUE(ctx.ended);
+    EXPECT_EQ(ctx.data, body);
+}

@@ -2252,3 +2252,286 @@ TEST(HTTP2ServerProtocol, TrailersWithPseudoHeaderIsStreamError) {
     EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
     EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
 }
+
+// ===========================================================================
+// Extended coverage wave 3: is_hop_by_hop utility, send_push_promise failure
+// matrix + pushed-stream counting, cleanup_idle_streams, DATA-after-response.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// is_hop_by_hop (qb::http::well_known) — a documented public helper with no
+// in-tree caller. Drive every short-circuit term and confirm case-insensitivity.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, IsHopByHopRecognizesAllForbiddenHeaders) {
+    using qb::http::well_known::is_hop_by_hop;
+    // Every hop-by-hop name the function enumerates (lowercased input).
+    EXPECT_TRUE(is_hop_by_hop("connection"));
+    EXPECT_TRUE(is_hop_by_hop("keep-alive"));
+    EXPECT_TRUE(is_hop_by_hop("proxy-authenticate"));
+    EXPECT_TRUE(is_hop_by_hop("proxy-authorization"));
+    EXPECT_TRUE(is_hop_by_hop("te"));
+    EXPECT_TRUE(is_hop_by_hop("trailers"));
+    EXPECT_TRUE(is_hop_by_hop("transfer-encoding"));
+    EXPECT_TRUE(is_hop_by_hop("upgrade"));
+
+    // Case-insensitive: the function lowercases before comparing.
+    EXPECT_TRUE(is_hop_by_hop("Connection"));
+    EXPECT_TRUE(is_hop_by_hop("Transfer-Encoding"));
+    EXPECT_TRUE(is_hop_by_hop("UPGRADE"));
+
+    // End-to-end headers are NOT hop-by-hop.
+    EXPECT_FALSE(is_hop_by_hop("content-type"));
+    EXPECT_FALSE(is_hop_by_hop("host"));
+    EXPECT_FALSE(is_hop_by_hop(""));
+}
+
+// ---------------------------------------------------------------------------
+// send_push_promise failure matrix. Each crafts the precise precondition for one
+// PushPromiseFailureReason return, with push enabled where needed.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using qb::protocol::http2::PushPromiseFailureReason;
+
+// Handshake enabling client push (SETTINGS_ENABLE_PUSH = 1), optionally setting
+// SETTINGS_MAX_CONCURRENT_STREAMS so the peer concurrency cap can be forced.
+void
+handshake_push_enabled(ServerProtocol &protocol, Http2FakeIO &io, std::optional<uint32_t> max_concurrent = std::nullopt) {
+    push_preface(io);
+    std::vector<std::pair<Http2SettingIdentifier, uint32_t>> settings{{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}};
+    if (max_concurrent.has_value()) {
+        settings.emplace_back(Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, *max_concurrent);
+    }
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload(settings));
+    drive(protocol, io);
+}
+
+qb::http::Request
+make_promised_request(const std::string &uri = "https://example.test/asset.css") {
+    qb::http::Request r{qb::io::uri{uri}};
+    r.method() = qb::http::method::GET;
+    return r;
+}
+
+} // namespace
+
+TEST(HTTP2ServerProtocol, SendPushPromiseOnInactiveConnectionReturnsConnectionInactive) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+
+    // Tear the connection down with a client error GOAWAY -> !ok()/!active.
+    std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    push_frame(io, FrameType::GOAWAY, 0, 0, payload);
+    drive(protocol, io);
+    ASSERT_FALSE(protocol.ok());
+
+    auto failure = protocol.send_push_promise(1, 2, make_promised_request());
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::CONNECTION_INACTIVE);
+}
+
+TEST(HTTP2ServerProtocol, SendPushPromiseInvalidPromisedStreamId) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+
+    // Promised stream id must be non-zero AND even (server-initiated). An odd id
+    // (3) and zero both hit the invalid-promised-stream-id guard.
+    auto odd = protocol.send_push_promise(1, 3, make_promised_request());
+    ASSERT_TRUE(odd.has_value());
+    EXPECT_EQ(*odd, PushPromiseFailureReason::INVALID_PROMISED_STREAM);
+
+    auto zero = protocol.send_push_promise(1, 0, make_promised_request());
+    ASSERT_TRUE(zero.has_value());
+    EXPECT_EQ(*zero, PushPromiseFailureReason::INVALID_PROMISED_STREAM);
+}
+
+TEST(HTTP2ServerProtocol, SendPushPromiseExceedingPeerConcurrencyLimit) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    // Client advertises MAX_CONCURRENT_STREAMS = 0, so any push exceeds the cap.
+    handshake_push_enabled(protocol, io, /*max_concurrent=*/0);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+
+    auto failure = protocol.send_push_promise(1, 2, make_promised_request());
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED);
+}
+
+TEST(HTTP2ServerProtocol, SendPushPromiseOnNonexistentAssociatedStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // No associated stream 9 was ever opened -> INVALID_ASSOCIATED_STREAM.
+    auto failure = protocol.send_push_promise(9, 2, make_promised_request());
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM);
+}
+
+TEST(HTTP2ServerProtocol, SendPushPromiseOnClosedAssociatedStreamIsInvalid) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Open then fully close a stream so its state is no longer OPEN /
+    // HALF_CLOSED_REMOTE (it is erased / closed) -> wrong-state guard.
+    open_get_stream_end_stream(protocol, io, 1, "/done");
+    ASSERT_TRUE(protocol.ok());
+    qb::http::Response response;
+    response.status() = qb::http::status::NO_CONTENT;
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_TRUE(protocol.is_stream_closed(1));
+
+    auto failure = protocol.send_push_promise(1, 2, make_promised_request());
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM);
+}
+
+// Associated stream EXISTS but is in a state that cannot anchor a push: a
+// RESERVED_LOCAL pushed stream. This hits the wrong-state guard (not the
+// not-found guard).
+TEST(HTTP2ServerProtocol, SendPushPromiseOnReservedLocalAssociatedStreamIsInvalid) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+
+    // First push creates stream 2 in RESERVED_LOCAL.
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, make_promised_request("https://example.test/a.css")).has_value());
+    ASSERT_FALSE(protocol.is_stream_closed(2)); // present, RESERVED_LOCAL
+
+    // Using the RESERVED_LOCAL stream 2 as the association is a wrong-state error
+    // (exists in the map, but not OPEN / HALF_CLOSED_REMOTE).
+    auto failure = protocol.send_push_promise(2, 6, make_promised_request("https://example.test/c.css"));
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM);
+}
+
+TEST(HTTP2ServerProtocol, SendPushPromiseWithUninitializedMethodIsInvalidRequest) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+
+    // A promised request whose method is UNINITIALIZED fails the
+    // method/scheme/authority/path completeness guard -> INVALID_PROMISED_REQUEST
+    // (and the half-built promised stream context is rolled back). The single-uri
+    // Request ctor defaults to GET, so force the method back to UNINITIALIZED.
+    qb::http::Request promised{qb::io::uri{"https://example.test/x.css"}};
+    promised.method() = qb::http::method::UNINITIALIZED;
+
+    auto failure = protocol.send_push_promise(1, 2, std::move(promised));
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_PROMISED_REQUEST);
+    // The promised stream id 2 must not linger after the rollback.
+    EXPECT_TRUE(protocol.is_stream_closed(2));
+}
+
+// Two successive pushes: the second send_push_promise sees the first pushed
+// (even) stream still active, exercising the server-initiated (even) branch of
+// get_active_stream_count(true).
+TEST(HTTP2ServerProtocol, SecondPushPromiseCountsExistingPushedStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, make_promised_request("https://example.test/a.css")).has_value());
+    // Stream 2 now exists in RESERVED_LOCAL (active, even). The second push must
+    // iterate it in get_active_stream_count(true) and still succeed (cap is the
+    // default, far above 1).
+    ASSERT_FALSE(protocol.send_push_promise(1, 4, make_promised_request("https://example.test/b.css")).has_value());
+
+    EXPECT_EQ(count_frames(io.output, FrameType::PUSH_PROMISE), 2u);
+}
+
+// ---------------------------------------------------------------------------
+// cleanup_idle_streams: a zero idle/incomplete threshold forces cleanup of every
+// live stream (RST_STREAM + erase), exercising the incomplete-OPEN and the
+// generic-idle branches plus the closed-stream skip.
+// ---------------------------------------------------------------------------
+
+// Note: the "force every live stream to be cleaned up" path of
+// cleanup_idle_streams is NOT exercised here. When a stream actually crosses the
+// idle threshold, cleanup_idle_streams calls send_rst_stream(... close_context=
+// true), which itself erases the stream via try_close_stream_context; the
+// subsequent `it = _server_streams.erase(it)` in cleanup_idle_streams then
+// operates on an already-invalidated iterator (double-erase UB / hang). Driving
+// the should_cleanup==true branch is therefore unsafe with the current code; only
+// the no-cleanup (++it) path below is covered. See the flagged follow-up task.
+
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsLeavesFreshStreamsAlone) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/fresh");
+    ASSERT_TRUE(protocol.ok());
+
+    // Generous thresholds: the just-opened stream is well within them, so the
+    // should_cleanup == false (++it) branch is taken and nothing is removed.
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1h), 0u);
+    EXPECT_FALSE(protocol.is_stream_closed(1));
+}
+
+// ---------------------------------------------------------------------------
+// DATA carrying END_STREAM that arrives AFTER the server already sent its full
+// response (end_stream_sent) -> the stream is past end-of-response; the late
+// DATA is treated as a closed-stream reset.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, DataAfterResponseEndStreamIsResetClosed) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // POST stays OPEN (declares clen but sends no body yet) so we can respond
+    // while the read side is still open.
+    open_post_stream_with_clen(protocol, io, 1, "/early-response", "100");
+    ASSERT_TRUE(protocol.ok());
+
+    // Server responds fully (END_STREAM sent) before the client body arrives.
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    ASSERT_TRUE(protocol.send_response(1, response));
+
+    const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
+
+    // Late client DATA on the now end-of-response stream -> RST_STREAM(
+    // STREAM_CLOSED); the connection survives.
+    push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 1, {'l', 'a', 't', 'e'});
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
+    EXPECT_EQ(io.goaway_count, 0);
+}

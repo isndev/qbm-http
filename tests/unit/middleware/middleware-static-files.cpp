@@ -900,4 +900,52 @@ TEST_F(StaticFilesMiddlewareTest, MaxFileSizeZeroDisablesCap) {
     EXPECT_EQ(_session->_response.body().size(), 4096u);
 }
 
+// A Range request against an oversize file still hits the whole-file DoS cap
+// (which dominates: the per-range cap can only fire when full_file_size already
+// exceeds the budget, so the full-file guard returns first). Pins that Range +
+// max_file_size interact safely.
+TEST_F(StaticFilesMiddlewareTest, RangeRequestAgainstOversizeFileYields413) {
+    create_test_file(_test_root_dir / "big.bin", std::string(4096, 'z'));
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_range_requests(true).with_max_file_size(16);
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/big.bin", {{"Range", "bytes=0-1023"}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
+}
+
+// --- Constructor guards ----------------------------------------------------
+
+TEST_F(StaticFilesMiddlewareTest, ConstructorRejectsEmptyRootDirectory) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.root_directory.clear();
+    EXPECT_THROW((qb::http::StaticFilesMiddleware<MockMiddlewareSession>(options)), std::invalid_argument);
+}
+
+TEST_F(StaticFilesMiddlewareTest, ConstructorRejectsNonexistentRootDirectory) {
+    qb::http::StaticFilesOptions options(_test_root_dir / "does_not_exist_subdir_xyz");
+    EXPECT_THROW((qb::http::StaticFilesMiddleware<MockMiddlewareSession>(options)), std::runtime_error);
+}
+
+// --- Fluent option setters not otherwise exercised -------------------------
+
+TEST_F(StaticFilesMiddlewareTest, WithRootDirectoryAndIndexFileNameSettersServeNamedIndex) {
+    create_test_file(_test_root_dir / "main.page", "Custom Index Page");
+
+    // Build options against a throw-away path, then re-root via with_root_directory
+    // and pick a non-default index file name via with_index_file_name.
+    qb::http::StaticFilesOptions options(std::filesystem::temp_directory_path());
+    options.with_root_directory(_test_root_dir).with_serve_index_file(true).with_index_file_name("main.page");
+
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Custom Index Page");
+}
+
+// --- cancel() is a no-op on the synchronous middleware ---------------------
+
+TEST_F(StaticFilesMiddlewareTest, CancelIsNoop) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    auto                         mw = make_mw(options);
+    EXPECT_NO_THROW(mw->cancel());
+}
+
 } // namespace

@@ -1683,3 +1683,339 @@ TEST(HTTP2ClientProtocol, ResponseBodyLongerThanContentLengthIsRst) {
     ASSERT_NE(rst_off, SIZE_MAX);
     EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 1u);
 }
+
+// ===========================================================================
+// Wave-2 coverage: error/edge branches in ClientHttp2Protocol that are only
+// reachable by dispatching typed frames straight to the protocol's `on(...)`
+// overloads (bypassing the base framer's own pre-dispatch validation) or by
+// exercising the public trailer/CONTINUATION surface with adversarial input.
+// All socket-less and deterministic. See coverage cluster `h2-client`.
+// ===========================================================================
+
+namespace {
+
+// Build a CONTINUATION Http2FrameData ready to hand to protocol.on(...). Used to
+// drive the client's own on(ContinuationFrame) guard branches, which the base
+// framer would otherwise reject before they are reached.
+[[nodiscard]] h2::Http2FrameData<h2::ContinuationFrame>
+make_continuation_frame(uint32_t stream_id, uint8_t flags, const std::vector<uint8_t> &fragment) {
+    h2::Http2FrameData<h2::ContinuationFrame> frame;
+    frame.header.type  = static_cast<uint8_t>(h2::FrameType::CONTINUATION);
+    frame.header.flags = flags;
+    frame.header.set_stream_id(stream_id);
+    frame.payload.header_block_fragment = fragment;
+    return frame;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// CONTINUATION dispatched while no header block is open (i.e.
+// `_active_header_block_stream_id == 0`) is a connection PROTOCOL_ERROR. The
+// base framer normally rejects a stray CONTINUATION before dispatch, so this
+// drives the protocol's own guard (client.h on(ContinuationFrame), first branch)
+// directly.
+// ---------------------------------------------------------------------------
+TEST(HTTP2ClientProtocol, ContinuationWithNoOpenHeaderBlockIsConnectionError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_continuation_frame(1, h2::FLAG_END_HEADERS, {0x00}));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_NE(find_frame_offset(io.output, h2::FrameType::GOAWAY, before), SIZE_MAX);
+}
+
+// ---------------------------------------------------------------------------
+// HEADERS for an even (server-initiated) stream id that was never promised and
+// is not pending-pushed is treated as HEADERS on an unknown/closed stream:
+// the client RST_STREAMs that id (STREAM_CLOSED) and the connection survives.
+// Drives client.h on(HeadersFrame) unknown-stream RST branch (the even id skips
+// the "idle client stream" GOAWAY branch reserved for odd ids).
+// ---------------------------------------------------------------------------
+TEST(HTTP2ClientProtocol, HeadersForUnknownEvenStreamRstsStreamOnly) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    const std::size_t before = io.output.size();
+    // Even id 4 was never promised via PUSH_PROMISE and is not a known stream.
+    protocol.on(make_headers_frame(4, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+
+    EXPECT_TRUE(protocol.ok()); // stream-level only, connection healthy
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(io.response_count, 0);
+
+    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
+    ASSERT_NE(rst_off, SIZE_MAX);
+    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 4u);
+    EXPECT_FALSE(io.last_status.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// send_request_trailers — trailer validation rejects: a trailer carrying a
+// PSEUDO-header name (leading ':') is a stream PROTOCOL_ERROR (RST_STREAM) and
+// the call returns false. Hits client.h send_request_trailers pseudo-header
+// branch. The stream must first have announced trailers (request "trailer"
+// header) and stay open (body not fully flushed) so the trailer path is taken.
+// ---------------------------------------------------------------------------
+TEST(HTTP2ClientProtocol, SendTrailersWithPseudoHeaderNameRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    // Tiny stream window so the body DATA cannot fully flush -> stream stays OPEN
+    // and end_stream_sent stays false, keeping the trailer path live.
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1}}));
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/trailers-pseudo");
+    req.body()   = "bb";
+    req.set_header("trailer", "x-checksum");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 31));
+
+    const std::size_t before = io.output.size();
+
+    qb::http::headers trailers;
+    trailers.add_header(":status", "200"); // pseudo-header is forbidden in trailers
+    EXPECT_FALSE(protocol.send_request_trailers(1, trailers));
+
+    EXPECT_TRUE(protocol.ok());
+    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
+    ASSERT_NE(rst_off, SIZE_MAX);
+    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// send_request_trailers — a FORBIDDEN trailer header (`content-length`, which
+// is_forbidden_trailer_header rejects) is a stream PROTOCOL_ERROR and returns
+// false. Hits client.h send_request_trailers forbidden-header branch.
+// ---------------------------------------------------------------------------
+TEST(HTTP2ClientProtocol, SendTrailersWithForbiddenHeaderRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1}}));
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/trailers-forbidden");
+    req.body()   = "bb";
+    req.set_header("trailer", "content-length");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 33));
+
+    const std::size_t before = io.output.size();
+
+    qb::http::headers trailers;
+    trailers.add_header("content-length", "5"); // forbidden in the trailer section
+    EXPECT_FALSE(protocol.send_request_trailers(1, trailers));
+
+    EXPECT_TRUE(protocol.ok());
+    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
+    ASSERT_NE(rst_off, SIZE_MAX);
+    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// send_request_trailers — a trailer whose VALUE contains a control byte (CR)
+// fails is_valid_header_field and is a stream PROTOCOL_ERROR returning false.
+// Hits client.h send_request_trailers invalid-value branch.
+// ---------------------------------------------------------------------------
+TEST(HTTP2ClientProtocol, SendTrailersWithInvalidValueRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1}}));
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/trailers-badvalue");
+    req.body()   = "bb";
+    req.set_header("trailer", "x-checksum");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 35));
+
+    const std::size_t before = io.output.size();
+
+    qb::http::headers trailers;
+    trailers.add_header("x-checksum", std::string("dead\r\nbeef")); // CRLF -> invalid value
+    EXPECT_FALSE(protocol.send_request_trailers(1, trailers));
+
+    EXPECT_TRUE(protocol.ok());
+    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
+    ASSERT_NE(rst_off, SIZE_MAX);
+    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 1u);
+}
+
+// ===========================================================================
+// Wave-2 coverage: response HEADERS validation rejects in
+// parse_and_validate_headers_into_response. Each case sends a single request to
+// open stream 1, then dispatches a response HEADERS block that is malformed in
+// exactly one way; the client RST_STREAMs the stream (PROTOCOL_ERROR or
+// ENHANCE_YOUR_CALM), dispatches no response, and the connection stays OK.
+// ===========================================================================
+
+namespace {
+
+// Open client stream 1 by sending a GET, returns the protocol ready for a
+// response HEADERS frame on stream 1.
+void
+open_stream_one(h2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol, uint64_t app_id, const char *path) {
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri(std::string("https://example.test") + path);
+    ASSERT_TRUE(protocol.send_request(std::move(req), app_id));
+}
+
+} // namespace
+
+// A regular header appearing BEFORE the :status pseudo-header violates pseudo-
+// header ordering (validate_pseudo_header_order) -> PROTOCOL_ERROR RST.
+TEST(HTTP2ClientProtocol, ResponsePseudoHeaderAfterRegularHeaderRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 41, "/order");
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{"x-early", "1"}, {":status", "200"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// A regular header whose NAME contains an uppercase letter fails
+// is_valid_header_field (HTTP/2 header names must be lowercase) ->
+// PROTOCOL_ERROR RST. (An uppercase name survives the HPACK round-trip, unlike a
+// control-byte value which the encoder may sanitize before it reaches the
+// validator.)
+TEST(HTTP2ClientProtocol, ResponseInvalidRegularHeaderValueRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 43, "/badhdr");
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"X-Bad-Upper", "v"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// A forbidden connection-specific response header (`connection`) ->
+// PROTOCOL_ERROR RST (is_forbidden_response_header branch).
+TEST(HTTP2ClientProtocol, ResponseForbiddenConnectionHeaderRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 45, "/forbidden");
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"connection", "keep-alive"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// A non-numeric content-length value fails parse_content_length ->
+// PROTOCOL_ERROR RST.
+TEST(HTTP2ClientProtocol, ResponseInvalidContentLengthRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 47, "/badcl");
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "not-a-number"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// Two DIFFERENT content-length values on the same response are conflicting ->
+// PROTOCOL_ERROR RST (second value mismatches the stored expected length).
+TEST(HTTP2ClientProtocol, ResponseConflictingContentLengthRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 49, "/conflict");
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
+                                   {{":status", "200"}, {"content-length", "5"}, {"content-length", "7"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// A content-length larger than the configured MAX_BODY_SIZE is refused with
+// ENHANCE_YOUR_CALM RST before any body arrives.
+TEST(HTTP2ClientProtocol, ResponseContentLengthExceedsLimitRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 51, "/huge");
+
+    const std::size_t before = io.output.size();
+    // Far beyond MAX_BODY_SIZE; parse_content_length accepts it, the limit check rejects.
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
+                                   {{":status", "200"}, {"content-length", "99999999999999"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// A :status that is three digits and numeric (so it passes the pseudo-header
+// validator) but is below 100 ("000") is rejected by parse_status_code ->
+// PROTOCOL_ERROR RST. Drives the post-loop status-parse branch.
+TEST(HTTP2ClientProtocol, ResponseStatusBelowOneHundredRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 53, "/status000");
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "000"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// A pseudo-header appearing in a TRAILERS block (which skips the response-pseudo
+// validator) is rejected with PROTOCOL_ERROR RST. The main response is assembled
+// first (HEADERS + DATA without END_STREAM is not needed: HEADERS-only with a
+// "trailer" announce, then a trailers HEADERS carrying a pseudo-header).
+TEST(HTTP2ClientProtocol, ResponsePseudoHeaderInTrailersRstsStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 55, "/trailer-pseudo");
+
+    // Main response headers announce trailers and do NOT end the stream.
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"trailer", "x-sig"}}));
+    ASSERT_TRUE(protocol.ok());
+
+    const std::size_t before = io.output.size();
+    // Trailers block (END_STREAM) carrying a pseudo-header -> rejected.
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "204"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
