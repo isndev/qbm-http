@@ -1,372 +1,281 @@
-#include <gtest/gtest.h>
-#include <qb/io/async.h>
-#include <qb/io/uri.h>   // For qb::http::Request constructor
-#include "../2/client.h" // For HTTP/2 client
-#include "../2/http2.h"  // For HTTP/2 server components
-#include "../http.h"     // Brings in make_server, AppServer, DefaultSession, etc.
-
-#if QB_HAS_SSL
-#include <fstream> // For checking certificate file existence
-#endif
-
+/**
+ * @file qbm/http/tests/system/server/make-server-factory.cpp
+ * @brief Live loopback tests for the qbm-http server factory functions.
+ *
+ * The system-tier successor to `test-integration-make-server.cpp`. It verifies
+ * the three factory entry points produce a server that actually serves over the
+ * loopback interface:
+ *
+ *   - `qb::http::make_server()`        -> plaintext HTTP/1.1   (UN-GATED)
+ *   - `qb::http::ssl::make_server()`   -> HTTPS                (REQUIRES ssl)
+ *   - `qb::http2::make_server()`       -> HTTP/2 over TLS+ALPN (REQUIRES ssl)
+ *
+ * Differences from the legacy file (per the restructure spec, §2/§7):
+ *   - DROP the misleading `integration-` prefix (loopback, not daemon).
+ *   - UN-GATE the plaintext HTTP/1.1 fixture: it has no SSL dependency and must
+ *     build/run on `QB_HAS_SSL=OFF`. Only the https/h2 fixtures stay behind
+ *     `#if QB_HAS_SSL`.
+ *   - The hand-rolled server threads (fixed magic ports 29878/29880/29882,
+ *     `server_ready` busy flags, 200ms/100ms `sleep_for` settles) are replaced
+ *     by the shared `ServerThread<>` RAII (loopback_server.h): readiness via
+ *     condition variable, ephemeral ports, worker-thread run loops.
+ *   - The self-incremented client/server smoke counters are dropped; tests
+ *     assert OBSERVABLE response state. The server-side request counter that
+ *     still carries signal (proving the handler ran exactly once) is an atomic
+ *     owned by the test and asserted in the test body after completion.
+ *   - The cert-missing `GTEST_SKIP` + `check_test_certs_exist()` helper is
+ *     replaced by the shared `certs_available()` HARD prerequisite.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include <atomic>
 #include <chrono>
-#include <iostream>
-#include <memory> // For std::unique_ptr
+#include <memory>
 #include <string>
-#include <thread>
-#include <vector>
+
+#include <gtest/gtest.h>
+
+#include <qb/io/async.h>
+#include <qb/io/uri.h>
+
+#include "../2/client.h"
+#include "../2/http2.h"
+#include "../http.h"
+
+#include "../../shared/loopback_server.h"
+#include "../../shared/ssl_test_resource.h"
 
 using namespace std::chrono_literals;
 
-// --- Test Counters & Flags ---
-static std::atomic<bool> g_make_server_test_server_ready{false};
-static std::atomic<int>  g_make_server_test_req_count_server{0};
-static std::atomic<int>  g_make_server_test_req_count_client{0};
+namespace {
 
-// Helper to get current test name for logging
-static std::string
-GetCurrentTestNameForMakeServer() {
-    const auto *current_test_info = ::testing::UnitTest::GetInstance()->current_test_info();
-    if (current_test_info) {
-        return std::string(current_test_info->test_suite_name()) + "." + current_test_info->name();
-    }
-    return "UNKNOWN_TEST.UNKNOWN_CASE";
-}
+// ===========================================================================
+// Plaintext HTTP/1.1 factory (UN-GATED — no SSL dependency)
+// ===========================================================================
 
-// --- Test Fixture for qb::http::make_server (default session) ---
+using PlainServer       = qb::http::Server<>;
+using PlainServerThread = qb::http::test::ServerThread<PlainServer>;
+
+// Server-side request count: the one counter that still carries signal (it
+// proves the factory-built handler actually ran). It is an atomic so the test
+// thread can read it after the request round-trips.
+std::atomic<int> g_plain_server_requests{0};
+
 class HttpMakeServerTest : public ::testing::Test {
 protected:
-    std::unique_ptr<qb::http::Server<>> server_instance;
-    std::thread                         server_thread;
-    const uint16_t                      TEST_PORT = 29878;
+    std::uint16_t                      _port{0};
+    std::unique_ptr<PlainServerThread> _server;
 
     void
     SetUp() override {
         qb::io::async::init();
+        g_plain_server_requests = 0;
+        _port                   = qb::http::test::ephemeral_port();
 
-        g_make_server_test_server_ready     = false;
-        g_make_server_test_req_count_server = 0;
-        g_make_server_test_req_count_client = 0;
-
-        server_instance = qb::http::make_server();
-
-        server_instance->router().get("/ping", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
-            g_make_server_test_req_count_server++;
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().body()   = "pong_http_default";
-            ctx->complete();
-        });
-        server_instance->router().compile();
-
-        server_thread = std::thread([this]() {
-            qb::io::async::init();
-            server_instance->transport().listen_v4(TEST_PORT);
-            server_instance->start();
-            g_make_server_test_server_ready = true;
-            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP Server (default session) ready on port " << TEST_PORT
-                           << std::endl;
-            while (g_make_server_test_server_ready.load(std::memory_order_acquire)) {
-                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
+        const std::uint16_t port = _port;
+        _server                  = std::make_unique<PlainServerThread>([port](PlainServer &srv) -> bool {
+            srv.router().get("/ping", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+                ++g_plain_server_requests;
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().body()   = "pong_http_default";
+                ctx->complete();
+            });
+            srv.router().compile();
+            if (srv.transport().listen_v4(port) != 0) {
+                return false;
             }
-            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP Server (default session) thread finishing." << std::endl;
+            srv.start();
+            return true;
         });
-
-        while (!g_make_server_test_server_ready.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        ASSERT_TRUE(_server->ready()) << "plaintext HTTP/1.1 loopback server failed to start on port " << _port;
     }
 
     void
     TearDown() override {
-        g_make_server_test_server_ready = false;
-        if (server_thread.joinable()) {
-            server_thread.join();
-        }
-        server_instance.reset();
-        qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Test Finished. Client Reqs: " << g_make_server_test_req_count_client
-                       << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
+        _server.reset();
+    }
+
+    [[nodiscard]] std::string
+    base_url() const {
+        return "http://localhost:" + std::to_string(_port);
     }
 };
 
 TEST_F(HttpMakeServerTest, PingDefaultSessionHttpServer) {
-    qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping to HTTP server (default session) on port "
-                   << TEST_PORT << std::endl;
-    qb::http::Request request{{"http://localhost:" + std::to_string(TEST_PORT) + "/ping"}};
+    qb::http::Request request{{base_url() + "/ping"}};
     auto              response = qb::http::run_sync(qb::http::GET(request)).response;
 
-    EXPECT_EQ(HTTP_STATUS_OK, response.status());
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_http_default", response.body().as<std::string>());
-    g_make_server_test_req_count_client++;
-
-    EXPECT_EQ(1, g_make_server_test_req_count_client.load());
-    EXPECT_EQ(1, g_make_server_test_req_count_server.load());
+    EXPECT_EQ(1, g_plain_server_requests.load());
 }
 
 #if QB_HAS_SSL
 
-// --- Test Fixture for qb::http::ssl::make_server (default session) ---
+// ===========================================================================
+// HTTPS factory (REQUIRES ssl)
+// ===========================================================================
+
+using SecureServer       = qb::http::ssl::Server<>;
+using SecureServerThread = qb::http::test::ServerThread<SecureServer>;
+
+std::atomic<int> g_https_server_requests{0};
+
 class HttpsMakeServerTest : public ::testing::Test {
 protected:
-    std::unique_ptr<qb::http::ssl::Server<>> server_instance;
-    std::thread                              server_thread;
-    const uint16_t                           TEST_PORT_SSL = 29880;
-    const char                              *CERT_FILE     = "cert.pem";
-    const char                              *KEY_FILE      = "key.pem";
-
-    bool
-    check_test_certs_exist() {
-        std::ifstream certf(CERT_FILE);
-        std::ifstream keyf(KEY_FILE);
-        bool          cert_exists = certf.good();
-        bool          key_exists  = keyf.good();
-        if (!cert_exists)
-            std::cerr << "Warning: Test certificate file not found: " << CERT_FILE << std::endl;
-        if (!key_exists)
-            std::cerr << "Warning: Test key file not found: " << KEY_FILE << std::endl;
-        return cert_exists && key_exists;
-    }
+    std::uint16_t                       _port{0};
+    std::unique_ptr<SecureServerThread> _server;
 
     void
     SetUp() override {
-        if (!check_test_certs_exist()) {
-            GTEST_SKIP() << "Test SSL certificates (" << CERT_FILE << ", " << KEY_FILE << ") not found, skipping HTTPS tests.";
-            return;
-        }
+        ASSERT_TRUE(qb::http::test::certs_available())
+            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and "
+            << qb::http::test::ssl_key_path() << "). The HTTPS factory system suite REQUIRES them.";
 
         qb::io::async::init();
-        g_make_server_test_server_ready     = false;
-        g_make_server_test_req_count_server = 0;
-        g_make_server_test_req_count_client = 0;
+        g_https_server_requests = 0;
+        _port                   = qb::http::test::ephemeral_port();
 
-        server_instance = qb::http::ssl::make_server();
+        const std::string   cert = qb::http::test::ssl_cert_path().string();
+        const std::string   key  = qb::http::test::ssl_key_path().string();
+        const std::uint16_t port = _port;
 
-        auto ssl_ctx = qb::io::ssl::create_server_context(TLS_server_method(), CERT_FILE, KEY_FILE);
-        if (!ssl_ctx) {
-            throw std::runtime_error("Failed to create SSL server context for test.");
-        }
-        server_instance->transport().init(std::move(ssl_ctx));
-
-        server_instance->router().get("/ping_ssl", [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
-            g_make_server_test_req_count_server++;
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().body()   = "pong_https_default";
-            ctx->complete();
-        });
-        server_instance->router().compile();
-
-        server_thread = std::thread([this]() {
-            qb::io::async::init();
-            server_instance->transport().listen_v4(TEST_PORT_SSL);
-            server_instance->start();
-            g_make_server_test_server_ready = true;
-            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTPS Server (default session) ready on port " << TEST_PORT_SSL
-                           << std::endl;
-            while (g_make_server_test_server_ready.load(std::memory_order_acquire)) {
-                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
+        _server = std::make_unique<SecureServerThread>([cert, key, port](SecureServer &srv) -> bool {
+            auto ssl_ctx = qb::io::ssl::create_server_context(TLS_server_method(), cert.c_str(), key.c_str());
+            if (!ssl_ctx) {
+                return false;
             }
-            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTPS Server (default session) thread finishing." << std::endl;
+            srv.transport().init(std::move(ssl_ctx));
+            srv.router().get("/ping_ssl",
+                             [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
+                                 ++g_https_server_requests;
+                                 ctx->response().status() = qb::http::status::OK;
+                                 ctx->response().body()   = "pong_https_default";
+                                 ctx->complete();
+                             });
+            srv.router().compile();
+            if (srv.transport().listen_v4(port) != 0) {
+                return false;
+            }
+            srv.start();
+            return true;
         });
-
-        while (!g_make_server_test_server_ready.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        ASSERT_TRUE(_server->ready()) << "HTTPS loopback server failed to start on port " << _port;
     }
 
     void
     TearDown() override {
-        if (IsSkipped())
-            return;
-        g_make_server_test_server_ready = false;
-        if (server_thread.joinable()) {
-            server_thread.join();
-        }
-        server_instance.reset();
-        qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Test Finished. Client Reqs: " << g_make_server_test_req_count_client
-                       << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
+        _server.reset();
+    }
+
+    [[nodiscard]] std::string
+    base_url() const {
+        return "https://localhost:" + std::to_string(_port);
     }
 };
 
 TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
-    if (IsSkipped())
-        return;
-    qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_ssl to HTTPS server (default session) on port "
-                   << TEST_PORT_SSL << std::endl;
-    qb::http::Request request{{"https://localhost:" + std::to_string(TEST_PORT_SSL) + "/ping_ssl"}};
-
+    qb::http::Request request{{base_url() + "/ping_ssl"}};
     // Self-signed test certificate: opt out of secure-by-default verification.
     auto response = qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
 
-    EXPECT_EQ(HTTP_STATUS_OK, response.status());
+    EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_https_default", response.body().as<std::string>());
-    g_make_server_test_req_count_client++;
-
-    EXPECT_EQ(1, g_make_server_test_req_count_client.load());
-    EXPECT_EQ(1, g_make_server_test_req_count_server.load());
+    EXPECT_EQ(1, g_https_server_requests.load());
 }
 
-#endif // QB_HAS_SSL
+// ===========================================================================
+// HTTP/2 factory (REQUIRES ssl)
+// ===========================================================================
 
-#if QB_HAS_SSL
-// --- Test Fixture for qb::http2::make_server ---
+using Http2FactoryServer       = qb::http2::Server<>;
+using Http2FactoryServerThread = qb::http::test::ServerThread<Http2FactoryServer>;
+
+std::atomic<int> g_http2_server_requests{0};
+
 class Http2MakeServerTest : public ::testing::Test {
 protected:
-    std::unique_ptr<qb::http2::Server<>> server_instance_h2;
-    std::thread                          server_thread_h2;
-    const uint16_t                       TEST_PORT_HTTP2 = 29882;
-    const char                          *CERT_FILE       = "cert.pem";
-    const char                          *KEY_FILE        = "key.pem";
-
-    bool
-    check_test_certs_exist() {
-        std::ifstream certf(CERT_FILE);
-        std::ifstream keyf(KEY_FILE);
-        bool          cert_exists = certf.good();
-        bool          key_exists  = keyf.good();
-        if (!cert_exists)
-            std::cerr << "Warning: Test certificate file not found: " << CERT_FILE << std::endl;
-        if (!key_exists)
-            std::cerr << "Warning: Test key file not found: " << KEY_FILE << std::endl;
-        return cert_exists && key_exists;
-    }
+    std::uint16_t                             _port{0};
+    std::unique_ptr<Http2FactoryServerThread> _server;
 
     void
     SetUp() override {
-        if (!check_test_certs_exist()) {
-            GTEST_SKIP() << "Test SSL certificates (" << CERT_FILE << ", " << KEY_FILE << ") not found, skipping HTTP/2 tests.";
-            return;
-        }
+        ASSERT_TRUE(qb::http::test::certs_available())
+            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and "
+            << qb::http::test::ssl_key_path() << "). The HTTP/2 factory system suite REQUIRES them.";
 
         qb::io::async::init();
-        g_make_server_test_server_ready     = false;
-        g_make_server_test_req_count_server = 0;
-        g_make_server_test_req_count_client = 0;
+        g_http2_server_requests = 0;
+        _port                   = qb::http::test::ephemeral_port();
 
-        server_instance_h2 = qb::http2::make_server();
+        const std::string   cert = qb::http::test::ssl_cert_path().string();
+        const std::string   key  = qb::http::test::ssl_key_path().string();
+        const std::uint16_t port = _port;
 
-        auto ssl_ctx_h2 = qb::io::ssl::create_server_context(TLS_server_method(), CERT_FILE, KEY_FILE);
-        if (!ssl_ctx_h2) {
-            throw std::runtime_error("Failed to create SSL server context for HTTP/2 test.");
-        }
-        server_instance_h2->transport().init(std::move(ssl_ctx_h2));
-        server_instance_h2->transport().set_supported_alpn_protocols({"h2", "http/1.1"});
-
-        server_instance_h2->router().get("/ping_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
-            g_make_server_test_req_count_server++;
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().body()   = "pong_http2_default";
-            ctx->complete();
-        });
-        server_instance_h2->router().compile();
-
-        server_thread_h2 = std::thread([this]() {
-            qb::io::async::init();
-            server_instance_h2->transport().listen_v4(TEST_PORT_HTTP2);
-            server_instance_h2->start();
-            g_make_server_test_server_ready = true;
-            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Server ready on port " << TEST_PORT_HTTP2 << std::endl;
-            while (g_make_server_test_server_ready.load(std::memory_order_acquire)) {
-                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
+        _server = std::make_unique<Http2FactoryServerThread>([cert, key, port](Http2FactoryServer &srv) -> bool {
+            auto ssl_ctx = qb::io::ssl::create_server_context(TLS_server_method(), cert.c_str(), key.c_str());
+            if (!ssl_ctx) {
+                return false;
             }
-            qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] HTTP/2 Server thread finishing." << std::endl;
+            srv.transport().init(std::move(ssl_ctx));
+            srv.transport().set_supported_alpn_protocols({"h2", "http/1.1"});
+            srv.router().get("/ping_http2",
+                             [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                                 ++g_http2_server_requests;
+                                 ctx->response().status() = qb::http::status::OK;
+                                 ctx->response().body()   = "pong_http2_default";
+                                 ctx->complete();
+                             });
+            srv.router().compile();
+            if (srv.transport().listen_v4(port) != 0) {
+                return false;
+            }
+            srv.start();
+            return true;
         });
-
-        while (!g_make_server_test_server_ready.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start on port " << _port;
     }
 
     void
     TearDown() override {
-        if (IsSkipped())
-            return;
-        g_make_server_test_server_ready = false;
-        if (server_thread_h2.joinable()) {
-            server_thread_h2.join();
-        }
-        server_instance_h2.reset();
-        qb::io::cout() << "[" << GetCurrentTestNameForMakeServer()
-                       << "] HTTP/2 Test Finished. Client Reqs: " << g_make_server_test_req_count_client
-                       << ", Server Reqs: " << g_make_server_test_req_count_server << std::endl;
+        _server.reset();
+    }
+
+    [[nodiscard]] std::string
+    base_url() const {
+        return "https://localhost:" + std::to_string(_port);
     }
 };
 
 TEST_F(Http2MakeServerTest, PingHttp2Server) {
-    if (IsSkipped())
-        return;
-    qb::io::cout() << "[" << GetCurrentTestNameForMakeServer() << "] Client: Sending GET /ping_http2 to HTTP/2 server on port "
-                   << TEST_PORT_HTTP2 << std::endl;
-
-    std::string target_uri = "https://localhost:" + std::to_string(TEST_PORT_HTTP2);
-    auto        h2_client  = std::make_shared<qb::http2::Client>(target_uri);
-    h2_client->set_verify_peer(false); // self-signed test cert
-
-    std::atomic<bool> connect_successful{false};
-    std::atomic<bool> connect_attempted{false}; // To know if callback was even called
-    std::string       connection_error_msg;
+    auto client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false); // self-signed test cert
+    client->set_connect_timeout(5s);
 
     std::atomic<bool>  response_received{false};
-    qb::http::Response actual_response;
+    qb::http::Response response;
 
-    h2_client->connect([&](bool connected, const std::string &err_msg) {
-        connect_attempted = true;
-        if (connected) {
-            qb::io::cout() << "[Http2MakeServerTest.PingHttp2Server] Client connected to " << target_uri << std::endl;
-            connect_successful = true;
-        } else {
-            std::cerr << "[Http2MakeServerTest.PingHttp2Server] Client connection failed: " << err_msg << std::endl;
-            connect_successful   = false;
-            connection_error_msg = err_msg;
-        }
-    });
-
-    // Loop to wait for connection
-    auto connect_start_time = std::chrono::steady_clock::now();
-    while (!connect_attempted.load(std::memory_order_acquire)
-           && std::chrono::steady_clock::now() - connect_start_time < std::chrono::seconds(10)) {
-        qb::io::async::run(EVRUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    ASSERT_TRUE(connect_attempted.load()) << "HTTP/2 Client connect callback was not invoked.";
-    ASSERT_TRUE(connect_successful.load()) << "HTTP/2 Client failed to connect: " << connection_error_msg;
-
-    qb::http::Request request{{target_uri + "/ping_http2"}};
+    qb::http::Request request{{base_url() + "/ping_http2"}};
     request.method() = qb::http::Method::GET;
 
-    bool pushed = h2_client->push_request(std::move(request), [&](qb::http::Response resp) {
-        qb::io::cout() << "[Http2MakeServerTest.PingHttp2Server] Client received response. Status: " << resp.status() << std::endl;
-        actual_response   = std::move(resp);
+    ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response r) {
+        response          = std::move(r);
         response_received = true;
-    });
-    ASSERT_TRUE(pushed) << "HTTP/2 Client failed to push request.";
+    }));
+    client->connect(nullptr);
 
-    // Loop to wait for response
-    auto response_start_time = std::chrono::steady_clock::now();
-    while (!response_received.load(std::memory_order_acquire)
-           && std::chrono::steady_clock::now() - response_start_time < std::chrono::seconds(10)) {
-        qb::io::async::run(EVRUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    ASSERT_TRUE(response_received.load()) << "HTTP/2 Client did not receive response within timeout.";
+    ASSERT_TRUE(Http2FactoryServerThread::pump_until([&] { return response_received.load(); }));
 
-    EXPECT_EQ(HTTP_STATUS_OK, actual_response.status());
-    EXPECT_EQ("pong_http2_default", actual_response.body().as<std::string>());
-    g_make_server_test_req_count_client++;
+    EXPECT_EQ(qb::http::status::OK, response.status());
+    EXPECT_EQ("pong_http2_default", response.body().as<std::string>());
+    EXPECT_EQ(1, g_http2_server_requests.load());
 
-    EXPECT_EQ(1, g_make_server_test_req_count_client.load());
-    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Give server a bit more time to increment its counter
-    EXPECT_EQ(1, g_make_server_test_req_count_server.load());
-
-    h2_client->disconnect();
+    client->disconnect();
 }
 
 #endif // QB_HAS_SSL
+
+} // namespace
