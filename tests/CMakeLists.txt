@@ -97,6 +97,9 @@ qhttp_test(unit http2-server-protocol  unit/http2/http2-server-protocol.cpp  EXT
 qhttp_test(unit http2-client-protocol  unit/http2/http2-client-protocol.cpp  EXTRA_LABELS http2)
 qhttp_test(unit hpack-codec            unit/http2/hpack-codec.cpp            EXTRA_LABELS http2)
 qhttp_test(unit hpack-encoder-strategy unit/http2/hpack-encoder-strategy.cpp EXTRA_LABELS http2)
+qhttp_test(unit http2-header-validation unit/http2/http2-header-validation.cpp EXTRA_LABELS http2)
+qhttp_test(unit http2-protocol-state    unit/http2/http2-protocol-state.cpp    EXTRA_LABELS http2)
+qhttp_test(unit http2-client-validation unit/http2/http2-client-validation.cpp EXTRA_LABELS http2)
 
 # =============================================================================
 # SYSTEM — in-process loopback client+server (REQUIRES live). Local TLS = +ssl.
@@ -105,6 +108,7 @@ qhttp_test(system http1-client         system/http1/http1-client.cpp         REQ
 qhttp_test(system http1-loopback-basic system/http1/http1-loopback-basic.cpp REQUIRES live EXTRA_LABELS http1)
 qhttp_test(system router-e2e-advanced  system/routing/router-e2e-advanced.cpp REQUIRES live EXTRA_LABELS http1 routing)
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
+qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
 qhttp_test(system make-server-factory  system/server/make-server-factory.cpp REQUIRES ssl live EXTRA_LABELS http1 http2 ssl)
 qhttp_test(system coro-client-http1    system/coro/coro-client-http1.cpp     REQUIRES live EXTRA_LABELS http1 coro)
 qhttp_test(system coro-server-http1    system/coro/coro-server-http1.cpp     REQUIRES live EXTRA_LABELS http1 coro)
@@ -125,8 +129,6 @@ qhttp_test(unit   _pending-utility           test-utility.cpp)
 qhttp_test(unit   _pending-uri-only          test-uri-only.cpp)
 qhttp_test(unit   _pending-dos-protection    test-dos-protection.cpp)
 qhttp_test(unit   _pending-validation        test-validation.cpp)
-qhttp_test(unit   _pending-http2-header-validator test-http2-header-validator.cpp EXTRA_LABELS http2)
-qhttp_test(unit   _pending-coro-http2-client test-coro-http2-client.cpp REQUIRES ssl EXTRA_LABELS http2 ssl)
 qhttp_test(system _pending-session-http      test-session-http.cpp      REQUIRES ssl live EXTRA_LABELS http1 ssl)
 qhttp_test(system _pending-integration-middleware test-integration-middleware.cpp REQUIRES ssl live EXTRA_LABELS middleware ssl)
 qhttp_test(system _pending-ws-security       test-ws-security.cpp       REQUIRES ssl live EXTRA_LABELS ws)

@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "../2/protocol/base.h"
@@ -178,6 +179,41 @@ TEST(HTTP2FrameLayerFrameHeader, TypeRoundTrip) {
 TEST(HTTP2FrameLayerFrameHeader, HeaderSizeIsNineOctets) {
     EXPECT_EQ(h2::FRAME_HEADER_SIZE, 9u);
     EXPECT_EQ(sizeof(h2::FrameHeader), 9u);
+}
+
+// The 9-octet header is #pragma pack(1), so its in-memory image IS the wire
+// image: a memcpy round-trip must reproduce the exact byte layout RFC 9113 §4.1
+// specifies (3 length octets, type, flags, 4 stream-id octets, big-endian).
+TEST(HTTP2FrameLayerFrameHeader, WireByteLayoutRoundTrip) {
+    h2::FrameHeader fh{};
+    fh.set_payload_length(0x010203u);
+    fh.type  = static_cast<uint8_t>(h2::FrameType::HEADERS);
+    fh.flags = h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM; // 0x05
+    fh.set_stream_id(0x04050607u);
+
+    uint8_t wire[9] = {};
+    std::memcpy(wire, &fh, sizeof(fh));
+
+    // Length (24-bit, big-endian).
+    EXPECT_EQ(wire[0], 0x01);
+    EXPECT_EQ(wire[1], 0x02);
+    EXPECT_EQ(wire[2], 0x03);
+    // Type / flags.
+    EXPECT_EQ(wire[3], static_cast<uint8_t>(h2::FrameType::HEADERS));
+    EXPECT_EQ(wire[4], 0x05);
+    // Stream id (31-bit, big-endian; R bit clear on the top octet).
+    EXPECT_EQ(wire[5], 0x04);
+    EXPECT_EQ(wire[6], 0x05);
+    EXPECT_EQ(wire[7], 0x06);
+    EXPECT_EQ(wire[8], 0x07);
+
+    // Re-read the wire image and confirm every accessor recovers the value.
+    h2::FrameHeader parsed{};
+    std::memcpy(&parsed, wire, sizeof(parsed));
+    EXPECT_EQ(parsed.get_payload_length(), 0x010203u);
+    EXPECT_EQ(parsed.get_type(), h2::FrameType::HEADERS);
+    EXPECT_EQ(parsed.flags, 0x05);
+    EXPECT_EQ(parsed.get_stream_id(), 0x04050607u);
 }
 
 // ---------------------------------------------------------------------------
@@ -585,10 +621,4 @@ TEST(HTTP2FrameLayerStreamId, UnknownFrameTypeIsValid) {
     // Unknown frame types are ignored per RFC 9113, so validation passes.
     EXPECT_TRUE(h2::StreamIdValidator::validate_stream_id_for_frame(FrameType::UNKNOWN, 0, true).is_valid);
     EXPECT_TRUE(h2::StreamIdValidator::validate_stream_id_for_frame(FrameType::UNKNOWN, 5, false).is_valid);
-}
-
-int
-main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
