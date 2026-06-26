@@ -1060,6 +1060,44 @@ public:
      * most calls to `complete()` (except with `AsyncTaskResult::CANCELLED`) will be ignored to prevent conflicts.
      * The method also clears the in-flight flag of the current task.
      *
+     * ### Caller contract: exactly one terminal `complete()` per task invocation
+     *
+     * A task body (middleware / handler / error-chain task) MUST signal its outcome with exactly one
+     * terminal `complete()` — `COMPLETE`, `ERROR`, `CANCELLED`, or `FATAL_SPECIAL_HANDLER_ERROR` — per
+     * invocation (any number of `CONTINUE`-then-terminal is one logical outcome). The framework's own
+     * adapters honor this and are the pattern to copy when writing raw tasks:
+     *   - Coroutine routes (@ref coro_task.h) snapshot `completion_count()` and only auto-complete when
+     *     the user did not already signal an outcome.
+     *   - `IMiddleware` / `RouteHandler` adapters guard their fallback completion with
+     *     `!is_completed() && !is_cancelled()`.
+     *   - `FunctionalMiddleware`'s `next` is a one-shot: the SECOND call is ignored. The guard lives in the
+     *     per-invocation closure (`next_called`), which is what carries "this invocation already completed"
+     *     across an async deferral.
+     *
+     * ### Why `complete()` cannot self-defend against a double terminal call
+     *
+     * `complete()` receives only a `result` — never the identity of the calling task — so it cannot reject
+     * a *second* terminal call from a body that already completed. This is benign for the cases the lifecycle
+     * guards above already cover (post-finalisation / post-cancellation): the first call wins, the trailing
+     * one is a silent no-op. It is NOT recoverable in one specific window: a task that calls
+     * `complete(ERROR)` and then a stray `complete(COMPLETE)`. `complete(ERROR)` reseats the chain to a
+     * configured error chain and dispatches its first task; if that task is asynchronous, `complete(ERROR)`
+     * returns WITHOUT finalising, leaving the context `Running` in `ProcessingPhase::ERROR_CHAIN` with
+     * `task_in_flight == true`. The stray `complete(COMPLETE)` then finalises first and clobbers the error
+     * chain (whose own later `complete()` becomes the no-op).
+     *
+     * This window cannot be closed inside `complete()`. At entry, the stray and the *legitimate* in-flight
+     * error-chain task's completion are byte-for-byte identical in every observable dimension — `state`,
+     * `phase`, `task_in_flight`, `completion_count`, `_current_task_index`, `last_result`, re-entrancy
+     * depth. They differ ONLY by which event-loop turn they fire in (the stray is synchronous with
+     * `complete(ERROR)`; the legit completion is a later turn), a boundary the `Context` cannot observe.
+     * Any phase/counter guard added here drops the legit completion too — which in production never
+     * finalises the request (the session holds the only `shared_ptr<Context>`) and hangs the connection.
+     * Do NOT add a `phase == ERROR_CHAIN` guard here; see the anti-regression test
+     * `RouterErrorHandlingTest.CompleteAfterAsyncErrorChainLetsTheStrayCompleteWin`. The correct fix lives
+     * in the caller: issue exactly one terminal `complete()`, guarding with `completion_count()` /
+     * `is_completed()` exactly as the adapters above do.
+     *
      * @param result The outcome of the current task. Defaults to `AsyncTaskResult::COMPLETE`.
      * @throws Can indirectly lead to exceptions if `finalize_processing_internal()` or subsequent task executions throw,
      *         though this method itself tries to catch exceptions during its switch statement logic and set a 500 error.
