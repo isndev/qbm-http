@@ -96,7 +96,12 @@ struct WsServerThread {
             if (config) {
                 config(server);
             }
-            server.transport().listen_v4(port);
+            server.transport().listen_v4(static_cast<std::uint16_t>(port));
+            // When the caller asked for an ephemeral port (port == 0), read the
+            // kernel-assigned port back from the now-bound listener and publish it
+            // BEFORE flipping `ready`, so the main thread (which reads `port`
+            // only after observing `ready`) sees the real port instead of 0.
+            port = static_cast<int>(server.transport().local_endpoint().port());
             server.start();
             ready.store(true, std::memory_order_release);
             while (running.load(std::memory_order_acquire)) {
