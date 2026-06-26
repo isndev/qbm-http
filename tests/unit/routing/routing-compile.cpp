@@ -68,6 +68,38 @@ TEST_F(RoutingCompileTest, UnnamedWildcardThrows) {
     EXPECT_THROW(router.compile(), std::invalid_argument);
 }
 
+TEST_F(RoutingCompileTest, UnnamedParameterThrows) {
+    // A parameter must be named (e.g. :id); a bare ':' is rejected.
+    router.get("/users/:/profile", &RoutingCompileTest::noop_handler);
+
+    EXPECT_THROW(router.compile(), std::invalid_argument);
+}
+
+TEST_F(RoutingCompileTest, WildcardNotLastSegmentThrows) {
+    // A wildcard must be the terminal segment; anything after it is illegal.
+    router.get("/files/*rest/more", &RoutingCompileTest::noop_handler);
+
+    EXPECT_THROW(router.compile(), std::invalid_argument);
+}
+
+TEST_F(RoutingCompileTest, ConflictingWildcardNamesAtSameLevelThrows) {
+    // Two routes whose wildcard captures share a level but use different names
+    // (*a vs *b) collide when the second is woven into the tree.
+    router.get("/dl/*a", &RoutingCompileTest::noop_handler);
+    router.post("/dl/*b", &RoutingCompileTest::noop_handler);
+
+    EXPECT_THROW(router.compile(), std::invalid_argument);
+}
+
+TEST_F(RoutingCompileTest, ConflictingParameterNamesAtSameLevelThrows) {
+    // Two routes that put a parameter at the same level but name it differently
+    // (:x vs :y) are ambiguous — the radix node can hold only one param name.
+    router.get("/api/:x/edit", &RoutingCompileTest::noop_handler);
+    router.post("/api/:y/view", &RoutingCompileTest::noop_handler);
+
+    EXPECT_THROW(router.compile(), std::invalid_argument);
+}
+
 // --------------------------------------------------------------------------
 // Duplicate-route registration: last definition wins (not an error)
 // --------------------------------------------------------------------------

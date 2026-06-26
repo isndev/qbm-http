@@ -413,6 +413,64 @@ TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
     sock.close();
 }
 
+// A Close frame whose payload is exactly ONE byte is malformed: a close code is
+// two bytes, so a lone byte can never be a valid status (ws.h:492 → 1002).
+TEST(WsFramingEdge, OneByteCloseFramePayloadIsRejected) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+    // Close (0x88) with a single payload byte.
+    expect_close_code_after_frames(server, {make_client_frame(0x88, std::string(1, '\x03'))},
+                                   qb::http::ws::CloseStatus::ProtocolError);
+}
+
+// A Close frame with a VALID status code but a reason that is not valid UTF-8
+// must be failed with 1007 DataNotConsistent (ws.h:504). This is distinct from
+// the out-of-range-code path (1002) already covered above.
+TEST(WsFramingEdge, CloseFrameWithInvalidUtf8ReasonIsRejectedWith1007) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+
+    // Payload = status 1000 (Normal, valid) + invalid UTF-8 reason (lone 0x80
+    // continuation byte → not a valid scalar).
+    std::string close_payload;
+    close_payload.push_back(static_cast<char>((1000u >> 8) & 0xFFu));
+    close_payload.push_back(static_cast<char>(1000u & 0xFFu));
+    close_payload.push_back(static_cast<char>(0x80)); // invalid UTF-8
+
+    expect_close_code_after_frames(server, {make_client_frame(0x88, close_payload)},
+                                   qb::http::ws::CloseStatus::DataNotConsistent);
+}
+
+// A control (Ping) frame announcing a length indicator of 126 exceeds the 125
+// byte control-frame payload cap and is rejected from the indicator alone
+// (ws.h:674 → 1002): 126 is read as a length value > 125 before the ext16 path
+// is taken. make_client_frame only emits the 7-bit form, so build it by hand.
+TEST(WsFramingEdge, ControlFrameAnnouncingOversizeLengthIsRejected) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+
+    qb::io::tcp::socket sock;
+    const auto          rc = sock.connect(
+        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    ASSERT_EQ(rc, 0);
+    (void) sock.set_nonblocking(true);
+    perform_upgrade(sock, server.port, "/edge");
+
+    // Ping (0x89) + MASK + len-indicator 126 — over the control-frame cap.
+    std::vector<std::uint8_t> bad{0x89u, static_cast<std::uint8_t>(0x80u | 126u), 0x00u, 0x01u};
+    constexpr std::array<std::uint8_t, 4> mask{{0x12, 0x34, 0x56, 0x78}};
+    for (auto m : mask) {
+        bad.push_back(m);
+    }
+    bad.push_back(static_cast<std::uint8_t>('Z') ^ mask[0]);
+    sock.write(reinterpret_cast<const char *>(bad.data()), static_cast<int>(bad.size()));
+
+    const std::string got        = read_some(sock, 128);
+    const auto        close_code = extract_close_code(got);
+    ASSERT_TRUE(close_code.has_value())
+        << "server did not send a parseable close frame: size=" << got.size();
+    EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::ProtocolError));
+
+    sock.close();
+}
+
 // ===========================================================================
 // 5. UTF-8 validation (1007)
 // ===========================================================================

@@ -360,6 +360,17 @@ TEST_F(RouterRouteGroupTest, MountRouteGroupAndCallRoute) {
     EXPECT_TRUE(_mock_session->_handler_executed_flag);
 }
 
+// get_node_name() is the diagnostic label a RouteGroup reports for tree
+// introspection. Pin it for both a top-level and a nested group so the prefix
+// is reflected verbatim.
+TEST_F(RouterRouteGroupTest, NodeNameReflectsPrefix) {
+    auto api_group = _router.group("/api");
+    EXPECT_EQ(api_group->get_node_name(), "RouteGroup: /api");
+
+    auto v1_group = api_group->group("/v1");
+    EXPECT_EQ(v1_group->get_node_name(), "RouteGroup: /v1");
+}
+
 TEST_F(RouterRouteGroupTest, NestedRouteGroup) {
     auto api_group = _router.group("/api");
     auto v1_group  = api_group->group("/v1");

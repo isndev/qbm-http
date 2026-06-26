@@ -127,6 +127,33 @@ TEST_F(BodyTest, ChunkSerializationPreservesInternalZeroHexDigits) {
     EXPECT_TRUE(wire.ends_with("\r\n"));
 }
 
+// Body::add_chunk / add_final_chunk are the chunked-transfer convenience wrappers
+// (body.h:225/235). They append a length-prefixed chunk and the terminating
+// zero-length chunk respectively. Pin the exact wire bytes deterministically.
+TEST_F(BodyTest, AddChunkThenFinalChunkProducesChunkedWire) {
+    Body chunked;
+    chunked.add_chunk(Chunk("hello", 5)); // 5 == 0x5 → "5\r\nhello\r\n"
+    chunked.add_final_chunk();            // empty chunk → "0\r\n\r\n"
+
+    const std::string wire = chunked.as<std::string>();
+    EXPECT_EQ(wire, "5\r\nhello\r\n0\r\n\r\n");
+}
+
+TEST_F(BodyTest, AddChunkReturnsSelfForChaining) {
+    Body chunked;
+    // The wrappers return *this, so calls chain. Two 16-byte chunks then close.
+    Body &ref = chunked.add_chunk(Chunk(std::string(16, 'a').data(), 16)).add_chunk(Chunk(std::string(16, 'b').data(), 16));
+    EXPECT_EQ(&ref, &chunked);
+    chunked.add_final_chunk();
+
+    const std::string wire = chunked.as<std::string>();
+    // 16 == 0x10, so each data chunk is "10\r\n<16 bytes>\r\n".
+    EXPECT_TRUE(wire.starts_with("10\r\n"));
+    EXPECT_TRUE(wire.ends_with("0\r\n\r\n"));
+    EXPECT_NE(wire.find(std::string(16, 'a')), std::string::npos);
+    EXPECT_NE(wire.find(std::string(16, 'b')), std::string::npos);
+}
+
 TEST_F(BodyTest, AssignString) {
     std::string s_val = "Test String";
     body              = s_val;
@@ -464,6 +491,26 @@ TEST_F(BodyTest, FormParsingEdgeCases) {
     Form form8 = body.as<Form>();
     EXPECT_EQ(1, form8.fields().size());
     EXPECT_EQ("value1key2=value2", form8.get_first("key1").value_or(""));
+}
+
+// Form::get / get_first miss-paths (form.h:77/92): absent keys must return an
+// empty vector / std::nullopt, never the value of some other key. A populated
+// form is used so the negative result is genuinely "key not found", not "form
+// empty".
+TEST_F(BodyTest, FormGetAndGetFirstMissesReturnEmpty) {
+    Form form = create_simple_form(); // has name/email/param
+
+    // get() on an absent key → empty vector (the it == end() branch).
+    const auto absent = form.get("does-not-exist");
+    EXPECT_TRUE(absent.empty());
+
+    // get_first() on an absent key → nullopt.
+    EXPECT_FALSE(form.get_first("does-not-exist").has_value());
+
+    // Present keys still resolve, proving the miss above was key-specific.
+    EXPECT_EQ(form.get("name").size(), 1u);
+    EXPECT_EQ(form.get_first("name").value_or("WRONG"), "test_user");
+    EXPECT_EQ(form.get("param").size(), 2u); // multi-valued
 }
 
 TEST_F(BodyTest, MultipartDetailedComparisonAndBoundaryInBody) {

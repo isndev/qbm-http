@@ -98,6 +98,100 @@ TEST(Http2ClientConfigTest, MakeClientAcceptsHttpsBaseUriAndExposesIt) {
     EXPECT_EQ(failed, 0u);
 }
 
+// Pure configuration accessor surface: the verify_peer round-trip plus the
+// max-concurrent-streams / max-pending setters (pure stores) that the rest of the
+// suite does not otherwise reach.
+TEST(Http2ClientConfigTest, ConfigurationAccessorsRoundTrip) {
+    auto client = qb::http2::make_client("https://localhost:8443");
+
+    EXPECT_TRUE(client->verify_peer()); // default: TLS verification on
+    client->set_verify_peer(false);
+    EXPECT_FALSE(client->verify_peer());
+    client->set_verify_peer(true);
+    EXPECT_TRUE(client->verify_peer());
+
+    // Pure stores; assert callable on the public API (no observable getter, but
+    // they must compile + run without disturbing the request counters / state).
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(7s);
+    client->set_max_concurrent_streams(8);
+    client->set_max_pending_requests(64);
+    client->set_auto_reconnect(false);
+
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_EQ(client->get_active_request_count(), 0u);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 0u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 0u);
+}
+
+// max_pending_requests(0): a same-origin request that PASSES scheme/origin
+// validation still trips the outstanding-request bound (0 pending + 0 active >= 0)
+// and is rejected synchronously with 503 "pending request limit reached", failing
+// the request and returning false — without ever connecting.
+TEST(Http2ClientConfigTest, PendingRequestLimitRejectsValidatedRequestWith503) {
+    auto client = qb::http2::make_client("https://localhost:443");
+    client->set_max_pending_requests(0);
+
+    bool               done = false;
+    qb::http::Response response;
+    qb::http::Request  request{qb::io::uri("https://localhost:443/ping")};
+    const bool         queued = client->push_request(std::move(request), [&](qb::http::Response res) {
+        response = std::move(res);
+        done     = true;
+    });
+
+    EXPECT_FALSE(queued); // over the bound -> push_request returns false
+    ASSERT_TRUE(done);    // synchronous error callback
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(response.body().template as<std::string>(), "HTTP/2 client pending request limit reached");
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 1u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 1u);
+}
+
+// An empty batch is a synchronous no-op completion: the callback fires with an
+// empty vector and the client never connects (push_requests "requests.empty()").
+TEST(Http2ClientConfigTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
+    auto client = qb::http2::make_client("https://localhost:443");
+
+    bool                            done = false;
+    std::vector<qb::http::Response> responses{qb::http::Response{}}; // pre-seed non-empty
+    const bool                      queued = client->push_requests({}, [&](std::vector<qb::http::Response> res) {
+        responses = std::move(res);
+        done      = true;
+    });
+
+    EXPECT_TRUE(queued);
+    ASSERT_TRUE(done);
+    EXPECT_TRUE(responses.empty());
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// Empty callbacks are rejected up front (return false) with no counter side
+// effects, for both the single- and batch-request entry points.
+TEST(Http2ClientConfigTest, EmptyCallbacksAreRejectedWithoutSideEffects) {
+    auto client = qb::http2::make_client("https://localhost:443");
+
+    qb::http::Request req{qb::io::uri("https://localhost:443/ping")};
+    EXPECT_FALSE(client->push_request(std::move(req), qb::http2::ResponseCallback{}));
+
+    std::vector<qb::http::Request> reqs;
+    reqs.emplace_back(qb::io::uri("https://localhost:443/ping"));
+    EXPECT_FALSE(client->push_requests(std::move(reqs), qb::http2::BatchResponseCallback{}));
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 0u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 0u);
+}
+
 // ---------------------------------------------------------------------------
 // Per-request validation rejects (callback API, no connection)
 // ---------------------------------------------------------------------------

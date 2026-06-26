@@ -1596,3 +1596,90 @@ TEST(HTTP2ClientProtocol, HpackDynamicTableEvictsButStillRoundTrips) {
     // The decoder's table likewise stays within budget.
     EXPECT_LE(decoder.get_dynamic_table_size(), kSmallTable);
 }
+
+// ===========================================================================
+// FLOW CONTROL — a connection-level WINDOW_UPDATE whose increment would push the
+// connection send window past 2^31-1 is a connection error (FLOW_CONTROL_ERROR ->
+// GOAWAY). The default connection send window is 65535, so an increment of
+// 0x7FFFFFFF (the max legal single increment) overflows it: 65535 > (MAX - inc).
+// Mirrors StreamWindowUpdateOverflowIsFlowControlError but for stream 0.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, ConnectionWindowUpdateOverflowIsFlowControlError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    protocol.on(make_window_update_frame(0, 0x7FFFFFFF));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::FLOW_CONTROL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
+}
+
+// ===========================================================================
+// CONTENT-LENGTH (under-run) — a response that advertises content-length: 50 but
+// terminates the stream (END_STREAM) with only 5 body bytes is a content-length
+// mismatch: the client RST_STREAMs the stream (PROTOCOL_ERROR), dispatches no
+// response, and stays connection-OK. Hits the
+// `body().raw().size() != *expected_content_length` mismatch branch in
+// process_complete_response_if_ready / on(DataFrame, END_STREAM).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, ResponseBodyShorterThanContentLengthIsMismatchRst) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/short");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 21));
+
+    const std::size_t output_before = io.output.size();
+
+    // HEADERS announce a 50-byte body but do NOT end the stream.
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "50"}}));
+    EXPECT_EQ(io.response_count, 0);
+
+    // Only 5 bytes arrive, then END_STREAM: 5 != 50 -> content-length mismatch.
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "short"));
+
+    EXPECT_TRUE(protocol.ok()); // stream-level RST, connection survives
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+
+    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, output_before);
+    ASSERT_NE(rst_off, SIZE_MAX);
+    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 1u);
+}
+
+// ===========================================================================
+// CONTENT-LENGTH (over-run) — a single DATA frame carrying MORE bytes than the
+// advertised content-length is rejected immediately with RST_STREAM
+// (PROTOCOL_ERROR, "body exceeds content-length") on the DATA-frame path, before
+// END_STREAM. Hits the `body_size > *expected_content_length` branch.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, ResponseBodyLongerThanContentLengthIsRst) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/long");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 23));
+
+    const std::size_t output_before = io.output.size();
+
+    // Announce a 2-byte body, then deliver 10 bytes (no END_STREAM needed: the
+    // overflow is detected as soon as accumulated body exceeds the bound).
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "2"}}));
+    protocol.on(make_data_frame(1, 0, "0123456789"));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+
+    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, output_before);
+    ASSERT_NE(rst_off, SIZE_MAX);
+    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 1u);
+}

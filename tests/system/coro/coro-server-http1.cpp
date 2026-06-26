@@ -267,4 +267,57 @@ TEST_F(CoroServerTest, CoroMiddlewareManualContinueDoesNotDoubleAdvanceChain) {
     EXPECT_EQ(response.body().template as<std::string>(), "observed:yes");
 }
 
+// ===========================================================================
+// http_awaiter completion-callback safety (coro.h:129-141).
+//
+// The generic HTTP awaiter must tolerate a completion callback that fires more
+// than once (at-most-once is a contract callers can violate) and one that fires
+// after the awaiter has been destroyed. Both guards are pure awaiter mechanics,
+// driven here on the I/O thread with `make_awaiter` + `run_sync` — no socket.
+// ===========================================================================
+
+// A completion callback invoked TWICE must resolve the await exactly once with
+// the FIRST value; the second invocation is swallowed by the compare-exchange
+// guard (coro.h:133-136). We invoke it twice synchronously inside the operation,
+// while the awaiter is still alive, so the second call hits the double-complete
+// branch (not the destroyed-awaiter branch).
+TEST(CoroAwaiterMechanics, DoubleCompletionResolvesOnceWithFirstValue) {
+    qb::io::async::init();
+
+    auto scenario = [&]() -> qb::io::async::task<int> {
+        co_return co_await qb::http::async::make_awaiter<int>([](std::function<void(int &&)> done) {
+            done(7);  // first completion wins
+            done(99); // second completion must be ignored (135-136)
+        });
+    };
+
+    EXPECT_EQ(qb::http::run_sync(scenario()), 7);
+}
+
+// A completion callback captured OUT of the operation and invoked AFTER the
+// awaiter is gone must be a silent no-op (coro.h:130-132): the shared `_alive`
+// flag is false, so the callback returns before touching freed state. The await
+// still resolves through the in-band completion; the late call simply must not
+// crash (proven by running clean under ASan).
+TEST(CoroAwaiterMechanics, CompletionAfterAwaiterDestroyedIsSilentlyDropped) {
+    qb::io::async::init();
+
+    std::function<void(int &&)> escaped; // outlives the awaiter
+
+    auto scenario = [&]() -> qb::io::async::task<int> {
+        co_return co_await qb::http::async::make_awaiter<int>([&](std::function<void(int &&)> done) {
+            escaped = done; // stash the completion for a post-mortem call
+            done(42);       // resolve in-band so the coroutine finishes
+        });
+    };
+
+    const int value = qb::http::run_sync(scenario());
+    EXPECT_EQ(value, 42);
+
+    // The awaiter has been destroyed now. Calling the stale completion must hit
+    // the `!*alive` early-return and do nothing (no crash, no UAF).
+    ASSERT_TRUE(static_cast<bool>(escaped));
+    EXPECT_NO_THROW(escaped(123));
+}
+
 } // namespace
