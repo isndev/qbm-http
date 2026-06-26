@@ -1,37 +1,43 @@
 /**
- * @file qbm/http/tests/test-auth-manager.cpp
+ * @file qbm/http/tests/unit/auth/auth-manager.cpp
  * @brief Unit tests for the qb::http::auth::Manager API (JWT issue/verify, token payload).
  *
- * These tests exercise the Manager class directly (not through the AuthMiddleware),
- * targeting the previously-uncovered code paths in qbm/http/auth/manager.cpp:
- *   - generate_token / generate_token_payload (claim construction: sub, iat, exp,
- *     iss, aud, username, roles, metadata)
- *   - verify_token round-trip (HMAC HS256/HS384/HS512) including the
- *     signature-verified path and the unverified (require_signature_verification(false))
- *     path, which routes through decode_unverified_payload + parse_time_claim_as_int64
- *   - current_timestamp (exercised transitively via iat/exp generation)
- *   - extract_token_from_header edge cases
+ * These tests exercise the `Manager` class directly (not through the
+ * `AuthMiddleware`), targeting the code paths in `qbm/http/auth/manager.cpp`:
+ *   - `generate_token` / `generate_token_payload` (claim construction: sub, iat,
+ *     exp, iss, aud, username, roles, metadata)
+ *   - `verify_token` round-trip (HMAC HS256/HS384/HS512) including the
+ *     signature-verified path and the unverified
+ *     (`require_signature_verification(false)`) path, which routes through
+ *     `decode_unverified_payload` + `parse_time_claim_as_int64`
+ *   - `current_timestamp` (exercised transitively via iat/exp generation)
+ *   - `extract_token_from_header` edge cases
  *
- * No network is required; everything operates on in-memory tokens.
+ * Tier: **unit** with a real `ssl` build dependency — `qb/io/crypto.h` `#error`s
+ * without OpenSSL, so HMAC/JWT genuinely cannot link without it. No network,
+ * engine, socket, or event loop is involved; everything operates on in-memory
+ * tokens via synchronous `Manager` calls.
+ *
+ * Token-forging helpers (`forge_token`, `forge_token_raw_payload`, `now_epoch`,
+ * `hmac_options`, `make_user`) come from the shared
+ * `shared/auth_test_helpers.h`, deduplicated against `middleware-jwt.cpp` and the
+ * auth benchmark.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
-#include <gtest/gtest.h>
-
-#include "../auth.h" // qb::http::auth::{Manager, Options, User}
-
 #include <chrono>
 #include <cstdint>
-#include <map>
-#include <optional>
 #include <string>
-#include <vector>
 
-#include <qb/io/crypto_jwt.h> // qb::jwt::create for forged/foreign tokens
-#include <qb/json.h>          // qb::json
+#include <gtest/gtest.h>
+
+#include <qb/json.h> // qb::json
+
+#include "../auth.h"                       // qb::http::auth::{Manager, Options, User}
+#include "../../shared/auth_test_helpers.h" // forge_token, forge_token_raw_payload, now_epoch, hmac_options, make_user
 
 namespace {
 
@@ -39,44 +45,12 @@ using qb::http::auth::Manager;
 using qb::http::auth::Options;
 using qb::http::auth::User;
 
-constexpr char kSecret[] = "unit_test_secret_key_for_auth_manager_!@#$%";
-
-uint64_t
-now_epoch() {
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-}
-
-Options
-hmac_options(const std::string &secret = kSecret) {
-    Options opts;
-    opts.secret_key(secret);
-    return opts;
-}
-
-User
-make_user() {
-    User u;
-    u.id       = "user-42";
-    u.username = "alice";
-    u.roles    = {"admin", "user"};
-    u.metadata = {{"dept", "eng"}, {"tier", "gold"}};
-    return u;
-}
-
-// Build a raw HS256 token directly from a JSON payload, mirroring how the
-// production code maps payload values into the std::map<string,string> JWT
-// claim set (string values pass through, everything else is dumped).
-std::string
-forge_token(const qb::json &payload, const std::string &secret = kSecret, qb::jwt::Algorithm algo = qb::jwt::Algorithm::HS256) {
-    std::map<std::string, std::string> claims;
-    for (auto it = payload.begin(); it != payload.end(); ++it) {
-        claims[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
-    }
-    qb::jwt::CreateOptions create_opts;
-    create_opts.algorithm = algo;
-    create_opts.key       = secret;
-    return qb::jwt::create(claims, create_opts);
-}
+using qb::http::test::forge_token;
+using qb::http::test::forge_token_raw_payload;
+using qb::http::test::hmac_options;
+using qb::http::test::kDefaultSecret;
+using qb::http::test::make_user;
+using qb::http::test::now_epoch;
 
 // ---------------------------------------------------------------------------
 // generate_token_payload (public: unsigned claims JSON)
@@ -102,14 +76,14 @@ TEST(AuthManagerPayload, ContainsStandardAndUserClaims) {
 
     // iat is bounded by the wall-clock window around generation.
     ASSERT_TRUE(payload.contains("iat"));
-    const auto iat = payload.at("iat").get<uint64_t>();
+    const auto iat = payload.at("iat").get<std::uint64_t>();
     EXPECT_GE(iat, before);
     EXPECT_LE(iat, after);
 
     // Default options enable expiration verification -> exp present and in the future.
     ASSERT_TRUE(payload.contains("exp"));
-    EXPECT_GT(payload.at("exp").get<uint64_t>(), iat);
-    EXPECT_EQ(payload.at("exp").get<uint64_t>(), iat + 3600u);
+    EXPECT_GT(payload.at("exp").get<std::uint64_t>(), iat);
+    EXPECT_EQ(payload.at("exp").get<std::uint64_t>(), iat + 3600u);
 
     // Metadata is serialized as a nested object.
     ASSERT_TRUE(payload.contains("metadata"));
@@ -181,6 +155,12 @@ TEST(AuthManagerRoundTrip, HmacSha384AndSha512RoundTrip) {
     }
 }
 
+// IssuerAndAudienceRoundTrip: the previous version only re-asserted out->id and
+// dropped the iss/aud claims it had just round-tripped. A correct token is now
+// proven to survive verification AND to carry the configured iss/aud back to the
+// caller via the decoded payload, while a wrong-issuer / wrong-audience token
+// minted with the SAME signing key is rejected (so rejection is attributable to
+// the claim mismatch, not the signature).
 TEST(AuthManagerRoundTrip, IssuerAndAudienceRoundTrip) {
     Options opts = hmac_options();
     opts.token_issuer("my-issuer");
@@ -191,6 +171,25 @@ TEST(AuthManagerRoundTrip, IssuerAndAudienceRoundTrip) {
     auto        out   = mgr.verify_token(token);
     ASSERT_TRUE(out.has_value());
     EXPECT_EQ(out->id, "user-42");
+
+    // The generated payload must carry the exact iss/aud the options requested.
+    qb::json payload = qb::json::parse(mgr.generate_token_payload(make_user()));
+    ASSERT_TRUE(payload.contains("iss"));
+    EXPECT_EQ(payload.at("iss").get<std::string>(), "my-issuer");
+    ASSERT_TRUE(payload.contains("aud"));
+    EXPECT_EQ(payload.at("aud").get<std::string>(), "my-audience");
+
+    // Same secret, but a verifier expecting a different issuer rejects the token:
+    // the failure is the claim mismatch, not a signature failure.
+    Options wrong_iss = hmac_options();
+    wrong_iss.token_issuer("not-my-issuer");
+    wrong_iss.token_audience("my-audience");
+    EXPECT_FALSE(Manager(wrong_iss).verify_token(token).has_value());
+
+    Options wrong_aud = hmac_options();
+    wrong_aud.token_issuer("my-issuer");
+    wrong_aud.token_audience("not-my-audience");
+    EXPECT_FALSE(Manager(wrong_aud).verify_token(token).has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +339,27 @@ TEST(AuthManagerUnverified, NonNumericExpClaimIsRejected) {
     EXPECT_FALSE(mgr.verify_token(token).has_value());
 }
 
+// ADDED (spec): fractional NumericDate exp. RFC 7519 declares NumericDate as a
+// JSON number that MAY be non-integer, but Manager's parse_time_claim_as_int64
+// only accepts integers and integer-shaped strings (no is_number_float branch).
+// A native floating-point exp therefore fails to parse and the token is rejected
+// even though the instant is comfortably in the future. This pins that contract
+// (reject, do NOT crash, do NOT accept) so a future float-tolerant change is a
+// deliberate decision rather than a silent regression.
+TEST(AuthManagerUnverified, FractionalNumericDateExpIsRejected) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    Manager mgr(opts);
+
+    // exp as a native JSON float (sub-second precision), far in the future.
+    qb::json payload;
+    payload["sub"]    = "frac";
+    payload["exp"]    = static_cast<double>(now_epoch() + 3600) + 0.5;
+    std::string token = forge_token_raw_payload(payload); // keep float native, not stringified
+
+    EXPECT_FALSE(mgr.verify_token(token).has_value());
+}
+
 TEST(AuthManagerUnverified, NotYetValidNbfIsRejected) {
     Options opts = hmac_options();
     opts.require_signature_verification(false);
@@ -352,6 +372,27 @@ TEST(AuthManagerUnverified, NotYetValidNbfIsRejected) {
     std::string token = forge_token(payload, "irrelevant_secret");
 
     EXPECT_FALSE(mgr.verify_token(token).has_value());
+}
+
+// ADDED (spec): far-future iat. The Manager validates exp/nbf/iss/aud on the
+// unverified path but does NOT reject an issued-in-the-future `iat`. A token
+// whose iat is years ahead is therefore accepted (only sub/identity matters).
+// This pins the current "iat is informational, not enforced by Manager"
+// contract — distinct from JwtMiddleware, which DOES reject a future iat.
+TEST(AuthManagerUnverified, FarFutureIatIsAcceptedByManager) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"]    = "timetraveler";
+    payload["iat"]    = now_epoch() + 10ull * 365 * 24 * 3600; // ~10 years ahead
+    payload["exp"]    = now_epoch() + 11ull * 365 * 24 * 3600;
+    std::string token = forge_token(payload, "irrelevant_secret");
+
+    auto out = mgr.verify_token(token);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(out->id, "timetraveler");
 }
 
 TEST(AuthManagerUnverified, ClockSkewToleratesRecentlyExpiredToken) {
@@ -388,20 +429,6 @@ TEST(AuthManagerUnverified, IssuerMismatchRejectedWithoutSignatureCheck) {
     EXPECT_FALSE(mgr.verify_token(forge_token(no_iss, "irrelevant_secret")).has_value());
 }
 
-// Hand-craft a JWT whose payload JSON is `payload_obj` verbatim. Needed when a
-// claim must reach decode_unverified_payload() as a NATIVE JSON type (e.g. an
-// array `aud`); qb::jwt::create() would stringify non-string claim values.
-std::string
-forge_token_raw_payload(const qb::json &payload_obj) {
-    auto b64url = [](const std::string &s) {
-        return qb::crypto::base64url_encode(std::vector<unsigned char>(s.begin(), s.end()));
-    };
-    const std::string header_b64    = b64url(R"({"alg":"HS256","typ":"JWT"})");
-    const std::string payload_b64   = b64url(payload_obj.dump());
-    const std::string signature_b64 = b64url("sig"); // unchecked on the unverified path
-    return header_b64 + "." + payload_b64 + "." + signature_b64;
-}
-
 TEST(AuthManagerUnverified, AudienceAsArrayIsMatched) {
     Options opts = hmac_options();
     opts.require_signature_verification(false);
@@ -428,6 +455,39 @@ TEST(AuthManagerUnverified, AudienceArrayWithoutMatchIsRejected) {
     qb::json payload;
     payload["sub"]    = "u";
     payload["aud"]    = qb::json::array({"svc-a", "svc-b"});
+    std::string token = forge_token_raw_payload(payload);
+
+    EXPECT_FALSE(mgr.verify_token(token).has_value());
+}
+
+// ADDED (spec): single-string aud. The `aud` claim may be a single JSON string
+// (not an array). Manager's is_string() branch compares it directly against the
+// configured audience: an exact match passes, a non-match is rejected.
+TEST(AuthManagerUnverified, AudienceAsSingleStringIsMatched) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    opts.token_audience("the-one-svc");
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"]    = "u";
+    payload["aud"]    = "the-one-svc"; // single string, exact match
+    std::string token = forge_token_raw_payload(payload);
+
+    auto out = mgr.verify_token(token);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(out->id, "u");
+}
+
+TEST(AuthManagerUnverified, AudienceAsSingleStringMismatchIsRejected) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    opts.token_audience("expected-svc");
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"]    = "u";
+    payload["aud"]    = "different-svc"; // single string, no match
     std::string token = forge_token_raw_payload(payload);
 
     EXPECT_FALSE(mgr.verify_token(token).has_value());
@@ -472,15 +532,9 @@ TEST(AuthManagerUnverified, NonObjectPayloadIsRejected) {
     opts.require_signature_verification(false);
     Manager mgr(opts);
 
-    // Hand-craft a structurally valid JWT whose payload segment decodes to a
-    // JSON array instead of an object -> verify_token's `!is_object()` branch.
-    auto b64url = [](const std::string &s) {
-        return qb::crypto::base64url_encode(std::vector<unsigned char>(s.begin(), s.end()));
-    };
-    const std::string header_b64    = b64url(R"({"alg":"HS256","typ":"JWT"})");
-    const std::string payload_b64   = b64url(R"([1,2,3])"); // valid JSON, not an object
-    const std::string signature_b64 = b64url("sig");        // unchecked on this path
-    const std::string token         = header_b64 + "." + payload_b64 + "." + signature_b64;
+    // A structurally valid JWT whose payload segment decodes to a JSON array
+    // instead of an object -> verify_token's `!is_object()` branch.
+    const std::string token = forge_token_raw_payload(qb::json::array({1, 2, 3}));
 
     EXPECT_FALSE(mgr.verify_token(token).has_value());
 }

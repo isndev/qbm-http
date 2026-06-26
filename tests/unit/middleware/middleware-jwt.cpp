@@ -1,108 +1,162 @@
-#include <gtest/gtest.h>
-#include "../http.h"
-// Explicitly include core http types that the linter might be missing
-#include "../request.h"
-#include "../response.h"
-#include "../routing/context.h"
-#include "../routing/router.h"
-#include "../routing/types.h" // For RouteHandlerFn and other routing types
-
-#include <qb/io/crypto_jwt.h>  // For generating test tokens if needed, or use AuthManager
-#include <qb/json.h>           // Added for qb::json
-#include "../auth.h"           // For qb::http::auth::User, qb::http::auth::Options (used by JwtOptions indirectly)
-#include "../middleware/jwt.h" // The adapted JwtMiddleware
-
-#include <functional>
+/**
+ * @file qbm/http/tests/unit/middleware/middleware-jwt.cpp
+ * @brief Unit tests for qb::http::JwtMiddleware<Session>.
+ *
+ * Drives the JWT middleware through a real `qb::http::Router<MockMiddlewareSession>`
+ * with a capturing mock session — token extraction (header / cookie / query),
+ * HS256 signature verification, standard-claim validation (exp/nbf/iat/iss/aud/sub),
+ * leeway, custom validators, custom error/success handlers, required claims, and
+ * the alg-confusion / "none"-algorithm attack surface.
+ *
+ * Tier: **unit** with an `ssl` build dependency — HS256 verification goes through
+ * `qb/io/crypto_jwt.h` (OpenSSL HMAC). No engine, socket, or event loop is
+ * involved; `Router::route` runs synchronously against the mock session.
+ *
+ * Token construction:
+ *   - `make_token(...)` produces a signed HS256 token from a claim map, auto-filling
+ *     exp/nbf with comfortable (deterministic, non-boundary) windows.
+ *   - `sign_hs256_native(...)` hand-signs a token whose payload is a NATIVE qb::json
+ *     value (e.g. an array `aud`), which `qb::jwt::create`'s string-map API cannot
+ *     express. This is what lets the array-audience and alg-confusion cases reach
+ *     the verifier with a structurally faithful payload.
+ *
+ * The file shares the canonical `MiddlewareTestFixture` / `MockMiddlewareSession`
+ * (shared/middleware_test_fixture.h), extended here with a JWT-aware session that
+ * also captures the decoded `jwt_payload` slot.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
+#include <chrono>
+#include <map>
 #include <memory>
-#include <sstream> // For ostringstream in session mock
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-// --- Mock Session for JwtMiddleware Tests ---
-struct MockJwtSession {
-    qb::http::Response      _response;
-    std::string             _session_id_str = "jwt_test_session";
-    std::optional<qb::json> _jwt_payload_in_context; // To check what middleware stores
-    bool                    _final_handler_called = false;
-    std::string             _trace; // Minimal trace if needed
+#include <gtest/gtest.h>
 
-    qb::http::Response &
-    get_response_ref() {
-        return _response;
-    }
+#include <qb/io/crypto.h>     // qb::crypto::{hmac, base64url_encode}
+#include <qb/io/crypto_jwt.h> // qb::jwt::{create, CreateOptions, Algorithm}
+#include <qb/json.h>          // qb::json
 
-    MockJwtSession &
-    operator<<(const qb::http::Response &resp) {
-        _response = resp;
-        return *this;
+#include "../http.h"                           // Router, Context, status, method
+#include "../middleware/jwt.h"                 // qb::http::JwtMiddleware + factories
+#include "../../shared/middleware_test_fixture.h" // MiddlewareTestFixture, MockMiddlewareSession
+
+namespace {
+
+using qb::http::JwtError;
+using qb::http::JwtErrorInfo;
+using qb::http::JwtMiddleware;
+using qb::http::JwtOptions;
+using qb::http::JwtTokenLocation;
+
+constexpr char kSecret[] = "very_secure_secret_for_jwt_tests!@#$%^";
+
+/// Whole-second epoch `now`, captured at call time.
+std::int64_t
+epoch_now() {
+    return static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+/**
+ * @brief Sign an HS256 token from a string claim map (the qb::jwt wire form).
+ *
+ * exp/nbf are auto-filled (unless already present) with a comfortable window
+ * around `now` so the happy path is deterministic regardless of CI load:
+ *   - exp = now + @p exp_off (default +1h)
+ *   - nbf = now + @p nbf_off (default -60s, i.e. already active)
+ */
+std::string
+make_token(std::map<std::string, std::string> claims, const std::string &secret = kSecret, std::int64_t exp_off = 3600,
+           std::int64_t nbf_off = -60) {
+    if (!claims.count("exp")) {
+        claims["exp"] = std::to_string(epoch_now() + exp_off);
     }
+    if (!claims.count("nbf")) {
+        claims["nbf"] = std::to_string(epoch_now() + nbf_off);
+    }
+    qb::jwt::CreateOptions opts;
+    opts.algorithm = qb::jwt::Algorithm::HS256;
+    opts.key       = secret;
+    return qb::jwt::create(claims, opts);
+}
+
+/**
+ * @brief Hand-sign an HS256 token whose payload is a NATIVE qb::json value.
+ *
+ * Unlike `qb::jwt::create` (which only takes std::map<string,string> and therefore
+ * stringifies every non-string claim), this builds the payload segment from the
+ * raw JSON so an array `aud`, numeric `exp`, etc. reach the verifier as native
+ * types. The signature is a genuine HMAC-SHA256 over `header.payload`, so the
+ * resulting token passes real signature verification.
+ *
+ * @param payload   The exact JSON payload object to encode.
+ * @param secret    HMAC signing secret.
+ * @param alg_header The literal `alg` value to stamp in the JOSE header (defaults
+ *                  to "HS256"; override to forge an alg-confusion / "none" header
+ *                  while still HMAC-signing the bytes).
+ */
+std::string
+sign_hs256_native(const qb::json &payload, const std::string &secret = kSecret, const std::string &alg_header = "HS256") {
+    const auto b64url = [](const std::string &s) {
+        return qb::crypto::base64url_encode(std::vector<unsigned char>(s.begin(), s.end()));
+    };
+    qb::json header   = {{"alg", alg_header}, {"typ", "JWT"}};
+    const std::string header_b64  = b64url(header.dump());
+    const std::string payload_b64 = b64url(payload.dump());
+    const std::string signing_input = header_b64 + "." + payload_b64;
+
+    const std::vector<unsigned char> data(signing_input.begin(), signing_input.end());
+    const std::vector<unsigned char> key(secret.begin(), secret.end());
+    const auto sig = qb::crypto::hmac(data, key, qb::crypto::DigestAlgorithm::SHA256);
+    const std::string sig_b64 = qb::crypto::base64url_encode(sig);
+
+    return signing_input + "." + sig_b64;
+}
+
+/// JWT-aware capturing session: also records the decoded `jwt_payload` slot.
+struct MockJwtSession : qb::http::test::MockMiddlewareSession {
+    std::optional<qb::json> _jwt_payload_in_context;
 
     void
     reset() {
-        _response = qb::http::Response();
+        qb::http::test::MockMiddlewareSession::reset();
         _jwt_payload_in_context.reset();
-        _final_handler_called = false;
-        _trace.clear();
-    }
-
-    void
-    trace(const std::string &point) {
-        if (!_trace.empty())
-            _trace += ";";
-        _trace += point;
     }
 };
 
-// --- Test Fixture for JwtMiddleware ---
-class JwtMiddlewareTest : public ::testing::Test {
+/// Fixture: owns a default HS256 JwtMiddleware and a payload-capturing handler.
+class JwtMiddlewareTest : public qb::http::test::MiddlewareTestFixture<MockJwtSession> {
 protected:
-    std::shared_ptr<MockJwtSession>                          _session;
-    std::unique_ptr<qb::http::Router<MockJwtSession>>        _router;
-    qb::http::JwtOptions                                     _jwt_options; // Use the struct from jwt.h
-    std::shared_ptr<qb::http::JwtMiddleware<MockJwtSession>> _jwt_mw;
-
-    const std::string _test_secret    = "very_secure_secret_for_jwt_tests!@#$%^";
-    const std::string _test_algorithm = "HS256";
+    JwtOptions                                       _jwt_options;
+    std::shared_ptr<JwtMiddleware<MockJwtSession>>   _jwt_mw;
+    const std::string                                _scheme = "Bearer";
+    const std::string                                _hdr    = "Authorization";
 
     void
     SetUp() override {
-        _session = std::make_shared<MockJwtSession>();
-        _router  = std::make_unique<qb::http::Router<MockJwtSession>>();
-
-        _jwt_options.secret         = _test_secret;
-        _jwt_options.algorithm      = _test_algorithm;
-        _jwt_options.token_location = qb::http::JwtTokenLocation::HEADER;
-        _jwt_options.token_name     = "Authorization";
-        _jwt_options.auth_scheme    = "Bearer";
-        _jwt_options.verify_exp     = true;
-        _jwt_options.verify_nbf     = true;
-        _jwt_options.verify_iat     = false;
-
-        _jwt_mw = qb::http::jwt_middleware_with_options<MockJwtSession>(_jwt_options);
+        qb::http::test::MiddlewareTestFixture<MockJwtSession>::SetUp();
+        _jwt_options.secret     = kSecret;
+        _jwt_options.algorithm  = "HS256";
+        _jwt_options.verify_exp = true;
+        _jwt_options.verify_nbf = true;
+        _jwt_options.verify_iat = false;
+        _jwt_mw                 = qb::http::jwt_middleware_with_options<MockJwtSession>(_jwt_options);
     }
 
-    qb::http::Request
-    create_request(const std::string &target_path = "/protected") {
-        qb::http::Request req;
-        req.method() = qb::http::method::GET;
-        try {
-            req.uri() = qb::io::uri(target_path);
-        } catch (const std::exception &e) {
-            ADD_FAILURE() << "URI parse failure: " << target_path << " (" << e.what() << ")";
-            req.uri() = qb::io::uri("/_ERROR_URI_");
-        }
-        return req;
-    }
-
+    /// Terminal handler that captures the jwt_payload slot and replies 200.
     qb::http::RouteHandlerFn<MockJwtSession>
-    success_handler() {
+    payload_handler() {
         return [this](std::shared_ptr<qb::http::Context<MockJwtSession>> ctx) {
-            if (_session) {
-                _session->_final_handler_called = true;
-                if (ctx->has("jwt_payload")) {
-                    _session->_jwt_payload_in_context = ctx->template get<qb::json>("jwt_payload");
-                }
+            _session->_final_handler_called = true;
+            if (ctx->has("jwt_payload")) {
+                _session->_jwt_payload_in_context = ctx->template get<qb::json>("jwt_payload");
             }
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body()   = "Authenticated Access Granted";
@@ -110,580 +164,264 @@ protected:
         };
     }
 
+    /// Wire the given JWT middleware ahead of payload_handler and route one request.
     void
-    configure_router_and_run(std::shared_ptr<qb::http::JwtMiddleware<MockJwtSession>> jwt_mw_to_use, qb::http::Request request) {
-        _router = std::make_unique<qb::http::Router<MockJwtSession>>(); // Re-initialize router for a clean state
-        _router->use(jwt_mw_to_use);
-        _router->get("/protected", success_handler());
-        _router->get("/optional_route", success_handler()); // For optional auth tests
+    run(std::shared_ptr<JwtMiddleware<MockJwtSession>> mw, qb::http::Request request, const std::string &path = "/protected") {
+        _router = std::make_unique<qb::http::Router<MockJwtSession>>();
+        _router->use(std::move(mw));
+        _router->get(path, payload_handler());
         _router->compile();
-
         _session->reset();
         _router->route(_session, std::move(request));
     }
 
-    // Helper to generate a token using qb::jwt::create
-    std::string
-    generate_token(const qb::json &payload_json, const std::string &secret_override = "",
-                   std::chrono::seconds                expiry_offset       = std::chrono::hours(1),
-                   std::optional<std::chrono::seconds> nbf_offset_from_now = std::nullopt) {
-        qb::jwt::CreateOptions jwt_create_options;
-        auto                   alg = qb::jwt::algorithm_from_string(_test_algorithm);
-        if (!alg)
-            throw std::runtime_error("Invalid algorithm for token generation in test: " + _test_algorithm);
-        jwt_create_options.algorithm = *alg;
-        jwt_create_options.key       = secret_override.empty() ? _test_secret : secret_override;
+    qb::http::Request
+    req_with_header(const std::string &value) {
+        auto r = create_request(qb::http::method::GET, "/protected");
+        r.set_header(_hdr, value);
+        return r;
+    }
 
-        std::map<std::string, std::string> full_payload_map;
+    qb::http::Request
+    bearer(const std::string &token) {
+        return req_with_header(_scheme + " " + token);
+    }
 
-        // Convert input qb::json payload to string map
-        if (payload_json.is_object()) {
-            for (auto &[key, value] : payload_json.items()) {
-                if (value.is_string()) {
-                    full_payload_map[key] = value.get<std::string>();
-                } else if (value.is_boolean()) {
-                    full_payload_map[key] = value.get<bool>() ? "true" : "false";
-                } else if (value.is_number_integer()) {
-                    full_payload_map[key] = std::to_string(value.get<long long>());
-                } else if (value.is_number_float()) {
-                    full_payload_map[key] = std::to_string(value.get<double>());
-                } else {
-                    // For arrays or nested objects, serialize to string or skip
-                    // For simplicity here, we'll use dump(), but this might not be ideal for all JWT claims.
-                    full_payload_map[key] = value.dump();
-                }
-            }
-        }
+    [[nodiscard]] std::string
+    body() const {
+        return _session->_response.body().template as<std::string>();
+    }
 
-        // Add/override standard claims based on _jwt_options and test parameters
-        // Priority: 1. Explicitly in payload_json, 2. From _jwt_options if verify_X and X is set, 3. Default logic (exp, nbf, iat)
-
-        // Expiry (exp)
-        if (!full_payload_map.count("exp") && _jwt_options.verify_exp) {
-            full_payload_map["exp"] = std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + expiry_offset));
-        }
-
-        // Not Before (nbf)
-        if (!full_payload_map.count("nbf") && _jwt_options.verify_nbf) {
-            if (nbf_offset_from_now.has_value()) {
-                full_payload_map["nbf"] =
-                    std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + *nbf_offset_from_now));
-            } else {
-                full_payload_map["nbf"] =
-                    std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() - std::chrono::minutes(1)));
-            }
-        }
-
-        // Issued At (iat)
-        if (!full_payload_map.count("iat")) {
-            // If not in input payload_json
-            if (_jwt_options.verify_iat) {
-                // Only add if verify_iat is true
-                full_payload_map["iat"] = std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
-            }
-        } // If payload_json already contains 'iat', its stringified version is already in full_payload_map
-
-        // Issuer (iss)
-        if (!full_payload_map.count("iss")) {
-            // If not in input payload_json
-            if (_jwt_options.verify_iss && !_jwt_options.issuer.empty()) {
-                full_payload_map["iss"] = _jwt_options.issuer;
-            }
-        } // If payload_json already contains 'iss', its stringified version is already in full_payload_map
-
-        // Audience (aud)
-        if (!full_payload_map.count("aud")) {
-            // If not in input payload_json
-            if (_jwt_options.verify_aud && !_jwt_options.audience.empty()) {
-                full_payload_map["aud"] = _jwt_options.audience;
-            }
-        }
-
-        // Subject (sub)
-        if (!full_payload_map.count("sub")) {
-            // If not in input payload_json
-            if (_jwt_options.verify_sub && !_jwt_options.subject.empty()) {
-                full_payload_map["sub"] = _jwt_options.subject;
-            }
-        }
-
-        return qb::jwt::create(full_payload_map, jwt_create_options);
+    [[nodiscard]] qb::http::status
+    status() const {
+        return _session->_response.status();
     }
 };
 
-// --- Test Cases ---
+// ---------------------------------------------------------------------------
+// Happy path + extraction locations
+// ---------------------------------------------------------------------------
 
 TEST_F(JwtMiddlewareTest, ValidTokenAuthentication) {
-    qb::json    payload = {{"sub", "user123"}, {"name", "Test User"}, {"admin", true}};
-    std::string token   = generate_token(payload);
+    const std::string token = make_token({{"sub", "user123"}, {"name", "Test User"}});
+    run(_jwt_mw, bearer(token));
 
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Response body: " << _session->_response.body().as<std::string>();
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "user123");
 }
 
-TEST_F(JwtMiddlewareTest, MissingToken) {
-    configure_router_and_run(_jwt_mw, create_request());
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-TEST_F(JwtMiddlewareTest, WhitespaceOnlyAuthorizationHeaderIsHandledGracefully) {
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, "    \t   ");
-    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, std::move(req)));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-TEST_F(JwtMiddlewareTest, InvalidTokenFormat) {
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " not.a.valid.jwt.token");
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid token format"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-TEST_F(JwtMiddlewareTest, ExpiredToken) {
-    qb::json    payload       = {{"sub", "exp_user"}};
-    std::string expired_token = generate_token(payload, "", std::chrono::seconds(-3600));
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + expired_token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Token has expired"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-TEST_F(JwtMiddlewareTest, TokenNotYetValid) {
-    _jwt_options.verify_nbf = true;
-    _jwt_mw->with_options(_jwt_options);
-
-    qb::json    payload_json = {{"sub", "nbf_user"}};
-    std::string nbf_token    = generate_token(payload_json, "", std::chrono::hours(1), std::chrono::hours(1));
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + nbf_token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Token is not yet active"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-TEST_F(JwtMiddlewareTest, RequiredClaimMissing) {
-    _jwt_mw->require_claims({"user_id", "scope"});
-
-    qb::json    payload             = {{"sub", "user123"}, {"user_id", "some_id"}};
-    std::string token_missing_claim = generate_token(payload);
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_claim);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Required claim 'scope' is missing"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
 TEST_F(JwtMiddlewareTest, TokenFromCookie) {
-    _jwt_options.token_location = qb::http::JwtTokenLocation::COOKIE;
+    _jwt_options.token_location = JwtTokenLocation::COOKIE;
     _jwt_options.token_name     = "my_jwt_cookie";
     _jwt_mw->with_options(_jwt_options);
 
-    qb::json    payload = {{"sub", "cookie_user"}};
-    std::string token   = generate_token(payload);
+    const std::string token = make_token({{"sub", "cookie_user"}});
+    auto              req   = create_request(qb::http::method::GET, "/protected");
+    req.cookies().add("my_jwt_cookie", token);
+    run(_jwt_mw, std::move(req));
 
-    auto req = create_request();
-    req.cookies().add(_jwt_options.token_name, token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "cookie_user");
 }
 
 TEST_F(JwtMiddlewareTest, TokenFromQuery) {
-    _jwt_options.token_location = qb::http::JwtTokenLocation::QUERY;
+    _jwt_options.token_location = JwtTokenLocation::QUERY;
     _jwt_options.token_name     = "access_token";
     _jwt_mw->with_options(_jwt_options);
 
-    qb::json    payload = {{"sub", "query_user"}};
-    std::string token   = generate_token(payload);
+    const std::string token = make_token({{"sub", "query_user"}});
+    auto              req   = create_request(qb::http::method::GET, "/protected", "access_token=" + token);
+    run(_jwt_mw, std::move(req));
 
-    auto req = create_request("/protected?access_token=" + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "query_user");
 }
 
-TEST_F(JwtMiddlewareTest, WrongAlgorithm) {
-    qb::json    payload                          = {{"sub", "algo_user"}};
-    std::string token_wrong_key_implies_sig_fail = generate_token(payload, "a_completely_different_secret_for_alg_test");
+// ---------------------------------------------------------------------------
+// Missing / malformed token (exact error messages, no OR-tolerance)
+// ---------------------------------------------------------------------------
 
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_key_implies_sig_fail);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for WrongAlgorithm: " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid token signature."), std::string::npos)
-        << "Response body for WrongAlgorithm: " << _session->_response.body().as<std::string>();
+TEST_F(JwtMiddlewareTest, MissingToken) {
+    run(_jwt_mw, create_request(qb::http::method::GET, "/protected"));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "JWT token is missing.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(JwtMiddlewareTest, CustomValidator) {
-    _jwt_mw->with_validator([](const qb::json &payload, qb::http::JwtErrorInfo &error_info) {
-        if (!payload.contains("custom_claim")) {
-            error_info = {qb::http::JwtError::INVALID_CLAIM, "Custom claim 'custom_claim' is missing."};
-            return false;
-        }
-        if (payload.at("custom_claim").get<std::string>() != "valid") {
-            error_info = {qb::http::JwtError::INVALID_CLAIM, "Custom claim 'custom_claim' has invalid value."};
-            return false;
-        }
-        return true;
-    });
-
-    // Test Case 1: Validator returns true
-    qb::json    payload_valid = {{"sub", "validator_user"}, {"custom_claim", "valid"}};
-    std::string token_valid   = generate_token(payload_valid);
-    auto        req_valid     = create_request();
-    req_valid.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_valid);
-    configure_router_and_run(_jwt_mw, std::move(req_valid));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
-    EXPECT_TRUE(_session->_final_handler_called);
-
-    // Test Case 2: Validator returns false (invalid value)
-    _session->reset();
-    qb::json    payload_invalid = {{"sub", "validator_user"}, {"custom_claim", "invalid"}};
-    std::string token_invalid   = generate_token(payload_invalid);
-    auto        req_invalid     = create_request();
-    req_invalid.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_invalid);
-    configure_router_and_run(_jwt_mw, std::move(req_invalid));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    std::string body_str_invalid = _session->_response.body().as<std::string>();
-    EXPECT_TRUE(body_str_invalid.find("Custom claim 'custom_claim' has invalid value.") != std::string::npos
-                || body_str_invalid.find("Custom JWT validation failed") != std::string::npos)
-        << "Body: " << body_str_invalid;
-    EXPECT_FALSE(_session->_final_handler_called);
-
-    // Test Case 3: Validator returns false (missing claim)
-    _session->reset();
-    qb::json    payload_missing = {{"sub", "validator_user"}};
-    std::string token_missing   = generate_token(payload_missing);
-    auto        req_missing     = create_request();
-    req_missing.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing);
-    configure_router_and_run(_jwt_mw, std::move(req_missing));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    std::string body_str_missing = _session->_response.body().as<std::string>();
-    EXPECT_TRUE(body_str_missing.find("Custom claim 'custom_claim' is missing.") != std::string::npos
-                || body_str_missing.find("Custom JWT validation failed") != std::string::npos)
-        << "Body: " << body_str_missing;
+TEST_F(JwtMiddlewareTest, WhitespaceOnlyAuthorizationHeaderIsMissingToken) {
+    EXPECT_NO_THROW(run(_jwt_mw, req_with_header("    \t   ")));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "JWT token is missing.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(JwtMiddlewareTest, ThrowingValidatorIsConvertedToUnauthorized) {
-    _jwt_mw->with_validator([](const qb::json &, qb::http::JwtErrorInfo &) -> bool { throw std::runtime_error("validator crash"); });
+TEST_F(JwtMiddlewareTest, InvalidTokenFormat) {
+    run(_jwt_mw, bearer("not.a.valid.jwt.token"));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid token format.");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
 
-    qb::json    payload = {{"sub", "validator_throw_user"}};
-    std::string token   = generate_token(payload);
-    auto        req     = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
+TEST_F(JwtMiddlewareTest, TokenWithNoSchemeWhenSchemeExpected) {
+    run(_jwt_mw, req_with_header(make_token({{"sub", "no_scheme_user"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "JWT token is missing.");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
 
-    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, std::move(req)));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Custom JWT validator threw exception"), std::string::npos);
+TEST_F(JwtMiddlewareTest, TokenWithWrongSchemeWhenSchemeExpected) {
+    run(_jwt_mw, req_with_header("Basic " + make_token({{"sub", "wrong_scheme_user"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "JWT token is missing.");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// ---------------------------------------------------------------------------
+// Crypto integrity (wrong secret, tampering)
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, WrongSecret) {
+    run(_jwt_mw, bearer(make_token({{"sub", "secret_user"}}, "another_secret_entirely")));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED) << "Body: " << body();
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid token signature.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(JwtMiddlewareTest, TokenTampering) {
-    qb::json    payload = {{"sub", "tamper_user"}};
-    std::string token   = generate_token(payload);
+    std::string token = make_token({{"sub", "tamper_user"}});
+    const auto  d2    = token.rfind('.');
+    ASSERT_NE(d2, std::string::npos);
+    ASSERT_LT(d2 + 1, token.size());
+    // Flip a byte inside the SIGNATURE segment: header/payload still decode and
+    // parse cleanly, so the verifier deterministically reaches the signature
+    // check and reports a signature failure (never a format error).
+    token[d2 + 1] = (token[d2 + 1] == 'A' ? 'B' : 'A');
 
-    size_t first_dot = token.find('.');
-    ASSERT_NE(first_dot, std::string::npos);
-    size_t second_dot = token.find('.', first_dot + 1);
-    ASSERT_NE(second_dot, std::string::npos);
-
-    std::string tampered_token = token;
-    if (second_dot > first_dot + 1) {
-        tampered_token[first_dot + 1] = (tampered_token[first_dot + 1] == 'A' ? 'B' : 'A');
-    } else {
-        tampered_token += "X";
-    }
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + tampered_token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    std::string body_str = _session->_response.body().as<std::string>();
-    bool        correct_error =
-        body_str.find("Token signature verification failed") != std::string::npos || body_str.find("Invalid token format") != std::string::npos;
-    EXPECT_TRUE(correct_error) << "Unexpected error message: " << body_str;
+    run(_jwt_mw, bearer(token));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid token signature.") << "Body: " << body();
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(JwtMiddlewareTest, IssuerVerification) {
-    _jwt_options.verify_iss = true;
-    _jwt_options.issuer     = "my-app-issuer";
+// ---------------------------------------------------------------------------
+// Algorithm confusion / "none" attack (security-relevant)
+// ---------------------------------------------------------------------------
+
+// A token whose JOSE header claims alg "none" (unsigned-JWT attack) must be
+// rejected: qb::jwt resolves the header alg, finds it does not match the
+// configured HS256, and fails as a signature error -> 401. The handler never runs.
+TEST_F(JwtMiddlewareTest, AlgNoneHeaderIsRejected) {
+    qb::json payload = {{"sub", "attacker"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60}};
+    // alg "none" header, but we still place a (now-irrelevant) HMAC sig segment.
+    const std::string token = sign_hs256_native(payload, kSecret, "none");
+
+    run(_jwt_mw, bearer(token));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid token signature.") << "Body: " << body();
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// Header alg differs from the configured algorithm (e.g. token says HS512 while
+// the middleware verifies HS256). The header/option mismatch is caught before any
+// signature math and rejected as a signature error.
+TEST_F(JwtMiddlewareTest, MismatchedHeaderAlgorithmIsRejected) {
+    qb::json payload = {{"sub", "confused"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60}};
+    const std::string token = sign_hs256_native(payload, kSecret, "HS512"); // header lies about alg
+
+    run(_jwt_mw, bearer(token));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid token signature.") << "Body: " << body();
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// Configuring the middleware itself with an unsupported algorithm string is a
+// distinct, deterministic failure: algorithm_from_string returns nullopt and the
+// middleware reports an algorithm-mismatch error before touching the token bytes.
+TEST_F(JwtMiddlewareTest, UnsupportedConfiguredAlgorithmIsRejected) {
+    _jwt_options.algorithm = "none";
     _jwt_mw->with_options(_jwt_options);
 
-    // Case 1: Correct issuer
-    qb::json    payload_correct_iss_json;
-    std::string token_correct_iss = generate_token(payload_correct_iss_json);
-    auto        req_correct_iss   = create_request();
-    req_correct_iss.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_correct_iss);
-    configure_router_and_run(_jwt_mw, std::move(req_correct_iss));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
-    EXPECT_TRUE(_session->_final_handler_called);
-
-    // Case 2: Wrong issuer
-    _session->reset();
-    qb::json    payload_wrong_iss_json = {{"iss", "wrong-issuer"}};
-    std::string token_wrong_iss        = generate_token(payload_wrong_iss_json);
-    auto        req_wrong_iss          = create_request();
-    req_wrong_iss.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_iss);
-    configure_router_and_run(_jwt_mw, std::move(req_wrong_iss));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for IssuerVerification (Wrong Issuer): " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid issuer.\""), std::string::npos)
-        << "Response body for IssuerVerification (Wrong Issuer): " << _session->_response.body().as<std::string>();
-    EXPECT_FALSE(_session->_final_handler_called);
-
-    // Case 3: Missing issuer claim
-    _session->reset();
-    std::string token_missing_iss;
-    {
-        qb::jwt::CreateOptions custom_create_opts;
-        auto                   alg_direct = qb::jwt::algorithm_from_string(_test_algorithm);
-        ASSERT_TRUE(alg_direct.has_value());
-        custom_create_opts.algorithm                          = *alg_direct;
-        custom_create_opts.key                                = _test_secret;
-        std::map<std::string, std::string> payload_map_no_iss = {
-            {"sub", "missing_iss_user"},
-            {"exp", std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + std::chrono::hours(1)))},
-            {"nbf", std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() - std::chrono::minutes(1)))}
-        };
-        token_missing_iss = qb::jwt::create(payload_map_no_iss, custom_create_opts);
-    }
-
-    auto req_missing_iss = create_request();
-    req_missing_iss.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_iss);
-    configure_router_and_run(_jwt_mw, std::move(req_missing_iss));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for IssuerVerification (Missing Issuer): " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid issuer.\""), std::string::npos)
-        << "Response body for IssuerVerification (Missing Issuer): " << _session->_response.body().as<std::string>();
+    run(_jwt_mw, bearer(make_token({{"sub", "x"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_NE(body().find("is not supported"), std::string::npos) << "Body: " << body();
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(JwtMiddlewareTest, WrongSecret) {
-    qb::json    payload            = {{"sub", "secret_user"}};
-    std::string token_wrong_secret = generate_token(payload, "another_secret_entirely");
+// ---------------------------------------------------------------------------
+// Time claims: exp / nbf / iat + leeway edge
+// ---------------------------------------------------------------------------
 
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_secret);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for WrongSecret: " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid token signature."), std::string::npos)
-        << "Response body for WrongSecret: " << _session->_response.body().as<std::string>();
+TEST_F(JwtMiddlewareTest, ExpiredToken) {
+    run(_jwt_mw, bearer(make_token({{"sub", "exp_user"}}, kSecret, /*exp_off=*/-3600)));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Token has expired.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(JwtMiddlewareTest, AudienceValidation) {
-    _jwt_options.verify_aud = true;
-    _jwt_options.audience   = "my-app-audience";
+TEST_F(JwtMiddlewareTest, TokenNotYetValid) {
+    // nbf one hour in the future, no leeway.
+    run(_jwt_mw, bearer(make_token({{"sub", "nbf_user"}}, kSecret, /*exp_off=*/3600, /*nbf_off=*/3600)));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Token is not yet active.");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// Leeway edge: with leeway==0, a token whose exp is a few seconds in the PAST is
+// rejected, and one a few seconds in the FUTURE is accepted. The +/-5s margins
+// are far enough from the boundary to be load-immune while still exercising the
+// zero-leeway exp comparison directly.
+TEST_F(JwtMiddlewareTest, ZeroLeewayExpBoundary) {
+    _jwt_options.leeway = std::chrono::seconds(0);
     _jwt_mw->with_options(_jwt_options);
 
-    // Case 1: Correct audience
-    qb::json    payload_correct_aud_json;
-    std::string token_correct_aud = generate_token(payload_correct_aud_json);
-    auto        req_correct_aud   = create_request();
-    req_correct_aud.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_correct_aud);
-    configure_router_and_run(_jwt_mw, std::move(req_correct_aud));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    run(_jwt_mw, bearer(make_token({{"sub", "edge"}}, kSecret, /*exp_off=*/-5)));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED) << "Body: " << body();
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Token has expired.");
+
+    run(_jwt_mw, bearer(make_token({{"sub", "edge"}}, kSecret, /*exp_off=*/5)));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
-
-    // Case 2: Wrong audience
-    _session->reset();
-    qb::json    payload_wrong_aud_json = {{"aud", "wrong-audience"}};
-    std::string token_wrong_aud        = generate_token(payload_wrong_aud_json);
-    auto        req_wrong_aud          = create_request();
-    req_wrong_aud.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_aud);
-    configure_router_and_run(_jwt_mw, std::move(req_wrong_aud));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for AudienceValidation (Wrong Audience): " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid audience.\""), std::string::npos)
-        << "Response body for AudienceValidation (Wrong Audience): " << _session->_response.body().as<std::string>();
-    EXPECT_FALSE(_session->_final_handler_called);
-
-    // Case 3: Missing audience claim
-    _session->reset();
-    std::string token_missing_aud;
-    {
-        qb::jwt::CreateOptions custom_create_opts;
-        auto                   alg_direct = qb::jwt::algorithm_from_string(_test_algorithm);
-        ASSERT_TRUE(alg_direct.has_value());
-        custom_create_opts.algorithm                          = *alg_direct;
-        custom_create_opts.key                                = _test_secret;
-        std::map<std::string, std::string> payload_map_no_aud = {
-            {"sub", "missing_aud_user"},
-            {"exp", std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + std::chrono::hours(1)))},
-            {"nbf", std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() - std::chrono::minutes(1)))}
-        };
-        token_missing_aud = qb::jwt::create(payload_map_no_aud, custom_create_opts);
-    }
-
-    auto req_missing_aud = create_request();
-    req_missing_aud.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_aud);
-    configure_router_and_run(_jwt_mw, std::move(req_missing_aud));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for AudienceValidation (Missing Audience): " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid audience.\""), std::string::npos)
-        << "Response body for AudienceValidation (Missing Audience): " << _session->_response.body().as<std::string>();
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-TEST_F(JwtMiddlewareTest, SubjectVerification) {
-    _jwt_options.verify_sub = true;
-    _jwt_options.subject    = "expected-subject";
-    _jwt_mw->with_options(_jwt_options);
-
-    // Case 1: Correct subject
-    qb::json    payload_correct_sub_json = {{"sub", "expected-subject"}};
-    std::string token_correct_sub        = generate_token(payload_correct_sub_json);
-    auto        req_correct_sub          = create_request();
-    req_correct_sub.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_correct_sub);
-    configure_router_and_run(_jwt_mw, std::move(req_correct_sub));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
-    EXPECT_TRUE(_session->_final_handler_called);
-
-    // Case 2: Wrong subject
-    _session->reset();
-    qb::json    payload_wrong_sub_json = {{"sub", "wrong-subject"}};
-    std::string token_wrong_sub        = generate_token(payload_wrong_sub_json);
-    auto        req_wrong_sub          = create_request();
-    req_wrong_sub.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_wrong_sub);
-    configure_router_and_run(_jwt_mw, std::move(req_wrong_sub));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for SubjectVerification (Wrong Subject): " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Invalid subject"), std::string::npos)
-        << "Response body for SubjectVerification (Wrong Subject): " << _session->_response.body().as<std::string>();
-    EXPECT_FALSE(_session->_final_handler_called);
-
-    // Case 3: Missing subject claim
-    _session->reset();
-    std::string token_missing_sub_alt;
-    {
-        qb::jwt::CreateOptions custom_create_opts;
-        auto                   alg_direct = qb::jwt::algorithm_from_string(_test_algorithm);
-        ASSERT_TRUE(alg_direct.has_value());
-        custom_create_opts.algorithm                          = *alg_direct;
-        custom_create_opts.key                                = _test_secret;
-        std::map<std::string, std::string> payload_map_no_sub = {
-            {"user_id", "user_without_sub_claim"},
-            {"exp", std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + std::chrono::hours(1)))},
-            {"nbf", std::to_string(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() - std::chrono::minutes(1)))}
-        };
-        token_missing_sub_alt = qb::jwt::create(payload_map_no_sub, custom_create_opts);
-    }
-
-    auto req_missing_sub = create_request();
-    req_missing_sub.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_missing_sub_alt);
-    configure_router_and_run(_jwt_mw, std::move(req_missing_sub));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-        << "Response body for SubjectVerification (Missing Subject): " << _session->_response.body().as<std::string>();
-    EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"Invalid subject.\""), std::string::npos)
-        << "Response body for SubjectVerification (Missing Subject): " << _session->_response.body().as<std::string>();
-    EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(JwtMiddlewareTest, ClockSkewTolerance) {
     _jwt_options.leeway = std::chrono::seconds(60);
     _jwt_mw->with_options(_jwt_options);
-    qb::json payload = {{"sub", "skew_user"}};
 
-    // Test 1: Token expired by 30s (within leeway)
-    _session->reset();
-    std::string token_exp_within_leeway = generate_token(payload, "", std::chrono::seconds(-30));
-    auto        req_exp_leeway          = create_request();
-    req_exp_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_exp_within_leeway);
-    configure_router_and_run(_jwt_mw, std::move(req_exp_leeway));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "Expired within leeway failed. Body: " << _session->_response.body().as<std::string>();
+    // exp 30s in the past -> within 60s leeway -> accepted.
+    run(_jwt_mw, bearer(make_token({{"sub", "skew"}}, kSecret, /*exp_off=*/-30)));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 
-    // Test 2: Token expired by 90s (outside leeway)
-    _session->reset();
-    std::string token_exp_outside_leeway = generate_token(payload, "", std::chrono::seconds(-90));
-    auto        req_exp_no_leeway        = create_request();
-    req_exp_no_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_exp_outside_leeway);
-    configure_router_and_run(_jwt_mw, std::move(req_exp_no_leeway));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Token has expired"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
+    // exp 90s in the past -> beyond leeway -> rejected.
+    run(_jwt_mw, bearer(make_token({{"sub", "skew"}}, kSecret, /*exp_off=*/-90)));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Token has expired.");
 
-    // Test 3: Token NBF is 30s in future (within leeway)
-    _session->reset();
-    std::string token_nbf_within_leeway = generate_token(payload, "", std::chrono::hours(1), std::chrono::seconds(30));
-    auto        req_nbf_leeway          = create_request();
-    req_nbf_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_nbf_within_leeway);
-    configure_router_and_run(_jwt_mw, std::move(req_nbf_leeway));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "NBF within leeway failed. Body: " << _session->_response.body().as<std::string>();
+    // nbf 30s in the future -> within leeway -> accepted.
+    run(_jwt_mw, bearer(make_token({{"sub", "skew"}}, kSecret, /*exp_off=*/3600, /*nbf_off=*/30)));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 
-    // Test 4: Token NBF is 90s in future (outside leeway)
-    _session->reset();
-    std::string token_nbf_outside_leeway = generate_token(payload, "", std::chrono::hours(1), std::chrono::seconds(90));
-    auto        req_nbf_no_leeway        = create_request();
-    req_nbf_no_leeway.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token_nbf_outside_leeway);
-    configure_router_and_run(_jwt_mw, std::move(req_nbf_no_leeway));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Token is not yet active"), std::string::npos);
-    EXPECT_FALSE(_session->_final_handler_called);
+    // nbf 90s in the future -> beyond leeway -> rejected.
+    run(_jwt_mw, bearer(make_token({{"sub", "skew"}}, kSecret, /*exp_off=*/3600, /*nbf_off=*/90)));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Token is not yet active.");
 }
 
 TEST_F(JwtMiddlewareTest, VerifyIatRejectsFutureIssuedAtClaim) {
     _jwt_options.verify_iat = true;
     _jwt_mw->with_options(_jwt_options);
 
-    qb::json payload = {
-        {"sub", "future_iat_user"},
-        {"iat", static_cast<long long>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + std::chrono::hours(1)))}
-    };
-    std::string token = generate_token(payload);
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("future"), std::string::npos);
+    const std::string token = make_token({{"sub", "future_iat_user"}, {"iat", std::to_string(epoch_now() + 3600)}});
+    run(_jwt_mw, bearer(token));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Token issued in the future (invalid 'iat').");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -691,227 +429,256 @@ TEST_F(JwtMiddlewareTest, VerifyIatCanBeDisabled) {
     _jwt_options.verify_iat = false;
     _jwt_mw->with_options(_jwt_options);
 
-    qb::json payload = {
-        {"sub", "future_iat_ignored_user"},
-        {"iat", static_cast<long long>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + std::chrono::hours(1)))}
-    };
-    std::string token = generate_token(payload);
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    const std::string token = make_token({{"sub", "future_iat_ignored"}, {"iat", std::to_string(epoch_now() + 3600)}});
+    run(_jwt_mw, bearer(token));
+    EXPECT_EQ(status(), qb::http::status::OK);
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
+// ---------------------------------------------------------------------------
+// iss / aud / sub verification (correct / wrong / missing)
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, IssuerVerification) {
+    _jwt_options.verify_iss = true;
+    _jwt_options.issuer     = "my-app-issuer";
+    _jwt_mw->with_options(_jwt_options);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "u"}, {"iss", "my-app-issuer"}})));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "u"}, {"iss", "wrong-issuer"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid issuer.");
+
+    run(_jwt_mw, bearer(make_token({{"sub", "u"}}))); // iss claim absent
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid issuer.");
+}
+
+TEST_F(JwtMiddlewareTest, AudienceValidationStringClaim) {
+    _jwt_options.verify_aud = true;
+    _jwt_options.audience   = "my-app-audience";
+    _jwt_mw->with_options(_jwt_options);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "u"}, {"aud", "my-app-audience"}})));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "u"}, {"aud", "wrong-audience"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid audience.");
+
+    run(_jwt_mw, bearer(make_token({{"sub", "u"}}))); // aud claim absent
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid audience.");
+}
+
+// ADDED (spec): the `aud` claim as a JSON ARRAY. RFC 7519 permits aud to be an
+// array; qb::jwt matches if any element equals the expected audience. The string
+// claim-map API can't produce a native array, so the token is hand-signed with a
+// native-JSON payload. A matching element passes; a disjoint array is rejected.
+TEST_F(JwtMiddlewareTest, AudienceValidationArrayClaim) {
+    _jwt_options.verify_aud = true;
+    _jwt_options.audience   = "svc-b";
+    _jwt_mw->with_options(_jwt_options);
+
+    qb::json match = {{"sub", "u"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60},
+                      {"aud", qb::json::array({"svc-a", "svc-b", "svc-c"})}};
+    run(_jwt_mw, bearer(sign_hs256_native(match)));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    qb::json no_match = {{"sub", "u"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60},
+                         {"aud", qb::json::array({"svc-x", "svc-y"})}};
+    run(_jwt_mw, bearer(sign_hs256_native(no_match)));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid audience.");
+}
+
+TEST_F(JwtMiddlewareTest, SubjectVerification) {
+    _jwt_options.verify_sub = true;
+    _jwt_options.subject    = "expected-subject";
+    _jwt_mw->with_options(_jwt_options);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "expected-subject"}})));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "wrong-subject"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid subject.");
+
+    run(_jwt_mw, bearer(make_token({{"name", "no-sub-claim"}}))); // sub claim absent
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid subject.");
+}
+
+// ---------------------------------------------------------------------------
+// Required claims + custom validator
+// ---------------------------------------------------------------------------
+
+TEST_F(JwtMiddlewareTest, RequiredClaimMissing) {
+    _jwt_mw->require_claims({"user_id", "scope"});
+    run(_jwt_mw, bearer(make_token({{"sub", "user123"}, {"user_id", "some_id"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Required claim 'scope' is missing.");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(JwtMiddlewareTest, CustomValidatorAcceptsAndRejects) {
+    _jwt_mw->with_validator([](const qb::json &payload, JwtErrorInfo &error_info) {
+        if (!payload.contains("custom_claim")) {
+            error_info = {JwtError::INVALID_CLAIM, "Custom claim 'custom_claim' is missing."};
+            return false;
+        }
+        if (payload.at("custom_claim").get<std::string>() != "valid") {
+            error_info = {JwtError::INVALID_CLAIM, "Custom claim 'custom_claim' has invalid value."};
+            return false;
+        }
+        return true;
+    });
+
+    run(_jwt_mw, bearer(make_token({{"sub", "v"}, {"custom_claim", "valid"}})));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "v"}, {"custom_claim", "invalid"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Custom claim 'custom_claim' has invalid value.");
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    run(_jwt_mw, bearer(make_token({{"sub", "v"}})));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Custom claim 'custom_claim' is missing.");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(JwtMiddlewareTest, ThrowingValidatorIsConvertedToUnauthorized) {
+    _jwt_mw->with_validator([](const qb::json &, JwtErrorInfo &) -> bool { throw std::runtime_error("validator crash"); });
+
+    EXPECT_NO_THROW(run(_jwt_mw, bearer(make_token({{"sub", "vt"}}))));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_NE(body().find("Custom JWT validator threw exception"), std::string::npos);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+// ---------------------------------------------------------------------------
+// Custom error / success handlers
+// ---------------------------------------------------------------------------
+
 TEST_F(JwtMiddlewareTest, CustomErrorHandler) {
-    bool custom_handler_called = false;
-    _jwt_mw->with_error_handler(
-        [&custom_handler_called](std::shared_ptr<qb::http::Context<MockJwtSession>> ctx, const qb::http::JwtErrorInfo &error_info) {
-            custom_handler_called    = true;
-            ctx->response().status() = qb::http::status::IM_A_TEAPOT;
-            ctx->response().body()   = "Custom JWT Error: " + error_info.message;
-            ctx->complete();
-        });
+    bool called = false;
+    _jwt_mw->with_error_handler([&called](std::shared_ptr<qb::http::Context<MockJwtSession>> ctx, const JwtErrorInfo &err) {
+        called                   = true;
+        ctx->response().status() = qb::http::status::IM_A_TEAPOT;
+        ctx->response().body()   = "Custom JWT Error: " + err.message;
+        ctx->complete();
+    });
 
-    configure_router_and_run(_jwt_mw, create_request());
-
-    EXPECT_TRUE(custom_handler_called);
-    EXPECT_EQ(_session->_response.status(), qb::http::status::IM_A_TEAPOT);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Custom JWT Error: JWT token is missing"), std::string::npos);
+    run(_jwt_mw, create_request(qb::http::method::GET, "/protected"));
+    EXPECT_TRUE(called);
+    EXPECT_EQ(status(), qb::http::status::IM_A_TEAPOT);
+    EXPECT_EQ(body(), "Custom JWT Error: JWT token is missing.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(JwtMiddlewareTest, ThrowingErrorHandlerFallsBackToDefaultUnauthorized) {
-    _jwt_mw->with_error_handler([](std::shared_ptr<qb::http::Context<MockJwtSession>> /*ctx*/, const qb::http::JwtErrorInfo & /*error_info*/) {
-        throw std::runtime_error("error handler crash");
-    });
+    _jwt_mw->with_error_handler(
+        [](std::shared_ptr<qb::http::Context<MockJwtSession>>, const JwtErrorInfo &) { throw std::runtime_error("error handler crash"); });
 
-    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, create_request()));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
+    EXPECT_NO_THROW(run(_jwt_mw, create_request(qb::http::method::GET, "/protected")));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "JWT token is missing.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(JwtMiddlewareTest, SuccessHandlerCanAccessPayload) {
-    _router = std::make_unique<qb::http::Router<MockJwtSession>>();
+    bool success_ran = false;
+    _jwt_mw->with_success_handler([&success_ran](std::shared_ptr<qb::http::Context<MockJwtSession>> ctx, const qb::json &payload) {
+        success_ran = true;
+        EXPECT_EQ(payload.at("sub").get<std::string>(), "payload_access_user");
+        EXPECT_EQ(payload.at("data").get<std::string>(), "secret_info");
+        ctx->response().set_header("X-Success", "1");
+    });
 
-    qb::http::RouteHandlerFn<MockJwtSession> custom_success_handler = [this](std::shared_ptr<qb::http::Context<MockJwtSession>> ctx) {
-        if (_session) {
-            _session->_final_handler_called = true;
-            EXPECT_TRUE(ctx->has("jwt_payload"));
-            if (ctx->has("jwt_payload")) {
-                _session->_jwt_payload_in_context = ctx->template get<qb::json>("jwt_payload");
-            }
-        }
-        ctx->response().status() = qb::http::status::OK;
-        ctx->response().body()   = "Authenticated Access Granted, payload checked";
-        ctx->complete();
-    };
-
-    _router->use(_jwt_mw);
-    _router->get("/protected", custom_success_handler);
-    _router->compile();
-
-    qb::json    payload = {{"sub", "payload_access_user"}, {"data", "secret_info"}};
-    std::string token   = generate_token(payload);
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
-
-    _session->reset();
-    _router->route(_session, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    run(_jwt_mw, bearer(make_token({{"sub", "payload_access_user"}, {"data", "secret_info"}})));
+    EXPECT_TRUE(success_ran);
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
-    ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
-    EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "payload_access_user");
-    EXPECT_EQ(_session->_jwt_payload_in_context->at("data").get<std::string>(), "secret_info");
+    EXPECT_EQ(_session->_response.header(std::string("X-Success")), "1");
 }
 
 TEST_F(JwtMiddlewareTest, ThrowingSuccessHandlerReturnsInternalServerError) {
-    _jwt_mw->with_success_handler([](std::shared_ptr<qb::http::Context<MockJwtSession>> /*ctx*/, const qb::json & /*payload*/) {
-        throw std::runtime_error("success handler crash");
-    });
+    _jwt_mw->with_success_handler(
+        [](std::shared_ptr<qb::http::Context<MockJwtSession>>, const qb::json &) { throw std::runtime_error("success handler crash"); });
 
-    qb::json    payload = {{"sub", "success_throw_user"}};
-    std::string token   = generate_token(payload);
-    auto        req     = create_request();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + " " + token);
-
-    EXPECT_NO_THROW(configure_router_and_run(_jwt_mw, std::move(req)));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("Error in JWT success handler"), std::string::npos);
+    EXPECT_NO_THROW(run(_jwt_mw, bearer(make_token({{"sub", "st"}}))));
+    EXPECT_EQ(status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_NE(body().find("Error in JWT success handler"), std::string::npos);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+// ---------------------------------------------------------------------------
+// Factories + scheme/whitespace parsing
+// ---------------------------------------------------------------------------
+
 TEST_F(JwtMiddlewareTest, FactoryFunctionsWorkAsExpected) {
-    // Test 1: jwt_middleware(secret, algorithm)
-    auto factory_mw1 = qb::http::jwt_middleware<MockJwtSession>(_test_secret, _test_algorithm);
-
-    qb::json    payload1 = {{"sub", "factory_user1"}};
-    std::string token1   = generate_token(payload1);
-
-    auto req1 = create_request();
-    req1.set_header("Authorization", "Bearer " + token1);
-    configure_router_and_run(factory_mw1, std::move(req1));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "Factory MW1 Failed. Body: " << _session->_response.body().as<std::string>();
-    EXPECT_TRUE(_session->_final_handler_called);
+    auto mw1 = qb::http::jwt_middleware<MockJwtSession>(kSecret, "HS256");
+    run(mw1, bearer(make_token({{"sub", "factory_user1"}})));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "factory_user1");
 
-    // Test 1.1: Missing token with factory_mw1
-    _session->reset();
-    configure_router_and_run(factory_mw1, create_request());
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("JWT token is missing"), std::string::npos);
+    run(mw1, create_request(qb::http::method::GET, "/protected"));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "JWT token is missing.");
 
-    // Test 2: jwt_middleware_with_options(options)
-    _session->reset();
-    qb::http::JwtOptions custom_options;
-    custom_options.secret         = "another_factory_secret";
-    custom_options.algorithm      = _test_algorithm;
-    custom_options.token_location = qb::http::JwtTokenLocation::COOKIE;
-    custom_options.token_name     = "factory_cookie_token";
-    custom_options.auth_scheme    = "";
+    JwtOptions cookie_opts;
+    cookie_opts.secret         = "another_factory_secret";
+    cookie_opts.algorithm      = "HS256";
+    cookie_opts.token_location = JwtTokenLocation::COOKIE;
+    cookie_opts.token_name     = "factory_cookie_token";
+    cookie_opts.auth_scheme    = "";
+    auto mw2                   = qb::http::jwt_middleware_with_options<MockJwtSession>(cookie_opts);
 
-    auto factory_mw2 = qb::http::jwt_middleware_with_options<MockJwtSession>(custom_options);
-
-    qb::json    payload2 = {{"sub", "factory_user2"}};
-    std::string token2   = generate_token(payload2, custom_options.secret);
-
-    auto req2 = create_request();
-    req2.cookies().add(custom_options.token_name, token2);
-    configure_router_and_run(factory_mw2, std::move(req2));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "Factory MW2 Failed. Body: " << _session->_response.body().as<std::string>();
-    EXPECT_TRUE(_session->_final_handler_called);
+    auto req = create_request(qb::http::method::GET, "/protected");
+    req.cookies().add("factory_cookie_token", make_token({{"sub", "factory_user2"}}, "another_factory_secret"));
+    run(mw2, std::move(req));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
     EXPECT_EQ(_session->_jwt_payload_in_context->at("sub").get<std::string>(), "factory_user2");
 }
 
-TEST_F(JwtMiddlewareTest, TokenWithNoSchemeWhenSchemeExpected) {
-    qb::json    payload = {{"sub", "no_scheme_user"}};
-    std::string token   = generate_token(payload);
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"JWT token is missing.\""), std::string::npos)
-        << "Response body: " << _session->_response.body().as<std::string>();
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
-TEST_F(JwtMiddlewareTest, TokenWithWrongSchemeWhenSchemeExpected) {
-    qb::json    payload = {{"sub", "wrong_scheme_user"}};
-    std::string token   = generate_token(payload);
-
-    auto req = create_request();
-    req.set_header(_jwt_options.token_name, "Basic " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-
-    EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"JWT token is missing.\""), std::string::npos)
-        << "Response body: " << _session->_response.body().as<std::string>();
-    EXPECT_FALSE(_session->_final_handler_called);
-}
-
 TEST_F(JwtMiddlewareTest, CaseInsensitiveAuthSchemeInHeader) {
-    qb::json    payload = {{"sub", "case_scheme_user"}};
-    std::string token   = generate_token(payload);
-    auto        req     = create_request();
+    const std::string token = make_token({{"sub", "case_scheme_user"}});
 
-    _session->reset();
-    req.set_header(_jwt_options.token_name, "bearer " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "Lowercase scheme failed. Body: " << _session->_response.body().as<std::string>();
+    run(_jwt_mw, req_with_header("bearer " + token));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Lowercase scheme. Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 
-    _session->reset();
-    req = create_request();
-    req.set_header(_jwt_options.token_name, "BeArEr " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "Mixed case scheme failed. Body: " << _session->_response.body().as<std::string>();
+    run(_jwt_mw, req_with_header("BeArEr " + token));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Mixed case scheme. Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(JwtMiddlewareTest, WhitespaceToleranceInAuthHeader) {
-    qb::json    payload = {{"sub", "whitespace_user"}};
-    std::string token   = generate_token(payload);
-    auto        req     = create_request();
+    const std::string token = make_token({{"sub", "whitespace_user"}});
 
-    _session->reset();
-    req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + "   " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "Extra spaces after scheme. Body: " << _session->_response.body().as<std::string>();
+    run(_jwt_mw, req_with_header(_scheme + "   " + token));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Extra spaces after scheme. Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 
-    _session->reset();
-    req = create_request();
-    req.set_header(_jwt_options.token_name, "  " + _jwt_options.auth_scheme + " " + token);
-    configure_router_and_run(_jwt_mw, std::move(req));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK)
-        << "Leading spaces before scheme. Body: " << _session->_response.body().as<std::string>();
+    run(_jwt_mw, req_with_header("  " + _scheme + " " + token));
+    EXPECT_EQ(status(), qb::http::status::OK) << "Leading spaces before scheme. Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 
-    if (!_jwt_options.auth_scheme.empty()) {
-        _session->reset();
-        req = create_request();
-        req.set_header(_jwt_options.token_name, _jwt_options.auth_scheme + token);
-        configure_router_and_run(_jwt_mw, std::move(req));
-        EXPECT_EQ(_session->_response.status(), qb::http::status::UNAUTHORIZED)
-            << "No space between scheme and token. Body: " << _session->_response.body().as<std::string>();
-        EXPECT_NE(_session->_response.body().as<std::string>().find("\"error\":\"JWT token is missing.\""), std::string::npos)
-            << "Response body: " << _session->_response.body().as<std::string>();
-        EXPECT_FALSE(_session->_final_handler_called);
-    }
+    // No space between scheme and token -> not a valid Bearer token.
+    run(_jwt_mw, req_with_header(_scheme + token));
+    EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED) << "No space. Body: " << body();
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "JWT token is missing.");
+    EXPECT_FALSE(_session->_final_handler_called);
 }
+
+} // namespace
