@@ -64,6 +64,10 @@ protected:
     std::unique_ptr<qb::http::Router<MockMiddlewareSession>> _router;
     std::filesystem::path                                    _test_root_dir;
     std::filesystem::path                                    _outside_file_path;
+    std::filesystem::path                                    _outside_root_file_path; ///< `<temp>/outside_root.txt`, the real escape target of the traversal tests.
+
+    /// @brief Sentinel body that NO traversal test may ever serve (escape == bug).
+    static constexpr const char *kOutsideRootSecret = "SECRET_OUTSIDE_ROOT_CONTENT";
 
     // --- One-shot platform capability probes (resolved in SetUp) -----------
     bool _symlinks_supported          = false; ///< OS allowed symlink creation in the temp tree.
@@ -87,9 +91,17 @@ protected:
         ASSERT_FALSE(ec) << "Failed to get temp directory path: " << ec.message();
         _outside_file_path = std::filesystem::temp_directory_path(ec) / "static_files_mw_tests_OUTSIDE_FILE.txt";
         ASSERT_FALSE(ec) << "Failed to get temp directory path for outside file: " << ec.message();
+        // The escape TARGET the SecurityPathTraversal* tests actually reference:
+        // `/../outside_root.txt` from the root resolves to `<temp>/outside_root.txt`.
+        // It MUST exist with a known sentinel body so a regressed escape guard
+        // that serves the real outside file is caught (instead of silently
+        // passing because the file was missing -> 404).
+        _outside_root_file_path = std::filesystem::temp_directory_path(ec) / "outside_root.txt";
+        ASSERT_FALSE(ec) << "Failed to get temp directory path for outside-root file: " << ec.message();
 
         std::filesystem::remove_all(_test_root_dir, ec);
         std::filesystem::remove(_outside_file_path, ec);
+        std::filesystem::remove(_outside_root_file_path, ec);
 
         std::filesystem::create_directories(_test_root_dir, ec);
         ASSERT_FALSE(ec) << "Failed to create test root directory: " << _test_root_dir << " (" << ec.message() << ")";
@@ -116,6 +128,7 @@ protected:
 #endif
 
         create_test_file(_outside_file_path, "Contents of file outside root");
+        create_test_file(_outside_root_file_path, kOutsideRootSecret);
 
         // --- Symlink capability probe (ONCE) -------------------------------
         std::error_code symlink_ec;
@@ -140,6 +153,7 @@ protected:
         std::error_code ec;
         std::filesystem::remove_all(_test_root_dir, ec);
         std::filesystem::remove(_outside_file_path, ec);
+        std::filesystem::remove(_outside_root_file_path, ec);
     }
 
     /** @brief Skip-once-locally / FAIL-on-CI guard for the symlink suite. */
@@ -173,6 +187,25 @@ protected:
         req.major_version = 1;
         req.minor_version = 1;
         return req;
+    }
+
+    /// @brief A traversal attempt must be DENIED, and must NEVER serve the real
+    /// outside-root file. FORBIDDEN/NOT_FOUND is the pass case; if the middleware
+    /// answered OK the served body MUST NOT be the outside-root sentinel (which
+    /// would mean the escape guard let the request out of the root).
+    void
+    expect_traversal_denied() {
+        const auto st = _session->_response.status();
+        EXPECT_TRUE(st == qb::http::status::FORBIDDEN || st == qb::http::status::NOT_FOUND)
+            << "Status was: " << st;
+        if (st == qb::http::status::FORBIDDEN) {
+            EXPECT_EQ(_session->_response.body().as<std::string>(), "Forbidden");
+        }
+        if (st == qb::http::status::OK) {
+            EXPECT_NE(_session->_response.body().as<std::string>(), kOutsideRootSecret)
+                << "Path traversal escaped the root and served outside_root.txt!";
+        }
+        EXPECT_FALSE(_session->_final_handler_called);
     }
 
     qb::http::RouteHandlerFn<MockMiddlewareSession>
@@ -742,48 +775,38 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryTraversalAttemptIsForbidden) {
 TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalSimple) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/../outside_root.txt"));
-    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND)
-        << "Status was: " << _session->_response.status();
-    if (_session->_response.status() == qb::http::status::FORBIDDEN) {
-        EXPECT_EQ(_session->_response.body().as<std::string>(), "Forbidden");
-    }
-    EXPECT_FALSE(_session->_final_handler_called);
+    expect_traversal_denied();
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalWithPathPrefix) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     options.with_path_prefix_to_strip("/static");
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/static/../outside_root.txt"));
-    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND);
-    EXPECT_FALSE(_session->_final_handler_called);
+    expect_traversal_denied();
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalDeep) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/subdir/../../../outside_root.txt"));
-    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND);
-    EXPECT_FALSE(_session->_final_handler_called);
+    expect_traversal_denied();
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalEncodedDotDotSlash) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/..%2Foutside_root.txt"));
-    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND);
-    EXPECT_FALSE(_session->_final_handler_called);
+    expect_traversal_denied();
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalEncodedDotDotBackslash) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/..%5Coutside_root.txt"));
-    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND);
-    EXPECT_FALSE(_session->_final_handler_called);
+    expect_traversal_denied();
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecurityPathTraversalDoubleEncodedSlash) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/..%252Foutside_root.txt"));
-    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND);
-    EXPECT_FALSE(_session->_final_handler_called);
+    expect_traversal_denied();
 }
 
 TEST_F(StaticFilesMiddlewareTest, EncodedTraversalIsRejected) {

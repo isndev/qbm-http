@@ -132,7 +132,7 @@ BM_Hpack_EncodeRequest(benchmark::State &state) {
     for (auto _ : state) {
         Encoder              encoder;
         std::vector<uint8_t> out;
-        const bool           ok = encoder.encode(headers, out);
+        bool           ok = encoder.encode(headers, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         bytes_per_iter = out.size();
@@ -160,7 +160,7 @@ BM_Hpack_EncodeResponse(benchmark::State &state) {
     for (auto _ : state) {
         Encoder              encoder;
         std::vector<uint8_t> out;
-        const bool           ok = encoder.encode(headers, out);
+        bool           ok = encoder.encode(headers, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         bytes_per_iter = out.size();
@@ -188,7 +188,7 @@ BM_Hpack_EncodeRequestWarmDynamicTable(benchmark::State &state) {
     std::size_t bytes_per_iter = 0;
     for (auto _ : state) {
         std::vector<uint8_t> out;
-        const bool           ok = encoder.encode(headers, out);
+        bool           ok = encoder.encode(headers, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         bytes_per_iter = out.size();
@@ -223,7 +223,7 @@ BM_Hpack_DecodeRequestC3(benchmark::State &state) {
         Decoder                  decoder;
         std::vector<HeaderField> out;
         bool                     incomplete = false;
-        const bool               ok         = decoder.decode(block, out, incomplete);
+        bool               ok         = decoder.decode(block, out, incomplete);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();
@@ -257,7 +257,7 @@ BM_Hpack_DecodeResponseC5(benchmark::State &state) {
         decoder.set_max_dynamic_table_size(256);
         std::vector<HeaderField> out;
         bool                     incomplete = false;
-        const bool               ok         = decoder.decode(block, out, incomplete);
+        bool               ok         = decoder.decode(block, out, incomplete);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();
@@ -285,7 +285,7 @@ BM_Hpack_DecodeEncodedRequest(benchmark::State &state) {
         Decoder                  decoder;
         std::vector<HeaderField> out;
         bool                     incomplete = false;
-        const bool               ok         = decoder.decode(block, out, incomplete);
+        bool               ok         = decoder.decode(block, out, incomplete);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();
@@ -377,7 +377,7 @@ BM_Huffman_Encode(benchmark::State &state) {
     std::int64_t in_bytes      = 0;
     for (auto _ : state) {
         std::vector<uint8_t> out;
-        const bool           ok = huffman_encode(inputs[i], out);
+        bool           ok = huffman_encode(inputs[i], out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         in_bytes += static_cast<std::int64_t>(inputs[i].size());
@@ -409,7 +409,7 @@ BM_Huffman_Decode(benchmark::State &state) {
     std::int64_t                in_bytes = 0;
     for (auto _ : state) {
         std::string out;
-        const bool  ok = huffman_decode(blocks[i]->data(), blocks[i]->size(), out);
+        bool  ok = huffman_decode(blocks[i]->data(), blocks[i]->size(), out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         in_bytes += static_cast<std::int64_t>(blocks[i]->size());
@@ -437,7 +437,7 @@ BM_Huffman_EncodeLargeValue(benchmark::State &state) {
 
     for (auto _ : state) {
         std::vector<uint8_t> out;
-        const bool           ok = huffman_encode(input, out);
+        bool           ok = huffman_encode(input, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();
@@ -475,7 +475,7 @@ BM_Hpack_DynamicTableChurnWithEviction(benchmark::State &state) {
         state.ResumeTiming();
 
         for (std::size_t i = 0; i < entry_count; ++i) {
-            const auto r = table.add("k" + std::to_string(i), "v");
+            auto r = table.add("k" + std::to_string(i), "v");
             benchmark::DoNotOptimize(r.evicted);
         }
         benchmark::DoNotOptimize(table.size());
@@ -498,7 +498,7 @@ BM_Hpack_DynamicTableGrowNoEviction(benchmark::State &state) {
         state.ResumeTiming();
 
         for (std::size_t i = 0; i < entry_count; ++i) {
-            const auto r = table.add("k" + std::to_string(i), "v");
+            auto r = table.add("k" + std::to_string(i), "v");
             benchmark::DoNotOptimize(r.added);
         }
         benchmark::DoNotOptimize(table.capacity());

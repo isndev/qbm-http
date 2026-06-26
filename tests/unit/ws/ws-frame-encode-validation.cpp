@@ -78,7 +78,7 @@ TEST(WebSocketFrameEncodeValidation, RejectsOutgoingRsvBits) {
     qb::allocator::pipe<char> out;
 
     qb::http::ws::Message rsv_text;
-    rsv_text.fin_rsv_opcode = 0xC1u; // FIN + RSV1 + RSV2 + text.
+    rsv_text.fin_rsv_opcode = 0xC1u; // FIN + RSV1 + text (0x80|0x40|0x01); RSV2/RSV3 clear.
     EXPECT_THROW(out << rsv_text, std::invalid_argument);
 }
 

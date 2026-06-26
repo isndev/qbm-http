@@ -123,6 +123,16 @@ namespace {
 std::atomic<std::size_t> msg_count_server_side{0};
 std::atomic<std::size_t> msg_count_client_side{0};
 
+// Server-side request observations, captured per request and asserted from the
+// test body AFTER the worker joins. The server's on() handler may run on whichever
+// thread pumps the server loop, so it must NOT call gtest EXPECT/ASSERT directly
+// (a failed EXPECT off the main thread is lost/UB). It records into these atomics
+// instead; the test body does the asserting.
+std::atomic<std::size_t> server_bad_method{0};      ///< requests whose method != GET.
+std::atomic<std::size_t> server_empty_headers{0};   ///< requests with no headers.
+std::atomic<std::size_t> server_bad_connection{0};  ///< requests whose Connection != keep-alive.
+std::atomic<std::size_t> server_bad_query{0};       ///< requests whose ?happy != true.
+
 bool
 all_done() {
     return msg_count_server_side.load() == NB_ITERATION && msg_count_client_side.load() == NB_ITERATION;
@@ -140,12 +150,20 @@ public:
 
     void
     on(Protocol::request &&request) {
-        // Assertions here run on the server thread; capture observable evidence
-        // and let the test body assert after join.
-        EXPECT_EQ(request.method(), HTTP_GET);
-        EXPECT_NE(request.headers().size(), 0u);
-        EXPECT_EQ(request.header("connection"), "keep-alive");
-        EXPECT_EQ(request.query("happy"), "true");
+        // Runs on the server-loop thread: capture observable evidence into atomics
+        // and let the test body assert after join (never EXPECT/ASSERT here).
+        if (request.method() != HTTP_GET) {
+            ++server_bad_method;
+        }
+        if (request.headers().size() == 0u) {
+            ++server_empty_headers;
+        }
+        if (request.header("connection") != "keep-alive") {
+            ++server_bad_connection;
+        }
+        if (request.query("happy") != "true") {
+            ++server_bad_query;
+        }
 
         qb::http::Response r;
         r.status() = qb::http::status::OK;
@@ -189,6 +207,10 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
     async::init();
     msg_count_server_side = 0;
     msg_count_client_side = 0;
+    server_bad_method     = 0;
+    server_empty_headers  = 0;
+    server_bad_connection = 0;
+    server_bad_query      = 0;
 
     TestServer server;
     ASSERT_EQ(server.transport().listen_v4(port), 0);
@@ -236,6 +258,14 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
     EXPECT_EQ(msg_count_client_side.load(), NB_ITERATION);
     EXPECT_FALSE(client_saw_non_ok.load());
     EXPECT_GE(server.connection_count.load(), 1u);
+
+    // Server-side per-request observations, captured off the test thread and
+    // asserted here after the worker joined: every request must have been a
+    // well-formed GET with non-empty headers, keep-alive, and ?happy=true.
+    EXPECT_EQ(server_bad_method.load(), 0u);
+    EXPECT_EQ(server_empty_headers.load(), 0u);
+    EXPECT_EQ(server_bad_connection.load(), 0u);
+    EXPECT_EQ(server_bad_query.load(), 0u);
 }
 
 TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {

@@ -236,6 +236,21 @@ BM_WS_EncodeUnmaskedBinary(benchmark::State &state) {
     const auto size    = static_cast<std::size_t>(state.range(0));
     const auto payload = make_payload(size);
 
+    // Correctness gate (out of the timed loop): an unmasked binary frame must
+    // carry at least a 2+ byte header on top of the payload, i.e. strictly more
+    // than the payload — so a broken serializer can't quietly post a number.
+    {
+        qb::allocator::pipe<char>  probe_out;
+        qb::http::ws::MessageBinary probe;
+        probe.masked = false;
+        probe << payload;
+        probe_out << probe;
+        if (probe_out.size() <= payload.size()) {
+            state.SkipWithError("unmasked frame must be larger than its payload");
+            return;
+        }
+    }
+
     qb::http::ws::MessageBinary msg;
     msg.masked = false;
     msg << payload;

@@ -50,6 +50,8 @@ TEST_F(ValidationRulesTest, TypeRuleValidation) {
     result.clear();
     EXPECT_FALSE(string_rule.validate(qb::json(123), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
 
     result.clear();
     EXPECT_TRUE(int_rule.validate(qb::json(123), "test", result));
@@ -57,6 +59,8 @@ TEST_F(ValidationRulesTest, TypeRuleValidation) {
     result.clear();
     EXPECT_FALSE(int_rule.validate(qb::json(123.5), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
     result.clear();
     EXPECT_FALSE(int_rule.validate(qb::json("123"), "test", result));
     EXPECT_FALSE(result.success());
@@ -120,6 +124,8 @@ TEST_F(ValidationRulesTest, MinLengthRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json("ab"), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "minLength");
 
     result.clear();
     EXPECT_TRUE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
@@ -127,6 +133,8 @@ TEST_F(ValidationRulesTest, MinLengthRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json::array({1, 2}), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "minLength");
 
     // Rule does not apply to numbers -> passes through.
     result.clear();
@@ -147,6 +155,8 @@ TEST_F(ValidationRulesTest, MaxLengthRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json("abcd"), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "maxLength");
 
     result.clear();
     EXPECT_TRUE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
@@ -154,6 +164,8 @@ TEST_F(ValidationRulesTest, MaxLengthRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json::array({1, 2, 3, 4}), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "maxLength");
 
     result.clear();
     EXPECT_TRUE(rule.validate(qb::json(123), "test", result));
@@ -200,16 +212,23 @@ TEST_F(ValidationRulesTest, MinimumRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule_incl.validate(qb::json(9.9), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "minimum");
 
     result.clear();
     EXPECT_FALSE(rule_excl.validate(qb::json(10.0), "test", result));
     EXPECT_FALSE(result.success());
+    // Exclusive bound reports the "exclusiveMinimum" rule name (rule.h MinimumRule).
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMinimum");
     result.clear();
     EXPECT_TRUE(rule_excl.validate(qb::json(10.0001), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
     EXPECT_FALSE(rule_excl.validate(qb::json(9.9), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMinimum");
 
     // Rule only applies to numbers -> a string passes through.
     result.clear();
@@ -232,16 +251,23 @@ TEST_F(ValidationRulesTest, MaximumRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule_incl.validate(qb::json(20.1), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "maximum");
 
     result.clear();
     EXPECT_FALSE(rule_excl.validate(qb::json(20.0), "test", result));
     EXPECT_FALSE(result.success());
+    // Exclusive bound reports the "exclusiveMaximum" rule name (rule.h MaximumRule).
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMaximum");
     result.clear();
     EXPECT_TRUE(rule_excl.validate(qb::json(19.9999), "test", result));
     EXPECT_TRUE(result.success());
     result.clear();
     EXPECT_FALSE(rule_excl.validate(qb::json(20.1), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMaximum");
 }
 
 // --- EnumRule ----------------------------------------------------------------
@@ -257,9 +283,13 @@ TEST_F(ValidationRulesTest, EnumRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json("yellow"), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "enum");
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json(20), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "enum");
 
     ASSERT_THROW(EnumRule(qb::json(qb::json::value_t::object)), std::invalid_argument);
 }
@@ -274,6 +304,8 @@ TEST_F(ValidationRulesTest, UniqueItemsRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json::array({1, 2, 3, 2}), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "uniqueItems");
     result.clear();
     EXPECT_TRUE(rule.validate(qb::json::array(), "test", result));
     EXPECT_TRUE(result.success());
@@ -303,6 +335,8 @@ TEST_F(ValidationRulesTest, MinItemsRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json::array({1}), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "minItems");
 }
 
 // --- MaxItemsRule ------------------------------------------------------------
@@ -318,6 +352,8 @@ TEST_F(ValidationRulesTest, MaxItemsRuleValidation) {
     result.clear();
     EXPECT_FALSE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
     EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "maxItems");
 }
 
 // --- CustomRule --------------------------------------------------------------

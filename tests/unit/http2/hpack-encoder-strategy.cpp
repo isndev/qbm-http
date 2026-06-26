@@ -456,18 +456,25 @@ TEST(HPACK_LL_Decoder, IntegerOverflowTooManyContinuationBytes) {
     EXPECT_FALSE(decoder.decode(block, out, incomplete));
 }
 
-// Malformed #3: a value that overflows uint64 via the `value > UINT64_MAX -
-// shifted_term` / `term > (UINT64_MAX >> M)` guards. A run of 0xFF bytes
-// then a large terminating byte overflows the accumulator.
+// Malformed #3: a value that genuinely overflows the accumulator via the
+// `term > (UINT64_MAX >> M)` guard in decode_integer (hpack.cpp). With a prefix-
+// saturated indexed field followed by TEN 0x80-or-larger continuation bytes, the
+// shift amount M reaches 63 *before* the M >= 64 guard fires; at M == 63,
+// (UINT64_MAX >> 63) == 1, so the 0x7F seven-bit group of the tenth continuation
+// (term == 127) trips `term > 1` and decode_integer returns the overflow
+// sentinel. This is distinct from the prior block {0xFF, 8x0xFF, 0x7F}, which
+// decodes SUCCESSFULLY to ~9.2e18 (one byte short of M==63) and only failed
+// later as an out-of-range table index — so it never reached an overflow guard.
+// (The M >= 64 too-many-continuations guard is covered by the sibling
+// IntegerOverflowTooManyContinuationBytes.)
 TEST(HPACK_LL_Decoder, IntegerOverflowAccumulatorWraps) {
     Decoder                  decoder;
     std::vector<HeaderField> out;
     bool                     incomplete = false;
 
     std::vector<uint8_t> block = {
-        0xFF,                               // indexed, prefix saturated
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // continuations, large 7-bit groups
-        0xFF, 0xFF, 0x7F                    // final big byte forces overflow
+        0xFF,                                                             // indexed, prefix saturated
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF       // 10 continuations: term>(MAX>>63)
     };
     EXPECT_FALSE(decoder.decode(block, out, incomplete));
 }

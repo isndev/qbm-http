@@ -57,8 +57,10 @@ using qb::http::test::make_user;
 // ---------------------------------------------------------------------------
 // Deterministic embedded RSA PEM pair — byte-exact from
 // tests/unit/middleware/middleware-auth.cpp (kRsaPrivateKeyPem/kRsaPublicKeyPem).
-// Reused so the asymmetric path needs no per-run keygen.
+// Reused so the asymmetric path needs no per-run keygen. This is a throwaway test
+// fixture key, not a real credential.
 // ---------------------------------------------------------------------------
+// NOSONAR  pragma: allowlist secret  (test-only RSA key, never used outside tests)
 const char *kRsaPrivateKeyPem = "-----BEGIN PRIVATE KEY-----\n"
                                 "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC9XQ6VOHmUCz/d\n"
                                 "b5jFqL/5ogkA7Zz6Kt2SR0eWa3lOLMimTcHGMNrkkeXt0vvHBKDiB5Rh8Jg40mar\n"

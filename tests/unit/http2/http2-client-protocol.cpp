@@ -1060,9 +1060,14 @@ TEST(HTTP2ClientProtocol, DataForUnknownPushedStreamResetsStreamOnly) {
 }
 
 // ===========================================================================
-// DATA for a CLOSED stream (already-completed initiated id) is a connection error.
+// DATA for an UNKNOWN (already-completed-then-erased) initiated id is a
+// connection error. After GET -> 200 -> END_STREAM the stream is ERASED, so the
+// trailing DATA frame is not found by id and falls into
+// handle_data_for_unknown_stream(), which raises GOAWAY(PROTOCOL_ERROR) — this
+// is the unknown-id path, NOT the per-stream STREAM_CLOSED RST path (that only
+// fires while a closed-but-still-resident stream context exists).
 // ===========================================================================
-TEST(HTTP2ClientProtocol, DataAfterStreamClosedIsConnectionError) {
+TEST(HTTP2ClientProtocol, DataOnUnknownStreamIsConnectionError) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
 
@@ -1080,6 +1085,7 @@ TEST(HTTP2ClientProtocol, DataAfterStreamClosedIsConnectionError) {
 
     EXPECT_FALSE(protocol.ok());
     ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
     EXPECT_EQ(io.goaway_count, 1);
 }
 

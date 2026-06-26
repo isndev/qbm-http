@@ -81,9 +81,15 @@ TEST(AuthManagerPayload, ContainsStandardAndUserClaims) {
     EXPECT_LE(iat, after);
 
     // Default options enable expiration verification -> exp present and in the future.
+    // manager.cpp reads the wall clock TWICE (once for iat, once for exp = now()+3600),
+    // so a one-second boundary straddle between the two reads makes exp == iat+3601
+    // legitimately. Assert exp - iat is the expected 3600 +/- the 1s straddle window
+    // rather than pinning the exact value (which would flake at a second rollover).
     ASSERT_TRUE(payload.contains("exp"));
-    EXPECT_GT(payload.at("exp").get<std::uint64_t>(), iat);
-    EXPECT_EQ(payload.at("exp").get<std::uint64_t>(), iat + 3600u);
+    const auto exp = payload.at("exp").get<std::uint64_t>();
+    EXPECT_GT(exp, iat);
+    EXPECT_GE(exp - iat, 3600u);
+    EXPECT_LE(exp - iat, 3601u);
 
     // Metadata is serialized as a nested object.
     ASSERT_TRUE(payload.contains("metadata"));
