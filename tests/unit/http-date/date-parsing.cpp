@@ -1,9 +1,13 @@
 /**
- * @file test-date-parsing.cpp
- * @brief Tests for HTTP date parsing with std::from_chars optimization
+ * @file unit/http-date/date-parsing.cpp
+ * @brief Unit tests for qb::http::date parsing/formatting (RFC 7231 / RFC 6265).
  *
- * These tests verify the C++23 std::from_chars optimization for date parsing
- * which is ~10x faster than std::stoi (no exceptions, no allocations).
+ * Pure-logic tests for the C++23 std::from_chars date parser path covering the
+ * three HTTP date formats (RFC 1123 IMF-fixdate, RFC 850, ANSI C asctime), the
+ * noexcept/std::optional error contract, format/parse round-trips, the Y2K pivot,
+ * and ground-truth epoch-second checks.
+ *
+ * No event loop, no socket; fully deterministic and parallel-safe.
  *
  * qb - C++ Actor Framework
  * Copyright (C) 2011-2026 isndev (www.qbaf.io). All rights reserved.
@@ -22,58 +26,89 @@
  */
 
 #include <gtest/gtest.h>
+#include <chrono>
+#include <cstdio>
+#include <string>
+#include <string_view>
+#include <vector>
 #include "../date.h"
 
 using namespace qb::http::date;
+using std::chrono::system_clock;
 
-#ifndef __has_feature
-#define __has_feature(x) 0
-#endif
+namespace {
 
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
-#define QB_TEST_UNDER_SANITIZER 1
-#endif
+// Canonical RFC 1123 fixture from RFC 7231 §7.1.1.1.
+constexpr const char *kCanonicalRfc1123 = "Sun, 06 Nov 1994 08:49:37 GMT";
+// Its Unix epoch second (1994-11-06T08:49:37Z). This is the ground-truth value
+// the smoke round-trips never asserted.
+constexpr long long kCanonicalEpoch = 784111777;
+
+[[nodiscard]] long long
+epoch_seconds(system_clock::time_point tp) {
+    return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
+}
+
+} // namespace
 
 // ====================================================================
-// HTTP Date Parsing Tests (std::from_chars optimization)
+// RFC 1123 (IMF-fixdate) parsing
 // ====================================================================
 
-class DateParsingTest : public ::testing::Test {
-protected:
-    void
-    SetUp() override {}
-};
+class DateParsingTest : public ::testing::Test {};
 
 TEST_F(DateParsingTest, ParseHttpDateRFC1123Format) {
-    // Standard RFC 1123 format: "Sun, 06 Nov 1994 08:49:37 GMT"
-    auto result = parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT"));
+    auto result = parse_http_date(std::string_view(kCanonicalRfc1123));
     ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(format_http_date(*result), kCanonicalRfc1123);
+}
 
-    // Convert back to verify
-    auto formatted = format_http_date(*result);
-    EXPECT_EQ(formatted, "Sun, 06 Nov 1994 08:49:37 GMT");
+TEST_F(DateParsingTest, CanonicalFixtureEqualsKnownEpochSecond) {
+    // Ground-truth: parsing the canonical fixture yields exactly epoch 784111777.
+    auto result = parse_http_date(std::string_view(kCanonicalRfc1123));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(epoch_seconds(*result), kCanonicalEpoch);
+
+    // And formatting that exact instant reproduces the canonical string.
+    EXPECT_EQ(format_http_date(system_clock::time_point(std::chrono::seconds(kCanonicalEpoch))), kCanonicalRfc1123);
 }
 
 TEST_F(DateParsingTest, ParseHttpDateVariousDays) {
-    // Test all days of week - just verify parsing succeeds
-    const char *days[] = {
-        "Sun, 01 Jan 2024 00:00:00 GMT", "Mon, 02 Jan 2024 00:00:00 GMT", "Tue, 03 Jan 2024 00:00:00 GMT", "Wed, 04 Jan 2024 00:00:00 GMT",
-        "Thu, 05 Jan 2024 00:00:00 GMT", "Fri, 06 Jan 2024 00:00:00 GMT", "Sat, 07 Jan 2024 00:00:00 GMT",
+    // Each weekday string parses AND reproduces its exact canonical date — the
+    // has_value()-only version could not catch a wrong day/date computation.
+    //
+    // Ground truth (date.cpp:125): format_http_date emits the day-name computed
+    // from the parsed instant (tm_wday); parse_rfc1123_date does NOT validate the
+    // input weekday token. So the canonical output uses the REAL weekday for the
+    // date. The seven dates below are the true Mon..Sun of the first week of 2024
+    // (01 Jan 2024 is a Monday), so input weekday == output weekday and the
+    // parse->format round-trip is an exact byte-for-byte match across all 7 days.
+    struct Case {
+        const char *input;
+        const char *canonical;
     };
-
-    for (const auto &date : days) {
-        auto result = parse_http_date(std::string_view(date));
-        EXPECT_TRUE(result.has_value()) << "Failed to parse: " << date;
+    const Case cases[] = {
+        {"Mon, 01 Jan 2024 00:00:00 GMT", "Mon, 01 Jan 2024 00:00:00 GMT"},
+        {"Tue, 02 Jan 2024 00:00:00 GMT", "Tue, 02 Jan 2024 00:00:00 GMT"},
+        {"Wed, 03 Jan 2024 00:00:00 GMT", "Wed, 03 Jan 2024 00:00:00 GMT"},
+        {"Thu, 04 Jan 2024 00:00:00 GMT", "Thu, 04 Jan 2024 00:00:00 GMT"},
+        {"Fri, 05 Jan 2024 00:00:00 GMT", "Fri, 05 Jan 2024 00:00:00 GMT"},
+        {"Sat, 06 Jan 2024 00:00:00 GMT", "Sat, 06 Jan 2024 00:00:00 GMT"},
+        {"Sun, 07 Jan 2024 00:00:00 GMT", "Sun, 07 Jan 2024 00:00:00 GMT"},
+    };
+    for (const auto &c : cases) {
+        auto result = parse_http_date(std::string_view(c.input));
+        ASSERT_TRUE(result.has_value()) << "Failed to parse: " << c.input;
+        EXPECT_EQ(format_http_date(*result), c.canonical);
     }
 }
 
 TEST_F(DateParsingTest, ParseHttpDateVariousMonths) {
-    // Test all months
     const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
     for (int i = 0; i < 12; ++i) {
-        char date_str[30];
-        snprintf(date_str, sizeof(date_str), "Mon, 15 %s 2024 12:00:00 GMT", months[i]);
+        char date_str[40];
+        std::snprintf(date_str, sizeof(date_str), "Mon, 15 %s 2024 12:00:00 GMT", months[i]);
 
         auto result = parse_http_date(std::string_view(date_str));
         ASSERT_TRUE(result.has_value()) << "Failed for month: " << months[i];
@@ -84,237 +119,166 @@ TEST_F(DateParsingTest, ParseHttpDateVariousMonths) {
 }
 
 TEST_F(DateParsingTest, ParseHttpDateBoundaryTimes) {
-    // Midnight
-    {
-        auto result = parse_http_date(std::string_view("Mon, 01 Jan 2024 00:00:00 GMT"));
-        ASSERT_TRUE(result.has_value());
-        auto formatted = format_http_date(*result);
-        EXPECT_EQ(formatted, "Mon, 01 Jan 2024 00:00:00 GMT");
-    }
-
-    // Just before midnight
-    {
-        auto result = parse_http_date(std::string_view("Mon, 01 Jan 2024 23:59:59 GMT"));
-        ASSERT_TRUE(result.has_value());
-        auto formatted = format_http_date(*result);
-        EXPECT_EQ(formatted, "Mon, 01 Jan 2024 23:59:59 GMT");
-    }
-
-    // Noon
-    {
-        auto result = parse_http_date(std::string_view("Mon, 01 Jan 2024 12:00:00 GMT"));
-        ASSERT_TRUE(result.has_value());
-        auto formatted = format_http_date(*result);
-        EXPECT_EQ(formatted, "Mon, 01 Jan 2024 12:00:00 GMT");
+    struct Case {
+        const char *str;
+        long long   epoch;
+    };
+    const Case cases[] = {
+        {"Mon, 01 Jan 2024 00:00:00 GMT", 1704067200}, // midnight
+        {"Mon, 01 Jan 2024 23:59:59 GMT", 1704153599}, // just before next midnight
+        {"Mon, 01 Jan 2024 12:00:00 GMT", 1704110400}, // noon
+    };
+    for (const auto &c : cases) {
+        auto result = parse_http_date(std::string_view(c.str));
+        ASSERT_TRUE(result.has_value()) << c.str;
+        EXPECT_EQ(epoch_seconds(*result), c.epoch) << c.str;
+        EXPECT_EQ(format_http_date(*result), c.str);
     }
 }
 
 TEST_F(DateParsingTest, ParseHttpDateLeapYear) {
-    // Leap year date
+    // 29 Feb 2024 is valid; assert the exact instant, not just has_value().
     auto result = parse_http_date(std::string_view("Thu, 29 Feb 2024 12:00:00 GMT"));
     ASSERT_TRUE(result.has_value());
-}
-
-TEST_F(DateParsingTest, ParseHttpDateInvalidFormats) {
-    // Too short
-    EXPECT_FALSE(parse_http_date(std::string_view("")).has_value());
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun")).has_value());
-
-    // Missing comma
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun 06 Nov 1994 08:49:37 GMT")).has_value());
-
-    // Wrong format
-    EXPECT_FALSE(parse_http_date(std::string_view("1994-11-06 08:49:37")).has_value());
-
-    // Invalid month
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 XYZ 1994 08:49:37 GMT")).has_value());
-
-    // Invalid time (out of range)
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 25:00:00 GMT")).has_value());
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:70:00 GMT")).has_value());
-
-    // Invalid calendar dates must not be normalized by timegm.
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 31 Feb 1994 08:49:37 GMT")).has_value());
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 00 Nov 1994 08:49:37 GMT")).has_value());
-
-    // RFC 1123/RFC 850 forms require the GMT zone and no trailing bytes.
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 UTC")).has_value());
-    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT extra")).has_value());
+    EXPECT_EQ(epoch_seconds(*result), 1709208000);
+    EXPECT_EQ(format_http_date(*result), "Thu, 29 Feb 2024 12:00:00 GMT");
 }
 
 // ====================================================================
-// RFC 850 Date Format Tests
+// RFC 850 parsing + Y2K pivot
 // ====================================================================
 
 TEST_F(DateParsingTest, ParseRFC850DateFormat) {
-    // RFC 850 format: "Sunday, 06-Nov-94 08:49:37 GMT"
     auto result = parse_http_date(std::string_view("Sunday, 06-Nov-94 08:49:37 GMT"));
     ASSERT_TRUE(result.has_value());
-
-    // Verify it's parsed correctly (year should be 1994)
-    auto formatted = format_http_date(*result);
-    EXPECT_EQ(formatted, "Sun, 06 Nov 1994 08:49:37 GMT");
+    EXPECT_EQ(epoch_seconds(*result), kCanonicalEpoch);
+    EXPECT_EQ(format_http_date(*result), kCanonicalRfc1123);
 }
 
 TEST_F(DateParsingTest, ParseRFC850DateY2K) {
-    // Y2K pivot: years < 70 become 2000+, >= 70 become 1900+
+    // Y2K pivot: years < 70 map to 2000+, >= 70 map to 1900+.
     {
         auto result = parse_http_date(std::string_view("Monday, 01-Jan-00 00:00:00 GMT"));
         ASSERT_TRUE(result.has_value());
-        auto formatted = format_http_date(*result);
-        EXPECT_EQ(formatted, "Sat, 01 Jan 2000 00:00:00 GMT");
+        EXPECT_EQ(format_http_date(*result), "Sat, 01 Jan 2000 00:00:00 GMT");
     }
     {
         auto result = parse_http_date(std::string_view("Wednesday, 01-Jan-70 00:00:00 GMT"));
         ASSERT_TRUE(result.has_value());
-        auto formatted = format_http_date(*result);
-        EXPECT_EQ(formatted, "Thu, 01 Jan 1970 00:00:00 GMT");
+        EXPECT_EQ(epoch_seconds(*result), 0);
+        EXPECT_EQ(format_http_date(*result), "Thu, 01 Jan 1970 00:00:00 GMT");
+    }
+    // Pivot edge: -69 stays in the 2000s, -70 falls back to the 1900s.
+    {
+        auto y69 = parse_http_date(std::string_view("Sunday, 01-Jan-69 00:00:00 GMT"));
+        ASSERT_TRUE(y69.has_value());
+        EXPECT_EQ(format_http_date(*y69).substr(12, 4), "2069");
     }
 }
 
 // ====================================================================
-// ANSI C Date Format Tests (asctime)
+// ANSI C asctime parsing
 // ====================================================================
 
 TEST_F(DateParsingTest, ParseANSICDateFormat) {
-    // ANSI C format: "Sun Nov  6 08:49:37 1994" (note the double space before single digit day)
+    // asctime single-digit day uses a double space; assert the exact instant.
     auto result = parse_http_date(std::string_view("Sun Nov  6 08:49:37 1994"));
-    // Just verify parsing succeeds - exact format support may vary
-    EXPECT_TRUE(result.has_value());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(epoch_seconds(*result), kCanonicalEpoch);
+    EXPECT_EQ(format_http_date(*result), kCanonicalRfc1123);
 }
 
 TEST_F(DateParsingTest, ParseANSICDateTwoDigitDay) {
-    // Two-digit day
     auto result = parse_http_date(std::string_view("Mon Jan 15 12:30:45 2024"));
     ASSERT_TRUE(result.has_value());
-
-    auto formatted = format_http_date(*result);
-    EXPECT_EQ(formatted, "Mon, 15 Jan 2024 12:30:45 GMT");
+    EXPECT_EQ(format_http_date(*result), "Mon, 15 Jan 2024 12:30:45 GMT");
 }
 
 // ====================================================================
-// Format/Parse Round-trip Tests
+// Format/parse round-trips
 // ====================================================================
 
 TEST_F(DateParsingTest, RoundTripHttpDate) {
-    // Format then parse should give consistent results
-    auto now       = std::chrono::system_clock::now();
+    auto now       = system_clock::now();
     auto formatted = format_http_date(now);
     auto parsed    = parse_http_date(formatted);
-
     ASSERT_TRUE(parsed.has_value());
-
-    // The formatted result should be identical (within seconds precision)
-    auto reformatted = format_http_date(*parsed);
-    EXPECT_EQ(formatted, reformatted);
+    EXPECT_EQ(format_http_date(*parsed), formatted);
 }
 
 TEST_F(DateParsingTest, RoundTripCookieDate) {
-    // Cookie date format
-    auto now       = std::chrono::system_clock::now();
+    auto now       = system_clock::now();
     auto formatted = format_cookie_date(now);
     auto parsed    = parse_cookie_date(formatted);
-
     ASSERT_TRUE(parsed.has_value());
-
-    // Cookie dates use same format as HTTP dates
-    auto reformatted = format_cookie_date(*parsed);
-    EXPECT_EQ(formatted, reformatted);
+    EXPECT_EQ(format_cookie_date(*parsed), formatted);
 }
 
 // ====================================================================
-// Performance Validation Tests
+// Negative inputs (one consolidated parametrized table)
+//
+// Merges the three previously overlapping negative batteries
+// (ParseHttpDateInvalidFormats, NullOptForInvalidDates, the asctime/edge dupes)
+// into a single deduplicated TEST_P. Every input must yield std::nullopt with
+// no exception (the noexcept contract).
 // ====================================================================
 
-TEST_F(DateParsingTest, PerformanceParseManyDates) {
-#if defined(QB_TEST_UNDER_SANITIZER)
-    GTEST_SKIP() << "micro-benchmark threshold is not meaningful under sanitizer instrumentation";
-#endif
-    // Performance test: parse many dates to verify std::from_chars efficiency
-    const int iterations = 1000;
+class InvalidHttpDateTest : public ::testing::TestWithParam<std::string> {};
 
-    auto start = std::chrono::high_resolution_clock::now();
-
-    for (int i = 0; i < iterations; ++i) {
-        auto result = parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT"));
-        ASSERT_TRUE(result.has_value());
-    }
-
-    auto end      = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-    // Should be very fast with std::from_chars (no exceptions, no allocations)
-    // Average should be less than 1 microsecond per parse on modern hardware
-    double avg_microseconds = static_cast<double>(duration.count()) / iterations;
-
-    std::cout << "Average parse time: " << avg_microseconds << " microseconds" << std::endl;
-
-    // Just verify it's reasonably fast (under 10 microseconds per parse)
-    EXPECT_LT(avg_microseconds, 10.0);
+TEST_P(InvalidHttpDateTest, ReturnsNulloptWithoutThrowing) {
+    const std::string &input = GetParam();
+    std::optional<system_clock::time_point> result;
+    EXPECT_NO_THROW(result = parse_http_date(input)) << "threw for: [" << input << "]";
+    EXPECT_FALSE(result.has_value()) << "expected nullopt for: [" << input << "]";
 }
 
+INSTANTIATE_TEST_SUITE_P(
+    DateParsing, InvalidHttpDateTest,
+    ::testing::Values(
+        // Empty / too short / truncated at each field boundary.
+        std::string(""),
+        std::string("invalid"),
+        std::string("Sun"),
+        std::string("Sun,"),
+        std::string("Sun, 06"),
+        std::string("Sun, 06 Nov"),
+        std::string("Sun, 06 Nov 1994"),
+        std::string("Sun, 06 Nov 1994 08"),
+        std::string("Sun, 06 Nov 1994 08:"),
+        std::string("Sun, 06 Nov 1994 08:49"),
+        std::string("Sun, 06 Nov 1994 08:49:"),
+        std::string("Sun, 06 Nov 1994 08:49:37"), // missing zone
+        // Structural errors.
+        std::string("Sun 06 Nov 1994 08:49:37 GMT"),   // missing comma
+        std::string("1994-11-06 08:49:37"),            // ISO, not HTTP
+        std::string("Sun, 06 XYZ 1994 08:49:37 GMT"),  // invalid month
+        // Out-of-range fields.
+        std::string("Sun, 32 Nov 1994 08:49:37 GMT"),
+        std::string("Sun, 06 Nov 1994 25:00:00 GMT"),
+        std::string("Sun, 06 Nov 1994 08:70:00 GMT"),
+        // Invalid calendar dates must NOT be normalized by timegm.
+        std::string("Sun, 31 Feb 1994 08:49:37 GMT"),
+        std::string("Sun, 00 Nov 1994 08:49:37 GMT"),
+        std::string("Sunday, 31-Feb-94 08:49:37 GMT"),
+        std::string("Sun Feb 31 08:49:37 1994"),
+        // Zone / trailing-byte requirements.
+        std::string("Sun, 06 Nov 1994 08:49:37 UTC"),
+        std::string("Sun, 06 Nov 1994 08:49:37 GMT extra")));
+
 // ====================================================================
-// Edge Cases and Error Handling
+// Case sensitivity + noexcept contract
 // ====================================================================
 
-TEST_F(DateParsingTest, EdgeCases) {
-    // Single digit day (with space padding in asctime format)
-    {
-        auto result = parse_http_date(std::string_view("Sun Nov  6 08:49:37 1994"));
-        ASSERT_TRUE(result.has_value());
-        auto formatted = format_http_date(*result);
-        EXPECT_EQ(formatted, "Sun, 06 Nov 1994 08:49:37 GMT");
-    }
-
-    // Year boundaries
-    {
-        auto result = parse_http_date(std::string_view("Mon, 01 Jan 2024 00:00:00 GMT"));
-        ASSERT_TRUE(result.has_value());
-    }
-    {
-        auto result = parse_http_date(std::string_view("Sun, 31 Dec 2023 23:59:59 GMT"));
-        ASSERT_TRUE(result.has_value());
-    }
-}
-
-TEST_F(DateParsingTest, NullOptForInvalidDates) {
-    // All invalid inputs should return std::nullopt (no exceptions)
-    std::vector<std::string> invalid_dates = {
-        "",
-        "invalid",
-        "Sun",
-        "Sun,",
-        "Sun, 06",
-        "Sun, 06 Nov",
-        "Sun, 06 Nov 1994",
-        "Sun, 06 Nov 1994 08",
-        "Sun, 06 Nov 1994 08:",
-        "Sun, 06 Nov 1994 08:49",
-        "Sun, 06 Nov 1994 08:49:",
-        "Sun, 06 Nov 1994 08:49:37",
-        // Out of range values
-        "Sun, 32 Nov 1994 08:49:37 GMT",
-        "Sun, 06 Nov 1994 25:00:00 GMT",
-        "Sunday, 31-Feb-94 08:49:37 GMT",
-        "Sun Feb 31 08:49:37 1994",
-    };
-
-    for (const auto &date : invalid_dates) {
-        EXPECT_FALSE(parse_http_date(date).has_value()) << "Should return nullopt for: " << date;
-    }
+TEST_F(DateParsingTest, ZoneIsCaseSensitiveGMT) {
+    // HTTP dates require the uppercase "GMT" token; "gmt" must be rejected.
+    EXPECT_TRUE(parse_http_date(std::string_view(kCanonicalRfc1123)).has_value());
+    EXPECT_FALSE(parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 gmt")).has_value());
 }
 
 TEST_F(DateParsingTest, ExceptionSafety) {
-    // All parsing functions should be noexcept (no exceptions thrown)
     EXPECT_NO_THROW((void) parse_http_date(std::string_view("")));
     EXPECT_NO_THROW((void) parse_http_date(std::string_view("invalid")));
-    EXPECT_NO_THROW((void) parse_http_date(std::string_view("Sun, 06 Nov 1994 08:49:37 GMT")));
+    EXPECT_NO_THROW((void) parse_http_date(std::string_view(kCanonicalRfc1123)));
     EXPECT_NO_THROW((void) parse_cookie_date(std::string_view("")));
     EXPECT_NO_THROW((void) parse_cookie_date(std::string_view("invalid")));
-}
-
-int
-main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

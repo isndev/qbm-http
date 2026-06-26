@@ -1,12 +1,61 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 #include "../headers.h"
 #include "../request.h"
 #include "../response.h"
+#include "../utility.h"
+
+namespace {
+// Discover the encodings this build actually supports by parsing the codec
+// names out of the server-advertised Accept-Encoding string (e.g.
+// "gzip;q=1.0, deflate;q=0.9" -> {"gzip", "deflate"}). Returns empty when the
+// build has no compression support.
+std::vector<std::string>
+supported_encodings() {
+    std::vector<std::string> out;
+    for (const auto &token : qb::http::utility::split_string<std::string>(qb::http::accept_encoding(), ",")) {
+        std::string_view name = qb::http::utility::trim_http_whitespace(token);
+        const auto        semi = name.find(';');
+        if (semi != std::string_view::npos) {
+            name = qb::http::utility::trim_http_whitespace(name.substr(0, semi));
+        }
+        if (!name.empty()) {
+            out.emplace_back(name);
+        }
+    }
+    return out;
+}
+} // namespace
 
 TEST(HeadersUtility, AcceptEncodingDoesNotAdvertiseChunked) {
     const std::string advertised = qb::http::accept_encoding();
     EXPECT_EQ(advertised.find("chunked"), std::string::npos);
+    // "identity" is a transfer/content coding the server never advertises as a
+    // compression algorithm either.
+    EXPECT_EQ(advertised.find("identity"), std::string::npos);
+}
+
+// ALWAYS-ON: holds regardless of which codecs (if any) are compiled in. The
+// negotiation logic must select nothing for an empty header and for a header
+// listing only encodings the server does not support. This guarantees the
+// selection path is exercised even on a no-compression build, where the q=0
+// branch below is skipped.
+TEST(HeadersUtility, ContentEncodingSelectsNothingForUnknownOrEmpty) {
+    EXPECT_TRUE(qb::http::content_encoding("").empty());
+    EXPECT_TRUE(qb::http::content_encoding("x-no-such-codec").empty());
+    EXPECT_TRUE(qb::http::content_encoding("x-no-such-codec, y-also-none;q=1.0").empty());
+    // A wildcard with no server-supported encoding still selects nothing on a
+    // no-compression build; on a compression build it picks a real codec — pin
+    // the build-independent invariant that the result is never an unsupported name.
+    const std::string wildcard = qb::http::content_encoding("*");
+    if (!wildcard.empty()) {
+        const auto sup = supported_encodings();
+        EXPECT_NE(std::find(sup.begin(), sup.end(), wildcard), sup.end());
+    }
 }
 
 TEST(HeadersUtility, ContentEncodingRespectsQZero) {
@@ -29,6 +78,28 @@ TEST(HeadersUtility, WildcardDoesNotReenableExplicitlyDisabledEncoding) {
     const std::string selected = qb::http::content_encoding(header);
 
     EXPECT_TRUE(selected.empty() || selected != first_supported);
+}
+
+// Multi-value negotiation: a positive-q encoding is selected while a q=0 sibling
+// in the same list is excluded. Selection follows header order among the
+// server-supported, positive-q tokens (the impl returns the FIRST acceptable
+// match, NOT the highest q-value), so we pin that deterministic behavior.
+TEST(HeadersUtility, ContentEncodingSelectsPositiveQAndSkipsZeroQ) {
+    const auto sup = supported_encodings();
+    if (sup.size() < 2) {
+        GTEST_SKIP() << "Need at least two supported encodings to exercise multi-value ranking.";
+    }
+    const std::string &a = sup[0];
+    const std::string &b = sup[1];
+
+    // a disabled (q=0), b enabled -> b is selected even though a is the server's
+    // first preference, because a is explicitly unacceptable.
+    EXPECT_EQ(qb::http::content_encoding(a + ";q=0, " + b + ";q=0.9"), b);
+
+    // Both acceptable -> the first in HEADER order wins (header-order priority,
+    // not q-value magnitude): b is listed first here so b is chosen despite a's
+    // higher q-value.
+    EXPECT_EQ(qb::http::content_encoding(b + ";q=0.1, " + a + ";q=0.9"), b);
 }
 
 TEST(HeadersUtility, SetHeaderSynchronizesContentTypeHelper) {
@@ -168,4 +239,42 @@ TEST(HeadersUtility, HeaderAttributesAllowEscapedTab) {
     expected.push_back('\t');
     expected += "b";
     EXPECT_EQ(parsed.at("filename"), expected);
+}
+
+// A bare token (a name without an '=' value) is accepted and stored with an
+// empty value — this is how flags like "form-data" in a Content-Disposition or
+// "must-revalidate" in Cache-Control are represented.
+TEST(HeadersUtility, HeaderAttributesBareTokenGetsEmptyValue) {
+    const auto parsed = qb::http::parse_header_attributes(std::string("form-data; name=\"field\"; filename"));
+
+    ASSERT_NE(parsed.find("form-data"), parsed.end());
+    EXPECT_EQ(parsed.at("form-data"), "");
+    ASSERT_NE(parsed.find("name"), parsed.end());
+    EXPECT_EQ(parsed.at("name"), "field");
+    // Trailing bare token at end-of-string is also captured with an empty value.
+    ASSERT_NE(parsed.find("filename"), parsed.end());
+    EXPECT_EQ(parsed.at("filename"), "");
+}
+
+// Duplicate attribute names are FIRST-WINS: the parser uses map emplace, which
+// does not overwrite an existing key, so the first occurrence's value is kept.
+TEST(HeadersUtility, HeaderAttributesDuplicateNameIsFirstWins) {
+    const auto parsed = qb::http::parse_header_attributes(std::string("name=first; name=second; name=third"));
+
+    ASSERT_NE(parsed.find("name"), parsed.end());
+    EXPECT_EQ(parsed.at("name"), "first");
+    // The duplicated key collapses to a single entry holding the first value.
+    EXPECT_TRUE(parsed.has("name"));
+    EXPECT_EQ(parsed.size(), 1u);
+}
+
+// Name matching is case-insensitive (icase map), so a differently-cased
+// duplicate also collapses to first-wins.
+TEST(HeadersUtility, HeaderAttributesDuplicateNameCaseInsensitiveFirstWins) {
+    const auto parsed = qb::http::parse_header_attributes(std::string("Charset=utf-8; charset=utf-16"));
+
+    ASSERT_NE(parsed.find("charset"), parsed.end());
+    EXPECT_EQ(parsed.at("charset"), "utf-8");
+    EXPECT_TRUE(parsed.has("CHARSET"));
+    EXPECT_EQ(parsed.size(), 1u);
 }

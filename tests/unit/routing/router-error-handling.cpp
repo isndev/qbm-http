@@ -758,6 +758,25 @@ TEST_F(RouterErrorHandlingTest, CompleteAfterSynchronousErrorChainIsIdempotent) 
 // (no ERROR_CHAIN-phase / task_in_flight re-entry guard). A correct handler must
 // issue exactly one terminal complete(); this test pins the observable behavior
 // when that contract is violated, it does not endorse it.
+//
+// ANTI-REGRESSION — do NOT "fix" this by adding a phase==ERROR_CHAIN guard to complete().
+// It is proven unsound, not merely unimplemented:
+//   * At the complete() seam the stray and the *legitimate* in-flight error-chain task's
+//     completion are byte-for-byte identical — state, phase, task_in_flight, completion_count,
+//     _current_task_index, last_result, re-entrancy depth. They differ ONLY by event-loop turn
+//     (the stray is synchronous with complete(ERROR); the legit completion is a later turn), a
+//     boundary the Context cannot observe. complete(ERROR) re-dispatches the error task BEFORE the
+//     stray runs, so any flag/counter armed for the in-flight task is consumed by whichever call
+//     comes next — the stray here, the legit completion in the no-stray case — indistinguishably.
+//   * Empirically: the literal guard `if (result != CANCELLED && phase == ERROR_CHAIN &&
+//     task_in_flight) return;` drops the legit completion too and breaks 7 tests in this suite
+//     (ErrorChainWithMultipleSuccessfulHandlers, GlobalMiddlewarePrependedToErrorChainSeesResponse,
+//     ErrorInErrorChainHandlerItselfFinalizesTo500, GlobalMiddlewareErrorPreventsNotFoundHandler,
+//     FatalErrorInMainErrorChainIsStillFatal, CompleteAfterSynchronousErrorChainIsIdempotent, and
+//     this one). In production it is worse: the dropped legit completion never finalises (the
+//     session owns the only shared_ptr<Context>) and the connection hangs.
+// The contract is enforced where it belongs — in the caller. See the "Completion contract" section
+// on Context::complete(); the coro/middleware/next adapters guard with completion_count()/is_completed().
 TEST_F(RouterErrorHandlingTest, CompleteAfterAsyncErrorChainLetsTheStrayCompleteWin) {
     set_error_chain({std::make_shared<CompletingTask>("ErrorChainHandler", _session, &_executor,
                                                       qb::http::status::SERVICE_UNAVAILABLE, "error-chain body", true)});
