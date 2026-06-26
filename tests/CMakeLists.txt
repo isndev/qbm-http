@@ -162,3 +162,31 @@ endif()
 # SSL resources are copied by qb_setup_test_resources() (qb/CMakeLists.txt); tests find them in CWD.
 qb_status_message("Configured qbm-http tests (tiered backbone: unit/system + 16 split-pending monoliths)")
 
+
+# -----------------------------------------------------------------------------
+# Benchmarks — google-benchmark harnesses (qbm-http-bench-<name>). REQUIRES gates as for tests.
+# -----------------------------------------------------------------------------
+function(qhttp_bench NAME RELPATH)
+    cmake_parse_arguments(B "" "" "REQUIRES;EXTRA_LABELS" ${ARGN})
+    qb_register_module_benchmark(
+        MODULE_NAME http BENCH_NAME ${NAME}
+        SOURCES ${RELPATH}
+        INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}
+        LABELS module:qbm-http bench ${B_EXTRA_LABELS}
+        REQUIRES ${B_REQUIRES})
+endfunction()
+
+qhttp_bench(route-match      benchmark/routing/route-match.bench.cpp     EXTRA_LABELS routing)
+qhttp_bench(http1-parser     benchmark/http1/http1-parser.bench.cpp      EXTRA_LABELS http1)
+qhttp_bench(http1-serialize  benchmark/http1/http1-serialize.bench.cpp   EXTRA_LABELS http1)
+qhttp_bench(hpack            benchmark/http2/hpack.bench.cpp             EXTRA_LABELS http2)
+qhttp_bench(frame-codec      benchmark/http2/frame-codec.bench.cpp       EXTRA_LABELS http2)
+qhttp_bench(cors             benchmark/middleware/cors.bench.cpp         EXTRA_LABELS middleware)
+qhttp_bench(body-codec       benchmark/message/body-codec.bench.cpp      EXTRA_LABELS message)
+qhttp_bench(uri-parse        benchmark/uri/uri-parse.bench.cpp           EXTRA_LABELS uri)
+qhttp_bench(ws-throughput    benchmark/ws/ws-throughput.bench.cpp        REQUIRES ssl         EXTRA_LABELS ws)
+qhttp_bench(auth-verify      benchmark/middleware/auth-verify.bench.cpp  REQUIRES ssl         EXTRA_LABELS middleware ssl)
+qhttp_bench(compression      benchmark/middleware/compression.bench.cpp  REQUIRES compression EXTRA_LABELS middleware)
+if(QBM_HTTP_HAS_HTTP3)
+    qhttp_bench(http3-field-block benchmark/http3/field-block.bench.cpp  EXTRA_LABELS http3)
+endif()
