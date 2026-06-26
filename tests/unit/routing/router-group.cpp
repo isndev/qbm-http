@@ -1,39 +1,29 @@
+/**
+ * @file qbm/http/tests/unit/routing/router-group.cpp
+ * @brief Route-group nesting, prefix composition, group middleware, and path-param
+ *        propagation through groups.
+ *
+ * Drives @ref qb::http::Router<Session> + @ref qb::http::RouteGroup directly via
+ * `route()` and the shared synchronous @ref qb::http::test::TaskExecutor pump.
+ * Deterministic unit tier — no `qb::Main`, no event loop, no socket.
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
 #include <functional> // For std::function
 #include <gtest/gtest.h>
-#include <iostream> // For potential debugging, can be removed later
 #include <memory>
 #include <string>
 #include <vector>
 #include <qb/uuid.h> // For qb::uuid and qb::generate_random_uuid
 #include "../http.h" // Provides qb::http::Router, Request, Response, Context, RouteGroup, etc.
+#include "../../shared/router_test_support.h" // qb::http::test::TaskExecutor
+
+using qb::http::test::TaskExecutor;
 
 // --- Helper Classes for RouteGroup Tests ---
-
-// Simple Task Executor (can be refactored into a common test utility later)
-class TaskExecutor {
-public:
-    void
-    addTask(std::function<void()> task) {
-        _tasks.push_back(std::move(task));
-    }
-
-    void
-    processAllTasks() {
-        std::vector<std::function<void()>> tasks_to_process = _tasks;
-        _tasks.clear();
-        for (auto &task : tasks_to_process) {
-            task();
-        }
-    }
-
-    size_t
-    getPendingTaskCount() const {
-        return _tasks.size();
-    }
-
-private:
-    std::vector<std::function<void()>> _tasks;
-};
 
 // Mock Session for RouteGroup Tests
 struct MockRouteGroupSession {
@@ -530,10 +520,11 @@ TEST_F(RouterRouteGroupTest, GroupMiddlewareSignalsError) {
     _task_executor.processAllTasks();
 
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    // Body might be the one set by TestRouteGroupErrorMiddleware or a generic one from RouterCore
-    // For now, just check trace and that handler didn't run.
-    EXPECT_EQ(_mock_session->get_trace(), "error_signal_mw");
-    ASSERT_FALSE(_mock_session->_handler_executed_flag); // Handler should not have run
+    // With no error chain set, the default-ERROR finalization forces the status to
+    // 500 but PRESERVES the body the middleware set before signaling ERROR.
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Error from mw: error_signal_mw");
+    EXPECT_EQ(_mock_session->get_trace(), "error_signal_mw"); // after_error_mw must NOT run
+    ASSERT_FALSE(_mock_session->_handler_executed_flag);      // Handler should not have run
 }
 
 TEST_F(RouterRouteGroupTest, ErrorInRouteHandlerWithinGroup) {
@@ -586,6 +577,85 @@ TEST_F(RouterRouteGroupTest, MultipleGroupsAtSameLevel) {
     EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
     EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: admin_settings_handler");
     EXPECT_EQ(_mock_session->get_trace(), "admin_settings_handler");
+}
+
+// A request whose path does NOT fall under the group prefix must not run the
+// group's middleware. Group middleware is bound into the matched route's chain, so
+// an unrelated path (here a sibling top-level route) bypasses the group entirely.
+TEST_F(RouterRouteGroupTest, PrefixMismatchDoesNotRunGroupMiddleware) {
+    auto api_group = _router.group("/api");
+    api_group->use(std::make_shared<TestRouteGroupSyncMiddleware>("api_group_mw"));
+    api_group->get("/data", make_simple_handler("api_data_handler"));
+
+    // A sibling route NOT under /api.
+    _router.get("/health", make_simple_handler("health_handler"));
+
+    _router.compile();
+
+    auto request = create_request(HTTP_GET, "/health");
+    _router.route(_mock_session, std::move(request));
+    _task_executor.processAllTasks();
+
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "Handler response: health_handler");
+    // Only the health handler traced — the /api group's middleware never ran.
+    EXPECT_EQ(_mock_session->get_trace(), "health_handler");
+}
+
+// A path that matches a route INSIDE a group but with the wrong method yields 405
+// with an Allow header. The group's middleware is bound to the matched route chain,
+// not the 405 special handler, so it must NOT run.
+TEST_F(RouterRouteGroupTest, MethodMismatchInGroupYields405WithoutGroupMiddleware) {
+    auto api_group = _router.group("/api");
+    api_group->use(std::make_shared<TestRouteGroupSyncMiddleware>("api_group_mw"));
+    api_group->get("/resource", make_simple_handler("get_resource"));
+    api_group->post("/resource", make_simple_handler("post_resource", qb::http::status::CREATED));
+
+    _router.compile();
+
+    auto request = create_request(HTTP_PUT, "/api/resource"); // PUT not registered
+    _router.route(_mock_session, std::move(request));
+    _task_executor.processAllTasks();
+
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_METHOD_NOT_ALLOWED);
+    ASSERT_FALSE(_mock_session->_handler_executed_flag);
+    EXPECT_EQ(_mock_session->get_trace(), "") << "Group middleware must not run on the 405 special path.";
+
+    const std::string allow = std::string(_mock_session->_response.header("Allow"));
+    EXPECT_NE(allow.find("GET"), std::string::npos) << "Allow: " << allow;
+    EXPECT_NE(allow.find("POST"), std::string::npos) << "Allow: " << allow;
+    EXPECT_EQ(allow.find("PUT"), std::string::npos) << "Allow must omit the rejected method. Allow: " << allow;
+}
+
+// Two sibling groups sharing a common path prefix (/apiv1, /apiv2) must split
+// correctly in the radix tree: each route resolves to its own group's middleware
+// and handler, with no cross-talk despite the shared "/api" character prefix.
+TEST_F(RouterRouteGroupTest, SiblingGroupsWithSharedCharPrefixSplitCorrectly) {
+    auto v1 = _router.group("/apiv1");
+    v1->use(std::make_shared<TestRouteGroupSyncMiddleware>("v1_mw"));
+    v1->get("/ping", make_simple_handler("v1_ping", qb::http::status::OK, "v1: "));
+
+    auto v2 = _router.group("/apiv2");
+    v2->use(std::make_shared<TestRouteGroupSyncMiddleware>("v2_mw"));
+    v2->get("/ping", make_simple_handler("v2_ping", qb::http::status::ACCEPTED, "v2: "));
+
+    _router.compile();
+
+    _mock_session->reset();
+    auto req_v1 = create_request(HTTP_GET, "/apiv1/ping");
+    _router.route(_mock_session, std::move(req_v1));
+    _task_executor.processAllTasks();
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "v1: v1_ping");
+    EXPECT_EQ(_mock_session->get_trace(), "v1_mw;v1_ping");
+
+    _mock_session->reset();
+    auto req_v2 = create_request(HTTP_GET, "/apiv2/ping");
+    _router.route(_mock_session, std::move(req_v2));
+    _task_executor.processAllTasks();
+    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_ACCEPTED);
+    EXPECT_EQ(_mock_session->_response.body().as<std::string>(), "v2: v2_ping");
+    EXPECT_EQ(_mock_session->get_trace(), "v2_mw;v2_ping");
 }
 
 TEST_F(RouterRouteGroupTest, MiddlewareOrderInGroup) {

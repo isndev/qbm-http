@@ -1,1200 +1,916 @@
-#include <gtest/gtest.h>
-#include "../http.h" // Provides qb::http::Router, Request, Response, Context, etc.
-// #include <qb/uuid.h>    // For qb::uuid and qb::generate_random_uuid -- Linter still complains, assume http.h or other includes cover it
-#include <functional> // For std::function
+/**
+ * @file qbm/http/tests/unit/routing/router-middleware-chain.cpp
+ * @brief Unit tests for the router's middleware-chain execution contract.
+ *
+ * Exercises the @ref qb::http::Router middleware state machine entirely in-process — ordering,
+ * short-circuit (`AsyncTaskResult::COMPLETE`), error propagation into a configured error chain
+ * (`AsyncTaskResult::ERROR`), cancellation (`Context::cancel` + `IAsyncTask::cancel`), the
+ * not-found chain (`set_not_found_handler`), `FATAL_SPECIAL_HANDLER_ERROR`, and
+ * `FunctionalMiddleware`'s "around" `next()` pre/post wrapping (one-shot `next`, post-`next`
+ * exception-to-500). Async middleware is made deterministic via a shared
+ * @ref qb::http::test::TaskExecutor pump — there is no event loop, socket, or wall-clock here.
+ *
+ * Execution order is asserted structurally against a `std::vector<std::string>` carried on the
+ * session (no `;`-joined string markers).
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
+#include <functional>
 #include <memory>
-#include <sstream> // For std::ostringstream
 #include <string>
 #include <vector>
-// #include <future> // Removed due to single-threaded refactor
-// #include <thread> // Removed due to single-threaded refactor
 
-// --- Helper Classes for Middleware Router Tests ---
+#include <gtest/gtest.h>
 
-// Simple Task Executor (can be copied from test-router-async.cpp or refined)
-class TaskExecutor {
-public:
-    void
-    addTask(std::function<void()> task) {
-        _tasks.push_back(std::move(task));
-    }
+#include <qb/uuid.h>
 
-    void
-    processAllTasks() {
-        std::vector<std::function<void()>> tasks_to_process = _tasks;
-        _tasks.clear();
-        for (auto &task : tasks_to_process) {
-            task();
-        }
-    }
+#include "../../shared/router_test_support.h"
 
-    void
-    processTaskAtIndex(size_t index) {
-        if (index < _tasks.size()) {
-            auto task = _tasks[index];
-            _tasks.erase(_tasks.begin() + index);
-            task();
-        }
-    }
+using qb::http::test::TaskExecutor;
 
-    size_t
-    getPendingTaskCount() const {
-        return _tasks.size();
-    }
+namespace {
 
-    void
-    clearTasks() {
-        _tasks.clear();
-    }
+/**
+ * @brief Capturing session carrying an ordered execution trace (vector, not string markers).
+ *
+ * Satisfies the router's session concept (`operator<<`, `id()`) and additionally records the order
+ * in which middlewares/handlers run so tests assert against an expected `std::vector<std::string>`.
+ * Enforces a single finalization between resets (a second `operator<<` throws) — surfacing any
+ * accidental double-finalization the router must never produce.
+ */
+struct TraceSession {
+    qb::http::Response       _response;
+    qb::uuid                 _session_id  = qb::generate_random_uuid();
+    unsigned int             _write_count = 0;
+    std::vector<std::string> _trace;
+    bool                     _final_handler_called = false;
 
-private:
-    std::vector<std::function<void()>> _tasks;
-};
-
-// Mock Session for Middleware Router Tests
-struct MockMiddlewareSession {
-    qb::http::Response _response;
-    qb::uuid           _session_id = qb::generate_random_uuid();
-    std::ostringstream _execution_trace; // To trace middleware execution
-    bool               _final_handler_called = false;
-
-    qb::http::Response &
+    [[nodiscard]] qb::http::Response &
     get_response_ref() {
         return _response;
     }
 
-    MockMiddlewareSession &
-    operator<<(const qb::http::Response &resp) {
-        _response = resp;
+    TraceSession &
+    operator<<(const qb::http::Response &response) {
+        _response = response;
+        if (++_write_count > 1) {
+            throw std::runtime_error("TraceSession::operator<< called more than once between resets");
+        }
         return *this;
     }
 
     [[nodiscard]] const qb::uuid &
-    id() const {
+    id() const noexcept {
         return _session_id;
     }
 
     void
-    reset() {
-        _response = qb::http::Response();
-        _execution_trace.str("");
-        _execution_trace.clear();
-        _final_handler_called = false;
+    trace(const std::string &id) {
+        _trace.push_back(id);
+    }
+
+    [[nodiscard]] const std::vector<std::string> &
+    trace() const noexcept {
+        return _trace;
+    }
+
+    [[nodiscard]] unsigned int
+    write_count() const noexcept {
+        return _write_count;
     }
 
     void
-    trace(const std::string &id) {
-        if (!_execution_trace.str().empty()) {
-            _execution_trace << ";";
-        }
-        _execution_trace << id;
-    }
-
-    std::string
-    get_trace() const {
-        return _execution_trace.str();
+    reset() {
+        _response             = qb::http::Response();
+        _write_count          = 0;
+        _final_handler_called = false;
+        _trace.clear();
     }
 };
 
-// --- Test Middleware Implementations ---
+// --- Middleware helpers (chain-shape specific; trace into the session vector) ----------------
 
-// Base class for Test Middlewares to provide an ID
-class BaseTestMiddleware : public qb::http::IMiddleware<MockMiddlewareSession> {
-protected:
-    std::string _id;
-
+/** @brief Base: carries an id, name(), and a no-op cancel(). */
+class TraceMiddleware : public qb::http::IMiddleware<TraceSession> {
 public:
-    explicit BaseTestMiddleware(std::string id)
+    explicit TraceMiddleware(std::string id)
         : _id(std::move(id)) {}
 
-    std::string
+    [[nodiscard]] std::string
     name() const override {
         return _id;
     }
 
     void
     cancel() noexcept override {}
+
+protected:
+    std::string _id;
 };
 
-// Synchronous middleware that appends its ID and calls next
-class SyncAppendingMiddleware : public BaseTestMiddleware {
+/** @brief Records its id and continues the chain synchronously. */
+class SyncAppendingMiddleware : public TraceMiddleware {
 public:
-    explicit SyncAppendingMiddleware(std::string id)
-        : BaseTestMiddleware(std::move(id)) {}
+    using TraceMiddleware::TraceMiddleware;
 
     void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (ctx && ctx->session()) {
+    process(std::shared_ptr<qb::http::Context<TraceSession>> ctx) override {
+        if (ctx->session()) {
             ctx->session()->trace(_id);
         }
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
     }
 };
 
-// Asynchronous middleware that appends ID and calls next via TaskExecutor
-class AsyncAppendingMiddleware : public BaseTestMiddleware {
-private:
-    TaskExecutor *_executor;
-
+/** @brief Records `<id>_handle` synchronously, then `<id>_task` + CONTINUE via the pump. */
+class AsyncAppendingMiddleware : public TraceMiddleware {
 public:
     AsyncAppendingMiddleware(std::string id, TaskExecutor *executor)
-        : BaseTestMiddleware(std::move(id))
+        : TraceMiddleware(std::move(id))
         , _executor(executor) {}
 
     void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (!_executor) {
-            if (ctx->session())
-                ctx->session()->trace(_id + "_NO_EXECUTOR");
-            ctx->complete(qb::http::AsyncTaskResult::ERROR); // Cannot proceed
-            return;
-        }
-        if (ctx && ctx->session()) {
+    process(std::shared_ptr<qb::http::Context<TraceSession>> ctx) override {
+        if (ctx->session()) {
             ctx->session()->trace(_id + "_handle");
         }
-        auto shared_ctx = ctx;
-        _executor->addTask([shared_ctx, id = _id]() {
-            if (shared_ctx->is_cancelled()) {
-                // Check for cancellation
-                // If cancelled, the context should already be finalizing or finalized.
-                // We might not even need to trace here, or trace something specific like "task_cancelled_before_execution"
-                // std::cerr << "Async task for " << id << " was cancelled before execution." << std::endl;
-                return;
+        const std::string id = _id;
+        _executor->addTask([ctx, id]() {
+            if (ctx->is_cancelled()) {
+                return; // Context is finalizing; do not advance.
             }
-            if (shared_ctx && shared_ctx->session()) {
-                shared_ctx->session()->trace(id + "_task");
+            if (ctx->session()) {
+                ctx->session()->trace(id + "_task");
             }
-            shared_ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+            ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
         });
     }
+
+protected:
+    TaskExecutor *_executor;
 };
 
-// Synchronous middleware that short-circuits
-class SyncShortCircuitMiddleware : public BaseTestMiddleware {
-private:
-    qb::http::status _status_code;
-
+/** @brief Records its id and short-circuits the chain with COMPLETE at a chosen status/body. */
+class SyncShortCircuitMiddleware : public TraceMiddleware {
 public:
-    SyncShortCircuitMiddleware(std::string id, qb::http::status status_code = qb::http::status::OK)
-        : BaseTestMiddleware(std::move(id))
-        , _status_code(status_code) {}
+    SyncShortCircuitMiddleware(std::string id, qb::http::status status)
+        : TraceMiddleware(std::move(id))
+        , _status(status) {}
 
     void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (ctx && ctx->session()) {
+    process(std::shared_ptr<qb::http::Context<TraceSession>> ctx) override {
+        if (ctx->session()) {
             ctx->session()->trace(_id);
         }
-        ctx->response().status() = _status_code;
+        ctx->response().status() = _status;
         ctx->response().body()   = _id + " short-circuited";
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     }
+
+private:
+    qb::http::status _status;
 };
 
-// Synchronous middleware that signals an error
-class SyncErrorMiddleware : public BaseTestMiddleware {
+/** @brief Sync middleware whose handle phase invokes a test hook (used to cancel mid-handle). */
+class HookableSyncMiddleware : public TraceMiddleware {
 public:
-    explicit SyncErrorMiddleware(std::string id)
-        : BaseTestMiddleware(std::move(id)) {}
+    using Hook = std::function<void(std::shared_ptr<qb::http::Context<TraceSession>>)>;
+
+    explicit HookableSyncMiddleware(std::string id)
+        : TraceMiddleware(std::move(id)) {}
 
     void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (ctx && ctx->session()) {
+    process(std::shared_ptr<qb::http::Context<TraceSession>> ctx) override {
+        if (ctx->session()) {
             ctx->session()->trace(_id);
         }
-        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-        ctx->response().body()   = _id + " signaled error";
+        if (_hook) {
+            _hook(ctx);
+        }
+        if (!ctx->is_cancelled()) {
+            ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+        }
+        // If the hook cancelled, Context::cancel already finalized — do not complete again.
+    }
+
+    void
+    cancel() noexcept override {
+        cancel_called = true;
+    }
+
+    bool cancel_called = false;
+    Hook _hook;
+};
+
+/** @brief Async middleware whose cancel() sets a flag; used for cancel-before-task-finishes. */
+class CancellableAsyncMiddleware : public AsyncAppendingMiddleware {
+public:
+    using AsyncAppendingMiddleware::AsyncAppendingMiddleware;
+
+    void
+    cancel() noexcept override {
+        cancel_called = true;
+    }
+
+    bool cancel_called = false;
+};
+
+/** @brief A simple error-triggering middleware (records id, completes ERROR). */
+class ErrorTriggerMiddleware : public TraceMiddleware {
+public:
+    using TraceMiddleware::TraceMiddleware;
+
+    void
+    process(std::shared_ptr<qb::http::Context<TraceSession>> ctx) override {
+        if (ctx->session()) {
+            ctx->session()->trace(_id);
+        }
         ctx->complete(qb::http::AsyncTaskResult::ERROR);
     }
 };
 
-// Asynchronous middleware that short-circuits
-class AsyncShortCircuitMiddleware : public BaseTestMiddleware {
-private:
-    TaskExecutor    *_executor;
-    qb::http::status _status_code;
+/** @brief Builds an HTTP/1.1 request from a method + path (TraceSession-local helper). */
+qb::http::Request
+make_request(qb::http::method method_val, const std::string &path) {
+    qb::http::Request req;
+    req.method()      = method_val;
+    req.uri()         = qb::io::uri(path);
+    req.major_version = 1;
+    req.minor_version = 1;
+    return req;
+}
 
-public:
-    AsyncShortCircuitMiddleware(std::string id, TaskExecutor *executor, qb::http::status status_code = qb::http::status::OK)
-        : BaseTestMiddleware(std::move(id))
-        , _executor(executor)
-        , _status_code(status_code) {}
-
-    void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (!_executor) {
-            if (ctx->session())
-                ctx->session()->trace(_id + "_NO_EXECUTOR");
-            ctx->complete(qb::http::AsyncTaskResult::ERROR);
-            return;
+/** @brief Final handler that records its id, marks the session, sets 200 + body, completes. */
+qb::http::RouteHandlerFn<TraceSession>
+final_handler(const std::string &id = "final_handler") {
+    return [id](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace(id);
+            ctx->session()->_final_handler_called = true;
         }
-        if (ctx && ctx->session()) {
-            ctx->session()->trace(_id + "_handle");
-        }
-        auto shared_ctx = ctx;
-        _executor->addTask([shared_ctx, id = _id, status = _status_code]() {
-            if (shared_ctx && shared_ctx->session()) {
-                shared_ctx->session()->trace(id + "_task");
-            }
-            shared_ctx->response().status() = status;
-            shared_ctx->response().body()   = id + " short-circuited asynchronously";
-            shared_ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-        });
-    }
-};
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = id + " executed";
+        ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+    };
+}
 
-// Asynchronous middleware that signals an error
-class AsyncErrorMiddleware : public BaseTestMiddleware {
-private:
-    TaskExecutor *_executor;
+/** @brief Builds a single-task error chain that records `id` and finalizes with the given status/body. */
+std::vector<std::shared_ptr<qb::http::IAsyncTask<TraceSession>>>
+make_error_chain(const std::string &id, qb::http::status status, const std::string &body) {
+    return {std::make_shared<qb::http::MiddlewareTask<TraceSession>>(
+        std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
+            [id, status, body](auto ctx, auto /*next*/) {
+                if (ctx->session()) {
+                    ctx->session()->trace(id);
+                }
+                ctx->response().status() = status;
+                ctx->response().body()   = body;
+                ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+            },
+            id))};
+}
 
-public:
-    AsyncErrorMiddleware(std::string id, TaskExecutor *executor)
-        : BaseTestMiddleware(std::move(id))
-        , _executor(executor) {}
+} // namespace
 
-    void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (!_executor) {
-            if (ctx->session())
-                ctx->session()->trace(_id + "_NO_EXECUTOR");
-            ctx->complete(qb::http::AsyncTaskResult::ERROR);
-            return;
-        }
-        if (ctx && ctx->session()) {
-            ctx->session()->trace(_id + "_handle");
-        }
-        auto shared_ctx = ctx;
-        _executor->addTask([shared_ctx, id = _id]() {
-            if (shared_ctx && shared_ctx->session()) {
-                shared_ctx->session()->trace(id + "_task");
-            }
-            shared_ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-            shared_ctx->response().body()   = id + " signaled error asynchronously";
-            shared_ctx->complete(qb::http::AsyncTaskResult::ERROR);
-        });
-    }
-};
+// --- Fixture --------------------------------------------------------------------------------
 
-// --- Helper Middleware for Cancellation Tests ---
-
-class CancellableSyncAppendingMiddleware : public SyncAppendingMiddleware {
-public:
-    bool                                                                           cancel_called = false;
-    std::function<void(std::shared_ptr<qb::http::Context<MockMiddlewareSession>>)> on_handle_sync_point_for_test;
-
-    CancellableSyncAppendingMiddleware(std::string id)
-        : SyncAppendingMiddleware(std::move(id)) {}
-
-    void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (ctx && ctx->session()) {
-            ctx->session()->trace(_id);
-        }
-
-        // Hook for test to intervene (e.g., to cancel the context)
-        if (on_handle_sync_point_for_test) {
-            on_handle_sync_point_for_test(ctx);
-        }
-
-        // If the context was cancelled by the hook, complete() should respect that.
-        if (!ctx->is_cancelled()) {
-            // Only proceed if not cancelled by the hook
-            ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
-        } else {
-            // If cancelled by the hook, the context's complete(CANCELLED) should have already been called by ctx->cancel().
-            // No need to call complete() again here as it might interfere or be redundant.
-            // The Context::cancel mechanism should handle the finalization.
-            std::cerr << "CancellableSyncAppendingMiddleware [" << _id
-                      << "]: Context was cancelled by test hook. Not calling complete(CONTINUE)." << std::endl;
-        }
-    }
-
-    void
-    cancel() noexcept override {
-        cancel_called = true;
-        // It's hard to reliably trace from here if the context isn't stored,
-        // as cancel() can be called when the task isn't actively handling a context.
-        // For testing, we'll rely on the cancel_called flag.
-        // std::cerr << "Cancel called for: " << _id << std::endl; // For debugging test failures
-    }
-};
-
-class CancellableAsyncAppendingMiddleware : public AsyncAppendingMiddleware {
-public:
-    bool cancel_called = false;
-
-    CancellableAsyncAppendingMiddleware(std::string id, TaskExecutor *executor)
-        : AsyncAppendingMiddleware(std::move(id), executor) {}
-
-    void
-    cancel() noexcept override {
-        cancel_called = true;
-        // std::cerr << "Cancel called for: " << _id << std::endl;
-    }
-
-    // The base AsyncAppendingMiddleware posts a task. If Context::cancel() is called
-    // while that task is pending or executing, the Context should handle it.
-    // The IAsyncTask::cancel() is for the RouterCore to notify the task.
-};
-
-// --- Test Suite ---
-class RouterMiddlewareTest : public ::testing::Test {
+class RouterMiddlewareChainTest : public ::testing::Test {
 protected:
-    std::shared_ptr<MockMiddlewareSession>  _mock_session;
-    qb::http::Router<MockMiddlewareSession> _router;
-    TaskExecutor                            _task_executor;
+    std::shared_ptr<TraceSession> session;
+    qb::http::Router<TraceSession> router;
+    TaskExecutor                   executor;
 
     void
     SetUp() override {
-        _mock_session = std::make_shared<MockMiddlewareSession>();
-        _router       = qb::http::Router<MockMiddlewareSession>(); // Re-initialize router
-        _task_executor.clearTasks();                               // Clear tasks for each test
+        session = std::make_shared<TraceSession>();
     }
 
     void
-    TearDown() override {
-        // Clean up if necessary
+    drain() {
+        while (executor.hasTasks()) {
+            executor.processAllTasks();
+        }
     }
 
-    qb::http::Request
-    create_request(qb::http::method method_val, const std::string &target_path_str) {
-        qb::http::Request req;
-        req.method()      = method_val;
-        req.uri()         = qb::io::uri(target_path_str); // Correctly set URI via assignment to reference
-        req.major_version = 1;                            // Set HTTP version directly
-        req.minor_version = 1;
-        return req;
-    }
-
-    // Final handler for routes
-    qb::http::RouteHandlerFn<MockMiddlewareSession>
-    final_handler(const std::string &handler_id = "final_handler") {
-        return [handler_id](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
-            if (ctx && ctx->session()) {
-                ctx->session()->trace(handler_id);
-                ctx->session()->_final_handler_called = true;
-            }
-            ctx->response().status() = qb::http::status::OK;
-            ctx->response().body()   = handler_id + " executed";
-            ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-        };
-    }
+    using Trace = std::vector<std::string>;
 };
 
-// --- Basic Synchronous Middleware Tests (Router Level) ---
+// --- Empty chain ----------------------------------------------------------------------------
 
-TEST_F(RouterMiddlewareTest, SingleSyncMiddleware) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
-    _router.get("/test", final_handler());
-    _router.compile();
+TEST_F(RouterMiddlewareChainTest, EmptyChainReachesHandlerDirectly) {
+    router.get("/test", final_handler());
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
+    router.route(session, make_request(qb::http::method::GET, "/test"));
 
-    EXPECT_EQ(_mock_session->get_trace(), "mw1;final_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
+    EXPECT_EQ(session->trace(), (Trace{"final_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(session->write_count(), 1u);
 }
 
-TEST_F(RouterMiddlewareTest, MultipleSyncMiddlewareOrder) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw2"));
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw3"));
-    _router.get("/test", final_handler());
-    _router.compile();
+// --- Synchronous ordering -------------------------------------------------------------------
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
+TEST_F(RouterMiddlewareChainTest, SingleSyncMiddleware) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
+    router.get("/test", final_handler());
+    router.compile();
 
-    EXPECT_EQ(_mock_session->get_trace(), "mw1;mw2;mw3;final_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
+    router.route(session, make_request(qb::http::method::GET, "/test"));
+
+    EXPECT_EQ(session->trace(), (Trace{"mw1", "final_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
 }
 
-TEST_F(RouterMiddlewareTest, SyncMiddlewareShortCircuit) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
-    _router.use(std::make_shared<SyncShortCircuitMiddleware>("mw_sc", HTTP_STATUS_ACCEPTED));
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw3_never_reached"));
-    _router.get("/test", final_handler("handler_never_reached"));
-    _router.compile();
+TEST_F(RouterMiddlewareChainTest, MultipleSyncMiddlewareRunInRegistrationOrder) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw2"));
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw3"));
+    router.get("/test", final_handler());
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
+    router.route(session, make_request(qb::http::method::GET, "/test"));
 
-    EXPECT_EQ(_mock_session->get_trace(), "mw1;mw_sc");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_ACCEPTED);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "mw_sc short-circuited");
+    EXPECT_EQ(session->trace(), (Trace{"mw1", "mw2", "mw3", "final_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
 }
 
-TEST_F(RouterMiddlewareTest, SyncMiddlewareError) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
-    _router.use(std::make_shared<SyncErrorMiddleware>("mw_err"));
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw3_never_reached"));
-    _router.get("/test", final_handler("handler_never_reached"));
-    // Define a simple error handler for the router to check if it's called
-    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession>>>{
-        std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession>>(
-            std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
-                [](auto ctx, auto /*next*/) {
-                    // Assuming next is not used based on lambda body
-                    ctx->session()->trace("error_handler_task");
-                    // Don't change status if already an error status from mw_err
-                    if (ctx->response().status() != qb::http::status::INTERNAL_SERVER_ERROR) {
-                        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                    }
-                    ctx->response().body() = "Processed by error_handler_task";
-                    ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-                },
-                "error_handler_task"))
-    });
-    _router.compile();
+TEST_F(RouterMiddlewareChainTest, SyncMiddlewareShortCircuitStopsChain) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
+    router.use(std::make_shared<SyncShortCircuitMiddleware>("mw_sc", qb::http::status::ACCEPTED));
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw3_never"));
+    router.get("/test", final_handler("handler_never"));
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
+    router.route(session, make_request(qb::http::method::GET, "/test"));
 
-    EXPECT_EQ(_mock_session->get_trace(), "mw1;mw_err;error_handler_task");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Processed by error_handler_task");
+    EXPECT_EQ(session->trace(), (Trace{"mw1", "mw_sc"}));
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::ACCEPTED);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "mw_sc short-circuited");
 }
 
-// --- Basic Asynchronous Middleware Tests (Router Level) ---
+TEST_F(RouterMiddlewareChainTest, SyncMiddlewareErrorRoutesToErrorChain) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
+    router.use(std::make_shared<ErrorTriggerMiddleware>("mw_err"));
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw3_never"));
+    router.get("/test", final_handler("handler_never"));
+    router.set_error_task_chain(
+        make_error_chain("error_handler", qb::http::status::INTERNAL_SERVER_ERROR, "handled by error chain"));
+    router.compile();
 
-TEST_F(RouterMiddlewareTest, SingleAsyncMiddleware) {
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw1", &_task_executor));
-    _router.get("/test", final_handler());
-    _router.compile();
+    router.route(session, make_request(qb::http::method::GET, "/test"));
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle"); // Only handle part runs synchronously
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-
-    _task_executor.processAllTasks(); // Process the async part
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;final_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
+    EXPECT_EQ(session->trace(), (Trace{"mw1", "mw_err", "error_handler"}));
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "handled by error chain");
 }
 
-TEST_F(RouterMiddlewareTest, MultipleAsyncMiddlewareOrder) {
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw1", &_task_executor));
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw2", &_task_executor));
-    _router.get("/test", final_handler());
-    _router.compile();
+// --- Asynchronous ordering ------------------------------------------------------------------
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle");
+TEST_F(RouterMiddlewareChainTest, SingleAsyncMiddleware) {
+    router.use(std::make_shared<AsyncAppendingMiddleware>("amw1", &executor));
+    router.get("/test", final_handler());
+    router.compile();
 
-    _task_executor.processAllTasks(); // Process async_mw1's task
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_mw2_handle");
+    router.route(session, make_request(qb::http::method::GET, "/test"));
+    EXPECT_EQ(session->trace(), (Trace{"amw1_handle"}));
+    EXPECT_FALSE(session->_final_handler_called);
 
-    _task_executor.processAllTasks(); // Process async_mw2's task
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_mw2_handle;async_mw2_task;final_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
+    drain();
+    EXPECT_EQ(session->trace(), (Trace{"amw1_handle", "amw1_task", "final_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
 }
 
-TEST_F(RouterMiddlewareTest, MixedSyncAndAsyncMiddlewareOrder) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("sync1"));
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async1", &_task_executor));
-    _router.use(std::make_shared<SyncAppendingMiddleware>("sync2"));
-    _router.get("/test", final_handler());
-    _router.compile();
+TEST_F(RouterMiddlewareChainTest, MixedSyncAndAsyncMiddlewareOrder) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("sync1"));
+    router.use(std::make_shared<AsyncAppendingMiddleware>("async1", &executor));
+    router.use(std::make_shared<SyncAppendingMiddleware>("sync2"));
+    router.get("/test", final_handler());
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    // sync1 runs, then async1_handle runs and posts a task
-    EXPECT_EQ(_mock_session->get_trace(), "sync1;async1_handle");
+    router.route(session, make_request(qb::http::method::GET, "/test"));
+    EXPECT_EQ(session->trace(), (Trace{"sync1", "async1_handle"}));
 
-    _task_executor.processAllTasks(); // Process async1's task
-    // async1_task runs, then sync2 runs, then final_handler
-    EXPECT_EQ(_mock_session->get_trace(), "sync1;async1_handle;async1_task;sync2;final_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
+    drain();
+    EXPECT_EQ(session->trace(), (Trace{"sync1", "async1_handle", "async1_task", "sync2", "final_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
 }
 
-// --- RouteGroup Level Middleware Tests ---
+// --- Group middleware -----------------------------------------------------------------------
 
-TEST_F(RouterMiddlewareTest, GroupSingleSyncMiddleware) {
-    auto group = _router.group("/group");
-    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw1"));
+TEST_F(RouterMiddlewareChainTest, RouterThenGroupMiddlewareOrder) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("router_mw"));
+    auto group = router.group("/group");
+    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw"));
     group->get("/test", final_handler());
-    _router.compile();
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "group_mw1;final_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
+    router.route(session, make_request(qb::http::method::GET, "/group/test"));
+
+    EXPECT_EQ(session->trace(), (Trace{"router_mw", "group_mw", "final_handler"}));
 }
 
-TEST_F(RouterMiddlewareTest, RouterAndGroupSyncMiddleware) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("router_mw1"));
-    auto group = _router.group("/group");
-    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw1"));
-    group->get("/test", final_handler());
-    _router.compile();
-
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
-    // Router middleware runs first, then group middleware
-    EXPECT_EQ(_mock_session->get_trace(), "router_mw1;group_mw1;final_handler");
-}
-
-TEST_F(RouterMiddlewareTest, RouterAsyncAndGroupSyncMiddleware) {
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("router_async_mw1", &_task_executor));
-    auto group = _router.group("/group");
-    group->use(std::make_shared<SyncAppendingMiddleware>("group_sync_mw1"));
-    group->get("/test", final_handler());
-    _router.compile();
-
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "router_async_mw1_handle");
-
-    _task_executor.processAllTasks();
-    EXPECT_EQ(_mock_session->get_trace(), "router_async_mw1_handle;router_async_mw1_task;group_sync_mw1;final_handler");
-}
-
-TEST_F(RouterMiddlewareTest, GroupMiddlewareNotAppliedToOtherRoutes) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("router_mw1"));
-    auto group = _router.group("/group");
-    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw1"));
+TEST_F(RouterMiddlewareChainTest, GroupMiddlewareIsolatedFromOtherRoutes) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("router_mw"));
+    auto group = router.group("/group");
+    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw"));
     group->get("/test", final_handler("group_handler"));
+    router.get("/other", final_handler("other_handler"));
+    router.compile();
 
-    _router.get("/other", final_handler("other_handler"));
-    _router.compile();
+    router.route(session, make_request(qb::http::method::GET, "/group/test"));
+    EXPECT_EQ(session->trace(), (Trace{"router_mw", "group_mw", "group_handler"}));
 
-    // Test group route
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "router_mw1;group_mw1;group_handler");
+    session->reset();
 
-    _mock_session->reset(); // Reset session for next route call
-
-    // Test other route
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/other"));
-    EXPECT_EQ(_mock_session->get_trace(), "router_mw1;other_handler"); // group_mw1 should not be here
+    router.route(session, make_request(qb::http::method::GET, "/other"));
+    EXPECT_EQ(session->trace(), (Trace{"router_mw", "other_handler"}));
 }
 
-// TODO: Add tests for async short-circuit and async error middleware
-// TODO: Add tests for middleware on nested groups.
-
-TEST_F(RouterMiddlewareTest, AsyncMiddlewareShortCircuit) {
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw1", &_task_executor));
-    _router.use(std::make_shared<AsyncShortCircuitMiddleware>("async_sc", &_task_executor, HTTP_STATUS_CREATED));
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw3_never_reached", &_task_executor));
-    _router.get("/test", final_handler("handler_never_reached"));
-    _router.compile();
-
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle");
-
-    _task_executor.processAllTasks(); // Process async_mw1's task, then async_sc_handle
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_sc_handle");
-
-    _task_executor.processAllTasks(); // Process async_sc's task which short-circuits
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_sc_handle;async_sc_task");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_CREATED);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "async_sc short-circuited asynchronously");
-}
-
-TEST_F(RouterMiddlewareTest, AsyncMiddlewareError) {
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw1", &_task_executor));
-    _router.use(std::make_shared<AsyncErrorMiddleware>("async_err_mw", &_task_executor));
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw3_never_reached", &_task_executor));
-    _router.get("/test", final_handler("handler_never_reached"));
-
-    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession>>>{
-        std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession>>(
-            std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
-                [](auto ctx, auto /*next*/) {
-                    // Assuming next is not used
-                    ctx->session()->trace("async_error_handler_task");
-                    if (ctx->response().status() != qb::http::status::INTERNAL_SERVER_ERROR) {
-                        ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
-                        // Original was SERVICE_UNAVAILABLE, keeping it.
-                    }
-                    ctx->response().body() = "Processed by async_error_handler_task";
-                    ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-                },
-                "async_error_handler_task"))
-    });
-    _router.compile();
-
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle");
-
-    _task_executor.processAllTasks(); // Process async_mw1's task, then async_err_mw_handle
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_err_mw_handle");
-
-    _task_executor.processAllTasks(); // Process async_err_mw's task which signals error
-    // This should trigger the error handler chain.
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_handle;async_mw1_task;async_err_mw_handle;async_err_mw_task;async_error_handler_task");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Processed by async_error_handler_task");
-}
-
-TEST_F(RouterMiddlewareTest, NestedGroupMiddleware) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("router_mw"));
-    auto group1 = _router.group("/group1");
+TEST_F(RouterMiddlewareChainTest, NestedGroupMiddlewareOrder) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("router_mw"));
+    auto group1 = router.group("/g1");
     group1->use(std::make_shared<SyncAppendingMiddleware>("g1_mw"));
-
-    auto group2 = group1->group("/group2");
+    auto group2 = group1->group("/g2");
     group2->use(std::make_shared<SyncAppendingMiddleware>("g2_mw"));
     group2->get("/test", final_handler("g2_handler"));
+    router.compile();
 
-    _router.compile();
+    router.route(session, make_request(qb::http::method::GET, "/g1/g2/test"));
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/group1/group2/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "router_mw;g1_mw;g2_mw;g2_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
+    EXPECT_EQ(session->trace(), (Trace{"router_mw", "g1_mw", "g2_mw", "g2_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
 }
 
-TEST_F(RouterMiddlewareTest, NestedGroupAsyncMiddleware) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("router_sync"));
-    auto group1 = _router.group("/g1");
-    group1->use(std::make_shared<AsyncAppendingMiddleware>("g1_async", &_task_executor));
-
+TEST_F(RouterMiddlewareChainTest, NestedGroupAsyncMiddlewareOrder) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("router_sync"));
+    auto group1 = router.group("/g1");
+    group1->use(std::make_shared<AsyncAppendingMiddleware>("g1_async", &executor));
     auto group2 = group1->group("/g2");
     group2->use(std::make_shared<SyncAppendingMiddleware>("g2_sync"));
     group2->get("/test", final_handler("g2_handler"));
+    router.compile();
 
-    _router.compile();
+    router.route(session, make_request(qb::http::method::GET, "/g1/g2/test"));
+    EXPECT_EQ(session->trace(), (Trace{"router_sync", "g1_async_handle"}));
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/g1/g2/test"));
-    EXPECT_EQ(_mock_session->get_trace(), "router_sync;g1_async_handle");
-
-    _task_executor.processAllTasks(); // Process g1_async's task
-    EXPECT_EQ(_mock_session->get_trace(), "router_sync;g1_async_handle;g1_async_task;g2_sync;g2_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
+    drain();
+    EXPECT_EQ(session->trace(), (Trace{"router_sync", "g1_async_handle", "g1_async_task", "g2_sync", "g2_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
 }
 
-// --- Not Found Handler Tests ---
+// --- Not-found chain ------------------------------------------------------------------------
 
-TEST_F(RouterMiddlewareTest, DefaultNotFoundHandler) {
-    _router.get("/exists", final_handler("handler_exists"));
-    _router.compile();
+TEST_F(RouterMiddlewareChainTest, DefaultNotFoundHandler) {
+    router.get("/exists", final_handler("handler_exists"));
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/does_not_exist"));
-    _task_executor.processAllTasks(); // Process any async tasks if they were part of a (non-existent) 404 chain
+    router.route(session, make_request(qb::http::method::GET, "/missing"));
+    drain();
 
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "404 Not Found (Default)");
+    EXPECT_EQ(session->_response.status(), qb::http::status::NOT_FOUND);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "404 Not Found (Default)");
 }
 
-TEST_F(RouterMiddlewareTest, CustomNotFoundHandler) {
-    _router.set_not_found_handler([](auto ctx) {
-        ctx->session()->trace("custom_404_handler");
+TEST_F(RouterMiddlewareChainTest, CustomNotFoundHandler) {
+    router.set_not_found_handler([](auto ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("custom_404");
+        }
         ctx->response().status() = qb::http::status::NOT_FOUND;
         ctx->response().body()   = "Custom 404 Page";
         ctx->complete();
     });
-    _router.get("/exists", final_handler("handler_exists"));
-    _router.compile();
+    router.get("/exists", final_handler("handler_exists"));
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/does_not_exist"));
-    _task_executor.processAllTasks();
+    router.route(session, make_request(qb::http::method::GET, "/missing"));
+    drain();
 
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Custom 404 Page");
-    EXPECT_EQ(_mock_session->get_trace(), "custom_404_handler");
-    // The custom handler itself is wrapped in DefaultOrCustomNotFoundHandler
+    EXPECT_EQ(session->_response.status(), qb::http::status::NOT_FOUND);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "Custom 404 Page");
+    EXPECT_EQ(session->trace(), (Trace{"custom_404"}));
 }
 
-TEST_F(RouterMiddlewareTest, GlobalMiddlewareBeforeCustomNotFoundHandler) {
-    _router.use(std::make_shared<SyncAppendingMiddleware>("global_mw1"));
-    _router.set_not_found_handler([](auto ctx) {
-        ctx->session()->trace("custom_404_handler");
+TEST_F(RouterMiddlewareChainTest, GlobalMiddlewareRunsBeforeCustomNotFoundHandler) {
+    router.use(std::make_shared<SyncAppendingMiddleware>("global_mw"));
+    router.set_not_found_handler([](auto ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("custom_404");
+        }
         ctx->response().status() = qb::http::status::NOT_FOUND;
         ctx->response().body()   = "Custom 404 With Global MW";
         ctx->complete();
     });
-    _router.compile();
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/will_be_404"));
-    _task_executor.processAllTasks();
+    router.route(session, make_request(qb::http::method::GET, "/missing"));
+    drain();
 
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_NOT_FOUND);
-    EXPECT_EQ(_mock_session->get_trace(), "global_mw1;custom_404_handler");
+    EXPECT_EQ(session->_response.status(), qb::http::status::NOT_FOUND);
+    EXPECT_EQ(session->trace(), (Trace{"global_mw", "custom_404"}));
 }
 
-TEST_F(RouterMiddlewareTest, ErrorInCustomNotFoundHandlerIsFatal) {
-    _router.set_not_found_handler([](auto ctx) {
-        ctx->session()->trace("custom_404_causes_error");
-        // This handler will signal FATAL_SPECIAL_HANDLER_ERROR
+// --- Fatal-error contracts (canonical 500, pinned body) -------------------------------------
+
+TEST_F(RouterMiddlewareChainTest, ErrorInCustomNotFoundHandlerIsFatal) {
+    router.set_not_found_handler([](auto ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("custom_404_fatal");
+        }
         ctx->complete(qb::http::AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR);
     });
-    _router.compile();
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/any_path_for_404"));
-    _task_executor.processAllTasks();
+    router.route(session, make_request(qb::http::method::GET, "/missing"));
+    drain();
 
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    EXPECT_EQ(_mock_session->get_trace(), "custom_404_causes_error");
-    // Body might be empty or default for 500, depending on how finalize_processing handles it
+    EXPECT_EQ(session->trace(), (Trace{"custom_404_fatal"}));
+    EXPECT_EQ(session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    // Canonical contract: FATAL_SPECIAL_HANDLER_ERROR sets status 500 and finalizes the response
+    // the handler left behind (no auto-filled body); the handler set none, so the body is empty.
+    EXPECT_TRUE(session->_response.body().template as<std::string>().empty());
+    EXPECT_EQ(session->write_count(), 1u) << "Fatal special-handler error finalizes exactly once.";
 }
 
-TEST_F(RouterMiddlewareTest, ErrorInGlobalMiddlewareDuringNotFoundProcessing) {
-    _router.use(std::make_shared<SyncErrorMiddleware>("global_error_mw")); // This will cause an error
-    _router.set_not_found_handler([](auto ctx) {
-        // This 404 handler should not be reached
-        ctx->session()->trace("custom_404_not_reached");
+TEST_F(RouterMiddlewareChainTest, ErrorInUserErrorHandlerIsFatal) {
+    router.use(std::make_shared<ErrorTriggerMiddleware>("trigger_initial_error"));
+    router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<TraceSession>>>{
+        std::make_shared<qb::http::MiddlewareTask<TraceSession>>(
+            std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
+                [](auto ctx, auto /*next*/) {
+                    if (ctx->session()) {
+                        ctx->session()->trace("faulty_error_handler");
+                    }
+                    ctx->complete(qb::http::AsyncTaskResult::ERROR); // error within the error chain
+                },
+                "faulty_error_handler"))});
+    router.compile();
+
+    router.route(session, make_request(qb::http::method::GET, "/test"));
+    drain();
+
+    EXPECT_EQ(session->trace(), (Trace{"trigger_initial_error", "faulty_error_handler"}));
+    EXPECT_EQ(session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    // An ERROR raised while already in the ERROR_CHAIN phase forces 500 and finalizes (no loop);
+    // the faulty handler set no body, so the canonical result is an empty body.
+    EXPECT_TRUE(session->_response.body().template as<std::string>().empty());
+    EXPECT_EQ(session->write_count(), 1u) << "Error-in-error-handler must finalize exactly once (no loop).";
+}
+
+TEST_F(RouterMiddlewareChainTest, ErrorInGlobalMiddlewareDuringNotFoundRoutesToErrorChain) {
+    router.use(std::make_shared<ErrorTriggerMiddleware>("global_error_mw"));
+    router.set_not_found_handler([](auto ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("custom_404_not_reached");
+        }
         ctx->complete();
     });
-    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession>>>{
-        std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession>>(
-            std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
-                [](auto ctx, auto /*next*/) {
-                    ctx->session()->trace("main_error_handler_after_404_global_mw_error");
-                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                    ctx->response().body()   = "Error in global_mw during 404 processing, caught by main error handler";
-                    ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-                },
-                "main_error_handler_after_404_global_mw_error"))
-    });
-    _router.compile();
+    router.set_error_task_chain(
+        make_error_chain("main_error_handler", qb::http::status::INTERNAL_SERVER_ERROR, "caught by main error handler"));
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/triggers_404_then_error"));
-    _task_executor.processAllTasks();
+    router.route(session, make_request(qb::http::method::GET, "/missing"));
+    drain();
 
-    EXPECT_EQ(_mock_session->get_trace(), "global_error_mw;main_error_handler_after_404_global_mw_error");
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(),
-              "Error in global_mw during 404 processing, caught by main error handler");
+    EXPECT_EQ(session->trace(), (Trace{"global_error_mw", "main_error_handler"}));
+    EXPECT_EQ(session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "caught by main error handler");
 }
 
-// --- Error in Error Handler Test ---
+// --- Cancellation ---------------------------------------------------------------------------
 
-TEST_F(RouterMiddlewareTest, ErrorInUserErrorHandlerIsFatal) {
-    _router.use(std::make_shared<SyncErrorMiddleware>("trigger_initial_error")); // To trigger the error chain
-    _router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<MockMiddlewareSession>>>{
-        std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession>>(
-            std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
-                [](auto ctx, auto /*next*/) {
-                    ctx->session()->trace("faulty_error_handler");
-                    // This error handler itself signals an error
-                    ctx->complete(qb::http::AsyncTaskResult::ERROR);
-                },
-                "faulty_error_handler"))
-    });
-    _router.compile();
+TEST_F(RouterMiddlewareChainTest, CancellationDuringSyncGlobalMiddleware) {
+    auto mw1 = std::make_shared<HookableSyncMiddleware>("mw1");
+    mw1->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel during mw1 handle"); };
+    router.use(mw1);
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw2_never"));
+    router.get("/test", final_handler("handler_never"));
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    _task_executor.processAllTasks();
-
-    EXPECT_EQ(_mock_session->get_trace(), "trigger_initial_error;faulty_error_handler");
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    // Body will likely be what `faulty_error_handler` set before erroring, or empty if status set late.
-    // The key is that it doesn't loop and results in a 500.
-}
-
-// --- Cancellation Tests ---
-
-TEST_F(RouterMiddlewareTest, CancellationDuringSyncGlobalMiddleware) {
-    auto mw1 = std::make_shared<CancellableSyncAppendingMiddleware>("mw1_cancellable");
-    // Setup the hook for mw1 to cancel the context during its handle method
-    mw1->on_handle_sync_point_for_test = [](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx_inside_handle) {
-        if (ctx_inside_handle) {
-            ctx_inside_handle->cancel("Test initiated cancellation during mw1 handle");
-        }
-    };
-
-    _router.use(mw1);
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw2_never_reached"));
-    _router.get("/test", final_handler("handler_never_reached"));
-    _router.compile();
-
-    // Route the request. The cancellation will happen inside mw1's handle method.
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    // ctx_ptr might be null if routing itself failed catastrophically before even starting the chain,
-    // but given the setup, it should be valid if mw1->handle was reached.
-    // The assertions below will cover the outcome.
-
-    _task_executor.processAllTasks(); // Should be no async tasks involved here.
+    router.route(session, make_request(qb::http::method::GET, "/test"));
+    drain();
 
     EXPECT_TRUE(mw1->cancel_called);
-    EXPECT_EQ(_mock_session->get_trace(), "mw1_cancellable");                      // mw1 runs and traces, then cancelled
-    EXPECT_FALSE(_mock_session->_final_handler_called);                            // Should not be reached
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
+    EXPECT_EQ(session->trace(), (Trace{"mw1"}));
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(session->write_count(), 1u);
 }
 
-TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGlobalMiddleware_BeforeAsyncTaskFinishes) {
-    auto async_mw1 = std::make_shared<CancellableAsyncAppendingMiddleware>("async_mw1_cancellable", &_task_executor);
-    _router.use(async_mw1);
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw2_never_reached"));
-    _router.get("/test", final_handler("handler_never_reached"));
-    _router.compile();
+TEST_F(RouterMiddlewareChainTest, CancellationDuringAsyncGlobalMiddlewareBeforeTaskFinishes) {
+    auto amw = std::make_shared<CancellableAsyncMiddleware>("async_mw", &executor);
+    router.use(amw);
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw2_never"));
+    router.get("/test", final_handler("handler_never"));
+    router.compile();
 
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/test"));
-    ASSERT_NE(ctx_ptr, nullptr) << "Context pointer should not be null.";
+    auto ctx = router.route(session, make_request(qb::http::method::GET, "/test"));
+    ASSERT_NE(ctx, nullptr);
 
-    // At this point, async_mw1->process() has run and posted its task to _task_executor.
-    // The trace reflects only the synchronous part of async_mw1.
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_cancellable_handle");
-    EXPECT_EQ(_task_executor.getPendingTaskCount(), 1); // Task for async_mw1_cancellable_task is pending
+    EXPECT_EQ(session->trace(), (Trace{"async_mw_handle"}));
+    EXPECT_EQ(executor.getPendingTaskCount(), 1u);
 
-    ctx_ptr->cancel("Cancelled before async task completes");
+    ctx->cancel("cancel before async task completes");
+    drain();
 
-    // Try to process tasks - the cancelled context should prevent the async task part from running.
-    // The TaskExecutor will still run the lambda, but the lambda should respect ctx->is_cancelled() or ctx->complete() should handle it.
-    // Our AsyncAppendingMiddleware completes with CONTINUE. Context::complete should then see it's cancelled and finalize.
-    _task_executor.processAllTasks();
-
-    EXPECT_TRUE(async_mw1->cancel_called);
-    // The trace should remain as it was after the _handle part, as the _task part should not execute its trace or proceed.
-    EXPECT_EQ(_mock_session->get_trace(), "async_mw1_cancellable_handle");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
-    EXPECT_EQ(_task_executor.getPendingTaskCount(), 0); // All tasks from executor should be processed or discarded
+    EXPECT_TRUE(amw->cancel_called);
+    EXPECT_EQ(session->trace(), (Trace{"async_mw_handle"})); // task observed cancellation, did not advance
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(executor.hasTasks());
+    EXPECT_EQ(session->write_count(), 1u);
 }
 
-TEST_F(RouterMiddlewareTest, CancellationDuringSyncGroupMiddleware) {
-    auto group    = _router.group("/group");
-    auto group_mw = std::make_shared<CancellableSyncAppendingMiddleware>("group_mw_cancellable");
-    // Setup the hook for group_mw to cancel the context
-    group_mw->on_handle_sync_point_for_test = [](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx_inside_handle) {
-        if (ctx_inside_handle) {
-            ctx_inside_handle->cancel("Test initiated cancellation during group_mw handle");
-        }
-    };
-
+TEST_F(RouterMiddlewareChainTest, CancellationDuringSyncGroupMiddleware) {
+    auto group    = router.group("/group");
+    auto group_mw = std::make_shared<HookableSyncMiddleware>("group_mw");
+    group_mw->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel during group_mw"); };
     group->use(group_mw);
-    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw2_never_reached"));
-    group->get("/test", final_handler("handler_never_reached"));
-    _router.compile();
+    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw2_never"));
+    group->get("/test", final_handler("handler_never"));
+    router.compile();
 
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
-    // Similar to the global sync test, ctx_ptr validity is mostly an intermediate check.
-    // The actual outcome is verified by assertions.
-
-    _task_executor.processAllTasks(); // No async tasks here.
+    router.route(session, make_request(qb::http::method::GET, "/group/test"));
+    drain();
 
     EXPECT_TRUE(group_mw->cancel_called);
-    EXPECT_EQ(_mock_session->get_trace(), "group_mw_cancellable");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
+    EXPECT_EQ(session->trace(), (Trace{"group_mw"}));
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
 }
 
-TEST_F(RouterMiddlewareTest, CancellationDuringAsyncGroupMiddleware_BeforeAsyncTaskFinishes) {
-    auto group          = _router.group("/group");
-    auto async_group_mw = std::make_shared<CancellableAsyncAppendingMiddleware>("async_group_mw_cancellable", &_task_executor);
-    group->use(async_group_mw);
-    group->use(std::make_shared<SyncAppendingMiddleware>("group_mw2_never_reached"));
-    group->get("/test", final_handler("handler_never_reached"));
-    _router.compile();
-
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/group/test"));
-    ASSERT_NE(ctx_ptr, nullptr) << "Context pointer should not be null.";
-
-    EXPECT_EQ(_mock_session->get_trace(), "async_group_mw_cancellable_handle");
-    EXPECT_EQ(_task_executor.getPendingTaskCount(), 1);
-
-    ctx_ptr->cancel("Cancelled before async group task completes");
-
-    _task_executor.processAllTasks();
-
-    EXPECT_TRUE(async_group_mw->cancel_called);
-    EXPECT_EQ(_mock_session->get_trace(), "async_group_mw_cancellable_handle");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE);
-    EXPECT_EQ(_task_executor.getPendingTaskCount(), 0);
-}
-
-// --- Advanced Middleware Scenarios ---
-
-// Test for FunctionalMiddleware acting as "around" middleware (pre and post processing)
-TEST_F(RouterMiddlewareTest, FunctionalMiddlewareAroundBehavior) {
-    _router.use(std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
-        [](auto ctx, auto next_fn) {
-            ctx->request().set_header("X-Pre-Process", "handled_by_around_mw");
-            if (ctx->session())
-                ctx->session()->trace("around_mw_pre_next_fn"); // Trace pre
-
-            next_fn(); // Call the next task in the chain
-
-            // This part executes after the next_fn() chain has processed.
-            // It will modify ctx->response().
-            ctx->response().set_header("X-Post-Process-On-Ctx", "handled_by_around_mw_on_ctx");
-            if (ctx->session())
-                ctx->session()->trace("around_mw_post_next_fn"); // Trace post
+TEST_F(RouterMiddlewareChainTest, CancellationDuringAsyncTaskBody) {
+    // The async middleware's deferred task body cancels the context, then attempts CONTINUE; the
+    // stale CONTINUE must be absorbed (the context already finalized with 503).
+    router.use(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
+        [exec = &executor](auto ctx, auto /*next*/) {
+            if (ctx->session()) {
+                ctx->session()->trace("body_handle");
+            }
+            exec->addTask([ctx]() {
+                if (ctx->session()) {
+                    ctx->session()->trace("body_task");
+                }
+                ctx->cancel("cancel inside async task body");
+                ctx->complete(qb::http::AsyncTaskResult::CONTINUE); // stale; must be a no-op
+            });
         },
-        "AroundFunctionalMiddleware"));
+        "BodyCancellingMiddleware"));
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw2_never"));
+    router.get("/test", final_handler("handler_never"));
+    router.compile();
 
-    _router.use(std::make_shared<SyncAppendingMiddleware>("inner_mw")); // To check request header
+    router.route(session, make_request(qb::http::method::GET, "/test"));
+    EXPECT_EQ(session->trace(), (Trace{"body_handle"}));
+    EXPECT_EQ(executor.getPendingTaskCount(), 1u);
 
-    _router.get("/test_around", [](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
-        // Check request header set by the "around" middleware before next_fn()
-        EXPECT_EQ(ctx->request().header("X-Pre-Process"), "handled_by_around_mw");
+    drain();
 
-        if (ctx && ctx->session()) {
-            ctx->session()->trace("final_around_handler");
+    EXPECT_EQ(session->trace(), (Trace{"body_handle", "body_task"}));
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(session->write_count(), 1u) << "cancel() finalizes once; the trailing CONTINUE must not re-finalize.";
+}
+
+TEST_F(RouterMiddlewareChainTest, CancellationDuringGlobalMiddlewareInNotFoundChain) {
+    auto global_mw = std::make_shared<HookableSyncMiddleware>("global_mw_404");
+    global_mw->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel in 404 chain"); };
+    router.use(global_mw);
+    router.compile();
+
+    router.route(session, make_request(qb::http::method::GET, "/missing"));
+    drain();
+
+    EXPECT_TRUE(global_mw->cancel_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(session->trace(), (Trace{"global_mw_404"}));
+}
+
+// --- Double-complete idempotency ------------------------------------------------------------
+
+TEST_F(RouterMiddlewareChainTest, DoubleCompleteIsIdempotent) {
+    // A route handler that completes COMPLETE twice must finalize exactly once and the first result
+    // must win. TraceSession throws on a second write, so a non-idempotent complete() would surface
+    // as that throw. (A route handler runs without FunctionalMiddleware's finalization-deferral
+    // scope, so the first complete() finalizes immediately and the second is a true no-op.)
+    router.use(std::make_shared<SyncAppendingMiddleware>("mw1"));
+    router.get("/test", [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("handler");
+        }
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "first";
+        ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+        // Already Finalised -> these mutations and the second complete() are ignored.
+        ctx->response().status() = qb::http::status::ACCEPTED;
+        ctx->response().body()   = "second";
+        ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+    });
+    router.compile();
+
+    EXPECT_NO_THROW(router.route(session, make_request(qb::http::method::GET, "/test")));
+
+    EXPECT_EQ(session->trace(), (Trace{"mw1", "handler"}));
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "first");
+    EXPECT_EQ(session->write_count(), 1u);
+}
+
+// --- FunctionalMiddleware "around" semantics ------------------------------------------------
+
+TEST_F(RouterMiddlewareChainTest, FunctionalMiddlewareAroundBehavior) {
+    router.use(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
+        [](auto ctx, auto next_fn) {
+            ctx->request().set_header("X-Pre-Process", "around");
+            if (ctx->session()) {
+                ctx->session()->trace("around_pre");
+            }
+            next_fn();
+            ctx->response().set_header("X-Post-Process", "around");
+            if (ctx->session()) {
+                ctx->session()->trace("around_post");
+            }
+        },
+        "AroundMiddleware"));
+    router.use(std::make_shared<SyncAppendingMiddleware>("inner_mw"));
+    router.get("/around", [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        EXPECT_EQ(ctx->request().header("X-Pre-Process"), "around");
+        EXPECT_TRUE(ctx->response().header("X-Post-Process").empty()) << "Post-next mutation must not be visible yet.";
+        if (ctx->session()) {
+            ctx->session()->trace("handler");
             ctx->session()->_final_handler_called = true;
         }
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body()   = "final_around_handler executed";
-        // Check that X-Post-Process-On-Ctx is NOT YET on the response when handler is running
-        EXPECT_TRUE(ctx->response().header("X-Post-Process-On-Ctx").empty());
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     });
+    router.compile();
 
-    _router.compile();
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test_around"));
-    _task_executor.processAllTasks(); // Process any async tasks
+    router.route(session, make_request(qb::http::method::GET, "/around"));
 
-    EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
-
-    // Verify the execution trace to show the pre and post processing code ran in the middleware lambda
-    EXPECT_EQ(_mock_session->get_trace(), "around_mw_pre_next_fn;inner_mw;final_around_handler;around_mw_post_next_fn");
-
-    // Synchronous downstream completion is deferred until the functional middleware
-    // returns, so post-next response mutations are visible in the final response.
-    EXPECT_EQ(_mock_session->_response.header("X-Post-Process-On-Ctx"), "handled_by_around_mw_on_ctx");
-
-    // Also check that the original X-Post-Process (if it was ever set on session response) is not there
-    EXPECT_TRUE(_mock_session->_response.header("X-Post-Process").empty());
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(session->trace(), (Trace{"around_pre", "inner_mw", "handler", "around_post"}));
+    // Synchronous downstream completion is deferred until the around-MW returns, so the post-next
+    // response mutation lands in the finalized response.
+    EXPECT_EQ(session->_response.header("X-Post-Process"), "around");
 }
 
-TEST_F(RouterMiddlewareTest, FunctionalMiddlewarePostNextExceptionBecomesErrorBeforeFinalization) {
-    _router.use(std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
+TEST_F(RouterMiddlewareChainTest, FunctionalMiddlewarePostNextThrowBecomesError) {
+    router.use(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
         [](auto ctx, auto next_fn) {
-            if (ctx && ctx->session()) {
-                ctx->session()->trace("post_next_throw_pre");
+            if (ctx->session()) {
+                ctx->session()->trace("pre");
             }
             next_fn();
-            if (ctx && ctx->session()) {
-                ctx->session()->trace("post_next_throw_post");
+            if (ctx->session()) {
+                ctx->session()->trace("post");
             }
             throw std::runtime_error("post-next failure");
         },
-        "PostNextThrowingFunctionalMiddleware"));
-
-    _router.get("/post-next-throws", [](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
-        if (ctx && ctx->session()) {
-            ctx->session()->trace("post_next_throw_handler");
+        "PostNextThrowMiddleware"));
+    router.get("/post-throws", [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        if (ctx->session()) {
+            ctx->session()->trace("handler");
             ctx->session()->_final_handler_called = true;
         }
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body()   = "ok before post-next throw";
+        ctx->response().body()   = "ok before throw";
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     });
+    router.compile();
 
-    _router.compile();
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/post-next-throws"));
+    router.route(session, make_request(qb::http::method::GET, "/post-throws"));
 
-    EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->get_trace(), "post_next_throw_pre;post_next_throw_handler;post_next_throw_post");
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_INTERNAL_SERVER_ERROR);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Internal Server Error");
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->trace(), (Trace{"pre", "handler", "post"}));
+    EXPECT_EQ(session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "Internal Server Error");
 }
 
-// Test for FunctionalMiddleware conditionally exiting early
-TEST_F(RouterMiddlewareTest, FunctionalMiddlewareConditionalEarlyExit) {
-    _router.use(std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
+TEST_F(RouterMiddlewareChainTest, FunctionalMiddlewareConditionalEarlyExit) {
+    router.use(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
         [](auto ctx, auto next_fn) {
             if (ctx->request().has_header("X-Stop-Early")) {
                 ctx->response().status() = qb::http::status::IM_A_TEAPOT;
-                ctx->response().body()   = "Stopped early by Functional MW";
-                ctx->complete(qb::http::AsyncTaskResult::COMPLETE); // Short-circuit
+                ctx->response().body()   = "stopped early";
+                ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
             } else {
-                next_fn(); // Continue processing
+                next_fn();
             }
         },
-        "ConditionalFunctionalMiddleware"));
+        "ConditionalMiddleware"));
+    router.use(std::make_shared<SyncAppendingMiddleware>("after_conditional"));
+    router.get("/conditional", final_handler("conditional_handler"));
+    router.compile();
 
-    _router.use(std::make_shared<SyncAppendingMiddleware>("mw_after_conditional"));
-    _router.get("/test_conditional_exit", final_handler("handler_for_conditional"));
-    _router.compile();
+    // Case 1: short-circuits.
+    qb::http::Request stop = make_request(qb::http::method::GET, "/conditional");
+    stop.set_header("X-Stop-Early", "true");
+    router.route(session, std::move(stop));
+    EXPECT_EQ(session->_response.status(), qb::http::status::IM_A_TEAPOT);
+    EXPECT_EQ(session->_response.body().template as<std::string>(), "stopped early");
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_TRUE(session->trace().empty());
 
-    // --- Case 1: Middleware stops early ---
-    _mock_session->reset();
-    qb::http::Request req_stop = create_request(qb::http::method::GET, "/test_conditional_exit");
-    req_stop.set_header("X-Stop-Early", "true");
-    _router.route(_mock_session, std::move(req_stop));
-    _task_executor.processAllTasks();
-
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_IM_A_TEAPOT);
-    EXPECT_EQ(_mock_session->_response.body().template as<std::string>(), "Stopped early by Functional MW");
-    EXPECT_FALSE(_mock_session->_final_handler_called); // Handler and subsequent MW should not run
-    EXPECT_TRUE(_mock_session->get_trace().empty());
-    // ConditionalFunctionalMiddleware does not trace, nor does mw_after_conditional or handler
-
-    // --- Case 2: Middleware continues ---
-    _mock_session->reset();
-    qb::http::Request req_continue = create_request(qb::http::method::GET, "/test_conditional_exit");
-    // No X-Stop-Early header
-    _router.route(_mock_session, std::move(req_continue));
-    _task_executor.processAllTasks();
-
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
-    EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->get_trace(), "mw_after_conditional;handler_for_conditional");
+    // Case 2: continues.
+    session->reset();
+    router.route(session, make_request(qb::http::method::GET, "/conditional"));
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->trace(), (Trace{"after_conditional", "conditional_handler"}));
 }
 
-TEST_F(RouterMiddlewareTest, FunctionalMiddlewareNextIsOneShotEvenWhenCalledTwice) {
-    _router.use(std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
+TEST_F(RouterMiddlewareChainTest, FunctionalMiddlewareNextIsOneShotEvenWhenCalledTwice) {
+    router.use(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
         [](auto ctx, auto next_fn) {
-            if (ctx && ctx->session()) {
+            if (ctx->session()) {
                 ctx->session()->trace("double_next_pre");
             }
             next_fn();
-            next_fn(); // Must be ignored by the framework.
-            if (ctx && ctx->session()) {
+            next_fn(); // must be ignored
+            if (ctx->session()) {
                 ctx->session()->trace("double_next_post");
             }
         },
-        "DoubleNextFunctionalMiddleware"));
-    _router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw", &_task_executor));
-    _router.get("/double-next", final_handler("double_next_handler"));
-    _router.compile();
+        "DoubleNextMiddleware"));
+    router.use(std::make_shared<AsyncAppendingMiddleware>("async_mw", &executor));
+    router.get("/double-next", final_handler("double_next_handler"));
+    router.compile();
 
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/double-next"));
+    router.route(session, make_request(qb::http::method::GET, "/double-next"));
 
-    // First middleware invocation reaches async middleware "handle" synchronously.
-    EXPECT_EQ(_mock_session->get_trace(), "double_next_pre;async_mw_handle;double_next_post");
-    EXPECT_FALSE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_task_executor.getPendingTaskCount(), 1);
+    EXPECT_EQ(session->trace(), (Trace{"double_next_pre", "async_mw_handle", "double_next_post"}));
+    EXPECT_FALSE(session->_final_handler_called);
+    EXPECT_EQ(executor.getPendingTaskCount(), 1u);
 
-    _task_executor.processAllTasks();
+    drain();
 
-    // The async task must complete before the final handler; no duplicate chain advance is allowed.
-    EXPECT_EQ(_mock_session->get_trace(), "double_next_pre;async_mw_handle;double_next_post;async_mw_task;double_next_handler");
-    EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
+    EXPECT_EQ(session->trace(),
+              (Trace{"double_next_pre", "async_mw_handle", "double_next_post", "async_mw_task", "double_next_handler"}));
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
 }
 
-// Test for state sharing between router-level middleware (e.g., via request headers)
-TEST_F(RouterMiddlewareTest, MiddlewareStateSharingViaRequestHeaders) {
-    _router.use(std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
+TEST_F(RouterMiddlewareChainTest, MiddlewareStateSharingViaRequestHeaders) {
+    router.use(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
         [](auto ctx, auto next_fn) {
-            ctx->request().set_header("X-Data-From-MW-A", "hello_from_A");
+            ctx->request().set_header("X-From-A", "hello");
             next_fn();
         },
-        "Middleware_A_SetsHeader"));
-
-    _router.use(std::make_shared<qb::http::FunctionalMiddleware<MockMiddlewareSession>>(
+        "MiddlewareA"));
+    router.use(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
         [](auto ctx, auto next_fn) {
-            if (ctx->request().header("X-Data-From-MW-A") == "hello_from_A") {
-                ctx->request().set_header("X-Data-From-MW-B", "B_confirms_A"); // MW_B sets its own confirmation
-                if (ctx->session())
-                    ctx->session()->trace("MW_B_processed_A_data");
+            if (ctx->request().header("X-From-A") == "hello") {
+                ctx->request().set_header("X-From-B", "confirmed");
+                if (ctx->session()) {
+                    ctx->session()->trace("B_saw_A");
+                }
             }
             next_fn();
         },
-        "Middleware_B_ChecksHeader"));
-
-    _router.get("/test_mw_sharing", [](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
-        // Check if MW_B processed data from MW_A by looking for the header MW_B sets
-        EXPECT_EQ(ctx->request().header("X-Data-From-MW-B"), "B_confirms_A");
-
-        if (ctx && ctx->session()) {
-            ctx->session()->trace("final_sharing_handler");
+        "MiddlewareB"));
+    router.get("/sharing", [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        EXPECT_EQ(ctx->request().header("X-From-B"), "confirmed");
+        if (ctx->session()) {
+            ctx->session()->trace("handler");
             ctx->session()->_final_handler_called = true;
         }
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body()   = "final_sharing_handler executed";
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
     });
+    router.compile();
 
-    _router.compile();
-    _router.route(_mock_session, create_request(qb::http::method::GET, "/test_mw_sharing"));
-    _task_executor.processAllTasks();
+    router.route(session, make_request(qb::http::method::GET, "/sharing"));
 
-    EXPECT_TRUE(_mock_session->_final_handler_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_OK);
-    EXPECT_EQ(_mock_session->get_trace(), "MW_B_processed_A_data;final_sharing_handler");
+    EXPECT_TRUE(session->_final_handler_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(session->trace(), (Trace{"B_saw_A", "handler"}));
 }
 
-// --- More Advanced Cancellation Scenarios ---
+// --- Error handling chain cancellation ------------------------------------------------------
 
-// Helper Middleware to trigger an error
-class ErrorTriggerMiddleware : public BaseTestMiddleware {
-public:
-    explicit ErrorTriggerMiddleware(std::string id)
-        : BaseTestMiddleware(std::move(id)) {}
+TEST_F(RouterMiddlewareChainTest, CancellationDuringErrorHandlingMiddleware) {
+    router.use(std::make_shared<ErrorTriggerMiddleware>("error_trigger"));
 
-    void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (ctx->session())
-            ctx->session()->trace(_id);
-        ctx->complete(qb::http::AsyncTaskResult::ERROR);
-    }
-};
+    auto cancellable_error_mw = std::make_shared<HookableSyncMiddleware>("cancellable_error_mw");
+    cancellable_error_mw->_hook =
+        [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel during error handling"); };
+    router.set_error_task_chain({std::make_shared<qb::http::MiddlewareTask<TraceSession>>(cancellable_error_mw)});
+    router.compile();
 
-// Helper Middleware for testing cancellation within an error handler chain
-class CancellableErrorHandlingMiddleware : public BaseTestMiddleware {
-public:
-    bool                                                                           cancel_called = false;
-    std::function<void(std::shared_ptr<qb::http::Context<MockMiddlewareSession>>)> on_handle_sync_point_for_test;
+    router.route(session, make_request(qb::http::method::GET, "/trigger_error"));
+    drain();
 
-    CancellableErrorHandlingMiddleware(std::string id)
-        : BaseTestMiddleware(std::move(id)) {}
-
-    void
-    process(std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) override {
-        if (ctx->session())
-            ctx->session()->trace(_id + "_handling_error");
-
-        if (on_handle_sync_point_for_test) {
-            on_handle_sync_point_for_test(ctx);
-        }
-
-        if (!ctx->is_cancelled()) {
-            ctx->response().status() = qb::http::status::EXPECTATION_FAILED; // Some distinct status
-            ctx->response().body()   = _id + " processed error before any cancellation.";
-            ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-        } else {
-            // If cancelled by the hook, Context::cancel mechanism should take over.
-            // No explicit complete() here to avoid interference.
-        }
-    }
-
-    void
-    cancel() noexcept override {
-        cancel_called = true;
-        // if(_mock_session) _mock_session->trace(_id + "_cancel_called"); // Cannot access session here easily
-    }
-};
-
-TEST_F(RouterMiddlewareTest, CancellationDuringErrorHandlingMiddleware) {
-    auto error_trigger_mw             = std::make_shared<ErrorTriggerMiddleware>("error_trigger");
-    auto cancellable_error_handler_mw = std::make_shared<CancellableErrorHandlingMiddleware>("cancellable_error_mw");
-
-    _router.use(error_trigger_mw); // This middleware will trigger the error chain
-
-    _router.set_error_task_chain({std::make_shared<qb::http::MiddlewareTask<MockMiddlewareSession>>(cancellable_error_handler_mw)});
-
-    cancellable_error_handler_mw->on_handle_sync_point_for_test =
-        [](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx_in_error_handler) {
-            if (ctx_in_error_handler) {
-                ctx_in_error_handler->cancel("Test cancellation during error handling");
-            }
-        };
-
-    _router.compile();
-
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/trigger_error_then_cancel"));
-    _task_executor.processAllTasks();
-
-    EXPECT_TRUE(cancellable_error_handler_mw->cancel_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
-    // The trace should show the error trigger, then the start of the error handler, but not its completion
-    EXPECT_EQ(_mock_session->get_trace(), "error_trigger;cancellable_error_mw_handling_error");
-}
-
-TEST_F(RouterMiddlewareTest, CancellationDuringGlobalMiddlewareInNotFoundChain) {
-    auto global_mw_cancellable = std::make_shared<CancellableSyncAppendingMiddleware>("global_mw_for_404_cancel");
-    _router.use(global_mw_cancellable);
-
-    // No route defined for "/path_to_trigger_404", so it will use the not_found_chain
-    // which includes global middleware.
-
-    global_mw_cancellable->on_handle_sync_point_for_test = [](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx_in_global_mw) {
-        if (ctx_in_global_mw) {
-            // This middleware is now part of the not_found_chain execution
-            ctx_in_global_mw->cancel("Test cancellation during global MW in 404 chain");
-        }
-    };
-
-    _router.compile(); // Ensures global_mw_cancellable is part of the compiled not_found_tasks prefix
-
-    auto ctx_ptr = _router.route(_mock_session, create_request(qb::http::method::GET, "/path_to_trigger_404"));
-    _task_executor.processAllTasks();
-
-    EXPECT_TRUE(global_mw_cancellable->cancel_called);
-    EXPECT_EQ(_mock_session->_response.status(), HTTP_STATUS_SERVICE_UNAVAILABLE); // Default cancellation status
-
-    // The global middleware should trace its ID before being cancelled.
-    // The default 404 handler (or any custom one) should not be reached.
-    EXPECT_EQ(_mock_session->get_trace(), "global_mw_for_404_cancel");
+    EXPECT_TRUE(cancellable_error_mw->cancel_called);
+    EXPECT_EQ(session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(session->trace(), (Trace{"error_trigger", "cancellable_error_mw"}));
+    EXPECT_EQ(session->write_count(), 1u);
 }
