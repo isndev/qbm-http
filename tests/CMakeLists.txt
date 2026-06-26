@@ -49,6 +49,18 @@ endfunction()
 # UNIT — pure logic (no loop, no socket). Local FS + link-time crypto still unit.
 # =============================================================================
 # --- utility / uri / message / cookie ---
+qhttp_test(unit utility-codec  unit/utility/utility-codec.cpp  EXTRA_LABELS utility)
+qhttp_test(unit utility-split  unit/utility/utility-split.cpp  EXTRA_LABELS utility)
+qhttp_test(unit utility-chars  unit/utility/utility-chars.cpp  EXTRA_LABELS utility)
+qhttp_test(unit uri-parse      unit/uri/uri-parse.cpp          EXTRA_LABELS uri)
+qhttp_test(unit http1-serialize-limits unit/http1/http1-serialize-limits.cpp EXTRA_LABELS http1)
+qhttp_test(unit http1-parse-limits     unit/http1/http1-parse-limits.cpp     EXTRA_LABELS http1)
+qhttp_test(unit validation-rules     unit/validation/validation-rules.cpp     EXTRA_LABELS validation)
+qhttp_test(unit validation-schema    unit/validation/validation-schema.cpp    EXTRA_LABELS validation)
+qhttp_test(unit validation-parameter unit/validation/validation-parameter.cpp EXTRA_LABELS validation)
+qhttp_test(unit validation-sanitizer unit/validation/validation-sanitizer.cpp EXTRA_LABELS validation)
+qhttp_test(unit validation-result    unit/validation/validation-result.cpp    EXTRA_LABELS validation)
+qhttp_test(unit validation-request   unit/validation/validation-request.cpp   EXTRA_LABELS validation)
 qhttp_test(unit body-codec       unit/message/body-codec.cpp)
 qhttp_test(unit headers-utility  unit/message/headers-utility.cpp)
 qhttp_test(unit cookie           unit/cookie/cookie.cpp)
@@ -125,10 +137,6 @@ qhttp_test(system ws-framing-edge  system/ws/ws-framing-edge.cpp  REQUIRES ssl l
 # SPLIT-PENDING — legacy monoliths still flat; dissolved + removed by the split waves.
 # Registered transitionally with the REQUIRES they currently need to BUILD (SSL-on).
 # =============================================================================
-qhttp_test(unit   _pending-utility           test-utility.cpp)
-qhttp_test(unit   _pending-uri-only          test-uri-only.cpp)
-qhttp_test(unit   _pending-dos-protection    test-dos-protection.cpp)
-qhttp_test(unit   _pending-validation        test-validation.cpp)
 qhttp_test(system _pending-session-http      test-session-http.cpp      REQUIRES ssl live EXTRA_LABELS http1 ssl)
 qhttp_test(system _pending-integration-middleware test-integration-middleware.cpp REQUIRES ssl live EXTRA_LABELS middleware ssl)
 qhttp_test(system _pending-ws-security       test-ws-security.cpp       REQUIRES ssl live EXTRA_LABELS ws)

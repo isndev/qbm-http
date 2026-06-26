@@ -302,12 +302,15 @@ TEST_F(BodyTest, MultipartAssignmentAndConversion) {
     Multipart original_mp = create_simple_multipart();
     body                  = original_mp;
 
-    // Basic check: The body should contain the boundary.
+    // The serialized body opens with "--<boundary>\r\n"; the boundary is recovered
+    // from that first line on parse, so the round-trip boundary is deterministic and
+    // equals the original (not "might change"). Pin both facts explicitly.
     std::string body_str = body.as<std::string>();
     EXPECT_NE(body_str.find(original_mp.boundary()), std::string::npos);
+    EXPECT_TRUE(body_str.starts_with("--" + original_mp.boundary() + "\r\n"));
 
     Multipart parsed_mp = body.as<Multipart>();
-    EXPECT_EQ(original_mp.boundary(), parsed_mp.boundary()); // Boundary might change if not set from body
+    EXPECT_EQ(parsed_mp.boundary(), original_mp.boundary());
     ASSERT_EQ(original_mp.parts().size(), parsed_mp.parts().size());
 
     // Compare parts (basic comparison)
@@ -517,17 +520,26 @@ TEST_F(BodyTest, SelfAssignment) {
     body2          = body_ref; // Test self-assignment (copy) via reference
     EXPECT_EQ("other data", body2.as<std::string>());
 
-    // Test self-move assignment
-    // body = std::move(body); // This is problematic and usually indicates a bug in user code.
-    // The standard library containers have specific behavior for self-move.
-    // For qb::allocator::pipe, the behavior might depend on its specific
-    // move assignment operator implementation.
-    // A common outcome is that the object is left in a valid but unspecified state.
-    // It's generally not a useful test unless specific guarantees are made.
+}
 
-    // No specific test for self-move for now as default implementation should handle it,
-    // and direct self-move is often undefined behavior or leads to an unspecified state.
-    // The existing move assignment test `body = std::move(s_val_move);` already tests the move mechanics.
+// Self-move assignment must leave the Body in a valid state (no crash, no UAF):
+// the post-condition is "valid but unspecified", so we pin the only guarantee the
+// standard makes — the object remains usable and can be reassigned and read back.
+TEST_F(BodyTest, SelfMoveAssignmentLeavesValidState) {
+    body = "before self-move";
+
+    // Launder through a reference so the compiler cannot diagnose the self-move.
+    Body &self = body;
+    body       = std::move(self); // valid-but-unspecified afterwards; must not crash
+
+    // The Body is still a usable object: reassign and read back deterministically.
+    body = "after self-move";
+    EXPECT_EQ("after self-move", body.as<std::string>());
+    EXPECT_FALSE(body.empty());
+
+    // Clearing a self-moved-then-reused Body still works.
+    body.clear();
+    EXPECT_TRUE(body.empty());
 }
 
 TEST_F(BodyTest, ExplicitBodyConstructorsAndAssignments) {
@@ -690,10 +702,4 @@ TEST(BodyTryAs, MalformedJsonReturnsNulloptInsteadOfThrowing) {
         auto result = b.try_as<qb::json>();
         EXPECT_FALSE(result.has_value());
     });
-}
-
-int
-main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

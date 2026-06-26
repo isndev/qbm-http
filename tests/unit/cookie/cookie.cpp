@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <chrono>
+#include "../date.h" // qb::http::date::format_http_date (expiry ground-truth asserts)
 #include "../http.h"
 
 using namespace qb::http;
@@ -53,20 +55,28 @@ TEST_F(CookieTest, Expiration) {
     EXPECT_FALSE(cookie.expires().has_value());
     EXPECT_FALSE(cookie.max_age().has_value());
 
-    // Set expiration using time point
+    // Set expiration using time point: expires(tp) stores the exact value, so
+    // assert the computed time, not just that an optional became engaged.
     auto future_time = getFutureTime(3600); // 1 hour from now
     cookie.expires(future_time);
-    EXPECT_TRUE(cookie.expires().has_value());
+    ASSERT_TRUE(cookie.expires().has_value());
+    EXPECT_EQ(cookie.expires().value(), future_time);
 
     // Set max-age
     cookie.max_age(std::chrono::seconds(1800)); // 30 minutes
     EXPECT_TRUE(cookie.max_age().has_value());
     EXPECT_EQ(1800, cookie.max_age().value());
 
-    // Test expires_in helper
-    Cookie another_cookie("test2", "value2");
+    // expires_in(ttl) computes now()+ttl: assert the result lands in a tight
+    // window around the expected instant (allow 5s of test-execution slack).
+    const auto before = std::chrono::system_clock::now();
+    Cookie     another_cookie("test2", "value2");
     another_cookie.expires_in(std::chrono::seconds(7200)); // 2 hours
-    EXPECT_TRUE(another_cookie.expires().has_value());
+    ASSERT_TRUE(another_cookie.expires().has_value());
+    const auto expected_lo = before + std::chrono::seconds(7200);
+    const auto expected_hi = std::chrono::system_clock::now() + std::chrono::seconds(7200);
+    EXPECT_GE(another_cookie.expires().value(), expected_lo);
+    EXPECT_LE(another_cookie.expires().value(), expected_hi);
 }
 
 TEST_F(CookieTest, ToHeader) {
@@ -138,10 +148,11 @@ TEST_F(CookieTest, MaxAgeAndExpires) {
     // Mais définir max-age dans le futur
     cookie.max_age(std::chrono::seconds(3600));
 
-    // Les deux attributs doivent apparaître dans l'en-tête
-    std::string header = cookie.to_header();
-    EXPECT_TRUE(header.find("Max-Age=3600") != std::string::npos);
-    EXPECT_TRUE(header.find("Expires=") != std::string::npos);
+    // Both attributes must appear, and the serialization is fully deterministic:
+    // assert the exact ordered header (Expires precedes Max-Age precedes Path).
+    std::string       header           = cookie.to_header();
+    const std::string expected_expires = "Expires=" + qb::http::date::format_http_date(past);
+    EXPECT_EQ(header, "test=value; " + expected_expires + "; Max-Age=3600; Path=/");
 }
 
 // Test pour vérifier SameSite=None avec Secure (bonne pratique)
@@ -210,6 +221,76 @@ TEST_F(CookieTest, SizeLimits) {
     // Le cookie devrait être correctement formé
     std::string header = cookie.to_header();
     EXPECT_TRUE(header.find(long_name + "=" + long_value) == 0);
+}
+
+TEST_F(CookieTest, ParseCookiesValueAtLimitSucceeds) {
+    // A value of exactly COOKIE_VALUE_MAX - 1 bytes is accepted by the tokenizer
+    // (the limit check rejects only on reaching COOKIE_VALUE_MAX).
+    std::string at_limit_value(COOKIE_VALUE_MAX - 1, 'v');
+    auto        cookies = parse_cookies(std::string("big=" + at_limit_value), false);
+    ASSERT_EQ(cookies.size(), 1u);
+    EXPECT_EQ(cookies["big"], at_limit_value);
+}
+
+TEST_F(CookieTest, ParseCookiesExactlyLimitValueIsAccepted) {
+    // Ground truth (cookie.cpp:187): the guard is `length() >= COOKIE_VALUE_MAX`
+    // checked BEFORE pushing, so the longest accepted value is exactly
+    // COOKIE_VALUE_MAX bytes (the check passes for lengths 0..MAX-1, then the
+    // MAX-th char is pushed). A value of exactly COOKIE_VALUE_MAX is therefore
+    // ACCEPTED verbatim, not rejected. COOKIE_VALUE_MAX is the max stored length.
+    std::string at_max_value(COOKIE_VALUE_MAX, 'v');
+    auto        cookies = parse_cookies(std::string("big=" + at_max_value), false);
+    ASSERT_EQ(cookies.size(), 1u);
+    EXPECT_EQ(cookies["big"].size(), static_cast<std::size_t>(COOKIE_VALUE_MAX));
+    EXPECT_EQ(cookies["big"], at_max_value);
+}
+
+TEST_F(CookieTest, ParseCookiesOverLimitValueIsRejected) {
+    // The FIRST rejected length is COOKIE_VALUE_MAX + 1: on the (MAX+1)-th value
+    // char the guard `length() >= COOKIE_VALUE_MAX` (cookie.cpp:187) trips and
+    // throws, keeping memory bounded against a malicious oversized Cookie header.
+    std::string over_limit_value(COOKIE_VALUE_MAX + 1, 'v');
+    EXPECT_THROW((void) parse_cookies(std::string("big=" + over_limit_value), false), std::runtime_error);
+}
+
+TEST_F(CookieTest, ParseCookiesExactlyLimitNameIsAccepted) {
+    // Same boundary semantics as the value guard (cookie.cpp:164): the check is
+    // `length() >= COOKIE_NAME_MAX` before pushing, so a name of exactly
+    // COOKIE_NAME_MAX bytes is the longest accepted, not a rejection.
+    std::string at_max_name(COOKIE_NAME_MAX, 'n');
+    auto        cookies = parse_cookies(std::string(at_max_name + "=v"), false);
+    ASSERT_EQ(cookies.size(), 1u);
+    EXPECT_EQ(cookies[at_max_name], "v");
+}
+
+TEST_F(CookieTest, ParseCookiesOverLimitNameIsRejected) {
+    // The FIRST rejected name length is COOKIE_NAME_MAX + 1: the (MAX+1)-th name
+    // char trips the guard `length() >= COOKIE_NAME_MAX` (cookie.cpp:164).
+    std::string over_limit_name(COOKIE_NAME_MAX + 1, 'n');
+    EXPECT_THROW((void) parse_cookies(std::string(over_limit_name + "=v"), false), std::runtime_error);
+}
+
+TEST_F(CookieTest, HostPrefixCookieNameIsPreservedAndRoundTrips) {
+    // RFC 6265bis __Host-/__Secure- prefixes are part of the cookie name; the
+    // parser carries them verbatim (no stripping, no enforcement here).
+    auto result = parse_set_cookie("__Host-session=abc123; Path=/; Secure");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->name(), "__Host-session");
+    EXPECT_EQ(result->value(), "abc123");
+    EXPECT_EQ(result->path(), "/");
+    EXPECT_TRUE(result->secure());
+
+    // The prefix survives serialization byte-for-byte.
+    EXPECT_EQ(result->to_header().substr(0, 22), "__Host-session=abc123;");
+}
+
+TEST_F(CookieTest, SecurePrefixCookieNameIsPreserved) {
+    auto result = parse_set_cookie("__Secure-id=42; Secure; HttpOnly");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->name(), "__Secure-id");
+    EXPECT_EQ(result->value(), "42");
+    EXPECT_TRUE(result->secure());
+    EXPECT_TRUE(result->http_only());
 }
 
 //////////////////////////////////////////////////
@@ -618,18 +699,23 @@ TEST_F(CookieTest, MaxAgeParsingInvalidValues) {
         EXPECT_FALSE(result->max_age().has_value());
     }
 
-    // Test Max-Age with leading whitespace in value
+    // Test Max-Age with leading whitespace in value. parse_set_cookie applies
+    // utility::trim_http_whitespace to the attribute value before from_chars
+    // (cookie.cpp:323), so the leading space is stripped and "456" parses fully.
+    // Pin the deterministic qb behavior rather than accept-either.
     {
         auto result = parse_set_cookie("test=value; Max-Age= 456");
         ASSERT_TRUE(result.has_value());
-        // Note: Some implementations of std::from_chars may skip leading whitespace
-        // The important thing is that the cookie is valid and max_age is either
-        // set (if parsed) or not set (if parsing failed)
-        // Either behavior is acceptable for this edge case
-        if (result->max_age().has_value()) {
-            EXPECT_EQ(456, result->max_age().value());
-        }
-        // If not set, that's also acceptable
+        ASSERT_TRUE(result->max_age().has_value());
+        EXPECT_EQ(456, result->max_age().value());
+    }
+
+    // Internal whitespace, however, leaves trailing bytes that from_chars cannot
+    // consume (ptr != end), so the Max-Age is silently dropped.
+    {
+        auto result = parse_set_cookie("test=value; Max-Age=4 56");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_FALSE(result->max_age().has_value());
     }
 }
 
@@ -754,9 +840,13 @@ TEST_F(CookieTest, ToHeaderOptimizationOnlyExpires) {
 
     std::string header = cookie.to_header();
 
-    // Should include Expires
-    EXPECT_NE(header.find("Expires="), std::string::npos);
+    // The Expires attribute must serialize the exact computed time_point via the
+    // canonical RFC 1123 formatter, not merely "be present".
+    const std::string expected_expires = "Expires=" + qb::http::date::format_http_date(future);
+    EXPECT_NE(header.find(expected_expires), std::string::npos);
     EXPECT_NE(header.find("expiring=soon"), std::string::npos);
+    // Exact full header for this single-attribute cookie.
+    EXPECT_EQ(header, "expiring=soon; " + expected_expires + "; Path=/");
 }
 
 TEST_F(CookieTest, ToHeaderOptimizationOnlyMaxAge) {
@@ -872,10 +962,4 @@ TEST_F(CookieTest, MaxAgeRoundTrip) {
     // Max-Age should survive round-trip
     EXPECT_TRUE(reparsed->max_age().has_value());
     EXPECT_EQ(3600, reparsed->max_age().value());
-}
-
-int
-main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

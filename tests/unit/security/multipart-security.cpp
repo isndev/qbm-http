@@ -61,15 +61,12 @@ TEST_F(MultipartSecurityTest, BoundaryParsingHandlesCaseAndAdditionalParameters)
 }
 
 TEST_F(MultipartSecurityTest, BoundaryAtMaxLength) {
-    // Boundary at exactly 70 characters (RFC 2046 limit)
-    std::string long_boundary(70, 'a');
-    std::string content_type = "multipart/form-data; boundary=" + long_boundary;
-    std::string boundary     = parse_boundary(content_type);
-    // Should either succeed or throw with appropriate error
-    // Behavior depends on implementation
-    if (!boundary.empty()) {
-        EXPECT_LE(boundary.length(), 70);
-    }
+    // A boundary of exactly MAX_BOUNDARY_LENGTH is the inclusive upper bound
+    // (multipart.cpp is_valid_boundary uses `size() <= MAX_BOUNDARY_LENGTH`),
+    // so it parses and is returned verbatim. Pin the deterministic outcome.
+    const std::string long_boundary(multipart_limits::MAX_BOUNDARY_LENGTH, 'a');
+    const std::string content_type = "multipart/form-data; boundary=" + long_boundary;
+    EXPECT_EQ(parse_boundary(content_type), long_boundary);
 }
 
 TEST_F(MultipartSecurityTest, BodyParsingAcceptsBoundaryAtMaxLength) {
@@ -112,6 +109,43 @@ TEST_F(MultipartSecurityTest, ExcessivePartCountIsRejected) {
                  "\r\n"
                  "v\r\n";
     }
+    raw += "--" + boundary + "--";
+
+    Body body;
+    body = raw;
+    EXPECT_THROW({ (void) body.as<Multipart>(); }, std::runtime_error);
+}
+
+TEST_F(MultipartSecurityTest, ParseSideRejectsControlCharacterInPartHeaderName) {
+    // On the parse path a part header field name may only contain RFC token
+    // characters; an embedded control byte (here a NUL) trips the parser's
+    // "Malformed header name" and Body::as<Multipart>() surfaces it as a throw
+    // (the wire complement of the serialize-side injection defenses below).
+    const std::string boundary = "bnd";
+    std::string       raw       = "--" + boundary + "\r\n";
+    raw += "Bad";
+    raw.push_back('\0'); // control char inside the header field name
+    raw += "Name: form-data; name=\"f\"\r\n\r\nvalue\r\n";
+    raw += "--" + boundary + "--";
+
+    Body body;
+    body = raw;
+    EXPECT_THROW({ (void) body.as<Multipart>(); }, std::runtime_error);
+}
+
+TEST_F(MultipartSecurityTest, ParseSideRejectsOversizedPartHeaderValue) {
+    // Per-part header value size is capped on the parse path at
+    // multipart_limits::MAX_HEADER_VALUE_LENGTH (body.cpp:196); a single part
+    // whose header value exceeds it is rejected before accumulating unbounded.
+    const std::string boundary  = "bnd";
+    const std::string huge_value(multipart_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');
+    std::string       raw = "--" + boundary
+                            + "\r\n"
+                              "X-Big: "
+                            + huge_value
+                            + "\r\n"
+                              "\r\n"
+                              "value\r\n";
     raw += "--" + boundary + "--";
 
     Body body;
@@ -188,29 +222,46 @@ TEST_F(MultipartSecurityTest, ValidHeaderAttributesParsing) {
     EXPECT_EQ(result["filename"], "document.pdf");
 }
 
-TEST_F(MultipartSecurityTest, HeaderAttributesAtLimit) {
-    // Header attributes at size limit should work
-    std::string large_value(64000, 'x');
-    std::string attrs = "data=" + large_value;
-
-    // Behavior depends on limit - should either work or throw
-    try {
-        auto result = parse_header_attributes(attrs.data(), attrs.size());
-        // If succeeded, verify result
-        if (result.find("data") != result.end()) {
-            EXPECT_FALSE(result["data"].empty());
-        }
-    } catch (const std::runtime_error &e) {
-        // If limit is lower, this is expected
-        EXPECT_TRUE(std::string(e.what()).find("size") != std::string::npos || std::string(e.what()).find("exceeds") != std::string::npos);
-    }
+TEST_F(MultipartSecurityTest, HeaderAttributeValueAtLimitSucceeds) {
+    // The per-value cap is ATTRIBUTE_VALUE_MAX (8192). A value of exactly
+    // ATTRIBUTE_VALUE_MAX - 1 bytes is the largest accepted (the check rejects on
+    // reaching the cap), so this is deterministic success — not accept-either.
+    const std::string at_limit_value(ATTRIBUTE_VALUE_MAX - 1, 'x');
+    const std::string attrs  = "data=" + at_limit_value;
+    auto              result = parse_header_attributes(attrs.data(), attrs.size());
+    ASSERT_TRUE(result.find("data") != result.end());
+    EXPECT_EQ(result["data"].size(), static_cast<std::size_t>(ATTRIBUTE_VALUE_MAX - 1));
+    EXPECT_EQ(result["data"], at_limit_value);
 }
 
-TEST_F(MultipartSecurityTest, HeaderAttributesOverLimitIsRejected) {
-    // Header attributes exceeding 64KB should be rejected
-    std::string huge_value(70000, 'y');
-    std::string attrs = "data=" + huge_value;
+TEST_F(MultipartSecurityTest, HeaderAttributeValueExactlyAtLimitIsAccepted) {
+    // Ground truth (headers.cpp:199): the guard is `size() >= ATTRIBUTE_VALUE_MAX`
+    // checked BEFORE pushing, so the longest accepted value is exactly
+    // ATTRIBUTE_VALUE_MAX bytes. A value of exactly ATTRIBUTE_VALUE_MAX is
+    // therefore ACCEPTED verbatim, not rejected — the constant is the max stored
+    // length, and rejection only triggers when a further char would exceed it.
+    const std::string at_max_value(ATTRIBUTE_VALUE_MAX, 'x');
+    const std::string attrs  = "data=" + at_max_value;
+    auto              result = parse_header_attributes(attrs.data(), attrs.size());
+    ASSERT_TRUE(result.find("data") != result.end());
+    EXPECT_EQ(result["data"].size(), static_cast<std::size_t>(ATTRIBUTE_VALUE_MAX));
+    EXPECT_EQ(result["data"], at_max_value);
+}
 
+TEST_F(MultipartSecurityTest, HeaderAttributeValueOverLimitIsRejected) {
+    // The FIRST rejected length is ATTRIBUTE_VALUE_MAX + 1: on the (MAX+1)-th value
+    // char the guard `size() >= ATTRIBUTE_VALUE_MAX` (headers.cpp:199) trips and
+    // throws, even though the whole input stays well under the 64KB total cap.
+    const std::string over_value(ATTRIBUTE_VALUE_MAX + 1, 'x');
+    const std::string attrs = "data=" + over_value;
+    EXPECT_THROW({ (void) parse_header_attributes(attrs.data(), attrs.size()); }, std::runtime_error);
+}
+
+TEST_F(MultipartSecurityTest, HeaderAttributesTotalInputOverLimitIsRejected) {
+    // The whole-input guard (len > 64KB) trips before any per-value parsing,
+    // so a >64KB blob is rejected even split across many small attributes.
+    constexpr std::size_t over_total = 64u * 1024u + 1u;
+    const std::string     attrs(over_total, 'y');
     EXPECT_THROW({ (void) parse_header_attributes(attrs.data(), attrs.size()); }, std::runtime_error);
 }
 
@@ -231,14 +282,17 @@ TEST_F(MultipartSecurityTest, HeaderAttributesWithQuotes) {
 }
 
 TEST_F(MultipartSecurityTest, HeaderAttributesFlagStyle) {
-    // Flag-style attributes (no value)
+    // Flag-style attributes (no '=') must be present AND map to an empty value,
+    // matching the documented behavior (not merely "key exists").
     std::string attrs  = "required; secure; httponly";
     auto        result = parse_header_attributes(attrs.data(), attrs.size());
 
-    // Flag-style attributes should be parsed as empty values
-    EXPECT_TRUE(result.find("required") != result.end());
-    EXPECT_TRUE(result.find("secure") != result.end());
-    EXPECT_TRUE(result.find("httponly") != result.end());
+    ASSERT_TRUE(result.find("required") != result.end());
+    ASSERT_TRUE(result.find("secure") != result.end());
+    ASSERT_TRUE(result.find("httponly") != result.end());
+    EXPECT_EQ(result["required"], "");
+    EXPECT_EQ(result["secure"], "");
+    EXPECT_EQ(result["httponly"], "");
 }
 
 // ====================================================================
@@ -337,10 +391,4 @@ TEST_F(MultipartSecurityTest, SerializationRejectsInvalidBoundaryLength) {
     qb::allocator::pipe<char> out;
     EXPECT_THROW(out.put(mp), std::length_error);
     EXPECT_TRUE(out.empty());
-}
-
-int
-main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
