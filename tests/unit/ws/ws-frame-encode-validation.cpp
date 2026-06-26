@@ -105,3 +105,114 @@ TEST(WebSocketFrameEncodeValidation, SetSubprotocolsRejectsBadAndAcceptsGoodToke
     EXPECT_THROW(client.set_subprotocols({"chat.v1", "bad proto"}), std::invalid_argument);
     EXPECT_NO_THROW(client.set_subprotocols({"chat.v1", "superchat-v2"}));
 }
+
+// ---------------------------------------------------------------------------
+// Handshake header-parsing primitives (qb::protocol::detail).
+//
+// These pure inline helpers back BOTH the server `populate_handshake_response`
+// and the client `validate_handshake_response`. The over-the-wire system tests
+// only exercise their happy path; the cases below pin the case-folding,
+// token-grammar, comma-list, OWS-trim and constant-time-equality branches
+// directly (ws.h:807..880) with no socket.
+// ---------------------------------------------------------------------------
+
+TEST(WsHandshakeDetail, IequalAsciiFoldsCaseAndRejectsMismatches) {
+    using qb::protocol::detail::iequal_ascii;
+
+    EXPECT_TRUE(iequal_ascii("websocket", "WebSocket"));
+    EXPECT_TRUE(iequal_ascii("UPGRADE", "upgrade"));
+    EXPECT_TRUE(iequal_ascii("", ""));
+    EXPECT_FALSE(iequal_ascii("websocket", "websockets")); // length mismatch
+    EXPECT_FALSE(iequal_ascii("websocket", "websscket"));  // single-byte differ
+}
+
+TEST(WsHandshakeDetail, IsTokenCharAndIsValidToken) {
+    using qb::protocol::detail::is_token_char;
+    using qb::protocol::detail::is_valid_token;
+
+    // RFC 7230 token chars: alphanumerics + a fixed punctuation set.
+    EXPECT_TRUE(is_token_char('a'));
+    EXPECT_TRUE(is_token_char('Z'));
+    EXPECT_TRUE(is_token_char('0'));
+    EXPECT_TRUE(is_token_char('!'));
+    EXPECT_TRUE(is_token_char('~'));
+    // Non-token separators / controls.
+    EXPECT_FALSE(is_token_char(' '));
+    EXPECT_FALSE(is_token_char(','));
+    EXPECT_FALSE(is_token_char('\n'));
+    EXPECT_FALSE(is_token_char('('));
+
+    EXPECT_TRUE(is_valid_token("chat.v1"));
+    EXPECT_TRUE(is_valid_token("superchat-v2"));
+    EXPECT_FALSE(is_valid_token(""));          // empty rejected
+    EXPECT_FALSE(is_valid_token("chat v1"));   // space
+    EXPECT_FALSE(is_valid_token("chat,v1"));   // comma
+}
+
+TEST(WsHandshakeDetail, HasTokenCiHandlesListsCaseAndWhitespace) {
+    using qb::protocol::detail::has_token_ci;
+
+    // Single token, exact and case-folded.
+    EXPECT_TRUE(has_token_ci("Upgrade", "upgrade"));
+    EXPECT_TRUE(has_token_ci("upgrade", "Upgrade"));
+    // Multi-token Connection list with OWS around each element.
+    EXPECT_TRUE(has_token_ci("keep-alive, Upgrade", "upgrade"));
+    EXPECT_TRUE(has_token_ci("  Upgrade  ,  keep-alive  ", "upgrade"));
+    EXPECT_TRUE(has_token_ci("a,b,c,Upgrade", "upgrade"));
+    // Absent token in a list.
+    EXPECT_FALSE(has_token_ci("keep-alive, close", "upgrade"));
+    // Empty header value and an all-whitespace element (find_first_not_of npos
+    // branch) must not match.
+    EXPECT_FALSE(has_token_ci("", "upgrade"));
+    EXPECT_FALSE(has_token_ci("  ,  ", "upgrade"));
+}
+
+TEST(WsHandshakeDetail, TrimOwsStripsSurroundingSpacesAndTabs) {
+    using qb::protocol::detail::trim_ows;
+
+    EXPECT_EQ(trim_ows("  value  "), "value");
+    EXPECT_EQ(trim_ows("\tvalue\t"), "value");
+    EXPECT_EQ(trim_ows("value"), "value");
+    EXPECT_EQ(trim_ows("   "), std::string_view{}); // all-OWS → empty (npos branch)
+    EXPECT_EQ(trim_ows(""), std::string_view{});
+}
+
+TEST(WsHandshakeDetail, ConstantTimeEqualMatchesAndDiffers) {
+    using qb::protocol::detail::constant_time_equal;
+
+    EXPECT_TRUE(constant_time_equal("abc123", "abc123"));
+    EXPECT_TRUE(constant_time_equal("", ""));
+    EXPECT_FALSE(constant_time_equal("abc123", "abc124")); // last byte differs
+    EXPECT_FALSE(constant_time_equal("abc", "abcd"));       // length differs
+}
+
+// ---------------------------------------------------------------------------
+// MessageClose typed-status constructor (ws.h:289 delegating ctor).
+//
+// The encode/validation TU never builds a Close via the CloseStatus overload;
+// the close-frame-negative TU does, but coverage is per-binary. Pin the typed
+// overload here so this binary records the delegating constructor and its
+// status-byte layout.
+// ---------------------------------------------------------------------------
+
+TEST(WebSocketFrameEncodeValidation, MessageCloseTypedStatusOverloadEncodesStatusBytes) {
+    using qb::http::ws::CloseStatus;
+    using qb::http::ws::MessageClose;
+
+    MessageClose msg{CloseStatus::GoingAway, "bye"};
+    ASSERT_GE(msg.size(), 2u + 3u);
+
+    const auto         status = static_cast<std::uint16_t>(CloseStatus::GoingAway);
+    const char        *bytes  = msg._data.begin();
+    EXPECT_EQ(static_cast<std::uint8_t>(bytes[0]), static_cast<std::uint8_t>((status >> 8) & 0xFFu));
+    EXPECT_EQ(static_cast<std::uint8_t>(bytes[1]), static_cast<std::uint8_t>(status & 0xFFu));
+    EXPECT_EQ(std::string_view(bytes + 2, msg.size() - 2), "bye");
+
+    // The default-status overload uses Normal (1000) with the default reason.
+    MessageClose def{CloseStatus::Normal};
+    ASSERT_GE(def.size(), 2u);
+    const auto   normal = static_cast<std::uint16_t>(CloseStatus::Normal);
+    const char  *db     = def._data.begin();
+    EXPECT_EQ(static_cast<std::uint8_t>(db[0]), static_cast<std::uint8_t>((normal >> 8) & 0xFFu));
+    EXPECT_EQ(static_cast<std::uint8_t>(db[1]), static_cast<std::uint8_t>(normal & 0xFFu));
+}

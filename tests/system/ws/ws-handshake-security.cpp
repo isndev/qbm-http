@@ -222,6 +222,57 @@ TEST(WsHandshakeSecurity, NonGetMethodIsRejected) {
     sock.close();
 }
 
+// ---------------------------------------------------------------------------
+// Sec-WebSocket-Key value validation inside populate_handshake_response.
+//
+// The session's own pre-check only requires the key to be *present*; the strict
+// RFC 6455 §4.2.1 validation (24-char base64 of 16 bytes) lives in
+// ws_server::populate_handshake_response (ws.h:913..926). A key that is present
+// but malformed therefore passes the session gate, is handed to switch_protocol,
+// and the ws_server constructor rejects it → 400 + not_ok (ws.h:964). Each case
+// below isolates one rejection branch and asserts the 400.
+// ---------------------------------------------------------------------------
+
+TEST(WsHandshakeSecurity, WrongLengthKeyIsRejected) {
+    WsServerThread<SecurityServer> server{ephemeral_port()};
+    auto sock = connect_raw(server.port);
+
+    // 8-char key: non-empty (passes session gate) but != 24 chars (ws.h:915).
+    write_all(sock, raw_handshake_request(server.port, "shortkey"));
+
+    const auto response = read_http_response(sock);
+    EXPECT_NE(response.find("400"), std::string::npos) << response;
+    sock.close();
+}
+
+TEST(WsHandshakeSecurity, NonBase64KeyOfCorrectLengthIsRejected) {
+    WsServerThread<SecurityServer> server{ephemeral_port()};
+    auto sock = connect_raw(server.port);
+
+    // Exactly 24 chars but contains characters illegal in base64 ('*','!','@'),
+    // so base64::decode either throws or yields the wrong byte count
+    // (ws.h:919-926). Either way → 400.
+    write_all(sock, raw_handshake_request(server.port, "************************"));
+
+    const auto response = read_http_response(sock);
+    EXPECT_NE(response.find("400"), std::string::npos) << response;
+    sock.close();
+}
+
+TEST(WsHandshakeSecurity, WellFormedButWrongDecodedSizeKeyIsRejected) {
+    WsServerThread<SecurityServer> server{ephemeral_port()};
+    auto sock = connect_raw(server.port);
+
+    // 24 valid base64 chars decoding to 18 bytes (not 16). "AAAAAAAAAAAAAAAAAAAAAAAA"
+    // is 24 'A's = 18 zero bytes when base64-decoded, so the size check at
+    // ws.h:923 (decoded_key.size() != 16) fires → 400.
+    write_all(sock, raw_handshake_request(server.port, "AAAAAAAAAAAAAAAAAAAAAAAA"));
+
+    const auto response = read_http_response(sock);
+    EXPECT_NE(response.find("400"), std::string::npos) << response;
+    sock.close();
+}
+
 // ===========================================================================
 // Wire compliance: client→server frames must be masked.
 // ===========================================================================

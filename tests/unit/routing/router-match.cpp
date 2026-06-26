@@ -583,6 +583,42 @@ TEST_F(RouterMatchTest, IdenticalWildcardPathDifferentMethods) {
     EXPECT_EQ(param("details"), "css/theme.css");
 }
 
+// 405 on a path that only a WILDCARD route covers: the Allow header must be
+// assembled from the wildcard branch of allowed_methods (the multi-segment
+// capture path), proving the wildcard contributes its methods to the merge.
+TEST_F(RouterMatchTest, MethodNotAllowedOnWildcardOnlyPathMergesWildcardMethods) {
+    router.get("/static/*path", make_verifying_handler<MockSession>("get_static"));
+    router.post("/static/*path", make_verifying_handler<MockSession>("post_static"));
+    router.compile();
+
+    // GET/POST dispatch normally through the wildcard.
+    route(HTTP_GET, "/static/js/app.js");
+    EXPECT_EQ(mock_session->_handler_id, "get_static");
+
+    // DELETE is unregistered for the wildcard path → 405 whose Allow lists the
+    // wildcard branch's methods (this drives the multi-segment wildcard merge).
+    mock_session->reset();
+    route(HTTP_DELETE, "/static/css/site/theme.css");
+    EXPECT_FALSE(mock_session->_handler_executed);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_METHOD_NOT_ALLOWED);
+    EXPECT_EQ(mock_session->_response.header("Allow"), "GET, POST");
+}
+
+// 405 where the request terminates exactly at the node owning a wildcard child
+// (the "/x/" base-case): allowed_methods must fold in the wildcard child's
+// methods via its empty-capture branch.
+TEST_F(RouterMatchTest, MethodNotAllowedAtWildcardParentNodeMergesEmptyCapture) {
+    router.get("/dl/*rest", make_verifying_handler<MockSession>("get_dl"));
+    router.put("/dl/*rest", make_verifying_handler<MockSession>("put_dl"));
+    router.compile();
+
+    // "/dl" terminates at the parent of the wildcard child (empty capture).
+    route(HTTP_DELETE, "/dl");
+    EXPECT_FALSE(mock_session->_handler_executed);
+    EXPECT_EQ(mock_session->_response.status(), HTTP_STATUS_METHOD_NOT_ALLOWED);
+    EXPECT_EQ(mock_session->_response.header("Allow"), "GET, PUT");
+}
+
 // ===========================================================================
 // Structural prefix / extension mismatches and empty router
 // ===========================================================================

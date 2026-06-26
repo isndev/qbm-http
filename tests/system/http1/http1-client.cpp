@@ -75,6 +75,19 @@ public:
             ctx->complete();
         });
 
+        // Emits a MULTI-TOKEN Connection header ("keep-alive, close") so the
+        // client's has_connection_close() token-split + trim + case-insensitive
+        // compare loop (client.cpp `for (token : split(value, ","))`) must walk
+        // past the leading token to find "close". A naive substring/equality
+        // check on the whole header value would miss it.
+        router().get("/multi-close", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "multi-bye";
+            ctx->response().set_header("Connection", "keep-alive, close");
+            ctx->complete();
+        });
+
         router().get("/item/:id", [this](auto ctx) {
             ++request_count;
             ctx->response().status() = qb::http::status::OK;
@@ -103,6 +116,31 @@ public:
             ++request_count;
             ctx->response().status() = qb::http::status::CREATED;
             ctx->response().body()   = ctx->request().body().template as<std::string>();
+            ctx->complete();
+        });
+
+        // Echoes back the EXACT raw request body bytes the server received (the
+        // wire bytes after the client serialized them). When the client compresses
+        // its request body (Content-Encoding), the server here sees + returns the
+        // compressed bytes, letting the test observe that compression happened.
+        router().post("/echo-raw", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = ctx->request().body().template as<std::string>();
+            ctx->complete();
+        });
+
+        // Returns a body that the handler compresses itself (then tags with
+        // Content-Encoding: gzip) so the wire carries gzip bytes and the client's
+        // on(response) path must uncompress it back to the original plaintext.
+        router().get("/gzipped", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(512, 'Q');
+#ifdef QB_HAS_COMPRESSION
+            ctx->response().body().compress("gzip");
+            ctx->response().set_header("Content-Encoding", "gzip");
+#endif
             ctx->complete();
         });
 
@@ -641,3 +679,184 @@ TEST(Http1ClientTest, ThrowingUserCallbackIsContainedAndClientSurvives) {
     auto after = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
     EXPECT_EQ(after.status(), qb::http::status::OK);
 }
+
+// A multi-token "Connection: keep-alive, close" response value still results in
+// connection-close handling: whichever layer detects the "close" token (the
+// HTTP/1.1 parser's keep_alive flag and/or the client's has_connection_close
+// token walk), the client tears the connection down and opens a fresh one for the
+// next request. Observable: the second request rides a new server connection.
+TEST(Http1ClientTest, MultiTokenConnectionCloseHeaderForcesReconnect) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    auto closing =
+        qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/multi-close")));
+    EXPECT_EQ(closing.status(), qb::http::status::OK);
+    EXPECT_EQ(closing.body().template as<std::string>(), "multi-bye");
+
+    auto after = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+    EXPECT_EQ(after.status(), qb::http::status::OK);
+    EXPECT_EQ(after.body().template as<std::string>(), "pong");
+    // The "close" token forced a teardown, so the second request rode a new
+    // connection: at least two server-side connections were observed.
+    EXPECT_GE(server.connection_count(), 2);
+}
+
+// With auto-reconnect DISABLED and no live connection, process_pending_requests()
+// takes the "!_auto_reconnect" branch: it pops the head pending request and fails
+// it synchronously with 503 ("HTTP/1.1 client is not connected"), then recurses to
+// drain the rest the same way — never attempting a connect. We point the client at
+// a closed port so no connection can exist.
+TEST(Http1ClientTest, AutoReconnectDisabledFailsPendingRequestsWithoutConnecting) {
+    auto client = qb::http1::make_client("http://127.0.0.1:1");
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero()); // disarm the pending timeout
+
+    qb::http::status status_a = qb::http::status::IM_A_TEAPOT;
+    qb::http::status status_b = qb::http::status::IM_A_TEAPOT;
+    bool             a_done   = false;
+    bool             b_done   = false;
+
+    // Two queued requests must BOTH be drained by the no-reconnect recursion.
+    client->push_request(request(qb::http::method::GET, "/a"), [&](qb::http::Response r) {
+        status_a = r.status();
+        a_done   = true;
+    });
+    client->push_request(request(qb::http::method::GET, "/b"), [&](qb::http::Response r) {
+        status_b = r.status();
+        b_done   = true;
+    });
+
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return a_done && b_done; }));
+    EXPECT_EQ(status_a, qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(status_b, qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// set_max_pending_requests(0) makes the very first push exceed the limit
+// (pending+active 0 >= 0), so push_request synthesizes a 503 "pending request
+// limit reached", returns false, and increments the failed-request counter — all
+// without ever queueing or connecting.
+TEST(Http1ClientTest, PendingRequestLimitRejectsImmediatelyWith503) {
+    auto client = qb::http1::make_client("http://127.0.0.1:1");
+    client->set_max_pending_requests(0);
+
+    qb::http::status status = qb::http::status::IM_A_TEAPOT;
+    bool             done   = false;
+    const bool       queued = client->push_request(request(qb::http::method::GET, "/ping"),
+                                                    [&](qb::http::Response r) {
+                                                  status = r.status();
+                                                  done   = true;
+                                              });
+
+    EXPECT_FALSE(queued); // over-limit push returns false
+    ASSERT_TRUE(done);    // the error callback fired synchronously
+    EXPECT_EQ(status, qb::http::status::SERVICE_UNAVAILABLE);
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 1u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 1u);
+}
+
+// An empty batch must complete immediately (no requests, no connection) by
+// invoking the batch callback with an empty vector — the push_requests
+// "requests.empty()" early-out.
+TEST(Http1ClientTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
+    auto client = qb::http1::make_client("http://127.0.0.1:1");
+
+    bool                            done = false;
+    std::vector<qb::http::Response> responses{qb::http::Response{}}; // pre-seed non-empty
+    client->push_requests({}, [&](std::vector<qb::http::Response> res) {
+        responses = std::move(res);
+        done      = true;
+    });
+
+    ASSERT_TRUE(done);
+    EXPECT_TRUE(responses.empty());
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// push_request/push_requests with an EMPTY callback are rejected up front
+// (return false) and never touch the request counters.
+TEST(Http1ClientTest, EmptyCallbackRequestsAreRejectedWithoutSideEffects) {
+    auto client = qb::http1::make_client("http://127.0.0.1:1");
+
+    EXPECT_FALSE(client->push_request(request(qb::http::method::GET, "/ping"),
+                                      qb::http1::ResponseCallback{}));
+    std::vector<qb::http::Request> reqs;
+    reqs.emplace_back(request(qb::http::method::GET, "/ping"));
+    EXPECT_FALSE(client->push_requests(std::move(reqs), qb::http1::BatchResponseCallback{}));
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 0u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 0u);
+}
+
+// Pure accessor surface: the configuration getters/setters that the loopback
+// flows above don't otherwise touch (verify_peer round-trips, base_uri is the
+// origin we constructed with, active-request count is 0 at rest).
+TEST(Http1ClientTest, ConfigurationAccessorsReflectMutations) {
+    auto client = qb::http1::make_client("http://example.test:8080/base");
+
+    EXPECT_TRUE(client->verify_peer()); // default
+    client->set_verify_peer(false);
+    EXPECT_FALSE(client->verify_peer());
+    client->set_verify_peer(true);
+    EXPECT_TRUE(client->verify_peer());
+
+    EXPECT_EQ(client->get_active_request_count(), 0u);
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+
+    const auto &base = client->get_base_uri();
+    EXPECT_EQ(base.scheme(), "http");
+    EXPECT_EQ(base.host(), "example.test");
+    EXPECT_EQ(base.port(), "8080");
+
+    // These setters are pure stores; assert they are callable on the public API.
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(7s);
+    client->set_max_pending_requests(64);
+    client->set_auto_reconnect(true);
+}
+
+#ifdef QB_HAS_COMPRESSION
+// A request carrying Content-Encoding: gzip has its body compressed by the client
+// transport BEFORE it hits the wire (client.cpp connection::send compress block).
+// The server echoes the raw bytes it received, so the response body is the
+// gzip-compressed form — strictly different from, and (for this payload) smaller
+// than, the original plaintext. That observable difference proves the client
+// performed the compression.
+TEST(Http1ClientTest, RequestBodyIsCompressedWhenContentEncodingSet) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    const std::string plaintext(2048, 'A'); // highly compressible
+    auto              req = request(qb::http::method::POST, "/echo-raw");
+    req.body()            = plaintext;
+    req.set_header("Content-Encoding", "gzip");
+
+    auto response = qb::http::run_sync(client->push_request(std::move(req)));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+
+    const auto echoed = response.body().template as<std::string>();
+    EXPECT_NE(echoed, plaintext);          // the server saw compressed bytes
+    EXPECT_LT(echoed.size(), plaintext.size()); // gzip shrank this payload
+}
+
+// A response tagged Content-Encoding: gzip is uncompressed by the client's
+// on(response) path (client.cpp uncompress block) so the application observes the
+// ORIGINAL plaintext, and the Content-Encoding header is consumed.
+TEST(Http1ClientTest, ResponseBodyIsUncompressedWhenContentEncodingSet) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    auto response = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/gzipped")));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    // The client transparently inflated the gzip payload back to 512 'Q's.
+    EXPECT_EQ(response.body().template as<std::string>(), std::string(512, 'Q'));
+}
+#endif

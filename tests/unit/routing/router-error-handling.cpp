@@ -808,4 +808,42 @@ TEST_F(RouterErrorHandlingTest, CompleteAfterAsyncErrorChainLetsTheStrayComplete
     EXPECT_EQ(_session->_response.body().as<std::string>(), "late body that wins because the error chain is still in flight");
 }
 
+// --- RouterCore::get_compiled_error_tasks() direct contract --------------------
+//
+// The accessor is normally consumed internally by Context only when a chain was
+// explicitly set (is_error_chain_set() == true). Drive both arms directly through
+// the exposed RouterCore so the nullptr (no-chain) and the materialised-list
+// (chain-set) branches are both pinned.
+TEST_F(RouterErrorHandlingTest, GetCompiledErrorTasksReflectsExplicitSet) {
+    auto core = _router->get_router_core_weak_ptr().lock();
+    ASSERT_TRUE(core) << "RouterCore must outlive the Router";
+
+    // No chain ever set: accessor must report absence and return nullptr.
+    EXPECT_FALSE(core->is_error_chain_set());
+    EXPECT_EQ(core->get_compiled_error_tasks(), nullptr);
+
+    // Explicitly set a non-empty chain.
+    auto handler = std::make_shared<CompletingTask>("StandaloneErrorHandler", _session, &_executor);
+    set_error_chain({handler});
+    EXPECT_TRUE(core->is_error_chain_set());
+
+    auto tasks = core->get_compiled_error_tasks();
+    ASSERT_NE(tasks, nullptr) << "an explicitly-set chain materialises a shared, immutable list";
+    EXPECT_EQ(tasks->size(), 1u);
+    EXPECT_EQ((*tasks)[0], handler);
+}
+
+TEST_F(RouterErrorHandlingTest, GetCompiledErrorTasksHonoursExplicitlyEmptyChain) {
+    auto core = _router->get_router_core_weak_ptr().lock();
+    ASSERT_TRUE(core);
+
+    // An explicitly-empty set still flips is_error_chain_set() true; the accessor
+    // returns a non-null but empty list (NOT the nullptr no-chain sentinel).
+    set_error_chain({});
+    EXPECT_TRUE(core->is_error_chain_set());
+    auto tasks = core->get_compiled_error_tasks();
+    ASSERT_NE(tasks, nullptr);
+    EXPECT_TRUE(tasks->empty());
+}
+
 } // namespace

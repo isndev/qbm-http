@@ -26,6 +26,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -281,4 +282,133 @@ TEST_F(DateParsingTest, ExceptionSafety) {
     EXPECT_NO_THROW((void) parse_http_date(std::string_view(kCanonicalRfc1123)));
     EXPECT_NO_THROW((void) parse_cookie_date(std::string_view("")));
     EXPECT_NO_THROW((void) parse_cookie_date(std::string_view("invalid")));
+}
+
+// ====================================================================
+// Per-field-boundary rejection in EACH parser.
+//
+// The big negative table above mostly trips the cheap front-door guards
+// (`size() != 29`, missing comma, etc.). The cases below are length-correct
+// single-character mutations of the three canonical fixtures, so each input
+// reaches deep INTO one specific parser and exercises exactly one internal
+// "wrong separator / non-numeric field" `return std::nullopt` branch that the
+// truncation table can never reach. Every input must still yield nullopt.
+// ====================================================================
+
+// Each mutation keeps the canonical RFC-1123 fixture's length (29) but corrupts
+// exactly one field, routing through parse_rfc1123_date (has ',' / no '-') to a
+// distinct interior failure branch (date.cpp:158..209).
+TEST_F(DateParsingTest, Rfc1123InteriorFieldRejections) {
+    const char *bad[] = {
+        "Sun,X06 Nov 1994 08:49:37 GMT", // no space after comma          (date.cpp:158)
+        "Sun, xx Nov 1994 08:49:37 GMT", // non-numeric day               (170)
+        "Sun, 06xNov 1994 08:49:37 GMT", // no space after day            (172)
+        "Sun, 06 NovX1994 08:49:37 GMT", // no space after month          (183)
+        "Sun, 06 Nov xxxx 08:49:37 GMT", // non-numeric year              (191)
+        "Sun, 06 Nov 1994x08:49:37 GMT", // no space after year           (193)
+        "Sun, 06 Nov 1994 xx:49:37 GMT", // non-numeric hour              (201)
+        "Sun, 06 Nov 1994 08x49:37 GMT", // missing ':' after hour        (203)
+        "Sun, 06 Nov 1994 08:xx:37 GMT", // non-numeric minute            (205)
+        "Sun, 06 Nov 1994 08:49x37 GMT", // missing ':' after minute      (207)
+        "Sun, 06 Nov 1994 08:49:xx GMT", // non-numeric second            (209)
+    };
+    for (const auto *s : bad) {
+        ASSERT_EQ(std::string_view(s).size(), 29u) << s; // fixture invariant
+        EXPECT_FALSE(parse_http_date(std::string_view(s)).has_value()) << "expected nullopt for: [" << s << "]";
+    }
+}
+
+// Length-correct (30-char) single-char mutations of the canonical RFC-850
+// fixture "Sunday, 06-Nov-94 08:49:37 GMT". Each contains a '-' so it routes to
+// parse_rfc850_date and reaches one interior branch (date.cpp:240..288).
+TEST_F(DateParsingTest, Rfc850InteriorFieldRejections) {
+    // Sanity: the canonical RFC-850 fixture parses (so the mutations below are
+    // genuinely isolating one corrupted field, not failing the front door).
+    ASSERT_TRUE(parse_http_date(std::string_view("Sunday, 06-Nov-94 08:49:37 GMT")).has_value());
+
+    const char *bad[] = {
+        "Sunday, xx-Nov-94 08:49:37 GMT", // non-numeric day             (date.cpp:240)
+        "Sunday, 06xNov-94 08:49:37 GMT", // missing '-' after day       (242)
+        "Sunday, 06-xxx-94 08:49:37 GMT", // invalid month               (251)
+        "Sunday, 06-NovX94 08:49:37 GMT", // missing '-' after month     (253)
+        "Sunday, 06-Nov-xx 08:49:37 GMT", // non-numeric year            (261)
+        "Sunday, 06-Nov-94x08:49:37 GMT", // missing space after year    (268)
+        "Sunday, 06-Nov-94 xx:49:37 GMT", // non-numeric hour            (276)
+        "Sunday, 06-Nov-94 08x49:37 GMT", // missing ':' after hour      (278)
+        "Sunday, 06-Nov-94 08:xx:37 GMT", // non-numeric minute          (280)
+        "Sunday, 06-Nov-94 08:49x37 GMT", // missing ':' after minute    (282)
+        "Sunday, 06-Nov-94 08:49:xx GMT", // non-numeric second          (284)
+        "Sunday, 06-Nov-94 08:49:37 UTC", // wrong trailing zone token   (288)
+    };
+    for (const auto *s : bad) {
+        EXPECT_FALSE(parse_http_date(std::string_view(s)).has_value()) << "expected nullopt for: [" << s << "]";
+    }
+}
+
+// Length-correct (24-char) single-char mutations of the canonical asctime
+// fixture "Sun Nov  6 08:49:37 1994" (no ',' and no '-', so the router falls
+// through to parse_asctime_date), each reaching one interior branch (309..358).
+TEST_F(DateParsingTest, AsctimeInteriorFieldRejections) {
+    ASSERT_TRUE(parse_http_date(std::string_view("Sun Nov  6 08:49:37 1994")).has_value());
+
+    const char *bad[] = {
+        "Sun xxx  6 08:49:37 1994", // invalid month                     (date.cpp:313)
+        "Sun Nov  6 xx:49:37 1994", // non-numeric hour                  (341)
+        "Sun Nov  6 08x49:37 1994", // missing ':' after hour            (343)
+        "Sun Nov  6 08:xx:37 1994", // non-numeric minute                (345)
+        "Sun Nov  6 08:49x37 1994", // missing ':' after minute          (347)
+        "Sun Nov  6 08:49:xx 1994", // non-numeric second                (349)
+        "Sun Nov  6 08:49:37 xxxx", // non-numeric year                  (358)
+    };
+    for (const auto *s : bad) {
+        ASSERT_EQ(std::string_view(s).size(), 24u) << s;
+        EXPECT_FALSE(parse_http_date(std::string_view(s)).has_value()) << "expected nullopt for: [" << s << "]";
+    }
+}
+
+// asctime allows a single-digit day with a preceding double-space ("Sun Nov  6
+// ..."). A two-digit day with three or more digits ("...  100 ...") trips the
+// `day_len > 2` guard (date.cpp:325) — pin it explicitly. A two-digit day with
+// a wrong delimiter after it trips date.cpp:333.
+TEST_F(DateParsingTest, AsctimeDayLengthAndDelimiterRejections) {
+    // Three-digit day field is impossible in asctime → rejected (325).
+    EXPECT_FALSE(parse_http_date(std::string_view("Sun Nov 100 08:49:37 994")).has_value());
+    // Two-digit day immediately followed by a non-space → rejected (333).
+    EXPECT_FALSE(parse_http_date(std::string_view("Mon Jan 15x12:30:45 2024")).has_value());
+}
+
+// ====================================================================
+// Formatting helpers that the parse-only smoke suite never touched.
+// ====================================================================
+
+// date::now() must emit a well-formed, parseable RFC-1123 string for the
+// current instant (date.cpp:436). It is non-deterministic in value, so we pin
+// only its STRUCTURE: it parses back, and re-formatting the parsed instant is a
+// byte-for-byte fixed point.
+TEST_F(DateParsingTest, NowEmitsParseableRfc1123) {
+    const std::string n = now();
+    ASSERT_EQ(n.size(), 29u) << n;
+    EXPECT_EQ(n.substr(25), " GMT");
+
+    auto parsed = parse_http_date(std::string_view(n));
+    ASSERT_TRUE(parsed.has_value()) << n;
+    EXPECT_EQ(format_http_date(*parsed), n); // round-trip fixed point
+}
+
+// date::format_timestamp() formats "YYYY-MM-DD HH:MM:SS" in LOCAL time
+// (date.cpp:440). The local offset is environment-dependent, so we pin the
+// FORMAT shape deterministically rather than the exact value.
+TEST_F(DateParsingTest, FormatTimestampShape) {
+    const auto  epoch = system_clock::time_point(std::chrono::seconds(kCanonicalEpoch));
+    const std::string s = format_timestamp(epoch);
+
+    ASSERT_EQ(s.size(), 19u) << s; // "YYYY-MM-DD HH:MM:SS"
+    EXPECT_EQ(s[4], '-');
+    EXPECT_EQ(s[7], '-');
+    EXPECT_EQ(s[10], ' ');
+    EXPECT_EQ(s[13], ':');
+    EXPECT_EQ(s[16], ':');
+    for (std::size_t i : {0u, 1u, 2u, 3u, 5u, 6u, 8u, 9u, 11u, 12u, 14u, 15u, 17u, 18u}) {
+        EXPECT_TRUE(std::isdigit(static_cast<unsigned char>(s[i]))) << "non-digit at " << i << " in [" << s << "]";
+    }
 }

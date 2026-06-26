@@ -670,6 +670,41 @@ TEST(HPACK_Encoder, EmptyHeaderNameRejected) {
     EXPECT_FALSE(encoder.encode(headers, encoded));
 }
 
+// Decoder::get_stats / Encoder::get_stats — the codecs expose live HpackStats.
+// Drive an insert through each so the insertion counter is non-zero, then read
+// the accessor (lines were previously never exercised).
+TEST(HPACK_Encoder, GetStatsReflectsInsertionsAndEvictions) {
+    Encoder encoder;
+    EXPECT_EQ(encoder.get_stats().dynamic_table_insertions, 0u);
+
+    std::vector<HeaderField> headers = {{"custom-header", "custom-value"}, {"x-trace-id", "abc-123"}};
+    std::vector<uint8_t>     encoded;
+    ASSERT_TRUE(encoder.encode(headers, encoded));
+    EXPECT_GE(encoder.get_stats().dynamic_table_insertions, 2u) << "both custom headers indexed";
+    EXPECT_EQ(encoder.get_stats().dynamic_table_evictions, 0u);
+
+    // Tighten the budget so the next insert evicts; the eviction counter must move.
+    encoder.set_max_capacity(50);
+    const std::size_t evictions_after_shrink = encoder.get_stats().dynamic_table_evictions;
+    EXPECT_GE(evictions_after_shrink, 1u) << "shrinking past the resident size evicts";
+}
+
+TEST(HPACK_Decoder, GetStatsAccessorIsLive) {
+    Decoder decoder;
+    // Fresh decoder: the stats block is default-zeroed and addressable.
+    EXPECT_EQ(decoder.get_stats().dynamic_table_insertions, 0u);
+    EXPECT_EQ(decoder.get_stats().dynamic_table_evictions, 0u);
+
+    // Decode a literal-with-incremental-indexing block; it inserts one dynamic entry.
+    std::vector<HeaderField> headers;
+    bool                     incomplete = false;
+    const std::vector<uint8_t> block = {0x40, 0x04, 'n', 'a', 'm', 'e', 0x05, 'v', 'a', 'l', 'u', 'e'};
+    ASSERT_TRUE(decoder.decode(block, headers, incomplete));
+    EXPECT_EQ(decoder.get_dynamic_table_entry_count(), 1u);
+    // The accessor returns the same object across calls (const ref, no copy churn).
+    EXPECT_EQ(&decoder.get_stats(), &decoder.get_stats());
+}
+
 // ====================================================================
 // Round-trip Tests (Encode then Decode)
 // ====================================================================
@@ -1006,6 +1041,37 @@ TEST(HPACK_StaticTableIndex, LegacyStringOverloadsStillWork) {
     const std::string value("POST");
     EXPECT_EQ(static_table::find_name_match(name).value(), 2u);
     EXPECT_EQ(static_table::find_exact_match(name, value).value(), 3u);
+}
+
+// static_table::get_entry — 1-based accessor with both out-of-range guards
+// (index 0 and index > 61) and the in-range mid-table fetch.
+TEST(HPACK_StaticTableIndex, GetEntryBoundsAndValues) {
+    EXPECT_FALSE(static_table::get_entry(0).has_value()) << "index 0 is reserved";
+    EXPECT_FALSE(static_table::get_entry(62).has_value()) << "index past the 61-row table";
+    EXPECT_FALSE(static_table::get_entry(1000).has_value());
+
+    const auto first = static_table::get_entry(1);
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->first, ":authority");
+    EXPECT_EQ(first->second, "");
+
+    const auto method_get = static_table::get_entry(2);
+    ASSERT_TRUE(method_get.has_value());
+    EXPECT_EQ(method_get->first, ":method");
+    EXPECT_EQ(method_get->second, "GET");
+
+    const auto last = static_table::get_entry(61);
+    ASSERT_TRUE(last.has_value());
+    EXPECT_EQ(last->first, "www-authenticate");
+}
+
+// static_table::is_valid_index — both bound checks, true for the full range.
+TEST(HPACK_StaticTableIndex, IsValidIndexRange) {
+    EXPECT_FALSE(static_table::is_valid_index(0));
+    EXPECT_TRUE(static_table::is_valid_index(1));
+    EXPECT_TRUE(static_table::is_valid_index(61));
+    EXPECT_FALSE(static_table::is_valid_index(62));
+    EXPECT_FALSE(static_table::is_valid_index(123456));
 }
 
 // ---------------------------------------------------------------------------

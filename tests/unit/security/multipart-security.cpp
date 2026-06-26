@@ -382,6 +382,150 @@ TEST_F(MultipartSecurityTest, SerializationRejectsBoundaryInjection) {
     EXPECT_TRUE(out.empty());
 }
 
+// ====================================================================
+// MultipartParser::setBoundary — direct error-path coverage.
+//
+// parse_boundary() guards the *header* form, but the low-level parser has its
+// own setBoundary() guards (multipart.cpp:245-256) reached when a parser is
+// driven directly (e.g. by a streaming consumer). These pin the two rejection
+// reasons and the resulting ERROR state, plus the accept path.
+// ====================================================================
+
+TEST_F(MultipartSecurityTest, ParserSetBoundaryRejectsEmpty) {
+    MultipartParser parser;
+    parser.setBoundary("");
+    EXPECT_TRUE(parser.hasError());
+    EXPECT_STREQ(parser.getErrorMessage(), "Boundary exceeds maximum allowed length");
+}
+
+TEST_F(MultipartSecurityTest, ParserSetBoundaryRejectsOverLength) {
+    MultipartParser parser;
+    parser.setBoundary(std::string(multipart_limits::MAX_BOUNDARY_LENGTH + 1, 'a'));
+    EXPECT_TRUE(parser.hasError());
+    EXPECT_STREQ(parser.getErrorMessage(), "Boundary exceeds maximum allowed length");
+    // feed() on an errored parser is a no-op returning 0 (multipart.cpp:273).
+    const char buf[] = "anything";
+    EXPECT_EQ(parser.feed(buf, sizeof(buf) - 1), 0u);
+}
+
+TEST_F(MultipartSecurityTest, ParserSetBoundaryRejectsControlCharacter) {
+    MultipartParser parser;
+    parser.setBoundary(std::string("ab\x01" "cd")); // 0x01 < 0x20 control byte
+    EXPECT_TRUE(parser.hasError());
+    EXPECT_STREQ(parser.getErrorMessage(), "Boundary contains invalid control character");
+}
+
+TEST_F(MultipartSecurityTest, ParserSetBoundaryRejectsDelByte) {
+    MultipartParser parser;
+    parser.setBoundary(std::string("ab\x7f""cd")); // DEL (0x7f) is rejected too
+    EXPECT_TRUE(parser.hasError());
+    EXPECT_STREQ(parser.getErrorMessage(), "Boundary contains invalid control character");
+}
+
+TEST_F(MultipartSecurityTest, ParserSetBoundaryAcceptsValid) {
+    MultipartParser parser;
+    parser.setBoundary("validBoundary123");
+    EXPECT_FALSE(parser.hasError());
+    EXPECT_FALSE(parser.stopped());
+    EXPECT_STREQ(parser.getErrorMessage(), "No error.");
+}
+
+// ====================================================================
+// find_boundary — the free helper (multipart.cpp:42).
+// ====================================================================
+
+TEST_F(MultipartSecurityTest, FindBoundaryLocatesAndMisses) {
+    const std::string boundary = "--XYZ";
+
+    // Present: iterator points at the first byte of the match.
+    {
+        const std::string hay = "prefix--XYZsuffix";
+        auto              it  = find_boundary(hay, boundary);
+        ASSERT_NE(it, hay.end());
+        EXPECT_EQ(std::string(it, it + boundary.size()), boundary);
+        EXPECT_EQ(static_cast<std::size_t>(it - hay.begin()), hay.find(boundary));
+    }
+    // Absent: returns end().
+    {
+        const std::string hay = "no marker present here";
+        EXPECT_EQ(find_boundary(hay, boundary), hay.end());
+    }
+    // A near-miss prefix that does not complete still misses (drives the
+    // std::mismatch advance loop, multipart.cpp:44-49).
+    {
+        const std::string hay = "--XY--XY"; // boundary "--XYZ" never completes
+        EXPECT_EQ(find_boundary(hay, boundary), hay.end());
+    }
+}
+
+// ====================================================================
+// Boyer-Moore non-boundary skip + reassembly across a parser feed.
+//
+// A part body packed with bytes that are NOT in the boundary alphabet forces
+// the inner `i += boundarySize` skip loop (multipart.cpp:129-135) — the fast
+// path the small body-codec fixtures never stress — while still reassembling
+// the exact payload. Driving the parser directly (not via Body) lets us assert
+// succeeded() and the captured payload through a raw callback.
+// ====================================================================
+
+namespace {
+struct CaptureCtx {
+    std::string data;
+    bool        ended = false;
+};
+void
+capture_part_data(const char *buf, size_t start, size_t end, void *user) {
+    auto *ctx = static_cast<CaptureCtx *>(user);
+    if (start != static_cast<size_t>(-1) && end >= start) {
+        ctx->data.append(buf + start, end - start);
+    }
+}
+void
+capture_end(const char *, size_t, size_t, void *user) {
+    static_cast<CaptureCtx *>(user)->ended = true;
+}
+} // namespace
+
+TEST_F(MultipartSecurityTest, ParserFeedReassemblesBodyThroughBoyerMooreSkip) {
+    const std::string boundary = "bnd";
+    // Payload contains only digits/letters absent from "\r\n--bnd", so the
+    // Boyer-Moore skip advances boundarySize at a time across the body.
+    const std::string payload(64, '7');
+    const std::string raw = "--" + boundary
+                            + "\r\n"
+                              "Content-Disposition: form-data; name=\"f\"\r\n"
+                              "\r\n"
+                            + payload + "\r\n--" + boundary + "--";
+
+    MultipartParser parser(boundary);
+    ASSERT_FALSE(parser.hasError());
+
+    CaptureCtx ctx;
+    parser.userData   = &ctx;
+    parser.onPartData = &capture_part_data;
+    parser.onEnd      = &capture_end;
+
+    const size_t consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_EQ(consumed, raw.size());
+    EXPECT_TRUE(parser.succeeded());
+    EXPECT_TRUE(ctx.ended);
+    EXPECT_EQ(ctx.data, payload);
+}
+
+TEST_F(MultipartSecurityTest, ParserFeedReportsMalformedFirstBoundary) {
+    // A buffer that does not begin with the expected boundary trips
+    // START_BOUNDARY's "different boundary data" guard (multipart.cpp:312) and
+    // stops the parser with an error before any part is emitted.
+    MultipartParser parser("bnd");
+    ASSERT_FALSE(parser.hasError());
+
+    const std::string raw = "--XXX\r\n\r\nbody\r\n--bnd--";
+    const size_t      consumed = parser.feed(raw.data(), raw.size());
+    EXPECT_LT(consumed, raw.size());
+    EXPECT_TRUE(parser.hasError());
+    EXPECT_FALSE(parser.succeeded());
+}
+
 TEST_F(MultipartSecurityTest, SerializationRejectsInvalidBoundaryLength) {
     Multipart mp(std::string(multipart_limits::MAX_BOUNDARY_LENGTH + 1, 'x'));
     auto     &part = mp.create_part();
