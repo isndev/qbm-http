@@ -70,9 +70,11 @@ public:
 
     qb::io::async::task<void>
     run() {
-        // The WebSocket protocol is installed by switch_protocol<WS_Protocol>
-        // before spawn_run_loop(), so this static_cast is safe.
-        if (auto *p = static_cast<qb::protocol::ws_server<BoundedSession> *>(this->protocol())) {
+        // The WebSocket protocol is installed by switch_protocol<WS_Protocol> before
+        // spawn_run_loop(). The live protocol's type is base::WS_Protocol —
+        // ws_server<coro_session<BoundedSession, BoundedServer>>, NOT ws_server<BoundedSession>
+        // (a sibling instantiation); casting to the latter is an invalid downcast (UB).
+        if (auto *p = static_cast<base::WS_Protocol *>(this->protocol())) {
             p->set_max_payload_size(64);
         }
         while (true) {
