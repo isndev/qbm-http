@@ -388,13 +388,15 @@ TEST_F(ValidationRulesTest, CustomRuleValidation) {
 
 // --- PatternRule ReDoS input-size guard --------------------------------------
 
-// The PatternRule caps the input length at MAX_REGEX_INPUT_LENGTH (256 KiB) before
-// running std::regex_match, since std::regex offers no execution timeout. Inputs at
-// or below the cap match normally; an input above the cap is rejected deterministically
-// with a `pattern` error (it never reaches the regex engine), which is what protects
-// against ReDoS. This pins the exact 262144-byte boundary in both directions.
+// The PatternRule caps the input length at MAX_REGEX_INPUT_LENGTH (2 KiB) before running
+// std::regex_match. The cap protects against BOTH catastrophic backtracking and, just as
+// importantly, stack exhaustion: libstdc++'s std::regex executor recurses once per matched
+// character, so even `^.*$` over a few KiB overflows the stack and crashes on Linux (macOS
+// libc++ does not). Inputs at or below the cap match normally and — critically — must NOT
+// crash; an input above the cap is rejected deterministically with a `pattern` error before
+// the regex ever runs. This pins the 2048-byte boundary in both directions.
 TEST_F(ValidationRulesTest, PatternRuleReDoSInputSizeGuard) {
-    constexpr std::size_t kMaxInput = 256 * 1024; // 262144, mirrors rule.cpp
+    constexpr std::size_t kMaxInput = 2 * 1024; // 2048, mirrors rule.cpp
 
     PatternRule pattern_rule("^.*$"); // matches everything within the size budget
 
@@ -403,7 +405,8 @@ TEST_F(ValidationRulesTest, PatternRuleReDoSInputSizeGuard) {
     EXPECT_TRUE(pattern_rule.validate(qb::json("normal text"), "field", result));
     EXPECT_TRUE(result.success());
 
-    // Exactly at the cap still goes through the regex and matches.
+    // Exactly at the cap still goes through the regex and matches — without overflowing
+    // the stack (the whole point of keeping the cap below libstdc++'s recursion limit).
     result.clear();
     EXPECT_TRUE(pattern_rule.validate(qb::json(std::string(kMaxInput, 'a')), "field", result));
     EXPECT_TRUE(result.success());

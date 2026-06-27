@@ -135,11 +135,19 @@ MaxLengthRule::validate(const qb::json &value, const std::string &field_path, Re
     return true;
 }
 
-// Security: Maximum string length for regex validation to prevent ReDoS attacks
-// with pathological regex patterns and very long input strings.
-// REDUCED from 1MB to 256KB for better protection - most legitimate use cases
-// don't need pattern matching on strings larger than 256KB.
-constexpr std::size_t MAX_REGEX_INPUT_LENGTH = 256 * 1024; // 256KB
+// Security: Maximum string length for regex validation. Two distinct DoS vectors:
+//  1. Catastrophic backtracking (classic ReDoS) — bounded by capping the input.
+//  2. Stack exhaustion — libstdc++'s std::regex executor is RECURSIVE (it descends one
+//     frame per matched character for a repeat like `.*`/`+`), so a long input against
+//     an otherwise benign pattern overflows the stack and crashes the process. Measured
+//     on libstdc++ (clang-19, aarch64, default 8 MB stack): `^.*$` overflows above ~4 KiB
+//     of input under ASan, and a release build crashes well before the old 256 KiB cap —
+//     i.e. 256 KiB was never actually safe here. Cap at 2 KiB: comfortably under the
+//     measured limit (and below it again for more-recursive patterns / smaller
+//     worker-thread stacks), yet far larger than any realistic pattern-validated field
+//     (emails, usernames, UUIDs, tokens). macOS libc++ does not recurse this way, which
+//     is why the crash only surfaced on Linux.
+constexpr std::size_t MAX_REGEX_INPUT_LENGTH = 2 * 1024; // 2 KiB
 // Align with cors_security_limits::MAX_REGEX_PATTERN_LENGTH — huge patterns are rarely
 // legitimate JSON Schema and are expensive to compile in libstdc++.
 constexpr std::size_t MAX_REGEX_PATTERN_LENGTH = 1024;
