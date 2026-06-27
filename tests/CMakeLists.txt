@@ -62,8 +62,11 @@ qhttp_test(unit validation-parameter unit/validation/validation-parameter.cpp EX
 qhttp_test(unit validation-sanitizer unit/validation/validation-sanitizer.cpp EXTRA_LABELS validation)
 qhttp_test(unit validation-result    unit/validation/validation-result.cpp    EXTRA_LABELS validation)
 qhttp_test(unit validation-request   unit/validation/validation-request.cpp   EXTRA_LABELS validation)
+qhttp_test(unit validation-parameter-types unit/validation/validation-parameter-types.cpp EXTRA_LABELS validation)
+qhttp_test(unit validation-request-params  unit/validation/validation-request-params.cpp  EXTRA_LABELS validation)
 qhttp_test(unit body-codec       unit/message/body-codec.cpp)
 qhttp_test(unit headers-utility  unit/message/headers-utility.cpp)
+qhttp_test(unit message-types    unit/message/message-types.cpp)
 qhttp_test(unit cookie           unit/cookie/cookie.cpp)
 qhttp_test(unit multipart-security unit/security/multipart-security.cpp EXTRA_LABELS security)
 qhttp_test(unit range-parser    unit/http1/range-parser.cpp    EXTRA_LABELS http1)
@@ -84,6 +87,8 @@ qhttp_test(unit routing-match      unit/routing/routing-match.cpp      EXTRA_LAB
 qhttp_test(unit routing-methods    unit/routing/routing-methods.cpp    EXTRA_LABELS routing)
 qhttp_test(unit routing-middleware unit/routing/routing-middleware.cpp EXTRA_LABELS routing)
 qhttp_test(unit routing-compile    unit/routing/routing-compile.cpp    EXTRA_LABELS routing)
+qhttp_test(unit path-parameters    unit/routing/path-parameters.cpp    EXTRA_LABELS routing)
+qhttp_test(unit handler-node       unit/routing/handler-node.cpp       EXTRA_LABELS routing)
 
 # --- middleware (pure) ---
 qhttp_test(unit middleware-conditional      unit/middleware/middleware-conditional.cpp      EXTRA_LABELS middleware)
@@ -103,6 +108,7 @@ qhttp_test(unit middleware-rate-limit-window unit/middleware/middleware-rate-lim
 qhttp_test(unit middleware-auth unit/middleware/middleware-auth.cpp REQUIRES ssl EXTRA_LABELS middleware ssl)
 qhttp_test(unit middleware-jwt  unit/middleware/middleware-jwt.cpp  REQUIRES ssl EXTRA_LABELS middleware ssl)
 qhttp_test(unit auth-manager    unit/auth/auth-manager.cpp          REQUIRES ssl EXTRA_LABELS auth ssl)
+qhttp_test(unit options-algorithm unit/auth/options-algorithm.cpp    REQUIRES ssl EXTRA_LABELS auth ssl)
 
 # --- http2 pure-logic (UN-GATED from the legacy SSL bucket) ---
 qhttp_test(unit http2-frame-layer      unit/http2/http2-frame-layer.cpp      EXTRA_LABELS http2)
@@ -113,6 +119,8 @@ qhttp_test(unit hpack-encoder-strategy unit/http2/hpack-encoder-strategy.cpp EXT
 qhttp_test(unit http2-header-validation unit/http2/http2-header-validation.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-state    unit/http2/http2-protocol-state.cpp    EXTRA_LABELS http2)
 qhttp_test(unit http2-client-validation unit/http2/http2-client-validation.cpp EXTRA_LABELS http2)
+qhttp_test(unit http2-stream-state      unit/http2/http2-stream-state.cpp      EXTRA_LABELS http2)
+qhttp_test(unit http2-protocol-coverage unit/http2/http2-protocol-coverage.cpp EXTRA_LABELS http2)
 # ws units (crypto-link ssl: ws.h #errors without qb::io::crypto; pure-logic, no socket)
 qhttp_test(unit ws-close-frame-negative   unit/ws/ws-close-frame-negative.cpp   REQUIRES ssl EXTRA_LABELS ws)
 qhttp_test(unit ws-frame-encode-validation unit/ws/ws-frame-encode-validation.cpp REQUIRES ssl EXTRA_LABELS ws)
