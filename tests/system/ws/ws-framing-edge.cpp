@@ -604,4 +604,281 @@ TEST(WsFramingEdge, ThrowingMessageHandlerDoesNotTerminate) {
         << "unexpected frame kind " << static_cast<int>(frame.kind);
 }
 
+// ===========================================================================
+// 8. Valid multi-byte UTF-8 acceptance (drives every accepting branch of
+//    qb::http::ws::is_utf8 in ws.cpp). The existing UTF-8 cases only send
+//    INVALID bytes (surrogate / lone continuation), so the 2/3/4-byte
+//    accept paths and their `continue` arms were never executed end-to-end.
+//    A text frame whose reassembled payload is valid UTF-8 is echoed back
+//    intact, which proves is_utf8() returned true through each multi-byte form.
+// ===========================================================================
+
+// One byte from every accepting UTF-8 length class. Kept ≤125 bytes so the
+// shared 7-bit make_client_frame builder can mask it.
+//   - 2-byte  C2..DF : "é"  = C3 A9
+//   - E0      lead    : "à"  = C3 A0? no -> use U+0800 "ࠀ" = E0 A0 80
+//   - E1..EC  lead    : "€"  = E2 82 AC
+//   - ED valid (<A0)  : U+D000 "퐀"? U+D000 = ED 80 80
+//   - EE..EF lead     : U+F000 "" = EF 80 80
+//   - F0     lead     : U+10000 "𐀀" = F0 90 80 80
+//   - F1..F3 lead     : U+40000      = F1 80 80 80
+//   - F4     lead     : U+100000     = F4 80 80 80
+static const std::string kAllUtf8Forms = []() {
+    std::string s;
+    s += "A";                              // ASCII (<=0x7F)
+    s += std::string("\xC3\xA9", 2);       // 2-byte
+    s += std::string("\xE0\xA0\x80", 3);   // E0 lead (b1 in A0..BF)
+    s += std::string("\xE2\x82\xAC", 3);   // E1..EC lead (euro)
+    s += std::string("\xED\x80\x80", 3);   // ED valid (b1 in 80..9F)
+    s += std::string("\xEF\x80\x80", 3);   // EE..EF lead
+    s += std::string("\xF0\x90\x80\x80", 4); // F0 lead (b1 in 90..BF)
+    s += std::string("\xF1\x80\x80\x80", 4); // F1..F3 lead
+    s += std::string("\xF4\x80\x80\x80", 4); // F4 lead (b1 in 80..8F)
+    return s;
+}();
+
+TEST(WsFramingEdge, ValidMultiByteUtf8TextIsAcceptedAndEchoed) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+
+    qb::io::tcp::socket sock;
+    const auto          rc = sock.connect(
+        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    ASSERT_EQ(rc, 0);
+    (void) sock.set_nonblocking(true);
+    perform_upgrade(sock, server.port, "/edge");
+
+    ASSERT_LE(kAllUtf8Forms.size(), 125u);
+    auto frame = make_client_frame(0x81, kAllUtf8Forms); // FIN + text, valid UTF-8
+    sock.write(reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()));
+
+    // Valid UTF-8 -> message delivered -> echoed back unmasked. 7-bit length form.
+    const std::size_t expected = 2u + kAllUtf8Forms.size();
+    const std::string got      = read_some(sock, expected);
+    ASSERT_GE(got.size(), expected) << "valid UTF-8 text was not echoed back intact";
+    EXPECT_EQ(static_cast<std::uint8_t>(got[0]), 0x81u) << "echo fin+opcode";
+    EXPECT_EQ(static_cast<std::uint8_t>(got[1]), kAllUtf8Forms.size())
+        << "echo must use 7-bit length form";
+    EXPECT_EQ(got.substr(2, kAllUtf8Forms.size()), kAllUtf8Forms)
+        << "echoed bytes must equal the sent UTF-8 payload";
+
+    sock.close();
+}
+
+// A multi-byte code point split ACROSS a fragment boundary must reassemble and
+// validate as one scalar (ws.h:572 final-fragment UTF-8 check on the joined
+// buffer). The euro sign (E2 82 AC) is split 1+2 between two frames.
+TEST(WsFramingEdge, MultiByteUtf8SplitAcrossFragmentsReassemblesAndValidates) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+
+    qb::io::tcp::socket sock;
+    const auto          rc = sock.connect(
+        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    ASSERT_EQ(rc, 0);
+    (void) sock.set_nonblocking(true);
+    perform_upgrade(sock, server.port, "/edge");
+
+    // Frame A: Text FIN=0 "A\xE2" (the lead + first byte of the euro sign).
+    // Frame B: Continuation FIN=1 "\x82\xAC" (the two trailing bytes).
+    // Reassembled = "A€" which is valid UTF-8 only as a whole.
+    auto frame_a = make_client_frame(0x01, std::string("A\xE2", 2));
+    auto frame_b = make_client_frame(0x80, std::string("\x82\xAC", 2));
+    sock.write(reinterpret_cast<const char *>(frame_a.data()), static_cast<int>(frame_a.size()));
+    sock.write(reinterpret_cast<const char *>(frame_b.data()), static_cast<int>(frame_b.size()));
+
+    const std::string expected_payload("A\xE2\x82\xAC", 4);
+    const std::size_t expected = 2u + expected_payload.size();
+    const std::string got      = read_some(sock, expected);
+    ASSERT_GE(got.size(), expected) << "split multi-byte UTF-8 not reassembled+echoed";
+    EXPECT_EQ(static_cast<std::uint8_t>(got[0]), 0x81u);
+    EXPECT_EQ(static_cast<std::uint8_t>(got[1]), expected_payload.size());
+    EXPECT_EQ(got.substr(2, expected_payload.size()), expected_payload);
+
+    sock.close();
+}
+
+// A valid UTF-8 (multi-byte) close reason must pass is_utf8() on both the close
+// path in ws.h (processControlFrame line 504 accept branch) and round-trip back
+// in the echoed close frame.
+TEST(WsFramingEdge, CloseFrameWithValidMultiByteUtf8ReasonIsEchoed) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+
+    qb::io::tcp::socket sock;
+    const auto          rc = sock.connect(
+        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    ASSERT_EQ(rc, 0);
+    (void) sock.set_nonblocking(true);
+    perform_upgrade(sock, server.port, "/edge");
+
+    // status 1000 (Normal) + valid UTF-8 reason "ok€" (euro is 3 bytes).
+    std::string close_payload;
+    close_payload.push_back(static_cast<char>((1000u >> 8) & 0xFFu));
+    close_payload.push_back(static_cast<char>(1000u & 0xFFu));
+    close_payload += std::string("ok\xE2\x82\xAC", 5);
+
+    auto frame = make_client_frame(0x88, close_payload);
+    sock.write(reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()));
+
+    const std::string got        = read_some(sock, 128);
+    const auto        close_code = extract_close_code(got);
+    ASSERT_TRUE(close_code.has_value())
+        << "server did not echo a parseable close frame: size=" << got.size();
+    // Valid reason => server echoes a Normal-closure close (not a protocol error).
+    EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::Normal));
+
+    sock.close();
+}
+
+// Drive the specific REJECTING sub-branches of is_utf8 that the existing
+// surrogate/lone-continuation cases miss: a truncated 2-byte lead at the very
+// end of the buffer (i+1 >= n), an E0 lead with an out-of-range second byte
+// (b1 < 0xA0), and an F0 lead with an out-of-range second byte (b1 < 0x90).
+// Each is sent as a standalone text frame and must close with 1007.
+TEST(WsFramingEdge, Utf8TruncatedTwoByteLeadAtEndIsRejected) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+    // "A" + lone 2-byte lead 0xC3 with no continuation byte. is_utf8: i+1>=n.
+    expect_close_code_after_frames(server,
+                                   {make_client_frame(0x81, std::string("A\xC3", 2))},
+                                   qb::http::ws::CloseStatus::DataNotConsistent);
+}
+
+TEST(WsFramingEdge, Utf8E0OverlongSecondByteIsRejected) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+    // E0 80 80 is an overlong encoding (b1 must be >= 0xA0). is_utf8 rejects it.
+    expect_close_code_after_frames(server,
+                                   {make_client_frame(0x81, std::string("\xE0\x80\x80", 3))},
+                                   qb::http::ws::CloseStatus::DataNotConsistent);
+}
+
+TEST(WsFramingEdge, Utf8F0OverlongSecondByteIsRejected) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+    // F0 80 80 80 is an overlong 4-byte encoding (b1 must be >= 0x90).
+    expect_close_code_after_frames(server,
+                                   {make_client_frame(0x81, std::string("\xF0\x80\x80\x80", 4))},
+                                   qb::http::ws::CloseStatus::DataNotConsistent);
+}
+
+TEST(WsFramingEdge, Utf8F4OutOfRangeSecondByteIsRejected) {
+    WsServerThread<EchoServer> server{ephemeral_port()};
+    // F4 90 80 80 would encode > U+10FFFF (b1 must be <= 0x8F). Rejected.
+    expect_close_code_after_frames(server,
+                                   {make_client_frame(0x81, std::string("\xF4\x90\x80\x80", 4))},
+                                   qb::http::ws::CloseStatus::DataNotConsistent);
+}
+
+// ===========================================================================
+// 9. MessageClose construction guards (ws.cpp:210-234). The wire tests above
+//    exercise the RECEIVE side; these drive the SEND-side constructor, which a
+//    real client invokes to build a Close frame. Reserved/out-of-range codes
+//    throw; an over-long reason is clipped to 123 bytes on a UTF-8 boundary.
+// ===========================================================================
+
+TEST(WsFramingEdge, MessageCloseRejectsReservedAndOutOfRangeCodes) {
+    using qb::http::ws::MessageClose;
+    // 1005 ("no status received") and 1006 ("abnormal") MUST NOT appear on the
+    // wire; 1004 is reserved; codes below 1000 / above 4999 are out of range.
+    EXPECT_THROW(MessageClose(std::uint16_t{1004}, "x"), std::invalid_argument);
+    EXPECT_THROW(MessageClose(std::uint16_t{1005}, "x"), std::invalid_argument);
+    EXPECT_THROW(MessageClose(std::uint16_t{1006}, "x"), std::invalid_argument);
+    EXPECT_THROW(MessageClose(std::uint16_t{1015}, "x"), std::invalid_argument);
+    EXPECT_THROW(MessageClose(std::uint16_t{999}, "x"), std::invalid_argument);
+    EXPECT_THROW(MessageClose(std::uint16_t{5000}, "x"), std::invalid_argument);
+    // A valid application code in [3000,4999] with a short reason is fine.
+    EXPECT_NO_THROW(MessageClose(std::uint16_t{3000}, "ok"));
+}
+
+TEST(WsFramingEdge, MessageCloseRejectsInvalidUtf8Reason) {
+    using qb::http::ws::MessageClose;
+    // A short reason carrying an invalid byte (lone continuation 0x80) must be
+    // rejected outright (it is <123 bytes, so it bypasses the clip path and hits
+    // the trailing is_utf8 guard).
+    EXPECT_THROW(MessageClose(std::uint16_t{1000}, std::string("bad\x80", 4)),
+                 std::invalid_argument);
+}
+
+TEST(WsFramingEdge, MessageCloseClipsOverLongReasonOnUtf8Boundary) {
+    using qb::http::ws::MessageClose;
+    // Build a >123-byte reason that ends with a multi-byte euro sign straddling
+    // the 123-byte cut so the UTF-8-clean loop must walk back past the partial
+    // sequence. 121 ASCII 'a' + euro(3 bytes) = 124 bytes; the cut at 123 leaves
+    // a truncated euro (a + a*120 + E2 82) which is invalid, so the clip loop
+    // removes bytes until valid.
+    std::string reason(121, 'a');
+    reason += std::string("\xE2\x82\xAC", 3); // total 124 bytes
+    ASSERT_GT(reason.size(), 123u);
+
+    MessageClose msg(std::uint16_t{1000}, reason);
+    // 2-byte status + clipped reason; the whole payload is a valid control frame
+    // (<=125 bytes) and the reason portion is valid UTF-8 (no dangling bytes).
+    ASSERT_GE(msg.size(), 2u);
+    EXPECT_LE(msg.size(), 125u) << "clip must keep the close frame within the control cap";
+    const std::string reason_bytes(msg._data.cbegin() + 2, msg.size() - 2);
+    EXPECT_TRUE(qb::http::ws::is_utf8(reason_bytes))
+        << "clipped reason must remain valid UTF-8";
+    // The trailing partial euro must have been dropped: last byte is an 'a'.
+    ASSERT_FALSE(reason_bytes.empty());
+    EXPECT_EQ(reason_bytes.back(), 'a') << "partial multi-byte tail must be clipped away";
+}
+
+TEST(WsFramingEdge, MessageCloseClipsOverLongAsciiReasonTo123) {
+    using qb::http::ws::MessageClose;
+    // A long pure-ASCII reason is simply truncated to 123 bytes (no UTF-8 walk-back).
+    const std::string reason(200, 'Z');
+    MessageClose      msg(std::uint16_t{1000}, reason);
+    EXPECT_EQ(msg.size(), 2u + 123u) << "ASCII reason clipped to exactly 123 bytes";
+}
+
+// ===========================================================================
+// 10. Outgoing-frame serialization guard rails (ws.cpp
+//     enforce_outgoing_frame_constraints, invoked from
+//     qb::allocator::pipe<char>::put<ws::Message>). Building a frame that
+//     violates RFC 6455 must throw at serialization time rather than emit a
+//     malformed frame on the wire. This drives the same `pipe << msg` path the
+//     server/client transport uses, just exercised directly so the test owns
+//     the (deliberately invalid) message.
+// ===========================================================================
+
+TEST(WsFramingEdge, SerializingFrameWithRsvBitsThrows) {
+    qb::http::ws::Message msg;
+    msg.fin_rsv_opcode = static_cast<unsigned char>(0x40u | 0x01u); // RSV1 + text
+    msg << std::string("x");
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << msg, std::invalid_argument);
+}
+
+TEST(WsFramingEdge, SerializingFrameWithReservedOpcodeThrows) {
+    qb::http::ws::Message msg;
+    msg.fin_rsv_opcode = static_cast<unsigned char>(0x80u | 0x03u); // FIN + reserved opcode 0x3
+    msg << std::string("x");
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << msg, std::invalid_argument);
+}
+
+TEST(WsFramingEdge, SerializingOversizeControlFrameThrows) {
+    qb::http::ws::Message msg;
+    // FIN + Close, but a 130-byte payload exceeds the 125-byte control cap.
+    msg.fin_rsv_opcode = static_cast<unsigned char>(0x80u | 0x08u);
+    msg << std::string(130, 'x');
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << msg, std::invalid_argument);
+}
+
+TEST(WsFramingEdge, SerializingFragmentedControlFrameThrows) {
+    qb::http::ws::Message msg;
+    // Ping (0x09) with FIN=0 is an illegal fragmented control frame.
+    msg.fin_rsv_opcode = static_cast<unsigned char>(0x09u); // no FIN bit
+    msg << std::string("x");
+    qb::allocator::pipe<char> out;
+    EXPECT_THROW(out << msg, std::invalid_argument);
+}
+
+TEST(WsFramingEdge, SerializingValidFrameSucceeds) {
+    qb::http::ws::Message msg;
+    msg.fin_rsv_opcode = static_cast<unsigned char>(0x80u | 0x01u); // FIN + text
+    msg << std::string("ok");
+    qb::allocator::pipe<char> out;
+    EXPECT_NO_THROW(out << msg);
+    // 2-byte header (FIN+text, len=2) + 2-byte payload for an unmasked frame.
+    EXPECT_EQ(out.size(), 4u);
+}
+
 } // namespace

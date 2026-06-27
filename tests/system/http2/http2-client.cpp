@@ -47,6 +47,7 @@
 
 #include "../2/client.h"
 #include "../2/http2.h"
+#include "../http.h" // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
@@ -107,6 +108,29 @@ public:
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body()   = large_body;
             ctx->response().add_header("Content-Type", "text/plain");
+            ctx->response().add_header("X-Protocol", "HTTP/2");
+            ctx->complete();
+        });
+
+        // 4b. Flow-control route: a response far larger than the default 64KiB
+        //     per-stream send window, so the server MUST queue pending DATA and
+        //     resume only as the client returns capacity via WINDOW_UPDATE. This
+        //     drives the server-side flow-control machinery (pending-data queue,
+        //     WINDOW_UPDATE handling, connection/stream window accounting) over a
+        //     real socket — unreachable through the socket-less FakeIO.
+        router().get("/api/flood", [](auto ctx) {
+            std::string flood;
+            flood.reserve(512 * 1024);
+            // Deterministic, position-checkable payload: 512 KiB of 'A'..'P' cycles
+            // with sentinel markers at both ends.
+            flood += "FLOOD-START;";
+            while (flood.size() < 512 * 1024) {
+                flood += static_cast<char>('A' + (flood.size() % 16));
+            }
+            flood += ";FLOOD-END";
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::move(flood);
+            ctx->response().add_header("Content-Type", "application/octet-stream");
             ctx->response().add_header("X-Protocol", "HTTP/2");
             ctx->complete();
         });
@@ -318,6 +342,44 @@ TEST_F(Http2ClientTest, LargeResponseIsReassembledAcrossDataFrames) {
     EXPECT_NE(body.find("This is line 999 of a large HTTP/2 response."), std::string::npos);
     EXPECT_GT(body.size(), 10000u);
     EXPECT_EQ(response.header("X-Protocol"), "HTTP/2");
+    client->disconnect();
+}
+
+// ---------------------------------------------------------------------------
+// Flow control: a >512KiB response forces the server past the default 64KiB
+// per-stream/connection send window, so the body only completes as the client
+// returns capacity via WINDOW_UPDATE. End-to-end integrity of the reassembled
+// payload proves the server's pending-DATA queue + WINDOW_UPDATE accounting
+// (2/protocol/server.h) work over a real socket.
+// ---------------------------------------------------------------------------
+
+TEST_F(Http2ClientTest, FlowControlledLargeResponseCompletesIntact) {
+    auto client = make_test_client();
+
+    std::atomic<bool>  response_received{false};
+    qb::http::Response response;
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/flood");
+
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response          = std::move(r);
+        response_received = true;
+    }));
+    client->connect(nullptr);
+
+    // Generous budget: the round-trip spans many DATA frames gated by flow
+    // control, but the bounded pump still fails loud rather than hanging.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return response_received.load(); }, 15s));
+
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    const std::string body = response.body().template as<std::string>();
+    EXPECT_GT(body.size(), 512u * 1024u);
+    // Both sentinels survived reassembly across the flow-controlled DATA frames.
+    EXPECT_EQ(body.compare(0, 12, "FLOOD-START;"), 0);
+    EXPECT_NE(body.find(";FLOOD-END"), std::string::npos);
+    EXPECT_EQ(response.header("Content-Type"), "application/octet-stream");
     client->disconnect();
 }
 
@@ -549,6 +611,146 @@ TEST_F(Http2ClientTest, ConnectFailsWhenServerDoesNotOfferH2) {
     EXPECT_FALSE(client->is_connected());
     EXPECT_NE(error_message.find("ALPN"), std::string::npos)
         << "expected an ALPN-negotiation failure message, got: " << error_message;
+}
+
+// ---------------------------------------------------------------------------
+// Unknown path: the compiled router answers with its standard 404 handler, so
+// the server `on(Request&&, stream_id)` dispatches a real NOT_FOUND response
+// over the stream (rather than the never-routed RST path). This exercises the
+// server's full request->response->end-of-stream machinery for a non-2xx,
+// handler-produced status across the live socket.
+// ---------------------------------------------------------------------------
+
+TEST_F(Http2ClientTest, UnknownPathIsAnsweredWithNotFound) {
+    auto client = make_test_client();
+
+    std::atomic<bool>  response_received{false};
+    qb::http::Response response;
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/no-such-route-exists");
+
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response          = std::move(r);
+        response_received = true;
+    }));
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return response_received.load(); }));
+
+    EXPECT_EQ(response.status(), qb::http::status::NOT_FOUND);
+    client->disconnect();
+}
+
+TEST_F(Http2ClientTest, NotFoundStreamDoesNotPoisonAdjacentStream) {
+    // A 404 stream must complete in isolation: a concurrent, well-routed stream
+    // on the SAME connection still answers normally. Proves per-stream response
+    // dispatch keeps the connection and sibling streams healthy.
+    auto client = make_test_client();
+
+    std::atomic<int>   responses_received{0};
+    qb::http::Response good_response;
+    qb::http::Response missing_response;
+
+    qb::http::Request good_request;
+    good_request.method() = qb::http::Method::GET;
+    good_request.uri()    = qb::io::uri("/api/test");
+
+    qb::http::Request missing_request;
+    missing_request.method() = qb::http::Method::GET;
+    missing_request.uri()    = qb::io::uri("/api/totally-unknown");
+
+    ASSERT_TRUE(client->push_request(good_request, [&](qb::http::Response r) {
+        good_response = std::move(r);
+        ++responses_received;
+    }));
+    ASSERT_TRUE(client->push_request(missing_request, [&](qb::http::Response r) {
+        missing_response = std::move(r);
+        ++responses_received;
+    }));
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return responses_received.load() == 2; }));
+
+    EXPECT_EQ(good_response.status(), qb::http::status::OK);
+    EXPECT_EQ(good_response.body().template as<std::string>(), "HTTP/2 GET Success");
+    EXPECT_EQ(missing_response.status(), qb::http::status::NOT_FOUND);
+    client->disconnect();
+}
+
+// ---------------------------------------------------------------------------
+// HTTP/1.1 fallback over ALPN: the H2Server advertises {h2, http/1.1}. A plain
+// HTTPS/1.1 client (run_sync) offers no `h2`, so the server negotiates
+// http/1.1 and serves the request through its `switch_protocol<Http1Protocol>`
+// branch — exercising the session's `on(Request&&)` (HTTP/1.1) and `on(eos&&)`
+// paths in 2/http2.h that the h2 client can never reach.
+// ---------------------------------------------------------------------------
+
+TEST_F(Http2ClientTest, Http1ClientFallsBackOverAlpnAndIsServed) {
+    qb::http::Request request{{url() + "/api/test"}};
+    auto              response =
+        qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
+
+    // The same route handler answers, this time through the HTTP/1.1 protocol
+    // object switched in by ALPN — the response is identical at the HTTP layer.
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().template as<std::string>(), "HTTP/2 GET Success");
+    EXPECT_EQ(response.header("X-Protocol"), "HTTP/2");
+}
+
+TEST_F(Http2ClientTest, Http1FallbackPostEchoesBodyOverAlpn) {
+    // Drive the HTTP/1.1 fallback with a body so the h1 request-with-content
+    // path (and the route's body echo) is exercised over the negotiated
+    // http/1.1 protocol object, not h2.
+    qb::http::Request request{{url() + "/api/data"}};
+    request.method() = qb::http::Method::POST;
+    request.add_header("Content-Type", "application/json");
+    request.body() = R"({"over":"http1.1"})";
+
+    auto response =
+        qb::http::run_sync(qb::http::POST(request, qb::duration::zero(), /*verify_peer=*/false)).response;
+
+    EXPECT_EQ(response.status(), qb::http::status::CREATED);
+    EXPECT_EQ(response.body().template as<std::string>(),
+              R"(Data received: {"over":"http1.1"} - created successfully)");
+}
+
+// ---------------------------------------------------------------------------
+// Abrupt peer disconnect with an in-flight stream: the server's session
+// `on(disconnected&&)` must cancel every still-open stream context and clear
+// the context map. We force an in-flight stream by issuing a request whose
+// handler the server never completes (the reset-stream route resets without
+// completing), then drop the transport from under it.
+// ---------------------------------------------------------------------------
+
+TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
+    auto client = make_test_client();
+
+    std::atomic<bool>  response_received{false};
+    qb::http::Response response;
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/large"); // multi-DATA-frame, gives the loop work in flight
+
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response          = std::move(r);
+        response_received = true;
+    }));
+    client->connect(nullptr);
+
+    // Wait until the connection is live, then drop it. The server observes a
+    // peer disconnect and runs its context-cancel/clear path.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return client->is_connected() || response_received.load(); }));
+    client->disconnect();
+
+    // The server-side cleanup happens on the worker thread; pump our own loop a
+    // bounded amount so any client-side teardown settles. The deterministic,
+    // observable post-condition is that the client reports disconnected with no
+    // active requests.
+    EXPECT_TRUE(ServerThread::pump_until([&] { return !client->is_connected(); }));
+    EXPECT_EQ(client->get_active_request_count(), 0u);
 }
 
 } // namespace

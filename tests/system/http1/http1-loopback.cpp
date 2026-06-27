@@ -317,6 +317,158 @@ TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {
     EXPECT_FALSE(any_status_mismatch.load());
 }
 
+// ---- Cookie-header parsing on the server (1.1/protocol/server.h) ----------
+//
+// The HTTP/1.1 server's onMessage() parses the request Cookie header in a
+// try/catch so a malformed Cookie can never std::terminate() the noexcept
+// reactor: a parse failure is logged and the request is still dispatched
+// WITHOUT cookies. These two cases drive both arms over a real loopback socket:
+//   - a VALID Cookie header is parsed and the cookies are visible to on(request)
+//   - a MALFORMED Cookie header throws inside parse_cookie_header(), is caught,
+//     and the request is still handled (server replies, no crash, no cookies).
+
+namespace {
+
+class CookieEchoServer;
+
+class CookieEchoClient
+    : public qb::io::use<CookieEchoClient>::tcp::client<CookieEchoServer> {
+public:
+    constexpr static const bool has_server = true;
+    using Protocol                         = qb::http::protocol<CookieEchoClient>;
+
+    explicit CookieEchoClient(CookieEchoServer &server)
+        : client(server) {}
+
+    static std::atomic<std::size_t> requests_seen;
+    static std::atomic<std::size_t> cookie_count_seen;
+    static std::string              session_cookie_seen;
+
+    void
+    on(Protocol::request &&request) {
+        cookie_count_seen.store(request.cookies().size());
+        // cookie_value() returns the value for a named cookie (empty if absent/unparsed).
+        session_cookie_seen = request.cookie_value("session");
+
+        qb::http::Response r;
+        r.status() = qb::http::status::OK;
+        r.body()   = "ok";
+        *this << r;
+        ++requests_seen;
+    }
+};
+
+class CookieEchoServer
+    : public qb::http::use<CookieEchoServer>::server<CookieEchoClient> {};
+
+std::atomic<std::size_t> CookieEchoClient::requests_seen{0};
+std::atomic<std::size_t> CookieEchoClient::cookie_count_seen{0};
+std::string              CookieEchoClient::session_cookie_seen;
+
+// Send a fixed raw HTTP/1.1 request over a connected socket and drain the
+// response header block (bounded), returning the accumulated bytes.
+std::string
+raw_request_response(std::uint16_t port, const std::string &raw) {
+    qb::io::tcp::socket sock;
+    EXPECT_EQ(sock.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(port)}), 0);
+    (void) sock.set_nonblocking(true);
+    sock.write(raw.data(), static_cast<int>(raw.size()));
+
+    std::string response;
+    for (int i = 0; i < 600 && response.find("\r\n\r\n") == std::string::npos; ++i) {
+        char buf[512];
+        int  n = sock.read(buf, sizeof(buf));
+        if (n > 0) {
+            response.append(buf, static_cast<std::size_t>(n));
+        } else {
+            std::this_thread::sleep_for(2ms);
+        }
+    }
+    sock.close();
+    return response;
+}
+
+} // namespace
+
+TEST(Http1Loopback, ValidCookieHeaderIsParsedAndVisibleToHandler) {
+    const std::uint16_t port = ephemeral_port();
+
+    async::init();
+    CookieEchoClient::requests_seen.store(0);
+    CookieEchoClient::cookie_count_seen.store(0);
+    CookieEchoClient::session_cookie_seen.clear();
+
+    CookieEchoServer server;
+    ASSERT_EQ(server.transport().listen_v4(port), 0);
+    server.start();
+
+    std::string response;
+    std::thread worker([&] {
+        async::init();
+        const std::string raw =
+            "GET /cookie HTTP/1.1\r\n"
+            "Host: 127.0.0.1:" + std::to_string(port) + "\r\n"
+            "Cookie: session=abc123; theme=dark\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        response = raw_request_response(port, raw);
+    });
+
+    pump_loop_until([&] { return CookieEchoClient::requests_seen.load() >= 1; });
+    worker.join();
+
+    EXPECT_EQ(CookieEchoClient::requests_seen.load(), 1u);
+    EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 2u)
+        << "both cookies should have parsed";
+    EXPECT_EQ(CookieEchoClient::session_cookie_seen, "abc123");
+    EXPECT_NE(response.find("200"), std::string::npos) << response;
+}
+
+TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
+    const std::uint16_t port = ephemeral_port();
+
+    async::init();
+    CookieEchoClient::requests_seen.store(0);
+    CookieEchoClient::cookie_count_seen.store(999); // sentinel; handler overwrites
+    CookieEchoClient::session_cookie_seen = "SENTINEL";
+
+    CookieEchoServer server;
+    ASSERT_EQ(server.transport().listen_v4(port), 0);
+    server.start();
+
+    std::string response;
+    std::thread worker([&] {
+        async::init();
+        // An over-long cookie NAME (>= COOKIE_NAME_MAX = 1024 bytes) makes
+        // parse_cookies() throw std::runtime_error ("... max length exceeded
+        // for cookie name."). The bytes are all printable so the HTTP header
+        // value validator accepts the header (its cap is 8192), but cookie
+        // parsing rejects it. The server's onMessage catches the throw and
+        // dispatches the request anyway (noexcept-safe degradation).
+        const std::string giant_name(1100, 'c'); // > 1024, < 8192
+        std::string       raw =
+            "GET /cookie HTTP/1.1\r\n"
+            "Host: 127.0.0.1:" + std::to_string(port) + "\r\n"
+            "Cookie: " + giant_name + "=value\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        response = raw_request_response(port, raw);
+    });
+
+    pump_loop_until([&] { return CookieEchoClient::requests_seen.load() >= 1; });
+    worker.join();
+
+    // The request was still delivered to the handler (no terminate, no crash)...
+    EXPECT_EQ(CookieEchoClient::requests_seen.load(), 1u);
+    // ...and the malformed Cookie left the request with NO parsed cookies
+    // (parse_cookie_header() cleared _cookies before it threw).
+    EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 0u)
+        << "malformed cookie header must yield zero parsed cookies";
+    EXPECT_TRUE(CookieEchoClient::session_cookie_seen.empty());
+    // The server still produced a well-formed HTTP response.
+    EXPECT_NE(response.find("200"), std::string::npos) << response;
+}
+
 // ---- Secure (TLS) HTTP/1.1 round-trip ------------------------------------
 
 #ifdef QB_HAS_SSL
