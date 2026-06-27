@@ -128,6 +128,8 @@ qhttp_test(unit http2-client-validation unit/http2/http2-client-validation.cpp E
 qhttp_test(unit http2-stream-state      unit/http2/http2-stream-state.cpp      EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-coverage unit/http2/http2-protocol-coverage.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-roundtrip unit/http2/http2-protocol-roundtrip.cpp EXTRA_LABELS http2)
+qhttp_test(unit http2-server-coverage-deep unit/http2/http2-server-coverage-deep.cpp EXTRA_LABELS http2)
+qhttp_test(unit http2-client-coverage-deep unit/http2/http2-client-coverage-deep.cpp EXTRA_LABELS http2)
 # ws units (crypto-link ssl: ws.h #errors without qb::io::crypto; pure-logic, no socket)
 qhttp_test(unit ws-close-frame-negative   unit/ws/ws-close-frame-negative.cpp   REQUIRES ssl EXTRA_LABELS ws)
 qhttp_test(unit ws-frame-encode-validation unit/ws/ws-frame-encode-validation.cpp REQUIRES ssl EXTRA_LABELS ws)
@@ -170,6 +172,9 @@ qhttp_test(system ws-client-hardening      system/ws/ws-client-hardening.cpp    
 # =============================================================================
 if(QBM_HTTP_HAS_HTTP3)
     qhttp_test(unit   http3-validation unit/http3/http3-validation.cpp EXTRA_LABELS http3)
+    # Direct connection<Owner> round-trip: drives the real nghttp3 engine in-process (no QUIC/TLS/socket,
+    # no daemon) — so it needs neither `live` nor the quic/ssl transport gates, only QBM_HTTP_HAS_HTTP3.
+    qhttp_test(system http3-connection-direct system/http3/http3-connection-direct.cpp EXTRA_LABELS http3)
     qhttp_test(system http3-loopback   system/http3/http3-loopback.cpp REQUIRES quic ssl live EXTRA_LABELS http3 quic ssl)
     qhttp_test(system http3-interop    system/http3/http3-interop.cpp  REQUIRES quic ssl live EXTRA_LABELS http3 interop)
 endif()
