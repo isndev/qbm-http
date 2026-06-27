@@ -156,18 +156,27 @@ protected:
         std::filesystem::remove(_outside_root_file_path, ec);
     }
 
-    /** @brief Skip-once-locally / FAIL-on-CI guard for the symlink suite. */
-    void
-    require_symlinks_or_resolve(const char *what) {
+    /**
+     * @brief Symlink-capability guard for the symlink suite.
+     * @return true if symlinks are available and the caller may proceed; false if the
+     *         caller must `GTEST_SKIP()` from its own body.
+     * @details GTEST_SKIP()/FAIL() expand to a bare `return`, so they only short-circuit
+     *          the function they are written in — calling GTEST_SKIP() from THIS helper
+     *          would return from the helper and let the test body run on anyway (the bug
+     *          this replaces). So the CI-required failure is raised here via ADD_FAILURE()
+     *          (which records a failure WITHOUT an early return), and the actual skip is
+     *          left to the test body via the returned bool.
+     */
+    [[nodiscard]] bool
+    symlinks_available_or_fail_on_ci(const char *what) {
         if (_symlinks_supported) {
-            return;
+            return true;
         }
         if (running_on_ci()) {
-            FAIL() << "Symlink creation is unavailable but required on CI for: " << what
-                   << " — the path-escape defence cannot be left untested.";
-        } else {
-            GTEST_SKIP() << "Platform did not allow symlink creation; skipping locally: " << what;
+            ADD_FAILURE() << "Symlink creation is unavailable but required on CI for: " << what
+                          << " — the path-escape defence cannot be left untested.";
         }
+        return false; // caller must GTEST_SKIP() from its body
     }
 
     qb::http::Request
@@ -859,14 +868,21 @@ TEST_F(StaticFilesMiddlewareTest, SecurityLongInBoundsPathYieldsNotFound) {
         << _session->_response.status();
     EXPECT_FALSE(_session->_final_handler_called);
 
-    // Boundary companion: a single component OVER NAME_MAX cannot be
-    // canonicalised, so the resolver returns empty and the middleware rejects
-    // it as FORBIDDEN (an unresolvable path is treated as a traversal/escape,
-    // not a missing file). This pins the over-limit side of the boundary.
+    // Boundary companion: a single component OVER the per-component limit. The
+    // security invariant is that it is DENIED and never serves out-of-root content;
+    // the exact denial code is platform-dependent and both are correct:
+    //   - POSIX: weakly_canonical fails with ENAMETOOLONG (NAME_MAX 255) → resolver
+    //     returns empty → middleware treats the unresolvable path as 403 FORBIDDEN.
+    //   - Windows (MSVC STL): weakly_canonical resolves the over-long tail purely
+    //     lexically (it only canonicalises the existing prefix), so it succeeds and
+    //     the existence check then fails → 404 NOT_FOUND.
+    // Pin the invariant (denied), not a POSIX-specific status.
     const std::string over_name_max(512, 'a');
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/" + over_name_max + ".txt"));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN)
-        << "An un-canonicalisable (over-NAME_MAX) path must be 403, not 404. Status was "
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
+                _session->_response.status() == qb::http::status::NOT_FOUND)
+        << "An over-NAME_MAX component must be denied (403 where the FS rejects the name, "
+           "404 where it lexically resolves to a missing file). Status was "
         << _session->_response.status();
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -874,7 +890,8 @@ TEST_F(StaticFilesMiddlewareTest, SecurityLongInBoundsPathYieldsNotFound) {
 // --- Security: symlinks (capability-gated, never silently green) ------------
 
 TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToOutsideRootIsForbidden) {
-    require_symlinks_or_resolve("symlink-escape-is-denied");
+    if (!symlinks_available_or_fail_on_ci("symlink-escape-is-denied"))
+        GTEST_SKIP() << "Platform did not allow symlink creation; skipping locally.";
 
     qb::http::StaticFilesOptions options(_test_root_dir);
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/symlink_to_outside.txt"));
@@ -884,7 +901,8 @@ TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToOutsideRootIsForbidden) {
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToInsideRootIsOk) {
-    require_symlinks_or_resolve("inside-symlink-is-served");
+    if (!symlinks_available_or_fail_on_ci("inside-symlink-is-served"))
+        GTEST_SKIP() << "Platform did not allow symlink creation; skipping locally.";
 
     qb::http::StaticFilesOptions options(_test_root_dir);
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/symlink_to_inside.txt"));
@@ -894,7 +912,8 @@ TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToInsideRootIsOk) {
 }
 
 TEST_F(StaticFilesMiddlewareTest, RejectSymlinksOptionBlocksInsideLinks) {
-    require_symlinks_or_resolve("reject-symlinks-blocks-inside-link");
+    if (!symlinks_available_or_fail_on_ci("reject-symlinks-blocks-inside-link"))
+        GTEST_SKIP() << "Platform did not allow symlink creation; skipping locally.";
 
     qb::http::StaticFilesOptions options(_test_root_dir);
     options.with_reject_symlinks(true);
