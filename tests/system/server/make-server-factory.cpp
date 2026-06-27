@@ -35,6 +35,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -229,6 +230,22 @@ protected:
                                  ctx->response().body()   = "pong_http2_default";
                                  ctx->complete();
                              });
+            // A response larger than the default per-stream send window forces
+            // the factory-built server through its flow-control / pending-DATA
+            // path over a real socket.
+            srv.router().get("/big_http2",
+                             [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                                 std::string body;
+                                 body.reserve(300 * 1024);
+                                 body += "BIG-START;";
+                                 while (body.size() < 300 * 1024) {
+                                     body += static_cast<char>('a' + (body.size() % 26));
+                                 }
+                                 body += ";BIG-END";
+                                 ctx->response().status() = qb::http::status::OK;
+                                 ctx->response().body()   = std::move(body);
+                                 ctx->complete();
+                             });
             srv.router().compile();
             if (srv.transport().listen_v4(port) != 0) {
                 return false;
@@ -274,6 +291,86 @@ TEST_F(Http2MakeServerTest, PingHttp2Server) {
     EXPECT_EQ(1, g_http2_server_requests.load());
 
     client->disconnect();
+}
+
+// A >256KiB response from the factory-built HTTP/2 server: the per-stream send
+// window cannot hold it, so the server's flow-control machinery (pending-DATA
+// queue + client WINDOW_UPDATE accounting in 2/protocol/server.h) carries the
+// body to completion. Asserting the reassembled sentinels proves end-to-end
+// integrity across many flow-controlled DATA frames.
+TEST_F(Http2MakeServerTest, FactoryServerStreamsLargeFlowControlledResponse) {
+    auto client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+
+    std::atomic<bool>  response_received{false};
+    qb::http::Response response;
+
+    qb::http::Request request{{base_url() + "/big_http2"}};
+    request.method() = qb::http::Method::GET;
+
+    ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response r) {
+        response          = std::move(r);
+        response_received = true;
+    }));
+    client->connect(nullptr);
+
+    ASSERT_TRUE(Http2FactoryServerThread::pump_until([&] { return response_received.load(); }, 15s));
+
+    EXPECT_EQ(qb::http::status::OK, response.status());
+    const std::string body = response.body().as<std::string>();
+    EXPECT_GT(body.size(), 300u * 1024u);
+    EXPECT_EQ(body.compare(0, 10, "BIG-START;"), 0);
+    EXPECT_NE(body.find(";BIG-END"), std::string::npos);
+
+    client->disconnect();
+}
+
+// Two concurrent streams on one factory-built HTTP/2 connection are each
+// answered, and the per-handler request counter advances exactly twice —
+// exercising the server session's multiplexed request dispatch + per-stream
+// response/cleanup across a real socket.
+TEST_F(Http2MakeServerTest, FactoryServerMultiplexesConcurrentStreams) {
+    auto client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+
+    std::atomic<int>                responses_received{0};
+    std::vector<qb::http::Response> responses(2);
+
+    for (int i = 0; i < 2; ++i) {
+        qb::http::Request request{{base_url() + "/ping_http2"}};
+        request.method() = qb::http::Method::GET;
+        ASSERT_TRUE(client->push_request(std::move(request), [&, i](qb::http::Response r) {
+            responses[i] = std::move(r);
+            ++responses_received;
+        }));
+    }
+    client->connect(nullptr);
+
+    ASSERT_TRUE(Http2FactoryServerThread::pump_until([&] { return responses_received.load() == 2; }));
+
+    for (const auto &r : responses) {
+        EXPECT_EQ(qb::http::status::OK, r.status());
+        EXPECT_EQ("pong_http2_default", r.body().as<std::string>());
+    }
+    EXPECT_EQ(2, g_http2_server_requests.load());
+
+    client->disconnect();
+}
+
+// The factory HTTP/2 server advertises {h2, http/1.1}. A plain HTTPS/1.1 client
+// (run_sync) negotiates http/1.1 over ALPN and is served by the SAME handler
+// through the session's HTTP/1.1 protocol branch — proving the factory server
+// transparently supports the ALPN fallback.
+TEST_F(Http2MakeServerTest, FactoryServerServesHttp1FallbackOverAlpn) {
+    qb::http::Request request{{base_url() + "/ping_http2"}};
+    auto              response =
+        qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
+
+    EXPECT_EQ(qb::http::status::OK, response.status());
+    EXPECT_EQ("pong_http2_default", response.body().as<std::string>());
+    EXPECT_EQ(1, g_http2_server_requests.load());
 }
 
 #endif // QB_HAS_SSL
