@@ -1182,3 +1182,239 @@ TEST(HPACK_DynamicTable, GrowsCapacityWhenCountExceedsInitial) {
     EXPECT_EQ(table[0].name, "k199");
     EXPECT_EQ(table[199].name, "k0");
 }
+
+// ====================================================================
+// Decoder error / edge paths (hpack.cpp)
+//
+// These feed deliberately malformed or boundary HPACK header blocks to a fresh
+// Decoder to drive the failure arms of Decoder::decode and its private helpers
+// (decode_integer overflow, decode_string_literal length-runoff, index
+// out-of-range in get_dynamic_table_entry / get_name_from_index) that the
+// happy-path round-trips never reach.
+// ====================================================================
+
+namespace {
+
+// Decode a whole block, asserting it FAILS (returns false). Returns the
+// incomplete flag for the caller to inspect.
+bool
+decode_fails(const std::vector<uint8_t> &block) {
+    Decoder                  decoder;
+    std::vector<HeaderField> out;
+    bool                     incomplete = false;
+    EXPECT_FALSE(decoder.decode(block, out, incomplete));
+    return incomplete;
+}
+
+} // namespace
+
+TEST(HPACK_DecoderError, IndexedFieldWithZeroIndexFails) {
+    // Indexed Header Field (prefix 1xxxxxxx) with index 0 is illegal.
+    EXPECT_FALSE(decode_fails({0x80})); // not flagged incomplete; it's malformed
+}
+
+TEST(HPACK_DecoderError, IndexedFieldBeyondTablesFails) {
+    // Indexed Header Field index 62: the static table holds 61 entries, so this
+    // resolves to dynamic index 1 — empty here — hitting the out-of-range arm of
+    // get_dynamic_table_entry and the indexed-field failure return.
+    EXPECT_FALSE(decode_fails({0xBE})); // 0x80 | 62
+}
+
+TEST(HPACK_DecoderError, IndexedFieldLargeMultibyteIndexBeyondTables) {
+    // Indexed field with a multi-byte index well past the dynamic table.
+    // 0xFF starts the 7-bit-prefix continuation: 0xFF, 0x80, 0x01 => index huge.
+    EXPECT_FALSE(decode_fails({0xFF, 0x80, 0x01}));
+}
+
+TEST(HPACK_DecoderError, LiteralWithIndexingNameIndexOutOfRange) {
+    // Literal with Incremental Indexing (01xxxxxx), name index 62 (first dynamic
+    // slot, empty) -> get_name_from_index out-of-range -> failure.
+    // 0x7E = 0x40 | 62, then a 0-length value string literal.
+    EXPECT_FALSE(decode_fails({0x7E, 0x00}));
+}
+
+TEST(HPACK_DecoderError, LiteralWithoutIndexingNameIndexOutOfRange) {
+    // Literal without Indexing (0000xxxx), 4-bit prefix. Index 15 then a
+    // continuation byte pushing the name index past the table.
+    // 0x0F = 0x00 | 15 (prefix maxed), 0x7F => index 15 + 127 = 142, value len 0.
+    EXPECT_FALSE(decode_fails({0x0F, 0x7F, 0x00}));
+}
+
+TEST(HPACK_DecoderError, NeverIndexedNameIndexOutOfRange) {
+    // Literal Never Indexed (0001xxxx). 0x1F = 0x10 | 15, 0x7F continuation,
+    // then a 0-length value -> get_name_from_index out-of-range failure.
+    EXPECT_FALSE(decode_fails({0x1F, 0x7F, 0x00}));
+}
+
+TEST(HPACK_DecoderError, StringLiteralLengthRunsPastBufferIsIncomplete) {
+    // Literal with Incremental Indexing, new name (index 0): the name string
+    // literal claims length 5 but only 2 bytes follow -> length > remaining ->
+    // decode_string_literal reports a truncated/incomplete block.
+    const std::vector<uint8_t> block = {0x40, 0x05, 'a', 'b'};
+    Decoder                    decoder;
+    std::vector<HeaderField>   out;
+    bool                       incomplete = false;
+    EXPECT_FALSE(decoder.decode(block, out, incomplete));
+    EXPECT_TRUE(incomplete);
+}
+
+TEST(HPACK_DecoderError, StringLiteralLengthPrefixTruncatedFails) {
+    // Name string literal whose length is a multi-byte integer that runs off the
+    // end of the buffer: 0x40 (new name), 0x7F (length prefix maxed, needs
+    // continuation) but no continuation byte -> decode_integer fails for length.
+    EXPECT_FALSE(decode_fails({0x40, 0x7F}));
+}
+
+TEST(HPACK_DecoderError, IntegerContinuationOverflowFails) {
+    // Indexed field whose index is encoded as an overlong multi-byte integer
+    // that overflows the 64-bit accumulator. A run of 0xFF continuation bytes
+    // forces the M>=64 / add-overflow guards in decode_integer.
+    std::vector<uint8_t> block = {0xFF}; // indexed, 7-bit prefix maxed
+    for (int i = 0; i < 12; ++i) {
+        block.push_back(0xFF); // continuation bytes, high bit set
+    }
+    block.push_back(0x7F); // final continuation byte
+    // decode_fails already asserts decode()==false; the block is flagged
+    // incomplete (truncated/overflowing integer), which is fine here.
+    decode_fails(block);
+}
+
+TEST(HPACK_DecoderError, DynamicTableSizeUpdateLengthTruncatedFails) {
+    // Dynamic Table Size Update (001xxxxx), 5-bit prefix maxed (0x3F) demanding a
+    // continuation byte that never arrives -> size integer decode fails. The
+    // block is reported incomplete, so just assert the decode failure itself.
+    decode_fails({0x3F});
+}
+
+TEST(HPACK_DecoderError, DynamicTableSizeUpdateOverConfiguredLimitFails) {
+    // A size update larger than the decoder's configured limit must fail.
+    Decoder decoder;
+    decoder.set_max_dynamic_table_size(100);
+    std::vector<HeaderField> out;
+    bool                     incomplete = false;
+    // 0x3F,0xE1,0x1F => 001 prefix, value 31 + (0x61=97 ... ) well above 100.
+    const std::vector<uint8_t> block = {0x3F, 0xE1, 0x1F};
+    EXPECT_FALSE(decoder.decode(block, out, incomplete));
+}
+
+TEST(HPACK_DecoderError, LiteralWithIndexingNewNameValueTruncatedIsIncomplete) {
+    // New name decodes fine, but the value string literal length overruns the
+    // buffer -> the value-side incomplete path.
+    // 0x40 (lit+idx, new name), name len 1 'x', value len 9 but no value bytes.
+    const std::vector<uint8_t> block = {0x40, 0x01, 'x', 0x09};
+    Decoder                    decoder;
+    std::vector<HeaderField>   out;
+    bool                       incomplete = false;
+    EXPECT_FALSE(decoder.decode(block, out, incomplete));
+    EXPECT_TRUE(incomplete);
+}
+
+// ====================================================================
+// Encoder edge paths (hpack.cpp)
+// ====================================================================
+
+TEST(HPACK_EncoderEdge, MultiByteIntegerEncodingForLargeStringLength) {
+    // A value longer than a 7-bit prefix (>=127 bytes) forces encode_integer
+    // into its multi-byte continuation loop (value/128 chain).
+    Encoder              encoder;
+    std::vector<uint8_t> out;
+    const std::string    long_value(300, 'a');
+    // Use a non-pseudo, non-sensitive header; disable huffman benefit by using
+    // repeated bytes that still produce a long literal length field.
+    std::vector<HeaderField> headers = {HeaderField("x-long", long_value)};
+    ASSERT_TRUE(encoder.encode(headers, out));
+    EXPECT_GT(out.size(), 127u);
+
+    // It round-trips through a fresh decoder.
+    Decoder                  decoder;
+    std::vector<HeaderField> decoded;
+    bool                     incomplete = false;
+    ASSERT_TRUE(decoder.decode(out, decoded, incomplete));
+    ASSERT_EQ(decoded.size(), 1u);
+    EXPECT_EQ(decoded[0].name, "x-long");
+    EXPECT_EQ(decoded[0].value, long_value);
+}
+
+TEST(HPACK_EncoderEdge, NameInDynamicTableButFieldTooBigUsesWithoutIndexing) {
+    // Drive the "Literal without Indexing" branch that references a *dynamic*
+    // table name index (base.cpp encoder path): a header whose name already
+    // lives in the dynamic table, with a new value, that is too large to be
+    // (re)added to the now-shrunken table.
+    Encoder encoder;
+
+    // 1) Encode a small header so its name is inserted into the dynamic table.
+    {
+        std::vector<uint8_t>     out;
+        std::vector<HeaderField> seed = {HeaderField("x-name", "v1")};
+        ASSERT_TRUE(encoder.encode(seed, out));
+        ASSERT_GE(encoder.get_dynamic_table_entry_count(), 1u);
+    }
+
+    // 2) Shrink the table budget so the *next* (larger) header cannot be added,
+    //    but keep it large enough that "x-name"/"v1" (size 6+32=38) survives.
+    encoder.set_max_capacity(40);
+    ASSERT_GE(encoder.get_dynamic_table_entry_count(), 1u);
+
+    // 3) Encode "x-name" again with a long value: name matches the dynamic entry
+    //    (dynamic_name_idx set), value differs, hpack_size > 40 so it is NOT
+    //    re-added -> the without-indexing + dynamic-name-index arm.
+    std::vector<uint8_t>     out;
+    const std::string        big_value(64, 'z');
+    std::vector<HeaderField> headers = {HeaderField("x-name", big_value)};
+    ASSERT_TRUE(encoder.encode(headers, out));
+    ASSERT_FALSE(out.empty());
+
+    // The emitted representation is "Literal Header Field without Indexing"
+    // (top 4 bits 0000) referencing the *dynamic* name index 62 (= 61 static
+    // entries + slot 1). encode_integer(prefix 0x00, N=4, 62) maxes the 4-bit
+    // prefix (0x0F) then encodes the remainder 62-15=47 in the next octet.
+    EXPECT_EQ(out[0], 0x0F);
+    ASSERT_GE(out.size(), 2u);
+    EXPECT_EQ(out[1], 47u);
+
+    // The header was NOT re-added to the dynamic table (still just the seed).
+    EXPECT_EQ(encoder.get_dynamic_table_entry_count(), 1u);
+}
+
+// --- decode_integer index-prefix truncation per representation -------------
+// Each representation reads its index with a different prefix width; a maxed
+// prefix with no continuation byte makes decode_integer return -1, exercising
+// the per-branch "index_len < 0 -> incomplete" arms of Decoder::decode.
+
+TEST(HPACK_DecoderError, LiteralWithIndexingIndexPrefixTruncated) {
+    // 0x7F = 0x40 | 0x3F : 6-bit prefix maxed, demands a continuation byte.
+    decode_fails({0x7F});
+}
+
+TEST(HPACK_DecoderError, LiteralWithoutIndexingIndexPrefixTruncated) {
+    // 0x0F = 0x00 | 0x0F : 4-bit prefix maxed, demands a continuation byte.
+    decode_fails({0x0F});
+}
+
+TEST(HPACK_DecoderError, NeverIndexedIndexPrefixTruncated) {
+    // 0x1F = 0x10 | 0x0F : never-indexed, 4-bit prefix maxed, no continuation.
+    decode_fails({0x1F});
+}
+
+TEST(HPACK_DecoderError, NeverIndexedNewNameStringTruncatedIsIncomplete) {
+    // Never indexed (0x10), index 0 => a new name follows; the name string
+    // literal claims length 5 but only 2 bytes are present -> value-side
+    // truncation reported as incomplete.
+    const std::vector<uint8_t> block = {0x10, 0x05, 'a', 'b'};
+    Decoder                    decoder;
+    std::vector<HeaderField>   out;
+    bool                       incomplete = false;
+    EXPECT_FALSE(decoder.decode(block, out, incomplete));
+    EXPECT_TRUE(incomplete);
+}
+
+TEST(HPACK_DecoderError, WithoutIndexingNewNameValueTruncatedIsIncomplete) {
+    // Without indexing (0x00), index 0 => new name "x"; then a value string
+    // literal whose declared length overruns the buffer.
+    const std::vector<uint8_t> block = {0x00, 0x01, 'x', 0x09};
+    Decoder                    decoder;
+    std::vector<HeaderField>   out;
+    bool                       incomplete = false;
+    EXPECT_FALSE(decoder.decode(block, out, incomplete));
+    EXPECT_TRUE(incomplete);
+}
