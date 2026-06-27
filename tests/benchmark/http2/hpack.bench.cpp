@@ -42,10 +42,11 @@
 #include <benchmark/benchmark.h>
 
 #include <cstdint>
-#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <qb/io/crypto.h>
 
 #include "../2/protocol/hpack.h"
 #include "../2/protocol/hpack_huffman.h"
@@ -59,13 +60,8 @@ namespace {
 // RFC 7541 Appendix C gold vectors map byte-for-byte to what the tests decode.
 std::vector<uint8_t>
 hex_to_bytes(std::string_view hex) {
-    std::vector<uint8_t> bytes;
-    bytes.reserve(hex.size() / 2);
-    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
-        const std::string byte_string(hex.substr(i, 2));
-        bytes.push_back(static_cast<uint8_t>(std::strtol(byte_string.c_str(), nullptr, 16)));
-    }
-    return bytes;
+    const std::string decoded = qb::crypto::hex_to_string(std::string(hex));
+    return {decoded.begin(), decoded.end()};
 }
 
 // Seed corpus: the realistic request header list from hpack-codec.cpp
@@ -394,7 +390,7 @@ BM_Huffman_Decode(benchmark::State &state) {
     // RFC 7541 C.4.1 Huffman("custom-key") and C.5.1 location URL.
     static const std::vector<uint8_t> custom_key = {0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f};
     static const std::vector<uint8_t> location =
-        hex_to_bytes("9d29ad1718863c78f0b97c8e9ae82ae43d3"); // Huffman("https://www.example.com")
+        hex_to_bytes("9d29ad171863c78f0b97c8e9ae82ae43d3"); // Huffman("https://www.example.com")
 
     {
         std::string probe;

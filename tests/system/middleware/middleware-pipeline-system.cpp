@@ -52,6 +52,7 @@
 #include "../../shared/loopback_server.h"
 
 #include <qb/json.h>
+#include <qb/system/parse.h>
 
 using namespace std::chrono_literals;
 
@@ -226,9 +227,11 @@ TEST_F(MiddlewarePipelineTest, TimingMiddlewareSetsResponseTimeHeader) {
     const std::string header{response.header("X-Response-Time")};
     EXPECT_FALSE(header.empty()) << "X-Response-Time header not set";
     if (!header.empty()) {
-        double value = -1.0;
-        EXPECT_NO_THROW(value = std::stod(header));
-        EXPECT_GE(value, 0.0);
+        // X-Response-Time is "<seconds>ms" (a numeric value with a trailing unit), so parse the
+        // leading numeric prefix and tolerate the "ms" suffix, like the original std::stod did.
+        const auto value = qb::to_number_prefix<double>(header);
+        ASSERT_TRUE(value.has_value()) << "X-Response-Time header is not numerically parseable";
+        EXPECT_GE(*value, 0.0);
     }
 }
 

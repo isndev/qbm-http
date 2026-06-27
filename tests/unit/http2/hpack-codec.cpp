@@ -45,6 +45,8 @@
 #include <string>
 #include <vector>
 
+#include <qb/io/crypto.h>
+
 #include "../2/protocol/hpack.h"
 #include "../2/protocol/hpack_huffman.h"
 
@@ -59,12 +61,10 @@ namespace {
 
 std::vector<uint8_t>
 hex_to_bytes(const std::string &hex) {
-    std::vector<uint8_t> bytes;
-    for (std::size_t i = 0; i + 1 < hex.length(); i += 2) {
-        const std::string byte_string = hex.substr(i, 2);
-        bytes.push_back(static_cast<uint8_t>(std::strtol(byte_string.c_str(), nullptr, 16)));
-    }
-    return bytes;
+    // RFC 7541 gold vectors are even-length, all-hex strings; qb::crypto::hex_to_string
+    // decodes them to the exact bytes (and returns "" on odd/invalid hex).
+    const std::string decoded = qb::crypto::hex_to_string(hex);
+    return std::vector<uint8_t>(decoded.begin(), decoded.end());
 }
 
 // Decode a whole block through a fresh decoder, asserting it succeeds and is
