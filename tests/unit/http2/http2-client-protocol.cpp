@@ -30,6 +30,7 @@
 
 #include "../../shared/http2_fake_io.h"
 
+using qb::http::test::default_request_headers;
 using qb::http::test::Http2ClientFakeIO;
 using qb::http::test::Http2PeerFakeIO;
 using qb::http::test::encode_hpack_headers;
@@ -2024,4 +2025,442 @@ TEST(HTTP2ClientProtocol, ResponsePseudoHeaderInTrailersRstsStream) {
     EXPECT_EQ(io.stream_error_count, 1);
     EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
     ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+}
+
+// ===========================================================================
+// Coverage-fill: protocol-internal error / state branches reachable only by
+// hand-feeding typed frames (the FakeIO harness lets us bypass the wire-level
+// framer that would otherwise reject these before dispatch).
+//
+// These extend the happy-path suite above to drive: the preface-complete
+// guards (not-ok / already-sent / single-request auto-send), the DATA
+// flow-control violation arms, END_STREAM window-update emission, the
+// CONTINUATION trailers reassembly path, the SETTINGS not-ok + unknown-id
+// arms, the RST_STREAM stream-0 + not-ok guards, the PRIORITY not-ok guard,
+// and the PUSH_PROMISE not-ok guard.
+// ===========================================================================
+
+namespace {
+
+// Locate the first frame of `type` from offset 0; safe here because every test
+// that uses it has already consumed past the preface (the protocol's output
+// pipe begins with the 24-byte preface, so callers pass start past it where the
+// preface might still be present). This walks from the FIRST real frame header.
+[[nodiscard]] bool
+output_has_frame_after(const qb::allocator::pipe<char> &pipe, h2::FrameType type) {
+    // The preface is exactly 24 bytes; frames start at offset 24.
+    return find_frame_offset(pipe, type, 24) != SIZE_MAX;
+}
+
+// Drive the protocol into a !ok() state via a RST_STREAM on stream 0 (a
+// connection PROTOCOL_ERROR). Returns with protocol.ok() == false so the next
+// frame ingest exercises the leading not-ok guard of each handler.
+void
+force_connection_not_ok(h2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol) {
+    h2::Http2FrameData<h2::RstStreamFrame> rst;
+    rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+    rst.header.set_stream_id(0);
+    rst.payload.error_code = h2::ErrorCode::CANCEL;
+    protocol.on(std::move(rst));
+    ASSERT_FALSE(protocol.ok());
+}
+
+} // namespace
+
+// --- Preface-complete guards -------------------------------------------------
+
+// PrefaceCompleteEvent received while the protocol is already not-ok: the
+// handler's leading guard returns early without emitting another SETTINGS frame.
+TEST(HTTP2ClientProtocol, PrefaceCompleteWhileNotOkIsIgnored) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    force_connection_not_ok(protocol);
+    const std::size_t before = io.output.size();
+
+    protocol.on(h2::PrefaceCompleteEvent{});
+
+    // No further bytes emitted (guard returned before the SETTINGS send).
+    EXPECT_EQ(io.output.size(), before);
+}
+
+// A second PrefaceCompleteEvent after the first already sent the initial
+// SETTINGS hits the `_initial_settings_sent` else-branch (no duplicate SETTINGS).
+TEST(HTTP2ClientProtocol, SecondPrefaceCompleteDoesNotResendSettings) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    protocol.on(h2::PrefaceCompleteEvent{}); // sends initial SETTINGS
+    const std::size_t after_first = io.output.size();
+
+    protocol.on(h2::PrefaceCompleteEvent{}); // _initial_settings_sent already true
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.output.size(), after_first); // nothing more emitted
+}
+
+// Single-request mode: when constructed with a request pointer, preface-complete
+// auto-sends that request (emitting a HEADERS frame) without an explicit
+// send_request call. Drives the `_single_request_mode` auto-send arm.
+TEST(HTTP2ClientProtocol, SingleRequestModeAutoSendsOnPrefaceComplete) {
+    Http2ClientFakeIO io;
+
+    qb::http::Request single;
+    single.method() = qb::http::method::GET;
+    single.uri()    = qb::io::uri("https://example.test/single");
+
+    // The request must outlive the protocol (it stores a raw pointer).
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io, &single);
+
+    const std::size_t before = io.output.size();
+    protocol.on(h2::PrefaceCompleteEvent{});
+
+    EXPECT_TRUE(protocol.ok());
+    // A HEADERS frame for the auto-sent stream 1 must have been emitted.
+    EXPECT_NE(find_frame_offset(io.output, h2::FrameType::HEADERS, before), SIZE_MAX);
+}
+
+// --- DATA frame flow-control / not-ok arms ----------------------------------
+
+// A DATA frame delivered while the protocol is not-ok is dropped by the leading
+// FramerBase::ok() guard (no crash, no response).
+TEST(HTTP2ClientProtocol, DataFrameWhileNotOkIsIgnored) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/data-notok");
+    force_connection_not_ok(protocol);
+
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "ignored"));
+
+    EXPECT_FALSE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+}
+
+// A single server DATA frame whose payload exceeds the stream's local receive
+// window (default 65535) is a stream FLOW_CONTROL_ERROR that also escalates to a
+// connection GOAWAY(FLOW_CONTROL_ERROR).
+TEST(HTTP2ClientProtocol, ServerDataExceedingStreamWindowIsFlowControlError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/overflow");
+
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+
+    // 70000 bytes > 65535 stream window -> stream FC violation + GOAWAY.
+    protocol.on(make_data_frame(1, 0, std::string(70000, 'x')));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::FLOW_CONTROL_ERROR);
+    EXPECT_TRUE(output_has_frame_after(io.output, h2::FrameType::RST_STREAM));
+}
+
+// A DATA frame that fits the stream window but exhausts the shared connection
+// receive window is a connection FLOW_CONTROL_ERROR. Stream A first consumes
+// most of the shared connection window; a fresh stream B then receives a DATA
+// frame within its own (full) stream window but over the remaining connection
+// window, driving the connection-level violation arm.
+TEST(HTTP2ClientProtocol, ServerDataExceedingConnectionWindowIsFlowControlError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    qb::http::Request a;
+    a.method() = qb::http::method::GET;
+    a.uri()    = qb::io::uri("https://example.test/a");
+    ASSERT_TRUE(protocol.send_request(std::move(a), 1)); // stream 1
+    qb::http::Request b;
+    b.method() = qb::http::method::GET;
+    b.uri()    = qb::io::uri("https://example.test/b");
+    ASSERT_TRUE(protocol.send_request(std::move(b), 2)); // stream 3
+
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+    protocol.on(make_headers_frame(3, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+
+    // Stream 1 consumes 32000 of the 65535 connection window. This stays just
+    // under the connection auto-WINDOW_UPDATE threshold (65535/2 = 32767), so the
+    // shared connection receive window is NOT replenished and is left at ~33535.
+    protocol.on(make_data_frame(1, 0, std::string(32000, 'a')));
+    EXPECT_TRUE(protocol.ok());
+
+    // Stream 3 (fresh 65535 stream window) receives 40000: passes the per-stream
+    // check (65535 >= 40000) but the remaining connection window (33535) is now
+    // too small -> connection FLOW_CONTROL_ERROR.
+    protocol.on(make_data_frame(3, 0, std::string(40000, 'b')));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::FLOW_CONTROL_ERROR);
+}
+
+// A large but in-window response body delivered as several DATA frames crosses
+// the per-stream window-update threshold; on END_STREAM the client emits a
+// WINDOW_UPDATE for the consumed bytes (the END_STREAM threshold-flush arm).
+TEST(HTTP2ClientProtocol, EndStreamFlushesPendingStreamWindowUpdate) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/winflush");
+
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+
+    const std::size_t before = io.output.size();
+    // First DATA stays below the per-stream window-update threshold (65535/2 =
+    // 32767), so no mid-stream flush fires. The second DATA carries END_STREAM
+    // and pushes the accumulated processed bytes (40000) past the threshold, so
+    // the flush happens on the END_STREAM path specifically.
+    protocol.on(make_data_frame(1, 0, std::string(20000, 'p')));
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, std::string(20000, 'q')));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 1);
+    // A stream-level WINDOW_UPDATE (stream id 1) must have been emitted.
+    EXPECT_GT(total_window_update_increment_for_stream(io.output, 1, before), 0u);
+}
+
+// --- HEADERS on an idle stream ----------------------------------------------
+
+// A HEADERS frame for an odd stream id ABOVE the last client-initiated id refers
+// to an idle client stream the server must not open -> connection PROTOCOL_ERROR.
+TEST(HTTP2ClientProtocol, HeadersForIdleHighOddStreamIsConnectionError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/hdr-idle"); // last initiated = 1
+
+    // Stream 9 is odd and > 1: idle client stream -> connection error.
+    protocol.on(make_headers_frame(9, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "200"}}));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// --- WINDOW_UPDATE on unknown / idle streams --------------------------------
+
+// A stream-level WINDOW_UPDATE for an odd stream id ABOVE the last client-
+// initiated stream id targets a never-opened (idle) client stream, which is a
+// connection PROTOCOL_ERROR.
+TEST(HTTP2ClientProtocol, WindowUpdateForIdleHighOddStreamIsConnectionError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/wu-idle"); // last initiated = 1
+
+    // Stream 7 is odd and > 1: never initiated -> idle -> connection error.
+    protocol.on(make_window_update_frame(7, 100));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// A stream-level WINDOW_UPDATE for an EVEN (server-push) stream id we never saw
+// is tolerated and ignored per RFC 9113 6.9 (frames may cross paths with a
+// closed stream): no error, connection stays ok.
+TEST(HTTP2ClientProtocol, WindowUpdateForUnknownEvenStreamIsIgnored) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/wu-even");
+
+    protocol.on(make_window_update_frame(4, 100)); // even, unknown -> ignored
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count, 0);
+    EXPECT_EQ(io.goaway_count, 0);
+}
+
+// --- CONTINUATION error + trailers reassembly -------------------------------
+
+// A CONTINUATION frame arriving when no header block is open for that stream is
+// a connection PROTOCOL_ERROR (the active-header-block stream id is 0, so the
+// "unexpected stream" guard fires). Driven via direct typed dispatch.
+TEST(HTTP2ClientProtocol, ContinuationWithNoActiveBlockTypedIsConnectionError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/lonecont");
+
+    h2::Http2FrameData<h2::ContinuationFrame> cont;
+    cont.header.type  = static_cast<uint8_t>(h2::FrameType::CONTINUATION);
+    cont.header.flags = h2::FLAG_END_HEADERS;
+    cont.header.set_stream_id(1);
+    cont.payload.header_block_fragment = encode_hpack_headers({{":status", "200"}});
+    protocol.on(std::move(cont));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// Trailers delivered as a HEADERS(no END_HEADERS) + CONTINUATION(END_HEADERS)
+// block after the main response: the CONTINUATION reassembly path detects the
+// trailers block (stream.headers_received_main is set) and dispatches the
+// completed response. Drives the is_trailers_block success branch of
+// on(ContinuationFrame).
+TEST(HTTP2ClientProtocol, TrailersViaContinuationAreReassembledAndDispatched) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 71, "/cont-trailers");
+
+    // Main response announces a trailer and does NOT end the stream.
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"trailer", "x-checksum"}}));
+    ASSERT_TRUE(protocol.ok());
+    // Body without END_STREAM (the END_STREAM rides the trailers HEADERS block).
+    protocol.on(make_data_frame(1, 0, "body"));
+    ASSERT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0); // awaiting trailers
+
+    // Trailers as a split HEADERS(END_STREAM) + CONTINUATION(END_HEADERS) block
+    // (no pseudo-headers). END_STREAM rides the opening HEADERS frame.
+    const auto block = encode_hpack_headers({{"x-checksum", "abc123"}});
+    ASSERT_GE(block.size(), 2u);
+    const std::size_t    cut = block.size() / 2;
+    std::vector<uint8_t> first(block.begin(), block.begin() + cut);
+    std::vector<uint8_t> rest(block.begin() + cut, block.end());
+
+    push_raw_header_carrier(io, h2::FrameType::HEADERS, h2::FLAG_END_STREAM, 1, first);
+    push_raw_header_carrier(io, h2::FrameType::CONTINUATION, h2::FLAG_END_HEADERS, 1, rest);
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count, 0);
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(io.response_count, 1);
+    ASSERT_TRUE(io.last_status.has_value());
+    EXPECT_EQ(*io.last_status, 200);
+    EXPECT_EQ(*io.last_body, "body");
+}
+
+// A CONTINUATION carrying a corrupt HPACK fragment after a valid open HEADERS
+// block fails to decode -> COMPRESSION_ERROR (RST + GOAWAY). Drives the
+// on(ContinuationFrame) HPACK-decode-failure arm.
+TEST(HTTP2ClientProtocol, ContinuationWithCorruptHpackIsCompressionError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 73, "/cont-bad-hpack");
+
+    const auto block = encode_hpack_headers({{":status", "200"}, {"x-trace", "cont"}});
+    ASSERT_GE(block.size(), 2u);
+    const std::size_t    cut = block.size() / 2;
+    std::vector<uint8_t> first(block.begin(), block.begin() + cut);
+
+    // HEADERS (no END_HEADERS) opens the block on stream 1.
+    push_raw_header_carrier(io, h2::FrameType::HEADERS, 0, 1, first);
+    // CONTINUATION (END_HEADERS) with a literal-name-reference to the reserved
+    // index 0 -> HPACK decode failure on reassembly.
+    const std::vector<uint8_t> corrupt = {0x10, 0x00};
+    push_raw_header_carrier(io, h2::FrameType::CONTINUATION, h2::FLAG_END_HEADERS, 1, corrupt);
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::COMPRESSION_ERROR);
+}
+
+// --- SETTINGS guards ---------------------------------------------------------
+
+// A SETTINGS frame arriving while the protocol is not-ok is dropped by the
+// leading not-ok / inactive guard.
+TEST(HTTP2ClientProtocol, SettingsFrameWhileNotOkIsIgnored) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    force_connection_not_ok(protocol);
+
+    const std::size_t before = io.output.size();
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE, 32768}}));
+
+    EXPECT_FALSE(protocol.ok());
+    EXPECT_EQ(io.output.size(), before); // no ACK emitted
+}
+
+// A SETTINGS frame carrying an UNKNOWN setting identifier must be accepted: the
+// unknown id is ignored (default switch arm) and the frame is still ACKed.
+TEST(HTTP2ClientProtocol, SettingsFrameWithUnknownIdIsIgnoredAndAcked) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    const std::size_t                     before = io.output.size();
+    h2::Http2FrameData<h2::SettingsFrame> frame;
+    frame.header.type  = static_cast<uint8_t>(h2::FrameType::SETTINGS);
+    frame.header.flags = 0;
+    frame.header.set_stream_id(0);
+    // 0x99 is not a defined SETTINGS id -> validated valid, hits default arm.
+    frame.payload.entries.push_back({static_cast<h2::Http2SettingIdentifier>(0x0099), 12345});
+    protocol.on(std::move(frame));
+
+    EXPECT_TRUE(protocol.ok());
+    const auto ack_off = find_frame_offset(io.output, h2::FrameType::SETTINGS, before);
+    ASSERT_NE(ack_off, SIZE_MAX);
+    EXPECT_TRUE(peek_frame_header(io.output, ack_off).flags & h2::FLAG_ACK);
+}
+
+// --- RST_STREAM / PRIORITY / PUSH_PROMISE guards ----------------------------
+
+// A RST_STREAM on stream 0 is a connection PROTOCOL_ERROR.
+TEST(HTTP2ClientProtocol, RstStreamOnStreamZeroIsConnectionError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    h2::Http2FrameData<h2::RstStreamFrame> rst;
+    rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+    rst.header.set_stream_id(0);
+    rst.payload.error_code = h2::ErrorCode::CANCEL;
+    protocol.on(std::move(rst));
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// A RST_STREAM arriving while the protocol is not-ok is dropped by the leading
+// not-ok guard.
+TEST(HTTP2ClientProtocol, RstStreamWhileNotOkIsIgnored) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/rst-notok");
+    force_connection_not_ok(protocol);
+
+    const int                              errs_before = io.stream_error_count;
+    h2::Http2FrameData<h2::RstStreamFrame> rst;
+    rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+    rst.header.set_stream_id(1);
+    rst.payload.error_code = h2::ErrorCode::CANCEL;
+    protocol.on(std::move(rst));
+
+    EXPECT_FALSE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count, errs_before); // guard returned early
+}
+
+// A PRIORITY frame arriving while the protocol is not-ok is dropped by the
+// leading not-ok guard.
+TEST(HTTP2ClientProtocol, PriorityFrameWhileNotOkIsIgnored) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    force_connection_not_ok(protocol);
+
+    const std::size_t                     before = io.output.size();
+    h2::Http2FrameData<h2::PriorityFrame> prio;
+    prio.header.type = static_cast<uint8_t>(h2::FrameType::PRIORITY);
+    prio.header.set_stream_id(1);
+    protocol.on(std::move(prio));
+
+    EXPECT_FALSE(protocol.ok());
+    EXPECT_EQ(io.output.size(), before); // no GOAWAY emitted by the handler
+}
+
+// A PUSH_PROMISE arriving while the protocol is not-ok is dropped by the leading
+// not-ok guard (before any promised-id validation).
+TEST(HTTP2ClientProtocol, PushPromiseWhileNotOkIsIgnored) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/pp-notok");
+    force_connection_not_ok(protocol);
+
+    const std::size_t                        before = io.output.size();
+    h2::Http2FrameData<h2::PushPromiseFrame> pp;
+    pp.header.type = static_cast<uint8_t>(h2::FrameType::PUSH_PROMISE);
+    pp.header.set_stream_id(1);
+    pp.payload.promised_stream_id    = 2;
+    pp.payload.header_block_fragment = encode_hpack_headers(default_request_headers("/pushed"));
+    protocol.on(std::move(pp));
+
+    EXPECT_FALSE(protocol.ok());
+    EXPECT_EQ(io.output.size(), before);
+    EXPECT_EQ(io.push_promise_count, 0);
 }

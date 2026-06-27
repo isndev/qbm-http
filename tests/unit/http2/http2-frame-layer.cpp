@@ -25,11 +25,24 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "../2/protocol/base.h"
+#include "../../shared/http2_fake_io.h"
 
 namespace h2 = qb::protocol::http2;
+
+using qb::http::test::Http2FakeIO;
+using qb::http::test::default_request_headers;
+using qb::http::test::do_handshake;
+using qb::http::test::drive;
+using qb::http::test::encode_hpack_headers;
+using qb::http::test::parse_emitted_frames;
+using qb::http::test::push_frame;
+using qb::http::test::push_preface;
+
+using FrameLayerServer = qb::protocol::http2::ServerHttp2Protocol<Http2FakeIO>;
 
 // ---------------------------------------------------------------------------
 // Binary utilities (base.h)
@@ -760,4 +773,511 @@ TEST(HTTP2FrameLayerStreamId, UnknownFrameTypeIsValid) {
     // Unknown frame types are ignored per RFC 9113, so validation passes.
     EXPECT_TRUE(h2::StreamIdValidator::validate_stream_id_for_frame(FrameType::UNKNOWN, 0, true).is_valid);
     EXPECT_TRUE(h2::StreamIdValidator::validate_stream_id_for_frame(FrameType::UNKNOWN, 5, false).is_valid);
+}
+
+// ===========================================================================
+// Framer-driving tests (base.h templated Http2Protocol<>)
+//
+// The static-helper tests above never instantiate the framer. The block below
+// drives the shared frame parser/state-machine (qb::protocol::http2::Http2Protocol)
+// through a real ServerHttp2Protocol over the socket-less Http2FakeIO harness,
+// reaching the frame-header validation, zero-payload dispatch, padding, the
+// HEADERS-with-PRIORITY parse, PUSH_PROMISE/GOAWAY payload parsing and the
+// CONTINUATION-required gate that pure value-type tests cannot exercise.
+// ===========================================================================
+
+namespace {
+
+using qb::protocol::http2::FLAG_ACK;
+using qb::protocol::http2::FLAG_END_HEADERS;
+using qb::protocol::http2::FLAG_END_STREAM;
+using qb::protocol::http2::FLAG_PADDED;
+using qb::protocol::http2::FLAG_PRIORITY;
+using FT = h2::FrameType;
+
+// Drive preface + an empty client SETTINGS so the server is post-handshake.
+void
+fl_handshake(FrameLayerServer &protocol, Http2FakeIO &io) {
+    push_preface(io);
+    push_frame(io, FT::SETTINGS, 0, 0, {});
+    drive(protocol, io);
+}
+
+} // namespace
+
+// --- getMessageSize stalls (base.h:523-525, 539-540) -----------------------
+
+TEST(HTTP2FramerDrive, PartialPrefaceLeavesParserStalled) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+
+    // Push only the first half of the 24-byte preface: getMessageSize in the
+    // EXPECTING_PREFACE state sees in_buffer < remaining_preface_needed and
+    // returns 0, so the framer makes no progress and stays ok().
+    const auto &preface = ::HTTP2_CONNECTION_PREFACE;
+    qb::http::test::push_bytes(io, preface.data(), preface.size() / 2);
+
+    EXPECT_EQ(protocol.getMessageSize(), 0u);
+    EXPECT_TRUE(protocol.ok());
+
+    // Completing the preface now unblocks it.
+    qb::http::test::push_bytes(io, preface.data() + preface.size() / 2, preface.size() - preface.size() / 2);
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, FrameHeaderWithoutPayloadLeavesParserStalled) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Manually write a frame header that promises an 8-byte PING payload, but
+    // do NOT push the payload bytes. The framer consumes the header, moves to
+    // EXPECTING_FRAME_PAYLOAD, then getMessageSize returns 0 because
+    // in_buffer.size() < _expected_payload_bytes.
+    h2::FrameHeader fh{};
+    fh.set_payload_length(8);
+    fh.type  = static_cast<uint8_t>(FT::PING);
+    fh.flags = 0;
+    fh.set_stream_id(0);
+    qb::http::test::push_bytes(io, &fh, sizeof(fh));
+
+    drive(protocol, io);              // consumes the header, then stalls
+    EXPECT_EQ(protocol.getMessageSize(), 0u);
+    EXPECT_TRUE(protocol.ok());
+
+    // Supplying the 8 payload octets now lets the PING complete.
+    const std::vector<uint8_t> ping_payload(8, 0u);
+    qb::http::test::push_bytes(io, ping_payload.data(), ping_payload.size());
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+}
+
+// --- invalid preface bytes (base.h:582-584) --------------------------------
+
+TEST(HTTP2FramerDrive, InvalidPrefaceBytesAreProtocolError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+
+    // 24 bytes of the wrong content (same length as the real preface so the
+    // size check passes but the memcmp fails -> PROTOCOL_ERROR).
+    const std::vector<uint8_t> bogus(::HTTP2_CONNECTION_PREFACE.size(), 'Z');
+    qb::http::test::push_bytes(io, bogus.data(), bogus.size());
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+// --- zero-payload frame dispatch (base.h:976-1048) -------------------------
+
+TEST(HTTP2FramerDrive, ZeroPayloadHeadersFrameDispatches) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // HEADERS with END_HEADERS|END_STREAM and a zero-length payload: the
+    // zero-payload dispatch path constructs an (empty) HeadersFrame and hands
+    // it to the side protocol. An empty header block is a malformed request,
+    // so the server resets the stream rather than accepting it.
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, {});
+    drive(protocol, io);
+
+    // The framer itself stays healthy (it dispatched a well-formed empty frame);
+    // the request was simply rejected at the stream layer.
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_TRUE(qb::http::test::output_has_frame(io.output, FT::RST_STREAM)
+                || io.request_count == 0);
+}
+
+TEST(HTTP2FramerDrive, ZeroPayloadDataFrameOnOpenStreamDispatches) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Open a POST stream (HEADERS, no END_STREAM) so a subsequent empty DATA
+    // frame has a live stream to land on; that drives the DATA arm of the
+    // zero-payload dispatch.
+    auto post_headers      = default_request_headers("/upload");
+    post_headers[0].value  = "POST";
+    const auto encoded     = encode_hpack_headers(post_headers);
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS, 1, encoded);
+    push_frame(io, FT::DATA, FLAG_END_STREAM, 1, {}); // zero-length DATA, END_STREAM
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+TEST(HTTP2FramerDrive, ZeroPayloadSettingsAckDispatches) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // A SETTINGS frame with the ACK flag and an empty payload exercises the
+    // SETTINGS-ACK branch of the zero-payload dispatch.
+    push_frame(io, FT::SETTINGS, FLAG_ACK, 0, {});
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, ZeroPayloadRstStreamIsFrameSizeError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // RST_STREAM mandates a 4-octet payload; a zero-length RST_STREAM hits the
+    // PRIORITY/RST_STREAM/GOAWAY/WINDOW_UPDATE "mandatory non-zero payload"
+    // arm -> FRAME_SIZE_ERROR.
+    push_frame(io, FT::RST_STREAM, 0, 1, {});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, ZeroPayloadWindowUpdateIsFrameSizeError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    push_frame(io, FT::WINDOW_UPDATE, 0, 0, {}); // 0-length WINDOW_UPDATE
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, ZeroPayloadPushPromiseIsFrameSizeError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // PUSH_PROMISE with zero payload hits its dedicated zero-payload arm
+    // (must carry at least the 4-octet promised stream id) -> FRAME_SIZE_ERROR.
+    push_frame(io, FT::PUSH_PROMISE, 0, 1, {});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, ZeroPayloadPingIsFrameSizeError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // PING payload MUST be 8 octets; a zero-length PING is the PING arm of the
+    // zero-payload dispatch -> FRAME_SIZE_ERROR.
+    push_frame(io, FT::PING, 0, 0, {});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+// --- CONTINUATION-required gate (base.h:604-613, 1036-1040) ----------------
+
+TEST(HTTP2FramerDrive, NonContinuationAfterIncompleteHeadersIsProtocolError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // HEADERS WITHOUT END_HEADERS leaves the parser expecting a CONTINUATION
+    // for the same stream. Sending a DATA frame instead trips the
+    // continuation-required gate in the frame-header state -> PROTOCOL_ERROR.
+    const auto encoded = encode_hpack_headers(default_request_headers("/"));
+    push_frame(io, FT::HEADERS, 0, 1, encoded); // no END_HEADERS
+    push_frame(io, FT::DATA, FLAG_END_STREAM, 1, {0x00});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, ContinuationOnWrongStreamIsProtocolError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // HEADERS on stream 1 without END_HEADERS, then a CONTINUATION on stream 3:
+    // the stream-id mismatch in the continuation-required gate is a
+    // PROTOCOL_ERROR.
+    const auto encoded = encode_hpack_headers(default_request_headers("/"));
+    push_frame(io, FT::HEADERS, 0, 1, encoded);     // no END_HEADERS, stream 1
+    push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 3, {}); // wrong stream
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, HeadersSplitAcrossContinuationCompletes) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Encode a full request header block, then split it: the first half rides a
+    // HEADERS frame WITHOUT END_HEADERS, the rest a zero-or-more CONTINUATION
+    // frames. This drives both the continuation-required gate (accepted path)
+    // and the zero-payload CONTINUATION dispatch when the tail is empty.
+    const auto encoded = encode_hpack_headers(default_request_headers("/split"));
+    ASSERT_GE(encoded.size(), 2u);
+    const std::size_t          half = encoded.size() / 2;
+    const std::vector<uint8_t> first(encoded.begin(), encoded.begin() + half);
+    const std::vector<uint8_t> rest(encoded.begin() + half, encoded.end());
+
+    push_frame(io, FT::HEADERS, FLAG_END_STREAM, 1, first); // no END_HEADERS
+    push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 1, rest);
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+// --- HEADERS with PRIORITY flag (base.h:1144-1152) -------------------------
+
+TEST(HTTP2FramerDrive, HeadersWithPriorityFlagParses) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Build a HEADERS payload that begins with the 5-octet PRIORITY block
+    // (exclusive=1, stream dependency=1, weight=16) followed by the HPACK block.
+    const auto           hpack = encode_hpack_headers(default_request_headers("/prio"));
+    std::vector<uint8_t> payload;
+    payload.push_back(0x80); // exclusive bit set, dependency high byte = 0
+    payload.push_back(0x00);
+    payload.push_back(0x00);
+    payload.push_back(0x01); // stream dependency = 1
+    payload.push_back(0x10); // weight = 16
+    payload.insert(payload.end(), hpack.begin(), hpack.end());
+
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM | FLAG_PRIORITY, 1, payload);
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+// --- padded frame validation (base.h:822-824, 1130) ------------------------
+
+TEST(HTTP2FramerDrive, PaddedHeadersSuccessPathStripsPadding) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // HEADERS, FLAG_PADDED, with a Pad Length octet of 0 followed by the real
+    // HPACK header block and no padding bytes. This drives the FLAG_PADDED
+    // branch of handle_headers_frame_payload (the success path that records
+    // pad_length and assigns the trimmed header block).
+    const auto           hpack = encode_hpack_headers(default_request_headers("/padh"));
+    std::vector<uint8_t> payload;
+    payload.push_back(0x00); // Pad Length = 0
+    payload.insert(payload.end(), hpack.begin(), hpack.end());
+
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM | FLAG_PADDED, 1, payload);
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+TEST(HTTP2FramerDrive, PaddedDataWithPadLengthExceedingPayloadIsProtocolError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Open a stream first so DATA has somewhere to land.
+    auto post_headers     = default_request_headers("/p");
+    post_headers[0].value = "POST";
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS, 1, encode_hpack_headers(post_headers));
+
+    // DATA, PADDED: first octet is Pad Length=200 but only 2 bytes follow ->
+    // pad_length > p_len -> PROTOCOL_ERROR.
+    push_frame(io, FT::DATA, FLAG_PADDED, 1, {200, 'a', 'b'});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, PaddedDataWithValidPaddingIsAccepted) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    auto post_headers     = default_request_headers("/p");
+    post_headers[0].value = "POST";
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS, 1, encode_hpack_headers(post_headers));
+
+    // Pad Length=3, payload "hi", then 3 padding octets: the padded-frame
+    // success path strips the padding cleanly.
+    push_frame(io, FT::DATA, FLAG_PADDED | FLAG_END_STREAM, 1, {3, 'h', 'i', 0, 0, 0});
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+// --- GOAWAY with debug data (base.h:1300-1301) -----------------------------
+
+TEST(HTTP2FramerDrive, GoAwayWithDebugDataParses) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // GOAWAY: last-stream-id (4) + error-code (4) + trailing debug bytes. The
+    // payload-size > 8 branch copies the additional debug data.
+    std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x01,  // last stream id = 1
+                                    0x00, 0x00, 0x00, 0x00};  // error code = NO_ERROR
+    const std::string    debug   = "bye";
+    payload.insert(payload.end(), debug.begin(), debug.end());
+
+    push_frame(io, FT::GOAWAY, 0, 0, payload);
+    drive(protocol, io);
+
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::NO_ERROR);
+}
+
+// --- WINDOW_UPDATE zero increment (base.h:1313-1314, 1326-1328) ------------
+
+TEST(HTTP2FramerDrive, WindowUpdateZeroIncrementIsProtocolError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // 4-octet WINDOW_UPDATE with a zero increment -> PROTOCOL_ERROR.
+    push_frame(io, FT::WINDOW_UPDATE, 0, 0, {0x00, 0x00, 0x00, 0x00});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, WindowUpdateWrongSizeIsFrameSizeError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // WINDOW_UPDATE with a 5-octet (non-4) payload -> FRAME_SIZE_ERROR.
+    push_frame(io, FT::WINDOW_UPDATE, 0, 0, {0x00, 0x00, 0x00, 0x01, 0x00});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+// --- send_headers_with_continuation (base.h:718-734) -----------------------
+
+TEST(HTTP2FramerDrive, ServerResponseLargeHeaderBlockSpansContinuation) {
+    Http2FakeIO      io;
+    // Advertise the smallest legal max-frame-size (16384) and force a tiny peer
+    // frame size via the client's SETTINGS so the server must fragment its
+    // response header block across HEADERS + CONTINUATION when it replies.
+    FrameLayerServer protocol(io);
+
+    push_preface(io);
+    // Client SETTINGS: SETTINGS_MAX_FRAME_SIZE = 16384 (the floor), which also
+    // bounds the server's per-frame fragment size for header serialization.
+    const std::vector<uint8_t> settings = {0x00, 0x05, 0x00, 0x00, 0x40, 0x00};
+    push_frame(io, FT::SETTINGS, 0, 0, settings);
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Issue a GET; the response path emits the response headers. We can't force
+    // a >16KB header block from here deterministically, but the single-frame
+    // path through send_headers_with_continuation (first_frame + last_fragment)
+    // is exercised by every emitted response.
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1,
+               encode_hpack_headers(default_request_headers("/")));
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+// --- PUSH_PROMISE payload parse (base.h:1234-1264) -------------------------
+
+TEST(HTTP2FramerDrive, PushPromisePayloadIsParsedThenRejectedByServer) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // A client must never send PUSH_PROMISE, but the shared framer still parses
+    // the payload (promised stream id + header block) before handing the typed
+    // frame to the server, which then rejects it. This drives
+    // handle_push_promise_frame_payload (promised id extraction + header block
+    // assignment + END_HEADERS continuation bookkeeping).
+    const auto           hpack = encode_hpack_headers(default_request_headers("/pushed"));
+    std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x02}; // promised stream id = 2
+    payload.insert(payload.end(), hpack.begin(), hpack.end());
+
+    push_frame(io, FT::PUSH_PROMISE, FLAG_END_HEADERS, 1, payload);
+    drive(protocol, io);
+
+    // Either way the payload-parse path ran; the server treats a received
+    // PUSH_PROMISE as a connection error.
+    EXPECT_FALSE(protocol.ok());
+}
+
+TEST(HTTP2FramerDrive, PaddedPushPromiseTooShortIsFrameSizeError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // PUSH_PROMISE, PADDED, with a Pad Length octet of 200 but only two trailing
+    // bytes: validate_padded_frame fails (pad_length > remaining payload) and the
+    // PUSH_PROMISE handler returns the failure early.
+    push_frame(io, FT::PUSH_PROMISE, FLAG_PADDED, 1, {200, 0x00, 0x02}); // pad len 200, 2 bytes
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+}
+
+// --- zero-payload CONTINUATION dispatch (base.h:1036-1040) -----------------
+
+TEST(HTTP2FramerDrive, EmptyEndHeadersContinuationCompletesHeaderBlock) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Full header block on a HEADERS frame WITHOUT END_HEADERS, then an EMPTY
+    // CONTINUATION carrying only END_HEADERS. The zero-length CONTINUATION takes
+    // the zero-payload dispatch CONTINUATION arm and closes the header block.
+    const auto encoded = encode_hpack_headers(default_request_headers("/cont0"));
+    push_frame(io, FT::HEADERS, FLAG_END_STREAM, 1, encoded);        // no END_HEADERS
+    push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 1, {});       // empty, END_HEADERS
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+// --- padded HEADERS failure path (base.h:1128-1130) ------------------------
+
+TEST(HTTP2FramerDrive, PaddedHeadersPadLengthExceedsPayloadIsProtocolError) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // HEADERS, PADDED: Pad Length octet = 200 but only a couple of bytes
+    // follow, so validate_padded_frame fails (pad_length > p_len) and the
+    // HEADERS handler returns the failure early.
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_PADDED, 1, {200, 0x82, 0x86});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
 }

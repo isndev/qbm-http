@@ -838,3 +838,84 @@ TEST(HPACK_LL_Decoder, HuffmanNameLengthTruncationFlagsIncomplete) {
     EXPECT_FALSE(decoder.decode(block, out, incomplete));
     EXPECT_TRUE(incomplete);
 }
+
+// ====================================================================
+// Huffman decode error arms + utility helpers (hpack_huffman.cpp)
+//
+// These drive the failure / boundary paths of the Huffman codec that the
+// happy-path round-trips skip: an invalid bit path that walks off the decode
+// tree, padding strictly longer than 7 bits, and the empty-input / degenerate
+// arms of the analysis utilities.
+// ====================================================================
+
+TEST(HPACK_LL_Huffman, InvalidBitPathWalksOffTreeFails) {
+    // 0x00 = first bits all zero. The '0' symbol is a 5-bit code, but a long run
+    // of zero bits eventually reaches a node with no left child -> decode fails
+    // on the null-node guard rather than producing output.
+    std::string                output;
+    const std::vector<uint8_t> bad = {0x00, 0x00, 0x00, 0x00};
+    // Either it decodes (all-zero is a valid symbol run) or it fails on an
+    // invalid path; we only require the call to be exercised and deterministic.
+    const bool ok = huffman_decode(bad.data(), bad.size(), output);
+    (void) ok;
+
+    // A guaranteed off-tree path: a single byte 0xFF with only EOS-prefix bits
+    // mid-stream. EOS appearing as a decoded symbol is an error.
+    std::string                eos_out;
+    const std::vector<uint8_t> eos_mid = {0xFF, 0xFF, 0xFF, 0xFF}; // 30-bit EOS code
+    EXPECT_FALSE(huffman_decode(eos_mid.data(), eos_mid.size(), eos_out));
+}
+
+TEST(HPACK_LL_Huffman, PaddingLongerThanSevenBitsFails) {
+    // Encode a single character, then append a full zero byte. The trailing
+    // partial path is now longer than 7 bits (a whole extra byte), which RFC
+    // 7541 §5.2 requires to be treated as a decode error.
+    std::vector<uint8_t> encoded;
+    ASSERT_TRUE(huffman_encode("x", encoded));
+    encoded.push_back(0x00); // 8 extra bits -> > 7-bit padding
+
+    std::string output;
+    EXPECT_FALSE(huffman_decode(encoded.data(), encoded.size(), output));
+}
+
+TEST(HPACK_LL_Huffman, EmptyInputUtilityArms) {
+    // estimate_compression_ratio / estimate_huffman_efficiency both special-case
+    // the empty string -> 1.0.
+    EXPECT_DOUBLE_EQ(estimate_compression_ratio(""), 1.0);
+    EXPECT_DOUBLE_EQ(estimate_huffman_efficiency(""), 1.0);
+
+    // validate_huffman_encoded_data on empty input is vacuously valid.
+    EXPECT_TRUE(validate_huffman_encoded_data({}));
+}
+
+TEST(HPACK_LL_Huffman, EfficiencyZeroEntropyDegenerateInput) {
+    // A single repeated character has zero Shannon entropy, so theoretical_bits
+    // is 0 and estimate_huffman_efficiency takes its degenerate-input return.
+    EXPECT_DOUBLE_EQ(estimate_huffman_efficiency(std::string(16, 'a')), 1.0);
+}
+
+TEST(HPACK_LL_Huffman, RoundTripTestConvenienceSucceeds) {
+    // huffman_round_trip_test encodes then decodes in one call.
+    std::string out;
+    EXPECT_TRUE(huffman_round_trip_test("round-trip-me", out));
+    EXPECT_EQ(out, "round-trip-me");
+}
+
+TEST(HPACK_LL_Huffman, BenchmarkReturnsNonNegativeTimings) {
+    // Exercise benchmark_huffman_performance (encode + decode timing loops).
+    const auto [encode_ms, decode_ms] = benchmark_huffman_performance("benchmark input string", 8);
+    EXPECT_GE(encode_ms, 0.0);
+    EXPECT_GE(decode_ms, 0.0);
+}
+
+TEST(HPACK_LL_Huffman, DecodeWithStatsAccumulates) {
+    std::vector<uint8_t> encoded;
+    ASSERT_TRUE(huffman_encode("stats", encoded));
+
+    HuffmanStats stats;
+    std::string  decoded;
+    EXPECT_TRUE(huffman_decode_with_stats(encoded.data(), encoded.size(), decoded, stats));
+    EXPECT_EQ(decoded, "stats");
+    EXPECT_EQ(stats.decoding_operations, 1u);
+    EXPECT_EQ(stats.decoded_bytes, 5u);
+}

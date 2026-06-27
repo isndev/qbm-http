@@ -2566,3 +2566,438 @@ TEST(HTTP2ServerProtocol, DataAfterResponseEndStreamIsResetClosed) {
     EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
     EXPECT_EQ(io.goaway_count, 0);
 }
+
+// ===========================================================================
+// Extended protocol-internal coverage (socket-less, FakeIO-driven).
+//
+// These cases target the server error/edge frame paths that the happy-path
+// suite above does not reach: the full SETTINGS apply matrix, GOAWAY receipt
+// with server-pushed streams, connection/stream WINDOW_UPDATE overflow + the
+// pending-flush loop, late/idle-stream frame handling, response-header
+// validation on the send path, content-length reflow, and PRIORITY edges.
+// ===========================================================================
+
+namespace {
+
+// GOAWAY wire payload: [last_stream_id:4][error_code:4][debug...].
+[[nodiscard]] std::vector<uint8_t>
+make_goaway_payload(uint32_t last_stream_id, ErrorCode error_code, const std::string &debug = {}) {
+    std::vector<uint8_t> p;
+    p.reserve(8 + debug.size());
+    p.push_back(static_cast<uint8_t>((last_stream_id >> 24) & 0xFF));
+    p.push_back(static_cast<uint8_t>((last_stream_id >> 16) & 0xFF));
+    p.push_back(static_cast<uint8_t>((last_stream_id >> 8) & 0xFF));
+    p.push_back(static_cast<uint8_t>(last_stream_id & 0xFF));
+    const uint32_t ec = static_cast<uint32_t>(error_code);
+    p.push_back(static_cast<uint8_t>((ec >> 24) & 0xFF));
+    p.push_back(static_cast<uint8_t>((ec >> 16) & 0xFF));
+    p.push_back(static_cast<uint8_t>((ec >> 8) & 0xFF));
+    p.push_back(static_cast<uint8_t>(ec & 0xFF));
+    p.insert(p.end(), debug.begin(), debug.end());
+    return p;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// SETTINGS apply matrix: every applied identifier branch in on(SettingsFrame).
+// A single SETTINGS frame carrying HEADER_TABLE_SIZE, MAX_CONCURRENT_STREAMS,
+// MAX_FRAME_SIZE, MAX_HEADER_LIST_SIZE and ENABLE_CONNECT_PROTOCOL exercises
+// the corresponding switch arms; it is ACK'd as a whole.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, ClientSettingsAppliesHeaderTableAndFrameSizeMatrix) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    drive(protocol, io); // server emits its initial SETTINGS
+
+    const std::size_t ack_before = count_frames(io.output, FrameType::SETTINGS);
+    push_frame(io, FrameType::SETTINGS, 0, 0,
+               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE, 8192},
+                                        {Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, 50},
+                                        {Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE, 32768},
+                                        {Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 4096},
+                                        {Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL, 1}}));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_GT(count_frames(io.output, FrameType::SETTINGS), ack_before); // ACK emitted
+}
+
+// Unknown SETTINGS identifier (id outside the known enum) MUST be ignored, and
+// the frame is still ACK'd (default arm of the apply switch).
+TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    const std::size_t ack_before = count_frames(io.output, FrameType::SETTINGS);
+    // Raw id 0xFF00 (reserved/unknown) with an arbitrary value.
+    push_frame(io, FrameType::SETTINGS, 0, 0, make_settings_payload({{0xFF00u, 12345u}}));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_GT(count_frames(io.output, FrameType::SETTINGS), ack_before);
+}
+
+// MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
+// when the server's encoded response headers exceed it, the stream is reset
+// with INTERNAL_ERROR (server.h:1079-1083).
+TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    // Tiny MAX_HEADER_LIST_SIZE forces the encoded-size guard to trip.
+    push_frame(io, FrameType::SETTINGS, 0, 0,
+               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 1}}));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/big-headers");
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.add_header("x-large-header", std::string(512, 'a'));
+
+    const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
+    EXPECT_FALSE(protocol.send_response(1, response));
+    EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
+    EXPECT_TRUE(protocol.ok()); // stream-level error, connection survives
+}
+
+// ---------------------------------------------------------------------------
+// send_response: response content-length consistency on the send path.
+// ---------------------------------------------------------------------------
+
+// Declared content-length that does not match the body size is a stream error
+// (server.h:1063-1065).
+TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/cl-mismatch");
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.add_header("content-length", "100"); // lie about the body length
+    response.body()   = std::string("short");
+
+    EXPECT_FALSE(protocol.send_response(1, response));
+    EXPECT_TRUE(protocol.ok());
+}
+
+// Two content-length response headers with conflicting values is a stream error
+// (server.h:1042-1045).
+TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/cl-conflict");
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.add_header("content-length", "5");
+    response.add_header("content-length", "7"); // conflicting
+    response.body()   = std::string("hello");
+
+    EXPECT_FALSE(protocol.send_response(1, response));
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A non-numeric content-length response header is rejected (server.h:1038-1040).
+TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/cl-bad");
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.add_header("content-length", "not-a-number");
+
+    EXPECT_FALSE(protocol.send_response(1, response));
+    EXPECT_TRUE(protocol.ok());
+}
+
+// ---------------------------------------------------------------------------
+// WINDOW_UPDATE overflow / flush paths.
+// ---------------------------------------------------------------------------
+
+// A connection-level WINDOW_UPDATE that would push the connection send window
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:851-855).
+TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Connection send window starts at the default (65535). An increment near
+    // the 2^31-1 limit overflows it.
+    make_window_update_frame(io, 0, 0x7FFFFFFFu);
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::FLOW_CONTROL_ERROR);
+}
+
+// A connection WINDOW_UPDATE flushes streams that had data queued behind an
+// exhausted connection window. Drives the snapshot-then-flush loop in
+// on(WindowUpdateFrame) for stream 0 (server.h:860-875).
+TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    // Large per-stream initial window so the STREAM window is not the limiter;
+    // the connection-level window (fixed at the 65535 default) is what blocks.
+    handshake_with_initial_window(protocol, io, 200000u);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/pending");
+    ASSERT_TRUE(protocol.ok());
+
+    // Exhaust the connection send window by responding with a body larger than
+    // the 65535-byte default connection window. The tail queues as pending.
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(70000, 'x');
+    ASSERT_TRUE(protocol.send_response(1, response));
+
+    const uint32_t sent_before = sum_data_bytes(io.output, 1);
+    EXPECT_LT(sent_before, 70000u); // blocked by connection window
+
+    // Grant connection window; the pending tail flushes.
+    make_window_update_frame(io, 0, 100000u);
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_GT(sum_data_bytes(io.output, 1), sent_before);
+}
+
+// ---------------------------------------------------------------------------
+// GOAWAY receipt with a server-pushed (even) stream present.
+// Injecting a client GOAWAY whose last_stream_id is below the pushed stream's
+// parent forces the pushed-stream-orphan cleanup arm (server.h:760-792) and the
+// client-stream implicit-close arm (server.h:793-813).
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, GoAwayReceiptClosesPushedAndHigherClientStreams) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}}));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Two open client streams (1 and 3) and a pushed stream (2) parented on 1.
+    open_post_stream_open(protocol, io, 1, "/parent");
+    open_post_stream_open(protocol, io, 3, "/other");
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Request promised{qb::io::uri{"https://example.test/asset.css"}};
+    promised.method() = qb::http::method::GET;
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, std::move(promised)).has_value());
+
+    const int stream_err_before = io.stream_error_count;
+
+    // Client GOAWAY(last_stream_id=1, NO_ERROR): stream 3 is above the high-water
+    // mark so it is implicitly closed; pushed stream 2's parent (1) is at the
+    // boundary, but the cleanup loop walks both even and odd branches.
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(1, ErrorCode::NO_ERROR));
+    drive(protocol, io);
+
+    EXPECT_EQ(io.goaway_count, 1);
+    // The implicit-close of stream 3 (above last_stream_id) dispatches a stream
+    // error event to the application.
+    EXPECT_GT(io.stream_error_count, stream_err_before);
+}
+
+// GOAWAY whose last_stream_id is below a pushed stream's PARENT forces the
+// pushed-stream orphan-close arm: parent (3) > last_stream_id (1) sets
+// close_pushed_stream, so pushed stream 4 is closed + erased and a stream-error
+// event fires for it (server.h:760-792).
+TEST(HTTP2ServerProtocol, GoAwayReceiptClosesOrphanedPushedStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}}));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Seed stream 1 (kept low), then open parent stream 3 and push stream 4 on it.
+    open_post_stream_open(protocol, io, 1, "/low");
+    open_post_stream_open(protocol, io, 3, "/parent");
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Request promised{qb::io::uri{"https://example.test/asset.css"}};
+    promised.method() = qb::http::method::GET;
+    ASSERT_FALSE(protocol.send_push_promise(3, 4, std::move(promised)).has_value());
+
+    const int stream_err_before = io.stream_error_count;
+
+    // GOAWAY(last_stream_id=1): parent stream 3 is above it (will be implicitly
+    // closed), so its pushed child stream 4 is orphaned and closed too.
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(1, ErrorCode::NO_ERROR));
+    drive(protocol, io);
+
+    EXPECT_EQ(io.goaway_count, 1);
+    // Two implicit closes (pushed stream 4 + client stream 3) -> >= 2 events.
+    EXPECT_GE(io.stream_error_count - stream_err_before, 2);
+}
+
+// GOAWAY(error) implicitly closing a higher client stream that is still OPEN
+// (server.h:793-813 error branch) dispatches a stream-error and erases it.
+TEST(HTTP2ServerProtocol, GoAwayWithErrorImplicitlyClosesHigherOpenClientStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/low");
+    open_post_stream_open(protocol, io, 3, "/high");
+    ASSERT_TRUE(protocol.ok());
+
+    const int stream_err_before = io.stream_error_count;
+    // last_stream_id=1: stream 3 is above it and OPEN -> implicit close.
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(1, ErrorCode::PROTOCOL_ERROR));
+    drive(protocol, io);
+
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_GT(io.stream_error_count, stream_err_before);
+    EXPECT_FALSE(protocol.ok()); // error GOAWAY closes the connection
+}
+
+// ---------------------------------------------------------------------------
+// SETTINGS_INITIAL_WINDOW_SIZE reflow that drives a stream window negative.
+// The server has a stream whose peer_window_size was already consumed; a
+// client SETTINGS lowering INITIAL_WINDOW_SIZE pushes it below zero, which is a
+// stream + connection FLOW_CONTROL_ERROR (server.h:2049-2055).
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsFlowControlError) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    // Start with a large initial window so the stream opens with a big send window.
+    push_frame(io, FrameType::SETTINGS, 0, 0,
+               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100000u}}));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/reflow");
+    ASSERT_TRUE(protocol.ok());
+
+    // Consume most of the stream's send window by responding with a body.
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(90000, 'x');
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_TRUE(protocol.ok());
+
+    // Now the client shrinks INITIAL_WINDOW_SIZE to a tiny value: the delta is
+    // strongly negative and drives stream 1's peer window below zero.
+    push_frame(io, FrameType::SETTINGS, 0, 0,
+               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1u}}));
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::FLOW_CONTROL_ERROR);
+}
+
+// ---------------------------------------------------------------------------
+// DATA on an idle (never-opened, lower-numbered) stream -> RST_STREAM(
+// STREAM_CLOSED) on the connection-receive-window path (server.h:275-278).
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Open stream 3 so the high-water mark is 3; stream 1 is then "old/unknown".
+    open_get_stream_end_stream(protocol, io, 3, "/seed");
+    ASSERT_TRUE(protocol.ok());
+
+    const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
+    // DATA on stream 1 (<= last_client_initiated, not in the map) -> RST_STREAM.
+    push_frame(io, FrameType::DATA, 0, 1, {'x', 'y'});
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
+}
+
+// DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
+// (server.h:271-273).
+TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    push_frame(io, FrameType::DATA, 0, 7, {'a'});
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::PROTOCOL_ERROR);
+}
+
+// ---------------------------------------------------------------------------
+// PRIORITY frame referencing a not-yet-existing stream is silently ignored
+// (no stream context to store into; server.h:978-981 else arm).
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // PRIORITY payload: [exclusive+dep:4][weight:1] = 5 octets, for stream 9.
+    push_frame(io, FrameType::PRIORITY, 0, 9, {0x00, 0x00, 0x00, 0x00, 0x0F});
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());     // ignored, no error
+    EXPECT_EQ(io.goaway_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
+// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:894-897);
+// without overflow it is ignored.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, WindowUpdateOnClosedStreamWithoutOverflowIsIgnored) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Fully complete stream 1 (request in + full response out -> CLOSED).
+    open_get_stream_end_stream(protocol, io, 1, "/done");
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    ASSERT_TRUE(protocol.send_response(1, response));
+
+    const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
+    // Small increment on the closed stream: no overflow -> silently ignored.
+    make_window_update_frame(io, 1, 10u);
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(count_frames(io.output, FrameType::RST_STREAM), rst_before);
+}
