@@ -56,6 +56,7 @@ qhttp_test(unit uri-parse      unit/uri/uri-parse.cpp          EXTRA_LABELS uri)
 qhttp_test(unit http1-serialize-limits unit/http1/http1-serialize-limits.cpp EXTRA_LABELS http1)
 qhttp_test(unit http1-parse-limits     unit/http1/http1-parse-limits.cpp     EXTRA_LABELS http1)
 qhttp_test(unit http1-serialization unit/http1/http1-serialization.cpp EXTRA_LABELS http1)
+qhttp_test(unit http1-protocol-framing unit/http1/http1-protocol-framing.cpp EXTRA_LABELS http1)
 qhttp_test(unit validation-rules     unit/validation/validation-rules.cpp     EXTRA_LABELS validation)
 qhttp_test(unit validation-schema    unit/validation/validation-schema.cpp    EXTRA_LABELS validation)
 qhttp_test(unit validation-parameter unit/validation/validation-parameter.cpp EXTRA_LABELS validation)
@@ -64,13 +65,17 @@ qhttp_test(unit validation-result    unit/validation/validation-result.cpp    EX
 qhttp_test(unit validation-request   unit/validation/validation-request.cpp   EXTRA_LABELS validation)
 qhttp_test(unit validation-parameter-types unit/validation/validation-parameter-types.cpp EXTRA_LABELS validation)
 qhttp_test(unit validation-request-params  unit/validation/validation-request-params.cpp  EXTRA_LABELS validation)
+qhttp_test(unit validation-schema-policy unit/validation/validation-schema-policy.cpp EXTRA_LABELS validation)
+qhttp_test(unit validation-error-type    unit/validation/validation-error-type.cpp    EXTRA_LABELS validation)
 qhttp_test(unit body-codec       unit/message/body-codec.cpp)
 qhttp_test(unit headers-utility  unit/message/headers-utility.cpp)
 qhttp_test(unit message-types    unit/message/message-types.cpp)
+qhttp_test(unit response-accessors unit/message/response-accessors.cpp)
 qhttp_test(unit cookie           unit/cookie/cookie.cpp)
 qhttp_test(unit multipart-security unit/security/multipart-security.cpp EXTRA_LABELS security)
 qhttp_test(unit range-parser    unit/http1/range-parser.cpp    EXTRA_LABELS http1)
 qhttp_test(unit date-parsing     unit/http-date/date-parsing.cpp)
+qhttp_test(unit date-convenience unit/http-date/date-convenience.cpp)
 
 # --- routing (router-* focused primitives + context) ---
 qhttp_test(unit context-slots               unit/routing/context-slots.cpp            EXTRA_LABELS routing)
@@ -89,6 +94,7 @@ qhttp_test(unit routing-middleware unit/routing/routing-middleware.cpp EXTRA_LAB
 qhttp_test(unit routing-compile    unit/routing/routing-compile.cpp    EXTRA_LABELS routing)
 qhttp_test(unit path-parameters    unit/routing/path-parameters.cpp    EXTRA_LABELS routing)
 qhttp_test(unit handler-node       unit/routing/handler-node.cpp       EXTRA_LABELS routing)
+qhttp_test(unit handler-node-extra unit/routing/handler-node-extra.cpp EXTRA_LABELS routing)
 
 # --- middleware (pure) ---
 qhttp_test(unit middleware-conditional      unit/middleware/middleware-conditional.cpp      EXTRA_LABELS middleware)
