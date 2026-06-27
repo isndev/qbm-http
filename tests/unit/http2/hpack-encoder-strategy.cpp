@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <iomanip>
+#include <qb/io/crypto.h>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -62,12 +63,12 @@ namespace {
 
 std::vector<uint8_t>
 ll_hex_to_bytes(const std::string &hex) {
-    std::vector<uint8_t> bytes;
-    for (std::size_t i = 0; i + 1 < hex.length(); i += 2) {
-        const std::string byte_str = hex.substr(i, 2);
-        bytes.push_back(static_cast<uint8_t>(std::strtol(byte_str.c_str(), nullptr, 16)));
-    }
-    return bytes;
+    // qb::crypto::hex_to_string decodes the whole hex string to raw bytes,
+    // returning "" on odd-length or non-hex input (the gold vectors here are
+    // always even-length, all-hex literals, so this is a faithful swap for the
+    // former per-byte std::strtol loop).
+    const std::string decoded = qb::crypto::hex_to_string(hex);
+    return std::vector<uint8_t>(decoded.begin(), decoded.end());
 }
 
 std::string

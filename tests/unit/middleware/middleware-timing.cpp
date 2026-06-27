@@ -23,6 +23,8 @@
 #include <optional>
 #include <string>
 
+#include <qb/system/parse.h>
+
 #include "../http.h"
 #include "../middleware/timing.h"
 #include "../routing/middleware.h"
@@ -43,11 +45,8 @@ std::optional<double>
 parse_response_time_ms(const std::string &header_value) {
     if (header_value.size() < 3 || header_value.substr(header_value.size() - 2) != "ms")
         return std::nullopt;
-    try {
-        return std::stod(header_value.substr(0, header_value.size() - 2));
-    } catch (...) {
-        return std::nullopt;
-    }
+    const std::string_view numeric(header_value.data(), header_value.size() - 2);
+    return qb::to_number_prefix<double>(numeric);
 }
 
 } // namespace

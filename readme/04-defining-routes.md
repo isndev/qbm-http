@@ -102,7 +102,7 @@ router().get("/users/:id", this, &ApiServer::handle_get_user);
 
 // ...
 void handle_get_user(std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
-    int id = std::stoi(ctx->path_param("id"));
+    int id = qb::to_number<int>(ctx->path_param("id")).value_or(-1);  // bad input → -1, never throws
     // look up id, populate ctx->response(), then complete
     ctx->complete();
 }
@@ -197,7 +197,7 @@ template <class T> [[nodiscard]] std::optional<T> path_param(std::string_view na
 template <class T> [[nodiscard]] T path_param_or(std::string_view name, T fallback) const;   // typed + fallback
 ```
 
-The raw form returns the captured string, or a static empty string when the name was not part of the matched pattern — so it never throws for a missing key. The value is always a decoded `std::string`; convert it yourself (`std::stoi`, etc.) and validate, since a client can send any value the pattern shape allows, or use `path_param<T>` / `path_param_or<T>` to parse and supply a fallback in one call.
+The raw form returns the captured string, or a static empty string when the name was not part of the matched pattern — so it never throws for a missing key. The value is always a decoded `std::string`; convert it yourself (`qb::to_number<T>(...)`, which returns `std::optional<T>` and never throws) and validate, since a client can send any value the pattern shape allows, or use `path_param<T>` / `path_param_or<T>` to parse and supply a fallback in one call.
 
 <!-- src: derived from examples/qbm/http/03_basic_routing.cpp:88-113 (route shapes) -->
 ```cpp

@@ -34,6 +34,8 @@
 
 #include <gtest/gtest.h>
 
+#include <qb/system/parse.h>
+
 #include "../../shared/middleware_test_fixture.h"
 #include "../middleware/rate_limit.h"
 
@@ -95,7 +97,8 @@ TEST_F(RateLimitWindowTest, ClientIsAllowedAgainAfterWindowElapses) {
     EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "1");
 
     // Reset seconds on a fresh window is bounded by the (sub-second) window.
-    const long long reset = std::stoll(header_value(_session->_response, "X-RateLimit-Reset"));
+    const long long reset =
+        qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
     EXPECT_GE(reset, 0);
     EXPECT_LE(reset, 1);
 }
@@ -128,7 +131,8 @@ TEST_F(RateLimitWindowTest, RequestsStraddlingWindowBoundary) {
     configure_router_and_run(mw, request_for("/mw_test", "straddle"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "1");
-    const long long reset = std::stoll(header_value(_session->_response, "X-RateLimit-Reset"));
+    const long long reset =
+        qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
     EXPECT_GE(reset, 0);
     EXPECT_LE(reset, 1);
 }

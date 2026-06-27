@@ -37,6 +37,8 @@
 #include <string>
 #include <thread>
 
+#include <qb/system/parse.h>
+
 #include "../../shared/ssl_test_resource.h"
 #include "../../shared/loopback_server.h"
 
@@ -377,7 +379,7 @@ TEST(Http3InteropTest, QbHttp3ClientCanCallConfiguredExternalServer) {
 
     const auto expected_status = configured_env_value("QB_HTTP3_EXTERNAL_EXPECT_STATUS");
     if (!expected_status.empty()) {
-        EXPECT_EQ(response.status().code(), std::stoi(expected_status));
+        EXPECT_EQ(response.status().code(), qb::to_number<int>(expected_status).value());
     } else {
         EXPECT_GE(response.status().code(), 200);
         EXPECT_LT(response.status().code(), 500);
