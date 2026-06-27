@@ -14,6 +14,7 @@
  */
 #include "./sanitizer.h"
 #include <algorithm>
+#include <qb/system/parse.h>
 #include <regex>
 #include "../utility.h"
 
@@ -107,15 +108,13 @@ Sanitizer::traverse_and_apply(qb::json &current_node, const std::vector<std::str
                 traverse_and_apply(item, path_segments, segment_idx + 1, funcs_to_apply);
             }
         } else {
-            try {
-                size_t index = std::stoul(segment);
-                if (index < current_node.size()) {
-                    traverse_and_apply(current_node[index], path_segments, segment_idx + 1, funcs_to_apply);
-                }
-            } catch (const std::invalid_argument &) {
-                /* Not a number, not an index */
-            } catch (const std::out_of_range &) {
-                /* Number too large for size_t */
+            // Best-effort parse: a non-numeric segment ("not a number, not an
+            // index") or one too large for size_t simply yields no traversal,
+            // matching the previous std::stoul invalid_argument/out_of_range
+            // catch behaviour. to_number_prefix mirrors std::stoul's lenient
+            // longest-prefix parse (skips leading ws, accepts '+').
+            if (const auto index = qb::to_number_prefix<size_t>(segment); index && *index < current_node.size()) {
+                traverse_and_apply(current_node[*index], path_segments, segment_idx + 1, funcs_to_apply);
             }
         }
     }

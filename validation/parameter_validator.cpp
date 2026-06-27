@@ -16,6 +16,7 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <qb/system/parse.h>
 #include "../utility.h"
 #include "./rule.h" // For TypeRule::data_type_to_string
 
@@ -45,32 +46,30 @@ ParameterValidator::parse_value(const std::string &input_value, DataType target_
             return nullptr;
         }
         case DataType::NUMBER: {
-            try {
-                std::size_t parsed_chars_count;
-                double      val_double = std::stod(input_value, &parsed_chars_count);
-                if (parsed_chars_count == input_value.length()) {
-                    // Reject NaN/Infinity explicitly: they are not valid JSON numbers
-                    // and casting them to integral types is undefined/unsafe.
-                    if (!std::isfinite(val_double)) {
-                        result.add_error(field_path, "type", "Must be a valid finite number.", input_value);
-                        success = false;
-                        return nullptr;
-                    }
-
-                    // Preserve integer values as integer JSON when representable.
-                    if (val_double >= static_cast<double>(std::numeric_limits<long long>::min())
-                        && val_double <= static_cast<double>(std::numeric_limits<long long>::max())) {
-                        const long long val_ll = static_cast<long long>(val_double);
-                        if (static_cast<double>(val_ll) == val_double) {
-                            return val_ll;
-                        }
-                    }
-                    return val_double;
+            std::size_t parsed_chars_count = 0;
+            // Lenient parse + whole-field check preserves the prior std::stod(input,&pos)
+            // semantics exactly (leading whitespace / '+' tolerated, trailing data rejected),
+            // but locale-free and without throwing on representable subnormals.
+            if (auto val_opt = qb::to_number_prefix<double>(input_value, &parsed_chars_count);
+                val_opt && parsed_chars_count == input_value.length()) {
+                const double val_double = *val_opt;
+                // Reject NaN/Infinity explicitly: they are not valid JSON numbers
+                // and casting them to integral types is undefined/unsafe.
+                if (!std::isfinite(val_double)) {
+                    result.add_error(field_path, "type", "Must be a valid finite number.", input_value);
+                    success = false;
+                    return nullptr;
                 }
-            } catch (const std::invalid_argument &) {
-                // Conversion failed
-            } catch (const std::out_of_range &) {
-                // Conversion failed
+
+                // Preserve integer values as integer JSON when representable.
+                if (val_double >= static_cast<double>(std::numeric_limits<long long>::min())
+                    && val_double <= static_cast<double>(std::numeric_limits<long long>::max())) {
+                    const long long val_ll = static_cast<long long>(val_double);
+                    if (static_cast<double>(val_ll) == val_double) {
+                        return val_ll;
+                    }
+                }
+                return val_double;
             }
             result.add_error(field_path, "type", "Must be a valid number.", input_value);
             success = false;
