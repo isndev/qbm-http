@@ -138,6 +138,41 @@ TEST(HTTP2ServerProtocol, RejectsRequestBodyShorterThanContentLengthOnDataEndStr
 }
 
 // ===========================================================================
+// Server: a padded DATA frame counts the Pad Length octet + Padding against flow
+// control (RFC 9113 §6.1), not just the de-padded application bytes. A frame whose
+// FULL payload exceeds the connection receive window is a FLOW_CONTROL_ERROR even
+// when its de-padded data alone would fit. (Regression: the accounting previously
+// used only data_payload.size(), under-debiting by 1 + pad_length per frame — a
+// ~256x flow-control amplification that defeats receive-side backpressure.)
+// ===========================================================================
+TEST(HTTP2ServerProtocol, PaddedDataFrameCountsPaddingAgainstFlowControl) {
+    Http2FakeIO                          io;
+    h2::ServerHttp2Protocol<Http2FakeIO> protocol(io);
+
+    h2::Http2FrameData<h2::HeadersFrame> headers;
+    headers.header.type  = static_cast<uint8_t>(h2::FrameType::HEADERS);
+    headers.header.flags = h2::FLAG_END_HEADERS;
+    headers.header.set_stream_id(1);
+    headers.payload.header_block_fragment = encode_hpack_headers(
+        {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/padded"}});
+    protocol.on(std::move(headers));
+    ASSERT_TRUE(protocol.ok());
+
+    // Tiny application data, but the padding pushes the full frame payload past the
+    // 65535-byte initial connection receive window.
+    h2::Http2FrameData<h2::DataFrame> data;
+    data.header.type = static_cast<uint8_t>(h2::FrameType::DATA);
+    data.header.set_stream_id(1);
+    data.payload.data_payload = {'a', 'b', 'c'};
+    data.payload.padding_size = 70000; // 3 + 70000 > 65535 -> connection flow-control error
+    protocol.on(std::move(data));
+
+    EXPECT_FALSE(protocol.ok());
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::FLOW_CONTROL_ERROR);
+}
+
+// ===========================================================================
 // Server: an outgoing response whose body length disagrees with its declared
 // content-length is rejected with a stream error.
 // ===========================================================================

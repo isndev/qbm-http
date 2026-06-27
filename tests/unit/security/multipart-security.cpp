@@ -456,6 +456,22 @@ TEST_F(MultipartSecurityTest, FindBoundaryLocatesAndMisses) {
         const std::string hay = "--XY--XY"; // boundary "--XYZ" never completes
         EXPECT_EQ(find_boundary(hay, boundary), hay.end());
     }
+    // Regression (OOB read): the haystack tail is a non-empty PROPER PREFIX of a
+    // boundary that is longer than the remaining bytes. The old hand-rolled loop
+    // advanced std::next(p.first) where p.first == hay.end(), producing an end()+1
+    // iterator and a one-byte read past the buffer on the next std::mismatch. Must
+    // miss cleanly with no out-of-bounds access (ASan).
+    {
+        const std::string a = "A"; // tail "A" is a proper prefix of "AB", which is longer
+        EXPECT_EQ(find_boundary(a, std::string("AB")), a.end());
+        const std::string hay = "xxABC"; // tail "ABC" is a proper prefix of "ABCDEF"
+        EXPECT_EQ(find_boundary(hay, std::string("ABCDEF")), hay.end());
+    }
+    // Empty boundary matches at the start (std::search contract), as before.
+    {
+        const std::string hay = "anything";
+        EXPECT_EQ(find_boundary(hay, std::string()), hay.begin());
+    }
 }
 
 // ====================================================================

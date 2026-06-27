@@ -1105,6 +1105,9 @@ private:
                 return false;
 
             data_f.payload.data_payload.assign(p_data, p_data + (p_len - pad_length));
+            // The Pad Length octet (1) + the pad_length padding bytes are stripped from
+            // data_payload but still count against flow control (RFC 9113 §6.1).
+            data_f.payload.padding_size = static_cast<std::size_t>(1) + pad_length;
         } else {
             data_f.payload.data_payload.assign(payload_data, payload_data + payload_size);
         }
