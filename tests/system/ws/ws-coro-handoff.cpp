@@ -335,6 +335,16 @@ TEST_F(WsCoroHandoff, PersistentHttp1ClientCanReuseConnectionBeforeUpgrade) {
     EXPECT_EQ(first_response.body().template as<std::string>(), "pong");
     EXPECT_EQ(second_response.body().template as<std::string>(), "pong");
     EXPECT_TRUE(client->is_connected());
+
+    // Drop the persistent client and drain the parent loop so the deferred self-guard
+    // release (Client::hold_through_current_tick's 1us callback) fires — otherwise the
+    // last response callback leaves _callback_self_guard set and the connection's io
+    // watcher registered when the fixture closes the server. Mirrors the established
+    // pattern in Http1ClientTest.DestroyingClientDuringConnectDoesNotLeaveDanglingCallback.
+    client.reset();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (std::chrono::steady_clock::now() < deadline)
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
 }
 
 } // namespace

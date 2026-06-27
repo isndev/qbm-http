@@ -42,6 +42,20 @@ using qb::http::test::ServerThread;
 
 namespace {
 
+// Drain the parent loop briefly so a Client's deferred self-guard release
+// (Client::hold_through_current_tick's ~1us callback) fires. A test that stops the loop
+// synchronously inside a user callback (run_sync / pump_until returns the instant the
+// awaited result is set) otherwise leaves _callback_self_guard holding the Client and the
+// connection's io watcher registered — leaking the Client + connection. Mirrors the drain
+// already used in DestroyingClientDuringConnectDoesNotLeaveDanglingCallback.
+inline void
+drain_client_callbacks() {
+    const auto deadline = std::chrono::steady_clock::now() + 200ms;
+    while (std::chrono::steady_clock::now() < deadline) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+}
+
 class Http1ClientTestServer;
 
 class Http1ClientTestSession
@@ -385,6 +399,7 @@ TEST(Http1ClientTest, ConnectCallbackMayDropLastClientReference) {
     ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connect_callback_called; }));
     EXPECT_TRUE(connect_callback_called);
     EXPECT_EQ(client, nullptr); // observable: the callback released the client
+    drain_client_callbacks();   // let the self-guard release fire so the Client is freed
 }
 
 TEST(Http1ClientTest, ResponseCallbackMayDropLastClientReference) {
@@ -401,6 +416,7 @@ TEST(Http1ClientTest, ResponseCallbackMayDropLastClientReference) {
     ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return response_callback_called; }));
     EXPECT_EQ(response_status, qb::http::status::OK);
     EXPECT_EQ(client, nullptr);
+    drain_client_callbacks(); // let the self-guard release fire so the Client is freed
 }
 
 TEST(Http1ClientTest, ResponseCallbackMayDisconnectClient) {
@@ -858,5 +874,6 @@ TEST(Http1ClientTest, ResponseBodyIsUncompressedWhenContentEncodingSet) {
     EXPECT_EQ(response.status(), qb::http::status::OK);
     // The client transparently inflated the gzip payload back to 512 'Q's.
     EXPECT_EQ(response.body().template as<std::string>(), std::string(512, 'Q'));
+    drain_client_callbacks(); // let the response callback's self-guard release fire
 }
 #endif
