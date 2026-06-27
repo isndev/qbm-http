@@ -17,8 +17,9 @@
 
 #include <algorithm> // For std::find_if_not, std::transform
 // PERFORMANCE FIX: Removed <sstream> - no longer using std::ostringstream
-#include <charconv>  // PERFORMANCE FIX: For std::from_chars (C++17) - faster than std::stoi
 #include <stdexcept> // For std::runtime_error
+
+#include <qb/system/parse.h> // For qb::to_number (locale-free, non-throwing string->number)
 // #include <qb/system/time.h> // Not directly used here, date.h handles conversions
 // <chrono>, <string>, <vector> are included via cookie.h or other headers above
 
@@ -332,21 +333,16 @@ parse_set_cookie(std::string_view header) {
                     result_cookie.expires(*tp);
                 }
             } else if (utility::iequals(attr_name_sv, "Max-Age")) {
-                // PERFORMANCE FIX: Use std::from_chars instead of std::stoi
-                // - No exceptions thrown (no try/catch overhead)
-                // - No memory allocation for temp string
-                // - Direct parsing from string_view data
+                // STRICT parse of the whole Max-Age value (untrusted wire input).
+                // qb::to_number<int> is locale-free, non-throwing, and rejects any
+                // surrounding whitespace, leading '+', trailing data, or overflow,
+                // matching the previous from_chars (ec==0 && consumed-all) contract.
+                // On any malformed value the optional is empty and we silently skip
+                // setting Max-Age (RFC 6265 best-effort: ignore a bad attribute).
                 if (!attr_value_sv.empty()) {
-                    int         max_age_value = 0;
-                    const char *begin         = attr_value_sv.data();
-                    const char *end           = begin + attr_value_sv.size();
-                    auto [ptr, ec]            = std::from_chars(begin, end, max_age_value);
-                    if (ec == std::errc() && ptr == end) {
-                        // Successful parse, consumed entire value
-                        result_cookie.max_age(std::chrono::seconds(max_age_value));
+                    if (auto max_age_value = qb::to_number<int>(attr_value_sv)) {
+                        result_cookie.max_age(std::chrono::seconds(*max_age_value));
                     }
-                    // If parsing failed or didn't consume all input, ignore silently
-                    // (same behavior as previous std::stoi version with catch blocks)
                 }
             } else if (utility::iequals(attr_name_sv, "Domain")) {
                 result_cookie.domain(std::string(attr_value_sv));

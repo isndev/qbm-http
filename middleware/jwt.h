@@ -13,10 +13,8 @@
 #pragma once
 
 #include <algorithm>
-#include <charconv> // For std::from_chars (C++17) - PERFORMANCE FIX
 #include <chrono>
-#include <cmath>   // For std::isfinite (reject inf/nan numeric claims)
-#include <cstdlib> // For std::strtod - PERFORMANCE FIX (exception-free parsing)
+#include <cmath> // For std::isfinite (reject inf/nan numeric claims)
 #include <functional>
 #include <limits>
 #include <memory>
@@ -27,6 +25,7 @@
 
 #include <qb/io/crypto_jwt.h>
 #include <qb/json.h>
+#include <qb/system/parse.h>
 
 #include "../cookie.h"
 #include "../request.h"
@@ -366,13 +365,11 @@ private:
                 return static_cast<int64_t>(d);
             }
             if (claim.is_string()) {
-                const auto &s        = claim.get_ref<const std::string &>();
-                int64_t     out      = 0;
-                const auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
-                if (ec == std::errc() && ptr == s.data() + s.size()) {
-                    return out;
-                }
-                return std::nullopt;
+                // Untrusted string-form NumericDate: the WHOLE string must be one
+                // canonical integer (no whitespace, sign, or trailing junk), else
+                // the claim is rejected as INVALID_CLAIM upstream. Never crashes.
+                const auto &s = claim.get_ref<const std::string &>();
+                return qb::to_number<int64_t>(s);
             }
             return std::nullopt;
         };
@@ -415,28 +412,18 @@ private:
                 } else if (pair.second == "false") {
                     payload_json[pair.first] = false;
                 } else {
-                    // PERFORMANCE FIX: Use std::from_chars instead of exception-based std::stold
-                    // std::from_chars is ~50x faster for invalid inputs (no exception overhead)
-                    // and doesn't allocate memory.
-                    // First try to parse as integer (most common case for JWT claims like timestamps)
-                    long long int_val      = 0;
-                    auto [int_end, int_ec] = std::from_chars(pair.second.data(), pair.second.data() + pair.second.size(), int_val);
-
-                    if (int_ec == std::errc{} && int_end == pair.second.data() + pair.second.size()) {
-                        // Successfully parsed as integer
-                        payload_json[pair.first] = int_val;
+                    // Exception-free parsing via qb::to_number (built on std::from_chars):
+                    // ~50x faster than exception-based std::stold on invalid input and
+                    // allocation-free. First try to parse the WHOLE string as an integer
+                    // (most common case for JWT claims like timestamps).
+                    if (const auto int_val = qb::to_number<long long>(pair.second)) {
+                        // Successfully parsed entire string as integer
+                        payload_json[pair.first] = *int_val;
                     } else {
-                        // Try to parse as double for decimal values
-                        // Note: std::from_chars for floating point requires C++17 charconv support
-                        // Fallback to std::stod with manual error checking
-                        char       *end_ptr   = nullptr;
-                        const char *str_begin = pair.second.c_str();
-                        errno                 = 0; // Clear errno before call
-                        double double_val     = std::strtod(str_begin, &end_ptr);
-
-                        // Accept only a finite, JSON-number-shaped decimal. strtod also parses
-                        // "inf"/"nan" and hex-floats ("0x1p4"); those must remain strings rather
-                        // than silently become float claims.
+                        // Try to parse as a finite, JSON-number-shaped decimal. qb::to_number
+                        // also parses "inf"/"infinity"/"nan"; those must remain strings rather
+                        // than silently become float claims, so gate on a JSON-number shape
+                        // (digits, sign, '.', exponent only) and reject non-finite results.
                         const std::string &num_str     = pair.second;
                         bool               json_number = !num_str.empty() && (num_str[0] == '-' || (num_str[0] >= '0' && num_str[0] <= '9'));
                         for (char c : num_str) {
@@ -445,9 +432,12 @@ private:
                                 break;
                             }
                         }
-                        if (end_ptr == str_begin + num_str.size() && errno == 0 && json_number && std::isfinite(double_val)) {
+                        std::optional<double> double_val;
+                        if (json_number)
+                            double_val = qb::to_number<double>(num_str);
+                        if (json_number && double_val && std::isfinite(*double_val)) {
                             // Successfully parsed entire string as double
-                            payload_json[pair.first] = double_val;
+                            payload_json[pair.first] = *double_val;
                         } else {
                             // Not a valid number, store as string
                             payload_json[pair.first] = pair.second;
