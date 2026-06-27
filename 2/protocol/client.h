@@ -318,8 +318,11 @@ public:
             return;
         }
 
-        const auto    &data_payload = data_event.payload.data_payload;
-        const uint32_t payload_size = data_payload.size();
+        const auto &data_payload = data_event.payload.data_payload;
+        // RFC 9113 §6.1: the ENTIRE DATA frame payload (Pad Length octet + Padding included)
+        // counts against flow control, not just the de-padded application bytes. Debit and
+        // replenish the full frame size; data_payload (de-padded) is used for the body below.
+        const uint32_t payload_size = static_cast<uint32_t>(data_payload.size() + data_event.payload.padding_size);
 
         if (stream.local_window_size < payload_size) {
             // send_rst_stream() closes the stream context (do not re-close via the now-freed

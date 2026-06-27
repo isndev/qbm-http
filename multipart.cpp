@@ -40,14 +40,13 @@ is_valid_multipart_boundary(const std::string &boundary) noexcept {
  */
 std::string::const_iterator
 find_boundary(std::string const &str, std::string const &boundary) {
-    auto begin = str.begin();
-    while (begin != str.end()) {
-        auto p = std::mismatch(begin, str.end(), boundary.begin(), boundary.end());
-        if (p.second == boundary.end())
-            return begin;
-        begin = std::next(p.first);
-    }
-    return str.end();
+    // std::search returns the first occurrence of `boundary` in `str`, or str.end() if
+    // absent (and str.begin() for an empty boundary, matching the previous behaviour).
+    // The earlier hand-rolled loop advanced `std::next(p.first)` where p.first could equal
+    // str.end() when the boundary was longer than the remaining haystack and that haystack
+    // tail was a proper prefix of the boundary, producing an end()+1 iterator and a
+    // one-byte out-of-bounds read on the next std::mismatch.
+    return std::search(str.begin(), str.end(), boundary.begin(), boundary.end());
 }
 
 /**

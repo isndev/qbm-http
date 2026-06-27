@@ -199,7 +199,10 @@ struct Http2PriorityData {
  * associated with a stream.
  */
 struct DataFrame {
-    std::vector<uint8_t> data_payload; ///< Application data
+    std::vector<uint8_t> data_payload;     ///< Application data (de-padded)
+    std::size_t          padding_size = 0; ///< Pad Length octet + Padding bytes. Stripped from
+                                           ///< data_payload, but RFC 9113 §6.1 still counts them
+                                           ///< against flow control, so they are carried here.
 };
 
 /**

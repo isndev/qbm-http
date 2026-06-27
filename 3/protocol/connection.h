@@ -586,6 +586,12 @@ private:
     qb::unordered_map<std::uint64_t, std::unique_ptr<stream_state>> _streams;
     bool                                                            _local_streams_bound = false;
     bool                                                            _shutdown_started    = false;
+    // Liveness flag for reentrancy-safe teardown. drain() forwards bytes to the owner,
+    // which can SYNCHRONOUSLY destroy this connection (the owner erases it from its
+    // _connections map when the transport reports a close mid-send). drain() captures a
+    // copy of this shared_ptr so it can detect that destruction and bail out instead of
+    // dereferencing freed members (_conn, _owner, _streams).
+    std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
 
     static nghttp3_tstamp
     now_ts() noexcept {
@@ -1017,6 +1023,8 @@ public:
 
     /// @brief Destroy the connection, releasing the underlying @c nghttp3_conn.
     ~connection() {
+        if (_alive)
+            *_alive = false; // wake any drain() still on the stack so it bails out
         nghttp3_conn_del(_conn);
     }
 
@@ -1032,7 +1040,8 @@ public:
         , _role(rhs._role)
         , _connection_id(rhs._connection_id)
         , _conn(std::exchange(rhs._conn, nullptr))
-        , _streams(std::move(rhs._streams)) {}
+        , _streams(std::move(rhs._streams))
+        , _alive(std::move(rhs._alive)) {}
 
     /**
      * @brief Whether the underlying nghttp3 connection is live.
@@ -1247,6 +1256,10 @@ public:
                 }
             }
         };
+        // Reentrancy guard: each send_http3_stream_data() below may synchronously destroy
+        // this connection (owner erases it on a transport close). Hold a copy of the alive
+        // flag on the stack so we can detect that and stop touching freed members.
+        const auto alive = _alive;
         for (std::size_t budget = 0; budget < 256; ++budget) {
             int64_t    stream_id = -1;
             int        fin       = 0;
@@ -1266,12 +1279,14 @@ public:
                 }
                 _owner.send_http3_stream_data(_connection_id, static_cast<std::uint64_t>(stream_id),
                                               std::string_view(reinterpret_cast<const char *>(vec[i].base), vec[i].len), false);
+                if (!*alive)
+                    return; // this connection was destroyed mid-send
                 accepted += vec[i].len;
             }
-            if (fin && accepted == 0) {
+            if (fin) {
                 _owner.send_http3_stream_data(_connection_id, static_cast<std::uint64_t>(stream_id), std::string_view{}, true);
-            } else if (fin && accepted != 0) {
-                _owner.send_http3_stream_data(_connection_id, static_cast<std::uint64_t>(stream_id), std::string_view{}, true);
+                if (!*alive)
+                    return;
             }
             (void) nghttp3_conn_add_write_offset(_conn, stream_id, accepted);
             if (fin) {

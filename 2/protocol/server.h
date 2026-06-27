@@ -248,9 +248,13 @@ public:
         if (!this->ok() || !_connection_active)
             return;
 
-        const FrameHeader &header            = data_event.header;
-        uint32_t           stream_id         = header.get_stream_id();
-        std::size_t        data_payload_size = data_event.payload.data_payload.size();
+        const FrameHeader &header    = data_event.header;
+        uint32_t           stream_id = header.get_stream_id();
+        // RFC 9113 §6.1: the ENTIRE DATA frame payload — the Pad Length octet and the
+        // Padding included — counts against connection and stream flow control, NOT just
+        // the de-padded application bytes. Debit and replenish the full frame size; the
+        // de-padded data is read from data_payload below for body assembly / content-length.
+        std::size_t data_payload_size = data_event.payload.data_payload.size() + data_event.payload.padding_size;
 
         LOG_HTTP_TRACE_PA(stream_id, "Server: Received DATA frame, size: " << data_payload_size << ", flags: " << (int) header.flags);
 
