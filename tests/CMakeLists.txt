@@ -121,6 +121,7 @@ qhttp_test(unit http2-protocol-state    unit/http2/http2-protocol-state.cpp    E
 qhttp_test(unit http2-client-validation unit/http2/http2-client-validation.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-stream-state      unit/http2/http2-stream-state.cpp      EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-coverage unit/http2/http2-protocol-coverage.cpp EXTRA_LABELS http2)
+qhttp_test(unit http2-protocol-roundtrip unit/http2/http2-protocol-roundtrip.cpp EXTRA_LABELS http2)
 # ws units (crypto-link ssl: ws.h #errors without qb::io::crypto; pure-logic, no socket)
 qhttp_test(unit ws-close-frame-negative   unit/ws/ws-close-frame-negative.cpp   REQUIRES ssl EXTRA_LABELS ws)
 qhttp_test(unit ws-frame-encode-validation unit/ws/ws-frame-encode-validation.cpp REQUIRES ssl EXTRA_LABELS ws)
