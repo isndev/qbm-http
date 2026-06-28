@@ -268,6 +268,11 @@ TEST_F(ValidationRulesTest, MaximumRuleValidation) {
     EXPECT_FALSE(result.success());
     ASSERT_FALSE(result.errors().empty());
     EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMaximum");
+
+    // Rule only applies to numbers -> a non-number passes through.
+    result.clear();
+    EXPECT_TRUE(rule_incl.validate(qb::json("test"), "test", result));
+    EXPECT_TRUE(result.success());
 }
 
 // --- EnumRule ----------------------------------------------------------------
@@ -337,6 +342,11 @@ TEST_F(ValidationRulesTest, MinItemsRuleValidation) {
     EXPECT_FALSE(result.success());
     ASSERT_FALSE(result.errors().empty());
     EXPECT_EQ(result.errors()[0].rule_violated, "minItems");
+
+    // Rule only applies to arrays -> a non-array passes through.
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json("not an array"), "test", result));
+    EXPECT_TRUE(result.success());
 }
 
 // --- MaxItemsRule ------------------------------------------------------------
@@ -354,6 +364,11 @@ TEST_F(ValidationRulesTest, MaxItemsRuleValidation) {
     EXPECT_FALSE(result.success());
     ASSERT_FALSE(result.errors().empty());
     EXPECT_EQ(result.errors()[0].rule_violated, "maxItems");
+
+    // Rule only applies to arrays -> a non-array passes through.
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json(123), "test", result));
+    EXPECT_TRUE(result.success());
 }
 
 // --- CustomRule --------------------------------------------------------------
@@ -426,4 +441,99 @@ TEST_F(ValidationRulesTest, PatternRuleReDoSInputSizeGuard) {
     ASSERT_FALSE(result.success());
     ASSERT_EQ(result.errors().size(), 1);
     EXPECT_EQ(result.errors()[0].rule_violated, "pattern");
+}
+
+// --- RequiredRule ------------------------------------------------------------
+
+// RequiredRule is a presence marker: presence is enforced by the validator
+// (SchemaValidator/ParameterValidator) before rules run, so the rule's own
+// validate() is a no-op that passes whatever value reaches it.
+TEST_F(ValidationRulesTest, RequiredRuleValidateAlwaysPasses) {
+    RequiredRule rule;
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json("present"), "test", result));
+    EXPECT_TRUE(result.success());
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json(nullptr), "test", result));
+    EXPECT_TRUE(result.success());
+    EXPECT_EQ(rule.rule_name(), "required");
+}
+
+// --- MinPropertiesRule -------------------------------------------------------
+
+TEST_F(ValidationRulesTest, MinPropertiesRuleValidation) {
+    MinPropertiesRule rule(2);
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json({{"a", 1}, {"b", 2}}), "test", result));
+    EXPECT_TRUE(result.success());
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json({{"a", 1}}), "test", result));
+    EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "minProperties");
+    // Rule only applies to objects -> a non-object passes through.
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2}), "test", result));
+    EXPECT_TRUE(result.success());
+}
+
+// --- MaxPropertiesRule -------------------------------------------------------
+
+TEST_F(ValidationRulesTest, MaxPropertiesRuleValidation) {
+    MaxPropertiesRule rule(2);
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json({{"a", 1}, {"b", 2}}), "test", result));
+    EXPECT_TRUE(result.success());
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json({{"a", 1}, {"b", 2}, {"c", 3}}), "test", result));
+    EXPECT_FALSE(result.success());
+    ASSERT_FALSE(result.errors().empty());
+    EXPECT_EQ(result.errors()[0].rule_violated, "maxProperties");
+    // Rule only applies to objects -> a non-object passes through.
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json("not an object"), "test", result));
+    EXPECT_TRUE(result.success());
+}
+
+// --- PropertyNamesRule -------------------------------------------------------
+
+// Validates every property NAME of an object against a sub-schema. Names that
+// violate the schema produce errors; a non-object input is outside the rule's
+// scope and passes through.
+TEST_F(ValidationRulesTest, PropertyNamesRuleValidation) {
+    // Each key must be a string of at most 4 characters.
+    PropertyNamesRule rule(qb::json({{"type", "string"}, {"maxLength", 4}}));
+
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json({{"abcd", 1}, {"xy", 2}}), "test", result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json({{"toolong", 1}}), "test", result));
+    EXPECT_FALSE(result.success());
+    EXPECT_FALSE(result.errors().empty());
+
+    // Rule only applies to objects -> a non-object passes through.
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2}), "test", result));
+    EXPECT_TRUE(result.success());
+}
+
+// --- ItemsRule ---------------------------------------------------------------
+
+// ItemsRule is a data carrier; the actual "items"/"additionalItems" logic lives
+// in SchemaValidator, so the rule's own validate() is a placeholder that always
+// passes. Exercise the constructor and that placeholder directly.
+TEST_F(ValidationRulesTest, ItemsRulePlaceholderValidatePasses) {
+    auto      item_schema = std::make_shared<SchemaValidator>(qb::json({{"type", "integer"}}));
+    ItemsRule rule(ItemsRuleLogic{item_schema});
+
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json::array({1, 2, 3}), "test", result));
+    EXPECT_TRUE(result.success());
+    // Even a type the real keyword logic would reject passes the placeholder.
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json("not an array"), "test", result));
+    EXPECT_TRUE(result.success());
+    EXPECT_EQ(rule.rule_name(), "items");
 }

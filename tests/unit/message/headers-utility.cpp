@@ -278,3 +278,113 @@ TEST(HeadersUtility, HeaderAttributesDuplicateNameCaseInsensitiveFirstWins) {
     EXPECT_TRUE(parsed.has("CHARSET"));
     EXPECT_EQ(parsed.size(), 1u);
 }
+
+// A q-value that does not match the strict grammar ("1"/"1.0".."1.000", or
+// "0" with up to three fractional digits) is rejected and treated as q=0, which
+// makes the encoding unacceptable. Each input below exercises a distinct
+// rejection branch of the q-value parser; since the named codec is the only
+// candidate, the negotiated result must be empty in every case.
+TEST(HeadersUtility, ContentEncodingMalformedQValueDisablesEncoding) {
+    const std::string first = qb::http::content_encoding("*");
+    if (first.empty()) {
+        GTEST_SKIP() << "Compression support is not available in this build.";
+    }
+
+    for (const char *bad_q : {
+             "",        // empty q value
+             "2",       // leading digit is not '0' (and q > 1)
+             "0x",      // two chars, second is not '.'
+             "0.5x",    // trailing non-digit in the fraction
+             "0.1234",  // more than three fractional digits
+         }) {
+        const std::string header = first + ";q=" + bad_q;
+        EXPECT_TRUE(qb::http::content_encoding(header).empty())
+            << "malformed q=\"" << bad_q << "\" should disable the encoding";
+    }
+}
+
+// The q parameter need not be the first parameter on a token: the parser must
+// skip preceding ';'-delimited parameters to find it, and default to q=1 when no
+// q parameter is present at all. Both paths leave the codec acceptable, so it is
+// selected.
+TEST(HeadersUtility, ContentEncodingFindsQAfterOtherParameters) {
+    const std::string first = qb::http::content_encoding("*");
+    if (first.empty()) {
+        GTEST_SKIP() << "Compression support is not available in this build.";
+    }
+
+    // q follows an unrelated parameter -> parser advances past "v=1" to read it.
+    EXPECT_EQ(qb::http::content_encoding(first + ";v=1;q=0.5"), first);
+    // Only a non-q parameter is present -> q defaults to 1 (acceptable).
+    EXPECT_EQ(qb::http::content_encoding(first + ";level=best"), first);
+}
+
+// An empty token between commas has neither a wildcard nor a named codec; it must
+// be skipped rather than treated as a match, and a following supported codec still
+// wins.
+TEST(HeadersUtility, ContentEncodingSkipsEmptyTokens) {
+    const std::string first = qb::http::content_encoding("*");
+    if (first.empty()) {
+        GTEST_SKIP() << "Compression support is not available in this build.";
+    }
+
+    EXPECT_EQ(qb::http::content_encoding(" , " + first), first);
+}
+
+// When the attribute section of a Content-Type is malformed (parse_header_attributes
+// throws), ContentType::parse must swallow the error and fall back to the default
+// charset rather than propagate or leave the charset empty. The media type, parsed
+// before the attributes, is still reported.
+TEST(HeadersUtility, ContentTypeFallsBackToDefaultCharsetWhenAttributesThrow) {
+    // Capture the build's default charset (no attributes -> default) instead of
+    // hardcoding the constant.
+    qb::http::Headers clean;
+    clean.set_header("Content-Type", "text/html");
+    const std::string default_charset = clean.content_type().charset();
+
+    // A literal control character inside a quoted attribute value makes the
+    // attribute parser throw.
+    std::string ct = "text/html; charset=\"a";
+    ct.push_back('\n');
+    ct += "b\"";
+
+    qb::http::Headers malformed;
+    malformed.set_header("Content-Type", ct);
+
+    EXPECT_EQ(malformed.content_type().type(), "text/html");
+    EXPECT_EQ(malformed.content_type().charset(), default_charset);
+}
+
+// A control character in the attribute NAME (as opposed to the value) is rejected.
+TEST(HeadersUtility, HeaderAttributesRejectControlCharInName) {
+    std::string attrs;
+    attrs.push_back('\x01');
+    attrs += "name=value";
+
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
+}
+
+// Security/DoS guard: a quoted attribute value exceeding ATTRIBUTE_VALUE_MAX
+// (8192) bytes is rejected rather than buffered without bound.
+TEST(HeadersUtility, HeaderAttributesRejectOversizedQuotedValue) {
+    std::string attrs = "x=\"";
+    attrs.append(8193, 'a'); // one past the limit, still inside the open quote
+
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
+}
+
+// Same guard on the quoted-pair (escaped) path: the size check fires while
+// consuming the escaped character once the value is already at the limit.
+TEST(HeadersUtility, HeaderAttributesRejectOversizedEscapedQuotedValue) {
+    std::string attrs = "x=\"";
+    attrs.append(8192, 'a'); // value now exactly at the limit
+    attrs += "\\b";          // escaped char pushes past it
+
+    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
+}
+
+// The raw (pointer,length) overload rejects a null buffer with a non-zero length
+// instead of dereferencing it.
+TEST(HeadersUtility, HeaderAttributesRejectNullPointerWithLength) {
+    EXPECT_THROW((void) qb::http::parse_header_attributes(nullptr, 5), std::runtime_error);
+}

@@ -160,6 +160,56 @@ TEST_F(ValidationRequestTest, HeaderSanitizerExceptionIsCaptured) {
     EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.header");
 }
 
+// A sanitizer that throws a non-std exception type (not derived from
+// std::exception) must still be contained by the catch-all and reported, for the
+// query, header and body sanitizer paths respectively.
+TEST_F(ValidationRequestTest, QuerySanitizerNonStdExceptionIsCaptured) {
+    RequestValidator validator;
+    validator.add_query_param_sanitizer("q", [](const std::string &) -> std::string { throw 42; });
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/search?q=test");
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "query.q");
+    EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.query");
+}
+
+TEST_F(ValidationRequestTest, HeaderSanitizerNonStdExceptionIsCaptured) {
+    RequestValidator validator;
+    validator.add_header_sanitizer("X-Test", [](const std::string &) -> std::string { throw 42; });
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/submit");
+    req.set_header("X-Test", std::string("raw"));
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "header.x-test");
+    EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.header");
+}
+
+TEST_F(ValidationRequestTest, BodySanitizerNonStdExceptionIsCaptured) {
+    RequestValidator validator;
+    validator.add_body_sanitizer("name", [](const std::string &) -> std::string { throw 42; });
+
+    qb::http::Request req;
+    req.uri()  = qb::io::uri("/submit");
+    req.body() = R"({"name":"alice"})";
+
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out, nullptr));
+    ASSERT_FALSE(out.success());
+    ASSERT_EQ(out.errors().size(), 1);
+    EXPECT_EQ(out.errors().front().field_path, "body");
+    EXPECT_EQ(out.errors().front().rule_violated, "sanitizeException.body");
+}
+
 // --- Path parameters ---------------------------------------------------------
 
 // Path-param rules require a PathParameters context; without one the parameter
