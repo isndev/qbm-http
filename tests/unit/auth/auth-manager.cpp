@@ -34,7 +34,8 @@
 
 #include <gtest/gtest.h>
 
-#include <qb/json.h> // qb::json
+#include <qb/io/crypto.h> // qb::crypto::generate_{rsa,ec,ed25519}_keypair
+#include <qb/json.h>      // qb::json
 
 #include "../auth.h"                       // qb::http::auth::{Manager, Options, User}
 #include "../../shared/auth_test_helpers.h" // forge_token, forge_token_raw_payload, now_epoch, hmac_options, make_user
@@ -159,6 +160,105 @@ TEST(AuthManagerRoundTrip, HmacSha384AndSha512RoundTrip) {
         EXPECT_EQ(out->id, "user-42");
         EXPECT_TRUE(out->has_role("admin"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Asymmetric round-trips (RSA RS384/RS512, ECDSA ES384/ES512, EdDSA)
+//
+// The HMAC tests above cover the symmetric algorithm branches; these drive the asymmetric
+// algorithm-mapping switches (both the sign and the verify path in auth::Manager) and the
+// public/private-key handling, using freshly generated keypairs (no checked-in PEM material).
+// RS256 / ES256 are already exercised by the middleware-auth suite; here we close the 384/512 +
+// EdDSA branches. Each test mints a token with the private key and verifies it with the public key,
+// proving a real end-to-end sign+verify per algorithm — not just an enum mapping.
+// ---------------------------------------------------------------------------
+
+namespace {
+void
+expect_asymmetric_roundtrip(Options::Algorithm algo, const std::string &priv, const std::string &pub) {
+    Options sign_opts;
+    sign_opts.algorithm(algo).private_key(priv).secret_key("");
+    Options verify_opts;
+    verify_opts.algorithm(algo).public_key(pub).secret_key("");
+
+    const User  user  = make_user();
+    std::string token = Manager(sign_opts).generate_token(user);
+    ASSERT_FALSE(token.empty()) << "sign failed for algorithm index " << static_cast<int>(algo);
+
+    auto out = Manager(verify_opts).verify_token(token);
+    ASSERT_TRUE(out.has_value()) << "verify failed for algorithm index " << static_cast<int>(algo);
+    EXPECT_EQ(out->id, "user-42");
+    EXPECT_TRUE(out->has_role("admin"));
+}
+} // namespace
+
+TEST(AuthManagerRoundTrip, RsaSha384AndSha512RoundTrip) {
+    auto [priv, pub] = qb::crypto::generate_rsa_keypair(2048); // {private, public}
+    ASSERT_FALSE(priv.empty());
+    ASSERT_FALSE(pub.empty());
+    expect_asymmetric_roundtrip(Options::Algorithm::RSA_SHA384, priv, pub);
+    expect_asymmetric_roundtrip(Options::Algorithm::RSA_SHA512, priv, pub);
+}
+
+TEST(AuthManagerRoundTrip, EcdsaSha384RoundTrip) {
+    auto [priv, pub] = qb::crypto::generate_ec_keypair("secp384r1"); // P-384 for ES384
+    ASSERT_FALSE(priv.empty());
+    expect_asymmetric_roundtrip(Options::Algorithm::ECDSA_SHA384, priv, pub);
+}
+
+TEST(AuthManagerRoundTrip, EcdsaSha512RoundTrip) {
+    auto [priv, pub] = qb::crypto::generate_ec_keypair("secp521r1"); // P-521 for ES512
+    ASSERT_FALSE(priv.empty());
+    expect_asymmetric_roundtrip(Options::Algorithm::ECDSA_SHA512, priv, pub);
+}
+
+TEST(AuthManagerRoundTrip, Ed25519RoundTrip) {
+    auto [priv, pub] = qb::crypto::generate_ed25519_keypair();
+    ASSERT_FALSE(priv.empty());
+    expect_asymmetric_roundtrip(Options::Algorithm::ED25519, priv, pub);
+}
+
+// ---------------------------------------------------------------------------
+// Malformed-claim robustness (security): a signature-valid token with a bad claim shape must
+// degrade gracefully, never crash. exp verification is disabled so the forged (exp-less) token
+// reaches the claim-extraction path.
+// ---------------------------------------------------------------------------
+
+// A "roles" claim whose string value is not parseable JSON must verify (signature is valid) but
+// leave roles empty — the parse failure is caught + logged, not fatal. Drives the roles-parse
+// catch branch in auth::Manager.
+TEST(AuthManagerRoundTrip, MalformedRolesClaimDegradesToEmpty) {
+    Options opts = hmac_options();
+    opts.verify_expiration(false);
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"]    = "user-x";
+    payload["roles"]  = "this is not valid json {"; // a string that fails json::parse
+    std::string token = qb::http::test::forge_token(payload); // signed with the default secret
+
+    auto out = mgr.verify_token(token);
+    ASSERT_TRUE(out.has_value()) << "a malformed roles claim must not fail verification";
+    EXPECT_EQ(out->id, "user-x");
+    EXPECT_TRUE(out->roles.empty()) << "an unparseable roles claim must degrade to empty, not crash";
+}
+
+// Metadata with non-string values must be stringified to their JSON text (not dropped). Drives the
+// metadata `it.value().dump()` else-branch.
+TEST(AuthManagerRoundTrip, NonStringMetadataValuesAreStringified) {
+    Options opts = hmac_options();
+    opts.verify_expiration(false);
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"]      = "user-y";
+    payload["metadata"] = qb::json{{"count", 5}, {"active", true}}; // numeric + bool values
+    std::string token   = qb::http::test::forge_token(payload);
+
+    auto out = mgr.verify_token(token);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(out->metadata.at("count"), "5") << "a numeric metadata value must be dumped to its JSON text";
+    EXPECT_EQ(out->metadata.at("active"), "true");
 }
 
 // IssuerAndAudienceRoundTrip: the previous version only re-asserted out->id and

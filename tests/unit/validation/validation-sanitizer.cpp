@@ -308,3 +308,24 @@ TEST_F(ValidationSanitizerTest, ChainedRulesApplyInOrder) {
     s.sanitize(data);
     EXPECT_EQ(data["content"].get<std::string>(), "hello world");
 }
+
+// --- escape_html: ampersand / quote / apostrophe -----------------------------
+// The existing MultipleRulesOnField test only exercises the `<`/`>` cases. These three entities
+// (`&` → &amp;, `"` → &quot;, `'` → &#39;) are the uncovered branches of escape_html.
+TEST_F(ValidationSanitizerTest, EscapeHtmlAmpersandQuoteApostrophe) {
+    Sanitizer s;
+    s.add_rule("c", PredefinedSanitizers::escape_html());
+    qb::json data = {{"c", "Tom & \"Jerry\" 's"}};
+    s.sanitize(data);
+    EXPECT_EQ(data["c"].get<std::string>(), "Tom &amp; &quot;Jerry&quot; &#39;s");
+}
+
+// --- alphanumeric_only: strips every non-[A-Za-z0-9] character ----------------
+// Whole sanitizer previously untested.
+TEST_F(ValidationSanitizerTest, AlphanumericOnlyStripsNonAlnum) {
+    Sanitizer s;
+    s.add_rule("c", PredefinedSanitizers::alphanumeric_only());
+    qb::json data = {{"c", "a1! b2 @c3#"}};
+    s.sanitize(data);
+    EXPECT_EQ(data["c"].get<std::string>(), "a1b2c3") << "only letters and digits survive";
+}
