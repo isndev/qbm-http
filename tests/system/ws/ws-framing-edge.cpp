@@ -74,9 +74,8 @@ public:
         // spawn_run_loop(). The live protocol's type is base::WS_Protocol —
         // ws_server<coro_session<BoundedSession, BoundedServer>>, NOT ws_server<BoundedSession>
         // (a sibling instantiation); casting to the latter is an invalid downcast (UB).
-        if (auto *p = static_cast<base::WS_Protocol *>(this->protocol())) {
-            p->set_max_payload_size(64);
-        }
+        // The WS protocol is installed (switch_protocol) before run(), so protocol() is it (never null).
+        static_cast<base::WS_Protocol *>(this->protocol())->set_max_payload_size(64);
         while (true) {
             auto frame = co_await this->next_frame();
             if (frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected ||

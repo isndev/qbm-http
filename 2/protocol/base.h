@@ -744,7 +744,7 @@ protected:
      * @brief Set protocol to error state without specific reason
      */
     void
-    not_ok() noexcept {
+    not_ok() noexcept override {
         _last_error_code.reset();
         Base::not_ok();
     }
