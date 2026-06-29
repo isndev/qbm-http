@@ -1,6 +1,6 @@
 # The middleware model
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 Middleware is the cross-cutting layer of the router: a chain of tasks that run before (and, for synchronous functional middleware, around) a route handler, each free to inspect the request, mutate the response, short-circuit the request, or pass control onward.
 
@@ -9,6 +9,19 @@ Middleware is the cross-cutting layer of the router: a chain of tasks that run b
 ## Summary
 
 A request that matches a route does not call your handler directly. The router executes a **compiled chain of tasks** — every applicable middleware, in order, followed by the route handler. Each task drives the chain forward by calling `ctx->complete(AsyncTaskResult)` (or, for `(ctx, next)`-style functional middleware, by calling `next()`). A task can let the request continue, finalize a response and stop the chain, or divert to the error chain. This page covers the interface, how chains are built and ordered, how short-circuiting works, and the synchronous-versus-asynchronous contract.
+
+```mermaid
+flowchart TB
+    Req["matched request"] --> MW1["middleware 1<br/>process(ctx)"]
+    MW1 -->|"complete(CONTINUE)"| MW2["middleware 2<br/>process(ctx)"]
+    MW2 -->|"complete(CONTINUE)"| H["route handler"]
+    H -->|"complete(...)"| Out["response written · sent"]
+    MW1 -->|"complete(COMPLETE)"| Out
+    MW2 -->|"complete(COMPLETE)"| Out
+    MW1 -->|"complete(ERROR) · or throws → 500"| Err["error chain"]
+    MW2 -->|"complete(ERROR) · or throws → 500"| Err
+    Err --> Out
+```
 
 Middleware comes in three forms that resolve to the same runtime type:
 
@@ -127,7 +140,7 @@ The `Context` enforces single-completion: once finalized or cancelled, further `
 This is what "short-circuit" means in practice — a middleware that calls `complete(COMPLETE)` ends the chain:
 
 ```cpp
-// src: qbm/http/tests/test-integration-middleware.cpp:1087-1098 (ResponseHeaderMiddleware::process)
+// src: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:615-642 (HeaderStampMiddleware::process)
 void process(std::shared_ptr<MidCtx> ctx) override {
     ctx->response().set_header(_header_name, _header_value);
     if (_complete_request) {
@@ -255,7 +268,7 @@ You do not need a hand-rolled `if` inside a middleware to run one branch per req
 ```cpp
 #include <http/http.h>
 
-// Pattern: qbm/http/tests/test-integration-middleware.cpp:1167-1230 (ConditionalMiddleware tests)
+// Pattern: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:643-649 (ConditionalMiddleware tests)
 auto predicate = [](const std::shared_ptr<qb::http::Context<MySession>> &ctx) -> bool {
     return ctx->request().uri().path().starts_with("/admin");
 };

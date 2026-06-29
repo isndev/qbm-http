@@ -1,6 +1,6 @@
 # WebSocket coroutines
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 Write a WebSocket conversation as a single straight-line coroutine — `co_await` the connect, each inbound frame, and the close handshake — instead of scattering the logic across CRTP `on(...)` callbacks.
 
@@ -57,7 +57,7 @@ struct IncomingFrame {
 `connect(uri, timeout)` performs both the TCP/TLS connection and the HTTP `Upgrade` handshake. The timeout is a `qb::duration` (default `qb::duration::zero()`, meaning no client-side deadline). `ConnectResult::ok` is `true` only when both phases succeed; on failure the result stays intentionally small — bind a `sending_http_request` callback or inspect the transport log before `connect()` if you need wire-level detail.
 
 ```cpp
-// <!-- src: qbm/http/tests/test-ws-coro-server.cpp:294-314 -->
+// <!-- src: qbm/http/tests/system/ws/ws-coro-client.cpp:373-395 -->
 #include <http/http.h>
 #include <http/ws.h>
 
@@ -89,7 +89,7 @@ Sending is not a coroutine: `operator<<` queues an outbound frame on the reactor
 The coroutine client inherits the subprotocol API from the shared CRTP base. Offer tokens in preference order before `connect()`; read the server's selection after it resolves.
 
 ```cpp
-// <!-- src: qbm/http/tests/test-ws-coro-server.cpp:353-368 -->
+// <!-- src: qbm/http/tests/system/ws/ws-coro-server.cpp:288-305 -->
 qb::http::ws::coro_client ws;
 ws.set_subprotocols({"chat.v1", "chat.v2"});
 
@@ -116,14 +116,14 @@ auto res = co_await ws.close_async(qb::http::ws::CloseStatus::Normal, "done");
 (void) res.ok;
 ```
 
-A reserved or out-of-range close code is fail-fast: `close_async` re-dispatches through the `MessageClose` constructor, which throws `std::invalid_argument` for codes `1004/1005/1006/1015` or anything outside `1000..4999`. The throw surfaces inside your coroutine, so guard it if you forge codes. <!-- src: qbm/http/tests/test-ws-coro-negative.cpp:152-169 -->
+A reserved or out-of-range close code is fail-fast: `close_async` re-dispatches through the `MessageClose` constructor, which throws `std::invalid_argument` for codes `1004/1005/1006/1015` or anything outside `1000..4999`. The throw surfaces inside your coroutine, so guard it if you forge codes. <!-- src: qbm/http/tests/system/ws/ws-coro-handshake-negative.cpp:113-126 -->
 
 ## The coroutine server session
 
 `coro_session<Self, Server>` is the server-side mirror of `coro_client`. Instead of a bag of `on(...)` handlers, you express the whole session as one `run()` coroutine. The base wires the HTTP protocol at construction, accepts the upgrade, installs `ws::protocol` on success, and spawns `run()` exactly once.
 
 ```cpp
-// <!-- src: qbm/http/tests/test-ws-coro-server.cpp:53-89 -->
+// <!-- src: qbm/http/tests/system/ws/ws-coro-server.cpp:59-89 -->
 #include <http/http.h>
 #include <http/ws.h>
 
@@ -175,7 +175,7 @@ Contract:
 Customize or reject the upgrade with `set_handshake_hook(...)` **before** the session starts (the constructor is the right place). The hook runs once, on the upgrade request, before the `101` response is sent. Return `true` to accept; mutate the response to negotiate a subprotocol or add headers. Return `false` to refuse — set a non-success status and the base sends that response as-is, then drops the connection.
 
 ```cpp
-// <!-- src: qbm/http/tests/test-ws-coro-server.cpp:177-186 -->
+// <!-- src: qbm/http/tests/system/ws/ws-coro-server.cpp:161-173 -->
 RejectingSession(RejectingServer &s) : base(s) {
     set_handshake_hook(
         [](RejectingSession &, qb::http::Request &, qb::http::Response &res) {
@@ -189,7 +189,7 @@ RejectingSession(RejectingServer &s) : base(s) {
 If the hook returns `false` without setting a status, the base falls back to `400 Bad Request`. To advertise a subprotocol, append it to the response inside the hook:
 
 ```cpp
-// <!-- src: qbm/http/tests/test-ws-coro-server.cpp:107-137 (condensed) -->
+// <!-- src: qbm/http/tests/system/ws/ws-coro-server.cpp:98-131 (condensed) -->
 set_handshake_hook(
     [](MySession &, qb::http::Request &req, qb::http::Response &res) {
         const auto &offered = req.header("Sec-WebSocket-Protocol");

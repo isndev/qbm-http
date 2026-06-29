@@ -1,6 +1,6 @@
 # qbm-http documentation map
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 This is the table of contents for the qbm-http narrative documentation: twenty-one numbered pages covering HTTP/1.1, HTTP/2, HTTP/3, WebSocket, routing, middleware, authentication, and validation, ordered as a learning path.
 

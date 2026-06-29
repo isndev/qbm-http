@@ -1,6 +1,6 @@
 # HTTP/3 over QUIC
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 `qb::http3` delivers native HTTP/3 — a same-origin async client, a Router-integrated server, and a dual-stack wrapper — layered on the qb-io QUIC transport and `libnghttp3`, and gated behind the `QBM_HTTP_HAS_HTTP3` build macro.
 
@@ -13,6 +13,18 @@ HTTP/3 runs HTTP semantics over QUIC (UDP), not over TCP. Inside `qbm/http`, the
 - `qb::http3::Server<Session>` — a native HTTP/3 server that reuses the same `Router`, `Context`, middleware, `Request`, and `Response` types as the rest of the module.
 - `qb::http3::Client` — a persistent, same-origin async client that connects with ALPN `h3` and multiplexes requests over one QUIC connection.
 - `qb::http::dual_stack_server<...>` — a convenience wrapper that runs an HTTP/2 (TCP+TLS) server and an HTTP/3 (QUIC) server against one shared route table.
+
+```mermaid
+flowchart TB
+    subgraph Surfaces["public surfaces · gated by QBM_HTTP_HAS_HTTP3"]
+        Cl["qb::http3::Client"]
+        Sv["http3 server<br/>Router-integrated"]
+        DS["dual_stack_server<br/>HTTP/2 + HTTP/3, shared routes"]
+    end
+    Surfaces --> H3["qb::protocol::http3::connection&lt;Owner&gt;<br/>HTTP/3 framing + QPACK · libnghttp3"]
+    H3 --> QUIC["qb-io QUIC transport<br/>connections · bidi / uni streams · flow control · reset"]
+    QUIC --> UDP["UDP — not TCP"]
+```
 
 Everything in this page is behind one compile-time gate. Read the build section first.
 
@@ -84,7 +96,7 @@ All HTTP/3 work is **event-loop affine**: the client and server have no internal
 An HTTP/3 server is constructed with `qb::http3::make_server()`. It exposes the same `Router` as every other server in the module, so routes, middleware, controllers, and contexts behave identically — the transport is the only thing that differs.
 
 ```cpp
-// src: qbm/http/tests/test-http3-client.cpp:264-299 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:163-176 (adapted)
 #include <http/http.h>
 
 #ifdef QBM_HTTP_HAS_HTTP3
@@ -110,7 +122,7 @@ server->listen(qb::io::uri("https://0.0.0.0:4433"), "cert.pem", "key.pem");
 Custom sessions follow the same CRTP shape as HTTP/2:
 
 ```cpp
-// src: qbm/http/tests/test-http3-client.cpp:29-35
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:60-69
 class CustomHttp3Session;
 using CustomHttp3Server = qb::http3::Server<CustomHttp3Session>;
 
@@ -137,7 +149,7 @@ The server caps inbound request bodies via `set_max_body_size` (default 64 MiB);
 `push_request` connects lazily on the first request, multiplexes over the live QUIC connection thereafter, and invokes the callback on the I/O thread when the response (or an error response) is ready.
 
 ```cpp
-// src: qbm/http/tests/test-http3-client.cpp:279-296 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:178-190 (adapted)
 auto client = qb::http3::make_client("https://127.0.0.1:4433");
 client->set_verify_peer(false);   // self-signed dev certificate only
 
@@ -176,7 +188,7 @@ if (result) {
 `push_requests` issues a vector of requests concurrently over independent QUIC streams and completes once with the responses in submission order:
 
 ```cpp
-// src: qbm/http/tests/test-http3-client.cpp:463-476 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:512-523 (adapted)
 std::vector<qb::http::Request> requests;
 requests.emplace_back(qb::io::uri("/item/1"));
 requests.emplace_back(qb::io::uri("/item/2"));
@@ -230,7 +242,7 @@ Incoming trailers are surfaced through the ordinary header APIs on `Request` / `
 HTTP/2 and HTTP/3 use **different transports** — TCP/TLS for HTTP/1.1 and HTTP/2, UDP/QUIC for HTTP/3 — so they cannot share a socket. `qb::http::make_dual_stack_server()` runs both servers behind a single route facade, registering each route on *both* routers. It returns a `std::unique_ptr<qb::http::dual_stack_server<...>>`.
 
 ```cpp
-// src: qbm/http/tests/test-http3-client.cpp:309-322 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:2009-2019 (adapted)
 auto server = qb::http::make_dual_stack_server();
 
 server->router().get("/shared", [](auto ctx) {
@@ -293,7 +305,7 @@ HTTP/3 enforces the same safety posture as HTTP/1.1 and HTTP/2, plus QUIC-specif
 
 ## Interop testing
 
-The in-tree integration suite (`tests/test-http3-client.cpp`) covers handshake, routing, bodies, batches, concurrency, cancellation, trailers, limits, malformed-length handling, graceful shutdown, and dual-stack regression against HTTP/1.1, HTTP/2, and coroutines. It skips when TLS test certificates are unavailable.
+The in-tree integration suite (`tests/system/http3/`) covers handshake, routing, bodies, batches, concurrency, cancellation, trailers, limits, malformed-length handling, graceful shutdown, and dual-stack regression against HTTP/1.1, HTTP/2, and coroutines. It skips when TLS test certificates are unavailable.
 
 External interop is optional and auto-detected or env-configured; each external command is bounded by a test-side timeout and skipped when the tool is absent:
 

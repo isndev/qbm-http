@@ -1,6 +1,6 @@
 # Core HTTP concepts
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 The value types every other page builds on: `Request`, `Response`, the case-insensitive multi-value `Headers` map, the `Body` payload, and the `Method`/`Status` wrappers — all in the `qb::http` namespace, all riding on qb-io's asynchronous sessions.
 
@@ -43,6 +43,15 @@ namespace qb::http::internal {
 | `qb::http::Request` | `qb::http::request` | `<http/http.h>` | `Method`, `qb::io::uri`, request `CookieJar` |
 | `qb::http::Response` | `qb::http::response` | `<http/http.h>` | `Status`, response `CookieJar` (serialized to `Set-Cookie`) |
 
+```mermaid
+flowchart TB
+    H["Headers<br/>case-insensitive multi-value map + ContentType"] --> MB
+    B["Body<br/>payload over pipe&lt;char&gt;"] --> MB
+    MB["internal::MessageBase<br/>version · upgrade · stream_id · keep_alive"]
+    MB --> REQ["Request<br/>+ Method · qb::io::uri · request CookieJar"]
+    MB --> RES["Response<br/>+ Status · response CookieJar → Set-Cookie"]
+```
+
 ## `qb::http::Request`
 
 A `Request` carries a method, a target URI, headers, a body, and a jar of parsed `Cookie` headers. The default constructor leaves the method `UNINITIALIZED` with an empty URI; the single-argument `Request(qb::io::uri)` constructor defaults the method to `GET`, and the two-argument constructor takes an explicit method and a `qb::io::uri`. (`reset()` sets the method to `GET`.)
@@ -78,7 +87,7 @@ Key accessors, each verified against `request.h`:
 
 Request cookies are not parsed automatically — call `parse_cookie_header()` once the headers are present, then read from the jar.
 
-<!-- src: qbm/http/tests/test-cookie.cpp -->
+<!-- src: qbm/http/tests/unit/cookie/cookie.cpp:488-494 -->
 ```cpp
 qb::http::Request request;
 request.add_header("Cookie", "name1=value1; name2=value2");
@@ -118,7 +127,7 @@ Status is the only response-specific scalar; everything else (headers, body) com
 
 `add_cookie` keeps the jar and the raw `Set-Cookie` headers in lockstep. If you mutate a cookie through the pointer or the jar reference, you must call `update_cookie_header(name)` (or `update_cookie_headers()`) afterward — the header text does not update itself.
 
-<!-- src: qbm/http/tests/test-cookie.cpp -->
+<!-- src: qbm/http/tests/unit/cookie/cookie.cpp:511-513 -->
 ```cpp
 qb::http::Response response;
 response.add_cookie("session", "abc123");          // jar + Set-Cookie header, in sync
@@ -169,7 +178,7 @@ const std::string &enc1 = req.header("Accept-Encoding", 1); // "deflate"
 
 `Headers` caches a parsed `Content-Type` so you do not re-parse the MIME type and charset on every read. `set_content_type(value)` updates both the raw header and the cached helper; `content_type()` returns the parsed view.
 
-<!-- src: qbm/http/tests/test-headers.cpp -->
+<!-- src: qbm/http/tests/unit/message/headers-utility.cpp:108-111 -->
 ```cpp
 qb::http::Headers headers;
 headers.set_header("Content-Type", "text/html; charset=UTF-16");

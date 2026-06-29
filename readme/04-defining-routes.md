@@ -1,6 +1,6 @@
 # Defining routes
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 Bind an HTTP method and a path pattern to a handler, extract path parameters from the URL, and drive each request through the `Context` it receives.
 
@@ -128,7 +128,7 @@ public:
 
 `process()` carries the same contract as a lambda handler: it must call `ctx->complete(...)`. `cancel()` is the inverse — it is invoked when the request is torn down (client disconnect, timeout) while this handler is the in-flight task, and it **must not** call `ctx->complete()`; the `Context` owns the cancellation and finalization sequence. Use `cancel()` only to release resources or abort in-flight async work.
 
-<!-- src: derived from qbm/http/tests/test-router-api.cpp:28-44 (SimpleApiCustomRoute) -->
+<!-- src: derived from qbm/http/tests/unit/routing/router-controller.cpp:289-336 (MyCustomControllerRoute) -->
 ```cpp
 #include <http/http.h>
 
@@ -255,7 +255,7 @@ ctx->json(qb::json{{"ok", true}});
 
 A handler does not have to finish synchronously. Capture `ctx` into a continuation, return without completing, and call `complete()` when the async work lands:
 
-<!-- src: qbm/http/tests/test-router-async.cpp -->
+<!-- src: qbm/http/tests/unit/routing/router-async-dispatch.cpp:449-465 -->
 ```cpp
 router().get("/slow", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
     // Defer work onto the event loop; ctx (a shared_ptr) keeps the context alive.

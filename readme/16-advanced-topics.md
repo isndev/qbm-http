@@ -1,6 +1,6 @@
 # Advanced topics: streaming, connection lifecycle, performance, actor composition
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 How qbm-http handles chunked bodies, persistent connections and protocol upgrades, where the performance levers are, and how an HTTP server composes with the rest of your qb actor system.
 
@@ -77,7 +77,7 @@ A WebSocket connection begins life as an HTTP/1.1 session. The opening `GET` wit
 The lifecycle hazard is the request context. When you upgrade (or otherwise transfer ownership of the connection), call `ctx->suppress_response()` so the `Context` destructor does not send a stale, moved-from HTTP response over a transport that now speaks WebSocket (`qbm/http/routing/context.h:1213`). If you reject a failed upgrade with an HTTP error response, send it and use `close_after_deliver()` so the connection closes cleanly after the rejection flushes. The full upgrade walkthrough — handshake validation, subprotocol negotiation, the callback and coroutine session APIs — is in [WebSocket](./20-websocket.md) and [WebSocket coroutines](./21-websocket-coroutines.md).
 
 ```cpp
-// src: qbm/http/tests/test-ws-session.cpp:96-102 (shape)
+// src: qbm/http/tests/system/ws/ws-lifecycle.cpp:109-114 (shape)
 void on(Protocol::request&& request) {      // HTTP upgrade arrives
     if (!this->switch_protocol<WS_Protocol>(*this, request))
         disconnect();

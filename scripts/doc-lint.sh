@@ -19,7 +19,7 @@ red(){ printf '\033[31m%s\033[0m\n' "$1"; }; grn(){ printf '\033[32m%s\033[0m\n'
 doc_files(){ { echo "README.md"; echo "CHANGELOG.md"; echo "SECURITY.md"; echo "CONTRIBUTING.md"; find readme -name '*.md' 2>/dev/null; } | sort -u | while read -r f; do [ -f "$f" ] && echo "$f"; done; }
 
 echo "== 1. Forbidden token scan =="
-FORBIDDEN='qb::Timestamp|qb::Duration|qb::TimePoint|to_timestamp\(|to_time_point\('
+FORBIDDEN='qb::Timestamp|qb::Duration|qb::TimePoint|to_timestamp\(|to_time_point\(|get_ptr<|create_[a-z_]+_middleware\(|coro_handler<|coro_middleware<|MEMBER_HANDLER\('
 is_allowed(){ case "$1" in CHANGELOG.md|CONTRIBUTING.md) return 0;; *) return 1;; esac; }
 hits=0
 while read -r f; do
@@ -30,6 +30,13 @@ while read -r f; do
   fi
 done < <(doc_files)
 [ "$hits" -eq 0 ] && grn "  no forbidden tokens" || fail=1
+
+echo "== 1b. Citation integrity (src: file + line ranges) =="
+if command -v python3 >/dev/null 2>&1; then
+  python3 "${SCRIPT_DIR}/cite-check.py" || fail=1
+else
+  ylw "  python3 not found — skipping citation check"
+fi
 
 echo "== 2. Internal link check =="
 while read -r f; do

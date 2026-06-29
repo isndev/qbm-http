@@ -1,6 +1,6 @@
 # Request validation
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 A composable pipeline for sanitizing and validating the body, query parameters, headers, and path parameters of an incoming request — JSON-Schema-subset rules for bodies, typed-and-coerced rule sets for parameters, in-place string sanitizers, and a middleware that turns a failed validation into a `400 Bad Request` with a structured JSON error list.
 
@@ -144,7 +144,7 @@ auto even_only = std::make_shared<CustomRule>(
 - **Combinators:** `allOf`, `anyOf`, `oneOf`, `not`.
 
 ```cpp
-// <!-- src: qbm/http/tests/test-validation.cpp (schema shape) -->
+// <!-- src: qbm/http/tests/unit/validation/validation-schema.cpp (schema shape) -->
 #include <http/validation.h>
 #include <qb/json.h>
 
@@ -203,7 +203,7 @@ struct ParameterRuleSet {
 ```
 
 ```cpp
-// <!-- src: qbm/http/tests/test-middleware-validator.cpp -->
+// <!-- src: qbm/http/tests/unit/validation/validation-parameter.cpp -->
 #include <http/validation.h>
 using namespace qb::http::validation;
 
@@ -285,7 +285,7 @@ Path segments use dot notation for object keys, `[N]` for a specific array index
 `RequestValidator` (`validation/request_validator.h`) ties the four parts together with a fluent builder. Each `for_*` method registers a validator; each `add_*_sanitizer` registers a transform:
 
 ```cpp
-// <!-- src: qbm/http/tests/test-middleware-validator.cpp -->
+// <!-- src: qbm/http/tests/unit/validation/validation-request.cpp -->
 #include <http/validation.h>
 using namespace qb::http::validation;
 
@@ -306,6 +306,20 @@ rv->set_error_value_policy(Result::ErrorValuePolicy::Preview, 256);
 ```
 
 `validate(Request&, Result&, const PathParameters* = nullptr)` runs the pipeline. **Sanitizers run first, then validators**, and the precise order inside `validate` (confirmed against `request_validator.cpp`) is: query sanitizers → header sanitizers → body sanitizer → body-schema validation → query validation → header validation → path validation, with every stage merged into the one `Result`.
+
+```mermaid
+flowchart TD
+    REQ["Request (mutated in place)"] --> QS["query sanitizers"]
+    QS --> HS["header sanitizers"]
+    HS --> BS["body sanitizer"]
+    BS --> BV["body-schema validation"]
+    BV --> QV["query validation"]
+    QV --> HV["header validation"]
+    HV --> PV["path validation"]
+    PV --> R{"Result.success()?"}
+    R -- yes --> NEXT["continue chain<br/>(handler sees sanitized request)"]
+    R -- no --> E400["400 Bad Request<br/>JSON { message, errors[] }"]
+```
 
 > **`validate()` mutates the request.** Sanitizers rewrite query and header values *in place*, and a sanitized body is re-serialized via `dump()` back into `request.body()`. Do not assume the request is unchanged after `validate()` returns — even after a *failed* validation. The handler downstream sees the sanitized request.
 
@@ -332,7 +346,7 @@ A few more pipeline facts to design around:
 Attach it like any other middleware (see [the middleware model](./07-middleware.md)). The free-function factory is `validation_middleware<SessionType>(...)`:
 
 ```cpp
-// <!-- src: qbm/http/tests/test-middleware-validator.cpp -->
+// <!-- src: qbm/http/tests/unit/middleware/middleware-validator.cpp -->
 #include <http/http.h>
 
 auto rv = std::make_shared<qb::http::validation::RequestValidator>();

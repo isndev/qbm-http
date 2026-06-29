@@ -681,7 +681,7 @@ public:
         : _func(std::forward<Func>(func))
         , _request(std::move([](auto &req) -> auto & {
             if (!req.has_header("User-Agent"))
-                req.headers()["User-Agent"] = {"qb/1.0.0"};
+                req.headers()["User-Agent"] = {"qb/2.6.0"};
             req.headers()["Accept-Encoding"] = {accept_encoding()};
             return req;
         }(request))) {

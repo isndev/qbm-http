@@ -1,6 +1,6 @@
 # Route groups
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 Mount a set of related routes under a shared path prefix, nest groups to any depth, and attach middleware that every route inside the group inherits.
 
@@ -111,7 +111,7 @@ v1->get("/status", h_status);
 
 This ordering is enforced by the framework, not by chance — a router-middleware test asserts the exact trace `"router_mw;g1_mw;g2_mw;g2_handler"` for a route nested two groups deep. Middleware applies to descendants only: a sibling group does **not** inherit another sibling's middleware.
 
-<!-- src: qbm/http/tests/test-router-middleware.cpp:627-639 -->
+<!-- src: qbm/http/tests/unit/routing/router-middleware-chain.cpp:418-447 -->
 ```cpp
 auto api = router().group("/api");
 api->use(api_auth_mw);                          // shared by v1 and v2 below
@@ -144,25 +144,16 @@ auto users = api->controller<UserController>("/manage");
 
 ## How prefixes and middleware accumulate
 
-```
-Router  (root group, prefix "")
-  │  global_mw
-  │
-  ├─ GET /public/info ─────────────► global_mw ▸ handler
-  │
-  └─ group /api               (prefix /api)
-       │  api_mw
-       │
-       ├─ GET /users ─────────────► global_mw ▸ api_mw ▸ handler            (/api/users)
-       │
-       └─ group /v1            (prefix /api/v1)
-            │  v1_mw
-            │
-            ├─ POST /items ────────► global_mw ▸ api_mw ▸ v1_mw ▸ handler   (/api/v1/items)
-            │
-            └─ controller /products (prefix /api/v1/products)
-                 │  ctrl_mw
-                 └─ GET /:id ──────► global_mw ▸ api_mw ▸ v1_mw ▸ ctrl_mw ▸ handler
+```mermaid
+flowchart TD
+    R["Router (root group, prefix '')<br/>global_mw"]
+    R --> PUB["GET /public/info<br/>global_mw ▸ handler"]
+    R --> API["group /api (prefix /api)<br/>api_mw"]
+    API --> USERS["GET /api/users<br/>global_mw ▸ api_mw ▸ handler"]
+    API --> V1["group /v1 (prefix /api/v1)<br/>v1_mw"]
+    V1 --> ITEMS["POST /api/v1/items<br/>global_mw ▸ api_mw ▸ v1_mw ▸ handler"]
+    V1 --> PROD["controller /products (prefix /api/v1/products)<br/>ctrl_mw"]
+    PROD --> PID["GET /:id<br/>global_mw ▸ api_mw ▸ v1_mw ▸ ctrl_mw ▸ handler"]
 ```
 
 Path prefixes accumulate as you descend; middleware chains build up the same way, each level appending after the levels above it.

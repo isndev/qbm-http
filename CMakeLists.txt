@@ -76,7 +76,7 @@ endif()
 # Register the HTTP module using the new framework functions
 qb_register_module(
     NAME http
-    VERSION 1.0.0
+    VERSION 2.6.0
     DEPENDS qb-core llhttp ${QBM_HTTP_EXTRA_DEPENDS}
     SOURCES
         # Core files
@@ -114,7 +114,7 @@ qb_register_module(
         middleware/static_files.cpp
         ${QBM_HTTP_EXTRA_SOURCES}
     DEFINES
-        QBM_HTTP_VERSION="1.0.0"
+        QBM_HTTP_VERSION="2.6.0"
         ${QBM_HTTP_EXTRA_DEFINES}
 )
 

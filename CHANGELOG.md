@@ -7,9 +7,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-Tracks changes on the development branch not yet part of a tagged release. This cycle reworks
-the accessor surface, the routing/middleware registration API, and the coroutine handler ergonomics,
-and hardens the request-stringify, http2 back-pressure, and JWT/auth paths.
+Tracks changes on the development branch not yet part of a tagged release.
+
+_Nothing yet._
+
+## [2.6.0] - 2026-06-29
+
+This cycle reworks the accessor surface, the routing/middleware registration API, and the coroutine
+handler ergonomics, and hardens the request-stringify, http2 back-pressure, and JWT/auth paths.
 
 ### Added
 
@@ -119,4 +124,5 @@ Aligns qbm-http with the qb 2.0 framework and hardens the HTTP/2, HTTP/3, WebSoc
   pending-request queue.
 - Reject control characters in quoted header-attribute values.
 
-[Unreleased]: https://github.com/isndev/qbm-http/compare/main...HEAD
+[Unreleased]: https://github.com/isndev/qbm-http/compare/v2.6.0...HEAD
+[2.6.0]: https://github.com/isndev/qbm-http/releases/tag/v2.6.0
