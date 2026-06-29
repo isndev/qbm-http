@@ -753,4 +753,52 @@ TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
     EXPECT_EQ(client->get_active_request_count(), 0u);
 }
 
+// A batch whose size exceeds the outstanding-request bound is rejected up-front:
+// the call returns false and the callback fires synchronously with a 503 per
+// request (no connection, no event loop needed). Mirrors the single-request
+// limit guard, on the batch path.
+TEST_F(Http2ClientTest, BatchExceedingPendingLimitIsRejectedWith503) {
+    auto client = make_test_client();
+    client->set_max_pending_requests(2);
+
+    std::vector<qb::http::Request> reqs;
+    for (int i = 0; i < 3; ++i) {
+        qb::http::Request r;
+        r.method() = qb::http::Method::GET;
+        r.uri()    = qb::io::uri("/api/test");
+        reqs.push_back(std::move(r));
+    }
+
+    bool                            done = false;
+    std::vector<qb::http::Response> out;
+    EXPECT_FALSE(client->push_requests(reqs, [&](std::vector<qb::http::Response> rs) {
+        out  = std::move(rs);
+        done = true;
+    }));
+    ASSERT_TRUE(done); // rejection callback is synchronous
+    ASSERT_EQ(out.size(), 3u);
+    for (auto &r : out) {
+        EXPECT_EQ(r.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    }
+}
+
+// Connecting to a port with no listener fails via the transport connect-completion
+// path (TCP/SSL connection failed), invoking the connect callback with success=false.
+TEST_F(Http2ClientTest, ConnectToRefusedPortFails) {
+    const auto dead   = qb::http::test::ephemeral_port(); // bound then closed -> refused
+    auto       client = qb::http2::make_client("https://localhost:" + std::to_string(dead));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(2s);
+
+    std::atomic<bool> cb{false};
+    std::atomic<bool> ok{true};
+    client->connect([&](bool o, const std::string &) {
+        ok = o;
+        cb = true;
+    });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return cb.load(); }));
+    EXPECT_FALSE(ok.load());
+    EXPECT_FALSE(client->is_connected());
+}
+
 } // namespace
