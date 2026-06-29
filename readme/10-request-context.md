@@ -1,6 +1,6 @@
 # The request context
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 `qb::http::Context<Session>` is the per-request object the router hands to every middleware and handler: it carries the request and response, the matched path parameters, a typed scratchpad shared across the chain, and the `complete()` / `cancel()` state machine that drives the request to a sent response.
 

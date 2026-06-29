@@ -1,6 +1,6 @@
 # WebSocket (RFC 6455)
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 Upgrade an HTTP/1.1 connection to a full-duplex RFC 6455 WebSocket — server-side handshake validation, the CRTP/callback client, automatic ping keepalive, strict framing, and WSS over TLS.
 
@@ -36,6 +36,19 @@ The WebSocket subsystem is split across a few namespaces. You normally only touc
 A few mechanics worth knowing before you wire anything up:
 
 - **The handshake is an HTTP exchange.** The client sends `GET` with `Sec-WebSocket-Key`; the server replies `101 Switching Protocols` with `Sec-WebSocket-Accept = base64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`. The client verifies that accept value in constant time. <!-- src: ws/ws.h:872-885, ws/ws.h:1090-1110 -->
+
+```mermaid
+sequenceDiagram
+    participant Cl as ws client
+    participant Sv as http server
+    Cl->>Sv: GET / · Upgrade: websocket · Sec-WebSocket-Key
+    Note over Sv: validate · Sec-WebSocket-Accept =<br/>base64(sha1(key + RFC 6455 GUID))
+    Sv-->>Cl: 101 Switching Protocols · Sec-WebSocket-Accept
+    Note over Cl: verify accept in constant time
+    Note over Cl,Sv: switch_protocol → ws::protocol;<br/>byte stream is now WebSocket frames
+    Cl->>Sv: masked text / binary / ping frames
+    Sv-->>Cl: on(MessageText) · auto-pong to ping
+```
 - **Masking is directional and mandatory.** Every client-to-server frame (control frames included) must be masked; every server-to-client frame must not be. The framer enforces both directions: a server that receives an unmasked frame, or a client that receives a masked one, fails the connection with `ProtocolError`. On the send side `WebSocket::operator<<` forces `masked = true` on outbound frames regardless of what you set. <!-- src: ws/ws.h:729-739, ws/ws.h:1562-1566 -->
 - **Reassembly is bounded by default.** A message reassembled from continuation fragments is capped at `qb::http::protocol_limits::MAX_BODY_SIZE`; a peer streaming unbounded fragments is cut off with `CloseStatus::MessageTooBig`. Call `set_max_payload_size(0)` only deliberately to lift the cap. <!-- src: ws/ws.h:476-478, ws/ws.h:617-624 -->
 - **Ping keepalive is a `qb::duration`.** `set_ping_interval(qb::duration)` arms a timer on the client; on each tick it sends a `MessagePing`, and the framer auto-replies to inbound pings with a same-payload `MessagePong`. A zero interval disables it. <!-- src: ws/ws.h:1279-1283, ws/ws.h:575-584 -->
@@ -46,7 +59,7 @@ A WebSocket server session is an ordinary `qb-io` TCP session that starts by par
 
 For a bare WebSocket endpoint, subclass `qb::io::use<Self>::tcp::client<Server>` — an HTTP-parsing TCP session bound to its listener.
 
-<!-- src: qbm/http/tests/test-ws-session.cpp:76-150 -->
+<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:100-139 -->
 ```cpp
 #include <http/http.h>
 #include <qb/io/async.h>
@@ -169,7 +182,7 @@ RFC 6455 §5.5.1 is a two-way handshake: after you send a Close you should wait 
 
 Subclass `WebSocket<Self>` (or `WebSocketSecure<Self>` for WSS) when the client holds state. You receive lifecycle and frame events as `on(...)` overloads; only the handlers you actually define are wired up. <!-- src: ws/ws.h:1165-1572 -->
 
-<!-- src: qbm/http/tests/test-ws-session.cpp:160-220 -->
+<!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:124-216 -->
 ```cpp
 #include <http/http.h>
 #include <qb/io/async.h>
@@ -202,9 +215,9 @@ The `connect(...)` signature is `connect(const qb::io::uri &remote, qb::duration
 
 ## Client: the callback form
 
-For compact, stateless clients, use `qb::http::ws::client` (or `client_secure` for WSS) and register lambdas. Each `on_*` returns `*this` so the calls chain. <!-- src: ws/ws.h:1594-1765 -->
+For compact, stateless clients, use `qb::http::ws::client` (or `client_secure` for WSS) and register lambdas. Each `on_*` returns `*this` so the calls chain. <!-- src: ws/ws.h:1512-1699 -->
 
-<!-- src: qbm/http/tests/test-ws-client.cpp:391-462 -->
+<!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:222-258 -->
 ```cpp
 #include <http/http.h>
 
@@ -249,7 +262,7 @@ qb::http::ws::client_secure ws;            // = Client<qb::io::transport::stcp>
 ws.connect("wss://localhost:9443/ws");      // verify_peer defaults to true
 ```
 
-Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/test-ws-session.cpp:295-420, ws/ws.h:1581-1582 -->
+Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:275-378, ws/ws.h:1071-1072 -->
 
 ## Pitfalls
 

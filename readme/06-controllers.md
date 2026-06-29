@@ -1,6 +1,6 @@
 # Controllers
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 Group related route handlers, their shared state, and their middleware into a single class that mounts onto the router under a base path.
 
@@ -22,7 +22,7 @@ For a handful of stateless endpoints, an inline `RouteGroup` is lighter. Control
 
 ## Anatomy of a controller
 
-<!-- src: qbm/http/routing/controller.h:51-166, tests/test-router-controller.cpp:92-141 -->
+<!-- src: qbm/http/routing/controller.h:53-168, tests/unit/routing/router-controller.cpp:94-145 -->
 
 ```cpp
 #include <http/http.h>   // qb::http::Controller, Context, Router, status
@@ -115,7 +115,7 @@ The bound member takes `std::shared_ptr<Context>` and returns either `void` (syn
 
 ## Mounting a controller
 
-<!-- src: qbm/http/routing/router.h:178-188, route_group.h:207-223, tests/test-router-controller.cpp:559-570 -->
+<!-- src: qbm/http/routing/router.h:219-220, route_group.h:230-232, tests/unit/routing/router-controller.cpp:572-583 -->
 
 Mount a controller on a `Router` or a `RouteGroup` with `controller<C>(path_prefix, ctor_args...)`:
 
@@ -160,9 +160,23 @@ router.compile();
 
 `AuthMiddleware` here runs ahead of any controller-level middleware and ahead of the route handlers, because parent middleware is always inherited first. See [Middleware overview](./07-middleware.md) for the full ordering rules.
 
+A controller is an `IHandlerNode` in the same tree as the router and its groups, so mounting composes paths and inherits middleware top-down:
+
+```mermaid
+flowchart TD
+    R["Router&lt;Session&gt; — global middleware"]
+    R --> G["group('/api/v1') — + AuthMiddleware"]
+    G --> C["controller&lt;UserController&gt;('/users') — + controller use() middleware"]
+    C --> RT1["GET /:id → get_user()"]
+    C --> RT2["POST / → create_user()"]
+    C --> RT3["GET /health → inline lambda"]
+```
+
+Effective path = `/api/v1/users/…`; middleware runs outermost-first: global → group → controller → handler.
+
 ## Controller-scoped middleware
 
-<!-- src: qbm/http/routing/controller.h:314-358, tests/test-router-controller.cpp:538-552, 773-786 -->
+<!-- src: qbm/http/routing/controller.h:327-372, tests/unit/routing/router-controller.cpp:549-568, 763-786 -->
 
 Middleware declared on a controller applies to **all** routes the controller defines, and only those routes. Declare it from inside `initialize_routes()` with `this->use(...)`, or add it after mounting through the returned handle. Three forms, matching the router and group APIs:
 
@@ -206,7 +220,7 @@ All three `use` overloads return `Controller<MySession>&` for chaining. Within a
 
 Because a controller is a plain object, it holds state across requests and can be mounted more than once. The router owns one instance per mount, and that instance lives for the router's lifetime — so a member counter accumulates across every request the mount serves:
 
-<!-- src: tests/test-router-controller.cpp:499-536, 663-707 -->
+<!-- src: tests/unit/routing/router-controller.cpp:509-547, 667-713 -->
 
 ```cpp
 class CounterController : public qb::http::Controller<MySession> {

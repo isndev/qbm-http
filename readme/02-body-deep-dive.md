@@ -1,6 +1,6 @@
 # HTTP message body: a deep dive
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 `qb::http::Body` is the payload of every request and response: a `qb::allocator::pipe<char>` buffer with typed views (`as<T>()`), constrained append/assign, chunked-transfer helpers, and optional gzip/deflate (de)compression.
 
@@ -15,6 +15,14 @@
 - **Optional compression** (`compress` / `uncompress`), gated on `QB_HAS_COMPRESSION`, which the protocol layer drives automatically from `Content-Encoding`.
 
 The buffer is owning. The historical zero-copy `string_view` body mode was retired because the input pipe relocates bytes between socket reads and an async handler cannot guarantee a captured view outlives the read — so a `Body` always owns stable, movable bytes.
+
+```mermaid
+flowchart LR
+    I1["&lt;&lt; / ctor: bytes, Chunk, Multipart, qb::json, arithmetic"] --> B
+    I2["= only: Form (no put&lt;Form&gt; serializer)"] --> B
+    B["Body — wraps one pipe&lt;char&gt; (owning)"] --> O["as&lt;T&gt;() / try_as&lt;T&gt;()<br/>string_view · string · qb::json · Multipart · Form"]
+    B <--> C["compress / uncompress<br/>QB_HAS_COMPRESSION — driven by Content-Encoding"]
+```
 
 ## The `pipe<char>` backing store
 
@@ -314,7 +322,7 @@ The pair order follows the underlying unordered map and is not guaranteed. Round
 
 `Multipart` builds and represents `multipart/form-data` (RFC 7578). Each part is a `Multipart::Part`, which **derives from `Headers`** and adds a `std::string body` — so you set a part's headers with the full `Headers` API (`set_header`, `set_content_type`, `header`, `has_header`).
 
-<!-- src: qbm/http/multipart.h:797-923 -->
+<!-- src: qbm/http/multipart.h:499-606 -->
 ```cpp
 namespace qb::http {
     class Multipart {
@@ -339,7 +347,7 @@ namespace qb::http {
 
 A default-constructed `Multipart` generates a random boundary (OpenSSL-backed secure random when `QB_HAS_SSL` is set, a UUID fallback otherwise — so multipart works in plain-HTTP builds too). Build parts, then assign to a body:
 
-<!-- src: qbm/http/tests/test-body.cpp:13-23 -->
+<!-- src: qbm/http/tests/unit/message/body-codec.cpp:15-23 -->
 ```cpp
 #include <http/http.h>
 
@@ -375,7 +383,7 @@ Serialization writes, for each part, `--<boundary>\r\n`, the part headers as `Na
 | Parts per message | `multipart_limits::MAX_PARTS_COUNT` | 1000 |
 | Total payload | `multipart_limits::MAX_TOTAL_SIZE` | 100 MB |
 
-<!-- src: qbm/http/multipart.h:768-784, 553-578 -->
+<!-- src: qbm/http/multipart.h:374-413, 477 -->
 ```cpp
 #include <http/http.h>
 

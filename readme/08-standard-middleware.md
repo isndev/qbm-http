@@ -1,6 +1,6 @@
 # Standard middleware
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 The middleware that ships with the module — CORS, JWT, rate limiting, compression, timing, static files, full authentication, and security headers — together with the exact configuration options each exposes and the time type each duration field uses.
 
@@ -35,7 +35,7 @@ qb::http::Router<MySession> router;
 router.use(qb::http::cors_dev_middleware<MySession>());
 router.compile();
 ```
-<!-- src: qbm/http/middleware/cors.h:597 -->
+<!-- src: qbm/http/middleware/cors.h:511 -->
 
 `Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the three overloads.
 
@@ -351,7 +351,7 @@ Configuration is `qb::http::SecurityHeadersOptions`, a builder of optional strin
 | `Cross-Origin-Embedder-Policy` | `with_cross_origin_embedder_policy(std::string)` |
 | `Cross-Origin-Resource-Policy` | `with_cross_origin_resource_policy(std::string)` |
 
-`SecurityHeadersOptions::secure_defaults()` is a strong baseline: HSTS `max-age=31536000; includeSubDomains`, `nosniff`, `X-Frame-Options: SAMEORIGIN`, a restrictive CSP, `Referrer-Policy: strict-origin-when-cross-origin`, and `Cross-Origin-Opener-Policy: same-origin`. COEP and `Permissions-Policy` are left unset because they are application-specific.
+`SecurityHeadersOptions::secure_defaults()` is a strong baseline: HSTS `max-age=31536000; includeSubDomains`, `nosniff`, `X-Frame-Options: SAMEORIGIN`, a restrictive CSP, `Referrer-Policy: strict-origin-when-cross-origin`, `Cross-Origin-Opener-Policy: same-origin`, and `X-Permitted-Cross-Domain-Policies: none`. COEP and `Permissions-Policy` are left unset because they are application-specific.
 
 ```cpp
 #include <http/http.h>

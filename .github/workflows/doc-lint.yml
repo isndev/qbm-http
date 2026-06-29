@@ -1,0 +1,34 @@
+# Documentation anti-drift guard for qbm-http.
+# Runs scripts/doc-lint.sh: forbidden retired tokens, broken internal links,
+# missing governance files. See CONTRIBUTING.md.
+name: doc-lint
+
+on:
+  push:
+    branches:
+      - 'c\+\+23'
+    paths:
+      - 'README.md'
+      - 'readme/**'
+      - 'CHANGELOG.md'
+      - 'SECURITY.md'
+      - 'CONTRIBUTING.md'
+      - 'scripts/doc-lint.sh'
+  pull_request:
+    branches:
+      - 'c\+\+23'
+    paths:
+      - 'README.md'
+      - 'readme/**'
+      - 'CHANGELOG.md'
+      - 'SECURITY.md'
+      - 'CONTRIBUTING.md'
+      - 'scripts/doc-lint.sh'
+
+jobs:
+  doc-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run documentation anti-drift guard
+        run: ./scripts/doc-lint.sh

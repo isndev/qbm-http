@@ -1,6 +1,6 @@
 # Asynchronous HTTP client
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 Make non-blocking outbound HTTP/1.1, HTTP/2, and HTTP/3 requests over the qb-io event loop — through one-shot callbacks, single-shot coroutine awaiters, or a persistent connection-reusing client.
 
@@ -59,7 +59,7 @@ The coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`co
 
 All three clients consume a `qb::http::Request`. Build it the same way regardless of protocol:
 
-<!-- src: qbm/http/tests/test-coro-client.cpp -->
+<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:197-206 -->
 ```cpp
 #include <http/http.h>
 #include <qb/io/uri.h>
@@ -79,7 +79,7 @@ post_req.body() = R"({"name":"test","value":123})";
 The clients fill in standard headers for you:
 
 - **Host** — set automatically from `request.uri()` (bracketed IPv6, default ports omitted for `http:80` / `https:443`).
-- **User-Agent** — the one-shot HTTP/1.1 sessions default to `qb/1.0.0` if you do not set one.
+- **User-Agent** — the one-shot HTTP/1.1 sessions default to `qb/2.6.0` if you do not set one.
 - **Accept-Encoding** — added automatically when compression is compiled in (`QB_HAS_COMPRESSION`); matching `Content-Encoding` responses are decompressed transparently.
 - **Content-Length** — computed from the body for requests that carry one.
 
@@ -89,7 +89,7 @@ To send a *compressed* request body, compress it yourself and set `Content-Encod
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`; it runs on the I/O thread when the response arrives or the request fails.
 
-<!-- src: qbm/http/1.1/http.h:896-901 -->
+<!-- src: qbm/http/1.1/http.h:869-874 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -145,7 +145,7 @@ namespace qb::http {
 
 From inside a coroutine, the call reads top to bottom — request out, response back, error handling is a plain `if`:
 
-<!-- src: qbm/http/tests/test-coro-client.cpp -->
+<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:284-302 -->
 ```cpp
 #include <http/http.h>
 #include <qb/io/async/coroutine.h>
@@ -192,6 +192,26 @@ auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
 ```
 
+## Persistent client capability matrix
+
+The three persistent clients share the connect / `push_request` / `push_requests` shape but differ in transport, gating, and a few protocol-specific knobs:
+
+| Capability | `http1::Client` | `http2::Client` | `http3::Client` |
+|---|---|---|---|
+| Compile gate | none¹ | `QB_HAS_SSL` | `QBM_HTTP_HAS_HTTP3` |
+| Transport (ALPN) | TCP / TLS | TLS only (`h2`) | QUIC (`h3`) |
+| Base URI scheme | `http://` or `https://` | `https://` only | `https://` only |
+| Concurrency | one active request, rest queued | multiplexed streams | multiplexed streams |
+| `set_max_concurrent_streams` | — | ✓ (default 100) | ✓ (default 100) |
+| `set_max_pending_requests` | ✓ | ✓ | — |
+| `push_request_with_id` / `cancel_request` | — | — | ✓ |
+| `set_max_body_size` | — | — | ✓ (default 64 MiB) |
+| `set_auto_reconnect` | ✓ (default true) | ✓ (default true) | ✓ (default true) |
+| Connect / request timeout | 30s / 60s | 30s / 60s | 30s / 60s |
+| `set_verify_peer` default | true | true | true |
+
+¹ HTTP/1.1 itself needs no gate; only `https://` base URIs require `QB_HAS_SSL`.
+
 ## Persistent HTTP/1.1 client (`qb::http1::Client`)
 
 When you make many requests to the *same origin*, the one-shot helpers reconnect every time. The persistent client keeps one TCP/TLS connection open, sends one active request at a time (queuing the rest), preserves batch order, and reconnects only when it is safe to do so.
@@ -232,7 +252,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/test-http1-client.cpp:284-298 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:361-378 -->
 ```cpp
 #include <http/http.h>
 
@@ -297,7 +317,7 @@ namespace qb::http2 {
 
 The coroutine form connects lazily — `push_request` establishes the connection on first use, so you can `co_await` without calling `connect()` first:
 
-<!-- src: qbm/http/tests/test-coro-http2-client.cpp:215-220 -->
+<!-- src: qbm/http/tests/system/http2/http2-client-coro.cpp:211-216 -->
 ```cpp
 auto response = qb::http::run_sync([]() -> qb::io::async::task<qb::http::Response> {
     auto client = qb::http2::make_client("https://api.example.com");
@@ -310,7 +330,7 @@ Two cautions unique to the HTTP/2 client:
 
 - **`connect(nullptr)` for fire-and-forget.** The callback `connect` has no default-argument overload, so the coroutine `connect()` stays unambiguous. Call `connect(nullptr)` when you do not need a connection callback.
 
-  <!-- src: qbm/http/tests/test-http3-client.cpp:341 -->
+  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:249-253 -->
   ```cpp
   http2_client->connect(nullptr);  // queue requests now, flush on handshake
   ```
@@ -356,7 +376,7 @@ namespace qb::http3 {
 
 The callback form, run-to-completion driven by the event loop:
 
-<!-- src: qbm/http/tests/test-http3-client.cpp:279-298 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:178-197 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 auto client = qb::http3::make_client("https://127.0.0.1:31943");
@@ -373,7 +393,7 @@ client->disconnect();
 
 And the coroutine form with lazy connect:
 
-<!-- src: qbm/http/tests/test-http3-client.cpp:432-436 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:283-294 -->
 ```cpp
 auto client = qb::http3::make_client("https://127.0.0.1:31992");
 client->set_verify_peer(false);  // self-signed local endpoint; default is true

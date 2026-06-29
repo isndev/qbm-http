@@ -1,6 +1,6 @@
 # Routing overview
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 How `qb::http::Router` turns a tree of route, group, and controller definitions into a compiled radix tree, and how an incoming request is matched and dispatched to a chain of tasks.
 
@@ -13,6 +13,17 @@ How `qb::http::Router` turns a tree of route, group, and controller definitions 
 The router lives behind your server: an HTTP/1.1, HTTP/2, or HTTP/3 server exposes it through `server->router()`, and the session's request handler calls `router().route(session, std::move(request))` for you. You rarely call `route()` by hand; you call the definition API (`get`, `post`, `group`, `controller`, `use`) and `compile()`.
 
 `Router`, `RouteGroup`, `Controller`, `Context`, and the routing types are all reachable through the umbrella header `<http/http.h>`; `routing.h` is the narrower include if you only need the routing layer. `RouterCore` and `RadixTree` are internal — you never include or instantiate them directly.
+
+```mermaid
+flowchart LR
+    D["definition API you write:<br/>get · post · group · controller · use"] --> Comp["compile() — once"]
+    Comp --> RT["RadixTree<br/>compiled match structure"]
+    Req["incoming request"] --> Route["route(session, request)<br/>match path + method"]
+    RT --> Route
+    Route -->|match| Chain["task chain on a per-request Context<br/>(middleware → handler)"]
+    Route -->|no path| C404["404 chain"]
+    Route -->|path, wrong method| C405["405 chain"]
+```
 
 ## Concepts
 
@@ -80,7 +91,7 @@ The assembled order for any endpoint is **parent middleware → this node's midd
 
 Calling `compile()` again recompiles from scratch — it is idempotent and safe to re-run after adding routes.
 
-<!-- src: qbm/http/routing/router.h:243-249; router.tpp:306-328 -->
+<!-- src: qbm/http/routing/router.h:290,302; router.tpp:271-287 -->
 
 ### Request dispatch
 
@@ -190,19 +201,22 @@ Global middleware **is** prepended to the default and custom 404 and 405 chains,
 
 ### Conceptual radix tree
 
+```mermaid
+flowchart LR
+    R["(root)"] --> U["users (static)"]
+    U --> ID[":id (param)"]
+    ID --> PR["profile (static)<br/>GET → handler"]
+    R --> P["posts (static)"]
+    P --> PID[":postId (param)<br/>GET → handler"]
+    R --> WC["*filepath (wildcard, terminal)<br/>GET → handler"]
 ```
-(root)
- ├─ users (static) ── :id (param) ── profile (static)   GET → handler
- ├─ posts (static) ── :postId (param)                   GET → handler
- └─ *filepath (wildcard, terminal)                      GET → handler
 
-Request: GET /users/alice/profile
-  1. root → static child "users"            ✓
-  2. "users" → no static "alice" → param :id, capture id="alice"
-  3. ":id" → static child "profile"          ✓
-  4. segments exhausted → GET handler present → run chain {middleware..., handler}
-     with path params { id: "alice" }
-```
+Matching `GET /users/alice/profile` against that tree:
+
+1. root → static child `users` ✓
+2. `users` → no static `alice` → param `:id`, capture `id="alice"`
+3. `:id` → static child `profile` ✓
+4. segments exhausted → GET handler present → run chain `{middleware…, handler}` with path params `{ id: "alice" }`
 
 ## Pitfalls
 

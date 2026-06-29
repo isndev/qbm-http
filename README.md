@@ -1,6 +1,6 @@
 # qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb actor framework
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 `qbm-http` is a compiled qb module that gives an actor asynchronous HTTP servers and clients — HTTP/1.1 always, plus HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL and QUIC — over qb-io's non-blocking I/O.
 
@@ -115,7 +115,7 @@ For TLS, mix in `qb::http::ssl::Server<>` instead and pass certificate and key p
 
 The one-shot client free functions (`GET`, `POST`, `REQUEST`, ...) heap-allocate a self-deleting session, run a single request, and deliver an `qb::http::async::Reply` (the original request plus the response). The callback form takes a `qb::duration` timeout.
 
-<!-- src: qbm/http/1.1/http.h:659-661, 904-905 -->
+<!-- src: qbm/http/1.1/http.h:858-872 -->
 
 ```cpp
 #include <http/http.h>
@@ -139,7 +139,7 @@ public:
 
 The same `GET`/`POST`/`REQUEST` names also have coroutine overloads that return `qb::http::async::awaiter<qb::http::async::Reply>`. Drive them with `co_await` inside a coroutine, or with `qb::http::run_sync(...)` from a plain function:
 
-<!-- src: qbm/http/tests/test-coro-client.cpp:163-166 -->
+<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:196-200 -->
 
 ```cpp
 #include <http/http.h>
@@ -160,7 +160,7 @@ For connection reuse against a single origin, use `qb::http1::Client` (request q
 
 WebSocket is part of `qbm-http` (namespace `qb::http::ws`); there is no separate module. A server session starts as HTTP/1.1, validates the RFC 6455 `GET` upgrade, then switches the connection from HTTP parsing to WebSocket framing with `switch_protocol`.
 
-<!-- src: qbm/http/tests/test-ws-session.cpp:76-117 -->
+<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:100-119 -->
 
 ```cpp
 #include <http/http.h>

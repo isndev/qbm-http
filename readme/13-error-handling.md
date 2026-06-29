@@ -1,6 +1,6 @@
 # Error handling strategies
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 How an HTTP request fails, what the client sees, and where you intervene: status codes on the response, the `AsyncTaskResult::ERROR` task outcome and the router error chain, contained handler exceptions, and the protocol-level `not_ok()` framing-error path that closes a malformed connection before routing ever runs.
 
@@ -155,13 +155,14 @@ The dispatch lives in `Context::complete()`. When a task signals `ERROR` (and th
 
 So `AsyncTaskResult::ERROR` with no configured chain is not lost — it produces a 500 using any status and body the erroring task already wrote. Setting a meaningful status before signaling `ERROR` is therefore worthwhile even without an error chain.
 
-```text
-normal chain ── ctx->complete(ERROR) ──► [error chain set & non-empty?]
-                                              │ yes                 │ no / empty
-                                              ▼                     ▼
-                              run error chain (phase=ERROR_CHAIN)   500, finalize
-                                              │
-                              error-chain task signals ERROR ──► 500, finalize (no recursion)
+```mermaid
+flowchart TD
+    N["normal-chain task → ctx->complete(ERROR)"] --> Q{already in ERROR_CHAIN phase?}
+    Q -- yes --> R1["500 INTERNAL_SERVER_ERROR, finalize<br/>(no recursion into the error chain)"]
+    Q -- no --> Q2{error chain set & non-empty?}
+    Q2 -- yes --> EC["switch phase = ERROR_CHAIN,<br/>run compiled error tasks from the top"]
+    Q2 -- "no / empty" --> R2["500 INTERNAL_SERVER_ERROR,<br/>finalize with the current response"]
+    EC --> ECT["an error-chain task signals ERROR"] --> R1
 ```
 
 `complete()` is **idempotent after finalization**: once the context reaches `State::Finalised` (or is cancelled), further `complete()` calls are ignored except `AsyncTaskResult::CANCELLED`. State only moves forward (`Ready → Running → Finalised`), and `is_cancelled` is sticky. This is what makes a double-`complete()` a no-op rather than a crash.

@@ -1,6 +1,6 @@
 # Writing custom middleware
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 How to write your own middleware: the `IMiddleware` interface, the functional `(ctx, next)` form, the coroutine form, how each one drives the task chain, how to share state through the context, and where ordering is decided.
 
@@ -36,7 +36,19 @@ Every task in the chain — middleware, route handler, error handler — reports
 
 `complete()` is **idempotent after finalization**: once the context reaches `State::Finalised` (or is cancelled), further `complete()` calls are ignored, except `CANCELLED`, which is sticky. State only moves forward — `Ready -> Running -> Finalised`. This is what makes the "call it exactly once" rule forgiving: a redundant second call is dropped rather than corrupting the chain.
 
-> **`AsyncTaskResult::ERROR` and Windows.** `types.h` does `#undef ERROR` immediately before the `ERROR` enumerator so the enum survives inclusion alongside `<windows.h>`. After the enum, the Win32 `ERROR` macro is gone. This is a deliberate, documented boundary; you do not need to do anything about it.
+> **`AsyncTaskResult::ERROR` and Windows.** `types.h` does `#undef ERROR` at the top of the `AsyncTaskResult` enum body (before any enumerator, four lines ahead of the `ERROR` enumerator) so the enum survives inclusion alongside `<windows.h>`. After the enum, the Win32 `ERROR` macro is gone. This is a deliberate, documented boundary; you do not need to do anything about it.
+
+Each task ends by reporting one outcome, and the router acts on it:
+
+```mermaid
+flowchart TD
+    T["task calls ctx->complete(outcome)"] --> O{outcome?}
+    O -- CONTINUE --> N["run the next task in the chain"]
+    O -- COMPLETE --> F["finalize + send the response"]
+    O -- ERROR --> E["invoke the error task chain"]
+    O -- CANCELLED --> X["stop (sticky)"]
+    N --> T
+```
 
 ## Form 1 — Functional middleware
 

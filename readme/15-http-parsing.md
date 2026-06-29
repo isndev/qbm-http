@@ -1,6 +1,6 @@
 # HTTP message parsing and framing
 
-> **Audience:** Contributor · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Contributor · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 How raw bytes off a qb-io socket become a `qb::http::Request` or `qb::http::Response`: the llhttp-backed `qb::http::Parser`, the `qb::protocol::http` framing layer that drives it, and the security limits that gate every message.
 
@@ -64,9 +64,22 @@ struct qb::http::Parser : public http_t {
 - **`reset()` returns to a clean state** for the next message. It re-initializes llhttp, placement-constructs a fresh `MessageType` (it deliberately avoids assigning into a moved-from message — `onMessage()` moves the message out before resetting), and clears the body buffer and all bookkeeping.
 - **`on_message_complete` returns `1`,** which surfaces as `HPE_CB_MESSAGE_COMPLETE`. The framing layer keys off that specific code on the body/resume path (see below).
 
+```mermaid
+flowchart TD
+    F["parse(bytes) — incremental feed"] --> CB["llhttp callbacks:<br/>message-begin · URL / status · header field / value"]
+    CB --> HC{"headers complete?"}
+    HC -- "no (HPE_OK, need more)" --> F
+    HC -- "yes → HPE_PAUSED" --> INSPECT["framing layer inspects headers<br/>content-length · transfer-encoding · upgrade"]
+    INSPECT --> RES["resume() → parse() continues into the body"]
+    RES --> MC{"message complete?"}
+    MC -- no --> RES
+    MC -- "yes (HPE_CB_MESSAGE_COMPLETE)" --> DONE["onMessage() moves the message out → reset()"]
+    DONE --> F
+```
+
 Here is the contract exercised directly, taken from the test suite:
 
-<!-- src: tests/test-dos-protection.cpp:547-555 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:122-130 -->
 
 ```cpp
 #include <http/http.h>
@@ -83,7 +96,7 @@ assert(parser.content_length == 0u);   // normalized — see "Body framing" belo
 
 And fragmented input — the case the framing layer is built around — reassembles correctly:
 
-<!-- src: tests/test-dos-protection.cpp:603-620 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:185-202 -->
 
 ```cpp
 Parser<Request> parser;
@@ -212,7 +225,7 @@ Two framing defenses go beyond size limits, both in `on_headers_complete`:
 
 These are exercised directly against `Parser`:
 
-<!-- src: tests/test-dos-protection.cpp:510-594 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:59-160 -->
 
 ```cpp
 Parser<Request> parser;
@@ -237,7 +250,7 @@ assert(err != HPE_OK && err != HPE_PAUSED);
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: request.h:394-395; response.h:406-407; request.cpp:134-136; response.cpp:149-151 -->
+<!-- src: request.h:384; response.h:357; request.cpp:161-163; response.cpp:228-230 -->
 
 ```cpp
 template <>

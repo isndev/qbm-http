@@ -1,6 +1,6 @@
 # Authentication system
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
 
 The `qb::http::auth` triad — `Options`, `User`, and `Manager` — issues and verifies JSON Web Tokens, turns a valid token into a typed principal, and feeds the two authentication middleware that gate your routes.
 
@@ -106,7 +106,7 @@ struct User {
 };
 ```
 
-<!-- src: qbm/http/auth/user.h:35-91 -->
+<!-- src: qbm/http/auth/user.h:33-68 -->
 
 Role comparison is case-sensitive. The empty-list semantics matter for authorization gates: `has_any_role({})` is `false` (no role can satisfy an empty allow-list), while `has_all_roles({})` is `true` (no requirement to violate).
 
@@ -188,7 +188,7 @@ if (!raw.empty()) {
 }
 ```
 
-<!-- src: qbm/http/tests/test-middleware-auth.cpp:65-118 -->
+<!-- src: qbm/http/tests/unit/middleware/middleware-auth.cpp:223-232 -->
 
 `Manager` is a lightweight value type with no shared mutable state, and its three operations are `const`, so a `const Manager` may be shared across the synchronous request path. There is no thread-safety contract beyond const-correctness: do not call `set_options` concurrently with verifications.
 
@@ -205,6 +205,19 @@ You rarely call the `Manager` from a handler. Two middleware drive it; both are 
 3. On success, stores the `auth::User` in the context under the configured key.
 4. If roles were required via `with_roles`, checks them and answers `403` on failure.
 5. Answers `401` when authentication is required and no valid user could be established.
+
+```mermaid
+flowchart TD
+    REQ["incoming request"] --> CTX{"context already has<br/>auth::User ('user') or 'jwt_payload'?"}
+    CTX -- yes --> ROLES
+    CTX -- no --> EX["extract token from the configured header"]
+    EX --> VT["verify_token — alg + key pinned from Options<br/>(never the token header → defeats alg-confusion)"]
+    VT -- "invalid: bad sig / exp / nbf / iss / aud / no sub+username" --> R401["401 if auth required"]
+    VT -- valid --> STORE["store auth::User in context (key 'user')"]
+    STORE --> ROLES{"roles required (with_roles)?"}
+    ROLES -- "missing role" --> R403["403"]
+    ROLES -- "ok / none required" --> NEXT["continue the chain"]
+```
 
 Four factories cover the common shapes — all `<Session>`-templated:
 
@@ -241,7 +254,7 @@ router.get("/admin", [](auto ctx) {
 });
 ```
 
-<!-- src: qbm/http/tests/test-middleware-auth.cpp:72-98,262-296 -->
+<!-- src: qbm/http/tests/unit/middleware/middleware-auth.cpp:324-341,438-456 -->
 
 Reach for the equivalent tag dispatch when you prefer the unified entry point. With `namespace mw = qb::http::middleware;`, `mw::make<mw::tags::auth, MySession>(opts)` forwards to the same factory; the other tags are `mw::tags::jwt_auth`, `mw::tags::role_auth`, and `mw::tags::optional_auth`.
 
