@@ -749,3 +749,15 @@ TEST(BodyTryAs, MalformedJsonReturnsNulloptInsteadOfThrowing) {
         EXPECT_FALSE(result.has_value());
     });
 }
+
+#ifdef QB_HAS_COMPRESSION
+// An encoding naming only "chunked" (a transfer coding, not a compression codec)
+// selects no compressor, so compress() is a no-op that returns the unchanged
+// body size and leaves the bytes untouched.
+TEST_F(BodyTest, CompressOnlyChunkedSelectsNoCompressor) {
+    body                = std::string("payload data");
+    const auto original = std::string("payload data").size();
+    EXPECT_EQ(body.compress("chunked"), original);
+    EXPECT_EQ(body.as<std::string>(), "payload data");
+}
+#endif

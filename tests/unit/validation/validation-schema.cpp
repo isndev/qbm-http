@@ -414,6 +414,48 @@ TEST_F(ValidationSchemaTest, Not) {
     EXPECT_EQ(result.errors()[0].rule_violated, "not");
 }
 
+// additionalProperties bound to an OBJECT sub-schema: a dynamic key whose NESTED
+// property fails carries a non-empty inner field_path, which must be re-prefixed
+// under the dynamic key ("key.inner"). The existing AdditionalProperties test
+// only uses a scalar sub-schema (empty inner path), so this hits the join branch.
+TEST_F(ValidationSchemaTest, AdditionalPropertiesObjectSchemaRepathsNestedError) {
+    qb::json schema = {{"type", "object"},
+                       {"properties", {{"id", {{"type", "integer"}}}}},
+                       {"additionalProperties", {{"type", "object"}, {"properties", {{"port", {{"type", "integer"}}}}}}}};
+    SchemaValidator validator(schema);
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json{{"id", 1}, {"svc", {{"port", "nope"}}}}, result));
+    ASSERT_FALSE(result.success());
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].field_path, "svc.port"); // dynamic key joined with inner field
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+}
+
+// A malformed "anyOf"/"oneOf" definition (not a non-empty array) is a schema
+// error, distinct from the per-item non-object check the existing tests cover.
+TEST_F(ValidationSchemaTest, AnyOfMalformedNonArrayOrEmpty) {
+    for (const qb::json &bad : {qb::json::object(), qb::json(qb::json::array())}) {
+        SchemaValidator validator(qb::json{{"anyOf", bad}});
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json("x"), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1u);
+        EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.anyOf");
+    }
+}
+
+TEST_F(ValidationSchemaTest, OneOfMalformedNonArrayOrEmpty) {
+    for (const qb::json &bad : {qb::json::object(), qb::json(qb::json::array())}) {
+        SchemaValidator validator(qb::json{{"oneOf", bad}});
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json("x"), result));
+        ASSERT_FALSE(result.success());
+        ASSERT_EQ(result.errors().size(), 1u);
+        EXPECT_EQ(result.errors()[0].rule_violated, "schemaError.oneOf");
+    }
+}
+
 // --- type-array / min-max / propertyNames ------------------------------------
 
 TEST_F(ValidationSchemaTest, TypeArrayRejectsUnknownTypeEntries) {

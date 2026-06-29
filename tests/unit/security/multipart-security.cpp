@@ -133,6 +133,32 @@ TEST_F(MultipartSecurityTest, ParseSideRejectsControlCharacterInPartHeaderName) 
     EXPECT_THROW({ (void) body.as<Multipart>(); }, std::runtime_error);
 }
 
+// Body::as<Multipart>() derives the boundary from the first line; a body with no
+// line terminator (npos) or whose first line is too short to hold a boundary
+// (pos <= 2, i.e. empty boundary) must be rejected before parsing begins.
+TEST_F(MultipartSecurityTest, AsMultipartRejectsMissingOrEmptyBoundaryLine) {
+    Body no_crlf;
+    no_crlf = std::string("no line terminator at all"); // pos == npos
+    EXPECT_THROW({ (void) no_crlf.as<Multipart>(); }, std::runtime_error);
+
+    Body empty_boundary;
+    empty_boundary = std::string("\r\nrest"); // first CRLF at pos 0 -> boundary length 0
+    EXPECT_THROW({ (void) empty_boundary.as<Multipart>(); }, std::runtime_error);
+}
+
+// Parse-side length guard on the part header NAME (complement of the VALUE guard
+// below): a name longer than MAX_HEADER_NAME_LENGTH, built from RFC token chars
+// so it passes the malformed-name check and reaches the length check, is rejected.
+TEST_F(MultipartSecurityTest, ParseSideRejectsOversizedPartHeaderName) {
+    const std::string boundary = "bnd";
+    const std::string huge_name(multipart_limits::MAX_HEADER_NAME_LENGTH + 1, 'N');
+    std::string       raw = "--" + boundary + "\r\n" + huge_name + ": v\r\n\r\nbody\r\n--" + boundary + "--";
+
+    Body body;
+    body = raw;
+    EXPECT_THROW({ (void) body.as<Multipart>(); }, std::runtime_error);
+}
+
 TEST_F(MultipartSecurityTest, ParseSideRejectsOversizedPartHeaderValue) {
     // Per-part header value size is capped on the parse path at
     // multipart_limits::MAX_HEADER_VALUE_LENGTH (body.cpp:196); a single part

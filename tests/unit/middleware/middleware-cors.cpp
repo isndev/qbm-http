@@ -215,6 +215,33 @@ TEST_F(CorsMiddlewareTest, ThrowingFunctionMatcherFailsClosedAndRequestContinues
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
+// Direct CorsOptions / regex_match_with_timeout guards that the middleware path
+// pre-filters (it rejects empty and over-length origins before these inner
+// checks), so they are only reachable by calling the API directly.
+TEST(CorsOptionsDirect, EmptyOriginIsNotAllowed) {
+    qb::http::CorsOptions o;
+    o.origins({"http://a.com"});
+    EXPECT_FALSE(o.is_origin_allowed("")); // empty-origin guard
+}
+
+TEST(CorsOptionsDirect, FunctionStrategyWithNullMatcherIsFalse) {
+    qb::http::CorsOptions o;
+    o.origin_matcher(std::function<bool(const std::string &)>{}); // empty std::function
+    EXPECT_FALSE(o.is_origin_allowed("http://a.com"));            // null-matcher guard
+}
+
+TEST(CorsOptionsDirect, InvalidRegexPatternIsSkippedAtCompile) {
+    qb::http::CorsOptions o;
+    o.origin_patterns({"["});                          // unbalanced -> regex_error caught
+    EXPECT_FALSE(o.is_origin_allowed("http://a.com")); // compile-time skip, no match
+}
+
+TEST(CorsRegexMatcher, OverlongOriginShortCircuitsToFalse) {
+    std::regex  re("http://.*");
+    std::string evil(qb::http::cors_security_limits::MAX_ORIGIN_LENGTH + 1, 'a');
+    EXPECT_FALSE(qb::http::regex_match_with_timeout(evil, re)); // length short-circuit
+}
+
 // --- Credentials -------------------------------------------------------------
 
 TEST_F(CorsMiddlewareTest, CredentialsAllowed) {
