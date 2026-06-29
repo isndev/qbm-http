@@ -201,8 +201,7 @@ TEST(HPACK_Huffman, GoldVectorEncodeResponseValues) {
     } cases[] = {
         {"302", {0x64, 0x02}},
         {"private", {0xae, 0xc3, 0x77, 0x1a, 0x4b}},
-        {"https://www.example.com",
-         {0x9d, 0x29, 0xad, 0x17, 0x18, 0x63, 0xc7, 0x8f, 0x0b, 0x97, 0xc8, 0xe9, 0xae, 0x82, 0xae, 0x43, 0xd3}},
+        {"https://www.example.com", {0x9d, 0x29, 0xad, 0x17, 0x18, 0x63, 0xc7, 0x8f, 0x0b, 0x97, 0xc8, 0xe9, 0xae, 0x82, 0xae, 0x43, 0xd3}},
         {"307", {0x64, 0x0e, 0xff}},
     };
     for (const auto &c : cases) {
@@ -402,7 +401,7 @@ TEST(HPACK_Huffman, ValidateEncodedData) {
 }
 
 TEST(HPACK_Huffman, GlobalStatsResetIsZeroed) {
-    auto &global_stats = get_global_huffman_stats();
+    auto &global_stats               = get_global_huffman_stats();
     global_stats.encoding_operations = 5;
     global_stats.decoding_operations = 7;
     global_stats.reset();
@@ -498,8 +497,8 @@ TEST(HPACK_Huffman, RoundTripAcrossStringFamilies) {
 // ====================================================================
 
 TEST(HPACK_Decoder, IndexedHeaderField) {
-    Decoder        decoder;
-    const auto     headers = decode_ok(decoder, {0x82}); // index 2 (:method GET)
+    Decoder    decoder;
+    const auto headers = decode_ok(decoder, {0x82}); // index 2 (:method GET)
     ASSERT_EQ(headers.size(), 1u);
     EXPECT_EQ(headers[0].name, ":method");
     EXPECT_EQ(headers[0].value, "GET");
@@ -519,9 +518,8 @@ TEST(HPACK_Decoder, LiteralHeaderWithIncrementalIndexing) {
 
 TEST(HPACK_Decoder, LiteralHeaderWithIndexedName) {
     Decoder    decoder;
-    const auto headers = decode_ok(decoder, {
-                                                0x41, // indexed name 1 (:authority)
-                                                0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'});
+    const auto headers = decode_ok(decoder, {0x41, // indexed name 1 (:authority)
+                                             0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'});
     ASSERT_EQ(headers.size(), 1u);
     EXPECT_EQ(headers[0].name, ":authority");
     EXPECT_EQ(headers[0].value, "example.com");
@@ -543,10 +541,8 @@ TEST(HPACK_Decoder, LiteralHeaderWithoutIndexing) {
 TEST(HPACK_Decoder, LiteralHeaderNeverIndexed) {
     Decoder    decoder;
     const auto headers =
-        decode_ok(decoder, {
-                               0x10, // never indexed, new name
-                               0x0D, 'a', 'u', 't', 'h', 'o', 'r', 'i', 'z', 'a', 't', 'i', 'o', 'n',
-                               0x05, 't', 'o', 'k', 'e', 'n'});
+        decode_ok(decoder, {0x10, // never indexed, new name
+                            0x0D, 'a', 'u', 't', 'h', 'o', 'r', 'i', 'z', 'a', 't', 'i', 'o', 'n', 0x05, 't', 'o', 'k', 'e', 'n'});
     ASSERT_EQ(headers.size(), 1u);
     EXPECT_EQ(headers[0].name, "authorization");
     EXPECT_EQ(headers[0].value, "token");
@@ -561,12 +557,11 @@ TEST(HPACK_Decoder, DynamicTableSizeUpdateProducesNoHeaders) {
 
 TEST(HPACK_Decoder, MultipleHeaders) {
     Decoder    decoder;
-    const auto headers = decode_ok(decoder, {
-                                                0x82,                     // :method GET
-                                                0x84,                     // :path /
-                                                0x40,                     // incremental indexing, new name
-                                                0x04, 'h', 'o', 's', 't', // name "host"
-                                                0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'});
+    const auto headers = decode_ok(decoder, {0x82,                     // :method GET
+                                             0x84,                     // :path /
+                                             0x40,                     // incremental indexing, new name
+                                             0x04, 'h', 'o', 's', 't', // name "host"
+                                             0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'});
     ASSERT_EQ(headers.size(), 3u);
     EXPECT_EQ(headers[0].name, ":method");
     EXPECT_EQ(headers[0].value, "GET");
@@ -582,10 +577,8 @@ TEST(HPACK_Decoder, MultipleHeaders) {
 // 8-byte Huffman of "custom-key". Concrete decode, not result||incomplete.
 TEST(HPACK_Decoder, HuffmanEncodedValueDecodesExactly) {
     Decoder    decoder;
-    const auto headers =
-        decode_ok(decoder, {
-                               0x40, 0x04, 't', 'e', 's', 't',                                  // name "test"
-                               0x88, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f /*custom-key*/}); // value (Huffman)
+    const auto headers = decode_ok(decoder, {0x40, 0x04, 't', 'e', 's', 't',                                        // name "test"
+                                             0x88, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f /*custom-key*/}); // value (Huffman)
     ASSERT_EQ(headers.size(), 1u);
     EXPECT_EQ(headers[0].name, "test");
     EXPECT_EQ(headers[0].value, "custom-key");
@@ -596,10 +589,8 @@ TEST(HPACK_Decoder, HuffmanEncodedNameAndValueDecodeExactly) {
     // H-value "custom-header" (len 9 -> 25a849e95ae728e42d9b ... actually 9
     // bytes). Decode must yield the original ascii pair.
     Decoder    decoder;
-    const auto headers = decode_ok(
-        decoder, {0x40,
-                  0x88, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f, // name "custom-key" Huffman
-                  0x89, 0x25, 0xa8, 0x49, 0xe9, 0x5a, 0x72, 0x8e, 0x42, 0xd9 /*custom-header*/});
+    const auto headers = decode_ok(decoder, {0x40, 0x88, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f, // name "custom-key" Huffman
+                                             0x89, 0x25, 0xa8, 0x49, 0xe9, 0x5a, 0x72, 0x8e, 0x42, 0xd9 /*custom-header*/});
     ASSERT_EQ(headers.size(), 1u);
     EXPECT_EQ(headers[0].name, "custom-key");
     EXPECT_EQ(headers[0].value, "custom-header");
@@ -696,9 +687,9 @@ TEST(HPACK_Decoder, GetStatsAccessorIsLive) {
     EXPECT_EQ(decoder.get_stats().dynamic_table_evictions, 0u);
 
     // Decode a literal-with-incremental-indexing block; it inserts one dynamic entry.
-    std::vector<HeaderField> headers;
-    bool                     incomplete = false;
-    const std::vector<uint8_t> block = {0x40, 0x04, 'n', 'a', 'm', 'e', 0x05, 'v', 'a', 'l', 'u', 'e'};
+    std::vector<HeaderField>   headers;
+    bool                       incomplete = false;
+    const std::vector<uint8_t> block      = {0x40, 0x04, 'n', 'a', 'm', 'e', 0x05, 'v', 'a', 'l', 'u', 'e'};
     ASSERT_TRUE(decoder.decode(block, headers, incomplete));
     EXPECT_EQ(decoder.get_dynamic_table_entry_count(), 1u);
     // The accessor returns the same object across calls (const ref, no copy churn).
@@ -714,9 +705,14 @@ TEST(HPACK_RoundTrip, BasicRoundTrip) {
     Decoder decoder;
 
     std::vector<HeaderField> original_headers = {
-        {":method", "GET"},      {":path", "/api/v1/users"},    {":scheme", "https"},
-        {":authority", "api.example.com"}, {"user-agent", "test-client/1.0"}, {"accept", "application/json"},
-        {"content-type", "application/json"}};
+        {":method", "GET"},
+        {":path", "/api/v1/users"},
+        {":scheme", "https"},
+        {":authority", "api.example.com"},
+        {"user-agent", "test-client/1.0"},
+        {"accept", "application/json"},
+        {"content-type", "application/json"}
+    };
 
     std::vector<uint8_t> encoded;
     ASSERT_TRUE(encoder.encode(original_headers, encoded));
@@ -740,7 +736,8 @@ TEST(HPACK_RoundTrip, DynamicTableReuseShrinksSecondEncoding) {
     // the static table and emits :path's custom value as a literal-without-indexing, so only custom
     // fields enter the dynamic table — use two of them to make the entry count deterministic).
     std::vector<HeaderField> headers1 = {
-        {":method", "GET"}, {":path", "/long/dynamic/path"}, {"custom-header", "custom-value"}, {"x-trace-id", "abc-123-def"}};
+        {":method", "GET"}, {":path", "/long/dynamic/path"}, {"custom-header", "custom-value"}, {"x-trace-id", "abc-123-def"}
+    };
     std::vector<uint8_t> encoded1;
     ASSERT_TRUE(encoder.encode(headers1, encoded1));
     EXPECT_EQ(decode_ok(decoder, encoded1).size(), 4u);
@@ -748,7 +745,8 @@ TEST(HPACK_RoundTrip, DynamicTableReuseShrinksSecondEncoding) {
 
     // Same custom headers, different (still static-indexed) method — the repeat collapses to indices.
     std::vector<HeaderField> headers2 = {
-        {":method", "POST"}, {":path", "/long/dynamic/path"}, {"custom-header", "custom-value"}, {"x-trace-id", "abc-123-def"}};
+        {":method", "POST"}, {":path", "/long/dynamic/path"}, {"custom-header", "custom-value"}, {"x-trace-id", "abc-123-def"}
+    };
     std::vector<uint8_t> encoded2;
     ASSERT_TRUE(encoder.encode(headers2, encoded2));
 
@@ -832,9 +830,8 @@ TEST(HPACK_DynamicTable, HeaderListSizeLimitRejectsOversizedBlock) {
 
     std::vector<HeaderField> headers;
     bool                     incomplete = false;
-    std::vector<uint8_t>     data       = {
-        0x40, 0x10, 'v', 'e', 'r', 'y', '-', 'l', 'o', 'n', 'g', '-', 'h', 'e', 'a', 'd', 'e', 'r',
-        0x10, 'v', 'e', 'r', 'y', '-', 'l', 'o', 'n', 'g', '-', 'v', 'a', 'l', 'u', 'e', '-'};
+    std::vector<uint8_t>     data       = {0x40, 0x10, 'v', 'e', 'r', 'y', '-', 'l', 'o', 'n', 'g', '-', 'h', 'e', 'a', 'd', 'e', 'r',
+                                           0x10, 'v',  'e', 'r', 'y', '-', 'l', 'o', 'n', 'g', '-', 'v', 'a', 'l', 'u', 'e', '-'};
     EXPECT_FALSE(decoder.decode(data, headers, incomplete));
 }
 
@@ -911,9 +908,9 @@ TEST(HPACK_RFC7541, ExampleC5_ResponseSequenceWithEviction) {
 
     // C.5.1
     {
-        const auto out = decode_ok(
-            decoder, hex_to_bytes("4803333032580770726976617465611d4d6f6e2c203231204f637420323031332032303a31333a323120474d546e1768"
-                                  "747470733a2f2f7777772e6578616d706c652e636f6d"));
+        const auto out =
+            decode_ok(decoder, hex_to_bytes("4803333032580770726976617465611d4d6f6e2c203231204f637420323031332032303a31333a323120474d546e1768"
+                                            "747470733a2f2f7777772e6578616d706c652e636f6d"));
         ASSERT_EQ(out.size(), 4u);
         EXPECT_EQ(out[0].name, ":status");
         EXPECT_EQ(out[0].value, "302");
@@ -955,7 +952,8 @@ TEST(HPACK_Integration, HttpRequestHeadersRoundTrip) {
         {"accept-language", "en-US,en;q=0.5"},
         {"accept-encoding", "gzip, deflate, br"},
         {"connection", "keep-alive"},
-        {"upgrade-insecure-requests", "1"}};
+        {"upgrade-insecure-requests", "1"}
+    };
 
     std::vector<uint8_t> encoded;
     ASSERT_TRUE(encoder.encode(request_headers, encoded));
@@ -981,7 +979,8 @@ TEST(HPACK_Integration, HttpResponseHeadersRoundTrip) {
         {"etag", "\"abc123def456\""},
         {"vary", "Accept-Encoding"},
         {"x-frame-options", "DENY"},
-        {"x-content-type-options", "nosniff"}};
+        {"x-content-type-options", "nosniff"}
+    };
 
     std::vector<uint8_t> encoded;
     ASSERT_TRUE(encoder.encode(response_headers, encoded));

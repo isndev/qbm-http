@@ -25,10 +25,10 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <gtest/gtest.h>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -89,12 +89,9 @@ TEST_F(DateParsingTest, ParseHttpDateVariousDays) {
         const char *canonical;
     };
     const Case cases[] = {
-        {"Mon, 01 Jan 2024 00:00:00 GMT", "Mon, 01 Jan 2024 00:00:00 GMT"},
-        {"Tue, 02 Jan 2024 00:00:00 GMT", "Tue, 02 Jan 2024 00:00:00 GMT"},
-        {"Wed, 03 Jan 2024 00:00:00 GMT", "Wed, 03 Jan 2024 00:00:00 GMT"},
-        {"Thu, 04 Jan 2024 00:00:00 GMT", "Thu, 04 Jan 2024 00:00:00 GMT"},
-        {"Fri, 05 Jan 2024 00:00:00 GMT", "Fri, 05 Jan 2024 00:00:00 GMT"},
-        {"Sat, 06 Jan 2024 00:00:00 GMT", "Sat, 06 Jan 2024 00:00:00 GMT"},
+        {"Mon, 01 Jan 2024 00:00:00 GMT", "Mon, 01 Jan 2024 00:00:00 GMT"}, {"Tue, 02 Jan 2024 00:00:00 GMT", "Tue, 02 Jan 2024 00:00:00 GMT"},
+        {"Wed, 03 Jan 2024 00:00:00 GMT", "Wed, 03 Jan 2024 00:00:00 GMT"}, {"Thu, 04 Jan 2024 00:00:00 GMT", "Thu, 04 Jan 2024 00:00:00 GMT"},
+        {"Fri, 05 Jan 2024 00:00:00 GMT", "Fri, 05 Jan 2024 00:00:00 GMT"}, {"Sat, 06 Jan 2024 00:00:00 GMT", "Sat, 06 Jan 2024 00:00:00 GMT"},
         {"Sun, 07 Jan 2024 00:00:00 GMT", "Sun, 07 Jan 2024 00:00:00 GMT"},
     };
     for (const auto &c : cases) {
@@ -227,44 +224,31 @@ TEST_F(DateParsingTest, RoundTripCookieDate) {
 class InvalidHttpDateTest : public ::testing::TestWithParam<std::string> {};
 
 TEST_P(InvalidHttpDateTest, ReturnsNulloptWithoutThrowing) {
-    const std::string &input = GetParam();
+    const std::string                      &input = GetParam();
     std::optional<system_clock::time_point> result;
     EXPECT_NO_THROW(result = parse_http_date(input)) << "threw for: [" << input << "]";
     EXPECT_FALSE(result.has_value()) << "expected nullopt for: [" << input << "]";
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    DateParsing, InvalidHttpDateTest,
-    ::testing::Values(
-        // Empty / too short / truncated at each field boundary.
-        std::string(""),
-        std::string("invalid"),
-        std::string("Sun"),
-        std::string("Sun,"),
-        std::string("Sun, 06"),
-        std::string("Sun, 06 Nov"),
-        std::string("Sun, 06 Nov 1994"),
-        std::string("Sun, 06 Nov 1994 08"),
-        std::string("Sun, 06 Nov 1994 08:"),
-        std::string("Sun, 06 Nov 1994 08:49"),
-        std::string("Sun, 06 Nov 1994 08:49:"),
-        std::string("Sun, 06 Nov 1994 08:49:37"), // missing zone
-        // Structural errors.
-        std::string("Sun 06 Nov 1994 08:49:37 GMT"),   // missing comma
-        std::string("1994-11-06 08:49:37"),            // ISO, not HTTP
-        std::string("Sun, 06 XYZ 1994 08:49:37 GMT"),  // invalid month
-        // Out-of-range fields.
-        std::string("Sun, 32 Nov 1994 08:49:37 GMT"),
-        std::string("Sun, 06 Nov 1994 25:00:00 GMT"),
-        std::string("Sun, 06 Nov 1994 08:70:00 GMT"),
-        // Invalid calendar dates must NOT be normalized by timegm.
-        std::string("Sun, 31 Feb 1994 08:49:37 GMT"),
-        std::string("Sun, 00 Nov 1994 08:49:37 GMT"),
-        std::string("Sunday, 31-Feb-94 08:49:37 GMT"),
-        std::string("Sun Feb 31 08:49:37 1994"),
-        // Zone / trailing-byte requirements.
-        std::string("Sun, 06 Nov 1994 08:49:37 UTC"),
-        std::string("Sun, 06 Nov 1994 08:49:37 GMT extra")));
+INSTANTIATE_TEST_SUITE_P(DateParsing, InvalidHttpDateTest,
+                         ::testing::Values(
+                             // Empty / too short / truncated at each field boundary.
+                             std::string(""), std::string("invalid"), std::string("Sun"), std::string("Sun,"), std::string("Sun, 06"),
+                             std::string("Sun, 06 Nov"), std::string("Sun, 06 Nov 1994"), std::string("Sun, 06 Nov 1994 08"),
+                             std::string("Sun, 06 Nov 1994 08:"), std::string("Sun, 06 Nov 1994 08:49"), std::string("Sun, 06 Nov 1994 08:49:"),
+                             std::string("Sun, 06 Nov 1994 08:49:37"), // missing zone
+                             // Structural errors.
+                             std::string("Sun 06 Nov 1994 08:49:37 GMT"),  // missing comma
+                             std::string("1994-11-06 08:49:37"),           // ISO, not HTTP
+                             std::string("Sun, 06 XYZ 1994 08:49:37 GMT"), // invalid month
+                             // Out-of-range fields.
+                             std::string("Sun, 32 Nov 1994 08:49:37 GMT"), std::string("Sun, 06 Nov 1994 25:00:00 GMT"),
+                             std::string("Sun, 06 Nov 1994 08:70:00 GMT"),
+                             // Invalid calendar dates must NOT be normalized by timegm.
+                             std::string("Sun, 31 Feb 1994 08:49:37 GMT"), std::string("Sun, 00 Nov 1994 08:49:37 GMT"),
+                             std::string("Sunday, 31-Feb-94 08:49:37 GMT"), std::string("Sun Feb 31 08:49:37 1994"),
+                             // Zone / trailing-byte requirements.
+                             std::string("Sun, 06 Nov 1994 08:49:37 UTC"), std::string("Sun, 06 Nov 1994 08:49:37 GMT extra")));
 
 // ====================================================================
 // Case sensitivity + noexcept contract
@@ -399,8 +383,8 @@ TEST_F(DateParsingTest, NowEmitsParseableRfc1123) {
 // (date.cpp:440). The local offset is environment-dependent, so we pin the
 // FORMAT shape deterministically rather than the exact value.
 TEST_F(DateParsingTest, FormatTimestampShape) {
-    const auto  epoch = system_clock::time_point(std::chrono::seconds(kCanonicalEpoch));
-    const std::string s = format_timestamp(epoch);
+    const auto        epoch = system_clock::time_point(std::chrono::seconds(kCanonicalEpoch));
+    const std::string s     = format_timestamp(epoch);
 
     ASSERT_EQ(s.size(), 19u) << s; // "YYYY-MM-DD HH:MM:SS"
     EXPECT_EQ(s[4], '-');

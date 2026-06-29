@@ -74,8 +74,7 @@ encode_settings_payload(const std::vector<std::pair<Http2SettingIdentifier, uint
 // Drive preface + a client SETTINGS frame carrying the given entries, then drive
 // the framer. Used to deliver a single value-validation-failing setting.
 void
-handshake_with_settings(ServerProtocol &protocol, Http2FakeIO &io,
-                        const std::vector<std::pair<Http2SettingIdentifier, uint32_t>> &settings) {
+handshake_with_settings(ServerProtocol &protocol, Http2FakeIO &io, const std::vector<std::pair<Http2SettingIdentifier, uint32_t>> &settings) {
     push_preface(io);
     push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload(settings));
     drive(protocol, io);
@@ -103,7 +102,8 @@ push_request_headers(ServerProtocol &protocol, Http2FakeIO &io, uint32_t stream_
 [[nodiscard]] std::vector<qb::protocol::hpack::HeaderField>
 request_with(const std::vector<qb::protocol::hpack::HeaderField> &extra) {
     std::vector<qb::protocol::hpack::HeaderField> hdrs = {
-        {":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}};
+        {":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}
+    };
     for (const auto &h : extra) {
         hdrs.push_back(h);
     }
@@ -119,31 +119,46 @@ struct RichServerIO {
     qb::allocator::pipe<char> input;
     qb::allocator::pipe<char> output;
 
-    int           request_count       = 0;
-    int           stream_error_count  = 0;
-    int           goaway_count        = 0;
-    ErrorCode     last_goaway_error   = ErrorCode::NO_ERROR;
-    uint32_t      last_goaway_last_id = 0;
-    std::string   last_goaway_debug;
+    int         request_count       = 0;
+    int         stream_error_count  = 0;
+    int         goaway_count        = 0;
+    ErrorCode   last_goaway_error   = ErrorCode::NO_ERROR;
+    uint32_t    last_goaway_last_id = 0;
+    std::string last_goaway_debug;
 
-    qb::allocator::pipe<char> &in() noexcept { return input; }
-    qb::allocator::pipe<char> &out() noexcept { return output; }
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    qb::allocator::pipe<char> &
+    out() noexcept {
+        return output;
+    }
 
     template <typename Frame>
-    RichServerIO &operator<<(const Frame &frame) {
+    RichServerIO &
+    operator<<(const Frame &frame) {
         output.put(frame);
         return *this;
     }
 
-    void on(qb::http::Request &&, uint32_t) { ++request_count; }
-    void on(const h2::Http2StreamErrorEvent &) { ++stream_error_count; }
-    void on(const h2::Http2GoAwayEvent &event) {
+    void
+    on(qb::http::Request &&, uint32_t) {
+        ++request_count;
+    }
+    void
+    on(const h2::Http2StreamErrorEvent &) {
+        ++stream_error_count;
+    }
+    void
+    on(const h2::Http2GoAwayEvent &event) {
         ++goaway_count;
         last_goaway_error   = event.error_code;
         last_goaway_last_id = event.last_stream_id;
         last_goaway_debug   = event.debug_data;
     }
-    void on(const h2::Http2PushPromiseEvent &) {}
+    void
+    on(const h2::Http2PushPromiseEvent &) {}
 };
 
 using RichServerProtocol = h2::ServerHttp2Protocol<RichServerIO>;
@@ -295,11 +310,8 @@ TEST(HTTP2ServerCoverageDeep, RequestContentLengthOverMaxBodySizeIsEnhanceYourCa
     // the content-length is meaningful; END_HEADERS without END_STREAM keeps the
     // stream awaiting the (never-sent) body, but the declared-length guard fires
     // during header processing regardless.
-    const auto encoded = encode_hpack_headers({{":method", "POST"},
-                                               {":scheme", "https"},
-                                               {":authority", "example.test"},
-                                               {":path", "/upload"},
-                                               {"content-length", "999999999999"}});
+    const auto encoded = encode_hpack_headers(
+        {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/upload"}, {"content-length", "999999999999"}});
     const std::size_t before = io.output.size();
     push_frame(io, FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, encoded);
     drive(server, io);
@@ -323,12 +335,13 @@ TEST(HTTP2ServerCoverageDeep, TrailersContentLengthMismatchIsProtocolError) {
 
     // POST declaring content-length 10, headers do NOT end the stream (trailers
     // announced so the request is not dispatched on the header block).
-    const auto headers = encode_hpack_headers({{":method", "POST"},
-                                              {":scheme", "https"},
-                                              {":authority", "example.test"},
-                                              {":path", "/upload"},
-                                              {"content-length", "10"},
-                                              {"trailer", "x-done"}});
+    const auto headers = encode_hpack_headers(
+        {{":method", "POST"},
+         {":scheme", "https"},
+         {":authority", "example.test"},
+         {":path", "/upload"},
+         {"content-length", "10"},
+         {"trailer", "x-done"}});
     push_frame(io, FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, headers);
     drive(server, io);
     ASSERT_TRUE(server.ok());
@@ -341,8 +354,8 @@ TEST(HTTP2ServerCoverageDeep, TrailersContentLengthMismatchIsProtocolError) {
 
     // Trailer HEADERS block carrying END_STREAM completes the stream; at trailer
     // processing the body length (3) != declared content-length (10).
-    const auto trailers      = encode_hpack_headers({{"x-done", "yes"}});
-    const std::size_t before = io.output.size();
+    const auto        trailers = encode_hpack_headers({{"x-done", "yes"}});
+    const std::size_t before   = io.output.size();
     push_frame(io, FrameType::HEADERS, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, 1, trailers);
     drive(server, io);
 
@@ -370,8 +383,7 @@ TEST(HTTP2ServerCoverageDeep, SendResponseOnReservedLocalPushStreamIsStreamError
 
     // Open a client request stream that stays OPEN (POST, no END_STREAM) so it is
     // a valid associated stream for a PUSH_PROMISE.
-    const auto parent = encode_hpack_headers(
-        {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/parent"}});
+    const auto parent = encode_hpack_headers({{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/parent"}});
     push_frame(io, FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, parent);
     drive(server, io);
     ASSERT_TRUE(server.ok());
@@ -384,7 +396,7 @@ TEST(HTTP2ServerCoverageDeep, SendResponseOnReservedLocalPushStreamIsStreamError
 
     // Attempt to send a response on the RESERVED_LOCAL promised stream BEFORE its
     // headers were sent -> the IDLE/RESERVED_LOCAL guard rejects with PROTOCOL_ERROR.
-    const std::size_t before = io.output.size();
+    const std::size_t  before = io.output.size();
     qb::http::Response response;
     response.status() = qb::http::status::OK;
     EXPECT_FALSE(server.send_response(2, response));
@@ -439,8 +451,8 @@ TEST(HTTP2ServerCoverageDeep, ReceivedGoawayEventCarriesLastStreamIdAndDebugData
 
     // Build a GOAWAY payload: 4-byte last_stream_id (7), 4-byte error code
     // (ENHANCE_YOUR_CALM == 11), then the debug bytes.
-    const std::string  debug   = "bye-now";
-    std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x07, // last_stream_id = 7
+    const std::string    debug   = "bye-now";
+    std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x07,  // last_stream_id = 7
                                     0x00, 0x00, 0x00, 0x0B}; // error_code = ENHANCE_YOUR_CALM (11)
     payload.insert(payload.end(), debug.begin(), debug.end());
     push_frame(io, FrameType::GOAWAY, 0, 0, payload);

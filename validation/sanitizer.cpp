@@ -14,8 +14,8 @@
  */
 #include "./sanitizer.h"
 #include <algorithm>
-#include <qb/system/parse.h>
 #include <regex>
+#include <qb/system/parse.h>
 #include "../utility.h"
 
 namespace qb::http::validation {

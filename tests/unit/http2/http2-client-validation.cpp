@@ -279,8 +279,8 @@ TEST(Http2ClientConfigTest, BatchRejectsCrossOriginRequestsAndPreservesOrder) {
     auto client = qb::http2::make_client("https://localhost:443");
 
     std::vector<qb::http::Request> requests;
-    requests.emplace_back(qb::io::uri("https://example.com/first"));   // cross-origin host
-    requests.emplace_back(qb::io::uri("http://localhost/plain"));      // wrong scheme
+    requests.emplace_back(qb::io::uri("https://example.com/first"));        // cross-origin host
+    requests.emplace_back(qb::io::uri("http://localhost/plain"));           // wrong scheme
     requests.emplace_back(qb::io::uri("https://localhost:444/wrong-port")); // cross-origin port
 
     bool                            done = false;
@@ -385,7 +385,7 @@ TEST(Http2ClientLifetimeTest, PushRequestAwaiterCompletesWhenClientExpiresBefore
     // A request awaiter held past the client's own lifetime must still resolve
     // (to a failure Response) rather than dangle or hang the run loop.
     auto response = qb::io::async::run_sync([]() -> qb::io::async::task<qb::http::Response> {
-        auto              client = qb::http2::make_client("https://localhost:1");
+        auto client = qb::http2::make_client("https://localhost:1");
         client->set_connect_timeout(10ms);
         qb::http::Request request{qb::io::uri("https://localhost:1/never")};
         auto              awaiter = client->push_request(std::move(request));
@@ -405,7 +405,7 @@ TEST(Http2ClientLifetimeTest, AbandonedRequestAwaiterDestroyedWithoutAwaitDoesNo
     // completion handler the awaiter registered with the client must be safely
     // dropped (no use-after-free, no leaked timer firing into freed state).
     {
-        auto              client = qb::http2::make_client("https://localhost:1");
+        auto client = qb::http2::make_client("https://localhost:1");
         client->set_connect_timeout(10ms);
         qb::http::Request request{qb::io::uri("https://localhost:1/abandon")};
         auto              awaiter = client->push_request(std::move(request));

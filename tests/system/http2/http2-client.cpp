@@ -148,8 +148,8 @@ public:
         router().get("/api/reset-stream", [](auto ctx) {
             auto session = ctx->session();
             if (session) {
-                (void) session->reset_stream(static_cast<uint32_t>(ctx->request().stream_id),
-                                      qb::protocol::http2::ErrorCode::CANCEL, "test initiated stream reset");
+                (void) session->reset_stream(static_cast<uint32_t>(ctx->request().stream_id), qb::protocol::http2::ErrorCode::CANCEL,
+                                             "test initiated stream reset");
             }
         });
 
@@ -191,8 +191,8 @@ protected:
     void
     SetUp() override {
         ASSERT_TRUE(qb::http::test::certs_available())
-            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and "
-            << qb::http::test::ssl_key_path() << "). The HTTP/2 client system suite REQUIRES them.";
+            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and " << qb::http::test::ssl_key_path()
+            << "). The HTTP/2 client system suite REQUIRES them.";
 
         qb::io::async::init();
         _port = qb::http::test::ephemeral_port();
@@ -282,8 +282,7 @@ TEST_F(Http2ClientTest, PostRequestEchoesBody) {
 
     EXPECT_EQ(response.status(), qb::http::status::CREATED);
     // Independent assertion on the server-echoed body, not a smoke counter.
-    EXPECT_EQ(response.body().template as<std::string>(),
-              R"(Data received: {"key": "test_data", "value": 123} - created successfully)");
+    EXPECT_EQ(response.body().template as<std::string>(), R"(Data received: {"key": "test_data", "value": 123} - created successfully)");
     EXPECT_EQ(response.header("X-Protocol"), "HTTP/2");
     client->disconnect();
 }
@@ -409,8 +408,7 @@ TEST_F(Http2ClientTest, ConcurrentRequestsAreEachAnswered) {
 
     for (int i = 0; i < 3; ++i) {
         EXPECT_EQ(responses[i].status(), qb::http::status::OK);
-        EXPECT_EQ(responses[i].body().template as<std::string>(),
-                  "User ID: " + std::to_string(100 + i) + " (via HTTP/2)");
+        EXPECT_EQ(responses[i].body().template as<std::string>(), "User ID: " + std::to_string(100 + i) + " (via HTTP/2)");
         EXPECT_EQ(responses[i].header("X-Protocol"), "HTTP/2");
     }
     client->disconnect();
@@ -609,8 +607,7 @@ TEST_F(Http2ClientTest, ConnectFailsWhenServerDoesNotOfferH2) {
 
     EXPECT_FALSE(connected.load()) << "h2 client must not consider itself connected when ALPN did not negotiate h2";
     EXPECT_FALSE(client->is_connected());
-    EXPECT_NE(error_message.find("ALPN"), std::string::npos)
-        << "expected an ALPN-negotiation failure message, got: " << error_message;
+    EXPECT_NE(error_message.find("ALPN"), std::string::npos) << "expected an ALPN-negotiation failure message, got: " << error_message;
 }
 
 // ---------------------------------------------------------------------------
@@ -689,8 +686,7 @@ TEST_F(Http2ClientTest, NotFoundStreamDoesNotPoisonAdjacentStream) {
 
 TEST_F(Http2ClientTest, Http1ClientFallsBackOverAlpnAndIsServed) {
     qb::http::Request request{{url() + "/api/test"}};
-    auto              response =
-        qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
+    auto              response = qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
 
     // The same route handler answers, this time through the HTTP/1.1 protocol
     // object switched in by ALPN — the response is identical at the HTTP layer.
@@ -708,12 +704,10 @@ TEST_F(Http2ClientTest, Http1FallbackPostEchoesBodyOverAlpn) {
     request.add_header("Content-Type", "application/json");
     request.body() = R"({"over":"http1.1"})";
 
-    auto response =
-        qb::http::run_sync(qb::http::POST(request, qb::duration::zero(), /*verify_peer=*/false)).response;
+    auto response = qb::http::run_sync(qb::http::POST(request, qb::duration::zero(), /*verify_peer=*/false)).response;
 
     EXPECT_EQ(response.status(), qb::http::status::CREATED);
-    EXPECT_EQ(response.body().template as<std::string>(),
-              R"(Data received: {"over":"http1.1"} - created successfully)");
+    EXPECT_EQ(response.body().template as<std::string>(), R"(Data received: {"over":"http1.1"} - created successfully)");
 }
 
 // ---------------------------------------------------------------------------

@@ -29,8 +29,8 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
 #include <cstdlib>
+#include <gtest/gtest.h>
 #include <stdexcept>
 #include <string>
 #include <qb/system/allocator/pipe.h>

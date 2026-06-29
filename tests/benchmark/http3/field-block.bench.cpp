@@ -223,12 +223,10 @@ BM_Http3_IsValidHeaderField(benchmark::State &state) {
         std::string_view value;
     };
     static const Field fields[] = {
-        {"x-test", "ok"},
-        {"content-type", "application/json; charset=utf-8"},
-        {"accept", "text/html,application/xhtml+xml"},
-        {"", "ok"},        // empty name (reject)
-        {"X-Test", "ok"},  // uppercase name (reject)
-        {"x test", "ok"},  // space in name (reject)
+        {"x-test", "ok"},   {"content-type", "application/json; charset=utf-8"}, {"accept", "text/html,application/xhtml+xml"},
+        {"", "ok"},         // empty name (reject)
+        {"X-Test", "ok"},   // uppercase name (reject)
+        {"x test", "ok"},   // space in name (reject)
         {"x-test", "a\tb"}, // TAB allowed (accept)
     };
 

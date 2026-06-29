@@ -41,8 +41,7 @@ using qb::http::test::ErrorSignalerTask;
  */
 class MessageErrorSignalerTask : public qb::http::IMiddleware<Session> {
 public:
-    MessageErrorSignalerTask(std::string id, qb::http::status status, std::string message,
-                             std::shared_ptr<std::vector<std::string>> order_log)
+    MessageErrorSignalerTask(std::string id, qb::http::status status, std::string message, std::shared_ptr<std::vector<std::string>> order_log)
         : _id(std::move(id))
         , _status(status)
         , _message(std::move(message))
@@ -77,8 +76,8 @@ private:
 
 class ErrorHandlingMiddlewareTest : public qb::http::test::MiddlewareTestFixture<Session> {
 protected:
-    std::shared_ptr<std::vector<std::string>>                       _order;
-    std::shared_ptr<qb::http::ErrorHandlingMiddleware<Session>>     _error_mw;
+    std::shared_ptr<std::vector<std::string>>                   _order;
+    std::shared_ptr<qb::http::ErrorHandlingMiddleware<Session>> _error_mw;
 
     void
     SetUp() override {
@@ -115,7 +114,7 @@ protected:
      * set_error_task_chain + compile + route boilerplate that every case repeated.
      */
     void
-    run_with_error_chain(const std::shared_ptr<qb::http::IMiddleware<Session>>             &trigger,
+    run_with_error_chain(const std::shared_ptr<qb::http::IMiddleware<Session>>              &trigger,
                          const std::vector<std::shared_ptr<qb::http::IMiddleware<Session>>> &error_chain,
                          const std::string                                                  &path = "/error_trigger") {
         _router = std::make_unique<qb::http::Router<Session>>();
@@ -272,12 +271,11 @@ TEST_F(ErrorHandlingMiddlewareTest, SpecificHandlerPriorityOverRange) {
         _order->push_back("Specific502");
         ctx->response().body() = "Handled by specific 502 handler.";
     });
-    _error_mw->on_status_range(qb::http::status::INTERNAL_SERVER_ERROR, qb::http::status::SERVICE_UNAVAILABLE,
-                               [&range, this](auto ctx) {
-                                   range = true;
-                                   _order->push_back("Range500-503");
-                                   ctx->response().body() = "Handled by 500-503 range.";
-                               });
+    _error_mw->on_status_range(qb::http::status::INTERNAL_SERVER_ERROR, qb::http::status::SERVICE_UNAVAILABLE, [&range, this](auto ctx) {
+        range = true;
+        _order->push_back("Range500-503");
+        ctx->response().body() = "Handled by 500-503 range.";
+    });
 
     run(std::make_shared<ErrorSignalerTask<Session>>("ErrorTrigger502", qb::http::status::BAD_GATEWAY, nullptr, _order));
 
@@ -450,8 +448,8 @@ TEST_F(ErrorHandlingMiddlewareTest, FirstChainEntryDeclinesSecondHandles) {
         ctx->response().body() = "Handled by MW2";
     });
 
-    run_with_error_chain(std::make_shared<ErrorSignalerTask<Session>>("ErrorTrigger500", qb::http::status::INTERNAL_SERVER_ERROR, nullptr, _order),
-                         {mw1, mw2});
+    run_with_error_chain(
+        std::make_shared<ErrorSignalerTask<Session>>("ErrorTrigger500", qb::http::status::INTERNAL_SERVER_ERROR, nullptr, _order), {mw1, mw2});
 
     EXPECT_TRUE(h1);
     EXPECT_FALSE(h2);

@@ -34,11 +34,11 @@
 
 #include "../../shared/http2_fake_io.h"
 
-using qb::http::test::Http2ClientFakeIO;
-using qb::http::test::Http2FakeIO;
 using qb::http::test::drive;
 using qb::http::test::encode_hpack_headers;
 using qb::http::test::find_frame_offset;
+using qb::http::test::Http2ClientFakeIO;
+using qb::http::test::Http2FakeIO;
 using qb::http::test::peek_frame_header;
 using qb::http::test::push_bytes;
 using qb::http::test::push_preface;
@@ -153,8 +153,8 @@ TEST(HTTP2ServerProtocol, PaddedDataFrameCountsPaddingAgainstFlowControl) {
     headers.header.type  = static_cast<uint8_t>(h2::FrameType::HEADERS);
     headers.header.flags = h2::FLAG_END_HEADERS;
     headers.header.set_stream_id(1);
-    headers.payload.header_block_fragment = encode_hpack_headers(
-        {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/padded"}});
+    headers.payload.header_block_fragment =
+        encode_hpack_headers({{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/padded"}});
     protocol.on(std::move(headers));
     ASSERT_TRUE(protocol.ok());
 
@@ -526,7 +526,7 @@ TEST(HTTP2ServerProtocol, ThrowingRequestHandlerEmitsRstStreamAndSurvives) {
     ASSERT_NE(rst_off, SIZE_MAX) << "no RST_STREAM emitted for the thrown handler";
     const auto rst_fh = peek_frame_header(io.output, rst_off);
     EXPECT_EQ(rst_fh.get_stream_id(), 1u);
-    const auto *p = reinterpret_cast<const uint8_t *>(io.output.cbegin() + rst_off + h2::FRAME_HEADER_SIZE);
+    const auto    *p   = reinterpret_cast<const uint8_t *>(io.output.cbegin() + rst_off + h2::FRAME_HEADER_SIZE);
     const uint32_t err = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) | (static_cast<uint32_t>(p[2]) << 8) | p[3];
     EXPECT_EQ(static_cast<h2::ErrorCode>(err), h2::ErrorCode::INTERNAL_ERROR);
     EXPECT_EQ(io.goaway_count, 0); // Connection survives; no GOAWAY.

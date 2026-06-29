@@ -260,8 +260,10 @@ TEST_F(WsCoroHandoff, NonWebSocketRequestToWsRouteIsNotUpgraded) {
     (void) sock.set_nonblocking(true);
 
     const std::string request = "GET /ws HTTP/1.1\r\n"
-                                "Host: localhost:" + std::to_string(port) + "\r\n"
-                                "\r\n";
+                                "Host: localhost:"
+                                + std::to_string(port)
+                                + "\r\n"
+                                  "\r\n";
     sock.write(request.data(), static_cast<int>(request.size()));
 
     // Read whatever the server is willing to send until it closes. A compliant

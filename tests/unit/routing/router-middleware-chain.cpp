@@ -260,17 +260,16 @@ final_handler(const std::string &id = "final_handler") {
 /** @brief Builds a single-task error chain that records `id` and finalizes with the given status/body. */
 std::vector<std::shared_ptr<qb::http::IAsyncTask<TraceSession>>>
 make_error_chain(const std::string &id, qb::http::status status, const std::string &body) {
-    return {std::make_shared<qb::http::MiddlewareTask<TraceSession>>(
-        std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
-            [id, status, body](auto ctx, auto /*next*/) {
-                if (ctx->session()) {
-                    ctx->session()->trace(id);
-                }
-                ctx->response().status() = status;
-                ctx->response().body()   = body;
-                ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
-            },
-            id))};
+    return {std::make_shared<qb::http::MiddlewareTask<TraceSession>>(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
+        [id, status, body](auto ctx, auto /*next*/) {
+            if (ctx->session()) {
+                ctx->session()->trace(id);
+            }
+            ctx->response().status() = status;
+            ctx->response().body()   = body;
+            ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
+        },
+        id))};
 }
 
 } // namespace
@@ -279,7 +278,7 @@ make_error_chain(const std::string &id, qb::http::status status, const std::stri
 
 class RouterMiddlewareChainTest : public ::testing::Test {
 protected:
-    std::shared_ptr<TraceSession> session;
+    std::shared_ptr<TraceSession>  session;
     qb::http::Router<TraceSession> router;
     TaskExecutor                   executor;
 
@@ -359,8 +358,7 @@ TEST_F(RouterMiddlewareChainTest, SyncMiddlewareErrorRoutesToErrorChain) {
     router.use(std::make_shared<ErrorTriggerMiddleware>("mw_err"));
     router.use(std::make_shared<SyncAppendingMiddleware>("mw3_never"));
     router.get("/test", final_handler("handler_never"));
-    router.set_error_task_chain(
-        make_error_chain("error_handler", qb::http::status::INTERNAL_SERVER_ERROR, "handled by error chain"));
+    router.set_error_task_chain(make_error_chain("error_handler", qb::http::status::INTERNAL_SERVER_ERROR, "handled by error chain"));
     router.compile();
 
     router.route(session, make_request(qb::http::method::GET, "/test"));
@@ -543,15 +541,15 @@ TEST_F(RouterMiddlewareChainTest, ErrorInCustomNotFoundHandlerIsFatal) {
 TEST_F(RouterMiddlewareChainTest, ErrorInUserErrorHandlerIsFatal) {
     router.use(std::make_shared<ErrorTriggerMiddleware>("trigger_initial_error"));
     router.set_error_task_chain(std::vector<std::shared_ptr<qb::http::IAsyncTask<TraceSession>>>{
-        std::make_shared<qb::http::MiddlewareTask<TraceSession>>(
-            std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
-                [](auto ctx, auto /*next*/) {
-                    if (ctx->session()) {
-                        ctx->session()->trace("faulty_error_handler");
-                    }
-                    ctx->complete(qb::http::AsyncTaskResult::ERROR); // error within the error chain
-                },
-                "faulty_error_handler"))});
+        std::make_shared<qb::http::MiddlewareTask<TraceSession>>(std::make_shared<qb::http::FunctionalMiddleware<TraceSession>>(
+            [](auto ctx, auto /*next*/) {
+                if (ctx->session()) {
+                    ctx->session()->trace("faulty_error_handler");
+                }
+                ctx->complete(qb::http::AsyncTaskResult::ERROR); // error within the error chain
+            },
+            "faulty_error_handler"))
+    });
     router.compile();
 
     router.route(session, make_request(qb::http::method::GET, "/test"));
@@ -588,8 +586,10 @@ TEST_F(RouterMiddlewareChainTest, ErrorInGlobalMiddlewareDuringNotFoundRoutesToE
 // --- Cancellation ---------------------------------------------------------------------------
 
 TEST_F(RouterMiddlewareChainTest, CancellationDuringSyncGlobalMiddleware) {
-    auto mw1 = std::make_shared<HookableSyncMiddleware>("mw1");
-    mw1->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel during mw1 handle"); };
+    auto mw1   = std::make_shared<HookableSyncMiddleware>("mw1");
+    mw1->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        ctx->cancel("cancel during mw1 handle");
+    };
     router.use(mw1);
     router.use(std::make_shared<SyncAppendingMiddleware>("mw2_never"));
     router.get("/test", final_handler("handler_never"));
@@ -630,9 +630,11 @@ TEST_F(RouterMiddlewareChainTest, CancellationDuringAsyncGlobalMiddlewareBeforeT
 }
 
 TEST_F(RouterMiddlewareChainTest, CancellationDuringSyncGroupMiddleware) {
-    auto group    = router.group("/group");
-    auto group_mw = std::make_shared<HookableSyncMiddleware>("group_mw");
-    group_mw->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel during group_mw"); };
+    auto group      = router.group("/group");
+    auto group_mw   = std::make_shared<HookableSyncMiddleware>("group_mw");
+    group_mw->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        ctx->cancel("cancel during group_mw");
+    };
     group->use(group_mw);
     group->use(std::make_shared<SyncAppendingMiddleware>("group_mw2_never"));
     group->get("/test", final_handler("handler_never"));
@@ -681,8 +683,10 @@ TEST_F(RouterMiddlewareChainTest, CancellationDuringAsyncTaskBody) {
 }
 
 TEST_F(RouterMiddlewareChainTest, CancellationDuringGlobalMiddlewareInNotFoundChain) {
-    auto global_mw = std::make_shared<HookableSyncMiddleware>("global_mw_404");
-    global_mw->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel in 404 chain"); };
+    auto global_mw   = std::make_shared<HookableSyncMiddleware>("global_mw_404");
+    global_mw->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        ctx->cancel("cancel in 404 chain");
+    };
     router.use(global_mw);
     router.compile();
 
@@ -853,8 +857,7 @@ TEST_F(RouterMiddlewareChainTest, FunctionalMiddlewareNextIsOneShotEvenWhenCalle
 
     drain();
 
-    EXPECT_EQ(session->trace(),
-              (Trace{"double_next_pre", "async_mw_handle", "double_next_post", "async_mw_task", "double_next_handler"}));
+    EXPECT_EQ(session->trace(), (Trace{"double_next_pre", "async_mw_handle", "double_next_post", "async_mw_task", "double_next_handler"}));
     EXPECT_TRUE(session->_final_handler_called);
     EXPECT_EQ(session->_response.status(), qb::http::status::OK);
 }
@@ -900,9 +903,10 @@ TEST_F(RouterMiddlewareChainTest, MiddlewareStateSharingViaRequestHeaders) {
 TEST_F(RouterMiddlewareChainTest, CancellationDuringErrorHandlingMiddleware) {
     router.use(std::make_shared<ErrorTriggerMiddleware>("error_trigger"));
 
-    auto cancellable_error_mw = std::make_shared<HookableSyncMiddleware>("cancellable_error_mw");
-    cancellable_error_mw->_hook =
-        [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) { ctx->cancel("cancel during error handling"); };
+    auto cancellable_error_mw   = std::make_shared<HookableSyncMiddleware>("cancellable_error_mw");
+    cancellable_error_mw->_hook = [](std::shared_ptr<qb::http::Context<TraceSession>> ctx) {
+        ctx->cancel("cancel during error handling");
+    };
     router.set_error_task_chain({std::make_shared<qb::http::MiddlewareTask<TraceSession>>(cancellable_error_mw)});
     router.compile();
 

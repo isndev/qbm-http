@@ -45,8 +45,8 @@
 #include <thread>
 #include <vector>
 
-#include "../../shared/ssl_test_resource.h"
 #include "../../shared/loopback_server.h"
+#include "../../shared/ssl_test_resource.h"
 
 using namespace std::chrono_literals;
 
@@ -101,8 +101,8 @@ protected:
     void
     SetUp() override {
         ASSERT_TRUE(qb::http::test::certs_available())
-            << "HTTP/3 system tests require the test TLS certificate pair; resolved cert="
-            << qb::http::test::ssl_cert_path() << " key=" << qb::http::test::ssl_key_path();
+            << "HTTP/3 system tests require the test TLS certificate pair; resolved cert=" << qb::http::test::ssl_cert_path()
+            << " key=" << qb::http::test::ssl_key_path();
         qb::io::async::init();
     }
 
@@ -161,8 +161,8 @@ constexpr auto kStallTimeout = 250ms;
 // ---------------------------------------------------------------------------
 
 TEST_F(Http3LoopbackTest, SimpleGetRequest) {
-    const auto port   = next_port();
-    auto       server = qb::http3::make_server();
+    const auto       port   = next_port();
+    auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/ping", [&server_requests](auto ctx) {
         ++server_requests;
@@ -393,7 +393,7 @@ TEST_F(Http3LoopbackTest, LargePostBody) {
 }
 
 TEST_F(Http3LoopbackTest, LargeResponseBody) {
-    const auto  port   = next_port();
+    const auto  port = next_port();
     std::string payload(160 * 1024, 'r');
     auto        server = qb::http3::make_server();
     server->router().get("/large-response", [&payload](auto ctx) {
@@ -1652,8 +1652,8 @@ TEST_F(Http3LoopbackTest, GracefulShutdownClosesCurrentConnectionOnly) {
 }
 
 TEST_F(Http3LoopbackTest, GracefulShutdownWaitsForActiveAsyncContext) {
-    const auto                                                   port   = next_port();
-    auto                                                         server = qb::http3::make_server();
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
     std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
     server->router().get("/delayed", [&](auto ctx) { held_context = ctx; });
     server->router().compile();

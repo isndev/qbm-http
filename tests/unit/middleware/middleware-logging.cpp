@@ -122,8 +122,7 @@ protected:
 // --- Basic emission ----------------------------------------------------------
 
 TEST_F(LoggingMiddlewareTest, BasicRequestAndResponseLogging) {
-    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/log_test"),
-                     "/log_test");
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/log_test"), "/log_test");
 
     ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Info);
@@ -134,9 +133,8 @@ TEST_F(LoggingMiddlewareTest, BasicRequestAndResponseLogging) {
 }
 
 TEST_F(LoggingMiddlewareTest, CustomLogLevels) {
-    run_single_route(
-        qb::http::logging_middleware<LoggingSession>(_logger, qb::http::LogLevel::Debug, qb::http::LogLevel::Warning),
-        create_request(qb::http::method::GET, "/log_test"), "/log_test", qb::http::status::NOT_FOUND);
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger, qb::http::LogLevel::Debug, qb::http::LogLevel::Warning),
+                     create_request(qb::http::method::GET, "/log_test"), "/log_test", qb::http::status::NOT_FOUND);
 
     ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_EQ(_session->_log_entries[0].first, qb::http::LogLevel::Debug);
@@ -145,15 +143,14 @@ TEST_F(LoggingMiddlewareTest, CustomLogLevels) {
 }
 
 TEST_F(LoggingMiddlewareTest, DifferentHttpMethodsLogged) {
-    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::POST, "/log_test"),
-                     "/log_test");
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::POST, "/log_test"), "/log_test");
     ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_NE(_session->_log_entries[0].second.find("Request: POST /log_test"), std::string::npos);
 }
 
 TEST_F(LoggingMiddlewareTest, ErrorResponseLogged) {
-    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/log_test"),
-                     "/log_test", qb::http::status::INTERNAL_SERVER_ERROR);
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/log_test"), "/log_test",
+                     qb::http::status::INTERNAL_SERVER_ERROR);
     ASSERT_EQ(_session->_log_entries.size(), 2u);
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 500"), std::string::npos);
 }
@@ -206,8 +203,7 @@ TEST_F(LoggingMiddlewareTest, RootPathLogged) {
 TEST_F(LoggingMiddlewareTest, TrailingSlashPreservedVerbatim) {
     // qb::io::uri::path() returns the path component unmodified, so format_request_info()
     // logs the trailing slash exactly as supplied — deterministic, not normalization-dependent.
-    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger),
-                     create_request(qb::http::method::GET, "/trailing/"), "/trailing/");
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/trailing/"), "/trailing/");
     ASSERT_EQ(_session->_log_entries.size(), 2u);
     const std::string &with_slash = _session->_log_entries[0].second;
     EXPECT_NE(with_slash.find("Request: GET /trailing/"), std::string::npos);
@@ -215,8 +211,7 @@ TEST_F(LoggingMiddlewareTest, TrailingSlashPreservedVerbatim) {
     EXPECT_EQ(with_slash.find("Request: GET /trailing "), std::string::npos);
     EXPECT_EQ(with_slash.find("Request: GET /trailing\n"), std::string::npos);
 
-    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger),
-                     create_request(qb::http::method::GET, "/trailing"), "/trailing");
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/trailing"), "/trailing");
     ASSERT_EQ(_session->_log_entries.size(), 2u);
     const std::string &no_slash = _session->_log_entries[0].second;
     EXPECT_NE(no_slash.find("Request: GET /trailing"), std::string::npos);
@@ -228,8 +223,8 @@ TEST_F(LoggingMiddlewareTest, TrailingSlashPreservedVerbatim) {
 TEST_F(LoggingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
     auto mw  = qb::http::logging_middleware<LoggingSession>(_logger);
     auto ctx = std::make_shared<qb::http::Context<LoggingSession>>(
-        create_request(qb::http::method::GET, "/log_test"), qb::http::Response{}, _session,
-        [](qb::http::Context<LoggingSession> &) {}, std::weak_ptr<qb::http::RouterCore<LoggingSession>>{});
+        create_request(qb::http::method::GET, "/log_test"), qb::http::Response{}, _session, [](qb::http::Context<LoggingSession> &) {},
+        std::weak_ptr<qb::http::RouterCore<LoggingSession>>{});
 
     mw->process(ctx);
     mw.reset(); // destroy middleware; the response-log hook closure must survive
@@ -257,9 +252,9 @@ TEST_F(LoggingMiddlewareTest, MiddlewareNameIsCorrect) {
     EXPECT_EQ(custom_ctor.name(), "MyCustomLogger");
 
     EXPECT_EQ(qb::http::logging_middleware<LoggingSession>(_logger)->name(), "LoggingMiddleware");
-    EXPECT_EQ(qb::http::logging_middleware<LoggingSession>(_logger, qb::http::LogLevel::Info, qb::http::LogLevel::Info, "MyFactoryLogger")
-                  ->name(),
-              "MyFactoryLogger");
+    EXPECT_EQ(
+        qb::http::logging_middleware<LoggingSession>(_logger, qb::http::LogLevel::Info, qb::http::LogLevel::Info, "MyFactoryLogger")->name(),
+        "MyFactoryLogger");
 }
 
 // --- Multi-middleware ordering ----------------------------------------------

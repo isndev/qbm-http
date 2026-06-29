@@ -566,7 +566,6 @@ TEST_F(BodyTest, SelfAssignment) {
     Body &body_ref = body2;
     body2          = body_ref; // Test self-assignment (copy) via reference
     EXPECT_EQ("other data", body2.as<std::string>());
-
 }
 
 // Self-move assignment must leave the Body in a valid state (no crash, no UAF):

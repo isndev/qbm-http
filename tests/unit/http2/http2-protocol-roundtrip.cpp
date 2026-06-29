@@ -75,47 +75,62 @@ struct RichClientIO {
     qb::allocator::pipe<char> input;
     qb::allocator::pipe<char> output;
 
-    int           response_count     = 0;
-    int           stream_error_count = 0;
-    int           goaway_count       = 0;
-    int           push_promise_count = 0;
-    ErrorCode     last_stream_error  = ErrorCode::NO_ERROR;
-    ErrorCode     last_goaway_error  = ErrorCode::NO_ERROR;
-    uint32_t      last_goaway_last_stream_id = 0;
+    int       response_count             = 0;
+    int       stream_error_count         = 0;
+    int       goaway_count               = 0;
+    int       push_promise_count         = 0;
+    ErrorCode last_stream_error          = ErrorCode::NO_ERROR;
+    ErrorCode last_goaway_error          = ErrorCode::NO_ERROR;
+    uint32_t  last_goaway_last_stream_id = 0;
 
     // Per-app-id captured responses, so concurrent streams stay distinguishable.
     std::vector<std::pair<uint64_t, qb::http::Response>> responses;
 
-    qb::allocator::pipe<char> &in() noexcept { return input; }
-    qb::allocator::pipe<char> &out() noexcept { return output; }
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    qb::allocator::pipe<char> &
+    out() noexcept {
+        return output;
+    }
 
     template <typename Frame>
-    RichClientIO &operator<<(const Frame &frame) {
+    RichClientIO &
+    operator<<(const Frame &frame) {
         output.put(frame);
         return *this;
     }
 
-    void on(qb::http::Response &&response, uint64_t app_id) {
+    void
+    on(qb::http::Response &&response, uint64_t app_id) {
         ++response_count;
         responses.emplace_back(app_id, std::move(response));
     }
-    void on(qb::http::Response &&response, uint64_t app_id, ErrorCode /*ec*/) {
+    void
+    on(qb::http::Response &&response, uint64_t app_id, ErrorCode /*ec*/) {
         ++response_count;
         responses.emplace_back(app_id, std::move(response));
     }
-    void on(const h2::Http2StreamErrorEvent &event) {
+    void
+    on(const h2::Http2StreamErrorEvent &event) {
         ++stream_error_count;
         last_stream_error = event.error_code;
     }
-    void on(const h2::Http2GoAwayEvent &event) {
+    void
+    on(const h2::Http2GoAwayEvent &event) {
         ++goaway_count;
         last_goaway_error          = event.error_code;
         last_goaway_last_stream_id = event.last_stream_id;
     }
-    void on(const h2::Http2PushPromiseEvent & /*event*/) { ++push_promise_count; }
+    void
+    on(const h2::Http2PushPromiseEvent & /*event*/) {
+        ++push_promise_count;
+    }
 
     // Find the captured response for a given application id.
-    [[nodiscard]] const qb::http::Response *find(uint64_t app_id) const {
+    [[nodiscard]] const qb::http::Response *
+    find(uint64_t app_id) const {
         for (const auto &pr : responses) {
             if (pr.first == app_id) {
                 return &pr.second;
@@ -474,7 +489,7 @@ TEST(HTTP2RoundTrip, LargeResponseDrivesClientConnectionAndStreamWindowUpdates) 
     // 50 KiB body: larger than half the default 65535 connection receive window,
     // so the client must emit connection-level WINDOW_UPDATE(s) as it drains it,
     // and a stream-level one when the stream completes.
-    const std::string big_body(50u * 1024u, 'q');
+    const std::string  big_body(50u * 1024u, 'q');
     qb::http::Response response;
     response.status() = qb::http::status::OK;
     response.body()   = big_body;

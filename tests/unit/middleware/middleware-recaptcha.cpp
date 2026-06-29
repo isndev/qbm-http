@@ -258,7 +258,7 @@ TEST_F(RecaptchaMiddlewareTest, AutoModeAcceptsScorelessSuccess) {
 
 TEST_F(RecaptchaMiddlewareTest, AutoModeEnforcesScoreThresholdWhenScorePresent) {
     // Auto mode: when Google DOES return a score, the threshold is enforced.
-    bool verifier_called = false;
+    bool                       verifier_called = false;
     qb::http::RecaptchaOptions opts("fake_secret_auto_score");
     opts.min_score(0.7f); // default challenge_type is Auto
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
@@ -274,8 +274,8 @@ TEST_F(RecaptchaMiddlewareTest, AutoModeEnforcesScoreThresholdWhenScorePresent) 
 
 TEST_F(RecaptchaMiddlewareTest, V2ModeIgnoresScoreThreshold) {
     // Explicit V2 ignores the score even when present and below the configured min.
-    bool verifier_called = false;
-    qb::http::RecaptchaOptions opts = qb::http::RecaptchaOptions::v2("fake_secret_v2");
+    bool                       verifier_called = false;
+    qb::http::RecaptchaOptions opts            = qb::http::RecaptchaOptions::v2("fake_secret_v2");
     opts.min_score(0.9f);
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);
     recap_mw->verification_client(ok_verifier(R"({"success":true,"score":0.1})", &verifier_called));
@@ -289,8 +289,7 @@ TEST_F(RecaptchaMiddlewareTest, V2ModeIgnoresScoreThreshold) {
 
 TEST_F(RecaptchaMiddlewareTest, ExplicitV3RejectsScorelessSuccess) {
     bool verifier_called = false;
-    auto recap_mw =
-        qb::http::recaptcha_middleware<MockRecaptchaSession>(qb::http::RecaptchaOptions::v3("fake_secret_for_mocked_scoreless_v3"));
+    auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(qb::http::RecaptchaOptions::v3("fake_secret_for_mocked_scoreless_v3"));
     recap_mw->verification_client(ok_verifier(R"({"success":true,"hostname":"test.com"})", &verifier_called));
 
     run_recaptcha(recap_mw, recaptcha_request("scoreless_mocked_v3_token"));
@@ -315,7 +314,7 @@ TEST_F(RecaptchaMiddlewareTest, V3AcceptsScoreExactlyAtThreshold) {
 }
 
 TEST_F(RecaptchaMiddlewareTest, TokenScoreTooLowRejectsWithInjectedVerifier) {
-    bool verifier_called = false;
+    bool                       verifier_called = false;
     qb::http::RecaptchaOptions opts("fake_secret_for_mocked_low_score");
     opts.min_score(0.7f).challenge_type(qb::http::RecaptchaOptions::ChallengeType::V3);
     auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(opts);

@@ -293,7 +293,7 @@ extract_close_code(const std::string &frame_bytes) {
         }
         payload_len = (static_cast<std::size_t>(static_cast<std::uint8_t>(frame_bytes[2])) << 8u)
                       | static_cast<std::size_t>(static_cast<std::uint8_t>(frame_bytes[3]));
-        header_len = 4u;
+        header_len  = 4u;
     } else if (payload_len == 127u) {
         return std::nullopt; // unexpected for Close in these tests
     }

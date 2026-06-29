@@ -37,8 +37,8 @@
 #include <qb/io/crypto.h> // qb::crypto::generate_{rsa,ec,ed25519}_keypair
 #include <qb/json.h>      // qb::json
 
-#include "../auth.h"                       // qb::http::auth::{Manager, Options, User}
 #include "../../shared/auth_test_helpers.h" // forge_token, forge_token_raw_payload, now_epoch, hmac_options, make_user
+#include "../auth.h"                        // qb::http::auth::{Manager, Options, User}
 
 namespace {
 
@@ -234,7 +234,7 @@ TEST(AuthManagerRoundTrip, MalformedRolesClaimDegradesToEmpty) {
 
     qb::json payload;
     payload["sub"]    = "user-x";
-    payload["roles"]  = "this is not valid json {"; // a string that fails json::parse
+    payload["roles"]  = "this is not valid json {";           // a string that fails json::parse
     std::string token = qb::http::test::forge_token(payload); // signed with the default secret
 
     auto out = mgr.verify_token(token);

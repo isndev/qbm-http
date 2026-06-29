@@ -26,8 +26,8 @@
 #include <utility>
 #include <vector>
 
-#include "../http.h"
 #include "../../shared/mock_session.h"
+#include "../http.h"
 
 using qb::http::test::create_request;
 using qb::http::test::MockSession;
@@ -39,11 +39,11 @@ namespace {
 // --------------------------------------------------------------------------
 
 struct VerbCase {
-    qb::http::method method;       ///< Verb to register and request.
-    const char      *verb_name;    ///< Human label for the test name.
-    qb::http::status status;       ///< Status the handler returns.
-    const char      *body;         ///< Body the handler returns (empty for body-less verbs).
-    bool             expect_body;  ///< Whether the response is expected to carry a body.
+    qb::http::method method;      ///< Verb to register and request.
+    const char      *verb_name;   ///< Human label for the test name.
+    qb::http::status status;      ///< Status the handler returns.
+    const char      *body;        ///< Body the handler returns (empty for body-less verbs).
+    bool             expect_body; ///< Whether the response is expected to carry a body.
 };
 
 class RoutingVerbDispatchTest : public ::testing::TestWithParam<VerbCase> {
@@ -64,14 +64,30 @@ TEST_P(RoutingVerbDispatchTest, DispatchesToRegisteredVerbHandler) {
     };
 
     switch (static_cast<qb::http::method::Value>(tc.method)) {
-        case qb::http::method::GET: router.get("/resource", handler); break;
-        case qb::http::method::POST: router.post("/resource", handler); break;
-        case qb::http::method::PUT: router.put("/resource", handler); break;
-        case qb::http::method::DEL: router.del("/resource", handler); break;
-        case qb::http::method::PATCH: router.patch("/resource", handler); break;
-        case qb::http::method::OPTIONS: router.options("/resource", handler); break;
-        case qb::http::method::HEAD: router.head("/resource", handler); break;
-        default: FAIL() << "unhandled verb in test table"; return;
+        case qb::http::method::GET:
+            router.get("/resource", handler);
+            break;
+        case qb::http::method::POST:
+            router.post("/resource", handler);
+            break;
+        case qb::http::method::PUT:
+            router.put("/resource", handler);
+            break;
+        case qb::http::method::DEL:
+            router.del("/resource", handler);
+            break;
+        case qb::http::method::PATCH:
+            router.patch("/resource", handler);
+            break;
+        case qb::http::method::OPTIONS:
+            router.options("/resource", handler);
+            break;
+        case qb::http::method::HEAD:
+            router.head("/resource", handler);
+            break;
+        default:
+            FAIL() << "unhandled verb in test table";
+            return;
     }
 
     router.compile();
@@ -86,16 +102,15 @@ TEST_P(RoutingVerbDispatchTest, DispatchesToRegisteredVerbHandler) {
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    AllVerbs, RoutingVerbDispatchTest,
-    ::testing::Values(VerbCase{qb::http::method::GET, "GET", qb::http::status::OK, "got", true},
-                      VerbCase{qb::http::method::POST, "POST", qb::http::status::CREATED, "created", true},
-                      VerbCase{qb::http::method::PUT, "PUT", qb::http::status::OK, "updated", true},
-                      VerbCase{qb::http::method::DEL, "DELETE", qb::http::status::NO_CONTENT, "", false},
-                      VerbCase{qb::http::method::PATCH, "PATCH", qb::http::status::OK, "patched", true},
-                      VerbCase{qb::http::method::OPTIONS, "OPTIONS", qb::http::status::OK, "opts", true},
-                      VerbCase{qb::http::method::HEAD, "HEAD", qb::http::status::OK, "", false}),
-    [](const ::testing::TestParamInfo<VerbCase> &info) { return info.param.verb_name; });
+INSTANTIATE_TEST_SUITE_P(AllVerbs, RoutingVerbDispatchTest,
+                         ::testing::Values(VerbCase{qb::http::method::GET, "GET", qb::http::status::OK, "got", true},
+                                           VerbCase{qb::http::method::POST, "POST", qb::http::status::CREATED, "created", true},
+                                           VerbCase{qb::http::method::PUT, "PUT", qb::http::status::OK, "updated", true},
+                                           VerbCase{qb::http::method::DEL, "DELETE", qb::http::status::NO_CONTENT, "", false},
+                                           VerbCase{qb::http::method::PATCH, "PATCH", qb::http::status::OK, "patched", true},
+                                           VerbCase{qb::http::method::OPTIONS, "OPTIONS", qb::http::status::OK, "opts", true},
+                                           VerbCase{qb::http::method::HEAD, "HEAD", qb::http::status::OK, "", false}),
+                         [](const ::testing::TestParamInfo<VerbCase> &info) { return info.param.verb_name; });
 
 // --------------------------------------------------------------------------
 // Standalone method behaviours
@@ -197,7 +212,7 @@ TEST_F(RoutingMethodsTest, DistinctVerbsOnSamePathAreIndependent) {
 TEST_F(RoutingMethodsTest, UnregisteredMethodOnKnownPathYields405WithAllow) {
     bool handler_ran = false;
     router.get("/only-get", [&handler_ran](auto ctx) {
-        handler_ran            = true;
+        handler_ran              = true;
         ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     });

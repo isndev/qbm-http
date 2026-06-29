@@ -64,11 +64,12 @@ find_ssl_test_resource(const char *file_name) {
     namespace fs = std::filesystem;
 
     // .../qbm/http/tests/shared/<this header>  ->  workspace (qb-dev) root.
-    const fs::path repo_root = fs::path(__FILE__).parent_path() // shared/
-                                   .parent_path()               // tests/
-                                   .parent_path()               // http/
-                                   .parent_path()               // qbm/
-                                   .parent_path();              // qb-dev/ (workspace root)
+    const fs::path repo_root = fs::path(__FILE__)
+                                   .parent_path()  // shared/
+                                   .parent_path()  // tests/
+                                   .parent_path()  // http/
+                                   .parent_path()  // qbm/
+                                   .parent_path(); // qb-dev/ (workspace root)
 
     const fs::path cwd = fs::current_path();
 

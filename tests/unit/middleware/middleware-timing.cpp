@@ -35,10 +35,10 @@ using namespace std::chrono_literals;
 
 namespace {
 
-using TimingMW    = qb::http::TimingMiddleware<qb::http::test::MockMiddlewareSession>;
-using SessionT    = qb::http::test::MockMiddlewareSession;
-using TimePoint   = TimingMW::Clock::time_point;
-using Ctx         = qb::http::Context<SessionT>;
+using TimingMW  = qb::http::TimingMiddleware<qb::http::test::MockMiddlewareSession>;
+using SessionT  = qb::http::test::MockMiddlewareSession;
+using TimePoint = TimingMW::Clock::time_point;
+using Ctx       = qb::http::Context<SessionT>;
 
 /** @brief Parses an `X-Response-Time` header value of the form "<double>ms" into milliseconds. */
 std::optional<double>
@@ -57,20 +57,23 @@ parse_response_time_ms(const std::string &header_value) {
 class TimingMiddlewareTest : public qb::http::test::MiddlewareTestFixture<SessionT> {
 protected:
     std::optional<std::chrono::milliseconds> _last_duration;
-    TimingMW::TimingCallback                  _record_cb;
+    TimingMW::TimingCallback                 _record_cb;
 
     void
     SetUp() override {
         MiddlewareTestFixture<SessionT>::SetUp();
         _last_duration.reset();
-        _record_cb = [this](const std::chrono::milliseconds &d) { _last_duration = d; };
+        _record_cb = [this](const std::chrono::milliseconds &d) {
+            _last_duration = d;
+        };
     }
 
     /** @brief Builds a standalone Context (no router) suitable for direct hook driving. */
     std::shared_ptr<Ctx>
     make_ctx() {
-        return std::make_shared<Ctx>(create_request(qb::http::method::GET, "/timed"), qb::http::Response{}, _session,
-                                     [](Ctx &) {}, std::weak_ptr<qb::http::RouterCore<SessionT>>{});
+        return std::make_shared<Ctx>(
+            create_request(qb::http::method::GET, "/timed"), qb::http::Response{}, _session, [](Ctx &) {},
+            std::weak_ptr<qb::http::RouterCore<SessionT>>{});
     }
 };
 
@@ -144,8 +147,8 @@ TEST_F(TimingMiddlewareTest, ResponseHookSurvivesMiddlewareDestruction) {
 
 TEST_F(TimingMiddlewareTest, CallbackIsInvokedThroughRouter) {
     bool callback_invoked = false;
-    auto mw               = qb::http::timing_middleware<SessionT>(
-        [&callback_invoked](const std::chrono::milliseconds &) { callback_invoked = true; }, "RouterTimer");
+    auto mw = qb::http::timing_middleware<SessionT>([&callback_invoked](const std::chrono::milliseconds &) { callback_invoked = true; },
+                                                    "RouterTimer");
 
     configure_router_and_run(mw, create_request(qb::http::method::GET, "/mw_test"), qb::http::status::OK, "/mw_test");
 

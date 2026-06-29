@@ -25,8 +25,8 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
-#include <gtest/gtest.h>
 #include <cstddef>
+#include <gtest/gtest.h>
 #include <string>
 
 #include <qb/json.h>

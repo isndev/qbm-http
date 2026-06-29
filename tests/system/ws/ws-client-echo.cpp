@@ -202,8 +202,7 @@ TEST(WsClientEcho, CrtpClientEchoesContent) {
     ASSERT_EQ(qb::io::SocketStatus::Done, client.transport().connect_v4("127.0.0.1", port));
     client.start();
     client.send_handshake();
-    ASSERT_TRUE(pump_until([&] { return client.connected.load(); }))
-        << "CRTP client never upgraded";
+    ASSERT_TRUE(pump_until([&] { return client.connected.load(); })) << "CRTP client never upgraded";
 
     for (const auto &m : sent) {
         client.send_text(m);
@@ -236,18 +235,15 @@ TEST(WsClientEcho, CallbackClientEchoesContent) {
     std::vector<std::string> echoed;
 
     qb::http::ws::client ws_client;
-    ws_client
-        .on_connected([&](auto &) { ++connected_calls; })
-        .on_message([&](auto &event) {
-            echoed.emplace_back(event.data, event.size);
-            ++received;
-        });
+    ws_client.on_connected([&](auto &) { ++connected_calls; }).on_message([&](auto &event) {
+        echoed.emplace_back(event.data, event.size);
+        ++received;
+    });
 
     qb::io::uri uri("ws://localhost:" + std::to_string(port) + "/");
     ws_client.connect(uri);
 
-    ASSERT_TRUE(pump_until([&] { return connected_calls.load() >= 1; }))
-        << "callback client never connected";
+    ASSERT_TRUE(pump_until([&] { return connected_calls.load() >= 1; })) << "callback client never connected";
 
     for (const auto &m : sent) {
         qb::http::ws::MessageText msg;
@@ -255,8 +251,7 @@ TEST(WsClientEcho, CallbackClientEchoesContent) {
         ws_client << msg;
     }
 
-    ASSERT_TRUE(pump_until([&] { return received.load() == kCount; }))
-        << "expected " << kCount << " echoes, got " << received.load();
+    ASSERT_TRUE(pump_until([&] { return received.load() == kCount; })) << "expected " << kCount << " echoes, got " << received.load();
 
     EXPECT_EQ(connected_calls.load(), 1u) << "on_connected must fire exactly once";
     EXPECT_EQ(received.load(), kCount);
@@ -357,16 +352,15 @@ public:
 };
 
 TEST(WsClientEcho, TlsHandshakeUpgrades) {
-    ASSERT_TRUE(qb::http::test::certs_available())
-        << "TLS test certificate/key not found; secure WS coverage cannot run";
+    ASSERT_TRUE(qb::http::test::certs_available()) << "TLS test certificate/key not found; secure WS coverage cannot run";
 
     const int port = ephemeral_port();
 
     // The TLS server is configured on its own worker thread before it listens.
     WsServerThread<SecureEchoServer> server{port, [](SecureEchoServer &s) {
-        s.transport().init(qb::io::ssl::create_server_context(
-            TLS_server_method(), qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()));
-    }};
+                                                s.transport().init(qb::io::ssl::create_server_context(
+                                                    TLS_server_method(), qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()));
+                                            }};
 
     SecureEchoClient client{port};
     // Self-signed test certificate: opt out of qb-io's secure-by-default peer
@@ -376,10 +370,8 @@ TEST(WsClientEcho, TlsHandshakeUpgrades) {
     client.start();
     client.send_handshake();
 
-    ASSERT_TRUE(pump_until([&] { return client.connected.load(); }))
-        << "secure WebSocket upgrade failed";
-    ASSERT_TRUE(pump_until([&] { return client.echoed_ok.load(); }))
-        << "secure echo frame did not round-trip";
+    ASSERT_TRUE(pump_until([&] { return client.connected.load(); })) << "secure WebSocket upgrade failed";
+    ASSERT_TRUE(pump_until([&] { return client.echoed_ok.load(); })) << "secure echo frame did not round-trip";
 
     EXPECT_TRUE(client.connected.load());
     EXPECT_TRUE(client.echoed_ok.load());

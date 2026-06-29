@@ -64,7 +64,7 @@ protected:
     std::unique_ptr<qb::http::Router<MockMiddlewareSession>> _router;
     std::filesystem::path                                    _test_root_dir;
     std::filesystem::path                                    _outside_file_path;
-    std::filesystem::path                                    _outside_root_file_path; ///< `<temp>/outside_root.txt`, the real escape target of the traversal tests.
+    std::filesystem::path _outside_root_file_path; ///< `<temp>/outside_root.txt`, the real escape target of the traversal tests.
 
     /// @brief Sentinel body that NO traversal test may ever serve (escape == bug).
     static constexpr const char *kOutsideRootSecret = "SECRET_OUTSIDE_ROOT_CONTENT";
@@ -87,7 +87,7 @@ protected:
         _session = std::make_shared<MockMiddlewareSession>();
 
         std::error_code ec;
-        _test_root_dir     = std::filesystem::temp_directory_path(ec) / "static_files_mw_tests";
+        _test_root_dir = std::filesystem::temp_directory_path(ec) / "static_files_mw_tests";
         ASSERT_FALSE(ec) << "Failed to get temp directory path: " << ec.message();
         _outside_file_path = std::filesystem::temp_directory_path(ec) / "static_files_mw_tests_OUTSIDE_FILE.txt";
         ASSERT_FALSE(ec) << "Failed to get temp directory path for outside file: " << ec.message();
@@ -205,8 +205,7 @@ protected:
     void
     expect_traversal_denied() {
         const auto st = _session->_response.status();
-        EXPECT_TRUE(st == qb::http::status::FORBIDDEN || st == qb::http::status::NOT_FOUND)
-            << "Status was: " << st;
+        EXPECT_TRUE(st == qb::http::status::FORBIDDEN || st == qb::http::status::NOT_FOUND) << "Status was: " << st;
         if (st == qb::http::status::FORBIDDEN) {
             EXPECT_EQ(_session->_response.body().as<std::string>(), "Forbidden");
         }
@@ -496,9 +495,8 @@ TEST_F(StaticFilesMiddlewareTest, MatchingETagWinsWhenBothValidatorsPresent) {
 
     // Pair a MATCHING ETag with a deliberately ancient If-Modified-Since (which on
     // its own would force a 200) — the matching ETag must still yield 304.
-    configure_router_and_run(
-        sf_mw, create_request(qb::http::method::GET, "/file1.txt",
-                              {{"If-None-Match", etag}, {"If-Modified-Since", "Sat, 01 Jan 2000 00:00:00 GMT"}}));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt",
+                                                   {{"If-None-Match", etag}, {"If-Modified-Since", "Sat, 01 Jan 2000 00:00:00 GMT"}}));
     EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
     EXPECT_TRUE(_session->_response.body().empty());
 }
@@ -529,9 +527,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestSuffix) {
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::PARTIAL_CONTENT);
     EXPECT_EQ(_session->_response.body().as<std::string>(), file_content.substr(file_content.length() - 4, 4));
-    EXPECT_EQ(std::string(_session->_response.header("Content-Range")),
-              "bytes " + std::to_string(file_content.length() - 4) + "-" + std::to_string(file_content.length() - 1) + "/"
-                  + std::to_string(file_content.length()));
+    EXPECT_EQ(std::string(_session->_response.header("Content-Range")), "bytes " + std::to_string(file_content.length() - 4) + "-"
+                                                                            + std::to_string(file_content.length() - 1) + "/"
+                                                                            + std::to_string(file_content.length()));
     EXPECT_EQ(std::string(_session->_response.header("Content-Length")), "4");
     EXPECT_FALSE(_session->_final_handler_called);
 }
@@ -567,7 +565,9 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestUnsatisfiableYields416) {
 // Malformed Range header variants all map to a single 416 outcome at the HTTP
 // seam. The single-range parse rules themselves are pinned white-box in
 // unit/http1/range-parser.cpp; here we only assert the integration outcome.
-class StaticFilesMalformedRangeTest : public StaticFilesMiddlewareTest, public ::testing::WithParamInterface<std::string> {};
+class StaticFilesMalformedRangeTest
+    : public StaticFilesMiddlewareTest
+    , public ::testing::WithParamInterface<std::string> {};
 
 TEST_P(StaticFilesMalformedRangeTest, YieldsRangeNotSatisfiable) {
     qb::http::StaticFilesOptions options(_test_root_dir);
@@ -607,9 +607,8 @@ TEST_F(StaticFilesMiddlewareTest, IfRangeHeaderIsIgnoredAndRangeStillServed) {
     options.with_range_requests(true).with_etags(true);
     const std::string file_content = "Contents of file1.txt";
 
-    configure_router_and_run(make_mw(options),
-                             create_request(qb::http::method::GET, "/file1.txt",
-                                            {{"Range", "bytes=0-3"}, {"If-Range", "\"some-stale-etag\""}}));
+    configure_router_and_run(
+        make_mw(options), create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=0-3"}, {"If-Range", "\"some-stale-etag\""}}));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::PARTIAL_CONTENT);
     EXPECT_EQ(_session->_response.body().as<std::string>(), file_content.substr(0, 4));
@@ -864,8 +863,7 @@ TEST_F(StaticFilesMiddlewareTest, SecurityLongInBoundsPathYieldsNotFound) {
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, long_in_bounds));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_FOUND)
-        << "An in-bounds path naming no file must be 404, not a security code. Status was "
-        << _session->_response.status();
+        << "An in-bounds path naming no file must be 404, not a security code. Status was " << _session->_response.status();
     EXPECT_FALSE(_session->_final_handler_called);
 
     // Boundary companion: a single component OVER the per-component limit. The
@@ -879,8 +877,7 @@ TEST_F(StaticFilesMiddlewareTest, SecurityLongInBoundsPathYieldsNotFound) {
     // Pin the invariant (denied), not a POSIX-specific status.
     const std::string over_name_max(512, 'a');
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/" + over_name_max + ".txt"));
-    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN ||
-                _session->_response.status() == qb::http::status::NOT_FOUND)
+    EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND)
         << "An over-NAME_MAX component must be denied (403 where the FS rejects the name, "
            "404 where it lexically resolves to a missing file). Status was "
         << _session->_response.status();

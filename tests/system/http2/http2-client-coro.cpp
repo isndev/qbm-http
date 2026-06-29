@@ -117,15 +117,14 @@ protected:
     SetUp() override {
         // Hard prerequisite: secure system tests must not silently skip.
         ASSERT_TRUE(qb::http::test::certs_available())
-            << "Missing TLS test certificates (looked for "
-            << qb::http::test::ssl_cert_path() << " and " << qb::http::test::ssl_key_path()
+            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and " << qb::http::test::ssl_key_path()
             << "). The HTTP/2 coro system suite REQUIRES them.";
 
         qb::io::async::init();
         _port = qb::http::test::ephemeral_port();
 
-        const std::string cert = qb::http::test::ssl_cert_path().string();
-        const std::string key  = qb::http::test::ssl_key_path().string();
+        const std::string   cert = qb::http::test::ssl_cert_path().string();
+        const std::string   key  = qb::http::test::ssl_key_path().string();
         const std::uint16_t port = _port;
 
         _server = std::make_unique<ServerThread>([cert, key, port](CoroH2Server &srv) -> bool {

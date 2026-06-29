@@ -71,11 +71,11 @@ const std::string &
 make_tricky_multipart_wire() {
     static const std::string boundary       = "Boundary123";
     static const std::string tricky_payload = "alpha\r\n--Boundary123Xbeta\r\n--Boundary123Ygamma";
-    static const std::string wire           = "--" + boundary +
-        "\r\n"
-        "Content-Disposition: form-data; name=\"file\"\r\n"
-        "\r\n" +
-        tricky_payload + "\r\n--" + boundary + "--";
+    static const std::string wire           = "--" + boundary
+                                              + "\r\n"
+                                                "Content-Disposition: form-data; name=\"file\"\r\n"
+                                                "\r\n"
+                                              + tricky_payload + "\r\n--" + boundary + "--";
     return wire;
 }
 
@@ -113,7 +113,7 @@ BM_Body_FormEncode(benchmark::State &state) {
     std::int64_t bytes = 0;
     for (auto _ : state) {
         Body body;
-        body = form;
+        body                = form;
         std::string encoded = body.as<std::string>();
         bytes               = static_cast<std::int64_t>(encoded.size());
         benchmark::DoNotOptimize(encoded.data());
@@ -209,10 +209,10 @@ BM_Body_JsonRoundTrip(benchmark::State &state) {
     std::int64_t bytes = 0;
     for (auto _ : state) {
         Body body;
-        body                  = j;                         // serialize via pipe::put<json>
-        qb::json parsed = body.as<qb::json>();             // parse back
+        body            = j;                   // serialize via pipe::put<json>
+        qb::json parsed = body.as<qb::json>(); // parse back
         bytes           = static_cast<std::int64_t>(body.size());
-        benchmark::DoNotOptimize(parsed);                  // non-const lvalue (avoids deprecated const-ref overload)
+        benchmark::DoNotOptimize(parsed); // non-const lvalue (avoids deprecated const-ref overload)
     }
 
     state.SetBytesProcessed(state.iterations() * bytes);

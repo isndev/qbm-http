@@ -1,5 +1,5 @@
-#include <gtest/gtest.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include "../date.h" // qb::http::date::format_http_date (expiry ground-truth asserts)
 #include "../http.h"
 
@@ -1050,7 +1050,7 @@ TEST_F(CookieTest, ParseSetCookieNoSemicolonWholeHeaderIsPair) {
 // parse_set_cookie returns nullopt when the cookie-pair has no '=' or an empty
 // name (cookie.cpp:292-295).
 TEST_F(CookieTest, ParseSetCookieInvalidPairReturnsNullopt) {
-    EXPECT_FALSE(parse_set_cookie("novalue; Path=/").has_value());   // no '='
+    EXPECT_FALSE(parse_set_cookie("novalue; Path=/").has_value());    // no '='
     EXPECT_FALSE(parse_set_cookie("=emptyname; Path=/").has_value()); // eq_pos == 0
 }
 

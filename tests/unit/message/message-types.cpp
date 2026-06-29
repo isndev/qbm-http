@@ -86,7 +86,7 @@ TEST(MethodTest, ComparisonOperators) {
     Method g = Method::GET;
     EXPECT_TRUE(g == Method::GET);
     EXPECT_TRUE(g != Method::POST);
-    EXPECT_TRUE(g == HTTP_GET);   // against raw ::http_method
+    EXPECT_TRUE(g == HTTP_GET); // against raw ::http_method
     EXPECT_TRUE(g != HTTP_POST);
     EXPECT_EQ(g, Method(HTTP_GET));
 
@@ -167,10 +167,7 @@ TEST(RequestTest, DefaultStateIsUninitializedMethod) {
 
 TEST(RequestTest, FluentBuildersChain) {
     Request req;
-    req.with_method(Method::POST)
-        .with_uri(qb::io::uri("/api/items?page=2"))
-        .with_header("X-Trace", "abc")
-        .with_body(std::string("payload"));
+    req.with_method(Method::POST).with_uri(qb::io::uri("/api/items?page=2")).with_header("X-Trace", "abc").with_body(std::string("payload"));
 
     EXPECT_EQ(req.method(), Method::POST);
     EXPECT_EQ(req.uri().path(), "/api/items");

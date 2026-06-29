@@ -247,11 +247,11 @@ private:
 // the actual echoed content, not just a count, and require an exact match on
 // both the number and the bytes — no tolerance band.
 TEST(WsLifecycle, EchoPreservesContent) {
-    const int                    port = ephemeral_port();
-    WsServerThread<EchoServer>   server{port};
+    const int                  port = ephemeral_port();
+    WsServerThread<EchoServer> server{port};
 
-    constexpr std::size_t        kCount = 32;
-    std::vector<std::string>     sent;
+    constexpr std::size_t    kCount = 32;
+    std::vector<std::string> sent;
     sent.reserve(kCount);
     for (std::size_t i = 0; i < kCount; ++i) {
         sent.push_back("lifecycle-echo-#" + std::to_string(i) + "-payload");
@@ -262,8 +262,7 @@ TEST(WsLifecycle, EchoPreservesContent) {
     client.start();
     client.send_handshake();
 
-    ASSERT_TRUE(pump_until([&] { return client.connected.load(); }))
-        << "client never completed the WebSocket upgrade";
+    ASSERT_TRUE(pump_until([&] { return client.connected.load(); })) << "client never completed the WebSocket upgrade";
 
     for (const auto &m : sent) {
         client.send_text(m);
@@ -276,8 +275,7 @@ TEST(WsLifecycle, EchoPreservesContent) {
     EXPECT_EQ(client.echoed_texts, sent) << "echoed content must match sent content exactly";
 
     client.send_close(qb::http::ws::CloseStatus::Normal, "done");
-    EXPECT_TRUE(pump_until([&] { return client.disconnected.load(); }))
-        << "server did not tear down after Close";
+    EXPECT_TRUE(pump_until([&] { return client.disconnected.load(); })) << "server did not tear down after Close";
 }
 
 // A binary payload with embedded NULs and the full 0..255 byte range round-trips
@@ -300,8 +298,7 @@ TEST(WsLifecycle, BinaryRoundTripExact) {
 
     client.send_binary(payload);
 
-    ASSERT_TRUE(pump_until([&] { return client.binary_received.load() == 1u; }))
-        << "binary frame was not echoed back";
+    ASSERT_TRUE(pump_until([&] { return client.binary_received.load() == 1u; })) << "binary frame was not echoed back";
 
     EXPECT_EQ(client.binary_received.load(), 1u);
     EXPECT_EQ(client.text_received.load(), 0u) << "binary frame must not arrive as text";
@@ -355,8 +352,7 @@ TEST(WsLifecycle, GracefulCloseExchange) {
 
     client.send_close(qb::http::ws::CloseStatus::Normal, "client closing");
 
-    ASSERT_TRUE(pump_until([&] { return client.disconnected.load(); }))
-        << "graceful close did not result in a disconnect";
+    ASSERT_TRUE(pump_until([&] { return client.disconnected.load(); })) << "graceful close did not result in a disconnect";
 
     EXPECT_TRUE(client.disconnected.load());
     EXPECT_FALSE(client.connected.load());
@@ -378,17 +374,14 @@ TEST(WsLifecycle, RapidConnectDisconnect) {
         client.start();
         client.send_handshake();
 
-        ASSERT_TRUE(pump_until([&] { return client.connected.load(); }))
-            << "connection #" << i << " never upgraded";
+        ASSERT_TRUE(pump_until([&] { return client.connected.load(); })) << "connection #" << i << " never upgraded";
 
         // Round-trip one frame so the connection is provably live.
         client.send_text("ping-" + std::to_string(i));
-        ASSERT_TRUE(pump_until([&] { return client.text_received.load() == 1u; }))
-            << "connection #" << i << " did not echo";
+        ASSERT_TRUE(pump_until([&] { return client.text_received.load() == 1u; })) << "connection #" << i << " did not echo";
 
         client.send_close(qb::http::ws::CloseStatus::Normal, "next");
-        ASSERT_TRUE(pump_until([&] { return client.disconnected.load(); }))
-            << "connection #" << i << " did not tear down";
+        ASSERT_TRUE(pump_until([&] { return client.disconnected.load(); })) << "connection #" << i << " did not tear down";
     }
 
     // Every one of the kConnections handshakes upgraded and echoed: the server

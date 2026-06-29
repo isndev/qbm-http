@@ -89,8 +89,10 @@ open_post_stream(Server &protocol, Http2FakeIO &io, uint32_t stream_id, const ch
 [[nodiscard]] std::vector<uint8_t>
 rst_payload(h2::ErrorCode ec) {
     const uint32_t code = static_cast<uint32_t>(ec);
-    return {static_cast<uint8_t>((code >> 24) & 0xFF), static_cast<uint8_t>((code >> 16) & 0xFF),
-            static_cast<uint8_t>((code >> 8) & 0xFF), static_cast<uint8_t>(code & 0xFF)};
+    return {
+        static_cast<uint8_t>((code >> 24) & 0xFF), static_cast<uint8_t>((code >> 16) & 0xFF), static_cast<uint8_t>((code >> 8) & 0xFF),
+        static_cast<uint8_t>(code & 0xFF)
+    };
 }
 
 } // namespace

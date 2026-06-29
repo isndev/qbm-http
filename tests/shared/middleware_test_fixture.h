@@ -49,7 +49,7 @@ namespace qb::http::test {
  * handler ran (vs. being short-circuited by the middleware under test).
  */
 struct MockMiddlewareSession {
-    qb::http::Response _response;                                ///< Last captured response.
+    qb::http::Response _response;                                 ///< Last captured response.
     std::string        _session_id_str       = "mw_test_session"; ///< Human-readable id.
     bool               _final_handler_called = false;             ///< Set when the terminal handler ran.
 
@@ -164,8 +164,8 @@ protected:
      */
     template <typename MiddlewarePtr>
     void
-    configure_router_and_run(MiddlewarePtr middleware, qb::http::Request request,
-                             qb::http::status handler_status = qb::http::status::OK, const std::string &path = "/mw_test") {
+    configure_router_and_run(MiddlewarePtr middleware, qb::http::Request request, qb::http::status handler_status = qb::http::status::OK,
+                             const std::string &path = "/mw_test") {
         _router = std::make_unique<qb::http::Router<SessionType>>();
         _router->use(std::move(middleware));
         _router->get(path, basic_handler(handler_status));

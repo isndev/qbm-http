@@ -51,9 +51,8 @@ protected:
 // --------------------------------------------------------------------------
 
 TEST_F(ParameterTypesTest, StringPassesThroughVerbatim) {
-    qb::json out =
-        pv.validate_single("name", std::make_optional<std::string>("Hello World"), ParameterRuleSet("name").set_type(DataType::STRING),
-                           result, "query");
+    qb::json out = pv.validate_single("name", std::make_optional<std::string>("Hello World"),
+                                      ParameterRuleSet("name").set_type(DataType::STRING), result, "query");
     EXPECT_TRUE(result.success());
     ASSERT_TRUE(out.is_string());
     EXPECT_EQ(out.get<std::string>(), "Hello World");
@@ -94,9 +93,8 @@ TEST_F(ParameterTypesTest, BooleanFalseForms) {
 }
 
 TEST_F(ParameterTypesTest, BooleanInvalidRejected) {
-    qb::json out =
-        pv.validate_single("flag", std::make_optional<std::string>("maybe"), ParameterRuleSet("flag").set_type(DataType::BOOLEAN), result,
-                           "query");
+    qb::json out = pv.validate_single("flag", std::make_optional<std::string>("maybe"), ParameterRuleSet("flag").set_type(DataType::BOOLEAN),
+                                      result, "query");
     EXPECT_FALSE(result.success());
     EXPECT_TRUE(out.is_null());
     ASSERT_EQ(result.errors().size(), 1u);
@@ -203,8 +201,8 @@ TEST_F(ParameterTypesTest, AbsentOptionalNoDefaultIsSilentlySkipped) {
 
 // Absent + required + default present: the default is substituted and validated.
 TEST_F(ParameterTypesTest, AbsentRequiredWithDefaultUsesDefault) {
-    qb::json out = pv.validate_single(
-        "limit", std::nullopt, ParameterRuleSet("limit").set_required().set_type(DataType::INTEGER).set_default("25"), result, "query");
+    qb::json out = pv.validate_single("limit", std::nullopt,
+                                      ParameterRuleSet("limit").set_required().set_type(DataType::INTEGER).set_default("25"), result, "query");
     EXPECT_TRUE(result.success());
     ASSERT_TRUE(out.is_number_integer());
     EXPECT_EQ(out.get<long long>(), 25);
@@ -231,8 +229,8 @@ TEST_F(ParameterTypesTest, SilentlyFailingCustomParserGetsGenericError) {
         return nullptr;
     };
 
-    qb::json out = pv.validate_single("p", std::make_optional<std::string>("anything"),
-                                      ParameterRuleSet("p").set_custom_parser(silent_fail), result, "query");
+    qb::json out = pv.validate_single("p", std::make_optional<std::string>("anything"), ParameterRuleSet("p").set_custom_parser(silent_fail),
+                                      result, "query");
     EXPECT_FALSE(result.success());
     EXPECT_TRUE(out.is_null());
     ASSERT_EQ(result.errors().size(), 1u);

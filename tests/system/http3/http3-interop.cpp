@@ -39,8 +39,8 @@
 
 #include <qb/system/parse.h>
 
-#include "../../shared/ssl_test_resource.h"
 #include "../../shared/loopback_server.h"
+#include "../../shared/ssl_test_resource.h"
 
 #ifndef _WIN32
 #include <csignal>
@@ -228,9 +228,7 @@ TEST(Http3InteropTest, HomebrewCurlCanCallQbHttp3ServerWhenAvailable) {
                          + "\""
                            " --write-out \"%{http_code}\""
                            " "
-                         + https_origin(port) + "/interop"
-                         + " > \""
-                         + code_path
+                         + https_origin(port) + "/interop" + " > \"" + code_path
                          + "\""
                            " 2> \""
                          + err_path + "\"";
@@ -279,11 +277,7 @@ TEST(Http3InteropTest, ConfiguredNghttp3ClientCanCallQbHttp3Server) {
     const auto out_path = base.string() + ".out";
     const auto err_path = base.string() + ".err";
 
-    const auto command = "\"" + client_tool.string()
-                         + "\" "
-                         + https_origin(port) + "/nghttp3"
-                         + " > \""
-                         + out_path
+    const auto command = "\"" + client_tool.string() + "\" " + https_origin(port) + "/nghttp3" + " > \"" + out_path
                          + "\""
                            " 2> \""
                          + err_path + "\"";
@@ -327,9 +321,7 @@ TEST(Http3InteropTest, ConfiguredH3SpecCanProbeQbHttp3Server) {
     const auto out_path = base.string() + ".out";
     const auto err_path = base.string() + ".err";
 
-    const auto command = "\"" + h3spec_tool.string()
-                         + "\" -host 127.0.0.1 -port "
-                         + std::to_string(port)
+    const auto command = "\"" + h3spec_tool.string() + "\" -host 127.0.0.1 -port " + std::to_string(port)
                          + " -insecure"
                            " > \""
                          + out_path

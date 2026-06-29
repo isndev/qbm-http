@@ -43,9 +43,9 @@
 #include <qb/io/crypto_jwt.h> // qb::jwt::{create, CreateOptions, Algorithm}
 #include <qb/json.h>          // qb::json
 
-#include "../http.h"                           // Router, Context, status, method
-#include "../middleware/jwt.h"                 // qb::http::JwtMiddleware + factories
 #include "../../shared/middleware_test_fixture.h" // MiddlewareTestFixture, MockMiddlewareSession
+#include "../http.h"                              // Router, Context, status, method
+#include "../middleware/jwt.h"                    // qb::http::JwtMiddleware + factories
 
 namespace {
 
@@ -107,15 +107,15 @@ sign_hs256_native(const qb::json &payload, const std::string &secret = kSecret, 
     const auto b64url = [](const std::string &s) {
         return qb::crypto::base64url_encode(std::vector<unsigned char>(s.begin(), s.end()));
     };
-    qb::json header   = {{"alg", alg_header}, {"typ", "JWT"}};
-    const std::string header_b64  = b64url(header.dump());
-    const std::string payload_b64 = b64url(payload.dump());
+    qb::json          header        = {{"alg", alg_header}, {"typ", "JWT"}};
+    const std::string header_b64    = b64url(header.dump());
+    const std::string payload_b64   = b64url(payload.dump());
     const std::string signing_input = header_b64 + "." + payload_b64;
 
     const std::vector<unsigned char> data(signing_input.begin(), signing_input.end());
     const std::vector<unsigned char> key(secret.begin(), secret.end());
-    const auto sig = qb::crypto::hmac(data, key, qb::crypto::DigestAlgorithm::SHA256);
-    const std::string sig_b64 = qb::crypto::base64url_encode(sig);
+    const auto                       sig     = qb::crypto::hmac(data, key, qb::crypto::DigestAlgorithm::SHA256);
+    const std::string                sig_b64 = qb::crypto::base64url_encode(sig);
 
     return signing_input + "." + sig_b64;
 }
@@ -134,10 +134,10 @@ struct MockJwtSession : qb::http::test::MockMiddlewareSession {
 /// Fixture: owns a default HS256 JwtMiddleware and a payload-capturing handler.
 class JwtMiddlewareTest : public qb::http::test::MiddlewareTestFixture<MockJwtSession> {
 protected:
-    JwtOptions                                       _jwt_options;
-    std::shared_ptr<JwtMiddleware<MockJwtSession>>   _jwt_mw;
-    const std::string                                _scheme = "Bearer";
-    const std::string                                _hdr    = "Authorization";
+    JwtOptions                                     _jwt_options;
+    std::shared_ptr<JwtMiddleware<MockJwtSession>> _jwt_mw;
+    const std::string                              _scheme = "Bearer";
+    const std::string                              _hdr    = "Authorization";
 
     void
     SetUp() override {
@@ -331,8 +331,8 @@ TEST_F(JwtMiddlewareTest, AlgNoneHeaderIsRejected) {
 // the middleware verifies HS256). The header/option mismatch is caught before any
 // signature math and rejected as a signature error.
 TEST_F(JwtMiddlewareTest, MismatchedHeaderAlgorithmIsRejected) {
-    qb::json payload = {{"sub", "confused"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60}};
-    const std::string token = sign_hs256_native(payload, kSecret, "HS512"); // header lies about alg
+    qb::json          payload = {{"sub", "confused"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60}};
+    const std::string token   = sign_hs256_native(payload, kSecret, "HS512"); // header lies about alg
 
     run(_jwt_mw, bearer(token));
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
@@ -484,14 +484,14 @@ TEST_F(JwtMiddlewareTest, AudienceValidationArrayClaim) {
     _jwt_options.audience   = "svc-b";
     _jwt_mw->with_options(_jwt_options);
 
-    qb::json match = {{"sub", "u"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60},
-                      {"aud", qb::json::array({"svc-a", "svc-b", "svc-c"})}};
+    qb::json match = {
+        {"sub", "u"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60}, {"aud", qb::json::array({"svc-a", "svc-b", "svc-c"})}
+    };
     run(_jwt_mw, bearer(sign_hs256_native(match)));
     EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 
-    qb::json no_match = {{"sub", "u"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60},
-                         {"aud", qb::json::array({"svc-x", "svc-y"})}};
+    qb::json no_match = {{"sub", "u"}, {"exp", epoch_now() + 3600}, {"nbf", epoch_now() - 60}, {"aud", qb::json::array({"svc-x", "svc-y"})}};
     run(_jwt_mw, bearer(sign_hs256_native(no_match)));
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
     EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid audience.");

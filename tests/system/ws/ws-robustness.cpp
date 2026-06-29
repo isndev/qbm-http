@@ -250,8 +250,7 @@ TEST(WsRobustness, LargeTextEchoExact) {
     ASSERT_TRUE(pump_until([&] { return client.connected.load(); }));
 
     client.send_text(payload);
-    ASSERT_TRUE(pump_until([&] { return client.text_received.load() == 1u; }))
-        << "large text frame was not echoed";
+    ASSERT_TRUE(pump_until([&] { return client.text_received.load() == 1u; })) << "large text frame was not echoed";
 
     EXPECT_EQ(client.last_text.size(), payload.size());
     EXPECT_EQ(client.last_text, payload) << "large text payload must round-trip byte-for-byte";
@@ -270,8 +269,7 @@ TEST(WsRobustness, LargeBinaryEchoExact) {
     ASSERT_TRUE(pump_until([&] { return client.connected.load(); }));
 
     client.send_binary(payload);
-    ASSERT_TRUE(pump_until([&] { return client.binary_received.load() == 1u; }))
-        << "large binary frame was not echoed";
+    ASSERT_TRUE(pump_until([&] { return client.binary_received.load() == 1u; })) << "large binary frame was not echoed";
 
     EXPECT_EQ(client.binary_received.load(), 1u);
     EXPECT_EQ(client.text_received.load(), 0u) << "binary frame must not arrive as text";
@@ -292,8 +290,7 @@ TEST(WsRobustness, PingPongPayloadFidelity) {
     const std::string ping_payload = "ROBUSTNESS-PING-PAYLOAD";
     client.send_ping(ping_payload);
 
-    ASSERT_TRUE(pump_until([&] { return client.pongs.load() == 1u; }))
-        << "no Pong received for the Ping";
+    ASSERT_TRUE(pump_until([&] { return client.pongs.load() == 1u; })) << "no Pong received for the Ping";
 
     EXPECT_EQ(client.pongs.load(), 1u);
     EXPECT_EQ(client.last_pong, ping_payload) << "Pong payload must equal the Ping payload (RFC 6455 §5.5.3)";
@@ -316,9 +313,9 @@ TEST(WsRobustness, FragmentedTextReassembled) {
     perform_upgrade(sock, port, "/");
 
     // opcode bytes: 0x01 = text/FIN0, 0x00 = continuation/FIN0, 0x80 = continuation/FIN1.
-    const auto f1 = make_client_frame(0x01, "Frag-");   // text, not final
-    const auto f2 = make_client_frame(0x00, "ment-");   // continuation, not final
-    const auto f3 = make_client_frame(0x80, "end");     // continuation, final
+    const auto f1 = make_client_frame(0x01, "Frag-"); // text, not final
+    const auto f2 = make_client_frame(0x00, "ment-"); // continuation, not final
+    const auto f3 = make_client_frame(0x80, "end");   // continuation, final
     sock.write(reinterpret_cast<const char *>(f1.data()), static_cast<int>(f1.size()));
     sock.write(reinterpret_cast<const char *>(f2.data()), static_cast<int>(f2.size()));
     sock.write(reinterpret_cast<const char *>(f3.data()), static_cast<int>(f3.size()));

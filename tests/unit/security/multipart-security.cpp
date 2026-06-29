@@ -122,7 +122,7 @@ TEST_F(MultipartSecurityTest, ParseSideRejectsControlCharacterInPartHeaderName) 
     // "Malformed header name" and Body::as<Multipart>() surfaces it as a throw
     // (the wire complement of the serialize-side injection defenses below).
     const std::string boundary = "bnd";
-    std::string       raw       = "--" + boundary + "\r\n";
+    std::string       raw      = "--" + boundary + "\r\n";
     raw += "Bad";
     raw.push_back('\0'); // control char inside the header field name
     raw += "Name: form-data; name=\"f\"\r\n\r\nvalue\r\n";
@@ -163,7 +163,7 @@ TEST_F(MultipartSecurityTest, ParseSideRejectsOversizedPartHeaderValue) {
     // Per-part header value size is capped on the parse path at
     // multipart_limits::MAX_HEADER_VALUE_LENGTH (body.cpp:196); a single part
     // whose header value exceeds it is rejected before accumulating unbounded.
-    const std::string boundary  = "bnd";
+    const std::string boundary = "bnd";
     const std::string huge_value(multipart_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');
     std::string       raw = "--" + boundary
                             + "\r\n"
@@ -436,14 +436,16 @@ TEST_F(MultipartSecurityTest, ParserSetBoundaryRejectsOverLength) {
 
 TEST_F(MultipartSecurityTest, ParserSetBoundaryRejectsControlCharacter) {
     MultipartParser parser;
-    parser.setBoundary(std::string("ab\x01" "cd")); // 0x01 < 0x20 control byte
+    parser.setBoundary(std::string("ab\x01"
+                                   "cd")); // 0x01 < 0x20 control byte
     EXPECT_TRUE(parser.hasError());
     EXPECT_STREQ(parser.getErrorMessage(), "Boundary contains invalid control character");
 }
 
 TEST_F(MultipartSecurityTest, ParserSetBoundaryRejectsDelByte) {
     MultipartParser parser;
-    parser.setBoundary(std::string("ab\x7f""cd")); // DEL (0x7f) is rejected too
+    parser.setBoundary(std::string("ab\x7f"
+                                   "cd")); // DEL (0x7f) is rejected too
     EXPECT_TRUE(parser.hasError());
     EXPECT_STREQ(parser.getErrorMessage(), "Boundary contains invalid control character");
 }
@@ -561,7 +563,7 @@ TEST_F(MultipartSecurityTest, ParserFeedReportsMalformedFirstBoundary) {
     MultipartParser parser("bnd");
     ASSERT_FALSE(parser.hasError());
 
-    const std::string raw = "--XXX\r\n\r\nbody\r\n--bnd--";
+    const std::string raw      = "--XXX\r\n\r\nbody\r\n--bnd--";
     const size_t      consumed = parser.feed(raw.data(), raw.size());
     EXPECT_LT(consumed, raw.size());
     EXPECT_TRUE(parser.hasError());

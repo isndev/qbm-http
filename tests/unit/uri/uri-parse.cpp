@@ -32,8 +32,7 @@
 // ====================================================================
 
 TEST(UriComponents, BasicComponents) {
-    qb::io::uri uri{
-        "http://username:password@example.com:8080/path/to/resource?query=value&param2=value2#fragment"};
+    qb::io::uri uri{"http://username:password@example.com:8080/path/to/resource?query=value&param2=value2#fragment"};
 
     EXPECT_TRUE(uri.is_valid());
     EXPECT_EQ(uri.scheme(), "http");
@@ -61,10 +60,9 @@ TEST(UriComponents, DefaultValues) {
 }
 
 TEST(UriComponents, SchemeSpecificDefaults) {
-    const std::vector<std::pair<std::string, uint16_t>> scheme_ports = {
-        {"http", 80},   {"https", 443}, {"ftp", 21},   {"ssh", 22},
-        {"telnet", 23}, {"smtp", 25},   {"pop3", 110}, {"imap", 143},
-        {"ws", 80},     {"wss", 443},   {"amqp", 5672}};
+    const std::vector<std::pair<std::string, uint16_t>> scheme_ports = {{"http", 80},   {"https", 443}, {"ftp", 21},   {"ssh", 22},
+                                                                        {"telnet", 23}, {"smtp", 25},   {"pop3", 110}, {"imap", 143},
+                                                                        {"ws", 80},     {"wss", 443},   {"amqp", 5672}};
 
     for (const auto &[scheme, port] : scheme_ports) {
         qb::io::uri uri{scheme + "://example.com"};
@@ -218,8 +216,7 @@ TEST(UriQueries, UrlEncodingDecoding) {
     qb::io::uri uri{"http://example.com/path?encoded=%20%21%40%23%24%25%5E%26%2A%28%29"};
     EXPECT_EQ(uri.query("encoded"), " !@#$%^&*()");
 
-    qb::io::uri uri2{
-        "http://example.com/path?q=space%20value&special=a+b+c&brackets=value%5B%5D"};
+    qb::io::uri uri2{"http://example.com/path?q=space%20value&special=a+b+c&brackets=value%5B%5D"};
     EXPECT_EQ(uri2.query("q"), "space value");
     EXPECT_EQ(uri2.query("special"), "a b c"); // '+' in a query decodes to space
     EXPECT_EQ(uri2.query("brackets"), "value[]");
@@ -281,10 +278,9 @@ TEST(UriEncoding, BasicEncodingRoundTrip) {
 }
 
 TEST(UriEncoding, SpecialCharactersRoundTrip) {
-    const std::string original =
-        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
-        "abcdefghijklmnopqrstuvwxyz{|}~";
-    const std::string encoded = qb::io::uri::encode(original);
+    const std::string original = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
+                                 "abcdefghijklmnopqrstuvwxyz{|}~";
+    const std::string encoded  = qb::io::uri::encode(original);
     EXPECT_EQ(qb::io::uri::decode(encoded), original);
 }
 

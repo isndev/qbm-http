@@ -339,9 +339,15 @@ TEST_F(SecurityHeadersMiddlewareTest, HeaderSetIsStableAndCanonicallyCasedAcross
     auto mw = qb::http::security_headers_middleware<MockMiddlewareSession>(opts);
 
     static const std::vector<std::string> kSecurityHeaders = {
-        "Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options",
-        "Content-Security-Policy",   "Referrer-Policy",        "Permissions-Policy",
-        "Cross-Origin-Opener-Policy", "X-Permitted-Cross-Domain-Policies"};
+        "Strict-Transport-Security",
+        "X-Content-Type-Options",
+        "X-Frame-Options",
+        "Content-Security-Policy",
+        "Referrer-Policy",
+        "Permissions-Policy",
+        "Cross-Origin-Opener-Policy",
+        "X-Permitted-Cross-Domain-Policies"
+    };
 
     auto snapshot = [&](void) {
         std::vector<std::pair<std::string, std::string>> out;
@@ -380,8 +386,7 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceGeneratedAndInContext) {
     opts.with_csp_nonce(true);
 
     std::string captured_nonce;
-    run(
-        qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(qb::http::method::GET, "/test", "http"),
+    run(qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(qb::http::method::GET, "/test", "http"),
         [this, &captured_nonce](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
             _session->_final_handler_called = true;
             auto nonce_opt                  = ctx->template get<std::string>("csp_nonce");
@@ -397,9 +402,13 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceGeneratedAndInContext) {
     ASSERT_FALSE(captured_nonce.empty());
 
     const std::string expected_csp = "default-src 'self'; "
-                                     "script-src 'self' 'nonce-" + captured_nonce + "' 'strict-dynamic'; "
-                                     "style-src 'self' 'nonce-" + captured_nonce + "'; "
-                                     "object-src 'none'; base-uri 'self'; form-action 'self';";
+                                     "script-src 'self' 'nonce-"
+                                     + captured_nonce
+                                     + "' 'strict-dynamic'; "
+                                       "style-src 'self' 'nonce-"
+                                     + captured_nonce
+                                     + "'; "
+                                       "object-src 'none'; base-uri 'self'; form-action 'self';";
     expect_header_value("Content-Security-Policy", expected_csp);
 }
 
@@ -410,12 +419,12 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceIsFreshPerRequest) {
 
     std::string nonce_a;
     std::string nonce_b;
-    auto capture = [this](std::string &out) {
+    auto        capture = [this](std::string &out) {
         return [this, &out](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
             _session->_final_handler_called = true;
             auto n                          = ctx->template get<std::string>("csp_nonce");
             ASSERT_TRUE(n.has_value());
-            out = *n;
+            out                      = *n;
             ctx->response().status() = qb::http::status::OK;
             ctx->complete();
         };
@@ -442,13 +451,12 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceWithUserProvidedCSP) {
     opts.with_csp_nonce(true).with_content_security_policy("custom-csp 'self'; script-src 'unsafe-inline'");
 
     std::string captured;
-    run(
-        qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(qb::http::method::GET, "/test", "http"),
+    run(qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(qb::http::method::GET, "/test", "http"),
         [this, &captured](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
             _session->_final_handler_called = true;
             auto n                          = ctx->template get<std::string>("csp_nonce");
             ASSERT_TRUE(n.has_value()) << "CSP Nonce must still be exposed even with a custom CSP";
-            captured = *n;
+            captured                 = *n;
             ctx->response().status() = qb::http::status::OK;
             ctx->complete();
         });
@@ -471,8 +479,7 @@ TEST_F(SecurityHeadersMiddlewareTest, CSPNonceDisabledNoNonceInContextOrDefaultC
     opts.with_csp_nonce(false);
     opts.without_content_security_policy();
 
-    run(
-        qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(qb::http::method::GET, "/test", "http"),
+    run(qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(qb::http::method::GET, "/test", "http"),
         [this](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
             _session->_final_handler_called = true;
             EXPECT_FALSE(ctx->template get<std::string>("csp_nonce").has_value());
@@ -490,8 +497,7 @@ TEST_F(SecurityHeadersMiddlewareTest, MiddlewareOverwritesHandlerSetHeader) {
     qb::http::SecurityHeadersOptions opts;
     opts.with_x_frame_options("SAMEORIGIN");
 
-    run(
-        qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(),
+    run(qb::http::security_headers_middleware<MockMiddlewareSession>(opts), scheme_request(),
         [this](std::shared_ptr<qb::http::Context<MockMiddlewareSession>> ctx) {
             _session->_final_handler_called = true;
             ctx->response().set_header("X-Frame-Options", "DENY"); // handler tries DENY...
@@ -547,9 +553,10 @@ TEST_F(SecurityHeadersMiddlewareTest, EmptyOptionsMeansNoHeaders) {
 
     run(qb::http::security_headers_middleware<MockMiddlewareSession>(empty_opts), scheme_request(qb::http::method::GET, "/test", "https"));
 
-    for (const char *name : {"Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options", "Content-Security-Policy",
-                             "Content-Security-Policy-Report-Only", "Referrer-Policy", "Permissions-Policy", "Cross-Origin-Opener-Policy",
-                             "Cross-Origin-Embedder-Policy", "Cross-Origin-Resource-Policy", "X-Permitted-Cross-Domain-Policies"}) {
+    for (const char *name :
+         {"Strict-Transport-Security", "X-Content-Type-Options", "X-Frame-Options", "Content-Security-Policy",
+          "Content-Security-Policy-Report-Only", "Referrer-Policy", "Permissions-Policy", "Cross-Origin-Opener-Policy",
+          "Cross-Origin-Embedder-Policy", "Cross-Origin-Resource-Policy", "X-Permitted-Cross-Domain-Policies"}) {
         expect_header_absent(std::string(name));
     }
 }

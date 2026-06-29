@@ -168,9 +168,8 @@ protected:
         return [this, id](std::shared_ptr<qb::http::Context<ConditionalSession>> ctx) {
             if (_session) {
                 _session->trace(id);
-                _session->_final_handler_called = true;
-                _session->_captured_chain_header =
-                    std::string(ctx->request().header(std::string("X-Chain1-Passed")));
+                _session->_final_handler_called  = true;
+                _session->_captured_chain_header = std::string(ctx->request().header(std::string("X-Chain1-Passed")));
             }
             ctx->response().status() = qb::http::status::OK;
             ctx->complete();
@@ -208,8 +207,8 @@ TEST_F(ConditionalMiddlewareTest, ConditionFalseWithElseExecutesElseMiddleware) 
     auto predicate = [](const std::shared_ptr<qb::http::Context<ConditionalSession>> &ctx) {
         return ctx->request().has_header(std::string("X-Execute-If"));
     };
-    auto cond_mw = qb::http::conditional_middleware<ConditionalSession>(
-        predicate, std::make_shared<TracerMiddleware>("IfMiddleware_NeverRuns"), std::make_shared<TracerMiddleware>("ElseMiddleware"));
+    auto cond_mw = qb::http::conditional_middleware<ConditionalSession>(predicate, std::make_shared<TracerMiddleware>("IfMiddleware_NeverRuns"),
+                                                                        std::make_shared<TracerMiddleware>("ElseMiddleware"));
 
     run_with(cond_mw, create_request()); // no X-Execute-If header
 
@@ -219,7 +218,7 @@ TEST_F(ConditionalMiddlewareTest, ConditionFalseWithElseExecutesElseMiddleware) 
 
 TEST_F(ConditionalMiddlewareTest, ConditionFalseWithoutElseContinues) {
     bool predicate_called = false;
-    auto predicate        = [&predicate_called](const auto & /*ctx*/) {
+    auto predicate        = [&predicate_called](const auto        &/*ctx*/) {
         predicate_called = true;
         return false;
     };
@@ -240,7 +239,7 @@ TEST_F(ConditionalMiddlewareTest, ContextManipulationInPredicateAndChild) {
         ctx->set("predicate_decision", std::string("took_if_branch"));
         return true;
     };
-    auto if_mw = std::make_shared<TracerMiddleware>("IfMiddlewareSetsHeader", "X-If-Action", "Performed");
+    auto if_mw   = std::make_shared<TracerMiddleware>("IfMiddlewareSetsHeader", "X-If-Action", "Performed");
     auto cond_mw = qb::http::conditional_middleware<ConditionalSession>(predicate, if_mw);
 
     _router = std::make_unique<qb::http::Router<ConditionalSession>>();
@@ -265,8 +264,11 @@ TEST_F(ConditionalMiddlewareTest, ContextManipulationInPredicateAndChild) {
 }
 
 TEST_F(ConditionalMiddlewareTest, ConditionTrueIfCompletesShortCircuitsHandler) {
-    auto predicate = [](const auto & /*ctx*/) { return true; };
-    auto cond_mw   = qb::http::conditional_middleware<ConditionalSession>(predicate, std::make_shared<CompletingTracerMiddleware>("IfMiddlewareCompletes"));
+    auto predicate = [](const auto & /*ctx*/) {
+        return true;
+    };
+    auto cond_mw =
+        qb::http::conditional_middleware<ConditionalSession>(predicate, std::make_shared<CompletingTracerMiddleware>("IfMiddlewareCompletes"));
 
     run_with(cond_mw, create_request());
 
@@ -276,10 +278,12 @@ TEST_F(ConditionalMiddlewareTest, ConditionTrueIfCompletesShortCircuitsHandler) 
 }
 
 TEST_F(ConditionalMiddlewareTest, ConditionFalseElseCompletesShortCircuitsHandler) {
-    auto predicate = [](const auto & /*ctx*/) { return false; };
-    auto cond_mw   = qb::http::conditional_middleware<ConditionalSession>(
-        predicate, std::make_shared<TracerMiddleware>("IfMiddleware_NeverRuns"),
-        std::make_shared<CompletingTracerMiddleware>("ElseMiddlewareCompletes"));
+    auto predicate = [](const auto & /*ctx*/) {
+        return false;
+    };
+    auto cond_mw =
+        qb::http::conditional_middleware<ConditionalSession>(predicate, std::make_shared<TracerMiddleware>("IfMiddleware_NeverRuns"),
+                                                             std::make_shared<CompletingTracerMiddleware>("ElseMiddlewareCompletes"));
 
     run_with(cond_mw, create_request());
 
@@ -291,13 +295,17 @@ TEST_F(ConditionalMiddlewareTest, ConditionFalseElseCompletesShortCircuitsHandle
 // --- Nesting & chaining ------------------------------------------------------
 
 TEST_F(ConditionalMiddlewareTest, NestedConditionalMiddleware) {
-    auto outer_predicate = [](const auto &ctx) { return ctx->request().has_header(std::string("X-Outer")); };
-    auto inner_predicate = [](const auto &ctx) { return ctx->request().has_header(std::string("X-Inner")); };
+    auto outer_predicate = [](const auto &ctx) {
+        return ctx->request().has_header(std::string("X-Outer"));
+    };
+    auto inner_predicate = [](const auto &ctx) {
+        return ctx->request().has_header(std::string("X-Inner"));
+    };
 
     auto make_outer = [&]() {
-        auto inner_cond = qb::http::conditional_middleware<ConditionalSession>(
-            inner_predicate, std::make_shared<TracerMiddleware>("InnerIf"), std::make_shared<TracerMiddleware>("InnerElse"),
-            "InnerConditional");
+        auto inner_cond =
+            qb::http::conditional_middleware<ConditionalSession>(inner_predicate, std::make_shared<TracerMiddleware>("InnerIf"),
+                                                                 std::make_shared<TracerMiddleware>("InnerElse"), "InnerConditional");
         return qb::http::conditional_middleware<ConditionalSession>(outer_predicate, inner_cond,
                                                                     std::make_shared<TracerMiddleware>("OuterElse"), "OuterConditional");
     };
@@ -322,8 +330,10 @@ TEST_F(ConditionalMiddlewareTest, NestedConditionalMiddleware) {
 }
 
 TEST_F(ConditionalMiddlewareTest, ChainedConditionalsExecuteSequentially) {
-    auto pred1 = [](const auto &ctx) { return ctx->request().uri().path() == "/mw_test"; };
-    auto if_mw1 = std::make_shared<TracerMiddleware>("Chain1If", "X-Chain1-Passed", "yes");
+    auto pred1 = [](const auto &ctx) {
+        return ctx->request().uri().path() == "/mw_test";
+    };
+    auto if_mw1   = std::make_shared<TracerMiddleware>("Chain1If", "X-Chain1-Passed", "yes");
     auto cond_mw1 = qb::http::conditional_middleware<ConditionalSession>(pred1, if_mw1, nullptr, "CondChain1");
 
     auto pred2 = [](const auto &ctx) {
@@ -349,7 +359,7 @@ TEST_F(ConditionalMiddlewareTest, ChainedConditionalsExecuteSequentially) {
 
 TEST_F(ConditionalMiddlewareTest, PredicateCalledOncePerRequestOnReusedInstance) {
     int  predicate_call_count = 0;
-    auto predicate            = [&](const auto & /*ctx*/) {
+    auto predicate            = [&](const auto            &/*ctx*/) {
         ++predicate_call_count;
         return true;
     };
@@ -369,7 +379,9 @@ TEST_F(ConditionalMiddlewareTest, PredicateCalledOncePerRequestOnReusedInstance)
 // --- Fail-closed behaviour (deterministic 500 + body) ------------------------
 
 TEST_F(ConditionalMiddlewareTest, PredicateThrowsReturnsInternalServerError) {
-    auto throwing_predicate = [](const auto & /*ctx*/) -> bool { throw std::runtime_error("Predicate failed!"); };
+    auto throwing_predicate = [](const auto & /*ctx*/) -> bool {
+        throw std::runtime_error("Predicate failed!");
+    };
     auto cond_mw = qb::http::conditional_middleware<ConditionalSession>(throwing_predicate, std::make_shared<TracerMiddleware>("IfMiddleware"));
 
     run_with(cond_mw, create_request());
@@ -380,8 +392,10 @@ TEST_F(ConditionalMiddlewareTest, PredicateThrowsReturnsInternalServerError) {
 }
 
 TEST_F(ConditionalMiddlewareTest, IfMiddlewareThrowsReturnsInternalServerError) {
-    auto predicate = [](const auto & /*ctx*/) { return true; };
-    auto cond_mw   = qb::http::conditional_middleware<ConditionalSession>(predicate, std::make_shared<ThrowingTracerMiddleware>("IfThrows"));
+    auto predicate = [](const auto & /*ctx*/) {
+        return true;
+    };
+    auto cond_mw = qb::http::conditional_middleware<ConditionalSession>(predicate, std::make_shared<ThrowingTracerMiddleware>("IfThrows"));
 
     run_with(cond_mw, create_request());
 
@@ -392,9 +406,11 @@ TEST_F(ConditionalMiddlewareTest, IfMiddlewareThrowsReturnsInternalServerError) 
 }
 
 TEST_F(ConditionalMiddlewareTest, ElseMiddlewareThrowsReturnsInternalServerError) {
-    auto predicate = [](const auto & /*ctx*/) { return false; };
-    auto cond_mw   = qb::http::conditional_middleware<ConditionalSession>(
-        predicate, std::make_shared<TracerMiddleware>("IfMiddleware_NeverRuns"), std::make_shared<ThrowingTracerMiddleware>("ElseThrows"));
+    auto predicate = [](const auto & /*ctx*/) {
+        return false;
+    };
+    auto cond_mw = qb::http::conditional_middleware<ConditionalSession>(predicate, std::make_shared<TracerMiddleware>("IfMiddleware_NeverRuns"),
+                                                                        std::make_shared<ThrowingTracerMiddleware>("ElseThrows"));
 
     run_with(cond_mw, create_request());
 
@@ -407,14 +423,16 @@ TEST_F(ConditionalMiddlewareTest, ElseMiddlewareThrowsReturnsInternalServerError
 // --- Constructor / factory guards -------------------------------------------
 
 TEST_F(ConditionalMiddlewareTest, FactoryThrowsOnNullIfMiddlewareOrNullPredicate) {
-    auto predicate = [](const auto & /*ctx*/) { return true; };
+    auto predicate = [](const auto & /*ctx*/) {
+        return true;
+    };
     std::shared_ptr<qb::http::IMiddleware<ConditionalSession>> null_if_mw    = nullptr;
     std::shared_ptr<qb::http::IMiddleware<ConditionalSession>> dummy_else_mw = std::make_shared<TracerMiddleware>("DummyElse");
 
     EXPECT_THROW((void) qb::http::conditional_middleware<ConditionalSession>(predicate, null_if_mw, dummy_else_mw), std::invalid_argument);
 
-    std::shared_ptr<qb::http::IMiddleware<ConditionalSession>>      valid_if_mw    = std::make_shared<TracerMiddleware>("ValidIf");
-    qb::http::ConditionalMiddleware<ConditionalSession>::Predicate  null_predicate = nullptr;
+    std::shared_ptr<qb::http::IMiddleware<ConditionalSession>>     valid_if_mw    = std::make_shared<TracerMiddleware>("ValidIf");
+    qb::http::ConditionalMiddleware<ConditionalSession>::Predicate null_predicate = nullptr;
     EXPECT_THROW((void) qb::http::conditional_middleware<ConditionalSession>(null_predicate, valid_if_mw, dummy_else_mw),
                  std::invalid_argument);
 }

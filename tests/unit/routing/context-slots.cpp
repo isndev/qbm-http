@@ -229,20 +229,28 @@ TEST(ContextSlots, SameNameDifferentTypeAliasesOneEntry) {
 // A static copy/move counter makes those promises observable.
 namespace {
 struct CopyMoveProbe {
-    static inline int copies = 0;
-    static inline int moves  = 0;
+    static inline int copies  = 0;
+    static inline int moves   = 0;
     int               payload = 0;
 
-    explicit CopyMoveProbe(int v) : payload(v) {}
-    CopyMoveProbe(const CopyMoveProbe &o) : payload(o.payload) { ++copies; }
-    CopyMoveProbe(CopyMoveProbe &&o) noexcept : payload(o.payload) {
+    explicit CopyMoveProbe(int v)
+        : payload(v) {}
+    CopyMoveProbe(const CopyMoveProbe &o)
+        : payload(o.payload) {
+        ++copies;
+    }
+    CopyMoveProbe(CopyMoveProbe &&o) noexcept
+        : payload(o.payload) {
         o.payload = -1;
         ++moves;
     }
     CopyMoveProbe &operator=(const CopyMoveProbe &) = delete;
     CopyMoveProbe &operator=(CopyMoveProbe &&)      = delete;
 
-    static void reset() { copies = moves = 0; }
+    static void
+    reset() {
+        copies = moves = 0;
+    }
 };
 
 inline constexpr qb::http::Slot<CopyMoveProbe> kProbe{"probe.slot"};
@@ -259,7 +267,7 @@ TEST(ContextSlots, EmplaceMoveOnlyTypeConstructsInPlaceWithoutCopy) {
     EXPECT_EQ(CopyMoveProbe::moves, 0);
 
     // Mutation via the returned reference round-trips through get_if — same object.
-    ref.payload = 99;
+    ref.payload   = 99;
     auto *fetched = ctx->get_if(kProbe);
     ASSERT_NE(fetched, nullptr);
     EXPECT_EQ(fetched->payload, 99);
@@ -274,7 +282,7 @@ TEST(ContextSlots, SetMovesRvalueInWithoutCopying) {
     CopyMoveProbe::reset();
 
     CopyMoveProbe local{7};
-    ctx->set(kProbe, std::move(local)); // by-value sink + move into std::any
+    ctx->set(kProbe, std::move(local));  // by-value sink + move into std::any
     EXPECT_EQ(CopyMoveProbe::copies, 0); // never copied
     EXPECT_GE(CopyMoveProbe::moves, 1);  // moved at least once
     EXPECT_EQ(local.payload, -1);        // moved-from sentinel
@@ -306,9 +314,9 @@ namespace {
 std::shared_ptr<TestContext>
 make_ctx_with_finalize(bool &finalized_flag) {
     auto session = std::make_shared<SlotTestSession>();
-    return std::make_shared<TestContext>(qb::http::Request{}, qb::http::Response{}, session,
-                                         [&finalized_flag](TestContext &) { finalized_flag = true; },
-                                         std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{});
+    return std::make_shared<TestContext>(
+        qb::http::Request{}, qb::http::Response{}, session, [&finalized_flag](TestContext &) { finalized_flag = true; },
+        std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{});
 }
 
 } // namespace
@@ -414,8 +422,8 @@ TEST(ContextLifecycle, ConstSessionAccessorReturnsSession) {
     // Hold the session alive: Context stores a weak_ptr, so the const session()
     // overload only returns non-null while an external owner exists.
     auto session = std::make_shared<SlotTestSession>();
-    auto ctx     = std::make_shared<TestContext>(qb::http::Request{}, qb::http::Response{}, session, [](TestContext &) {},
-                                                 std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{});
+    auto ctx     = std::make_shared<TestContext>(
+        qb::http::Request{}, qb::http::Response{}, session, [](TestContext &) {}, std::weak_ptr<qb::http::RouterCore<SlotTestSession>>{});
     const auto &cref = *ctx;
     auto        s    = cref.session(); // const overload
     EXPECT_NE(s, nullptr);

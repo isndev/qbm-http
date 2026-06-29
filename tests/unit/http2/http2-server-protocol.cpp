@@ -85,8 +85,7 @@ open_get_stream_end_stream(ServerProtocol &protocol, Http2FakeIO &io, uint32_t s
 // request is not dispatched (awaits body) but the stream is in OPEN state.
 void
 open_post_stream_open(ServerProtocol &protocol, Http2FakeIO &io, uint32_t stream_id, const std::string &path) {
-    const auto encoded =
-        encode_hpack_headers({{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", path}});
+    const auto encoded = encode_hpack_headers({{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", path}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, stream_id, encoded);
     drive(protocol, io);
 }
@@ -329,8 +328,8 @@ TEST(HTTP2ServerProtocol, HeadersOnDecreasingStreamIdIsStreamClosedRst) {
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
     drive(protocol, io);
 
-    EXPECT_TRUE(protocol.ok());      // connection stays up
-    EXPECT_EQ(io.request_count, 1);  // the stale stream is NOT dispatched
+    EXPECT_TRUE(protocol.ok());     // connection stays up
+    EXPECT_EQ(io.request_count, 1); // the stale stream is NOT dispatched
     ASSERT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
     // The RST_STREAM targets the offending old stream id 1.
     bool rst_on_1 = false;
@@ -424,7 +423,7 @@ TEST(HTTP2ServerProtocol, MalformedHpackBlockIsCompressionStreamError) {
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, {0x80});
     drive(protocol, io);
 
-    EXPECT_TRUE(protocol.ok()); // stream-level, connection survives
+    EXPECT_TRUE(protocol.ok());     // stream-level, connection survives
     EXPECT_EQ(io.request_count, 0); // never dispatched
     EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
     EXPECT_EQ(io.stream_error_count, 1);
@@ -865,8 +864,8 @@ TEST(HTTP2ServerProtocol, SendResponseNoBodyEmitsHeadersWithEndStream) {
 
     // Establish an open stream via a direct GET HEADERS dispatch. END_STREAM here
     // -> HALF_CLOSED_REMOTE, which send_response accepts.
-    auto headers = make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM,
-                                      default_request_headers("/resp"));
+    auto headers =
+        make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, default_request_headers("/resp"));
     protocol.on(std::move(headers));
     ASSERT_EQ(io.request_count, 1);
 
@@ -891,8 +890,8 @@ TEST(HTTP2ServerProtocol, SendResponseWithBodyEmitsHeadersAndData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
 
-    auto headers = make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM,
-                                      default_request_headers("/body"));
+    auto headers =
+        make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, default_request_headers("/body"));
     protocol.on(std::move(headers));
     ASSERT_EQ(io.request_count, 1);
 
@@ -1188,12 +1187,10 @@ TEST(HTTP2ServerProtocol, LargeInboundDataTriggersServerWindowUpdates) {
         while (offset + h2::FRAME_HEADER_SIZE <= total) {
             const auto fh   = peek_frame_header(io.output, offset);
             const auto plen = fh.get_payload_length();
-            if (fh.get_type() == FrameType::WINDOW_UPDATE && plen == 4u
-                && offset + h2::FRAME_HEADER_SIZE + 4u <= total) {
-                const uint8_t *p = reinterpret_cast<const uint8_t *>(data + offset + h2::FRAME_HEADER_SIZE);
-                const uint32_t inc =
-                    (static_cast<uint32_t>(p[0] & 0x7F) << 24) | (static_cast<uint32_t>(p[1]) << 16)
-                    | (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+            if (fh.get_type() == FrameType::WINDOW_UPDATE && plen == 4u && offset + h2::FRAME_HEADER_SIZE + 4u <= total) {
+                const uint8_t *p   = reinterpret_cast<const uint8_t *>(data + offset + h2::FRAME_HEADER_SIZE);
+                const uint32_t inc = (static_cast<uint32_t>(p[0] & 0x7F) << 24) | (static_cast<uint32_t>(p[1]) << 16)
+                                     | (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
                 if (fh.get_stream_id() == 1) {
                     stream_wu  = true;
                     stream_inc = std::max(stream_inc, inc);
@@ -1240,8 +1237,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeIncreaseFlushesPendingStream) {
     // Raise SETTINGS_INITIAL_WINDOW_SIZE to 1000. update_initial_peer_window_size
     // applies the +1000 delta to the open stream's peer_window_size (was 0) and
     // flushes it.
-    push_frame(io, FrameType::SETTINGS, 0, 0,
-               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1000}}));
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1000}}));
     drive(protocol, io);
 
     EXPECT_TRUE(protocol.ok());
@@ -1624,8 +1620,7 @@ namespace {
 // Open a POST stream (END_HEADERS, no END_STREAM) declaring content-length so a
 // subsequent DATA frame is body-bearing and the stream stays OPEN.
 void
-open_post_stream_with_clen(ServerProtocol &protocol, Http2FakeIO &io, uint32_t stream_id, const std::string &path,
-                           const std::string &clen) {
+open_post_stream_with_clen(ServerProtocol &protocol, Http2FakeIO &io, uint32_t stream_id, const std::string &path, const std::string &clen) {
     const auto encoded = encode_hpack_headers(
         {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", path}, {"content-length", clen}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, stream_id, encoded);
@@ -1666,8 +1661,8 @@ TEST(HTTP2ServerProtocol, PseudoHeaderAfterRegularHeaderIsStreamError) {
 
     // A regular header ("x-early") precedes the ":path" pseudo-header -> the
     // pseudo-after-regular guard fires (pseudo_headers_finished == true).
-    const auto encoded = encode_hpack_headers(
-        {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {"x-early", "1"}, {":path", "/late"}});
+    const auto encoded =
+        encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {"x-early", "1"}, {":path", "/late"}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
     drive(protocol, io);
 
@@ -1684,8 +1679,8 @@ TEST(HTTP2ServerProtocol, UnknownPseudoHeaderIsStreamError) {
     ASSERT_TRUE(protocol.ok());
 
     // ":bogus" is not a recognized request pseudo-header.
-    const auto encoded = encode_hpack_headers(
-        {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/x"}, {":bogus", "v"}});
+    const auto encoded =
+        encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/x"}, {":bogus", "v"}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
     drive(protocol, io);
 
@@ -1718,8 +1713,7 @@ TEST(HTTP2ServerProtocol, EmptyPathPseudoHeaderIsStreamError) {
     ASSERT_TRUE(protocol.ok());
 
     // ":path" present but empty -> the empty-path guard fires.
-    const auto encoded =
-        encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", ""}});
+    const auto encoded = encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", ""}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
     drive(protocol, io);
 
@@ -1769,11 +1763,8 @@ TEST(HTTP2ServerProtocol, InvalidContentLengthHeaderIsStreamError) {
     ASSERT_TRUE(protocol.ok());
 
     // Non-numeric content-length -> parse_content_length fails.
-    const auto encoded = encode_hpack_headers({{":method", "POST"},
-                                               {":scheme", "https"},
-                                               {":authority", "example.test"},
-                                               {":path", "/badclen"},
-                                               {"content-length", "not-a-number"}});
+    const auto encoded = encode_hpack_headers(
+        {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/badclen"}, {"content-length", "not-a-number"}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, 1, encoded);
     drive(protocol, io);
 
@@ -1790,12 +1781,13 @@ TEST(HTTP2ServerProtocol, ConflictingContentLengthHeadersIsStreamError) {
     ASSERT_TRUE(protocol.ok());
 
     // Two differing content-length values -> conflicting-content-length guard.
-    const auto encoded = encode_hpack_headers({{":method", "POST"},
-                                               {":scheme", "https"},
-                                               {":authority", "example.test"},
-                                               {":path", "/conflict"},
-                                               {"content-length", "5"},
-                                               {"content-length", "9"}});
+    const auto encoded = encode_hpack_headers(
+        {{":method", "POST"},
+         {":scheme", "https"},
+         {":authority", "example.test"},
+         {":path", "/conflict"},
+         {"content-length", "5"},
+         {"content-length", "9"}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, 1, encoded);
     drive(protocol, io);
 
@@ -1812,11 +1804,8 @@ TEST(HTTP2ServerProtocol, RequestContentLengthBodyMismatchOnEndStreamIsStreamErr
 
     // content-length 10 but END_STREAM arrives with an empty body (0 bytes) on
     // the headers frame itself -> process_complete_header_block mismatch guard.
-    const auto encoded = encode_hpack_headers({{":method", "POST"},
-                                               {":scheme", "https"},
-                                               {":authority", "example.test"},
-                                               {":path", "/clenmismatch"},
-                                               {"content-length", "10"}});
+    const auto encoded = encode_hpack_headers(
+        {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/clenmismatch"}, {"content-length", "10"}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
     drive(protocol, io);
 
@@ -2184,8 +2173,8 @@ TEST(HTTP2ServerProtocol, InvalidMethodValueIsStreamError) {
     // ":method" = "BOGUSVERB" parses to Method::Value::UNINITIALIZED ->
     // send_rst_stream(PROTOCOL_ERROR). All other pseudo-headers are valid so the
     // failure is specifically the method-validity guard.
-    const auto encoded = encode_hpack_headers(
-        {{":method", "BOGUSVERB"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/m"}});
+    const auto encoded =
+        encode_hpack_headers({{":method", "BOGUSVERB"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/m"}});
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
     drive(protocol, io);
 
@@ -2614,11 +2603,12 @@ TEST(HTTP2ServerProtocol, ClientSettingsAppliesHeaderTableAndFrameSizeMatrix) {
 
     const std::size_t ack_before = count_frames(io.output, FrameType::SETTINGS);
     push_frame(io, FrameType::SETTINGS, 0, 0,
-               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE, 8192},
-                                        {Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, 50},
-                                        {Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE, 32768},
-                                        {Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 4096},
-                                        {Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL, 1}}));
+               encode_settings_payload(
+                   {{Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE, 8192},
+                    {Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, 50},
+                    {Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE, 32768},
+                    {Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 4096},
+                    {Http2SettingIdentifier::SETTINGS_ENABLE_CONNECT_PROTOCOL, 1}}));
     drive(protocol, io);
 
     EXPECT_TRUE(protocol.ok());
@@ -2650,8 +2640,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
     ServerProtocol protocol(io);
     push_preface(io);
     // Tiny MAX_HEADER_LIST_SIZE forces the encoded-size guard to trip.
-    push_frame(io, FrameType::SETTINGS, 0, 0,
-               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 1}}));
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 1}}));
     drive(protocol, io);
     ASSERT_TRUE(protocol.ok());
 
@@ -2686,7 +2675,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     qb::http::Response response;
     response.status() = qb::http::status::OK;
     response.add_header("content-length", "100"); // lie about the body length
-    response.body()   = std::string("short");
+    response.body() = std::string("short");
 
     EXPECT_FALSE(protocol.send_response(1, response));
     EXPECT_TRUE(protocol.ok());
@@ -2707,7 +2696,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     response.status() = qb::http::status::OK;
     response.add_header("content-length", "5");
     response.add_header("content-length", "7"); // conflicting
-    response.body()   = std::string("hello");
+    response.body() = std::string("hello");
 
     EXPECT_FALSE(protocol.send_response(1, response));
     EXPECT_TRUE(protocol.ok());
@@ -2890,8 +2879,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsFl
     ServerProtocol protocol(io);
     push_preface(io);
     // Start with a large initial window so the stream opens with a big send window.
-    push_frame(io, FrameType::SETTINGS, 0, 0,
-               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100000u}}));
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100000u}}));
     drive(protocol, io);
     ASSERT_TRUE(protocol.ok());
 
@@ -2907,8 +2895,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsFl
 
     // Now the client shrinks INITIAL_WINDOW_SIZE to a tiny value: the delta is
     // strongly negative and drives stream 1's peer window below zero.
-    push_frame(io, FrameType::SETTINGS, 0, 0,
-               encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1u}}));
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1u}}));
     drive(protocol, io);
 
     EXPECT_FALSE(protocol.ok());
@@ -2971,7 +2958,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
     push_frame(io, FrameType::PRIORITY, 0, 9, {0x00, 0x00, 0x00, 0x00, 0x0F});
     drive(protocol, io);
 
-    EXPECT_TRUE(protocol.ok());     // ignored, no error
+    EXPECT_TRUE(protocol.ok()); // ignored, no error
     EXPECT_EQ(io.goaway_count, 0);
 }
 

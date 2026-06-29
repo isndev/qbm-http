@@ -76,8 +76,8 @@ protected:
     /** @brief Wires the validation middleware with the standard route table and routes once. */
     void
     configure_and_run(qb::http::Request request) {
-        _router      = std::make_unique<qb::http::Router<Session>>();
-        auto val_mw  = qb::http::validation_middleware<Session>(_request_validator);
+        _router     = std::make_unique<qb::http::Router<Session>>();
+        auto val_mw = qb::http::validation_middleware<Session>(_request_validator);
         _router->use(val_mw);
         _router->post("/test_validation", success_route_handler());
         _router->get("/test_validation_get", success_route_handler());
@@ -148,10 +148,7 @@ TEST_F(ValidationMiddlewareTest, InvalidEmailPatternFailsWithExactFieldPath) {
 }
 
 TEST_F(ValidationMiddlewareTest, MaxLengthBodyRuleFails) {
-    qb::json body_schema = {
-        {"type", "object"},
-        {"properties", {{"code", {{"type", "string"}, {"maxLength", 4}}}}}
-    };
+    qb::json body_schema = {{"type", "object"}, {"properties", {{"code", {{"type", "string"}, {"maxLength", 4}}}}}};
     _request_validator->for_body(body_schema);
 
     configure_and_run(val_request("/test_validation", qb::http::method::POST, qb::json{{"code", "toolong"}}.dump()));
@@ -162,10 +159,7 @@ TEST_F(ValidationMiddlewareTest, MaxLengthBodyRuleFails) {
 }
 
 TEST_F(ValidationMiddlewareTest, MaximumBodyRuleFails) {
-    qb::json body_schema = {
-        {"type", "object"},
-        {"properties", {{"qty", {{"type", "integer"}, {"maximum", 100}}}}}
-    };
+    qb::json body_schema = {{"type", "object"}, {"properties", {{"qty", {{"type", "integer"}, {"maximum", 100}}}}}};
     _request_validator->for_body(body_schema);
 
     configure_and_run(val_request("/test_validation", qb::http::method::POST, qb::json{{"qty", 250}}.dump()));
@@ -176,10 +170,7 @@ TEST_F(ValidationMiddlewareTest, MaximumBodyRuleFails) {
 }
 
 TEST_F(ValidationMiddlewareTest, EnumBodyRuleFails) {
-    qb::json body_schema = {
-        {"type", "object"},
-        {"properties", {{"color", {{"type", "string"}, {"enum", {"red", "green", "blue"}}}}}}
-    };
+    qb::json body_schema = {{"type", "object"}, {"properties", {{"color", {{"type", "string"}, {"enum", {"red", "green", "blue"}}}}}}};
     _request_validator->for_body(body_schema);
 
     configure_and_run(val_request("/test_validation", qb::http::method::POST, qb::json{{"color", "purple"}}.dump()));
@@ -193,10 +184,7 @@ TEST_F(ValidationMiddlewareTest, NestedObjectSchemaFailsWithDottedPath) {
     qb::json body_schema = {
         {"type", "object"},
         {"properties",
-         {{"address",
-           {{"type", "object"},
-            {"properties", {{"zip", {{"type", "string"}, {"pattern", "^[0-9]{5}$"}}}}},
-            {"required", {"zip"}}}}}}
+         {{"address", {{"type", "object"}, {"properties", {{"zip", {{"type", "string"}, {"pattern", "^[0-9]{5}$"}}}}}, {"required", {"zip"}}}}}}
     };
     _request_validator->for_body(body_schema);
 
@@ -213,10 +201,7 @@ TEST_F(ValidationMiddlewareTest, OneOfBodyRuleFailsWhenMatchingNone) {
     // oneOf: value must validate against exactly one sub-schema; a string matches neither.
     qb::json body_schema = {
         {"type", "object"},
-        {"properties",
-         {{"id",
-           {{"oneOf",
-             qb::json::array({qb::json{{"type", "integer"}}, qb::json{{"type", "boolean"}}})}}}}}
+        {"properties", {{"id", {{"oneOf", qb::json::array({qb::json{{"type", "integer"}}, qb::json{{"type", "boolean"}}})}}}}}
     };
     _request_validator->for_body(body_schema);
 
@@ -335,8 +320,8 @@ TEST_F(ValidationMiddlewareTest, BodySanitizationByMiddleware) {
     _request_validator->add_body_sanitizer("description", PredefinedSanitizers::trim());
     _request_validator->for_body({{"type", "object"}, {"properties", {{"description", {{"type", "string"}}}}}});
 
-    _router      = std::make_unique<qb::http::Router<Session>>();
-    auto val_mw  = qb::http::validation_middleware<Session>(_request_validator);
+    _router     = std::make_unique<qb::http::Router<Session>>();
+    auto val_mw = qb::http::validation_middleware<Session>(_request_validator);
     _router->use(val_mw);
     _router->post("/test_sanitization", [this](std::shared_ptr<qb::http::Context<Session>> ctx) {
         if (_session) {
@@ -350,7 +335,8 @@ TEST_F(ValidationMiddlewareTest, BodySanitizationByMiddleware) {
     _router->compile();
 
     _session->reset();
-    _router->route(_session, val_request("/test_sanitization", qb::http::method::POST, qb::json{{"description", "  Clean Description  "}}.dump()));
+    _router->route(_session,
+                   val_request("/test_sanitization", qb::http::method::POST, qb::json{{"description", "  Clean Description  "}}.dump()));
 
     EXPECT_TRUE(_session->_final_handler_called);
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
@@ -366,8 +352,8 @@ TEST_F(ValidationMiddlewareTest, SanitizerGatesRuleSoValidationPassesAfterTransf
     _request_validator->for_query_param("name",
                                         ParameterRuleSet("name").set_type(DataType::STRING).add_rule(std::make_shared<MinLengthRule>(3)));
 
-    _router      = std::make_unique<qb::http::Router<Session>>();
-    auto val_mw  = qb::http::validation_middleware<Session>(_request_validator);
+    _router     = std::make_unique<qb::http::Router<Session>>();
+    auto val_mw = qb::http::validation_middleware<Session>(_request_validator);
     _router->use(val_mw);
     _router->get("/test_query_sanitize", [this](std::shared_ptr<qb::http::Context<Session>> ctx) {
         if (_session) {

@@ -116,8 +116,7 @@ make_user() {
  * @return The compact-serialized JWT string.
  */
 inline std::string
-forge_token(const qb::json &payload, const std::string &secret = kDefaultSecret,
-            qb::jwt::Algorithm algo = qb::jwt::Algorithm::HS256) {
+forge_token(const qb::json &payload, const std::string &secret = kDefaultSecret, qb::jwt::Algorithm algo = qb::jwt::Algorithm::HS256) {
     std::map<std::string, std::string> claims;
     for (auto it = payload.begin(); it != payload.end(); ++it) {
         claims[it.key()] = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();

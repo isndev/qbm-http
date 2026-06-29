@@ -23,8 +23,8 @@
 #include <string>
 #include <utility>
 
-#include "../http.h"
 #include "../../shared/mock_session.h"
+#include "../http.h"
 
 using qb::http::test::create_request;
 using qb::http::test::MockSession;
@@ -271,7 +271,7 @@ TEST(RouteAdapters, RouteNodeNameForLambda) {
 }
 
 TEST(RouteAdapters, RouteNodeNameForCustomRoute) {
-    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::CompleteOk, "MyCustom");
+    auto                         custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::CompleteOk, "MyCustom");
     qb::http::Route<MockSession> route("seg", qb::http::method::POST, custom);
     EXPECT_NE(route.get_node_name().find("MyCustom"), std::string::npos);
 }
@@ -279,8 +279,8 @@ TEST(RouteAdapters, RouteNodeNameForCustomRoute) {
 // --- RouteLambdaTask::execute exception handling ---------------------------
 
 TEST(RouteAdapters, RouteLambdaTaskCatchesStdExceptionAndSets500) {
-    auto sess = std::make_shared<MockSession>();
-    auto ctx  = make_bare_ctx(sess);
+    auto                                   sess = std::make_shared<MockSession>();
+    auto                                   ctx  = make_bare_ctx(sess);
     qb::http::RouteLambdaTask<MockSession> task([](auto /*c*/) { throw std::runtime_error("boom"); }, "ThrowingLambda");
     EXPECT_EQ(task.name(), "ThrowingLambda");
     task.execute(ctx);
@@ -289,8 +289,8 @@ TEST(RouteAdapters, RouteLambdaTaskCatchesStdExceptionAndSets500) {
 }
 
 TEST(RouteAdapters, RouteLambdaTaskCatchesNonStdExceptionAndSets500) {
-    auto sess = std::make_shared<MockSession>();
-    auto ctx  = make_bare_ctx(sess);
+    auto                                   sess = std::make_shared<MockSession>();
+    auto                                   ctx  = make_bare_ctx(sess);
     qb::http::RouteLambdaTask<MockSession> task([](auto /*c*/) { throw 99; }, "NonStdLambda");
     task.execute(ctx);
     EXPECT_EQ(ctx->response().status(), qb::http::status::INTERNAL_SERVER_ERROR);
@@ -340,7 +340,7 @@ TEST(RouteAdapters, CustomRouteAdapterCatchesNonStdExceptionAndSets500) {
 }
 
 TEST(RouteAdapters, CustomRouteAdapterNullCtxStdExceptionDoesNotCrash) {
-    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::ThrowStd);
+    auto                                          custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::ThrowStd);
     qb::http::CustomRouteAdapterTask<MockSession> task(custom);
     EXPECT_NO_THROW(task.execute(nullptr));
 }
@@ -354,7 +354,7 @@ TEST(RouteAdapters, CustomRouteAdapterNullCtxNonStdExceptionDoesNotCrash) {
 // --- CustomRouteAdapterTask::cancel delegation -----------------------------
 
 TEST(RouteAdapters, CustomRouteAdapterCancelDelegatesToCustomRoute) {
-    auto custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::CompleteOk);
+    auto                                          custom = std::make_shared<ConfigurableCustomRoute>(ConfigurableCustomRoute::Mode::CompleteOk);
     qb::http::CustomRouteAdapterTask<MockSession> task(custom);
     task.cancel();
     EXPECT_EQ(custom->cancel_calls, 1);

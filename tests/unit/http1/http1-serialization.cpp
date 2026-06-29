@@ -91,8 +91,7 @@ TEST(Http1Serialization, MultipartRoundTripsPartsAndDispositions) {
     part2.headers()["Content-Type"]        = {"application/json"};
     part2.body                             = R"({"hello": "true"})";
 
-    qb::http::Request req{HTTP_POST, {"https://isndev.test"},
-                          {{"Content-Type", {"multipart/form-data"}}}, mp};
+    qb::http::Request req{HTTP_POST, {"https://isndev.test"}, {{"Content-Type", {"multipart/form-data"}}}, mp};
     req.body() = mp;
 
     auto mp2 = req.body().as<qb::http::Multipart>();

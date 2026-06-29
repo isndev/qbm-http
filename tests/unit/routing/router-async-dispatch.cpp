@@ -153,8 +153,8 @@ public:
         if (_order_log) {
             _order_log->push_back(_id + "_handle");
         }
-        const std::string         id        = _id;
-        auto                      order_log = _order_log;
+        const std::string               id        = _id;
+        auto                            order_log = _order_log;
         const qb::http::AsyncTaskResult result    = _result;
         const qb::http::status          status    = _status;
         _executor->addTask([ctx, id, order_log, result, status]() {
@@ -224,10 +224,12 @@ struct MethodCase {
     const char      *label;
 };
 
-class RouterAsyncMethodDispatchTest : public RouterAsyncDispatchTest, public ::testing::WithParamInterface<MethodCase> {};
+class RouterAsyncMethodDispatchTest
+    : public RouterAsyncDispatchTest
+    , public ::testing::WithParamInterface<MethodCase> {};
 
 TEST_P(RouterAsyncMethodDispatchTest, SimpleDeferredHandlerCompletes) {
-    const auto param = GetParam();
+    const auto param   = GetParam();
     auto       handler = std::make_shared<OrderTracingAsyncRoute>("handler", order, &executor);
     router.add_route(param.path, param.method, [handler](auto ctx) { handler->process(ctx); });
     router.compile();
@@ -341,8 +343,8 @@ TEST_F(RouterAsyncDispatchTest, DeferredHandlerSignalsError) {
 // --- Async middleware short-circuit (COMPLETE) ----------------------------------------------
 
 TEST_F(RouterAsyncDispatchTest, AsyncMiddlewareShortCircuitWithComplete) {
-    router.use(std::make_shared<AsyncResultMiddleware>("sc_mw", order, &executor, qb::http::AsyncTaskResult::COMPLETE,
-                                                       qb::http::status::ACCEPTED));
+    router.use(
+        std::make_shared<AsyncResultMiddleware>("sc_mw", order, &executor, qb::http::AsyncTaskResult::COMPLETE, qb::http::status::ACCEPTED));
     auto handler = std::make_shared<OrderTracingAsyncRoute>("never_handler", order, &executor);
     router.get("/async/short_circuit", [handler](auto ctx) { handler->process(ctx); });
     router.compile();
@@ -405,7 +407,7 @@ TEST_F(RouterAsyncDispatchTest, AsyncMiddlewareErrorAbortsChain) {
 // --- Route group with async middleware + async handler --------------------------------------
 
 TEST_F(RouterAsyncDispatchTest, RouteGroupAsyncMiddlewareAndHandler) {
-    auto group   = router.group("/api/group");
+    auto group = router.group("/api/group");
     group->use(std::make_shared<AsyncTraceMiddleware<MockSession>>("group_mw", order, &executor));
     auto handler = std::make_shared<OrderTracingAsyncRoute>("group_handler", order, &executor);
     group->get("/resource", [handler](auto ctx) { handler->process(ctx); });
@@ -530,12 +532,12 @@ TEST_F(RouterAsyncDispatchTest, CancelAfterAsyncMiddlewareBeforeHandlerTask) {
 }
 
 TEST_F(RouterAsyncDispatchTest, CancelOnAlreadyErroredContextOverridesTo503) {
-    qb::http::Request  req;
+    qb::http::Request req;
     req.method() = qb::http::method::GET;
     req.uri()    = qb::io::uri("/test");
     qb::http::Response resp_proto;
 
-    auto temp_session = std::make_shared<MockSession>();
+    auto                                                  temp_session = std::make_shared<MockSession>();
     std::function<void(qb::http::Context<MockSession> &)> on_finalized = [temp_session](qb::http::Context<MockSession> &ctx) {
         *temp_session << ctx.response();
     };
@@ -641,7 +643,7 @@ TEST_F(RouterAsyncDispatchTest, DeferredDoubleCompleteIsIdempotent) {
     ctx->response().status() = qb::http::status::OK;
     EXPECT_NO_THROW(ctx->complete(qb::http::AsyncTaskResult::COMPLETE));
     EXPECT_TRUE(ctx->is_completed());
-    ctx->response().status() = qb::http::status::ACCEPTED; // must NOT reach the wire: already finalized.
+    ctx->response().status() = qb::http::status::ACCEPTED;               // must NOT reach the wire: already finalized.
     EXPECT_NO_THROW(ctx->complete(qb::http::AsyncTaskResult::COMPLETE)); // no-op
     EXPECT_NO_THROW(ctx->complete(qb::http::AsyncTaskResult::ERROR));    // no-op
 

@@ -133,8 +133,8 @@ protected:
     void
     SetUp() override {
         ASSERT_TRUE(qb::http::test::certs_available())
-            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and "
-            << qb::http::test::ssl_key_path() << "). The HTTPS factory system suite REQUIRES them.";
+            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and " << qb::http::test::ssl_key_path()
+            << "). The HTTPS factory system suite REQUIRES them.";
 
         qb::io::async::init();
         g_https_server_requests = 0;
@@ -150,13 +150,12 @@ protected:
                 return false;
             }
             srv.transport().init(std::move(ssl_ctx));
-            srv.router().get("/ping_ssl",
-                             [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
-                                 ++g_https_server_requests;
-                                 ctx->response().status() = qb::http::status::OK;
-                                 ctx->response().body()   = "pong_https_default";
-                                 ctx->complete();
-                             });
+            srv.router().get("/ping_ssl", [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
+                ++g_https_server_requests;
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().body()   = "pong_https_default";
+                ctx->complete();
+            });
             srv.router().compile();
             if (srv.transport().listen_v4(port) != 0) {
                 return false;
@@ -205,8 +204,8 @@ protected:
     void
     SetUp() override {
         ASSERT_TRUE(qb::http::test::certs_available())
-            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and "
-            << qb::http::test::ssl_key_path() << "). The HTTP/2 factory system suite REQUIRES them.";
+            << "Missing TLS test certificates (looked for " << qb::http::test::ssl_cert_path() << " and " << qb::http::test::ssl_key_path()
+            << "). The HTTP/2 factory system suite REQUIRES them.";
 
         qb::io::async::init();
         g_http2_server_requests = 0;
@@ -223,29 +222,27 @@ protected:
             }
             srv.transport().init(std::move(ssl_ctx));
             srv.transport().set_supported_alpn_protocols({"h2", "http/1.1"});
-            srv.router().get("/ping_http2",
-                             [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
-                                 ++g_http2_server_requests;
-                                 ctx->response().status() = qb::http::status::OK;
-                                 ctx->response().body()   = "pong_http2_default";
-                                 ctx->complete();
-                             });
+            srv.router().get("/ping_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                ++g_http2_server_requests;
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().body()   = "pong_http2_default";
+                ctx->complete();
+            });
             // A response larger than the default per-stream send window forces
             // the factory-built server through its flow-control / pending-DATA
             // path over a real socket.
-            srv.router().get("/big_http2",
-                             [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
-                                 std::string body;
-                                 body.reserve(300 * 1024);
-                                 body += "BIG-START;";
-                                 while (body.size() < 300 * 1024) {
-                                     body += static_cast<char>('a' + (body.size() % 26));
-                                 }
-                                 body += ";BIG-END";
-                                 ctx->response().status() = qb::http::status::OK;
-                                 ctx->response().body()   = std::move(body);
-                                 ctx->complete();
-                             });
+            srv.router().get("/big_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                std::string body;
+                body.reserve(300 * 1024);
+                body += "BIG-START;";
+                while (body.size() < 300 * 1024) {
+                    body += static_cast<char>('a' + (body.size() % 26));
+                }
+                body += ";BIG-END";
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().body()   = std::move(body);
+                ctx->complete();
+            });
             srv.router().compile();
             if (srv.transport().listen_v4(port) != 0) {
                 return false;
@@ -365,8 +362,7 @@ TEST_F(Http2MakeServerTest, FactoryServerMultiplexesConcurrentStreams) {
 // transparently supports the ALPN fallback.
 TEST_F(Http2MakeServerTest, FactoryServerServesHttp1FallbackOverAlpn) {
     qb::http::Request request{{base_url() + "/ping_http2"}};
-    auto              response =
-        qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
+    auto              response = qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
 
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_http2_default", response.body().as<std::string>());

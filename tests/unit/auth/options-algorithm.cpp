@@ -11,9 +11,9 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
+#include <gtest/gtest.h>
 #include <optional>
 #include <string_view>
-#include <gtest/gtest.h>
 
 #include "../auth.h" // qb::http::auth::Options
 

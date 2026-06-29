@@ -170,8 +170,8 @@ TEST_F(MiddlewarePipelineTest, LoggingMiddlewareEmitsRequestAndResponseLines) {
 
     auto server = start_pipeline_server(_port, [capture](PipelineServer &srv) {
         srv.router().use<qb::http::LoggingMiddleware<PipelineSession>>(
-            [capture](qb::http::LogLevel level, const std::string &message) { capture->log(level, message); },
-            qb::http::LogLevel::Info, qb::http::LogLevel::Debug);
+            [capture](qb::http::LogLevel level, const std::string &message) { capture->log(level, message); }, qb::http::LogLevel::Info,
+            qb::http::LogLevel::Debug);
         srv.router().get("/logged_route", [](std::shared_ptr<PipelineCtx> ctx) {
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body()   = "Logged route content";
@@ -247,8 +247,7 @@ TEST_F(MiddlewarePipelineTest, SecurityHeadersMiddlewarePlainHttp) {
     // into it. The per-request nonce is exposed separately on the context under
     // the "csp_nonce" key so the application can embed it itself. So {NONCE} here
     // stays literal in the rendered header; we assert that exact contract below.
-    const std::string user_csp =
-        "default-src 'self'; script-src 'self' 'nonce-{NONCE}'; object-src 'none';";
+    const std::string user_csp = "default-src 'self'; script-src 'self' 'nonce-{NONCE}'; object-src 'none';";
 
     auto server = start_pipeline_server(_port, [user_csp](PipelineServer &srv) {
         qb::http::SecurityHeadersOptions options;
@@ -292,8 +291,7 @@ TEST_F(MiddlewarePipelineTest, SecurityHeadersMiddlewarePlainHttp) {
     EXPECT_EQ("microphone=(), geolocation=()", response.header("Permissions-Policy"));
 
     // HSTS is correctly suppressed for non-https schemes.
-    EXPECT_TRUE(std::string(response.header("Strict-Transport-Security")).empty())
-        << "HSTS must not be emitted over plain HTTP";
+    EXPECT_TRUE(std::string(response.header("Strict-Transport-Security")).empty()) << "HSTS must not be emitted over plain HTTP";
 
     // The user-provided CSP is emitted verbatim regardless of the nonce feature.
     const std::string csp{response.header("Content-Security-Policy")};
@@ -307,14 +305,12 @@ TEST_F(MiddlewarePipelineTest, SecurityHeadersMiddlewarePlainHttp) {
     EXPECT_FALSE(observed_nonce.empty()) << "CSP nonce was not injected into context";
     // The user-provided CSP keeps the literal {NONCE} the user wrote: the framework
     // does not touch it (contract: user-provided CSP wins verbatim).
-    EXPECT_NE(csp.find("{NONCE}"), std::string::npos)
-        << "framework must not rewrite a user-provided CSP";
+    EXPECT_NE(csp.find("{NONCE}"), std::string::npos) << "framework must not rewrite a user-provided CSP";
     EXPECT_EQ(csp.find("'nonce-" + observed_nonce + "'"), std::string::npos)
         << "framework must not splice the generated nonce into a user-provided CSP";
 #else
     // No crypto: the nonce feature is off, so no nonce is exposed on the context.
-    EXPECT_TRUE(std::string(response.header("X-Observed-Nonce")).empty())
-        << "no CSP nonce should be produced without QB_HAS_SSL";
+    EXPECT_TRUE(std::string(response.header("X-Observed-Nonce")).empty()) << "no CSP nonce should be produced without QB_HAS_SSL";
 #endif
 }
 
@@ -323,17 +319,13 @@ TEST_F(MiddlewarePipelineTest, SecurityHeadersMiddlewarePlainHttp) {
 // ---------------------------------------------------------------------------
 
 TEST_F(MiddlewarePipelineTest, CompressionMiddlewareGzipsAndInflatesRoundTrip) {
-    const std::string original =
-        "This is a sufficiently long string that should be compressed. Repeating to make it longer. "
-        "This is a sufficiently long string that should be compressed. Repeating to make it longer. "
-        "This is a sufficiently long string that should be compressed. Repeating to make it longer.";
+    const std::string original = "This is a sufficiently long string that should be compressed. Repeating to make it longer. "
+                                 "This is a sufficiently long string that should be compressed. Repeating to make it longer. "
+                                 "This is a sufficiently long string that should be compressed. Repeating to make it longer.";
 
     auto server = start_pipeline_server(_port, [original](PipelineServer &srv) {
         qb::http::CompressionOptions comp_options;
-        comp_options.compress_responses(true)
-            .decompress_requests(true)
-            .min_size_to_compress(100)
-            .preferred_encodings({"gzip", "deflate"});
+        comp_options.compress_responses(true).decompress_requests(true).min_size_to_compress(100).preferred_encodings({"gzip", "deflate"});
         srv.router().use<qb::http::CompressionMiddleware<PipelineSession>>(comp_options);
 
         srv.router().get("/compressible_route", [original](std::shared_ptr<PipelineCtx> ctx) {
@@ -398,8 +390,7 @@ TEST_F(MiddlewarePipelineTest, CompressionMiddlewareGzipsAndInflatesRoundTrip) {
         request.add_header("Content-Type", "text/plain");
         auto response = qb::http::run_sync(qb::http::POST(request)).response;
         EXPECT_EQ(qb::http::status::OK, response.status());
-        EXPECT_EQ("Received body: " + payload, response.body().as<std::string>())
-            << "server did not see the decompressed request body";
+        EXPECT_EQ("Received body: " + payload, response.body().as<std::string>()) << "server did not see the decompressed request body";
 #else
         request.body() = payload;
         request.add_header("Content-Type", "text/plain");
@@ -447,8 +438,7 @@ TEST_F(MiddlewarePipelineTest, CorsMiddlewareHandlesSimplePreflightAndCredential
         EXPECT_EQ(qb::http::status::OK, response.status());
         EXPECT_EQ("CORS test route content", response.body().as<std::string>());
         EXPECT_EQ("http://allowed.example.com", response.header("Access-Control-Allow-Origin"));
-        EXPECT_NE(std::string(response.header("Access-Control-Expose-Headers")).find("X-Response-Info"),
-                  std::string::npos);
+        EXPECT_NE(std::string(response.header("Access-Control-Expose-Headers")).find("X-Response-Info"), std::string::npos);
     }
 
     // 2. Simple GET from a disallowed origin: handler still runs, no ACAO.
@@ -499,12 +489,11 @@ TEST_F(MiddlewarePipelineTest, CorsMiddlewareHandlesSimplePreflightAndCredential
 TEST_F(MiddlewarePipelineTest, RateLimitMiddlewareLimitsThenResets) {
     // Hold the middleware instance so the test can reset its window
     // deterministically instead of waiting out a wall-clock window.
-    auto rl_mw = qb::http::rate_limit_middleware<PipelineSession>(
-        qb::http::RateLimitOptions()
-            .max_requests(3)
-            .window(std::chrono::seconds(60))
-            .status_code(qb::http::status::TOO_MANY_REQUESTS)
-            .message("Custom: Too many requests!"));
+    auto rl_mw = qb::http::rate_limit_middleware<PipelineSession>(qb::http::RateLimitOptions()
+                                                                      .max_requests(3)
+                                                                      .window(std::chrono::seconds(60))
+                                                                      .status_code(qb::http::status::TOO_MANY_REQUESTS)
+                                                                      .message("Custom: Too many requests!"));
 
     auto server = start_pipeline_server(_port, [rl_mw](PipelineServer &srv) {
         srv.router().use(rl_mw);
@@ -561,12 +550,11 @@ TEST_F(MiddlewarePipelineTest, ErrorHandlingMiddlewareMapsStatusesAndRanges) {
             ctx->response().body()   = "Custom Forbidden Error Page";
             ctx->response().set_header("X-Error-Handler", "Specific-403");
         });
-        error_mw->on_status_range(qb::http::status::INTERNAL_SERVER_ERROR, qb::http::status::BAD_GATEWAY,
-                                  [](std::shared_ptr<PipelineCtx> ctx) {
-                                      ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
-                                      ctx->response().body()   = "Custom 50x Error Page (became 503)";
-                                      ctx->response().set_header("X-Error-Handler", "Range-50x-to-503");
-                                  });
+        error_mw->on_status_range(qb::http::status::INTERNAL_SERVER_ERROR, qb::http::status::BAD_GATEWAY, [](std::shared_ptr<PipelineCtx> ctx) {
+            ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
+            ctx->response().body()   = "Custom 50x Error Page (became 503)";
+            ctx->response().set_header("X-Error-Handler", "Range-50x-to-503");
+        });
         error_mw->on_any_error([](std::shared_ptr<PipelineCtx> ctx, const std::string &error_message) {
             if (ctx->response().status() < qb::http::status::BAD_REQUEST
                 || ctx->response().status() >= qb::http::status::NETWORK_AUTHENTICATION_REQUIRED) {
@@ -577,8 +565,7 @@ TEST_F(MiddlewarePipelineTest, ErrorHandlingMiddlewareMapsStatusesAndRanges) {
         });
 
         std::vector<std::shared_ptr<qb::http::IAsyncTask<PipelineSession>>> error_chain;
-        error_chain.push_back(
-            std::make_shared<qb::http::MiddlewareTask<PipelineSession>>(error_mw, "ErrorHandlingMiddlewareTask"));
+        error_chain.push_back(std::make_shared<qb::http::MiddlewareTask<PipelineSession>>(error_mw, "ErrorHandlingMiddlewareTask"));
         srv.router().set_error_task_chain(std::move(error_chain));
 
         srv.router().get("/generic_error", [](std::shared_ptr<PipelineCtx> ctx) {
@@ -655,8 +642,10 @@ private:
 
 TEST_F(MiddlewarePipelineTest, ConditionalMiddlewarePredicateFalseSkipsIf) {
     auto server = start_pipeline_server(_port, [](PipelineServer &srv) {
-        auto predicate = [](const auto &) -> bool { return false; };
-        auto if_mw     = std::make_shared<HeaderStampMiddleware>("If", "X-If-Ran", "true");
+        auto predicate = [](const auto &) -> bool {
+            return false;
+        };
+        auto if_mw = std::make_shared<HeaderStampMiddleware>("If", "X-If-Ran", "true");
         srv.router().use(qb::http::conditional_middleware<PipelineSession>(predicate, if_mw));
         srv.router().get("/cond", [](std::shared_ptr<PipelineCtx> ctx) {
             ctx->response().set_header("X-Main-Ran", "true");
@@ -677,8 +666,10 @@ TEST_F(MiddlewarePipelineTest, ConditionalMiddlewarePredicateFalseSkipsIf) {
 
 TEST_F(MiddlewarePipelineTest, ConditionalMiddlewarePredicateTrueRunsIf) {
     auto server = start_pipeline_server(_port, [](PipelineServer &srv) {
-        auto predicate = [](const auto &ctx) -> bool { return ctx->request().uri().query("exec_if") == "1"; };
-        auto if_mw     = std::make_shared<HeaderStampMiddleware>("If", "X-If-Ran", "true");
+        auto predicate = [](const auto &ctx) -> bool {
+            return ctx->request().uri().query("exec_if") == "1";
+        };
+        auto if_mw = std::make_shared<HeaderStampMiddleware>("If", "X-If-Ran", "true");
         srv.router().use(qb::http::conditional_middleware<PipelineSession>(predicate, if_mw));
         srv.router().get("/cond", [](std::shared_ptr<PipelineCtx> ctx) {
             ctx->response().set_header("X-Main-Ran", "true");
@@ -840,9 +831,7 @@ TEST_F(MiddlewarePipelineTest, TransformMiddlewareChangesRequestMethod) {
 TEST_F(MiddlewarePipelineTest, ValidationMiddlewareAcceptsValidBody) {
     auto server = start_pipeline_server(_port, [](PipelineServer &srv) {
         auto     validator   = std::make_shared<qb::http::validation::RequestValidator>();
-        qb::json body_schema = {{"type", "object"},
-                                {"properties", {{"name", {{"type", "string"}}}}},
-                                {"required", {"name"}}};
+        qb::json body_schema = {{"type", "object"}, {"properties", {{"name", {{"type", "string"}}}}}, {"required", {"name"}}};
         validator->for_body(body_schema);
         srv.router().use(qb::http::validation_middleware<PipelineSession>(validator));
         srv.router().post("/val_body", [](std::shared_ptr<PipelineCtx> ctx) {
@@ -864,12 +853,12 @@ TEST_F(MiddlewarePipelineTest, ValidationMiddlewareAcceptsValidBody) {
 
 TEST_F(MiddlewarePipelineTest, ValidationMiddlewareRejectsInvalidBody) {
     auto server = start_pipeline_server(_port, [](PipelineServer &srv) {
-        auto     validator = std::make_shared<qb::http::validation::RequestValidator>();
+        auto     validator   = std::make_shared<qb::http::validation::RequestValidator>();
         qb::json body_schema = {
             {"type", "object"},
-            {"properties",
-             {{"email", {{"type", "string"}, {"pattern", "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"}}}}},
-            {"required", {"email"}}};
+            {"properties", {{"email", {{"type", "string"}, {"pattern", "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"}}}}},
+            {"required", {"email"}}
+        };
         validator->for_body(body_schema);
         srv.router().use(qb::http::validation_middleware<PipelineSession>(validator));
         srv.router().post("/val_body_invalid", [](std::shared_ptr<PipelineCtx> ctx) {

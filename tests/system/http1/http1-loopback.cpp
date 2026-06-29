@@ -53,8 +53,7 @@ pump_loop_until(const F &done, std::chrono::milliseconds budget = std::chrono::s
     const auto deadline = std::chrono::steady_clock::now() + budget;
     while (!done()) {
         if (std::chrono::steady_clock::now() >= deadline) {
-            ADD_FAILURE() << "pump_loop_until: predicate not satisfied within " << budget.count()
-                          << "ms";
+            ADD_FAILURE() << "pump_loop_until: predicate not satisfied within " << budget.count() << "ms";
             return false;
         }
         async::run(EVRUN_ONCE | EVRUN_NOWAIT);
@@ -66,8 +65,7 @@ pump_loop_until(const F &done, std::chrono::milliseconds budget = std::chrono::s
 
 class HostHeaderCaptureServer;
 
-class HostHeaderCaptureClient
-    : public qb::io::use<HostHeaderCaptureClient>::tcp::client<HostHeaderCaptureServer> {
+class HostHeaderCaptureClient : public qb::io::use<HostHeaderCaptureClient>::tcp::client<HostHeaderCaptureServer> {
 public:
     constexpr static const bool has_server = true;
     using Protocol                         = qb::http::protocol<HostHeaderCaptureClient>;
@@ -89,8 +87,7 @@ public:
     }
 };
 
-class HostHeaderCaptureServer
-    : public qb::http::use<HostHeaderCaptureServer>::server<HostHeaderCaptureClient> {};
+class HostHeaderCaptureServer : public qb::http::use<HostHeaderCaptureServer>::server<HostHeaderCaptureClient> {};
 
 std::atomic<bool> HostHeaderCaptureClient::got_request{false};
 std::string       HostHeaderCaptureClient::captured_host_header;
@@ -128,10 +125,10 @@ std::atomic<std::size_t> msg_count_client_side{0};
 // thread pumps the server loop, so it must NOT call gtest EXPECT/ASSERT directly
 // (a failed EXPECT off the main thread is lost/UB). It records into these atomics
 // instead; the test body does the asserting.
-std::atomic<std::size_t> server_bad_method{0};      ///< requests whose method != GET.
-std::atomic<std::size_t> server_empty_headers{0};   ///< requests with no headers.
-std::atomic<std::size_t> server_bad_connection{0};  ///< requests whose Connection != keep-alive.
-std::atomic<std::size_t> server_bad_query{0};       ///< requests whose ?happy != true.
+std::atomic<std::size_t> server_bad_method{0};     ///< requests whose method != GET.
+std::atomic<std::size_t> server_empty_headers{0};  ///< requests with no headers.
+std::atomic<std::size_t> server_bad_connection{0}; ///< requests whose Connection != keep-alive.
+std::atomic<std::size_t> server_bad_query{0};      ///< requests whose ?happy != true.
 
 bool
 all_done() {
@@ -230,9 +227,7 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
             qb::http::Request r{
                 HTTP_GET,
                 {"http://127.0.0.1:" + std::to_string(port) + "/?happy=true"},
-                {{"Host", {"127.0.0.1:" + std::to_string(port)}},
-                 {"Connection", {"keep-alive"}},
-                 {"Transfer-Encoding", {"chunked"}}}
+                {{"Host", {"127.0.0.1:" + std::to_string(port)}}, {"Connection", {"keep-alive"}}, {"Transfer-Encoding", {"chunked"}}}
             };
 
             for (auto i = 0u; i < NB_ITERATION; ++i) {
@@ -287,9 +282,7 @@ TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {
 
             qb::http::Request r{
                 {"http://localhost:" + std::to_string(port) + "/?happy=true"},
-                {{"Host", {"127.0.0.1:" + std::to_string(port)}},
-                 {"Connection", {"keep-alive"}},
-                 {"Authorization", {"None"}}},
+                {{"Host", {"127.0.0.1:" + std::to_string(port)}}, {"Connection", {"keep-alive"}}, {"Authorization", {"None"}}},
                 {STRING_MESSAGE}
             };
 
@@ -331,8 +324,7 @@ namespace {
 
 class CookieEchoServer;
 
-class CookieEchoClient
-    : public qb::io::use<CookieEchoClient>::tcp::client<CookieEchoServer> {
+class CookieEchoClient : public qb::io::use<CookieEchoClient>::tcp::client<CookieEchoServer> {
 public:
     constexpr static const bool has_server = true;
     using Protocol                         = qb::http::protocol<CookieEchoClient>;
@@ -358,8 +350,7 @@ public:
     }
 };
 
-class CookieEchoServer
-    : public qb::http::use<CookieEchoServer>::server<CookieEchoClient> {};
+class CookieEchoServer : public qb::http::use<CookieEchoServer>::server<CookieEchoClient> {};
 
 std::atomic<std::size_t> CookieEchoClient::requests_seen{0};
 std::atomic<std::size_t> CookieEchoClient::cookie_count_seen{0};
@@ -405,21 +396,21 @@ TEST(Http1Loopback, ValidCookieHeaderIsParsedAndVisibleToHandler) {
     std::string response;
     std::thread worker([&] {
         async::init();
-        const std::string raw =
-            "GET /cookie HTTP/1.1\r\n"
-            "Host: 127.0.0.1:" + std::to_string(port) + "\r\n"
-            "Cookie: session=abc123; theme=dark\r\n"
-            "Connection: close\r\n"
-            "\r\n";
-        response = raw_request_response(port, raw);
+        const std::string raw = "GET /cookie HTTP/1.1\r\n"
+                                "Host: 127.0.0.1:"
+                                + std::to_string(port)
+                                + "\r\n"
+                                  "Cookie: session=abc123; theme=dark\r\n"
+                                  "Connection: close\r\n"
+                                  "\r\n";
+        response              = raw_request_response(port, raw);
     });
 
     pump_loop_until([&] { return CookieEchoClient::requests_seen.load() >= 1; });
     worker.join();
 
     EXPECT_EQ(CookieEchoClient::requests_seen.load(), 1u);
-    EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 2u)
-        << "both cookies should have parsed";
+    EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 2u) << "both cookies should have parsed";
     EXPECT_EQ(CookieEchoClient::session_cookie_seen, "abc123");
     EXPECT_NE(response.find("200"), std::string::npos) << response;
 }
@@ -446,13 +437,16 @@ TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
         // parsing rejects it. The server's onMessage catches the throw and
         // dispatches the request anyway (noexcept-safe degradation).
         const std::string giant_name(1100, 'c'); // > 1024, < 8192
-        std::string       raw =
-            "GET /cookie HTTP/1.1\r\n"
-            "Host: 127.0.0.1:" + std::to_string(port) + "\r\n"
-            "Cookie: " + giant_name + "=value\r\n"
-            "Connection: close\r\n"
-            "\r\n";
-        response = raw_request_response(port, raw);
+        std::string       raw = "GET /cookie HTTP/1.1\r\n"
+                                "Host: 127.0.0.1:"
+                                + std::to_string(port)
+                                + "\r\n"
+                                  "Cookie: "
+                                + giant_name
+                                + "=value\r\n"
+                                  "Connection: close\r\n"
+                                  "\r\n";
+        response              = raw_request_response(port, raw);
     });
 
     pump_loop_until([&] { return CookieEchoClient::requests_seen.load() >= 1; });
@@ -462,8 +456,7 @@ TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
     EXPECT_EQ(CookieEchoClient::requests_seen.load(), 1u);
     // ...and the malformed Cookie left the request with NO parsed cookies
     // (parse_cookie_header() cleared _cookies before it threw).
-    EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 0u)
-        << "malformed cookie header must yield zero parsed cookies";
+    EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 0u) << "malformed cookie header must yield zero parsed cookies";
     EXPECT_TRUE(CookieEchoClient::session_cookie_seen.empty());
     // The server still produced a well-formed HTTP response.
     EXPECT_NE(response.find("200"), std::string::npos) << response;
@@ -477,8 +470,7 @@ namespace {
 
 class TestSecureServer;
 
-class TestSecureServerClient
-    : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
+class TestSecureServerClient : public use<TestSecureServerClient>::tcp::ssl::client<TestSecureServer> {
 public:
     using Protocol = qb::http::protocol<TestSecureServerClient>;
 
@@ -531,8 +523,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
     // HARD prerequisite: a secure build MUST have the test certs; missing certs
     // are a build/config error, not a reason to silently skip TLS coverage.
     ASSERT_TRUE(qb::http::test::certs_available())
-        << "Missing TLS test resources: " << qb::http::test::ssl_cert_path() << " / "
-        << qb::http::test::ssl_key_path();
+        << "Missing TLS test resources: " << qb::http::test::ssl_cert_path() << " / " << qb::http::test::ssl_key_path();
 
     const auto          cert_path = qb::http::test::ssl_cert_path();
     const auto          key_path  = qb::http::test::ssl_key_path();
@@ -543,8 +534,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
     msg_count_client_side = 0;
 
     TestSecureServer server;
-    server.transport().init(
-        ssl::create_server_context(TLS_server_method(), cert_path.string(), key_path.string()));
+    server.transport().init(ssl::create_server_context(TLS_server_method(), cert_path.string(), key_path.string()));
     ASSERT_EQ(server.transport().listen_v6(port), 0);
     server.start();
 
@@ -557,8 +547,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
             // Self-signed test certificate: opt out of qb-io's secure-by-default
             // peer verification for this local fixture.
             client.transport().set_insecure();
-            if (SocketStatus::Done !=
-                client.transport().connect(uri{"tcp://[::1]:" + std::to_string(port), AF_INET6})) {
+            if (SocketStatus::Done != client.transport().connect(uri{"tcp://[::1]:" + std::to_string(port), AF_INET6})) {
                 throw std::runtime_error("could not connect");
             }
             client.start();
