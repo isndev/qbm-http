@@ -178,4 +178,22 @@ TEST(ResponseAccessors, ConstAccessorsReadCookieState) {
     EXPECT_TRUE(jar.has("k"));
 }
 
+// update_cookie_header() for a name absent from the jar is a no-op (early return),
+// not an error, and writes no Set-Cookie header.
+TEST(ResponseAccessors, UpdateCookieHeaderUnknownNameIsNoop) {
+    Response res;
+    EXPECT_NO_THROW(res.update_cookie_header("does-not-exist"));
+    EXPECT_FALSE(res.has_header("Set-Cookie"));
+}
+
+// When re-syncing a cookie, a pre-existing Set-Cookie header with no '=' cannot
+// be matched by name and must be left in place (the erase predicate skips it).
+TEST(ResponseAccessors, UpdateCookieHeaderSkipsMalformedExistingSetCookie) {
+    Response res;
+    res.with_cookie(Cookie("sid", "v"));                 // real cookie in jar + Set-Cookie header
+    res.add_header("Set-Cookie", "malformed-no-equals"); // no '=' -> predicate returns false
+    EXPECT_NO_THROW(res.update_cookie_header("sid"));
+    EXPECT_TRUE(res.has_header("Set-Cookie"));
+}
+
 } // namespace

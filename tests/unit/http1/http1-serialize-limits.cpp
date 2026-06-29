@@ -485,3 +485,85 @@ TEST_F(ResponseSerializeLimitsTest, FramingMismatchClearsExistingBufferBeforeWri
     EXPECT_THROW(pipe.put(bad_resp), std::length_error);
     EXPECT_EQ(pipe.size(), 0u);
 }
+
+// ====================================================================
+// Content-Length header validity (distinct from the body/CL framing
+// mismatch above): an empty, non-numeric, or self-conflicting
+// Content-Length is rejected by declared_content_length() before framing,
+// and the pipe is cleared. Mirrored for Request and Response.
+// ====================================================================
+
+TEST_F(RequestSerializeLimitsTest, RejectsEmptyContentLength) {
+    Request req;
+    req.method() = method::POST;
+    req.uri()    = qb::io::uri("/u");
+    req.set_header("Content-Length", ""); // empty -> parse_content_length nullopt -> throw
+    EXPECT_THROW(pipe.put(req), std::length_error);
+    EXPECT_EQ(pipe.size(), 0u);
+}
+
+TEST_F(RequestSerializeLimitsTest, RejectsNonNumericContentLength) {
+    Request req;
+    req.method() = method::POST;
+    req.uri()    = qb::io::uri("/u");
+    req.set_header("Content-Length", "12x"); // from_chars stops short -> nullopt -> throw
+    EXPECT_THROW(pipe.put(req), std::length_error);
+}
+
+TEST_F(RequestSerializeLimitsTest, RejectsConflictingContentLengths) {
+    Request req;
+    req.method() = method::POST;
+    req.uri()    = qb::io::uri("/u");
+    req.add_header("Content-Length", "2");
+    req.add_header("Content-Length", "9"); // two different values -> conflict throw
+    EXPECT_THROW(pipe.put(req), std::length_error);
+}
+
+TEST_F(RequestSerializeLimitsTest, RejectsEmptyTransferEncodingTokens) {
+    Request req;
+    req.method() = method::POST;
+    req.uri()    = qb::io::uri("/u");
+    req.set_header("Transfer-Encoding", ","); // splits to zero tokens -> malformed TE
+    EXPECT_THROW(pipe.put(req), std::length_error);
+}
+
+TEST_F(ResponseSerializeLimitsTest, RejectsEmptyContentLength) {
+    Response r;
+    r.status() = status::OK;
+    r.set_header("Content-Length", "");
+    EXPECT_THROW(pipe.put(r), std::length_error);
+    EXPECT_EQ(pipe.size(), 0u);
+}
+
+TEST_F(ResponseSerializeLimitsTest, RejectsNonNumericContentLength) {
+    Response r;
+    r.status() = status::OK;
+    r.set_header("Content-Length", "abc");
+    EXPECT_THROW(pipe.put(r), std::length_error);
+}
+
+TEST_F(ResponseSerializeLimitsTest, RejectsConflictingContentLengths) {
+    Response r;
+    r.status() = status::OK;
+    r.add_header("Content-Length", "2");
+    r.add_header("Content-Length", "3");
+    EXPECT_THROW(pipe.put(r), std::length_error);
+}
+
+TEST_F(ResponseSerializeLimitsTest, RejectsEmptyTransferEncodingTokens) {
+    Response r;
+    r.status() = status::OK;
+    r.body()   = "x";
+    r.set_header("Transfer-Encoding", ",");
+    EXPECT_THROW(pipe.put(r), std::length_error);
+}
+
+TEST_F(ResponseSerializeLimitsTest, RejectsContentLengthWithTransferEncoding) {
+    Response r;
+    r.status() = status::OK;
+    r.body()   = "abc";
+    r.set_header("Transfer-Encoding", "chunked");
+    r.set_header("Content-Length", "3"); // CL forbidden alongside chunked TE
+    EXPECT_THROW(pipe.put(r), std::length_error);
+    EXPECT_EQ(pipe.size(), 0u);
+}
