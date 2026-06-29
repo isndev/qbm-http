@@ -85,7 +85,7 @@ TEST_F(CompressionMiddlewareTest, DecompressesGzipRequestAndUpdatesFraming) {
     auto comp_mw = qb::http::compression_middleware<MockMiddlewareSession>();
 
     const std::string original_body = "This is test data for gzip.";
-    qb::http::Body     gz;
+    qb::http::Body    gz;
     gz = original_body;
     gz.compress("gzip");
     const std::string compressed_body = gz.as<std::string>();
@@ -117,7 +117,7 @@ TEST_F(CompressionMiddlewareTest, DecompressesDeflateRequest) {
     auto comp_mw = qb::http::compression_middleware<MockMiddlewareSession>();
 
     const std::string original_body(512, 'Z'); // highly compressible
-    qb::http::Body     df;
+    qb::http::Body    df;
     df = original_body;
     df.compress("deflate");
     const std::string compressed_body = df.as<std::string>();

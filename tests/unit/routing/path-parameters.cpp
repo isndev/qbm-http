@@ -139,7 +139,7 @@ TEST(PathParametersTest, FindPresentAndAbsent) {
     EXPECT_EQ(pp.find("b"), pp.end());
 
     const PathParameters &cpp = pp;
-    auto cit = cpp.find("a");
+    auto                  cit = cpp.find("a");
     ASSERT_NE(cit, cpp.end());
     EXPECT_EQ(cit->second, "1");
     EXPECT_EQ(cpp.find("b"), cpp.end());

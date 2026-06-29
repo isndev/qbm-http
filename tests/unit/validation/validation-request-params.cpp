@@ -108,8 +108,8 @@ TEST_F(RequestParamsTest, MultiValueQueryValidatesEachOccurrence) {
     validator.for_query_param("ids", ParameterRuleSet("ids").set_type(DataType::INTEGER).add_rule(std::make_shared<MinimumRule>(10)));
 
     qb::http::Request req;
-    req.uri()        = qb::io::uri("/items?ids=10&ids=5&ids=20");
-    auto ids_it      = req.queries().find("ids");
+    req.uri()   = qb::io::uri("/items?ids=10&ids=5&ids=20");
+    auto ids_it = req.queries().find("ids");
     ASSERT_NE(ids_it, req.queries().end());
     ASSERT_EQ(ids_it->second.size(), 3u); // confirm the URI parsed all three occurrences
 

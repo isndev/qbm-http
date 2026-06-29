@@ -89,8 +89,8 @@ start_auth_server(std::uint16_t port, BuildFn build_routes) {
 // Forge a signed JWT carrying sub/iat/nbf/exp plus extra string claims, matching
 // the wire shape the verifier expects. Deltas are relative to "now".
 std::string
-make_token(const std::string &subject, const std::map<std::string, std::string> &extra_claims = {},
-           long long exp_delta_seconds = 3600, long long nbf_delta_seconds = 0) {
+make_token(const std::string &subject, const std::map<std::string, std::string> &extra_claims = {}, long long exp_delta_seconds = 3600,
+           long long nbf_delta_seconds = 0) {
     const auto                         now = qb::http::test::now_epoch();
     std::map<std::string, std::string> claims;
     claims["sub"] = subject;
@@ -190,8 +190,7 @@ TEST_F(MiddlewareAuthJwtTest, JwtMiddlewareEnforcesSignatureExpiryNbfAndRequired
         request.add_header("Authorization", "Bearer " + token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
         EXPECT_EQ(qb::http::status::UNAUTHORIZED, response.status());
-        EXPECT_NE(response.body().as<std::string>().find("Required claim 'custom_claim' is missing"),
-                  std::string::npos);
+        EXPECT_NE(response.body().as<std::string>().find("Required claim 'custom_claim' is missing"), std::string::npos);
     }
     // 6. Fully valid token.
     {
@@ -245,7 +244,7 @@ TEST_F(MiddlewareAuthJwtTest, AuthMiddlewareEnforcesAuthenticationAndRole) {
     }
     // 3. Valid token, wrong role.
     {
-        auto token = make_token("user123", {{"roles", qb::json::array({"viewer"}).dump()}});
+        auto              token = make_token("user123", {{"roles", qb::json::array({"viewer"}).dump()}});
         qb::http::Request request{{base_url() + "/auth_route"}};
         request.add_header("Authorization", "Bearer " + token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;
@@ -254,7 +253,7 @@ TEST_F(MiddlewareAuthJwtTest, AuthMiddlewareEnforcesAuthenticationAndRole) {
     }
     // 4. Valid token, correct role.
     {
-        auto token = make_token("user123", {{"roles", qb::json::array({"editor", "another_role"}).dump()}});
+        auto              token = make_token("user123", {{"roles", qb::json::array({"editor", "another_role"}).dump()}});
         qb::http::Request request{{base_url() + "/auth_route"}};
         request.add_header("Authorization", "Bearer " + token);
         auto response = qb::http::run_sync(qb::http::GET(request)).response;

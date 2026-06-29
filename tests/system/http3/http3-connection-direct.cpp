@@ -78,8 +78,8 @@ struct DirectOwnerBase {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> stops;           // (stream_id, code)
     std::vector<std::pair<std::uint64_t, std::uint64_t>> acks;            // (stream_id, bytes)
     std::optional<std::pair<std::uint64_t, std::string>> close;           // (code, reason) once
-    std::vector<std::uint64_t>                            drained;        // streams whose output drained
-    std::vector<std::uint64_t>                            shutdowns;      // last-ids from GOAWAY
+    std::vector<std::uint64_t>                           drained;         // streams whose output drained
+    std::vector<std::uint64_t>                           shutdowns;       // last-ids from GOAWAY
 
     std::uint64_t
     open_http3_unidirectional_stream(std::uint64_t) {
@@ -474,8 +474,8 @@ TEST(Http3ConnectionDirect, ServerResetsRequestWhoseBodyExceedsCap) {
     pump(client_owner, client, server_owner, server);
 
     EXPECT_TRUE(server_owner.requests.empty()) << "an over-cap request must not be delivered";
-    const bool reset_request_stream = std::any_of(server_owner.resets.begin(), server_owner.resets.end(),
-                                                  [](auto const &r) { return r.first == 0u; });
+    const bool reset_request_stream =
+        std::any_of(server_owner.resets.begin(), server_owner.resets.end(), [](auto const &r) { return r.first == 0u; });
     EXPECT_TRUE(reset_request_stream) << "recv_data_cb must reset the over-cap request stream";
 }
 

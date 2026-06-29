@@ -357,10 +357,10 @@ make_settings_payload(const std::vector<std::pair<uint16_t, uint32_t>> &settings
 /// Encode a WINDOW_UPDATE payload body (4 octets, big-endian increment).
 [[nodiscard]] inline std::vector<uint8_t>
 make_window_update_payload(uint32_t increment) {
-    return {static_cast<uint8_t>((increment >> 24) & 0xFF),
-            static_cast<uint8_t>((increment >> 16) & 0xFF),
-            static_cast<uint8_t>((increment >> 8) & 0xFF),
-            static_cast<uint8_t>(increment & 0xFF)};
+    return {
+        static_cast<uint8_t>((increment >> 24) & 0xFF), static_cast<uint8_t>((increment >> 16) & 0xFF),
+        static_cast<uint8_t>((increment >> 8) & 0xFF), static_cast<uint8_t>(increment & 0xFF)
+    };
 }
 
 /// Push a SETTINGS frame (stream 0) carrying the given id/value pairs.

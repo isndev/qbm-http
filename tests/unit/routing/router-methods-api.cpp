@@ -53,9 +53,10 @@ namespace {
 // otherwise visible on the finalized response.
 inline void
 echo_injected_headers(const std::shared_ptr<qb::http::Context<Session>> &ctx) {
-    for (const std::string name : {"X-Middleware-RouterMwTyped", "X-Middleware-RouterMwShared", "X-Router-Func-Mw",
-                             "X-Middleware-Group1MwTyped", "X-Middleware-Group1MwShared", "X-Group1-Func-Mw",
-                             "X-Middleware-Group2MwTyped", "X-Middleware-CtrlMwTyped", "X-Middleware-CtrlMwShared"}) {
+    for (const std::string name :
+         {"X-Middleware-RouterMwTyped", "X-Middleware-RouterMwShared", "X-Router-Func-Mw", "X-Middleware-Group1MwTyped",
+          "X-Middleware-Group1MwShared", "X-Group1-Func-Mw", "X-Middleware-Group2MwTyped", "X-Middleware-CtrlMwTyped",
+          "X-Middleware-CtrlMwShared"}) {
         if (ctx->request().has_header(name)) {
             ctx->response().set_header(std::string("X-Echo-") + name, ctx->request().header(name));
         }
@@ -292,12 +293,9 @@ TEST(RouterMethodsApi, RouterScopeLambdaVerbMatrix) {
         std::string      expected_body;
     };
     const Row rows[] = {
-        {HTTP_GET, "/r_lambda_get", "Lambda RGetLambda"},
-        {HTTP_POST, "/r_lambda_post", "Lambda RPostLambda"},
-        {HTTP_PUT, "/r_lambda_put", "Lambda RPutLambda"},
-        {HTTP_DELETE, "/r_lambda_delete", "Lambda RDeleteLambda"},
-        {HTTP_PATCH, "/r_lambda_patch", "Lambda RPatchLambda"},
-        {HTTP_OPTIONS, "/r_lambda_options", "Lambda ROptionsLambda"},
+        {HTTP_GET, "/r_lambda_get", "Lambda RGetLambda"},       {HTTP_POST, "/r_lambda_post", "Lambda RPostLambda"},
+        {HTTP_PUT, "/r_lambda_put", "Lambda RPutLambda"},       {HTTP_DELETE, "/r_lambda_delete", "Lambda RDeleteLambda"},
+        {HTTP_PATCH, "/r_lambda_patch", "Lambda RPatchLambda"}, {HTTP_OPTIONS, "/r_lambda_options", "Lambda ROptionsLambda"},
     };
     for (const auto &row : rows) {
         auto session = drive(router, row.method, row.path);

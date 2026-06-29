@@ -47,10 +47,10 @@
 #include <qb/io/crypto_jwt.h> // qb::jwt::{create, CreateOptions, Algorithm}
 #include <qb/json.h>          // qb::json
 
-#include "../http.h"                            // Router, Context, FunctionalMiddleware, status, method
-#include "../middleware/auth.h"                 // AuthMiddleware + factories
-#include "../../shared/middleware_test_fixture.h" // MiddlewareTestFixture, MockMiddlewareSession
 #include "../../shared/auth_test_helpers.h"       // now_epoch
+#include "../../shared/middleware_test_fixture.h" // MiddlewareTestFixture, MockMiddlewareSession
+#include "../http.h"                              // Router, Context, FunctionalMiddleware, status, method
+#include "../middleware/auth.h"                   // AuthMiddleware + factories
 
 namespace {
 
@@ -118,10 +118,10 @@ struct AuthSession : qb::http::test::MockMiddlewareSession {
 /// Fixture sharing the canonical middleware harness, with auth-specific helpers.
 class AuthMiddlewareTest : public qb::http::test::MiddlewareTestFixture<AuthSession> {
 protected:
-    Options                                            _auth_options; ///< Base HMAC options (secret pre-loaded).
-    std::shared_ptr<qb::http::AuthMiddleware<AuthSession>> _auth_mw;  ///< Default HMAC middleware.
-    std::string                                        _ec_private;   ///< ES256 private PEM (per-process).
-    std::string                                        _ec_public;    ///< ES256 public PEM (per-process).
+    Options                                                _auth_options; ///< Base HMAC options (secret pre-loaded).
+    std::shared_ptr<qb::http::AuthMiddleware<AuthSession>> _auth_mw;      ///< Default HMAC middleware.
+    std::string                                            _ec_private;   ///< ES256 private PEM (per-process).
+    std::string                                            _ec_public;    ///< ES256 public PEM (per-process).
 
     void
     SetUp() override {
@@ -236,8 +236,7 @@ TEST_F(AuthMiddlewareTest, MissingToken) {
     run(_auth_mw, create_request(qb::http::method::GET, "/test"));
 
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(),
-              "Authentication required: Missing token or authorization header.");
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Authentication required: Missing token or authorization header.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -246,8 +245,7 @@ TEST_F(AuthMiddlewareTest, InvalidToken) {
     run(_auth_mw, authed_request("Bearer an_invalid_token_string"));
 
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(),
-              "Invalid or expired token; user authentication failed.");
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid or expired token; user authentication failed.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
@@ -309,11 +307,8 @@ TEST_F(AuthMiddlewareTest, SignatureDisabledInvalidExpClaimIsRejectedWithoutThro
     opts.algorithm = qb::jwt::Algorithm::HS256;
     opts.key       = kSecret;
     std::map<std::string, std::string> payload{
-        {"sub", "user_invalid_exp"},
-        {"username", "invalidexp"},
-        {"roles", qb::json::array({"user"}).dump()},
-        {"iat", std::to_string(now_epoch())},
-        {"exp", "not-a-number"},
+        {"sub", "user_invalid_exp"},          {"username", "invalidexp"}, {"roles", qb::json::array({"user"}).dump()},
+        {"iat", std::to_string(now_epoch())}, {"exp", "not-a-number"},
     };
     auto req = authed_request("Bearer " + qb::jwt::create(payload, opts));
 
@@ -483,7 +478,7 @@ TEST_F(AuthMiddlewareTest, OptionalAuthRejectsProvidedExpiredToken) {
 }
 
 TEST_F(AuthMiddlewareTest, OptionalAuthRejectsProvidedWrongSignatureToken) {
-    auto mw = qb::http::optional_auth_middleware<AuthSession>(_auth_options);
+    auto        mw        = qb::http::optional_auth_middleware<AuthSession>(_auth_options);
     std::string wrong_sig = hmac_token(User{"user_sig_opt", "sigopter", {"user"}}, "a_completely_different_secret_key_!@#");
     run(mw, authed_request("Bearer " + wrong_sig));
 
@@ -506,14 +501,13 @@ TEST_F(AuthMiddlewareTest, ExpiredTokenIsRejected) {
     run(_auth_mw, authed_request("Bearer " + token));
 
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
-    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(),
-              "Invalid or expired token; user authentication failed.");
+    EXPECT_EQ(qb::json::parse(body()).at("error").get<std::string>(), "Invalid or expired token; user authentication failed.");
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(AuthMiddlewareTest, NotYetValidTokenIsRejected) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options nbf_opts        = _auth_options;
+    const std::int64_t now      = static_cast<std::int64_t>(now_epoch());
+    Options            nbf_opts = _auth_options;
     nbf_opts.verify_not_before(true);
     _auth_mw->with_options(nbf_opts).with_auth_required(true);
 
@@ -526,8 +520,8 @@ TEST_F(AuthMiddlewareTest, NotYetValidTokenIsRejected) {
 }
 
 TEST_F(AuthMiddlewareTest, ClockSkewExpWithinTolerance) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options skew           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            skew = _auth_options;
     skew.clock_skew_tolerance(std::chrono::seconds(20));
     _auth_mw->with_options(skew).with_auth_required(true);
 
@@ -543,8 +537,8 @@ TEST_F(AuthMiddlewareTest, ClockSkewExpWithinTolerance) {
 }
 
 TEST_F(AuthMiddlewareTest, ClockSkewExpBeyondTolerance) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options skew           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            skew = _auth_options;
     skew.clock_skew_tolerance(std::chrono::seconds(20));
     _auth_mw->with_options(skew).with_auth_required(true);
 
@@ -558,8 +552,8 @@ TEST_F(AuthMiddlewareTest, ClockSkewExpBeyondTolerance) {
 }
 
 TEST_F(AuthMiddlewareTest, ClockSkewNbfWithinTolerance) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options skew           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            skew = _auth_options;
     skew.clock_skew_tolerance(std::chrono::seconds(20));
     skew.verify_not_before(true);
     _auth_mw->with_options(skew).with_auth_required(true);
@@ -574,8 +568,8 @@ TEST_F(AuthMiddlewareTest, ClockSkewNbfWithinTolerance) {
 }
 
 TEST_F(AuthMiddlewareTest, ClockSkewNbfBeyondTolerance) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options skew           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            skew = _auth_options;
     skew.clock_skew_tolerance(std::chrono::seconds(20));
     skew.verify_not_before(true);
     _auth_mw->with_options(skew).with_auth_required(true);
@@ -594,39 +588,39 @@ TEST_F(AuthMiddlewareTest, ClockSkewNbfBeyondTolerance) {
 // ===========================================================================
 
 TEST_F(AuthMiddlewareTest, IssuerCorrectAccepted) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options opts           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            opts = _auth_options;
     opts.token_issuer("my_app");
     _auth_mw->with_options(opts).with_auth_required(true);
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now, /*iss=*/"my_app");
+    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt,
+                                 now, /*iss=*/"my_app");
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(AuthMiddlewareTest, IssuerIncorrectRejected) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options opts           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            opts = _auth_options;
     opts.token_issuer("my_app");
     _auth_mw->with_options(opts).with_auth_required(true);
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now, /*iss=*/"other_app");
+    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt,
+                                 now, /*iss=*/"other_app");
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(AuthMiddlewareTest, IssuerMissingRejected) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options opts           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            opts = _auth_options;
     opts.token_issuer("my_app");
     _auth_mw->with_options(opts).with_auth_required(true);
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now); // no iss
+    std::string token =
+        sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt, now); // no iss
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
     EXPECT_FALSE(_session->_final_handler_called);
@@ -637,47 +631,47 @@ TEST_F(AuthMiddlewareTest, IssuerPresentButVerificationOff) {
     // token_issuer("") leaves verify_issuer disabled -> iss claim ignored.
     _auth_mw->with_options(_auth_options).with_auth_required(true);
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now, /*iss=*/"any_app_iss");
+    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt,
+                                 now, /*iss=*/"any_app_iss");
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(AuthMiddlewareTest, AudienceCorrectAccepted) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options opts           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            opts = _auth_options;
     opts.token_audience("my_client");
     _auth_mw->with_options(opts).with_auth_required(true);
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now, std::nullopt, /*aud=*/"my_client");
+    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt,
+                                 now, std::nullopt, /*aud=*/"my_client");
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
 TEST_F(AuthMiddlewareTest, AudienceIncorrectRejected) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options opts           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            opts = _auth_options;
     opts.token_audience("my_client");
     _auth_mw->with_options(opts).with_auth_required(true);
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now, std::nullopt, /*aud=*/"other_client");
+    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt,
+                                 now, std::nullopt, /*aud=*/"other_client");
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
 TEST_F(AuthMiddlewareTest, AudienceMissingRejected) {
-    const std::int64_t now = static_cast<std::int64_t>(now_epoch());
-    Options opts           = _auth_options;
+    const std::int64_t now  = static_cast<std::int64_t>(now_epoch());
+    Options            opts = _auth_options;
     opts.token_audience("my_client");
     _auth_mw->with_options(opts).with_auth_required(true);
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now); // no aud
+    std::string token =
+        sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt, now); // no aud
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::UNAUTHORIZED);
     EXPECT_FALSE(_session->_final_handler_called);
@@ -687,8 +681,8 @@ TEST_F(AuthMiddlewareTest, AudiencePresentButVerificationOff) {
     const std::int64_t now = static_cast<std::int64_t>(now_epoch());
     _auth_mw->with_options(_auth_options).with_auth_required(true); // verify_audience off
 
-    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}},
-                                 now + 3600, std::nullopt, now, std::nullopt, /*aud=*/"any_client_aud");
+    std::string token = sign_jwt(qb::jwt::Algorithm::HS256, kSecret, User{"user_iss_aud", "iss_aud_tester", {"user"}}, now + 3600, std::nullopt,
+                                 now, std::nullopt, /*aud=*/"any_client_aud");
     run(_auth_mw, authed_request("Bearer " + token));
     EXPECT_EQ(status(), qb::http::status::OK) << "Body: " << body();
     EXPECT_TRUE(_session->_final_handler_called);
@@ -786,7 +780,7 @@ TEST_F(AuthMiddlewareTest, CustomUserContextKeyIsolation) {
     _auth_mw->with_user_context_key(custom_key).with_auth_required(true);
 
     bool found_default = false;
-    _router = std::make_unique<qb::http::Router<AuthSession>>();
+    _router            = std::make_unique<qb::http::Router<AuthSession>>();
     _router->use(_auth_mw);
     _router->get("/test_custom_key", [&](std::shared_ptr<qb::http::Context<AuthSession>> ctx) {
         _session->_final_handler_called = true;

@@ -34,15 +34,13 @@ namespace {
 
 class BasicLoopbackServer;
 
-class BasicLoopbackSession
-    : public qb::http::use<BasicLoopbackSession>::session<BasicLoopbackServer> {
+class BasicLoopbackSession : public qb::http::use<BasicLoopbackSession>::session<BasicLoopbackServer> {
 public:
     explicit BasicLoopbackSession(BasicLoopbackServer &server_ref)
         : session(server_ref) {}
 };
 
-class BasicLoopbackServer
-    : public qb::http::use<BasicLoopbackServer>::server<BasicLoopbackSession> {
+class BasicLoopbackServer : public qb::http::use<BasicLoopbackServer>::server<BasicLoopbackSession> {
 public:
     using SessionContext = qb::http::Context<BasicLoopbackSession>;
 
@@ -129,7 +127,7 @@ public:
         router().get("/json", [](std::shared_ptr<SessionContext> ctx) {
             ctx->response().status() = qb::http::status::OK;
             ctx->response().add_header("Content-Type", "application/json");
-            qb::json json_obj = {{"message", "This is JSON"}, {"success", true}, {"code", 200}};
+            qb::json json_obj      = {{"message", "This is JSON"}, {"success", true}, {"code", 200}};
             ctx->response().body() = json_obj;
             ctx->complete();
         });
@@ -191,20 +189,19 @@ public:
  */
 class Http1LoopbackBasicTest : public ::testing::Test {
 protected:
-    std::uint16_t                                     port = ephemeral_port();
+    std::uint16_t                                      port = ephemeral_port();
     std::unique_ptr<ServerThread<BasicLoopbackServer>> server;
 
     void
     SetUp() override {
         qb::io::async::init(); // client side runs on the main/test thread
-        server = std::make_unique<ServerThread<BasicLoopbackServer>>(
-            [this](BasicLoopbackServer &s) {
-                if (s.transport().listen_v4(port) != 0) {
-                    return false;
-                }
-                s.start();
-                return true;
-            });
+        server = std::make_unique<ServerThread<BasicLoopbackServer>>([this](BasicLoopbackServer &s) {
+            if (s.transport().listen_v4(port) != 0) {
+                return false;
+            }
+            s.start();
+            return true;
+        });
         ASSERT_TRUE(server->ready());
     }
 
@@ -350,13 +347,11 @@ TEST_F(Http1LoopbackBasicTest, KeepAliveConnectionServesMultipleRequests) {
     // both must round-trip to their own observable responses.
     auto client = qb::http1::make_client(url("/"));
 
-    auto first = qb::http::run_sync(client->push_request(
-        qb::http::Request{qb::http::method::GET, qb::io::uri(url("/test"))}));
+    auto first = qb::http::run_sync(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri(url("/test"))}));
     EXPECT_EQ(first.status(), qb::http::status::OK);
     EXPECT_EQ(first.body().template as<std::string>(), "GET Success");
 
-    auto second = qb::http::run_sync(client->push_request(
-        qb::http::Request{qb::http::method::GET, qb::io::uri(url("/sync-complete"))}));
+    auto second = qb::http::run_sync(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri(url("/sync-complete"))}));
     EXPECT_EQ(second.status(), qb::http::status::OK);
     EXPECT_EQ(second.body().template as<std::string>(), "Sync response");
     EXPECT_TRUE(client->is_connected());

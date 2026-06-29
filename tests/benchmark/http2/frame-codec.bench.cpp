@@ -238,8 +238,7 @@ BM_Frame_HeaderUnpack(benchmark::State &state) {
     {
         h2::FrameHeader parsed{};
         std::memcpy(&parsed, wire, sizeof(parsed));
-        if (parsed.get_payload_length() != 0x010203u || parsed.get_stream_id() != 0x04050607u
-            || parsed.get_type() != h2::FrameType::HEADERS) {
+        if (parsed.get_payload_length() != 0x010203u || parsed.get_stream_id() != 0x04050607u || parsed.get_type() != h2::FrameType::HEADERS) {
             state.SkipWithError("FrameHeader unpack mismatch");
             return;
         }
@@ -248,9 +247,9 @@ BM_Frame_HeaderUnpack(benchmark::State &state) {
     for (auto _ : state) {
         h2::FrameHeader parsed{};
         std::memcpy(&parsed, wire, sizeof(parsed));
-        uint32_t       len = parsed.get_payload_length();
-        uint32_t       sid = parsed.get_stream_id();
-        h2::FrameType  ty  = parsed.get_type();
+        uint32_t      len = parsed.get_payload_length();
+        uint32_t      sid = parsed.get_stream_id();
+        h2::FrameType ty  = parsed.get_type();
         benchmark::DoNotOptimize(len);
         benchmark::DoNotOptimize(sid);
         benchmark::DoNotOptimize(ty);
@@ -277,8 +276,7 @@ BM_Frame_HeaderBlockChunking(benchmark::State &state) {
 
     {
         std::vector<uint8_t> probe;
-        const std::size_t    frames = build_header_frames(block, max_frame, /*stream_id=*/1,
-                                                          h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, probe);
+        const std::size_t    frames = build_header_frames(block, max_frame, /*stream_id=*/1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, probe);
         const std::size_t    expected_frames = (block_bytes + max_frame - 1) / max_frame;
         if (frames != std::max<std::size_t>(1, expected_frames) || probe.empty()) {
             state.SkipWithError("header-block chunking produced wrong frame count");
@@ -289,8 +287,7 @@ BM_Frame_HeaderBlockChunking(benchmark::State &state) {
     std::vector<uint8_t> wire;
     std::size_t          frames_per_iter = 0;
     for (auto _ : state) {
-        frames_per_iter =
-            build_header_frames(block, max_frame, /*stream_id=*/1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, wire);
+        frames_per_iter = build_header_frames(block, max_frame, /*stream_id=*/1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, wire);
         benchmark::DoNotOptimize(wire.data());
         benchmark::DoNotOptimize(frames_per_iter);
         benchmark::ClobberMemory();

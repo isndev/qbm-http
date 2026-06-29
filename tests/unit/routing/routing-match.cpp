@@ -25,8 +25,8 @@
 #include <string>
 #include <utility>
 
-#include "../http.h"
 #include "../../shared/mock_session.h"
+#include "../http.h"
 
 using qb::http::test::create_request;
 using qb::http::test::MockSession;

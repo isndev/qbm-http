@@ -79,8 +79,7 @@ public:
         router().get("/coro/hello", [](auto ctx) -> qb::io::async::task<void> {
             co_await qb::io::async::sleep(1ms);
             ctx->response().status() = qb::http::status::OK;
-            ctx->response().body() =
-                std::string{"hi:"} + std::string(ctx->request().header("X-Seen-By-Coro-MW"));
+            ctx->response().body()   = std::string{"hi:"} + std::string(ctx->request().header("X-Seen-By-Coro-MW"));
             co_return;
         });
 
@@ -201,8 +200,7 @@ protected:
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready())
-            << "coro HTTP/1.1 server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "coro HTTP/1.1 server failed to start on port " << _port;
     }
 
     void
@@ -212,10 +210,7 @@ protected:
 
     [[nodiscard]] qb::http::Response
     get(const std::string &path) const {
-        return qb::http::run_sync(
-                   qb::http::GET(qb::http::Request{{"http://localhost:" + std::to_string(_port) +
-                                                    path}},
-                                 kClientTimeout))
+        return qb::http::run_sync(qb::http::GET(qb::http::Request{{"http://localhost:" + std::to_string(_port) + path}}, kClientTimeout))
             .response;
     }
 };

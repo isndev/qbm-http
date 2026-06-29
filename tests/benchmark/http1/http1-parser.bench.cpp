@@ -124,14 +124,14 @@ parse_byte_at_a_time(const std::string &raw) {
 // realistic partial-segment shape FragmentedHeaderFieldAndValue / FragmentedUrl pin.
 http_errno_t
 parse_fragmented(const std::string &raw) {
-    Parser<Request> parser;
+    Parser<Request>   parser;
     const std::size_t n = raw.size();
     // 4 cut points spread across the buffer (never zero-length slices for n>=4).
     const std::size_t cuts[] = {n / 5, (2 * n) / 5, (3 * n) / 5, (4 * n) / 5};
 
-    std::size_t  pos       = 0;
-    bool         resumed   = false;
-    http_errno_t err       = HPE_OK;
+    std::size_t  pos     = 0;
+    bool         resumed = false;
+    http_errno_t err     = HPE_OK;
     for (std::size_t c = 0; c <= 4; ++c) {
         const std::size_t end = (c < 4) ? cuts[c] : n;
         if (end <= pos)

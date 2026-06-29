@@ -40,9 +40,9 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
 #include <cstddef>
 #include <cstdio>
+#include <gtest/gtest.h>
 #include <string>
 #include <string_view>
 #include "../1.1/protocol/base.h"
@@ -58,21 +58,21 @@ class IncomingParserLimitsTest : public ::testing::Test {};
 
 TEST_F(IncomingParserLimitsTest, OversizedUrlIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw = "GET /" + std::string(protocol_limits::MAX_URL_LENGTH + 1, 'x') + " HTTP/1.1\r\n\r\n";
+    std::string               raw = "GET /" + std::string(protocol_limits::MAX_URL_LENGTH + 1, 'x') + " HTTP/1.1\r\n\r\n";
 
     EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderNameIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw = "GET / HTTP/1.1\r\n" + std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') + ": value\r\n\r\n";
+    std::string               raw = "GET / HTTP/1.1\r\n" + std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') + ": value\r\n\r\n";
 
     EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderValueIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string raw = "GET / HTTP/1.1\r\nX-Test: " + std::string(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V') + "\r\n\r\n";
+    std::string               raw = "GET / HTTP/1.1\r\nX-Test: " + std::string(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V') + "\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
 }

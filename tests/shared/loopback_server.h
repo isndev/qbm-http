@@ -127,17 +127,14 @@ public:
      *                  and `server.start()`.
      * @param ready_budget Maximum wall time to wait for readiness before giving up.
      */
-    explicit ServerThread(ConfigureFn configure,
-                          std::chrono::milliseconds ready_budget = std::chrono::seconds(5))
+    explicit ServerThread(ConfigureFn configure, std::chrono::milliseconds ready_budget = std::chrono::seconds(5))
         : _configure(std::move(configure)) {
         _thread = std::thread([this] { worker_main(); });
 
         std::unique_lock<std::mutex> lock(_mutex);
-        const bool                   signalled =
-            _cv.wait_for(lock, ready_budget, [this] { return _ready.load() || _failed.load(); });
+        const bool                   signalled = _cv.wait_for(lock, ready_budget, [this] { return _ready.load() || _failed.load(); });
         if (!signalled) {
-            ADD_FAILURE() << "ServerThread: server did not become ready within "
-                          << ready_budget.count() << "ms";
+            ADD_FAILURE() << "ServerThread: server did not become ready within " << ready_budget.count() << "ms";
         } else if (_failed.load()) {
             ADD_FAILURE() << "ServerThread: configure callback failed or threw during startup";
         }
@@ -203,8 +200,7 @@ public:
         const auto deadline = std::chrono::steady_clock::now() + budget;
         while (!pred()) {
             if (std::chrono::steady_clock::now() >= deadline) {
-                ADD_FAILURE() << "pump_until: predicate not satisfied within " << budget.count()
-                              << "ms (event loop pumped to timeout)";
+                ADD_FAILURE() << "pump_until: predicate not satisfied within " << budget.count() << "ms (event loop pumped to timeout)";
                 return false;
             }
             qb::io::async::run(EVRUN_NOWAIT);
@@ -250,14 +246,14 @@ private:
         _server.reset(); // Destroy the server on the thread it lived on.
     }
 
-    ConfigureFn                _configure;
-    std::unique_ptr<ServerT>   _server;
-    std::thread                _thread;
-    std::atomic<bool>          _running{true};
-    std::atomic<bool>          _ready{false};
-    std::atomic<bool>          _failed{false};
-    std::mutex                 _mutex;
-    std::condition_variable    _cv;
+    ConfigureFn              _configure;
+    std::unique_ptr<ServerT> _server;
+    std::thread              _thread;
+    std::atomic<bool>        _running{true};
+    std::atomic<bool>        _ready{false};
+    std::atomic<bool>        _failed{false};
+    std::mutex               _mutex;
+    std::condition_variable  _cv;
 };
 
 } // namespace qb::http::test

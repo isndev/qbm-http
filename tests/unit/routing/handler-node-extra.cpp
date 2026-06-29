@@ -85,8 +85,7 @@ public:
         : Node(std::move(segment)) {}
 
     void
-    compile_tasks_and_register(qb::http::RouterCore<MockSession> &, const std::string &,
-                               const std::vector<std::shared_ptr<Task>> &) override {
+    compile_tasks_and_register(qb::http::RouterCore<MockSession> &, const std::string &, const std::vector<std::shared_ptr<Task>> &) override {
         // Not under test here; intentionally a no-op.
     }
 

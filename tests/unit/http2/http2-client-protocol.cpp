@@ -31,10 +31,10 @@
 #include "../../shared/http2_fake_io.h"
 
 using qb::http::test::default_request_headers;
-using qb::http::test::Http2ClientFakeIO;
-using qb::http::test::Http2PeerFakeIO;
 using qb::http::test::encode_hpack_headers;
 using qb::http::test::find_frame_offset;
+using qb::http::test::Http2ClientFakeIO;
+using qb::http::test::Http2PeerFakeIO;
 using qb::http::test::make_data_frame;
 using qb::http::test::make_headers_frame;
 using qb::http::test::peek_frame_header;
@@ -121,7 +121,7 @@ window_update_increment_for_stream(const qb::allocator::pipe<char> &pipe, uint32
         const auto fh      = peek_frame_header(pipe, offset);
         const auto payload = fh.get_payload_length();
         if (fh.get_type() == h2::FrameType::WINDOW_UPDATE && fh.get_stream_id() == stream_id) {
-            const auto *p = reinterpret_cast<const uint8_t *>(pipe.cbegin() + offset + h2::FRAME_HEADER_SIZE);
+            const auto    *p = reinterpret_cast<const uint8_t *>(pipe.cbegin() + offset + h2::FRAME_HEADER_SIZE);
             const uint32_t raw =
                 (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) | (static_cast<uint32_t>(p[2]) << 8) | p[3];
             return raw & 0x7FFFFFFFu;
@@ -136,14 +136,14 @@ window_update_increment_for_stream(const qb::allocator::pipe<char> &pipe, uint32
 // threshold). Returns 0 if none were emitted.
 [[nodiscard]] uint64_t
 total_window_update_increment_for_stream(const qb::allocator::pipe<char> &pipe, uint32_t stream_id, std::size_t start) {
-    std::size_t       offset = start;
+    std::size_t       offset    = start;
     uint64_t          total_inc = 0;
     const std::size_t total     = pipe.size();
     while (offset + h2::FRAME_HEADER_SIZE <= total) {
         const auto fh      = peek_frame_header(pipe, offset);
         const auto payload = fh.get_payload_length();
         if (fh.get_type() == h2::FrameType::WINDOW_UPDATE && fh.get_stream_id() == stream_id) {
-            const auto *p = reinterpret_cast<const uint8_t *>(pipe.cbegin() + offset + h2::FRAME_HEADER_SIZE);
+            const auto    *p = reinterpret_cast<const uint8_t *>(pipe.cbegin() + offset + h2::FRAME_HEADER_SIZE);
             const uint32_t raw =
                 (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) | (static_cast<uint32_t>(p[2]) << 8) | p[3];
             total_inc += (raw & 0x7FFFFFFFu);
@@ -380,7 +380,7 @@ TEST(HTTP2ClientProtocol, ContinuationFrameSplitHeaderBlockIsReassembled) {
     push_raw_header_carrier(io, h2::FrameType::CONTINUATION, h2::FLAG_END_HEADERS, 1, rest);
     // DATA(END_STREAM) completes the response.
     {
-        h2::FrameHeader fh{};
+        h2::FrameHeader   fh{};
         const std::string body = "reassembled";
         fh.set_payload_length(static_cast<uint32_t>(body.size()));
         fh.type  = static_cast<uint8_t>(h2::FrameType::DATA);
@@ -1957,8 +1957,7 @@ TEST(HTTP2ClientProtocol, ResponseConflictingContentLengthRstsStream) {
     open_stream_one(protocol, 49, "/conflict");
 
     const std::size_t before = io.output.size();
-    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
-                                   {{":status", "200"}, {"content-length", "5"}, {"content-length", "7"}}));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "5"}, {"content-length", "7"}}));
 
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.response_count, 0);
@@ -1976,8 +1975,7 @@ TEST(HTTP2ClientProtocol, ResponseContentLengthExceedsLimitRstsStream) {
 
     const std::size_t before = io.output.size();
     // Far beyond MAX_BODY_SIZE; parse_content_length accepts it, the limit check rejects.
-    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
-                                   {{":status", "200"}, {"content-length", "99999999999999"}}));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "99999999999999"}}));
 
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.response_count, 0);

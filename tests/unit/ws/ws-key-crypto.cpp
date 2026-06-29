@@ -57,8 +57,7 @@ TEST(WsKeyCrypto, KeyUniqueness) {
         EXPECT_EQ(decoded.size(), 16u) << "decoded key must be exactly 16 bytes: " << key;
 
         // Base64 validity: re-encoding the decoded bytes must reproduce the key.
-        EXPECT_EQ(qb::crypto::base64::encode(decoded), key)
-            << "key is not a valid canonical base64 string: " << key;
+        EXPECT_EQ(qb::crypto::base64::encode(decoded), key) << "key is not a valid canonical base64 string: " << key;
     }
 
     EXPECT_EQ(keys.size(), static_cast<std::size_t>(kNumKeys)) << "keys should all be unique";
@@ -72,8 +71,7 @@ TEST(WsKeyCrypto, AcceptKeyComputation) {
     const std::string key             = "dGhlIHNhbXBsZSBub25jZQ==";
     const std::string expected_accept = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
-    const std::string computed_accept =
-        qb::crypto::base64::encode(qb::crypto::sha1(key + kWsAcceptGuid));
+    const std::string computed_accept = qb::crypto::base64::encode(qb::crypto::sha1(key + kWsAcceptGuid));
 
     EXPECT_EQ(computed_accept, expected_accept) << "accept-key computation is incorrect";
 }

@@ -19,7 +19,7 @@ supported_encodings() {
     std::vector<std::string> out;
     for (const auto &token : qb::http::utility::split_string<std::string>(qb::http::accept_encoding(), ",")) {
         std::string_view name = qb::http::utility::trim_http_whitespace(token);
-        const auto        semi = name.find(';');
+        const auto       semi = name.find(';');
         if (semi != std::string_view::npos) {
             name = qb::http::utility::trim_http_whitespace(name.substr(0, semi));
         }
@@ -291,15 +291,14 @@ TEST(HeadersUtility, ContentEncodingMalformedQValueDisablesEncoding) {
     }
 
     for (const char *bad_q : {
-             "",        // empty q value
-             "2",       // leading digit is not '0' (and q > 1)
-             "0x",      // two chars, second is not '.'
-             "0.5x",    // trailing non-digit in the fraction
-             "0.1234",  // more than three fractional digits
+             "",       // empty q value
+             "2",      // leading digit is not '0' (and q > 1)
+             "0x",     // two chars, second is not '.'
+             "0.5x",   // trailing non-digit in the fraction
+             "0.1234", // more than three fractional digits
          }) {
         const std::string header = first + ";q=" + bad_q;
-        EXPECT_TRUE(qb::http::content_encoding(header).empty())
-            << "malformed q=\"" << bad_q << "\" should disable the encoding";
+        EXPECT_TRUE(qb::http::content_encoding(header).empty()) << "malformed q=\"" << bad_q << "\" should disable the encoding";
     }
 }
 

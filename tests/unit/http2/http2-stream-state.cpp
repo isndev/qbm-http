@@ -39,9 +39,9 @@
 namespace h2 = qb::protocol::http2;
 
 using h2::FlowControlManager;
+using h2::Http2ServerStream;
 using h2::Http2StreamBase;
 using h2::Http2StreamConcreteState;
-using h2::Http2ServerStream;
 using State = h2::Http2StreamConcreteState;
 
 // Default initial window per RFC 9113 — what the stream ctors get fed in tests.
@@ -347,14 +347,14 @@ add_stream(ServerMap &map, uint32_t id, State st) {
 
 TEST(HTTP2StreamManager, CleanupRemovesClosedAndResetStreamsByDefault) {
     ServerMap map;
-    add_stream(map, 1, State::OPEN);                       // kept
-    add_stream(map, 3, State::CLOSED);                     // removed (closed)
+    add_stream(map, 1, State::OPEN);                        // kept
+    add_stream(map, 3, State::CLOSED);                      // removed (closed)
     add_stream(map, 5, State::OPEN).rst_stream_sent = true; // removed (reset)
     ASSERT_EQ(map.size(), 3u);
 
-    ServerManager mgr(map);
+    ServerManager                  mgr(map);
     ServerManager::CleanupCriteria criteria; // cleanup_closed + cleanup_reset default true
-    const std::size_t removed = mgr.cleanup_streams(criteria);
+    const std::size_t              removed = mgr.cleanup_streams(criteria);
 
     EXPECT_EQ(removed, 2u);
     EXPECT_EQ(map.size(), 1u);
@@ -368,7 +368,7 @@ TEST(HTTP2StreamManager, CleanupCanBeRestrictedToNotTouchClosedStreams) {
     add_stream(map, 1, State::CLOSED);
     add_stream(map, 3, State::OPEN);
 
-    ServerManager mgr(map);
+    ServerManager                  mgr(map);
     ServerManager::CleanupCriteria criteria;
     criteria.cleanup_closed_streams = false;
     criteria.cleanup_reset_streams  = false;
@@ -384,7 +384,7 @@ TEST(HTTP2StreamManager, CleanupEvictsByAge) {
     map.at(1).created_at = std::chrono::steady_clock::now() - std::chrono::seconds(60);
     add_stream(map, 3, State::OPEN); // fresh, kept
 
-    ServerManager mgr(map);
+    ServerManager                  mgr(map);
     ServerManager::CleanupCriteria criteria;
     criteria.cleanup_closed_streams = false;
     criteria.cleanup_reset_streams  = false;
@@ -401,7 +401,7 @@ TEST(HTTP2StreamManager, CleanupEvictsByIdleTime) {
     map.at(1).last_activity = std::chrono::steady_clock::now() - std::chrono::seconds(60);
     add_stream(map, 3, State::OPEN); // recently active
 
-    ServerManager mgr(map);
+    ServerManager                  mgr(map);
     ServerManager::CleanupCriteria criteria;
     criteria.cleanup_closed_streams = false;
     criteria.cleanup_reset_streams  = false;
@@ -425,7 +425,7 @@ TEST(HTTP2StreamManager, CleanupEnforcesMaxTotalStreamsByEvictingOldestClosed) {
     c3.created_at  = now - std::chrono::seconds(20);
     c5.created_at  = now - std::chrono::seconds(10);
 
-    ServerManager mgr(map);
+    ServerManager                  mgr(map);
     ServerManager::CleanupCriteria criteria;
     // Disable the regular closed/reset sweep so ONLY the max_total path runs.
     criteria.cleanup_closed_streams = false;
@@ -533,9 +533,9 @@ TEST(HTTP2StreamManager, UpdateAllStreamWindowsAppliesDeltaAndCountsOverflows) {
     ServerMap map;
     // Stream A has a healthy peer window; B is already at the RFC max so a
     // positive delta overflows and gets reset to FLOW_CONTROL_ERROR.
-    auto &a = add_stream(map, 1, State::OPEN);
+    auto &a            = add_stream(map, 1, State::OPEN);
     a.peer_window_size = 1000;
-    auto &b = add_stream(map, 3, State::OPEN);
+    auto &b            = add_stream(map, 3, State::OPEN);
     b.peer_window_size = h2::MAX_WINDOW_SIZE_LIMIT;
 
     ServerManager mgr(map);
@@ -550,20 +550,20 @@ TEST(HTTP2StreamManager, UpdateAllStreamWindowsAppliesDeltaAndCountsOverflows) {
 TEST(HTTP2StreamManager, FindStreamsNeedingWindowUpdate) {
     ServerMap map;
     // Stream 1: processed >= threshold AND can receive -> needs update.
-    auto &s1 = add_stream(map, 1, State::OPEN);
+    auto &s1                             = add_stream(map, 1, State::OPEN);
     s1.window_update_threshold           = 10;
     s1.processed_bytes_for_window_update = 20;
     // Stream 3: processed >= threshold but CLOSED -> cannot receive, excluded.
-    auto &s3 = add_stream(map, 3, State::CLOSED);
+    auto &s3                             = add_stream(map, 3, State::CLOSED);
     s3.window_update_threshold           = 10;
     s3.processed_bytes_for_window_update = 20;
     // Stream 5: below threshold -> excluded.
-    auto &s5 = add_stream(map, 5, State::OPEN);
+    auto &s5                             = add_stream(map, 5, State::OPEN);
     s5.window_update_threshold           = 10;
     s5.processed_bytes_for_window_update = 5;
 
     ServerManager mgr(map);
-    const auto ids = mgr.find_streams_needing_window_update();
+    const auto    ids = mgr.find_streams_needing_window_update();
     ASSERT_EQ(ids.size(), 1u);
     EXPECT_EQ(ids[0], 1u);
 }

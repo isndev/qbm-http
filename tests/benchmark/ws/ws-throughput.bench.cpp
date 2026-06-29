@@ -117,14 +117,14 @@ make_masked_client_frame(std::uint8_t opcode_with_flags, std::string_view payloa
 // dispatch). `error` is declared so notify_protocol_error() has a sink.
 // ---------------------------------------------------------------------------
 struct WsServerFakeIO {
-    using base_io_t = WsServerFakeIO;
+    using base_io_t                  = WsServerFakeIO;
     static constexpr bool has_server = true;
 
     qb::allocator::pipe<char> input;
     qb::allocator::pipe<char> output;
 
     std::size_t message_count = 0;
-    std::size_t last_size      = 0;
+    std::size_t last_size     = 0;
 
     struct error {};
 
@@ -166,11 +166,12 @@ using WsServerProtocol = qb::protocol::ws_server<WsServerFakeIO>;
 // must set it explicitly. Without it the constructor rejects the handshake,
 // calls not_ok(), and getMessageSize() short-circuits to 0 — so no frame is ever
 // decoded and the DECODE/ECHO correctness gates fail.
-static qb::http::Request ws_upgrade_request() {
+static qb::http::Request
+ws_upgrade_request() {
     qb::http::Request req;
-    req.method()  = qb::http::method::GET;
-    req.uri()     = qb::io::uri("/");
-    req.upgrade   = true;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("/");
+    req.upgrade  = true;
     req.set_header("Upgrade", "websocket");
     req.set_header("Connection", "Upgrade");
     req.set_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
@@ -240,7 +241,7 @@ BM_WS_EncodeUnmaskedBinary(benchmark::State &state) {
     // carry at least a 2+ byte header on top of the payload, i.e. strictly more
     // than the payload — so a broken serializer can't quietly post a number.
     {
-        qb::allocator::pipe<char>  probe_out;
+        qb::allocator::pipe<char>   probe_out;
         qb::http::ws::MessageBinary probe;
         probe.masked = false;
         probe << payload;
@@ -397,38 +398,14 @@ BM_WS_EchoRoundTrip(benchmark::State &state) {
 
 } // namespace
 
-BENCHMARK(BM_WS_EncodeMaskedText)
-    ->Arg(16)
-    ->Arg(256)
-    ->Arg(4 * 1024)
-    ->Arg(64 * 1024)
-    ->ArgNames({"bytes"})
-    ->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_WS_EncodeMaskedText)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
-BENCHMARK(BM_WS_EncodeUnmaskedBinary)
-    ->Arg(16)
-    ->Arg(256)
-    ->Arg(4 * 1024)
-    ->Arg(64 * 1024)
-    ->ArgNames({"bytes"})
-    ->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_WS_EncodeUnmaskedBinary)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
-BENCHMARK(BM_WS_DecodeMaskedText)
-    ->Arg(16)
-    ->Arg(256)
-    ->Arg(4 * 1024)
-    ->Arg(64 * 1024)
-    ->ArgNames({"bytes"})
-    ->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_WS_DecodeMaskedText)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK(BM_WS_DecodePingAutoPong)->Arg(0)->Arg(32)->Arg(125)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
-BENCHMARK(BM_WS_EchoRoundTrip)
-    ->Arg(16)
-    ->Arg(256)
-    ->Arg(4 * 1024)
-    ->Arg(64 * 1024)
-    ->ArgNames({"bytes"})
-    ->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_WS_EchoRoundTrip)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();

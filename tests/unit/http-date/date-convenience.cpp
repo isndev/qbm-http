@@ -25,8 +25,8 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
-#include <gtest/gtest.h>
 #include <chrono>
+#include <gtest/gtest.h>
 #include <string>
 #include <string_view>
 
@@ -103,7 +103,7 @@ TEST(DateConvenience, ParseCookieDateStdStringOverload) {
 
 // to_string + parse round-trip through the convenience layer only.
 TEST(DateConvenience, ConvenienceRoundTrip) {
-    const auto tp        = system_clock::time_point(std::chrono::seconds(kCanonicalEpoch));
+    const auto        tp = system_clock::time_point(std::chrono::seconds(kCanonicalEpoch));
     const std::string s  = to_string(tp);
     qb::wall_time     wt = parse(s);
     EXPECT_EQ(epoch_seconds(wt), kCanonicalEpoch);

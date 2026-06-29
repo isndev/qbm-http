@@ -175,8 +175,7 @@ protected:
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready())
-            << "coro HTTP/1.1 loopback server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "coro HTTP/1.1 loopback server failed to start on port " << _port;
     }
 
     void
@@ -223,25 +222,15 @@ TEST_F(CoroClientTest, PostWithBodyRoundTrips) {
 TEST_F(CoroClientTest, AllVerbsReachTheServer) {
     using qb::http::Request;
 
-    EXPECT_EQ(qb::http::run_sync(qb::http::GET(Request{{url("/ping")}})).response.status(),
-              qb::http::status::OK);
-    EXPECT_EQ(qb::http::run_sync(qb::http::PUT(Request{qb::http::method::PUT, {url("/resource/7")}}))
-                  .response.status(),
-              qb::http::status::OK);
-    EXPECT_EQ(qb::http::run_sync(qb::http::DEL(Request{qb::http::method::DEL, {url("/resource/7")}}))
-                  .response.status(),
+    EXPECT_EQ(qb::http::run_sync(qb::http::GET(Request{{url("/ping")}})).response.status(), qb::http::status::OK);
+    EXPECT_EQ(qb::http::run_sync(qb::http::PUT(Request{qb::http::method::PUT, {url("/resource/7")}})).response.status(), qb::http::status::OK);
+    EXPECT_EQ(qb::http::run_sync(qb::http::DEL(Request{qb::http::method::DEL, {url("/resource/7")}})).response.status(),
               qb::http::status::NO_CONTENT);
-    EXPECT_EQ(qb::http::run_sync(
-                  qb::http::PATCH(Request{qb::http::method::PATCH, {url("/resource/7")}}))
-                  .response.status(),
+    EXPECT_EQ(qb::http::run_sync(qb::http::PATCH(Request{qb::http::method::PATCH, {url("/resource/7")}})).response.status(),
               qb::http::status::OK);
-    EXPECT_EQ(qb::http::run_sync(qb::http::HEAD(Request{qb::http::method::HEAD, {url("/ping")}}))
-                  .response.status(),
+    EXPECT_EQ(qb::http::run_sync(qb::http::HEAD(Request{qb::http::method::HEAD, {url("/ping")}})).response.status(), qb::http::status::OK);
+    EXPECT_EQ(qb::http::run_sync(qb::http::OPTIONS(Request{qb::http::method::OPTIONS, {url("/ping")}})).response.status(),
               qb::http::status::OK);
-    EXPECT_EQ(
-        qb::http::run_sync(qb::http::OPTIONS(Request{qb::http::method::OPTIONS, {url("/ping")}}))
-            .response.status(),
-        qb::http::status::OK);
 }
 
 TEST_F(CoroClientTest, HeadResponseWithContentLengthCompletesWithoutBody) {
@@ -309,8 +298,7 @@ TEST_F(CoroClientTest, SequentialAwaitsShareLoop) {
 
     qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
         for (int i = 0; i < 3; ++i) {
-            auto reply =
-                co_await qb::http::GET(qb::http::Request{{url("/echo/" + std::to_string(i))}});
+            auto reply = co_await qb::http::GET(qb::http::Request{{url("/echo/" + std::to_string(i))}});
             statuses.push_back(reply.response.status());
         }
         co_return;
@@ -349,8 +337,7 @@ TEST_F(CoroClientTest, CallbackApiStillWorks) {
         callback_fired = true;
     });
 
-    ASSERT_TRUE(ServerThread::pump_until([&] { return callback_fired.load(); }))
-        << "callback-style GET never fired";
+    ASSERT_TRUE(ServerThread::pump_until([&] { return callback_fired.load(); })) << "callback-style GET never fired";
 
     EXPECT_EQ(received.status(), qb::http::status::OK);
     EXPECT_EQ(received.body().template as<std::string>(), "pong");
@@ -360,11 +347,10 @@ TEST_F(CoroClientTest, CallbackApiStillWorks) {
 
 // The awaiter's completion callback is one-shot: a second complete() is ignored.
 TEST(HttpCoroAwaiterTest, CompletionCallbackIsOneShot) {
-    auto value = qb::http::run_sync(
-        qb::http::async::make_awaiter<int>([](std::function<void(int &&)> complete) {
-            complete(1);
-            complete(2); // Must be ignored.
-        }));
+    auto value = qb::http::run_sync(qb::http::async::make_awaiter<int>([](std::function<void(int &&)> complete) {
+        complete(1);
+        complete(2); // Must be ignored.
+    }));
 
     EXPECT_EQ(value, 1);
 }

@@ -446,8 +446,8 @@ TEST_F(CorsMiddlewareTest, MaxOriginLengthBoundary) {
     // ONLY the length guard (not origin mismatch) decides the outcome.
     const std::string prefix = "http://";
     std::string       at_limit(qb::http::cors_security_limits::MAX_ORIGIN_LENGTH - prefix.size(), 'x');
-    at_limit          = prefix + at_limit; // length == 2048
-    std::string over_limit = at_limit + "y"; // length == 2049
+    at_limit               = prefix + at_limit; // length == 2048
+    std::string over_limit = at_limit + "y";    // length == 2049
     ASSERT_EQ(at_limit.size(), 2048u);
     ASSERT_EQ(over_limit.size(), 2049u);
 
@@ -544,8 +544,7 @@ TEST_F(CorsMiddlewareTest, MaxRegexPatternsCapEnforced) {
     run_cors(cors_mw, cors_request(qb::http::method::GET, "http://beyond.cap.example"));
 
     EXPECT_EQ(response().status(), qb::http::status::OK);
-    EXPECT_TRUE(header("Access-Control-Allow-Origin").empty())
-        << "Pattern beyond MAX_REGEX_PATTERNS should not have been compiled/matched.";
+    EXPECT_TRUE(header("Access-Control-Allow-Origin").empty()) << "Pattern beyond MAX_REGEX_PATTERNS should not have been compiled/matched.";
     EXPECT_TRUE(_session->_final_handler_called);
 
     // Sanity: a matching pattern within the cap DOES match.

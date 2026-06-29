@@ -110,8 +110,8 @@ make_corpus(std::size_t size) {
 qb::http::Request
 make_request(const std::string &accept_encoding) {
     qb::http::Request req;
-    req.method() = qb::http::method::GET;
-    req.uri()    = qb::io::uri("/bench");
+    req.method()      = qb::http::method::GET;
+    req.uri()         = qb::io::uri("/bench");
     req.major_version = 1;
     req.minor_version = 1;
     if (!accept_encoding.empty()) {

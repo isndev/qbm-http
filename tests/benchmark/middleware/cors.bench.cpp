@@ -224,8 +224,8 @@ BM_Cors_MatchFunction(benchmark::State &state) {
 qb::http::Request
 make_request(qb::http::method method_val, const std::string &origin) {
     qb::http::Request req;
-    req.method() = method_val;
-    req.uri()    = qb::io::uri("/cors_test");
+    req.method()      = method_val;
+    req.uri()         = qb::io::uri("/cors_test");
     req.major_version = 1;
     req.minor_version = 1;
     if (!origin.empty()) {
@@ -242,8 +242,8 @@ BM_Cors_ProcessSimpleGet(benchmark::State &state) {
 
     auto build_ctx = [&]() {
         return std::make_shared<qb::http::Context<Session>>(
-            make_request(qb::http::method::GET, "http://example.com"), qb::http::Response{}, session,
-            [](qb::http::Context<Session> &) {}, std::weak_ptr<qb::http::RouterCore<Session>>{});
+            make_request(qb::http::method::GET, "http://example.com"), qb::http::Response{}, session, [](qb::http::Context<Session> &) {},
+            std::weak_ptr<qb::http::RouterCore<Session>>{});
     };
 
     {
@@ -283,9 +283,8 @@ BM_Cors_ProcessPreflight(benchmark::State &state) {
         auto req = make_request(qb::http::method::OPTIONS, "http://localhost:3000");
         req.set_header("Access-Control-Request-Method", "POST");
         req.set_header("Access-Control-Request-Headers", "Content-Type, Authorization");
-        return std::make_shared<qb::http::Context<Session>>(std::move(req), qb::http::Response{}, session,
-                                                            [](qb::http::Context<Session> &) {},
-                                                            std::weak_ptr<qb::http::RouterCore<Session>>{});
+        return std::make_shared<qb::http::Context<Session>>(
+            std::move(req), qb::http::Response{}, session, [](qb::http::Context<Session> &) {}, std::weak_ptr<qb::http::RouterCore<Session>>{});
     };
 
     {

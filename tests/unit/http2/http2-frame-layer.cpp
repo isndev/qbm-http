@@ -28,16 +28,16 @@
 #include <string>
 #include <vector>
 
-#include "../2/protocol/base.h"
 #include "../../shared/http2_fake_io.h"
+#include "../2/protocol/base.h"
 
 namespace h2 = qb::protocol::http2;
 
-using qb::http::test::Http2FakeIO;
 using qb::http::test::default_request_headers;
 using qb::http::test::do_handshake;
 using qb::http::test::drive;
 using qb::http::test::encode_hpack_headers;
+using qb::http::test::Http2FakeIO;
 using qb::http::test::parse_emitted_frames;
 using qb::http::test::push_frame;
 using qb::http::test::push_preface;
@@ -503,19 +503,19 @@ TEST(HTTP2FrameLayerHeaderValidator, HeaderFieldControlCharInNameRejected) {
     // NUL / CR / LF and any non-token character in the name are rejected via the
     // is_valid_char == false branch.
     EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field(std::string("bad\x00name", 8), "v"));
-    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad name", "v"));     // space is not a token char
-    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad\tname", "v"));    // TAB is not a token char
-    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad:colon", "v"));    // ':' not a token char (mid-name)
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad name", "v"));  // space is not a token char
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad\tname", "v")); // TAB is not a token char
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("bad:colon", "v")); // ':' not a token char (mid-name)
 }
 
 TEST(HTTP2FrameLayerHeaderValidator, HeaderFieldControlCharInValueRejected) {
     // is_valid_header_value rejects NUL, CR, LF, other C0 controls (except TAB)
     // and DEL (0x7F).
     EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x00", 2))); // NUL
-    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", "v\r"));                    // CR
-    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", "v\n"));                    // LF
-    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x01", 2)));  // SOH (C0)
-    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x7F", 2)));  // DEL
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", "v\r"));                   // CR
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", "v\n"));                   // LF
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x01", 2))); // SOH (C0)
+    EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("name", std::string("v\x7F", 2))); // DEL
     // TAB (0x09) and ordinary printable bytes ARE allowed in a value.
     EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("name", "v\tw"));
     EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("name", "a normal value"));
@@ -555,18 +555,16 @@ TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersDuplicateBranches) {
 
 TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersEmptyValueBranches) {
     using h2::HeaderValidator;
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
-                     {{":method", ""}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}})
+    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers({{":method", ""}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}})
                      .is_valid);
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
-                     {{":method", "GET"}, {":path", ""}, {":scheme", "https"}, {":authority", "x"}})
-                     .is_valid);
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
-                     {{":method", "GET"}, {":path", "/"}, {":scheme", ""}, {":authority", "x"}})
-                     .is_valid);
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
-                     {{":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", ""}})
-                     .is_valid);
+    EXPECT_FALSE(
+        HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", ""}, {":scheme", "https"}, {":authority", "x"}})
+            .is_valid);
+    EXPECT_FALSE(
+        HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", "/"}, {":scheme", ""}, {":authority", "x"}}).is_valid);
+    EXPECT_FALSE(
+        HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", ""}})
+            .is_valid);
 }
 
 TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersUnknownAndMissing) {
@@ -843,7 +841,7 @@ TEST(HTTP2FramerDrive, FrameHeaderWithoutPayloadLeavesParserStalled) {
     fh.set_stream_id(0);
     qb::http::test::push_bytes(io, &fh, sizeof(fh));
 
-    drive(protocol, io);              // consumes the header, then stalls
+    drive(protocol, io); // consumes the header, then stalls
     EXPECT_EQ(protocol.getMessageSize(), 0u);
     EXPECT_TRUE(protocol.ok());
 
@@ -887,8 +885,7 @@ TEST(HTTP2FramerDrive, ZeroPayloadHeadersFrameDispatches) {
     // The framer itself stays healthy (it dispatched a well-formed empty frame);
     // the request was simply rejected at the stream layer.
     EXPECT_TRUE(protocol.ok());
-    EXPECT_TRUE(qb::http::test::output_has_frame(io.output, FT::RST_STREAM)
-                || io.request_count == 0);
+    EXPECT_TRUE(qb::http::test::output_has_frame(io.output, FT::RST_STREAM) || io.request_count == 0);
 }
 
 TEST(HTTP2FramerDrive, ZeroPayloadDataFrameOnOpenStreamDispatches) {
@@ -900,9 +897,9 @@ TEST(HTTP2FramerDrive, ZeroPayloadDataFrameOnOpenStreamDispatches) {
     // Open a POST stream (HEADERS, no END_STREAM) so a subsequent empty DATA
     // frame has a live stream to land on; that drives the DATA arm of the
     // zero-payload dispatch.
-    auto post_headers      = default_request_headers("/upload");
-    post_headers[0].value  = "POST";
-    const auto encoded     = encode_hpack_headers(post_headers);
+    auto post_headers     = default_request_headers("/upload");
+    post_headers[0].value = "POST";
+    const auto encoded    = encode_hpack_headers(post_headers);
     push_frame(io, FT::HEADERS, FLAG_END_HEADERS, 1, encoded);
     push_frame(io, FT::DATA, FLAG_END_STREAM, 1, {}); // zero-length DATA, END_STREAM
     drive(protocol, io);
@@ -1008,7 +1005,7 @@ TEST(HTTP2FramerDrive, ContinuationOnWrongStreamIsProtocolError) {
     // the stream-id mismatch in the continuation-required gate is a
     // PROTOCOL_ERROR.
     const auto encoded = encode_hpack_headers(default_request_headers("/"));
-    push_frame(io, FT::HEADERS, 0, 1, encoded);     // no END_HEADERS, stream 1
+    push_frame(io, FT::HEADERS, 0, 1, encoded);                // no END_HEADERS, stream 1
     push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 3, {}); // wrong stream
     drive(protocol, io);
 
@@ -1138,7 +1135,7 @@ TEST(HTTP2FramerDrive, GoAwayWithDebugDataParses) {
     // GOAWAY: last-stream-id (4) + error-code (4) + trailing debug bytes. The
     // payload-size > 8 branch copies the additional debug data.
     std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x01,  // last stream id = 1
-                                    0x00, 0x00, 0x00, 0x00};  // error code = NO_ERROR
+                                    0x00, 0x00, 0x00, 0x00}; // error code = NO_ERROR
     const std::string    debug   = "bye";
     payload.insert(payload.end(), debug.begin(), debug.end());
 
@@ -1180,7 +1177,7 @@ TEST(HTTP2FramerDrive, WindowUpdateWrongSizeIsFrameSizeError) {
 // --- send_headers_with_continuation (base.h:718-734) -----------------------
 
 TEST(HTTP2FramerDrive, ServerResponseLargeHeaderBlockSpansContinuation) {
-    Http2FakeIO      io;
+    Http2FakeIO io;
     // Advertise the smallest legal max-frame-size (16384) and force a tiny peer
     // frame size via the client's SETTINGS so the server must fragment its
     // response header block across HEADERS + CONTINUATION when it replies.
@@ -1198,8 +1195,7 @@ TEST(HTTP2FramerDrive, ServerResponseLargeHeaderBlockSpansContinuation) {
     // a >16KB header block from here deterministically, but the single-frame
     // path through send_headers_with_continuation (first_frame + last_fragment)
     // is exercised by every emitted response.
-    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1,
-               encode_hpack_headers(default_request_headers("/")));
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, encode_hpack_headers(default_request_headers("/")));
     drive(protocol, io);
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.request_count, 1);
@@ -1218,7 +1214,7 @@ TEST(HTTP2FramerDrive, PushPromisePayloadIsParsedThenRejectedByServer) {
     // frame to the server, which then rejects it. This drives
     // handle_push_promise_frame_payload (promised id extraction + header block
     // assignment + END_HEADERS continuation bookkeeping).
-    const auto           hpack = encode_hpack_headers(default_request_headers("/pushed"));
+    const auto           hpack   = encode_hpack_headers(default_request_headers("/pushed"));
     std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x02}; // promised stream id = 2
     payload.insert(payload.end(), hpack.begin(), hpack.end());
 
@@ -1257,8 +1253,8 @@ TEST(HTTP2FramerDrive, EmptyEndHeadersContinuationCompletesHeaderBlock) {
     // CONTINUATION carrying only END_HEADERS. The zero-length CONTINUATION takes
     // the zero-payload dispatch CONTINUATION arm and closes the header block.
     const auto encoded = encode_hpack_headers(default_request_headers("/cont0"));
-    push_frame(io, FT::HEADERS, FLAG_END_STREAM, 1, encoded);        // no END_HEADERS
-    push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 1, {});       // empty, END_HEADERS
+    push_frame(io, FT::HEADERS, FLAG_END_STREAM, 1, encoded);  // no END_HEADERS
+    push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 1, {}); // empty, END_HEADERS
     drive(protocol, io);
 
     EXPECT_TRUE(protocol.ok());

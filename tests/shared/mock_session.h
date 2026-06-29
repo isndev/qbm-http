@@ -55,9 +55,9 @@ namespace qb::http::test {
  * (a real bug class the router must never produce).
  */
 struct MockSession {
-    qb::http::Response       _response;                                   ///< Last captured response.
-    qb::uuid                 _session_id           = qb::generate_random_uuid(); ///< Stable per-session id.
-    unsigned int             _response_write_count = 0;                   ///< operator<< invocations since last reset.
+    qb::http::Response _response;                                          ///< Last captured response.
+    qb::uuid           _session_id           = qb::generate_random_uuid(); ///< Stable per-session id.
+    unsigned int       _response_write_count = 0;                          ///< operator<< invocations since last reset.
 
     // --- Bookkeeping populated by make_verifying_handler --------------------
     bool                     _handler_executed = false; ///< Set true when a verifying handler runs.

@@ -53,8 +53,7 @@ using qb::http::test::WsServerThread;
 
 class SecurityServer;
 
-class SecurityServerClient
-    : public qb::io::use<SecurityServerClient>::tcp::client<SecurityServer> {
+class SecurityServerClient : public qb::io::use<SecurityServerClient>::tcp::client<SecurityServer> {
 private:
     bool _validated = false;
 
@@ -86,8 +85,7 @@ public:
     }
 };
 
-class SecurityServer
-    : public qb::io::use<SecurityServer>::tcp::server<SecurityServerClient> {
+class SecurityServer : public qb::io::use<SecurityServer>::tcp::server<SecurityServerClient> {
 public:
     std::atomic<std::size_t> connections{0};
     std::atomic<std::size_t> rejections{0};
@@ -105,8 +103,7 @@ SecurityServerClient::on(typename Protocol::request &&request) {
     if (request.header("Sec-WebSocket-Key").empty()) {
         valid = false;
     }
-    if (!request.upgrade || request.header("Upgrade") != "websocket" ||
-        request.header("Connection").find("Upgrade") == std::string::npos) {
+    if (!request.upgrade || request.header("Upgrade") != "websocket" || request.header("Connection").find("Upgrade") == std::string::npos) {
         valid = false;
     }
 
@@ -133,10 +130,7 @@ SecurityServerClient::on(typename Protocol::request &&request) {
 // ---------------------------------------------------------------------------
 
 std::string
-raw_handshake_request(int              port,
-                      std::string_view key,
-                      std::string_view version = "13",
-                      std::string_view method  = "GET") {
+raw_handshake_request(int port, std::string_view key, std::string_view version = "13", std::string_view method = "GET") {
     std::string request;
     request += method;
     request += " / HTTP/1.1\r\n";
@@ -178,7 +172,7 @@ write_all(qb::io::tcp::socket &sock, std::string_view bytes) {
 
 TEST(WsHandshakeSecurity, ValidHandshake) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     const auto key = qb::http::ws::generateKey();
     write_all(sock, raw_handshake_request(server.port, key));
@@ -191,7 +185,7 @@ TEST(WsHandshakeSecurity, ValidHandshake) {
 
 TEST(WsHandshakeSecurity, MissingKeyIsRejected) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, ""));
 
@@ -202,7 +196,7 @@ TEST(WsHandshakeSecurity, MissingKeyIsRejected) {
 
 TEST(WsHandshakeSecurity, InvalidVersionIsRejected) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, qb::http::ws::generateKey(), "12"));
 
@@ -213,7 +207,7 @@ TEST(WsHandshakeSecurity, InvalidVersionIsRejected) {
 
 TEST(WsHandshakeSecurity, NonGetMethodIsRejected) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, qb::http::ws::generateKey(), "13", "POST"));
 
@@ -235,7 +229,7 @@ TEST(WsHandshakeSecurity, NonGetMethodIsRejected) {
 
 TEST(WsHandshakeSecurity, WrongLengthKeyIsRejected) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     // 8-char key: non-empty (passes session gate) but != 24 chars (ws.h:915).
     write_all(sock, raw_handshake_request(server.port, "shortkey"));
@@ -247,7 +241,7 @@ TEST(WsHandshakeSecurity, WrongLengthKeyIsRejected) {
 
 TEST(WsHandshakeSecurity, NonBase64KeyOfCorrectLengthIsRejected) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     // Exactly 24 chars but contains characters illegal in base64 ('*','!','@'),
     // so base64::decode either throws or yields the wrong byte count
@@ -261,7 +255,7 @@ TEST(WsHandshakeSecurity, NonBase64KeyOfCorrectLengthIsRejected) {
 
 TEST(WsHandshakeSecurity, WellFormedButWrongDecodedSizeKeyIsRejected) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     // 24 valid base64 chars decoding to 18 bytes (not 16). "AAAAAAAAAAAAAAAAAAAAAAAA"
     // is 24 'A's = 18 zero bytes when base64-decoded, so the size check at
@@ -279,7 +273,7 @@ TEST(WsHandshakeSecurity, WellFormedButWrongDecodedSizeKeyIsRejected) {
 
 TEST(WsHandshakeSecurity, UnmaskedClientFrameIsClosed) {
     WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto sock = connect_raw(server.port);
+    auto                           sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, qb::http::ws::generateKey()));
     const auto response = read_http_response(sock);
@@ -288,8 +282,8 @@ TEST(WsHandshakeSecurity, UnmaskedClientFrameIsClosed) {
     // Unmasked text frame (MASK bit clear) — RFC 6455 §5.1 violation.
     const std::string payload = "unmasked payload";
     std::string       frame;
-    frame.push_back(static_cast<char>(0x81));                       // FIN + text
-    frame.push_back(static_cast<char>(payload.size()));             // MASK=0, len7
+    frame.push_back(static_cast<char>(0x81));           // FIN + text
+    frame.push_back(static_cast<char>(payload.size())); // MASK=0, len7
     frame += payload;
     write_all(sock, frame);
 
@@ -297,9 +291,8 @@ TEST(WsHandshakeSecurity, UnmaskedClientFrameIsClosed) {
     ASSERT_GE(close_frame.size(), 4u) << "expected a Close frame from the server";
     EXPECT_EQ(static_cast<unsigned char>(close_frame[0]), 0x88u) << "must be a Close frame";
     EXPECT_LE(static_cast<unsigned char>(close_frame[1]), 125u) << "Close payload must fit 7-bit length";
-    const auto code = static_cast<std::uint16_t>(
-        (static_cast<unsigned char>(close_frame[2]) << 8) |
-        static_cast<unsigned char>(close_frame[3]));
+    const auto code =
+        static_cast<std::uint16_t>((static_cast<unsigned char>(close_frame[2]) << 8) | static_cast<unsigned char>(close_frame[3]));
     EXPECT_EQ(code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::ProtocolError));
     sock.close();
 }

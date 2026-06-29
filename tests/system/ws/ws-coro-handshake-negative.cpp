@@ -165,11 +165,13 @@ TEST_F(WsCoroHandshakeNegative, ServerRefusesHandshakeWithoutVersion) {
 
     // Hand-crafted upgrade request: missing `Sec-WebSocket-Version`.
     const std::string request = "GET /ws HTTP/1.1\r\n"
-                                "Host: localhost:" + std::to_string(server.port) + "\r\n"
-                                "Upgrade: websocket\r\n"
-                                "Connection: Upgrade\r\n"
-                                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-                                "\r\n";
+                                "Host: localhost:"
+                                + std::to_string(server.port)
+                                + "\r\n"
+                                  "Upgrade: websocket\r\n"
+                                  "Connection: Upgrade\r\n"
+                                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                  "\r\n";
 
     qb::io::tcp::socket sock;
     ASSERT_EQ(sock.connect(qb::io::uri{"tcp://localhost:" + std::to_string(server.port)}), 0) << "failed to connect to ProbeServer";
@@ -179,12 +181,9 @@ TEST_F(WsCoroHandshakeNegative, ServerRefusesHandshakeWithoutVersion) {
     const std::string response = read_http_response(sock);
     sock.close();
 
-    EXPECT_EQ(response.find("101"), std::string::npos)
-        << "server must NOT send 101 on an upgrade without Sec-WebSocket-Version; got:\n"
-        << response;
-    EXPECT_NE(response.find("400"), std::string::npos)
-        << "server should deliver a BAD_REQUEST before closing; got:\n"
-        << response;
+    EXPECT_EQ(response.find("101"), std::string::npos) << "server must NOT send 101 on an upgrade without Sec-WebSocket-Version; got:\n"
+                                                       << response;
+    EXPECT_NE(response.find("400"), std::string::npos) << "server should deliver a BAD_REQUEST before closing; got:\n" << response;
 }
 
 // Documented-but-previously-missing mirror of the client-side clamp: a reserved

@@ -128,7 +128,7 @@ BM_Hpack_EncodeRequest(benchmark::State &state) {
     for (auto _ : state) {
         Encoder              encoder;
         std::vector<uint8_t> out;
-        bool           ok = encoder.encode(headers, out);
+        bool                 ok = encoder.encode(headers, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         bytes_per_iter = out.size();
@@ -156,7 +156,7 @@ BM_Hpack_EncodeResponse(benchmark::State &state) {
     for (auto _ : state) {
         Encoder              encoder;
         std::vector<uint8_t> out;
-        bool           ok = encoder.encode(headers, out);
+        bool                 ok = encoder.encode(headers, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         bytes_per_iter = out.size();
@@ -184,7 +184,7 @@ BM_Hpack_EncodeRequestWarmDynamicTable(benchmark::State &state) {
     std::size_t bytes_per_iter = 0;
     for (auto _ : state) {
         std::vector<uint8_t> out;
-        bool           ok = encoder.encode(headers, out);
+        bool                 ok = encoder.encode(headers, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         bytes_per_iter = out.size();
@@ -219,7 +219,7 @@ BM_Hpack_DecodeRequestC3(benchmark::State &state) {
         Decoder                  decoder;
         std::vector<HeaderField> out;
         bool                     incomplete = false;
-        bool               ok         = decoder.decode(block, out, incomplete);
+        bool                     ok         = decoder.decode(block, out, incomplete);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();
@@ -253,7 +253,7 @@ BM_Hpack_DecodeResponseC5(benchmark::State &state) {
         decoder.set_max_dynamic_table_size(256);
         std::vector<HeaderField> out;
         bool                     incomplete = false;
-        bool               ok         = decoder.decode(block, out, incomplete);
+        bool                     ok         = decoder.decode(block, out, incomplete);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();
@@ -281,7 +281,7 @@ BM_Hpack_DecodeEncodedRequest(benchmark::State &state) {
         Decoder                  decoder;
         std::vector<HeaderField> out;
         bool                     incomplete = false;
-        bool               ok         = decoder.decode(block, out, incomplete);
+        bool                     ok         = decoder.decode(block, out, incomplete);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();
@@ -298,8 +298,8 @@ BM_Hpack_DecodeEncodedRequest(benchmark::State &state) {
 void
 BM_Hpack_StaticTableFindName(benchmark::State &state) {
     // Mix of hits at various probe depths + one guaranteed miss.
-    static const std::string_view names[] = {":authority", ":method", ":path",   ":scheme",        ":status",
-                                              "accept-encoding", "www-authenticate", "user-agent", "x-not-in-table"};
+    static const std::string_view names[] = {":authority",      ":method",          ":path",      ":scheme",       ":status",
+                                             "accept-encoding", "www-authenticate", "user-agent", "x-not-in-table"};
 
     if (!static_table::find_name_match(std::string_view(":status")).has_value()) {
         state.SkipWithError("static-table name lookup broken");
@@ -324,9 +324,16 @@ BM_Hpack_StaticTableFindExact(benchmark::State &state) {
         std::string_view value;
     };
     static const Pair pairs[] = {
-        {":method", "GET"}, {":method", "POST"}, {":path", "/"},        {":path", "/index.html"},
-        {":scheme", "https"}, {":status", "200"}, {":status", "404"},   {":status", "500"},
-        {"accept-encoding", "gzip, deflate"}, {":status", "418"} /* miss */,
+        {":method", "GET"},
+        {":method", "POST"},
+        {":path", "/"},
+        {":path", "/index.html"},
+        {":scheme", "https"},
+        {":status", "200"},
+        {":status", "404"},
+        {":status", "500"},
+        {"accept-encoding", "gzip, deflate"},
+        {":status", "418"} /* miss */,
     };
 
     if (static_table::find_exact_match(std::string_view(":method"), std::string_view("POST")).value() != 3u) {
@@ -352,28 +359,22 @@ void
 BM_Huffman_Encode(benchmark::State &state) {
     // C.4.1 / C.6.1 worked-example strings + a long compressible value.
     static const std::string inputs[] = {
-        "custom-key",
-        "custom-header",
-        "302",
-        "private",
-        "https://www.example.com",
-        "Mon, 21 Oct 2013 20:13:21 GMT",
+        "custom-key", "custom-header", "302", "private", "https://www.example.com", "Mon, 21 Oct 2013 20:13:21 GMT",
     };
 
     {
         std::vector<uint8_t> probe;
-        if (!huffman_encode("custom-key", probe) ||
-            probe != std::vector<uint8_t>{0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f}) {
+        if (!huffman_encode("custom-key", probe) || probe != std::vector<uint8_t>{0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f}) {
             state.SkipWithError("huffman_encode gold vector mismatch");
             return;
         }
     }
 
-    std::size_t  i             = 0;
-    std::int64_t in_bytes      = 0;
+    std::size_t  i        = 0;
+    std::int64_t in_bytes = 0;
     for (auto _ : state) {
         std::vector<uint8_t> out;
-        bool           ok = huffman_encode(inputs[i], out);
+        bool                 ok = huffman_encode(inputs[i], out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         in_bytes += static_cast<std::int64_t>(inputs[i].size());
@@ -389,8 +390,7 @@ void
 BM_Huffman_Decode(benchmark::State &state) {
     // RFC 7541 C.4.1 Huffman("custom-key") and C.5.1 location URL.
     static const std::vector<uint8_t> custom_key = {0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f};
-    static const std::vector<uint8_t> location =
-        hex_to_bytes("9d29ad171863c78f0b97c8e9ae82ae43d3"); // Huffman("https://www.example.com")
+    static const std::vector<uint8_t> location   = hex_to_bytes("9d29ad171863c78f0b97c8e9ae82ae43d3"); // Huffman("https://www.example.com")
 
     {
         std::string probe;
@@ -405,7 +405,7 @@ BM_Huffman_Decode(benchmark::State &state) {
     std::int64_t                in_bytes = 0;
     for (auto _ : state) {
         std::string out;
-        bool  ok = huffman_decode(blocks[i]->data(), blocks[i]->size(), out);
+        bool        ok = huffman_decode(blocks[i]->data(), blocks[i]->size(), out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         in_bytes += static_cast<std::int64_t>(blocks[i]->size());
@@ -433,7 +433,7 @@ BM_Huffman_EncodeLargeValue(benchmark::State &state) {
 
     for (auto _ : state) {
         std::vector<uint8_t> out;
-        bool           ok = huffman_encode(input, out);
+        bool                 ok = huffman_encode(input, out);
         benchmark::DoNotOptimize(ok);
         benchmark::DoNotOptimize(out.data());
         benchmark::ClobberMemory();

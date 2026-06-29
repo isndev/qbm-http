@@ -28,8 +28,8 @@
 #include <string>
 #include <vector>
 
-#include "../http.h"
 #include "../../shared/router_test_support.h" // qb::http::test::TaskExecutor
+#include "../http.h"
 
 using qb::http::test::TaskExecutor;
 
@@ -43,8 +43,8 @@ namespace {
 struct MockErrorSession {
     qb::http::Response       _response;
     bool                     _finalized = false;
-    std::vector<std::string> _executed;                  ///< Ordered names of tasks that ran.
-    std::string              _last_error_handler_name;    ///< Name of the error-chain handler that completed normally.
+    std::vector<std::string> _executed;                ///< Ordered names of tasks that ran.
+    std::string              _last_error_handler_name; ///< Name of the error-chain handler that completed normally.
 
     void
     record(const std::string &name) {
@@ -223,9 +223,9 @@ private:
 
 class RouterErrorHandlingTest : public ::testing::Test {
 protected:
-    TaskExecutor                                          _executor;
-    std::shared_ptr<qb::http::Router<MockErrorSession>>   _router;
-    std::shared_ptr<MockErrorSession>                     _session;
+    TaskExecutor                                        _executor;
+    std::shared_ptr<qb::http::Router<MockErrorSession>> _router;
+    std::shared_ptr<MockErrorSession>                   _session;
 
     void
     SetUp() override {
@@ -278,8 +278,8 @@ protected:
 // --- Route-handler error paths -------------------------------------------------
 
 TEST_F(RouterErrorHandlingTest, ErrorInHandlerTriggersErrorChain) {
-    auto error_handler = std::make_shared<CompletingTask>("ErrorHandlerInChain", _session, &_executor,
-                                                          qb::http::status::SERVICE_UNAVAILABLE, "Handled by error chain", true);
+    auto error_handler = std::make_shared<CompletingTask>("ErrorHandlerInChain", _session, &_executor, qb::http::status::SERVICE_UNAVAILABLE,
+                                                          "Handled by error chain", true);
     set_error_chain({error_handler});
 
     _router->get("/path_to_error", std::make_shared<ErrorTask>("ErroringRoute", _session, &_executor));
@@ -318,8 +318,7 @@ TEST_F(RouterErrorHandlingTest, ExceptionInHandlerTriggersErrorChain) {
 // response. Locks the chain-ordering contract beyond the legacy length-1 chains.
 TEST_F(RouterErrorHandlingTest, ErrorChainWithMultipleSuccessfulHandlersRunsAllInOrder) {
     auto first  = std::make_shared<ContinuingHeaderTask>("ErrorChainStep1", _session, "X-Error-Stage", "one");
-    auto second = std::make_shared<CompletingTask>("ErrorChainStep2", _session, &_executor, qb::http::status::BAD_GATEWAY,
-                                                   "two-handled", true);
+    auto second = std::make_shared<CompletingTask>("ErrorChainStep2", _session, &_executor, qb::http::status::BAD_GATEWAY, "two-handled", true);
     set_error_chain({first, second});
 
     _router->get("/multi_error", std::make_shared<ErrorTask>("MultiErrorRoute", _session, &_executor));
@@ -339,8 +338,7 @@ TEST_F(RouterErrorHandlingTest, ErrorChainWithMultipleSuccessfulHandlersRunsAllI
 }
 
 TEST_F(RouterErrorHandlingTest, ErrorInMiddlewareTriggersErrorChain) {
-    auto normal_handler =
-        std::make_shared<CompletingTask>("NormalHandler", _session, &_executor, qb::http::status::OK, "OK from handler");
+    auto normal_handler = std::make_shared<CompletingTask>("NormalHandler", _session, &_executor, qb::http::status::OK, "OK from handler");
 
     auto erroring_mw = make_functional_mw(
         [this](std::shared_ptr<qb::http::Context<MockErrorSession>> ctx, std::function<void()> /*next*/) {
@@ -355,8 +353,8 @@ TEST_F(RouterErrorHandlingTest, ErrorInMiddlewareTriggersErrorChain) {
     // The same global middleware is re-prepended to the error chain, so it runs a
     // second time and errors again — proving the chain itself fails (default 500).
     auto global_mw_task = std::make_shared<qb::http::MiddlewareTask<MockErrorSession>>(erroring_mw, erroring_mw->name());
-    auto chain_handler  = std::make_shared<CompletingTask>("MwErrorChainHandler", _session, &_executor,
-                                                          qb::http::status::INTERNAL_SERVER_ERROR, "should not run", true);
+    auto chain_handler  = std::make_shared<CompletingTask>("MwErrorChainHandler", _session, &_executor, qb::http::status::INTERNAL_SERVER_ERROR,
+                                                           "should not run", true);
     set_error_chain({global_mw_task, chain_handler});
 
     _router->use(erroring_mw);
@@ -384,9 +382,9 @@ TEST_F(RouterErrorHandlingTest, GlobalMiddlewarePrependedToErrorChainSeesRespons
         "GlobalMw");
     _router->use(global_mw);
 
-    auto error_route   = std::make_shared<ErrorTask>("ErrorRoute", _session, &_executor);
-    auto chain_handler = std::make_shared<CompletingTask>("CustomErrorChainHandler", _session, &_executor,
-                                                          qb::http::status::CONFLICT, "Custom error handled", true);
+    auto error_route    = std::make_shared<ErrorTask>("ErrorRoute", _session, &_executor);
+    auto chain_handler  = std::make_shared<CompletingTask>("CustomErrorChainHandler", _session, &_executor, qb::http::status::CONFLICT,
+                                                           "Custom error handled", true);
     auto global_mw_task = std::make_shared<qb::http::MiddlewareTask<MockErrorSession>>(global_mw, global_mw->name());
     set_error_chain({global_mw_task, chain_handler});
 
@@ -455,8 +453,8 @@ TEST_F(RouterErrorHandlingTest, ExceptionInMiddlewareTriggersDefault500WhenChain
         "ThrowingMiddleware");
 
     auto global_mw_task = std::make_shared<qb::http::MiddlewareTask<MockErrorSession>>(throwing_mw, throwing_mw->name());
-    auto chain_handler  = std::make_shared<CompletingTask>("MwExceptionChainHandler", _session, &_executor,
-                                                          qb::http::status::BAD_GATEWAY, "should not run", true);
+    auto chain_handler  = std::make_shared<CompletingTask>("MwExceptionChainHandler", _session, &_executor, qb::http::status::BAD_GATEWAY,
+                                                           "should not run", true);
     set_error_chain({global_mw_task, chain_handler});
 
     _router->use(throwing_mw);
@@ -483,8 +481,8 @@ TEST_F(RouterErrorHandlingTest, NonStdExceptionInMiddlewareTriggersErrorChain) {
         },
         "NonStdThrowingMiddleware");
 
-    auto chain_handler = std::make_shared<CompletingTask>("NonStdMwChainHandler", _session, &_executor,
-                                                         qb::http::status::BAD_GATEWAY, "Handled (non-std)", true);
+    auto chain_handler = std::make_shared<CompletingTask>("NonStdMwChainHandler", _session, &_executor, qb::http::status::BAD_GATEWAY,
+                                                          "Handled (non-std)", true);
     set_error_chain({chain_handler});
 
     _router->use(throwing_mw);
@@ -526,8 +524,8 @@ TEST_F(RouterErrorHandlingTest, CancellationDuringNormalProcessingFinalizesAndSk
         "CancellingMiddleware");
 
     auto handler = std::make_shared<CompletingTask>("HandlerAfterCancel", _session, &_executor);
-    set_error_chain({std::make_shared<CompletingTask>("ErrorChainOnCancel", _session, &_executor,
-                                                      qb::http::status::NOT_IMPLEMENTED, "ran on cancel!")});
+    set_error_chain(
+        {std::make_shared<CompletingTask>("ErrorChainOnCancel", _session, &_executor, qb::http::status::NOT_IMPLEMENTED, "ran on cancel!")});
     _router->use(cancelling_mw);
     _router->get("/cancel_path", handler);
     _router->compile();
@@ -548,8 +546,8 @@ TEST_F(RouterErrorHandlingTest, CancellationDuringErrorChainFinalizes) {
             ctx->cancel();
         },
         "ErrorChainCancellingTask");
-    auto subsequent = std::make_shared<CompletingTask>("ErrorChainSubsequent", _session, &_executor,
-                                                       qb::http::status::NOT_IMPLEMENTED, "ran after cancel!");
+    auto subsequent =
+        std::make_shared<CompletingTask>("ErrorChainSubsequent", _session, &_executor, qb::http::status::NOT_IMPLEMENTED, "ran after cancel!");
     set_error_chain({cancelling_chain_task, subsequent});
 
     _router->get("/cancel_in_chain", std::make_shared<ErrorTask>("InitialErrorForCancel", _session, &_executor));
@@ -572,8 +570,8 @@ TEST_F(RouterErrorHandlingTest, ErrorInNotFoundHandlerResultsIn500) {
         _session->record("ErroringNotFound");
         _executor.addTask([ctx]() { ctx->complete(qb::http::AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR); });
     });
-    set_error_chain({std::make_shared<CompletingTask>("MainErrorHandlerShouldNotRun", _session, &_executor,
-                                                      qb::http::status::NOT_IMPLEMENTED, "ran!", true)});
+    set_error_chain({std::make_shared<CompletingTask>("MainErrorHandlerShouldNotRun", _session, &_executor, qb::http::status::NOT_IMPLEMENTED,
+                                                      "ran!", true)});
     _router->compile();
 
     make_request(qb::http::method::GET, "/unhandled");
@@ -590,8 +588,8 @@ TEST_F(RouterErrorHandlingTest, ExceptionInNotFoundHandlerTriggersMainErrorChain
         _session->record("ExceptionThrowingNotFound");
         throw std::runtime_error("Exception from not_found handler");
     });
-    set_error_chain({std::make_shared<CompletingTask>("MainErrorHandlerForNotFound", _session, &_executor,
-                                                      qb::http::status::BAD_GATEWAY, "Handled (not_found exception)", true)});
+    set_error_chain({std::make_shared<CompletingTask>("MainErrorHandlerForNotFound", _session, &_executor, qb::http::status::BAD_GATEWAY,
+                                                      "Handled (not_found exception)", true)});
     _router->compile();
 
     make_request(qb::http::method::GET, "/unhandled_exception");
@@ -620,8 +618,9 @@ TEST_F(RouterErrorHandlingTest, GlobalMiddlewareErrorPreventsNotFoundHandler) {
     });
 
     auto global_mw_task = std::make_shared<qb::http::MiddlewareTask<MockErrorSession>>(erroring_global, erroring_global->name());
-    set_error_chain({global_mw_task, std::make_shared<CompletingTask>("MainErrorHandlerShouldNotRun", _session, &_executor,
-                                                                      qb::http::status::BAD_GATEWAY, "x", true)});
+    set_error_chain(
+        {global_mw_task,
+         std::make_shared<CompletingTask>("MainErrorHandlerShouldNotRun", _session, &_executor, qb::http::status::BAD_GATEWAY, "x", true)});
     _router->compile();
 
     make_request(qb::http::method::GET, "/unhandled_global_error");
@@ -638,8 +637,8 @@ TEST_F(RouterErrorHandlingTest, CancellationFromNotFoundHandlerFinalizes) {
         _session->record("CancellingNotFound");
         _executor.addTask([ctx]() { ctx->cancel(); });
     });
-    set_error_chain({std::make_shared<CompletingTask>("ErrorChainShouldNotRun", _session, &_executor,
-                                                      qb::http::status::NOT_IMPLEMENTED, "ran!", true)});
+    set_error_chain(
+        {std::make_shared<CompletingTask>("ErrorChainShouldNotRun", _session, &_executor, qb::http::status::NOT_IMPLEMENTED, "ran!", true)});
     _router->compile();
 
     make_request(qb::http::method::GET, "/unhandled_cancel");
@@ -653,9 +652,9 @@ TEST_F(RouterErrorHandlingTest, CancellationFromNotFoundHandlerFinalizes) {
 // --- Fatal path ----------------------------------------------------------------
 
 TEST_F(RouterErrorHandlingTest, FatalErrorInMainErrorChainIsStillFatal) {
-    auto fatal = std::make_shared<FatalTask>("FatalChainTask", _session, &_executor);
-    auto subsequent = std::make_shared<CompletingTask>("SubsequentShouldNotRun", _session, &_executor,
-                                                       qb::http::status::NOT_IMPLEMENTED, "ran after fatal!", true);
+    auto fatal      = std::make_shared<FatalTask>("FatalChainTask", _session, &_executor);
+    auto subsequent = std::make_shared<CompletingTask>("SubsequentShouldNotRun", _session, &_executor, qb::http::status::NOT_IMPLEMENTED,
+                                                       "ran after fatal!", true);
     set_error_chain({fatal, subsequent});
 
     _router->get("/fatal_in_chain", std::make_shared<ErrorTask>("InitialErrorForFatal", _session, &_executor));
@@ -679,8 +678,8 @@ TEST_F(RouterErrorHandlingTest, FatalErrorInMainErrorChainIsStillFatal) {
 TEST_F(RouterErrorHandlingTest, MethodMismatchYields405NotErrorChain) {
     _router->get("/resource", std::make_shared<CompletingTask>("GetHandler", _session, &_executor, qb::http::status::OK, "get"));
     _router->post("/resource", std::make_shared<CompletingTask>("PostHandler", _session, &_executor, qb::http::status::CREATED, "post"));
-    set_error_chain({std::make_shared<CompletingTask>("ErrorChainMustNotRun", _session, &_executor,
-                                                      qb::http::status::BAD_GATEWAY, "error!", true)});
+    set_error_chain(
+        {std::make_shared<CompletingTask>("ErrorChainMustNotRun", _session, &_executor, qb::http::status::BAD_GATEWAY, "error!", true)});
     _router->compile();
 
     make_request(qb::http::method::DEL, "/resource");
@@ -778,8 +777,8 @@ TEST_F(RouterErrorHandlingTest, CompleteAfterSynchronousErrorChainIsIdempotent) 
 // The contract is enforced where it belongs — in the caller. See the "Completion contract" section
 // on Context::complete(); the coro/middleware/next adapters guard with completion_count()/is_completed().
 TEST_F(RouterErrorHandlingTest, CompleteAfterAsyncErrorChainLetsTheStrayCompleteWin) {
-    set_error_chain({std::make_shared<CompletingTask>("ErrorChainHandler", _session, &_executor,
-                                                      qb::http::status::SERVICE_UNAVAILABLE, "error-chain body", true)});
+    set_error_chain({std::make_shared<CompletingTask>("ErrorChainHandler", _session, &_executor, qb::http::status::SERVICE_UNAVAILABLE,
+                                                      "error-chain body", true)});
 
     _router->get("/double_complete_async", [this](std::shared_ptr<qb::http::Context<MockErrorSession>> ctx) {
         _session->record("DoubleCompleteHandler");

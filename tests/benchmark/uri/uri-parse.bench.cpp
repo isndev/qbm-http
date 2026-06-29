@@ -49,9 +49,8 @@ namespace {
 // ---------------------------------------------------------------------------
 
 // UriComponents.BasicComponents — full userinfo + port + path + query + fragment.
-constexpr char kComplexUri[] =
-    "http://username:password@example.com:8080/path/to/resource"
-    "?query=value&param2=value2#fragment";
+constexpr char kComplexUri[] = "http://username:password@example.com:8080/path/to/resource"
+                               "?query=value&param2=value2#fragment";
 
 // UriEdgeCases.CompleteCombinations (uri1) — a leaner but complete request URI.
 constexpr char kSimpleUri[] = "http://example.com/path?query=value#fragment";
@@ -60,14 +59,12 @@ constexpr char kSimpleUri[] = "http://example.com/path?query=value#fragment";
 constexpr char kIpv6Uri[] = "http://[2001:db8::1]:8080/path";
 
 // UriQueries.ComplexQueries — bracketed/array-ish keys, '+'-encoded space.
-constexpr char kComplexQueryUri[] =
-    "http://example.com/path?q=search+term&filters[category]=books"
-    "&filters[price]=10-50&page=1";
+constexpr char kComplexQueryUri[] = "http://example.com/path?q=search+term&filters[category]=books"
+                                    "&filters[price]=10-50&page=1";
 
 // UriEncoding.SpecialCharactersRoundTrip — the full printable-ASCII span.
-constexpr char kCodecRoundTrip[] =
-    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
-    "abcdefghijklmnopqrstuvwxyz{|}~";
+constexpr char kCodecRoundTrip[] = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
+                                   "abcdefghijklmnopqrstuvwxyz{|}~";
 
 // UriQueries.UrlEncodingDecoding — a percent-encoded query value to decode.
 constexpr char kEncodedQueryValue[] = "%20%21%40%23%24%25%5E%26%2A%28%29";

@@ -33,8 +33,8 @@
 #include <string>
 #include <vector>
 
-#include "../http.h"
 #include "../../shared/router_test_support.h" // qb::http::test::TaskExecutor
+#include "../http.h"
 
 using qb::http::test::TaskExecutor;
 
@@ -392,15 +392,15 @@ protected:
         // 1. Global middleware (sync + async).
         _router->use(
             std::make_shared<AllInOneMiddleware>("GlobalSyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
-        _router->use(
-            std::make_shared<AllInOneMiddleware>("GlobalAsyncMw", &_task_executor, _session.get(), true, AllInOneMiddleware::Behavior::CONTINUE));
+        _router->use(std::make_shared<AllInOneMiddleware>("GlobalAsyncMw", &_task_executor, _session.get(), true,
+                                                          AllInOneMiddleware::Behavior::CONTINUE));
 
         // 2. groupA + its middleware.
         auto groupA = _router->group("/groupA");
         groupA->use(
             std::make_shared<AllInOneMiddleware>("GroupASyncMw", nullptr, _session.get(), false, AllInOneMiddleware::Behavior::CONTINUE));
-        groupA->use(
-            std::make_shared<AllInOneMiddleware>("GroupAAsyncMw", &_task_executor, _session.get(), true, AllInOneMiddleware::Behavior::CONTINUE));
+        groupA->use(std::make_shared<AllInOneMiddleware>("GroupAAsyncMw", &_task_executor, _session.get(), true,
+                                                         AllInOneMiddleware::Behavior::CONTINUE));
 
         groupA->get("/direct_sync", [this](auto ctx) {
             _session->trace("GroupADirectSyncHandler");

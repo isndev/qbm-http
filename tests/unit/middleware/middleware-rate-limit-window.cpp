@@ -70,7 +70,7 @@ protected:
 // This is the single consolidation of the four redundant recovery arcs that
 // previously lived in the monolithic file.
 TEST_F(RateLimitWindowTest, ClientIsAllowedAgainAfterWindowElapses) {
-    constexpr auto kWindow = std::chrono::milliseconds(80);
+    constexpr auto             kWindow = std::chrono::milliseconds(80);
     qb::http::RateLimitOptions options;
     options.max_requests(2).window(kWindow);
     auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
@@ -97,8 +97,7 @@ TEST_F(RateLimitWindowTest, ClientIsAllowedAgainAfterWindowElapses) {
     EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "1");
 
     // Reset seconds on a fresh window is bounded by the (sub-second) window.
-    const long long reset =
-        qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
+    const long long reset = qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
     EXPECT_GE(reset, 0);
     EXPECT_LE(reset, 1);
 }
@@ -106,7 +105,7 @@ TEST_F(RateLimitWindowTest, ClientIsAllowedAgainAfterWindowElapses) {
 // Requests within the same window share the counter; once the window rolls
 // over, the counter resets. Also pins the X-RateLimit-Reset progression.
 TEST_F(RateLimitWindowTest, RequestsStraddlingWindowBoundary) {
-    constexpr auto kWindow = std::chrono::milliseconds(120);
+    constexpr auto             kWindow = std::chrono::milliseconds(120);
     qb::http::RateLimitOptions options;
     options.max_requests(2).window(kWindow);
     auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
@@ -131,8 +130,7 @@ TEST_F(RateLimitWindowTest, RequestsStraddlingWindowBoundary) {
     configure_router_and_run(mw, request_for("/mw_test", "straddle"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "1");
-    const long long reset =
-        qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
+    const long long reset = qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
     EXPECT_GE(reset, 0);
     EXPECT_LE(reset, 1);
 }
@@ -141,7 +139,7 @@ TEST_F(RateLimitWindowTest, RequestsStraddlingWindowBoundary) {
 // slots. After their (short) windows elapse, an on-demand sweep reclaims every
 // slot. This requires a real elapsed window, hence it lives here.
 TEST_F(RateLimitWindowTest, OpportunisticCleanupRecoversCapacityAfterWindowElapses) {
-    constexpr auto kWindow = std::chrono::milliseconds(60);
+    constexpr auto             kWindow = std::chrono::milliseconds(60);
     qb::http::RateLimitOptions options;
     options.max_requests(1).window(kWindow);
     auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
@@ -163,7 +161,7 @@ TEST_F(RateLimitWindowTest, OpportunisticCleanupRecoversCapacityAfterWindowElaps
 // Surgical eviction across a real boundary: a client whose window has elapsed
 // is evicted, while one whose window is still fresh survives with its counter.
 TEST_F(RateLimitWindowTest, StaleEvictedActiveSurvivesAcrossRealWindow) {
-    constexpr auto kWindow = std::chrono::milliseconds(80);
+    constexpr auto             kWindow = std::chrono::milliseconds(80);
     qb::http::RateLimitOptions options;
     options.max_requests(3).window(kWindow);
     auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
@@ -178,8 +176,8 @@ TEST_F(RateLimitWindowTest, StaleEvictedActiveSurvivesAcrossRealWindow) {
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 
     const auto evicted = mw->evict_stale_entries_now();
-    EXPECT_EQ(evicted, 1U);                     // only `stale`
-    EXPECT_EQ(mw->tracked_client_count(), 1U);  // only `active` survives
+    EXPECT_EQ(evicted, 1U);                    // only `stale`
+    EXPECT_EQ(mw->tracked_client_count(), 1U); // only `active` survives
 
     // The survivor keeps its counter: next request sees remaining = 1 (3 - 2).
     configure_router_and_run(mw, request_for("/mw_test", "active"));

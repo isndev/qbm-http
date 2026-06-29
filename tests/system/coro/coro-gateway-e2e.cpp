@@ -122,73 +122,59 @@ public:
 
             ctx->response().status() = reply.response.status();
             ctx->response().set_header("X-Gateway", "coro");
-            ctx->response().set_header("X-Upstream-Source",
-                                       std::string{reply.response.header("X-Source")});
+            ctx->response().set_header("X-Upstream-Source", std::string{reply.response.header("X-Source")});
             ctx->response().body() = reply.response.body().template as<std::string>();
             co_return;
         });
 
         // ---- /aggregate/:id -> SEQUENTIAL upstream /profile + /stats ----
-        router().get("/aggregate/:id",
-                     [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
-                         const auto id       = std::string{ctx->path_param("id")};
-                         const auto prof_url = base + "/profile/" + id;
-                         const auto stat_url = base + "/stats/" + id;
+        router().get("/aggregate/:id", [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+            const auto id       = std::string{ctx->path_param("id")};
+            const auto prof_url = base + "/profile/" + id;
+            const auto stat_url = base + "/stats/" + id;
 
-                         auto prof = co_await qb::http::GET(qb::http::Request{{prof_url}},
-                                                            kUpstreamTimeout);
-                         auto stat = co_await qb::http::GET(qb::http::Request{{stat_url}},
-                                                            kUpstreamTimeout);
+            auto prof = co_await qb::http::GET(qb::http::Request{{prof_url}}, kUpstreamTimeout);
+            auto stat = co_await qb::http::GET(qb::http::Request{{stat_url}}, kUpstreamTimeout);
 
-                         if (prof.response.status() != qb::http::status::OK ||
-                             stat.response.status() != qb::http::status::OK) {
-                             ctx->response().status() = qb::http::status::BAD_GATEWAY;
-                             ctx->response().body()   = "aggregate-failed";
-                             co_return;
-                         }
+            if (prof.response.status() != qb::http::status::OK || stat.response.status() != qb::http::status::OK) {
+                ctx->response().status() = qb::http::status::BAD_GATEWAY;
+                ctx->response().body()   = "aggregate-failed";
+                co_return;
+            }
 
-                         ctx->response().status() = qb::http::status::OK;
-                         ctx->response().body() = prof.response.body().template as<std::string>() +
-                                                  "|" +
-                                                  stat.response.body().template as<std::string>();
-                         co_return;
-                     });
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = prof.response.body().template as<std::string>() + "|" + stat.response.body().template as<std::string>();
+            co_return;
+        });
 
         // ---- /parallel/:id -> CONCURRENT upstream /profile + /stats via when_all ----
-        router().get("/parallel/:id",
-                     [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
-                         const auto id       = std::string{ctx->path_param("id")};
-                         const auto prof_url = base + "/profile/" + id;
-                         const auto stat_url = base + "/stats/" + id;
+        router().get("/parallel/:id", [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
+            const auto id       = std::string{ctx->path_param("id")};
+            const auto prof_url = base + "/profile/" + id;
+            const auto stat_url = base + "/stats/" + id;
 
-                         // Each upstream call is wrapped in its own task<Reply> so
-                         // when_all can drive both concurrently on this scheduler.
-                         auto fetch = [](std::string u) -> qb::io::async::task<qb::http::async::Reply> {
-                             co_return co_await qb::http::GET(qb::http::Request{{u}},
-                                                             kUpstreamTimeout);
-                         };
+            // Each upstream call is wrapped in its own task<Reply> so
+            // when_all can drive both concurrently on this scheduler.
+            auto fetch = [](std::string u) -> qb::io::async::task<qb::http::async::Reply> {
+                co_return co_await qb::http::GET(qb::http::Request{{u}}, kUpstreamTimeout);
+            };
 
-                         auto [prof, stat] =
-                             co_await qb::io::async::when_all(fetch(prof_url), fetch(stat_url));
+            auto [prof, stat] = co_await qb::io::async::when_all(fetch(prof_url), fetch(stat_url));
 
-                         if (prof.response.status() != qb::http::status::OK ||
-                             stat.response.status() != qb::http::status::OK) {
-                             ctx->response().status() = qb::http::status::BAD_GATEWAY;
-                             ctx->response().body()   = "parallel-failed";
-                             co_return;
-                         }
+            if (prof.response.status() != qb::http::status::OK || stat.response.status() != qb::http::status::OK) {
+                ctx->response().status() = qb::http::status::BAD_GATEWAY;
+                ctx->response().body()   = "parallel-failed";
+                co_return;
+            }
 
-                         ctx->response().status() = qb::http::status::OK;
-                         ctx->response().body() = prof.response.body().template as<std::string>() +
-                                                  "|" +
-                                                  stat.response.body().template as<std::string>();
-                         co_return;
-                     });
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = prof.response.body().template as<std::string>() + "|" + stat.response.body().template as<std::string>();
+            co_return;
+        });
 
         // ---- /fallback -> upstream returns 500, degrade to 503 ----
         router().get("/fallback", [base = _upstream_base](auto ctx) -> qb::io::async::task<void> {
-            auto reply =
-                co_await qb::http::GET(qb::http::Request{{base + "/broken"}}, kUpstreamTimeout);
+            auto reply = co_await qb::http::GET(qb::http::Request{{base + "/broken"}}, kUpstreamTimeout);
 
             if (reply.response.status() != qb::http::status::OK) {
                 ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
@@ -202,26 +188,22 @@ public:
         });
 
         // ---- /fallback-refused -> upstream socket unreachable, degrade to 503 ----
-        router().get("/fallback-refused",
-                     [dead = _dead_base](auto ctx) -> qb::io::async::task<void> {
-                         // Bounded timeout so a refused/unreachable upstream resolves
-                         // (the awaiter yields BAD_GATEWAY / GATEWAY_TIMEOUT), never hangs.
-                         auto reply = co_await qb::http::GET(qb::http::Request{{dead + "/profile/1"}},
-                                                             500ms);
+        router().get("/fallback-refused", [dead = _dead_base](auto ctx) -> qb::io::async::task<void> {
+            // Bounded timeout so a refused/unreachable upstream resolves
+            // (the awaiter yields BAD_GATEWAY / GATEWAY_TIMEOUT), never hangs.
+            auto reply = co_await qb::http::GET(qb::http::Request{{dead + "/profile/1"}}, 500ms);
 
-                         if (reply.response.status() != qb::http::status::OK) {
-                             ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
-                             ctx->response().set_header(
-                                 "X-Upstream-Status",
-                                 std::to_string(reply.response.status().code()));
-                             ctx->response().body() = "upstream-unreachable";
-                             co_return;
-                         }
+            if (reply.response.status() != qb::http::status::OK) {
+                ctx->response().status() = qb::http::status::SERVICE_UNAVAILABLE;
+                ctx->response().set_header("X-Upstream-Status", std::to_string(reply.response.status().code()));
+                ctx->response().body() = "upstream-unreachable";
+                co_return;
+            }
 
-                         ctx->response().status() = qb::http::status::OK;
-                         ctx->response().body()   = reply.response.body().template as<std::string>();
-                         co_return;
-                     });
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = reply.response.body().template as<std::string>();
+            co_return;
+        });
 
         router().compile();
     }
@@ -270,8 +252,7 @@ protected:
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_upstream->ready())
-            << "upstream loopback server failed to start on port " << _upstream_port;
+        ASSERT_TRUE(_upstream->ready()) << "upstream loopback server failed to start on port " << _upstream_port;
 
         const std::string upstream_base = "http://localhost:" + std::to_string(_upstream_port);
         const std::string dead_base     = "http://localhost:" + std::to_string(_dead_port);
@@ -312,8 +293,7 @@ protected:
         });
 
         std::unique_lock<std::mutex> lock(_gateway_mtx);
-        const bool                   signalled = _gateway_cv.wait_for(
-            lock, std::chrono::seconds(5), [this] { return _gateway_ready || _gateway_failed; });
+        const bool signalled = _gateway_cv.wait_for(lock, std::chrono::seconds(5), [this] { return _gateway_ready || _gateway_failed; });
         ASSERT_TRUE(signalled) << "gateway server did not become ready in time";
         ASSERT_TRUE(_gateway_ready) << "gateway server failed to listen on port " << port;
     }
@@ -330,9 +310,7 @@ protected:
     [[nodiscard]] qb::http::Response
     gateway_get(const std::string &path) const {
         return qb::http::run_sync(
-                   qb::http::GET(qb::http::Request{{"http://localhost:" +
-                                                    std::to_string(_gateway_port) + path}},
-                                 kUpstreamTimeout))
+                   qb::http::GET(qb::http::Request{{"http://localhost:" + std::to_string(_gateway_port) + path}}, kUpstreamTimeout))
             .response;
     }
 

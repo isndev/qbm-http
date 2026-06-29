@@ -41,8 +41,8 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
-#include <gtest/gtest.h>
 #include <cstring>
+#include <gtest/gtest.h>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -94,8 +94,8 @@ struct ClientFakeIO {
 
     qb::allocator::pipe<char> input;
 
-    int                               response_count       = 0;
-    bool                              body_forbidden        = false;
+    int                               response_count = 0;
+    bool                              body_forbidden = false;
     std::optional<qb::http::Response> last_response;
 
     qb::allocator::pipe<char> &
@@ -144,7 +144,7 @@ step(Protocol &protocol, FakeIO &io) {
 // ===========================================================================
 
 TEST(Http1ProtocolFraming, ContentLengthRequestFramesAndDispatchesExactlyOnce) {
-    ServerFakeIO                            io;
+    ServerFakeIO                             io;
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
     feed(io, "POST /submit HTTP/1.1\r\n"

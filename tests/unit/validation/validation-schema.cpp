@@ -419,9 +419,11 @@ TEST_F(ValidationSchemaTest, Not) {
 // under the dynamic key ("key.inner"). The existing AdditionalProperties test
 // only uses a scalar sub-schema (empty inner path), so this hits the join branch.
 TEST_F(ValidationSchemaTest, AdditionalPropertiesObjectSchemaRepathsNestedError) {
-    qb::json schema = {{"type", "object"},
-                       {"properties", {{"id", {{"type", "integer"}}}}},
-                       {"additionalProperties", {{"type", "object"}, {"properties", {{"port", {{"type", "integer"}}}}}}}};
+    qb::json schema = {
+        {"type", "object"},
+        {"properties", {{"id", {{"type", "integer"}}}}},
+        {"additionalProperties", {{"type", "object"}, {"properties", {{"port", {{"type", "integer"}}}}}}}
+    };
     SchemaValidator validator(schema);
 
     result.clear();
@@ -767,8 +769,9 @@ TEST_F(ValidationSchemaTest, TypeArrayAcceptsAnyListedType) {
     qb::json        schema = {{"type", qb::json::array({"integer", "number", "boolean", "object", "array", "null", "string"})}};
     SchemaValidator validator(schema);
 
-    for (const qb::json &v : {qb::json(7), qb::json(3.5), qb::json(true), qb::json(qb::json::object()), qb::json(qb::json::array()),
-                              qb::json(nullptr), qb::json("text")}) {
+    for (const qb::json &v :
+         {qb::json(7), qb::json(3.5), qb::json(true), qb::json(qb::json::object()), qb::json(qb::json::array()), qb::json(nullptr),
+          qb::json("text")}) {
         result.clear();
         EXPECT_TRUE(validator.validate(v, result)) << "value: " << v.dump();
         EXPECT_TRUE(result.success());
@@ -887,9 +890,7 @@ TEST_F(ValidationSchemaTest, AdditionalPropertiesSchemaValidatesDynamicValues) {
     // additionalProperties bound to a schema: each non-declared property is run
     // through a nested SchemaValidator and its errors are re-pathed under the key.
     qb::json schema = {
-        {"type", "object"},
-        {"properties", {{"id", {{"type", "integer"}}}}},
-        {"additionalProperties", {{"type", "string"}, {"minLength", 3}}}
+        {"type", "object"}, {"properties", {{"id", {{"type", "integer"}}}}}, {"additionalProperties", {{"type", "string"}, {"minLength", 3}}}
     };
     SchemaValidator validator(schema);
 

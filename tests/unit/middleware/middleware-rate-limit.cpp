@@ -112,8 +112,7 @@ TEST_F(RateLimitFastTest, CountsRequestsAndEmitsHeadersUntilLimit) {
 
     // X-RateLimit-Reset on the limited response is a bounded, non-negative
     // seconds-until-reset within the (5 minute = 300 s) window.
-    const long long reset =
-        qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
+    const long long reset = qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
     EXPECT_GE(reset, 0);
     EXPECT_LE(reset, 300);
 }
@@ -159,7 +158,8 @@ TEST_F(RateLimitFastTest, ZeroMaxRequestsBlocksEveryRequest) {
 
 TEST_F(RateLimitFastTest, CustomErrorMessageAndStatusCode) {
     qb::http::RateLimitOptions options;
-    options.max_requests(0) // Reject immediately.
+    options
+        .max_requests(0) // Reject immediately.
         .window(std::chrono::minutes(5))
         .status_code(qb::http::status::SERVICE_UNAVAILABLE)
         .message("Custom rate limit message.");
@@ -178,9 +178,8 @@ TEST_F(RateLimitFastTest, CustomErrorMessageAndStatusCode) {
 TEST_F(RateLimitFastTest, CustomClientIdExtractorKeysOffHeader) {
     qb::http::RateLimitOptions options;
     options.max_requests(1).window(std::chrono::minutes(5));
-    options.client_id_extractor<MockMiddlewareSession>([](const qb::http::Context<MockMiddlewareSession> &ctx) {
-        return std::string(ctx.request().header(std::string("X-Client-ID")));
-    });
+    options.client_id_extractor<MockMiddlewareSession>(
+        [](const qb::http::Context<MockMiddlewareSession> &ctx) { return std::string(ctx.request().header(std::string("X-Client-ID"))); });
     auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
 
     auto req1 = create_request(qb::http::method::GET, "/mw_test");
@@ -410,8 +409,7 @@ TEST(RateLimitMiddlewareTypeSafety, MismatchedExtractorSessionTypeFallsBackToDef
     options.max_requests(1).window(std::chrono::minutes(5));
     // Extractor configured for MockMiddlewareSession, used by a middleware
     // instantiated for OtherRateLimitSession: it must NOT fire.
-    options.client_id_extractor<MockMiddlewareSession>(
-        [](const qb::http::Context<MockMiddlewareSession> &) -> std::string { return "FIXED"; });
+    options.client_id_extractor<MockMiddlewareSession>([](const qb::http::Context<MockMiddlewareSession> &) -> std::string { return "FIXED"; });
 
     auto mw = qb::http::rate_limit_middleware<OtherRateLimitSession>(options);
 
@@ -454,9 +452,9 @@ TEST(RateLimitMiddlewareTypeSafety, MismatchedExtractorSessionTypeFallsBackToDef
 // ---------------------------------------------------------------------------
 
 TEST(RateLimitMiddlewareConcurrency, PerListenerInstancesCountExactlyUnderThreads) {
-    constexpr int kThreads          = 8;
-    constexpr int kRequestsPerThread = 50; // > limit, so a deterministic # are 429.
-    constexpr std::size_t kLimit    = 20;
+    constexpr int         kThreads           = 8;
+    constexpr int         kRequestsPerThread = 50; // > limit, so a deterministic # are 429.
+    constexpr std::size_t kLimit             = 20;
 
     std::vector<std::thread> threads;
     std::vector<int>         allowed(kThreads, 0);
@@ -480,7 +478,7 @@ TEST(RateLimitMiddlewareConcurrency, PerListenerInstancesCountExactlyUnderThread
             router.compile();
 
             for (int i = 0; i < kRequestsPerThread; ++i) {
-                auto session = std::make_shared<MockMiddlewareSession>();
+                auto              session = std::make_shared<MockMiddlewareSession>();
                 qb::http::Request req;
                 req.method() = qb::http::method::GET;
                 req.uri()    = qb::io::uri("/r");

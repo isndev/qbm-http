@@ -148,9 +148,9 @@ TEST(WsHandshakeDetail, IsTokenCharAndIsValidToken) {
 
     EXPECT_TRUE(is_valid_token("chat.v1"));
     EXPECT_TRUE(is_valid_token("superchat-v2"));
-    EXPECT_FALSE(is_valid_token(""));          // empty rejected
-    EXPECT_FALSE(is_valid_token("chat v1"));   // space
-    EXPECT_FALSE(is_valid_token("chat,v1"));   // comma
+    EXPECT_FALSE(is_valid_token(""));        // empty rejected
+    EXPECT_FALSE(is_valid_token("chat v1")); // space
+    EXPECT_FALSE(is_valid_token("chat,v1")); // comma
 }
 
 TEST(WsHandshakeDetail, HasTokenCiHandlesListsCaseAndWhitespace) {
@@ -187,7 +187,7 @@ TEST(WsHandshakeDetail, ConstantTimeEqualMatchesAndDiffers) {
     EXPECT_TRUE(constant_time_equal("abc123", "abc123"));
     EXPECT_TRUE(constant_time_equal("", ""));
     EXPECT_FALSE(constant_time_equal("abc123", "abc124")); // last byte differs
-    EXPECT_FALSE(constant_time_equal("abc", "abcd"));       // length differs
+    EXPECT_FALSE(constant_time_equal("abc", "abcd"));      // length differs
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +206,8 @@ TEST(WebSocketFrameEncodeValidation, MessageCloseTypedStatusOverloadEncodesStatu
     MessageClose msg{CloseStatus::GoingAway, "bye"};
     ASSERT_GE(msg.size(), 2u + 3u);
 
-    const auto         status = static_cast<std::uint16_t>(CloseStatus::GoingAway);
-    const char        *bytes  = msg._data.begin();
+    const auto  status = static_cast<std::uint16_t>(CloseStatus::GoingAway);
+    const char *bytes  = msg._data.begin();
     EXPECT_EQ(static_cast<std::uint8_t>(bytes[0]), static_cast<std::uint8_t>((status >> 8) & 0xFFu));
     EXPECT_EQ(static_cast<std::uint8_t>(bytes[1]), static_cast<std::uint8_t>(status & 0xFFu));
     EXPECT_EQ(std::string_view(bytes + 2, msg.size() - 2), "bye");
@@ -215,8 +215,8 @@ TEST(WebSocketFrameEncodeValidation, MessageCloseTypedStatusOverloadEncodesStatu
     // The default-status overload uses Normal (1000) with the default reason.
     MessageClose def{CloseStatus::Normal};
     ASSERT_GE(def.size(), 2u);
-    const auto   normal = static_cast<std::uint16_t>(CloseStatus::Normal);
-    const char  *db     = def._data.begin();
+    const auto  normal = static_cast<std::uint16_t>(CloseStatus::Normal);
+    const char *db     = def._data.begin();
     EXPECT_EQ(static_cast<std::uint8_t>(db[0]), static_cast<std::uint8_t>((normal >> 8) & 0xFFu));
     EXPECT_EQ(static_cast<std::uint8_t>(db[1]), static_cast<std::uint8_t>(normal & 0xFFu));
 }
@@ -250,26 +250,39 @@ struct WsFakeIOBase {
     qb::allocator::pipe<char> output;
     struct error {};
 
-    qb::allocator::pipe<char> &in() noexcept { return input; }
-    qb::allocator::pipe<char> &out() noexcept { return output; }
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    qb::allocator::pipe<char> &
+    out() noexcept {
+        return output;
+    }
 
     template <typename T>
-    WsFakeIOBase &operator<<(const T &msg) {
+    WsFakeIOBase &
+    operator<<(const T &msg) {
         output.put(msg);
         return *this;
     }
-    void on(qb::protocol::ws_internal::event_message &&) {}
-    void on(qb::protocol::ws_internal::event_close &&) {}
-    void on(qb::protocol::ws_internal::event_ping &&) {}
-    void on(qb::protocol::ws_internal::event_pong &&) {}
-    void on(error &&) {}
+    void
+    on(qb::protocol::ws_internal::event_message &&) {}
+    void
+    on(qb::protocol::ws_internal::event_close &&) {}
+    void
+    on(qb::protocol::ws_internal::event_ping &&) {}
+    void
+    on(qb::protocol::ws_internal::event_pong &&) {}
+    void
+    on(error &&) {}
 };
 
 using HsServerFakeIO = WsFakeIOBase<true>;
 using HsClientFakeIO = WsFakeIOBase<false>;
 
 // Build a valid base upgrade request, then let the caller mutate one field.
-qb::http::Request valid_upgrade_request() {
+qb::http::Request
+valid_upgrade_request() {
     qb::http::Request req;
     req.method() = qb::http::method::GET;
     req.uri()    = qb::io::uri("/");
@@ -284,9 +297,9 @@ qb::http::Request valid_upgrade_request() {
 } // namespace
 
 TEST(WsHandshakeValidator, ServerAcceptsWellFormedUpgrade) {
-    HsServerFakeIO    io;
-    qb::http::Request req = valid_upgrade_request();
-    qb::http::Response resp;
+    HsServerFakeIO                          io;
+    qb::http::Request                       req = valid_upgrade_request();
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_TRUE(proto.ok());
     EXPECT_EQ(resp.status(), qb::http::status::SWITCHING_PROTOCOLS);
@@ -296,7 +309,7 @@ TEST(WsHandshakeValidator, ServerRejectsNonGetMethod) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
     req.method()          = qb::http::method::POST;
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
     EXPECT_EQ(resp.status(), qb::http::status::BAD_REQUEST);
@@ -306,7 +319,7 @@ TEST(WsHandshakeValidator, ServerRejectsMissingUpgradeFlag) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
     req.upgrade           = false; // ws.h:903-904 branch
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
 }
@@ -315,7 +328,7 @@ TEST(WsHandshakeValidator, ServerRejectsWrongUpgradeHeaderValue) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
     req.set_header("Upgrade", "h2c"); // not "websocket" => ws.h:905-906
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
 }
@@ -324,7 +337,7 @@ TEST(WsHandshakeValidator, ServerRejectsConnectionWithoutUpgradeToken) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
     req.set_header("Connection", "keep-alive"); // no Upgrade token => ws.h:907-908
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
 }
@@ -333,7 +346,7 @@ TEST(WsHandshakeValidator, ServerRejectsWrongKeyLength) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
     req.set_header("Sec-WebSocket-Key", "short"); // != 24 chars => ws.h:915-916
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
 }
@@ -344,7 +357,7 @@ TEST(WsHandshakeValidator, ServerRejectsNonBase64KeyOfCorrectLength) {
     // 24 chars containing base64-illegal bytes => decode throws (ws.h:919-922)
     // or yields a wrong size / non-canonical re-encode (ws.h:923-926).
     req.set_header("Sec-WebSocket-Key", "************************");
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
 }
@@ -358,7 +371,7 @@ TEST(WsHandshakeValidator, ServerRejectsNonCanonicalBase64Key) {
     // (ws.h:925-926). The decoder is noexcept, so this is the only way to fail
     // *after* a successful 16-byte decode.
     req.set_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZR==");
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
 }
@@ -367,7 +380,7 @@ TEST(WsHandshakeValidator, ServerRejectsWrongVersion) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
     req.set_header("Sec-WebSocket-Version", "8"); // != 13 => ws.h:929-930
-    qb::http::Response resp;
+    qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
 }
@@ -376,11 +389,13 @@ TEST(WsHandshakeValidator, ServerRejectsWrongVersion) {
 
 namespace {
 // Compute the accept value the client expects for a given key.
-std::string accept_for(const std::string &key) {
+std::string
+accept_for(const std::string &key) {
     return qb::protocol::detail::compute_accept_key(key);
 }
 
-qb::http::Response valid_handshake_response(const std::string &key) {
+qb::http::Response
+valid_handshake_response(const std::string &key) {
     qb::http::Response resp;
     resp.upgrade  = true;
     resp.status() = qb::http::status::SWITCHING_PROTOCOLS;
@@ -392,9 +407,9 @@ qb::http::Response valid_handshake_response(const std::string &key) {
 } // namespace
 
 TEST(WsHandshakeValidator, ClientAcceptsMatchingAccept) {
-    HsClientFakeIO     io;
-    const std::string  key  = "dGhlIHNhbXBsZSBub25jZQ==";
-    qb::http::Response resp = valid_handshake_response(key);
+    HsClientFakeIO                          io;
+    const std::string                       key  = "dGhlIHNhbXBsZSBub25jZQ==";
+    qb::http::Response                      resp = valid_handshake_response(key);
     qb::protocol::ws_client<HsClientFakeIO> proto(io, resp, key);
     EXPECT_TRUE(proto.ok());
 }
@@ -472,13 +487,13 @@ TEST(WsClientCallbacks, RegisteredCallbacksAreInvokedOnDispatch) {
     bool got_sending = false;
 
     client.on_sending_http_request([&](auto &) { got_sending = true; })
-          .on_connected([&](auto &) { got_connected = true; })
-          .on_error([&](auto &) { got_error = true; })
-          .on_closed([&](auto &) { got_closed = true; })
-          .on_ping([&](auto &) { got_ping = true; })
-          .on_pong([&](auto &) { got_pong = true; })
-          .on_message([&](auto &) { got_message = true; })
-          .on_disconnected([&](auto &) { got_disconnected = true; });
+        .on_connected([&](auto &) { got_connected = true; })
+        .on_error([&](auto &) { got_error = true; })
+        .on_closed([&](auto &) { got_closed = true; })
+        .on_ping([&](auto &) { got_ping = true; })
+        .on_pong([&](auto &) { got_pong = true; })
+        .on_message([&](auto &) { got_message = true; })
+        .on_disconnected([&](auto &) { got_disconnected = true; });
 
     using C = qb::http::ws::client;
 
@@ -549,19 +564,33 @@ struct WsFramerFakeIO {
     std::size_t               message_count = 0;
     struct error {};
 
-    qb::allocator::pipe<char> &in() noexcept { return input; }
-    qb::allocator::pipe<char> &out() noexcept { return output; }
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    qb::allocator::pipe<char> &
+    out() noexcept {
+        return output;
+    }
 
     template <typename T>
-    WsFramerFakeIO &operator<<(const T &msg) {
+    WsFramerFakeIO &
+    operator<<(const T &msg) {
         output.put(msg);
         return *this;
     }
-    void on(qb::protocol::ws_internal::event_message &&) { ++message_count; }
-    void on(qb::protocol::ws_internal::event_close &&) {}
-    void on(qb::protocol::ws_internal::event_ping &&) {}
-    void on(qb::protocol::ws_internal::event_pong &&) {}
-    void on(error &&) {}
+    void
+    on(qb::protocol::ws_internal::event_message &&) {
+        ++message_count;
+    }
+    void
+    on(qb::protocol::ws_internal::event_close &&) {}
+    void
+    on(qb::protocol::ws_internal::event_ping &&) {}
+    void
+    on(qb::protocol::ws_internal::event_pong &&) {}
+    void
+    on(error &&) {}
 };
 
 using WsFramer = qb::protocol::ws_server<WsFramerFakeIO>;
@@ -570,8 +599,8 @@ using WsFramer = qb::protocol::ws_server<WsFramerFakeIO>;
 // The extended-length form is selected automatically from payload size, but
 // `force_len_indicator` lets a test emit a *non-minimal* length encoding (e.g.
 // a 16-bit length field for a tiny payload) to drive the minimal-encoding guard.
-void push_masked_frame(qb::allocator::pipe<char> &pipe, std::uint8_t first_byte, std::string_view payload,
-                       int force_len_indicator = -1) {
+void
+push_masked_frame(qb::allocator::pipe<char> &pipe, std::uint8_t first_byte, std::string_view payload, int force_len_indicator = -1) {
     const std::array<std::uint8_t, 4> mask{{0xAA, 0x55, 0x01, 0xFE}};
     std::vector<std::uint8_t>         out;
     out.push_back(first_byte);
@@ -605,7 +634,8 @@ void push_masked_frame(qb::allocator::pipe<char> &pipe, std::uint8_t first_byte,
 }
 
 // Run the framer until it can no longer extract a complete message or it fails.
-void run_framer(WsFramer &proto, WsFramerFakeIO &io) {
+void
+run_framer(WsFramer &proto, WsFramerFakeIO &io) {
     std::size_t n;
     while (proto.ok() && (n = proto.getMessageSize()) > 0) {
         proto.onMessage(n);

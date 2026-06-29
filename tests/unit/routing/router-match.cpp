@@ -215,7 +215,9 @@ struct ParamDecodeRow {
     std::string label;
 };
 
-class ParamDecode : public RouterMatchTest, public ::testing::WithParamInterface<ParamDecodeRow> {};
+class ParamDecode
+    : public RouterMatchTest
+    , public ::testing::WithParamInterface<ParamDecodeRow> {};
 
 TEST_P(ParamDecode, DecodesPathParameter) {
     const auto &row = GetParam();
@@ -228,15 +230,14 @@ TEST_P(ParamDecode, DecodesPathParameter) {
     EXPECT_EQ(param("id"), row.decoded_value) << row.label;
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    Decoding, ParamDecode,
-    ::testing::Values(ParamDecodeRow{"plain", "plain", "plain"}, ParamDecodeRow{"a+b", "a+b", "literal_plus_kept"},
-                      ParamDecodeRow{"a%2Bb", "a+b", "encoded_plus"}, ParamDecodeRow{"a%20b", "a b", "encoded_space"},
-                      ParamDecodeRow{"a%2Fb", "a/b", "encoded_slash_in_param"},
-                      ParamDecodeRow{"a%2fb", "a/b", "encoded_slash_lowercase_hex"},
-                      ParamDecodeRow{"%41%42%43", "ABC", "all_encoded"},
-                      ParamDecodeRow{"trailing%", "trailing%", "bare_percent_kept_literal"}),
-    [](const ::testing::TestParamInfo<ParamDecodeRow> &i) { return i.param.label; });
+INSTANTIATE_TEST_SUITE_P(Decoding, ParamDecode,
+                         ::testing::Values(ParamDecodeRow{"plain", "plain", "plain"}, ParamDecodeRow{"a+b", "a+b", "literal_plus_kept"},
+                                           ParamDecodeRow{"a%2Bb", "a+b", "encoded_plus"}, ParamDecodeRow{"a%20b", "a b", "encoded_space"},
+                                           ParamDecodeRow{"a%2Fb", "a/b", "encoded_slash_in_param"},
+                                           ParamDecodeRow{"a%2fb", "a/b", "encoded_slash_lowercase_hex"},
+                                           ParamDecodeRow{"%41%42%43", "ABC", "all_encoded"},
+                                           ParamDecodeRow{"trailing%", "trailing%", "bare_percent_kept_literal"}),
+                         [](const ::testing::TestParamInfo<ParamDecodeRow> &i) { return i.param.label; });
 
 TEST_F(RouterMatchTest, ParameterMissingFollowingStaticSegmentYields404) {
     router.get("/item/:itemId/details", make_verifying_handler<MockSession>("item_details_handler"));
@@ -356,12 +357,14 @@ TEST_F(RouterMatchTest, VeryLongWildcardCapture) {
 struct PrecedenceRow {
     std::string request_path;
     std::string expected_handler;
-    std::string capture_name;  ///< empty when the winner captures nothing
+    std::string capture_name; ///< empty when the winner captures nothing
     std::string capture_value;
     std::string label;
 };
 
-class Precedence : public RouterMatchTest, public ::testing::WithParamInterface<PrecedenceRow> {
+class Precedence
+    : public RouterMatchTest
+    , public ::testing::WithParamInterface<PrecedenceRow> {
 protected:
     void
     SetUp() override {
@@ -385,13 +388,12 @@ TEST_P(Precedence, MostSpecificWins) {
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    StaticParamWildcard, Precedence,
-    ::testing::Values(PrecedenceRow{"/r/specific", "static", "", "", "static_beats_param_and_wildcard"},
-                      PrecedenceRow{"/r/123", "param", "id", "123", "param_beats_wildcard"},
-                      PrecedenceRow{"/r/a/b/c", "wildcard", "rest", "a/b/c", "wildcard_catches_multi_segment"},
-                      PrecedenceRow{"/r", "wildcard", "rest", "", "wildcard_catches_empty_at_prefix"}),
-    [](const ::testing::TestParamInfo<PrecedenceRow> &i) { return i.param.label; });
+INSTANTIATE_TEST_SUITE_P(StaticParamWildcard, Precedence,
+                         ::testing::Values(PrecedenceRow{"/r/specific", "static", "", "", "static_beats_param_and_wildcard"},
+                                           PrecedenceRow{"/r/123", "param", "id", "123", "param_beats_wildcard"},
+                                           PrecedenceRow{"/r/a/b/c", "wildcard", "rest", "a/b/c", "wildcard_catches_multi_segment"},
+                                           PrecedenceRow{"/r", "wildcard", "rest", "", "wildcard_catches_empty_at_prefix"}),
+                         [](const ::testing::TestParamInfo<PrecedenceRow> &i) { return i.param.label; });
 
 // Greedy-vs-specific: a specific deeper route must be reachable even though a
 // shallower wildcard could also have matched the same prefix.

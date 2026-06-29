@@ -167,18 +167,8 @@ BENCHMARK(BM_Http1Serialize_FixedLengthResponse)
     ->Arg(64 * 1024)
     ->ArgNames({"body_bytes"})
     ->Unit(benchmark::kNanosecond);
-BENCHMARK(BM_Http1Serialize_ChunkedResponse)
-    ->Arg(256)
-    ->Arg(4 * 1024)
-    ->Arg(64 * 1024)
-    ->ArgNames({"body_bytes"})
-    ->Unit(benchmark::kNanosecond);
-BENCHMARK(BM_Http1Serialize_ChunkedRequest)
-    ->Arg(256)
-    ->Arg(4 * 1024)
-    ->Arg(64 * 1024)
-    ->ArgNames({"body_bytes"})
-    ->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Http1Serialize_ChunkedResponse)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"body_bytes"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Http1Serialize_ChunkedRequest)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"body_bytes"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Http1Serialize_HeaderBlock)->Arg(1)->Arg(8)->Arg(32)->ArgNames({"headers"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();

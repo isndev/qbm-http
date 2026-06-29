@@ -348,12 +348,14 @@ TEST_F(WsCoroServer, CoroHandshakeHookRejectsWithHttpResponse) {
     (void) sock.set_nonblocking(true);
 
     const std::string request = "GET /ws HTTP/1.1\r\n"
-                                "Host: localhost:" + std::to_string(server.port) + "\r\n"
-                                "Upgrade: websocket\r\n"
-                                "Connection: Upgrade\r\n"
-                                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-                                "Sec-WebSocket-Version: 13\r\n"
-                                "\r\n";
+                                "Host: localhost:"
+                                + std::to_string(server.port)
+                                + "\r\n"
+                                  "Upgrade: websocket\r\n"
+                                  "Connection: Upgrade\r\n"
+                                  "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                  "Sec-WebSocket-Version: 13\r\n"
+                                  "\r\n";
     sock.write(request.data(), static_cast<int>(request.size()));
 
     const std::string response = read_http_response(sock);

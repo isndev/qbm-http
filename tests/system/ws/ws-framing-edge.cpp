@@ -78,8 +78,7 @@ public:
         static_cast<base::WS_Protocol *>(this->protocol())->set_max_payload_size(64);
         while (true) {
             auto frame = co_await this->next_frame();
-            if (frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected ||
-                frame.kind == qb::http::ws::IncomingFrame::Kind::Close) {
+            if (frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected || frame.kind == qb::http::ws::IncomingFrame::Kind::Close) {
                 co_return;
             }
         }
@@ -105,8 +104,7 @@ public:
     run() {
         while (true) {
             auto frame = co_await this->next_frame();
-            if (frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected ||
-                frame.kind == qb::http::ws::IncomingFrame::Kind::Close) {
+            if (frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected || frame.kind == qb::http::ws::IncomingFrame::Kind::Close) {
                 co_return;
             }
             if (frame.kind == qb::http::ws::IncomingFrame::Kind::Message) {
@@ -130,25 +128,21 @@ public:
 
 template <typename ServerT>
 void
-expect_close_code_after_frames(WsServerThread<ServerT>                    &server,
-                               std::vector<std::vector<std::uint8_t>> const &frames,
-                               qb::http::ws::CloseStatus                     expected) {
+expect_close_code_after_frames(WsServerThread<ServerT> &server, std::vector<std::vector<std::uint8_t>> const &frames,
+                               qb::http::ws::CloseStatus expected) {
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
 
     for (auto const &frame : frames) {
-        sock.write(reinterpret_cast<const char *>(frame.data()),
-                   static_cast<int>(frame.size()));
+        sock.write(reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()));
     }
 
     const std::string got        = read_some(sock, 128);
     const auto        close_code = extract_close_code(got);
-    ASSERT_TRUE(close_code.has_value())
-        << "server did not send a parseable close frame: size=" << got.size();
+    ASSERT_TRUE(close_code.has_value()) << "server did not send a parseable close frame: size=" << got.size();
     EXPECT_EQ(*close_code, static_cast<std::uint16_t>(expected));
 
     sock.close();
@@ -176,12 +170,10 @@ TEST(WsFramingEdge, MaxPayloadSizeEnforced) {
     };
 
     const auto frame = qb::http::ws::run_sync(scenario());
-    EXPECT_TRUE(frame.kind == qb::http::ws::IncomingFrame::Kind::Close ||
-                frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected)
+    EXPECT_TRUE(frame.kind == qb::http::ws::IncomingFrame::Kind::Close || frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected)
         << "Got unexpected kind " << static_cast<int>(frame.kind);
     if (frame.kind == qb::http::ws::IncomingFrame::Kind::Close) {
-        EXPECT_EQ(frame.close_code,
-                  static_cast<std::uint16_t>(qb::http::ws::CloseStatus::MessageTooBig))
+        EXPECT_EQ(frame.close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::MessageTooBig))
             << "reason='" << frame.close_reason << "'";
     }
 }
@@ -189,11 +181,8 @@ TEST(WsFramingEdge, MaxPayloadSizeEnforced) {
 TEST(WsFramingEdge, FragmentedPayloadLimitIsEnforcedOnAggregateMessageSize) {
     WsServerThread<BoundedServer> server{ephemeral_port()};
     // 40 + 40: each frame is under 64 but the reassembled message is not.
-    expect_close_code_after_frames(
-        server,
-        {make_client_frame(0x01, std::string(40, 'A')),
-         make_client_frame(0x80, std::string(40, 'B'))},
-        qb::http::ws::CloseStatus::MessageTooBig);
+    expect_close_code_after_frames(server, {make_client_frame(0x01, std::string(40, 'A')), make_client_frame(0x80, std::string(40, 'B'))},
+                                   qb::http::ws::CloseStatus::MessageTooBig);
 }
 
 // ===========================================================================
@@ -204,8 +193,7 @@ TEST(WsFramingEdge, InterleavedPingDuringFragmented) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -243,8 +231,7 @@ TEST(WsFramingEdge, ZeroLengthTextFrameIsDeliveredAndEchoed) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -264,8 +251,7 @@ TEST(WsFramingEdge, ZeroLengthPingGetsZeroLengthPong) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -289,15 +275,14 @@ TEST(WsFramingEdge, NonMinimalPayloadLengthEncodingIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
 
     // Text frame whose length is encoded as 126 + ext16(1): a 1-byte payload
     // that should have used the 7-bit form. Non-minimal => 1002.
-    std::vector<std::uint8_t>       bad{0x81u, static_cast<std::uint8_t>(0x80u | 126u), 0x00u, 0x01u};
+    std::vector<std::uint8_t>             bad{0x81u, static_cast<std::uint8_t>(0x80u | 126u), 0x00u, 0x01u};
     constexpr std::array<std::uint8_t, 4> mask{{0x12, 0x34, 0x56, 0x78}};
     for (auto m : mask) {
         bad.push_back(m);
@@ -307,8 +292,7 @@ TEST(WsFramingEdge, NonMinimalPayloadLengthEncodingIsRejected) {
 
     const std::string got        = read_some(sock, 128);
     const auto        close_code = extract_close_code(got);
-    ASSERT_TRUE(close_code.has_value())
-        << "server did not send a parseable close frame: size=" << got.size();
+    ASSERT_TRUE(close_code.has_value()) << "server did not send a parseable close frame: size=" << got.size();
     EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::ProtocolError));
 
     sock.close();
@@ -335,14 +319,14 @@ TEST(WsFramingEdge, ContinuationWithoutInitialDataFrameIsRejected) {
 TEST(WsFramingEdge, NewDataFrameBeforeFinalContinuationIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
     expect_close_code_after_frames(server,
-                                   {make_client_frame(0x01, "hel"), // Text, FIN=0
+                                   {make_client_frame(0x01, "hel"),  // Text, FIN=0
                                     make_client_frame(0x82, "bin")}, // Binary, FIN=1 mid-fragment
                                    qb::http::ws::CloseStatus::ProtocolError);
 }
 
 TEST(WsFramingEdge, PayloadLength64MostSignificantBitIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
-    std::vector<std::uint8_t> bad;
+    std::vector<std::uint8_t>  bad;
     bad.reserve(2 + 8 + 4);
     bad.push_back(0x81u);        // FIN + text
     bad.push_back(0x80u | 127u); // masked + extended64
@@ -359,8 +343,7 @@ TEST(WsFramingEdge, UnmaskedClientFrameIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -369,8 +352,8 @@ TEST(WsFramingEdge, UnmaskedClientFrameIsRejected) {
     // masks, so we cannot use it here).
     const std::string         payload = "unmasked payload";
     std::vector<std::uint8_t> frame;
-    frame.push_back(0x81u);                                          // FIN + text
-    frame.push_back(static_cast<std::uint8_t>(payload.size()));      // MASK=0, len7
+    frame.push_back(0x81u);                                     // FIN + text
+    frame.push_back(static_cast<std::uint8_t>(payload.size())); // MASK=0, len7
     for (char ch : payload) {
         frame.push_back(static_cast<std::uint8_t>(ch));
     }
@@ -378,8 +361,7 @@ TEST(WsFramingEdge, UnmaskedClientFrameIsRejected) {
 
     const std::string got        = read_some(sock, 128);
     const auto        close_code = extract_close_code(got);
-    ASSERT_TRUE(close_code.has_value())
-        << "server did not send a parseable close frame: size=" << got.size();
+    ASSERT_TRUE(close_code.has_value()) << "server did not send a parseable close frame: size=" << got.size();
     EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::ProtocolError));
 
     sock.close();
@@ -396,8 +378,7 @@ TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
     close_payload.push_back(static_cast<char>(999u & 0xFFu));
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -407,8 +388,7 @@ TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
 
     const std::string got        = read_some(sock, 128);
     const auto        close_code = extract_close_code(got);
-    ASSERT_TRUE(close_code.has_value())
-        << "server did not send a parseable close frame: size=" << got.size();
+    ASSERT_TRUE(close_code.has_value()) << "server did not send a parseable close frame: size=" << got.size();
     EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::ProtocolError));
 
     sock.close();
@@ -419,8 +399,7 @@ TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
 TEST(WsFramingEdge, OneByteCloseFramePayloadIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
     // Close (0x88) with a single payload byte.
-    expect_close_code_after_frames(server, {make_client_frame(0x88, std::string(1, '\x03'))},
-                                   qb::http::ws::CloseStatus::ProtocolError);
+    expect_close_code_after_frames(server, {make_client_frame(0x88, std::string(1, '\x03'))}, qb::http::ws::CloseStatus::ProtocolError);
 }
 
 // A Close frame with a VALID status code but a reason that is not valid UTF-8
@@ -436,8 +415,7 @@ TEST(WsFramingEdge, CloseFrameWithInvalidUtf8ReasonIsRejectedWith1007) {
     close_payload.push_back(static_cast<char>(1000u & 0xFFu));
     close_payload.push_back(static_cast<char>(0x80)); // invalid UTF-8
 
-    expect_close_code_after_frames(server, {make_client_frame(0x88, close_payload)},
-                                   qb::http::ws::CloseStatus::DataNotConsistent);
+    expect_close_code_after_frames(server, {make_client_frame(0x88, close_payload)}, qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
 // A control (Ping) frame announcing a length indicator of 126 exceeds the 125
@@ -448,14 +426,13 @@ TEST(WsFramingEdge, ControlFrameAnnouncingOversizeLengthIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
 
     // Ping (0x89) + MASK + len-indicator 126 — over the control-frame cap.
-    std::vector<std::uint8_t> bad{0x89u, static_cast<std::uint8_t>(0x80u | 126u), 0x00u, 0x01u};
+    std::vector<std::uint8_t>             bad{0x89u, static_cast<std::uint8_t>(0x80u | 126u), 0x00u, 0x01u};
     constexpr std::array<std::uint8_t, 4> mask{{0x12, 0x34, 0x56, 0x78}};
     for (auto m : mask) {
         bad.push_back(m);
@@ -465,8 +442,7 @@ TEST(WsFramingEdge, ControlFrameAnnouncingOversizeLengthIsRejected) {
 
     const std::string got        = read_some(sock, 128);
     const auto        close_code = extract_close_code(got);
-    ASSERT_TRUE(close_code.has_value())
-        << "server did not send a parseable close frame: size=" << got.size();
+    ASSERT_TRUE(close_code.has_value()) << "server did not send a parseable close frame: size=" << got.size();
     EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::ProtocolError));
 
     sock.close();
@@ -480,8 +456,7 @@ TEST(WsFramingEdge, InvalidUtf8TextFrameIsRejectedWith1007) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -493,10 +468,8 @@ TEST(WsFramingEdge, InvalidUtf8TextFrameIsRejectedWith1007) {
 
     const std::string got        = read_some(sock, 128);
     const auto        close_code = extract_close_code(got);
-    ASSERT_TRUE(close_code.has_value())
-        << "server did not send a parseable close frame: size=" << got.size();
-    EXPECT_EQ(*close_code,
-              static_cast<std::uint16_t>(qb::http::ws::CloseStatus::DataNotConsistent));
+    ASSERT_TRUE(close_code.has_value()) << "server did not send a parseable close frame: size=" << got.size();
+    EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::DataNotConsistent));
 
     sock.close();
 }
@@ -509,40 +482,36 @@ TEST(WsFramingEdge, LargeSingleFramePayloadUsesExt16LengthPath) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
 
     // 200-byte payload: forces the 126 + ext16 client length form. make_client_frame
     // only emits the 7-bit form, so build the masked frame by hand here.
-    const std::string                     payload(200, 'Z');
-    const std::array<std::uint8_t, 4>     mask{{0xAA, 0x55, 0x01, 0xFE}};
-    std::vector<std::uint8_t>             frame;
+    const std::string                 payload(200, 'Z');
+    const std::array<std::uint8_t, 4> mask{{0xAA, 0x55, 0x01, 0xFE}};
+    std::vector<std::uint8_t>         frame;
     frame.reserve(4 + 4 + payload.size());
-    frame.push_back(0x81u);                                                 // FIN + text
-    frame.push_back(static_cast<std::uint8_t>(0x80u | 126u));               // MASK + ext16
+    frame.push_back(0x81u);                                   // FIN + text
+    frame.push_back(static_cast<std::uint8_t>(0x80u | 126u)); // MASK + ext16
     frame.push_back(static_cast<std::uint8_t>((payload.size() >> 8) & 0xFFu));
     frame.push_back(static_cast<std::uint8_t>(payload.size() & 0xFFu));
     for (auto b : mask) {
         frame.push_back(b);
     }
     for (std::size_t i = 0; i < payload.size(); ++i) {
-        frame.push_back(static_cast<std::uint8_t>(
-            static_cast<std::uint8_t>(payload[i]) ^ mask[i & 3u]));
+        frame.push_back(static_cast<std::uint8_t>(static_cast<std::uint8_t>(payload[i]) ^ mask[i & 3u]));
     }
     sock.write(reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()));
 
     // Server echoes unmasked: 0x81, 126, ext16(200), then 200 payload bytes = 204.
     const std::string got = read_some(sock, 4 + payload.size());
-    ASSERT_GE(got.size(), 4u + payload.size())
-        << "only got " << got.size() << " bytes; expected the full ext16 echo";
+    ASSERT_GE(got.size(), 4u + payload.size()) << "only got " << got.size() << " bytes; expected the full ext16 echo";
     EXPECT_EQ(static_cast<std::uint8_t>(got[0]), 0x81u) << "echo fin+opcode";
     EXPECT_EQ(static_cast<std::uint8_t>(got[1]), 126u) << "echo must use ext16 length form";
     const std::size_t echoed_len =
-        (static_cast<std::size_t>(static_cast<std::uint8_t>(got[2])) << 8u) |
-        static_cast<std::size_t>(static_cast<std::uint8_t>(got[3]));
+        (static_cast<std::size_t>(static_cast<std::uint8_t>(got[2])) << 8u) | static_cast<std::size_t>(static_cast<std::uint8_t>(got[3]));
     EXPECT_EQ(echoed_len, payload.size());
     EXPECT_EQ(got.substr(4, payload.size()), payload) << "echoed bytes must equal sent bytes";
 
@@ -600,8 +569,7 @@ TEST(WsFramingEdge, ThrowingMessageHandlerDoesNotTerminate) {
     };
 
     const auto frame = qb::http::ws::run_sync(scenario());
-    EXPECT_TRUE(frame.kind == qb::http::ws::IncomingFrame::Kind::Close ||
-                frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected)
+    EXPECT_TRUE(frame.kind == qb::http::ws::IncomingFrame::Kind::Close || frame.kind == qb::http::ws::IncomingFrame::Kind::Disconnected)
         << "unexpected frame kind " << static_cast<int>(frame.kind);
 }
 
@@ -626,12 +594,12 @@ TEST(WsFramingEdge, ThrowingMessageHandlerDoesNotTerminate) {
 //   - F4     lead     : U+100000     = F4 80 80 80
 static const std::string kAllUtf8Forms = []() {
     std::string s;
-    s += "A";                              // ASCII (<=0x7F)
-    s += std::string("\xC3\xA9", 2);       // 2-byte
-    s += std::string("\xE0\xA0\x80", 3);   // E0 lead (b1 in A0..BF)
-    s += std::string("\xE2\x82\xAC", 3);   // E1..EC lead (euro)
-    s += std::string("\xED\x80\x80", 3);   // ED valid (b1 in 80..9F)
-    s += std::string("\xEF\x80\x80", 3);   // EE..EF lead
+    s += "A";                                // ASCII (<=0x7F)
+    s += std::string("\xC3\xA9", 2);         // 2-byte
+    s += std::string("\xE0\xA0\x80", 3);     // E0 lead (b1 in A0..BF)
+    s += std::string("\xE2\x82\xAC", 3);     // E1..EC lead (euro)
+    s += std::string("\xED\x80\x80", 3);     // ED valid (b1 in 80..9F)
+    s += std::string("\xEF\x80\x80", 3);     // EE..EF lead
     s += std::string("\xF0\x90\x80\x80", 4); // F0 lead (b1 in 90..BF)
     s += std::string("\xF1\x80\x80\x80", 4); // F1..F3 lead
     s += std::string("\xF4\x80\x80\x80", 4); // F4 lead (b1 in 80..8F)
@@ -642,8 +610,7 @@ TEST(WsFramingEdge, ValidMultiByteUtf8TextIsAcceptedAndEchoed) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -657,10 +624,8 @@ TEST(WsFramingEdge, ValidMultiByteUtf8TextIsAcceptedAndEchoed) {
     const std::string got      = read_some(sock, expected);
     ASSERT_GE(got.size(), expected) << "valid UTF-8 text was not echoed back intact";
     EXPECT_EQ(static_cast<std::uint8_t>(got[0]), 0x81u) << "echo fin+opcode";
-    EXPECT_EQ(static_cast<std::uint8_t>(got[1]), kAllUtf8Forms.size())
-        << "echo must use 7-bit length form";
-    EXPECT_EQ(got.substr(2, kAllUtf8Forms.size()), kAllUtf8Forms)
-        << "echoed bytes must equal the sent UTF-8 payload";
+    EXPECT_EQ(static_cast<std::uint8_t>(got[1]), kAllUtf8Forms.size()) << "echo must use 7-bit length form";
+    EXPECT_EQ(got.substr(2, kAllUtf8Forms.size()), kAllUtf8Forms) << "echoed bytes must equal the sent UTF-8 payload";
 
     sock.close();
 }
@@ -672,8 +637,7 @@ TEST(WsFramingEdge, MultiByteUtf8SplitAcrossFragmentsReassemblesAndValidates) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -704,8 +668,7 @@ TEST(WsFramingEdge, CloseFrameWithValidMultiByteUtf8ReasonIsEchoed) {
     WsServerThread<EchoServer> server{ephemeral_port()};
 
     qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(
-        qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -721,8 +684,7 @@ TEST(WsFramingEdge, CloseFrameWithValidMultiByteUtf8ReasonIsEchoed) {
 
     const std::string got        = read_some(sock, 128);
     const auto        close_code = extract_close_code(got);
-    ASSERT_TRUE(close_code.has_value())
-        << "server did not echo a parseable close frame: size=" << got.size();
+    ASSERT_TRUE(close_code.has_value()) << "server did not echo a parseable close frame: size=" << got.size();
     // Valid reason => server echoes a Normal-closure close (not a protocol error).
     EXPECT_EQ(*close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::Normal));
 
@@ -737,32 +699,27 @@ TEST(WsFramingEdge, CloseFrameWithValidMultiByteUtf8ReasonIsEchoed) {
 TEST(WsFramingEdge, Utf8TruncatedTwoByteLeadAtEndIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
     // "A" + lone 2-byte lead 0xC3 with no continuation byte. is_utf8: i+1>=n.
-    expect_close_code_after_frames(server,
-                                   {make_client_frame(0x81, std::string("A\xC3", 2))},
-                                   qb::http::ws::CloseStatus::DataNotConsistent);
+    expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("A\xC3", 2))}, qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
 TEST(WsFramingEdge, Utf8E0OverlongSecondByteIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
     // E0 80 80 is an overlong encoding (b1 must be >= 0xA0). is_utf8 rejects it.
-    expect_close_code_after_frames(server,
-                                   {make_client_frame(0x81, std::string("\xE0\x80\x80", 3))},
+    expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("\xE0\x80\x80", 3))},
                                    qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
 TEST(WsFramingEdge, Utf8F0OverlongSecondByteIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
     // F0 80 80 80 is an overlong 4-byte encoding (b1 must be >= 0x90).
-    expect_close_code_after_frames(server,
-                                   {make_client_frame(0x81, std::string("\xF0\x80\x80\x80", 4))},
+    expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("\xF0\x80\x80\x80", 4))},
                                    qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
 TEST(WsFramingEdge, Utf8F4OutOfRangeSecondByteIsRejected) {
     WsServerThread<EchoServer> server{ephemeral_port()};
     // F4 90 80 80 would encode > U+10FFFF (b1 must be <= 0x8F). Rejected.
-    expect_close_code_after_frames(server,
-                                   {make_client_frame(0x81, std::string("\xF4\x90\x80\x80", 4))},
+    expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("\xF4\x90\x80\x80", 4))},
                                    qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
@@ -792,8 +749,7 @@ TEST(WsFramingEdge, MessageCloseRejectsInvalidUtf8Reason) {
     // A short reason carrying an invalid byte (lone continuation 0x80) must be
     // rejected outright (it is <123 bytes, so it bypasses the clip path and hits
     // the trailing is_utf8 guard).
-    EXPECT_THROW(MessageClose(std::uint16_t{1000}, std::string("bad\x80", 4)),
-                 std::invalid_argument);
+    EXPECT_THROW(MessageClose(std::uint16_t{1000}, std::string("bad\x80", 4)), std::invalid_argument);
 }
 
 TEST(WsFramingEdge, MessageCloseClipsOverLongReasonOnUtf8Boundary) {
@@ -813,8 +769,7 @@ TEST(WsFramingEdge, MessageCloseClipsOverLongReasonOnUtf8Boundary) {
     ASSERT_GE(msg.size(), 2u);
     EXPECT_LE(msg.size(), 125u) << "clip must keep the close frame within the control cap";
     const std::string reason_bytes(msg._data.cbegin() + 2, msg.size() - 2);
-    EXPECT_TRUE(qb::http::ws::is_utf8(reason_bytes))
-        << "clipped reason must remain valid UTF-8";
+    EXPECT_TRUE(qb::http::ws::is_utf8(reason_bytes)) << "clipped reason must remain valid UTF-8";
     // The trailing partial euro must have been dropped: last byte is an 'a'.
     ASSERT_FALSE(reason_bytes.empty());
     EXPECT_EQ(reason_bytes.back(), 'a') << "partial multi-byte tail must be clipped away";

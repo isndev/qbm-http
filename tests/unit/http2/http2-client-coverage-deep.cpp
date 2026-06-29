@@ -89,32 +89,50 @@ struct RichClientIO {
     qb::allocator::pipe<char> input;
     qb::allocator::pipe<char> output;
 
-    int           response_count      = 0;
-    int           stream_error_count  = 0;
-    int           goaway_count        = 0;
-    ErrorCode     last_goaway_error   = ErrorCode::NO_ERROR;
-    uint32_t      last_goaway_last_id = 0;
-    std::string   last_goaway_debug;
+    int         response_count      = 0;
+    int         stream_error_count  = 0;
+    int         goaway_count        = 0;
+    ErrorCode   last_goaway_error   = ErrorCode::NO_ERROR;
+    uint32_t    last_goaway_last_id = 0;
+    std::string last_goaway_debug;
 
-    qb::allocator::pipe<char> &in() noexcept { return input; }
-    qb::allocator::pipe<char> &out() noexcept { return output; }
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    qb::allocator::pipe<char> &
+    out() noexcept {
+        return output;
+    }
 
     template <typename Frame>
-    RichClientIO &operator<<(const Frame &frame) {
+    RichClientIO &
+    operator<<(const Frame &frame) {
         output.put(frame);
         return *this;
     }
 
-    void on(qb::http::Response &&, uint64_t) { ++response_count; }
-    void on(qb::http::Response &&, uint64_t, ErrorCode) { ++response_count; }
-    void on(const h2::Http2StreamErrorEvent &) { ++stream_error_count; }
-    void on(const h2::Http2GoAwayEvent &event) {
+    void
+    on(qb::http::Response &&, uint64_t) {
+        ++response_count;
+    }
+    void
+    on(qb::http::Response &&, uint64_t, ErrorCode) {
+        ++response_count;
+    }
+    void
+    on(const h2::Http2StreamErrorEvent &) {
+        ++stream_error_count;
+    }
+    void
+    on(const h2::Http2GoAwayEvent &event) {
         ++goaway_count;
         last_goaway_error   = event.error_code;
         last_goaway_last_id = event.last_stream_id;
         last_goaway_debug   = event.debug_data;
     }
-    void on(const h2::Http2PushPromiseEvent &) {}
+    void
+    on(const h2::Http2PushPromiseEvent &) {}
 };
 
 using RichClientProtocol = h2::ClientHttp2Protocol<RichClientIO>;
@@ -271,8 +289,7 @@ TEST(HTTP2ClientCoverageDeep, IncomingPingAckIsNotAnswered) {
 
     EXPECT_TRUE(protocol.ok());
     // No PING frame (PONG) was emitted in response to a PING ACK.
-    EXPECT_EQ(find_frame_offset(io.output, FrameType::PING, before), SIZE_MAX)
-        << "client must not answer an incoming PING ACK";
+    EXPECT_EQ(find_frame_offset(io.output, FrameType::PING, before), SIZE_MAX) << "client must not answer an incoming PING ACK";
 }
 
 // ===========================================================================
@@ -301,8 +318,7 @@ TEST(HTTP2ClientCoverageDeep, MaxConcurrentStreamsLimitRejectsOverflowRequest) {
     qb::http::Request second;
     second.method() = qb::http::method::GET;
     second.uri()    = qb::io::uri("https://example.test/b");
-    EXPECT_FALSE(protocol.send_request(std::move(second), 2))
-        << "request past MAX_CONCURRENT_STREAMS must be rejected";
+    EXPECT_FALSE(protocol.send_request(std::move(second), 2)) << "request past MAX_CONCURRENT_STREAMS must be rejected";
 
     // No additional HEADERS frame was emitted for the rejected request.
     EXPECT_EQ(find_frame_offset(io.output, FrameType::HEADERS, after_first), SIZE_MAX);

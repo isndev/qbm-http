@@ -44,10 +44,10 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <iomanip>
-#include <qb/io/crypto.h>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <qb/io/crypto.h>
 #include "../2/protocol/hpack.h"
 #include "../2/protocol/hpack_huffman.h"
 
@@ -474,8 +474,8 @@ TEST(HPACK_LL_Decoder, IntegerOverflowAccumulatorWraps) {
     bool                     incomplete = false;
 
     std::vector<uint8_t> block = {
-        0xFF,                                                             // indexed, prefix saturated
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF       // 10 continuations: term>(MAX>>63)
+        0xFF,                                                      // indexed, prefix saturated
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF // 10 continuations: term>(MAX>>63)
     };
     EXPECT_FALSE(decoder.decode(block, out, incomplete));
 }
@@ -758,9 +758,9 @@ TEST(HPACK_LL_RFC7541, AppendixC5_ResponseSequenceWithEviction) {
     // new value). Inserting "date" and "set-cookie" forces the 256-octet table
     // to evict down to 3 live entries.
     {
-        const auto block = ll_hex_to_bytes(
-            "88c1611d4d6f6e2c203231204f637420323031332032303a31333a323220474d54c05a04677a69707738666f6f3d4153444a4b48"
-            "514b425a584f5157454f50495541585157454f49553b206d61782d6167653d333630303b2076657273696f6e3d31");
+        const auto block =
+            ll_hex_to_bytes("88c1611d4d6f6e2c203231204f637420323031332032303a31333a323220474d54c05a04677a69707738666f6f3d4153444a4b48"
+                            "514b425a584f5157454f50495541585157454f49553b206d61782d6167653d333630303b2076657273696f6e3d31");
         std::vector<HeaderField> out;
         bool                     incomplete = false;
         ASSERT_TRUE(decoder.decode(block, out, incomplete));
@@ -793,7 +793,7 @@ TEST(HPACK_LL_RFC7541, AppendixC5_ResponseSequenceWithEviction) {
 TEST(HPACK_LL_RFC7541, AppendixC4_1_HuffmanNameAndValueDecode) {
     Decoder decoder;
     // 0x40, H-name "custom-key" (len 8), H-value "custom-header" (len 9).
-    const auto block = ll_hex_to_bytes("408825a849e95ba97d7f8925a849e95a728e42d9");
+    const auto               block = ll_hex_to_bytes("408825a849e95ba97d7f8925a849e95a728e42d9");
     std::vector<HeaderField> out;
     bool                     incomplete = false;
     ASSERT_TRUE(decoder.decode(block, out, incomplete));

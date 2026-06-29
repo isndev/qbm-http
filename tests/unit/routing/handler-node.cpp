@@ -94,8 +94,7 @@ public:
         : Node(std::move(segment)) {}
 
     void
-    compile_tasks_and_register(qb::http::RouterCore<MockSession> &, const std::string &,
-                               const std::vector<std::shared_ptr<Task>> &) override {
+    compile_tasks_and_register(qb::http::RouterCore<MockSession> &, const std::string &, const std::vector<std::shared_ptr<Task>> &) override {
         // Not under test here; intentionally a no-op.
     }
 
@@ -192,9 +191,9 @@ TEST(HandlerNodeTest, CombineTasksKeepsParentThenSelfOrder) {
 }
 
 TEST(HandlerNodeTest, CombineTasksWithNoOwnMiddlewareEchoesInherited) {
-    TestNode node("/x");
+    TestNode                           node("/x");
     std::vector<std::shared_ptr<Task>> inherited = {make_noop_task("only_parent")};
-    auto combined = node.combine_tasks(inherited);
+    auto                               combined  = node.combine_tasks(inherited);
     ASSERT_EQ(combined.size(), 1u);
     EXPECT_EQ(combined.front()->name(), "only_parent");
 }

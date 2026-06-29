@@ -47,8 +47,8 @@
 #include <memory>
 #include <string>
 
-#include "../http.h"     // qb::http::Request, Response, method, status
-#include "../routing.h"  // qb::http::Router, Context
+#include "../http.h"    // qb::http::Request, Response, method, status
+#include "../routing.h" // qb::http::Router, Context
 
 namespace {
 
@@ -99,11 +99,8 @@ ok_handler() {
 void
 add_passthrough_middleware(qb::http::Router<BenchSession> &router, int depth) {
     for (int i = 0; i < depth; ++i) {
-        router.use(
-            [](std::shared_ptr<qb::http::Context<BenchSession>> /*ctx*/, std::function<void()> next) {
-                next();
-            },
-            "PassThroughMw" + std::to_string(i));
+        router.use([](std::shared_ptr<qb::http::Context<BenchSession>> /*ctx*/, std::function<void()> next) { next(); },
+                   "PassThroughMw" + std::to_string(i));
     }
 }
 
@@ -120,9 +117,9 @@ make_router(int extra_static, int mw_depth) {
         router->get("/pad/route" + std::to_string(i), ok_handler());
 
     // Canonical shapes (verbatim from router-match.cpp precedence + mixed cases).
-    router->get("/r/specific", ok_handler());                 // static hit target
-    router->get("/users/:id", ok_handler());                  // param hit target
-    router->get("/files/*filepath", ok_handler());            // wildcard hit target
+    router->get("/r/specific", ok_handler());                   // static hit target
+    router->get("/users/:id", ok_handler());                    // param hit target
+    router->get("/files/*filepath", ok_handler());              // wildcard hit target
     router->get("/data/:user/details/*itemPath", ok_handler()); // mixed param+wildcard
 
     router->compile();
@@ -131,13 +128,12 @@ make_router(int extra_static, int mw_depth) {
 
 // Drive one request through the matcher with setup hoisted out of the timed region.
 void
-run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::method m, const std::string &path,
-          qb::http::status expected) {
+run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::method m, const std::string &path, qb::http::status expected) {
     auto router = make_router(extra_static, mw_depth);
 
     // One out-of-loop correctness assert: a broken matcher must not report numbers.
     {
-        auto session = std::make_shared<BenchSession>();
+        auto              session = std::make_shared<BenchSession>();
         qb::http::Request probe;
         probe.method()      = m;
         probe.uri()         = qb::io::uri(path);
@@ -184,20 +180,18 @@ BM_Route_ParamHit(benchmark::State &state) {
 
 void
 BM_Route_WildcardHit(benchmark::State &state) {
-    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/files/documents/reports/q4.pdf",
-              qb::http::status::OK);
+    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/files/documents/reports/q4.pdf", qb::http::status::OK);
 }
 
 void
 BM_Route_MixedParamWildcardHit(benchmark::State &state) {
-    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET,
-              "/data/user123/details/path/to/item.json", qb::http::status::OK);
+    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/data/user123/details/path/to/item.json",
+              qb::http::status::OK);
 }
 
 void
 BM_Route_Miss404(benchmark::State &state) {
-    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/this/path/does/not/exist",
-              qb::http::status::NOT_FOUND);
+    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/this/path/does/not/exist", qb::http::status::NOT_FOUND);
 }
 
 // --- Middleware-chain depth benchmark (chain depth on the X axis) -----------
