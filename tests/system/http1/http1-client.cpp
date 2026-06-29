@@ -172,6 +172,25 @@ public:
             ctx->complete();
         });
 
+        // Echoes the "a" query parameter so a relative request URI carrying a
+        // query (?a=...) proves the client's ensure_absolute_uri appended it.
+        router().get("/q", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(ctx->request().query("a"));
+            ctx->complete();
+        });
+
+        // Advertises Content-Encoding: gzip but ships NON-gzip bytes, so the
+        // client's response-decompression must fail and surface BAD_REQUEST.
+        router().get("/bad-gzip", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "this is definitely not gzip";
+            ctx->response().set_header("Content-Encoding", "gzip");
+            ctx->complete();
+        });
+
         router().compile();
     }
 
@@ -839,6 +858,35 @@ TEST(Http1ClientTest, ConfigurationAccessorsReflectMutations) {
     client->set_auto_reconnect(true);
 }
 
+// A relative (host-less) request URI carrying a query string must be absolutized
+// against the client's base origin WITH the query preserved (ensure_absolute_uri
+// query-append path). The server echoes the "a" param back to prove it arrived.
+TEST(Http1ClientTest, RelativeRequestUriCarriesQueryString) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    qb::http::Request req{qb::http::method::GET, qb::io::uri("/q?a=hello")}; // host-less + query
+    auto              resp = qb::http::run_sync(client->push_request(std::move(req)));
+
+    EXPECT_EQ(resp.status(), qb::http::status::OK);
+    EXPECT_EQ(resp.body().template as<std::string>(), "hello");
+    drain_client_callbacks();
+}
+
+// A persistent client rejects an absolute request whose origin differs from its
+// base origin (same-origin guard) with a synthesized BAD_REQUEST, before any
+// bytes hit the wire.
+TEST(Http1ClientTest, CrossOriginRequestIsRejected) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    auto resp = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "http://example.test:9/ping")));
+
+    EXPECT_EQ(resp.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_NE(resp.body().template as<std::string>().find("same-origin"), std::string::npos);
+    drain_client_callbacks();
+}
+
 #ifdef QB_HAS_COMPRESSION
 // A request carrying Content-Encoding: gzip has its body compressed by the client
 // transport BEFORE it hits the wire (client.cpp connection::send compress block).
@@ -875,5 +923,34 @@ TEST(Http1ClientTest, ResponseBodyIsUncompressedWhenContentEncodingSet) {
     // The client transparently inflated the gzip payload back to 512 'Q's.
     EXPECT_EQ(response.body().template as<std::string>(), std::string(512, 'Q'));
     drain_client_callbacks(); // let the response callback's self-guard release fire
+}
+
+// A request whose Content-Encoding names an unsupported codec makes the client's
+// outbound compress() throw; the transport contains it and fails the request with
+// BAD_REQUEST instead of sending garbage.
+TEST(Http1ClientTest, RequestBodyCompressFailureSurfacesBadRequest) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    auto req   = request(qb::http::method::POST, "/echo");
+    req.body() = "payload";
+    req.set_header("Content-Encoding", "not-a-real-codec"); // compress() throws
+    auto resp = qb::http::run_sync(client->push_request(std::move(req)));
+
+    EXPECT_EQ(resp.status(), qb::http::status::BAD_REQUEST);
+    drain_client_callbacks();
+}
+
+// A response that lies about being gzip (Content-Encoding: gzip over plain bytes)
+// makes the client's inbound uncompress() throw; the transport rewrites the
+// response to BAD_REQUEST rather than handing back corrupt data.
+TEST(Http1ClientTest, ResponseDecompressFailureSurfacesBadRequest) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    auto resp = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/bad-gzip")));
+
+    EXPECT_EQ(resp.status(), qb::http::status::BAD_REQUEST);
+    drain_client_callbacks();
 }
 #endif
