@@ -45,7 +45,7 @@ sequenceDiagram
     Note over Sv: validate · Sec-WebSocket-Accept =<br/>base64(sha1(key + RFC 6455 GUID))
     Sv-->>Cl: 101 Switching Protocols · Sec-WebSocket-Accept
     Note over Cl: verify accept in constant time
-    Note over Cl,Sv: switch_protocol → ws::protocol;<br/>byte stream is now WebSocket frames
+    Note over Cl,Sv: switch_protocol → ws::protocol,<br/>byte stream is now WebSocket frames
     Cl->>Sv: masked text / binary / ping frames
     Sv-->>Cl: on(MessageText) · auto-pong to ping
 ```
