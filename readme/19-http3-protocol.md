@@ -38,7 +38,7 @@ HTTP/3 is optional and triple-gated. The entire `3/` tree — client, server, du
 | `QB_HAS_QUIC` (qb-io QUIC transport, itself requiring SSL) | `qb/cmake/qbDependencies.cmake` |
 | `libnghttp3` discoverable via `pkg-config` | `pkg_check_modules(PC_NGHTTP3 libnghttp3)` |
 
-<!-- src: qbm/http/CMakeLists.txt:49-70,101-103 -->
+<!-- src: qbm/http/CMakeLists.txt:53-74,121-122 -->
 
 When all three are present, `qbm/http`'s CMake sets `QBM_HTTP_HAS_HTTP3`, creates the imported target `Nghttp3::nghttp3`, appends `3/client.cpp` to the module sources, and — critically — defines `QBM_HTTP_HAS_HTTP3=1` **`PUBLIC`** on the `qbm-http` target so the `#ifdef` gate in `<http/http.h>` resolves the same way in your code as in the library:
 
@@ -52,7 +52,7 @@ endif()
 If any requirement is missing, the module still builds normally — HTTP/1.1, and (with SSL) HTTP/2 and WebSocket — but `QBM_HTTP_HAS_HTTP3` is never defined, and `<http/http.h>` does not include the `3/` headers. Including a `3/` header in that configuration is a hard error by design:
 
 ```cpp
-// qbm/http/3/client.h:7-9 — and identically in http3.h, dual_stack.h, protocol/connection.h
+// qbm/http/3/client.h:19-21 — and an equivalent guard in http3.h, dual_stack.h, protocol/connection.h
 #ifndef QBM_HTTP_HAS_HTTP3
 #error "HTTP/3 support is not enabled. Build qbm/http with QBM_HTTP_HAS_HTTP3."
 #endif
@@ -166,7 +166,7 @@ client->push_request(std::move(request), [](qb::http::Response res) {
 The awaiter overloads integrate with the module's coroutine layer (`#include <http/http.h>` already pulls in `coro.h`):
 
 ```cpp
-// src: qbm/http/3/client.h:101-116
+// src: qbm/http/3/client.h:173,214,227
 qb::http::async::awaiter<ConnectResult>            connect();
 qb::http::async::awaiter<qb::http::Response>       push_request(qb::http::Request request);
 qb::http::async::awaiter<std::vector<qb::http::Response>>
@@ -203,7 +203,7 @@ client->push_requests(std::move(requests), [](std::vector<qb::http::Response> re
 Queue a request with an id and cancel it while pending or active:
 
 ```cpp
-// src: qbm/http/3/client.h:109-112
+// src: qbm/http/3/client.h:201,208
 auto id = client->push_request_with_id(request, callback);
 client->cancel_request(id, "cancelled by application");
 ```

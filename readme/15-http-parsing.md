@@ -133,7 +133,7 @@ assert(parser.get_parsed_message().header("X-Custom-Header") == "value-part-1par
 
 The two specializations are:
 
-<!-- src: 1.1/protocol/server.h:45-46; 1.1/protocol/client.h:31-33 -->
+<!-- src: 1.1/protocol/server.h:45-46; 1.1/protocol/client.h:43-44 -->
 
 ```cpp
 namespace qb::protocol::http {

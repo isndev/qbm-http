@@ -162,14 +162,14 @@ router().get("/users/:id", route);
 
 Or let the router construct it in place with the typed overload, forwarding the constructor arguments after the path. The type is constrained to derive from `ICustomRoute<SessionType>`:
 
-<!-- src: qbm/http/routing/router.h:166-168 -->
+<!-- src: qbm/http/routing/router.h:172-175 -->
 ```cpp
 router().get<UserProfileRoute>("/users/:id", user_store);  // forwards user_store to the ctor
 ```
 
 There is also a typed general form, mirroring `add_route`:
 
-<!-- src: qbm/http/routing/router.h:161-163 -->
+<!-- src: qbm/http/routing/router.h:168-170 -->
 ```cpp
 router().add_custom_route<UserProfileRoute>("/users/:id", qb::http::method::GET, user_store);
 ```

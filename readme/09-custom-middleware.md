@@ -97,7 +97,7 @@ The string second argument to `use()` names the task for logs and diagnostics. I
 
 When you register a `(ctx, next)` lambda, the router wraps it in a `FunctionalMiddleware<SessionType>` adapter (an `IMiddleware` itself). The adapter, not you, owns the completion call:
 
-<!-- src: qbm/http/routing/middleware.h:153-203 -->
+<!-- src: qbm/http/routing/middleware.h:183-263 -->
 
 1. The adapter opens a `defer_finalization_scope()` for the duration of your lambda. While that scope is open, the response is **not** published even if a downstream task completes.
 2. Your lambda runs. If you call `next()`, the adapter checks an atomic `next_called` flag, then — if the context is neither completed nor cancelled — calls `ctx->complete(AsyncTaskResult::CONTINUE)` to advance the chain.
@@ -343,7 +343,9 @@ So for a request matching a route inside `/api/v1`, the chain is: router middlew
 
 ```cpp
 // Global: applies to all routes.
-router.use(qb::http::logging_middleware<Session>(), "AccessLog");
+router.use(qb::http::logging_middleware<Session>(
+    [](qb::http::LogLevel, const std::string &msg) { std::clog << msg << '\n'; }),
+    "AccessLog");
 
 // Scoped: applies only under /api/v1, and only after the global middleware.
 auto api = router.group("/api/v1");

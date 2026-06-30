@@ -48,7 +48,7 @@ struct IncomingFrame {
     std::string   close_reason{};  // human-readable close reason
 };
 ```
-<!-- src: qbm/http/ws/coro.h:115-129 -->
+<!-- src: qbm/http/ws/coro.h:110-124 -->
 
 `Ping` and `Pong` are surfaced for observation only — the framing engine already auto-replies to a Ping with a matching Pong before you see it, so you do not echo it yourself.
 
@@ -57,7 +57,7 @@ struct IncomingFrame {
 `connect(uri, timeout)` performs both the TCP/TLS connection and the HTTP `Upgrade` handshake. The timeout is a `qb::duration` (default `qb::duration::zero()`, meaning no client-side deadline). `ConnectResult::ok` is `true` only when both phases succeed; on failure the result stays intentionally small — bind a `sending_http_request` callback or inspect the transport log before `connect()` if you need wire-level detail.
 
 ```cpp
-// <!-- src: qbm/http/tests/system/ws/ws-coro-client.cpp:373-395 -->
+// <!-- src: qbm/http/tests/system/ws/ws-coro-client.cpp:371-393 -->
 #include <http/http.h>
 #include <http/ws.h>
 

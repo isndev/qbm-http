@@ -113,7 +113,7 @@ Request
   -> route handler
 ```
 
-Compilation happens in `router.compile()` (or lazily on the first `route()` call). Any change to routes or middleware resets the compiled flag, so re-registering after serving requires a recompile. <!-- src: qbm/http/routing/router.h:244-249 -->
+Compilation happens in `router.compile()` (or lazily on the first `route()` call). Any change to routes or middleware resets the compiled flag, so re-registering after serving requires a recompile. <!-- src: qbm/http/routing/router.tpp:281-283; router.h:238 -->
 
 ### Short-circuiting: `AsyncTaskResult`
 
@@ -140,14 +140,10 @@ The `Context` enforces single-completion: once finalized or cancelled, further `
 This is what "short-circuit" means in practice — a middleware that calls `complete(COMPLETE)` ends the chain:
 
 ```cpp
-// src: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:615-642 (HeaderStampMiddleware::process)
-void process(std::shared_ptr<MidCtx> ctx) override {
+// Illustrative: stamp a header, then either short-circuit or continue.
+void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
     ctx->response().set_header(_header_name, _header_value);
-    if (_complete_request) {
-        if (ctx->response().status() < qb::http::status::OK ||
-            ctx->response().status() >= qb::http::status::MULTIPLE_CHOICES) {
-            ctx->response().status() = qb::http::status::NO_CONTENT;
-        }
+    if (_short_circuit) {
         ctx->complete(qb::http::AsyncTaskResult::COMPLETE);  // stop here
     } else {
         ctx->complete(qb::http::AsyncTaskResult::CONTINUE);  // next task
@@ -172,8 +168,8 @@ This `(ctx, next)` form is the **synchronous** functional middleware. A **corout
 Inside the lambda:
 
 - Call **`next()`** to continue the chain. The wrapper translates this into `complete(CONTINUE)` for you. To short-circuit instead, set `ctx->response()` and call `ctx->complete(AsyncTaskResult::COMPLETE)` — do not call `next()`.
-- Calling `next()` **more than once** is detected (atomic exchange) and the duplicate is ignored with a warning, so accidental double-advance cannot happen. <!-- src: qbm/http/routing/middleware.h:158-169 -->
-- Like object middleware, exceptions out of the lambda are caught and turned into a `500` + `ERROR`. <!-- src: qbm/http/routing/middleware.h:170-199 -->
+- Calling `next()` **more than once** is detected (atomic exchange) and the duplicate is ignored with a warning, so accidental double-advance cannot happen. <!-- src: qbm/http/routing/middleware.h:218-225 -->
+- Like object middleware, exceptions out of the lambda are caught and turned into a `500` + `ERROR`. <!-- src: qbm/http/routing/middleware.h:230-259 -->
 
 ```cpp
 #include <http/http.h>
@@ -189,7 +185,7 @@ router.use(
 
 #### Post-`next()` mutation: synchronous only
 
-For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/routing/middleware.h:155-156, context.h:337-385 -->
+For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/routing/middleware.h:214-215, context.h:337-385 -->
 
 ```cpp
 router.use(
@@ -257,7 +253,7 @@ Two rules make async middleware correct: capture `ctx` as a `std::shared_ptr` so
 Global (root-group) middleware is treated specially for the router's built-in chains:
 
 - It **is** prepended to the default and custom **404** and **405** handlers, so cross-cutting concerns (logging, security headers) still apply to not-found and method-not-allowed responses. <!-- src: qbm/http/routing/router_core.h:104-142, 194-210 -->
-- It is **not** automatically prepended to the **user-defined error chain** set via `Router::set_error_task_chain`. If you want global behaviors (error logging, CORS headers) on error responses, include them explicitly in the error chain. <!-- src: qbm/http/routing/router_core.h:239-250 -->
+- It is **not** automatically prepended to the **user-defined error chain** set via `Router::set_error_task_chain`. If you want global behaviors (error logging, CORS headers) on error responses, include them explicitly in the error chain. <!-- src: qbm/http/routing/router_core.h:256-268 -->
 
 There is one more asymmetry worth knowing: a router-level lifecycle hook is the only way to observe `HookPoint::PRE_ROUTING`, because router hooks are copied into each new `Context` before routing runs — a hook added *inside* a middleware is registered too late for that point.
 
