@@ -61,7 +61,7 @@ Capture names must be unique within a single pattern. A `:` or `*` with no name,
 
 When more than one branch could match a segment, the radix tree applies a fixed priority: **static > parameter > wildcard**. A wildcard is the lowest priority and is terminal-only. So for a request to `/users/active`, a registered `/users/active` wins over `/users/:status`, which wins over `/users/*rest`.
 
-<!-- src: qbm/http/routing/radix_tree.h:401-403,478-517 -->
+<!-- src: qbm/http/routing/radix_tree.h:434-436,504-540 -->
 
 Path segmentation handles slashes for you:
 
@@ -69,7 +69,7 @@ Path segmentation handles slashes for you:
 - **Consecutive slashes** produce no empty segments — `/foo//bar` segments to `{"foo", "bar"}`.
 - The root `/` segments to the empty list, so a handler registered at `/` attaches to the tree root.
 
-<!-- src: qbm/http/routing/radix_tree.h:239-271 -->
+<!-- src: qbm/http/routing/radix_tree.h:279-313 -->
 
 ### The `compile()` step
 
@@ -150,7 +150,7 @@ server->listen(qb::io::uri("http://0.0.0.0:8080"));         // begin accepting c
 
 Every handler **must** eventually call a terminal: `ctx->complete(AsyncTaskResult)` (default `AsyncTaskResult::COMPLETE`) or one of the terminal response helpers (`json`, `text`, `html`, `redirect`, `no_content`, `bad_request`, …) — each of those ends in `complete(AsyncTaskResult::COMPLETE)` for you. Forget it and the request hangs. The `Context::status(code)` setter is the exception: it sets the status, returns `Context&`, and does **not** terminate, so you can chain it ahead of a terminal call.
 
-<!-- src: qbm/http/routing/async_task.h:62-76; context.h:734-866 -->
+<!-- src: qbm/http/routing/async_task.h:62-76; context.h:913-1106 -->
 
 ### Read captured parameters
 

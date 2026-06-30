@@ -275,7 +275,7 @@ opts.with_serve_index_file(true)
 
 router.use(qb::http::static_files_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/middleware/static_files.h:128 -->
+<!-- src: qbm/http/middleware/static_files.h:757 -->
 
 `static_files_middleware<S>(StaticFilesOptions)` is the only factory; there is no default-constructed form because the root directory is required.
 
@@ -363,7 +363,7 @@ auto sec = qb::http::security_headers_middleware<MySession>(
     qb::http::SecurityHeadersOptions::secure_defaults());
 router.use(sec);
 ```
-<!-- src: qbm/http/middleware/security_headers.h:237 -->
+<!-- src: qbm/http/middleware/security_headers.h:408 -->
 
 > **CSP nonce gate.** `with_csp_nonce(true)` requires `QB_HAS_SSL` — the per-request nonce comes from the framework CSPRNG. In a plain-HTTP build, leave nonce generation off; constructing the middleware with it enabled throws `std::logic_error`. The middleware itself remains available without SSL as long as you do not request nonces.
 
@@ -383,7 +383,7 @@ Four more middleware ship for flow control and instrumentation. They take callab
 ## reCAPTCHA
 
 - **Header:** `<http/middleware/recaptcha.h>` · **Class:** `qb::http::RecaptchaMiddleware<SessionType>`
-- **Requires:** `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE` (the whole family, including its `make` tags, is gated behind this define).
+- **Gate:** the factories and the `RecaptchaMiddleware` class in `<http/middleware/recaptcha.h>` are always available once that header is included (it is not pulled in by `all.h` by default); only the unified `make` tags (`recaptcha`/`recaptcha_v3`/`recaptcha_strict`) are compiled behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
 - **Purpose:** verify a Google reCAPTCHA v2/v3 token (via an outbound verification call) before the chain proceeds.
 
 Configuration is `qb::http::RecaptchaOptions` (secret key, minimum score, etc.). Three factories cover the common presets:
@@ -396,7 +396,7 @@ Configuration is `qb::http::RecaptchaOptions` (secret key, minimum score, etc.).
 
 <!-- src: qbm/http/middleware/recaptcha.h:579-626 -->
 
-Construction throws `std::invalid_argument` if the secret key is empty. These factories and their `make` tags only exist when the module is built with `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
+Construction throws `std::invalid_argument` if the secret key is empty. The free factories and class compile without any define once `<http/middleware/recaptcha.h>` is included; only the `make` tags for them are gated behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
 
 ## The unified `make` entry point
 

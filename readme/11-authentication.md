@@ -60,7 +60,7 @@ opts.secret_key("a-strong-32-byte-minimum-hmac-secret")
 | `ECDSA_SHA256` / `ECDSA_SHA384` / `ECDSA_SHA512` | `ES256` / `ES384` / `ES512` | `private_key` / `public_key` (PEM) |
 | `ED25519` | `EdDSA` | `private_key` / `public_key` (PEM) |
 
-<!-- src: qbm/http/auth/options.h:41-52,286-299 -->
+<!-- src: qbm/http/auth/options.h:41-52,358 ; qbm/http/auth/options.cpp:21-44 -->
 
 For HMAC, set `secret_key` (a `std::string` is reinterpreted as raw bytes, or pass a `std::vector<unsigned char>`). For the asymmetric families, set `private_key` (PEM) for signing and `public_key` (PEM) for verification — a verify-only service needs only the public key.
 
@@ -71,7 +71,7 @@ Two of the `Options` durations are `std::chrono::seconds`, not `qb::duration`. T
 - `token_expiration(std::chrono::seconds)` — validity of an issued token; default `3600` s. Only emitted as an `exp` claim when expiration verification is on.
 - `clock_skew_tolerance(std::chrono::seconds)` — widens both the `exp` and `nbf` windows during verification; default `0`.
 
-<!-- src: qbm/http/auth/options.h:62-64,154-157,243-246 -->
+<!-- src: qbm/http/auth/options.h:62-64,154-157,257-261 -->
 
 ### Verification-policy flags
 
@@ -287,7 +287,7 @@ router.get("/data", [](auto ctx) {
 });
 ```
 
-<!-- src: qbm/http/middleware/jwt.h:48-64,499-509 -->
+<!-- src: qbm/http/middleware/jwt.h:48-64,156-160,234,541-545 -->
 
 `JwtOptions::leeway` is `std::chrono::seconds` for the same NumericDate reason as `auth::Options`. The full `JwtOptions` table and the fluent setters (`from_cookie`, `with_validator`, `with_error_handler`, `with_success_handler`) are on [the standard-middleware page](./08-standard-middleware.md#jwt).
 
@@ -302,7 +302,7 @@ router.get("/data", [](auto ctx) {
 - **Never ship `require_signature_verification(false)`.** With it off, `verify_token` decodes the payload *without* a signature check and validates only `exp`/`nbf`/`iss`/`aud` against forgeable claims — any token with the right claims is accepted. The default is `true`; keep it `true` in production. (`qbm/http/auth/manager.cpp:261,336-398`)
 - **`verify_expiration(false)` mints non-expiring tokens.** `generate_token` only writes an `exp` claim when expiration verification is on, so disabling it produces tokens that never expire and are never rejected for age.
 - **The key must match the algorithm family.** An HMAC secret under an `RS*`/`ES*`/`EdDSA` algorithm (or vice versa) does not throw — `verify_token` simply returns `std::nullopt`. A verify-only service still needs the `public_key` set for asymmetric algorithms.
-- **`"Bearertoken"` is not a token.** `extract_token_from_header` requires whitespace after the scheme; a missing separator yields an empty string. Configure `auth_scheme("")` only if your header carries the bare token.
+- **`"Bearertoken"` is not a token.** `extract_token_from_header` always requires a scheme prefix followed by whitespace, so a missing separator yields an empty string. It cannot extract a bare/scheme-less token: `auth_scheme("")` does not enable that — it makes the whitespace check fall on the token's first character and reject every header.
 - **An empty principal fails even with a valid signature.** A token whose `sub` and `username` both resolve empty is rejected. When you issue tokens, set `user.id` (it becomes `sub`).
 - **Context-helper responses are terminal.** `ctx->json(...)`, `ctx->unauthorized()`, `ctx->forbidden()` and friends call `complete` internally — set any custom headers or body *before* calling them. See [the request context](./10-request-context.md).
 - **Don't mutate options under load.** `set_options` is not synchronized against in-flight verifications; configure the `Manager`/middleware at startup and treat it as read-only on the request path.

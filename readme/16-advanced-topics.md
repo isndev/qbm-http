@@ -29,7 +29,7 @@ Because `Chunk` does not own its bytes, the referenced memory must stay valid fo
 **Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as a *single* chunk followed by the terminating chunk, in one write:
 
 ```cpp
-// src: qbm/http/response.cpp:250-252
+// src: qbm/http/response.cpp:327-329
 if (transfer.chunked) {
     *this << qb::http::endl
           << qb::http::Chunk(r.body().raw().begin(), length)  // whole body, one chunk
@@ -37,12 +37,12 @@ if (transfer.chunked) {
 }
 ```
 
-So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/response.cpp:164-197`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
+So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/response.cpp:243-270`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
 
 If you need true incremental, time-spaced delivery (server-sent events, a long-lived download generated on the fly), you have three options, in increasing order of fit:
 
 - **Buffer and send chunked.** Fine when the body is large but bounded and produced quickly. Build the body, set `Transfer-Encoding: chunked`, `complete()`.
-- **Write `Chunk`s directly to a long-lived session.** The body-level helpers `body().add_chunk(chunk)` and `body().add_final_chunk()` (`qbm/http/body.h:204-217`) append chunk framing into the pipe; combined with direct session writes (`*session << ...`) you can emit chunks across multiple event-loop ticks. This is a low-level pattern: you own the framing, the `Content-Length`/`Transfer-Encoding` headers, and the terminating chunk, and you must call `ctx->suppress_response()` so the context does not also send a response (see [actor composition](#composing-with-qb-actors)).
+- **Write `Chunk`s directly to a long-lived session.** The body-level helpers `body().add_chunk(chunk)` and `body().add_final_chunk()` (`qbm/http/body.h:224-238`) append chunk framing into the pipe; combined with direct session writes (`*session << ...`) you can emit chunks across multiple event-loop ticks. This is a low-level pattern: you own the framing, the `Content-Length`/`Transfer-Encoding` headers, and the terminating chunk, and you must call `ctx->suppress_response()` so the context does not also send a response (see [actor composition](#composing-with-qb-actors)).
 - **Use a protocol designed for streaming.** HTTP/2 DATA frames (`END_STREAM`) and HTTP/3 give you real multiplexed streaming; WebSocket gives you bidirectional message framing. For genuinely streaming workloads, reach for [HTTP/2](./17-http2-protocol.md) or [WebSocket](./20-websocket.md) rather than HTTP/1.1 chunking. These are feature-gated: HTTP/2 and WebSocket compile only with `QB_HAS_SSL`, and HTTP/3 needs `QBM_HTTP_HAS_HTTP3` (`QB_HAS_SSL` + `QB_HAS_QUIC` + libnghttp3). HTTP/1.1 chunking has no such gate.
 
 > HTTP/2 and HTTP/3 do not use chunked transfer encoding. `Transfer-Encoding` is a hop-by-hop header forbidden in HTTP/2 messages (`qb::http::well_known::is_hop_by_hop`); streaming there is expressed with DATA frames and the `END_STREAM` flag. See [HTTP/2 protocol specifics](./17-http2-protocol.md).
@@ -74,7 +74,7 @@ The session also normalizes the outgoing `Connection` header for you: it adds `C
 
 A WebSocket connection begins life as an HTTP/1.1 session. The opening `GET` with `Upgrade: websocket` is parsed as a normal HTTP request; your session's `on(Protocol::request&&)` validates it and calls `switch_protocol<ws::protocol>` to hand the live connection from HTTP request/response parsing to WebSocket framing. After a successful switch, the connection no longer returns to HTTP parsing — it is a WebSocket for the rest of its life.
 
-The lifecycle hazard is the request context. When you upgrade (or otherwise transfer ownership of the connection), call `ctx->suppress_response()` so the `Context` destructor does not send a stale, moved-from HTTP response over a transport that now speaks WebSocket (`qbm/http/routing/context.h:1213`). If you reject a failed upgrade with an HTTP error response, send it and use `close_after_deliver()` so the connection closes cleanly after the rejection flushes. The full upgrade walkthrough — handshake validation, subprotocol negotiation, the callback and coroutine session APIs — is in [WebSocket](./20-websocket.md) and [WebSocket coroutines](./21-websocket-coroutines.md).
+The lifecycle hazard is the request context. When you upgrade (or otherwise transfer ownership of the connection), call `ctx->suppress_response()` so the `Context` destructor does not send a stale, moved-from HTTP response over a transport that now speaks WebSocket (`qbm/http/routing/context.h:1250-1255`). If you reject a failed upgrade with an HTTP error response, send it and use `close_after_deliver()` so the connection closes cleanly after the rejection flushes. The full upgrade walkthrough — handshake validation, subprotocol negotiation, the callback and coroutine session APIs — is in [WebSocket](./20-websocket.md) and [WebSocket coroutines](./21-websocket-coroutines.md).
 
 ```cpp
 // src: qbm/http/tests/system/ws/ws-lifecycle.cpp:109-114 (shape)
@@ -93,12 +93,12 @@ These are the levers that matter, grounded in how the types are built rather tha
 - **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). Appends and assigns avoid reallocation where possible, and `body.raw()` gives you the pipe directly for custom (de)serialization. Use move assignment to hand large payloads in without copying:
 
   ```cpp
-  // src: qbm/http/body.h:182-183 (move operator=)
+  // src: qbm/http/body.h:203-204 (move operator=)
   std::string payload = build_large_json();
   ctx->response().body() = std::move(payload);   // moves, does not copy
   ```
 
-  Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`Form`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/body.h:104-158`).
+  Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/body.h:104-158`). `Form` is deliberately not appendable — assign it wholesale (`body = form`), not `body << form`.
 
 - **The router compiles once.** `router().compile()` builds an optimized radix tree for path matching. Call it once, after all routes are defined and before serving; it is not designed to be re-run on a hot path. See [Routing overview](./03-routing-overview.md).
 
@@ -168,7 +168,8 @@ public:
 int main() {
     qb::Main engine;
     engine.addActor<ApiServer>(0);                // pin to core 0
-    engine.start();                               // blocks; the core drives the loop
+    engine.start();                               // async by default: returns immediately
+    engine.join();                                // blocks until every actor terminates
     return 0;
 }
 ```
@@ -208,12 +209,12 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 
 ## Pitfalls
 
-- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/response.cpp:250-252`). For real streaming use direct session writes, HTTP/2, or WebSocket.
-- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/response.cpp:187-189`). Set one framing mode, not both.
+- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/response.cpp:327-329`). For real streaming use direct session writes, HTTP/2, or WebSocket.
+- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/response.cpp:264-266`). Set one framing mode, not both.
 - **Blocking inside a handler.** It stalls every connection on that core. Defer with `qb::io::async::callback`, offload to a worker actor, or `co_await`.
 - **Forgetting `ctx->complete()`.** The request hangs until the inactivity timeout closes it. Terminal response helpers complete for you; raw `body =`/`status()` do not.
 - **Calling `complete()` from `cancel()`.** Contract violation — the `Context` manages its own finalization (`qbm/http/routing/async_task.h:62-76`).
-- **Omitting `suppress_response()` on upgrade or ownership transfer.** The `Context` destructor will send a stale HTTP response over a transport that has moved on (`qbm/http/routing/context.h:1213`).
+- **Omitting `suppress_response()` on upgrade or ownership transfer.** The `Context` destructor will send a stale HTTP response over a transport that has moved on (`qbm/http/routing/context.h:1250-1255`).
 - **Holding a `string_view` (or `Chunk`) past the request buffer.** Copy into an owning type before crossing an async or inter-actor boundary.
 - **Re-compiling the router on the hot path.** `compile()` is a setup-time, single-threaded operation; the router is not safe to mutate while serving.
 

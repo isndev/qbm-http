@@ -59,7 +59,6 @@ The coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`co
 
 All three clients consume a `qb::http::Request`. Build it the same way regardless of protocol:
 
-<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:197-206 -->
 ```cpp
 #include <http/http.h>
 #include <qb/io/uri.h>
@@ -133,7 +132,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/1.1/http.h:1024-1035 -->
+<!-- src: qbm/http/1.1/http.h:1003-1008 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -186,7 +185,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/1.1/http.h:1024-1035 -->
+<!-- src: qbm/http/1.1/http.h:1003-1008 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
@@ -252,7 +251,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:361-378 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:382-393 -->
 ```cpp
 #include <http/http.h>
 

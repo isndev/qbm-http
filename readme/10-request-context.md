@@ -230,7 +230,7 @@ Statuses are `qb::http::status` and JSON bodies are `qb::json` — see [Core HTT
 
 If you hand the request or response off to another subsystem — most commonly a **WebSocket upgrade**, where the connection stops being an HTTP request/response exchange — call `ctx->suppress_response()`. It marks the context finalized *without* invoking the send callback, so the destructor won't push a stale or moved-from HTTP response back over a transport you no longer own. After this, `is_completed()` is `true` and neither the finalization callback nor `POST_HANDLER_EXECUTION` hooks run.
 
-<!-- src: qbm/http/routing/context.h:1205-1218 -->
+<!-- src: qbm/http/routing/context.h:1250-1255 -->
 
 ## Cancellation
 
@@ -320,7 +320,7 @@ When a route is not matched, or a task returns `ERROR`, the same machinery runs 
 
 These read-only queries exist mainly for instrumentation, coroutine adapters, and tests — the normal request path never needs them: `is_completed()`, `state()`, `get_processing_phase()`, `last_task_result()`, and `completion_count()` (how many times `complete()` has been called). `defer_finalization_scope()` returns an RAII guard that holds back finalization until it leaves scope; it is the mechanism behind synchronous post-`next()` mutation in functional middleware, and you should not need it directly.
 
-<!-- src: qbm/http/routing/context.h:1190-1258, 385 -->
+<!-- src: qbm/http/routing/context.h:1221-1296, 385 -->
 
 ## Pitfalls
 

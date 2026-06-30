@@ -20,7 +20,7 @@ This page covers status codes, the four ways to produce an error response, the `
 `qb::http::status` is an alias for the `qb::http::Status` wrapper class (`types.h`), which carries a nested `enum class Value` backed by llhttp's `HTTP_STATUS_*` constants and re-exposes each code as a `static constexpr Value` member — so `qb::http::status::NOT_FOUND` names a value directly. The response status is plain mutable state: `ctx->response().status()` is an lvalue you assign.
 
 ```cpp
-// <!-- src: qbm/http/types.h:346-744 (class Status), routing/context.h:455-463 (response()), 989-993 (status()) -->
+// <!-- src: qbm/http/types.h:281-679 (class Status), routing/context.h:455-463 (response()), 989-993 (status()) -->
 ctx->response().status() = qb::http::status::NOT_FOUND;    // 404
 ctx->status(qb::http::status::FORBIDDEN);                  // 403, chainable, non-terminal
 ```
@@ -97,7 +97,7 @@ router.get("/items/:id", [](auto ctx) {
 `Router::set_error_task_chain(...)` installs a `std::vector` of `IAsyncTask` shared pointers run when any task signals `AsyncTaskResult::ERROR`. The chain runs in full, in order; the last task is responsible for finalizing (`COMPLETE`).
 
 ```cpp
-// <!-- src: qbm/http/routing/router.h:265, router_core.h:247-250 (set), 266-282 (get_compiled_error_tasks / is_error_chain_set) -->
+// <!-- src: qbm/http/routing/router.h:272 (decl), router_core.h:265 (set_error_task_chain), 290 (get_compiled_error_tasks), 303 (is_error_chain_set) -->
 std::vector<std::shared_ptr<qb::http::IAsyncTask<MySession>>> error_chain;
 error_chain.push_back(
     std::make_shared<qb::http::MiddlewareTask<MySession>>(my_error_formatter));

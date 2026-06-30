@@ -38,7 +38,7 @@ class Body {
 
 `pipe<char>` is the same growable byte buffer qb-io uses for socket I/O (defined in `qb/system/allocator/pipe.h`). Reusing it here means a body can be appended to the output pipe without an intermediate copy, and an inbound body is constructed directly from parser output. You reach it through `raw()`:
 
-<!-- src: qbm/http/body.h:298-310 -->
+<!-- src: qbm/http/body.h:318-330 -->
 ```cpp
 [[nodiscard]] qb::allocator::pipe<char> const &raw() const noexcept;
 [[nodiscard]] qb::allocator::pipe<char>       &raw()       noexcept;
@@ -76,14 +76,15 @@ Both the variadic constructor and `operator<<` are constrained by a single compi
 // << / ctor-appendable: Body, Chunk, Multipart, qb::json,
 //           std::string, std::string_view, std::vector<char>,
 //           char[N] / const char*, and any arithmetic type.
-// NOTE: Form appears in is_body_appendable_v but is ASSIGNMENT-ONLY —
-//       there is no pipe<char>::put<Form>, so `body << form` and
+// NOTE: Form is deliberately EXCLUDED from is_body_appendable_v
+//       (is_body_appendable_v<Form> is false) — there is no
+//       pipe<char>::put<Form>, so `body << form` and
 //       `Body{..., form}` do NOT compile. Use `body = form` instead.
 ```
 
 This is deliberate. A generic `pipe::put` fallback would compile `Body(42)` into `Body("42")` and would happily accept `Body(nullptr)` or `Body(std::map<int,int>{})` to produce ill-formed output. The predicate rejects all of those at the call site instead. Arithmetic types are accepted *explicitly* and stringified, so `body << 42` yields the bytes `42` — predictable, not accidental.
 
-`Form` is the one entry in the predicate without a `pipe<char>::put<>` serializer (`Chunk`, `Multipart`, and `qb::json` each have one). It is reachable only through the dedicated `operator=<Form>` assignment overloads (copy and move) below — `body << form` and `Body{..., form}` fail to compile.
+`Form` is deliberately excluded from `is_body_appendable_v` (so `is_body_appendable_v<Form>` is false): it has no `pipe<char>::put<Form>` serializer, unlike `Chunk`, `Multipart`, and `qb::json`, which each have one. It is reachable only through the dedicated `operator=<Form>` assignment overloads (copy and move) below — `body << form` and `Body{..., form}` fail to compile.
 
 ```cpp
 #include <http/http.h>
@@ -253,7 +254,7 @@ namespace qb::http {
 
 A default-constructed `Chunk{}` (size 0) is the **terminating** chunk: serialized, it emits `0\r\n\r\n`, which marks the end of a chunked stream. `Body` gives you two helpers so you do not have to construct the terminator by hand:
 
-<!-- src: qbm/http/body.h:204-218 -->
+<!-- src: qbm/http/body.h:224-238 -->
 ```cpp
 Body &add_chunk(Chunk const &c);   // append one segment
 Body &add_final_chunk();           // append the 0-length terminator
@@ -367,7 +368,7 @@ body = mp;   // serialize parts + boundaries
 // then set the request's Content-Type to: multipart/form-data; boundary=<mp.boundary()>
 ```
 
-<!-- src: qbm/http/multipart.cpp:154-167 -->
+<!-- src: qbm/http/multipart.cpp:448-500 -->
 Serialization writes, for each part, `--<boundary>\r\n`, the part headers as `Name: value\r\n`, a blank line, the part body, and `\r\n`; the message ends with `--<boundary>--`. The serializer validates the boundary and every part header name/value first, throwing `std::length_error` on an invalid boundary or header — so a hand-built `Multipart` with a malformed boundary fails loudly at write time rather than emitting a broken wire form.
 
 ### Parsing an inbound multipart with an explicit boundary
