@@ -25,6 +25,7 @@
 
 namespace qb::http {
 namespace {
+#ifdef QB_HAS_COMPRESSION // these qvalue parsers feed Accept-Encoding negotiation only
 // Parse RFC 9110 qvalue into milli-units [0..1000].
 // Accepts:
 // - "1" / "1.0" / "1.00" / "1.000"
@@ -100,6 +101,7 @@ parse_accept_encoding_q(std::string_view token_full) noexcept {
 
     return 1000;
 }
+#endif // QB_HAS_COMPRESSION
 } // namespace
 
 /**
