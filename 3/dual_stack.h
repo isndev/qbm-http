@@ -267,7 +267,19 @@ public:
             _http2->start();
         }
         const bool quic_ok = _http3->listen(std::move(quic_uri), cert_file, key_file);
-        return tcp_ok && quic_ok;
+        if (tcp_ok && quic_ok) {
+            return true;
+        }
+        // All-or-nothing: a half-bound pair (e.g. TCP came up but the QUIC UDP port is taken) must
+        // not leave one stack silently listening/accepting while the caller sees listen() return
+        // false. Roll back whichever side came up.
+        if (tcp_ok) {
+            close_http2();
+        }
+        if (quic_ok) {
+            close_http3();
+        }
+        return false;
     }
 
     /**
