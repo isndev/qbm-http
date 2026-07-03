@@ -136,6 +136,23 @@ TEST(StatusTest, ReasonPhraseConversions) {
     EXPECT_EQ(std::to_string(nf), "NOT_FOUND");
 }
 
+TEST(StatusTest, UnmappedCodeYieldsUnknownStatusInsteadOfAborting) {
+    // llhttp's http_status_name() calls abort() on any code absent from its sparse map;
+    // 209-213 are gaps (208 ALREADY_REPORTED jumps straight to 214). Status stringification
+    // must NOT delegate to it, or a peer response / an app setting such a code would crash
+    // the whole process the moment the status is serialized or written to an access log.
+    for (int code : {209, 210, 211, 212, 213}) {
+        Status s(code);
+        EXPECT_EQ(s.code(), code) << code;
+        EXPECT_EQ(std::string(s), "Unknown Status") << code;
+        EXPECT_EQ(std::string_view(s), std::string_view("Unknown Status")) << code;
+        EXPECT_EQ(std::to_string(s), "Unknown Status") << code;
+    }
+    // Mapped codes keep their previous (byte-identical) reason token.
+    EXPECT_EQ(std::to_string(Status(200)), "OK");
+    EXPECT_EQ(std::to_string(Status(404)), "NOT_FOUND");
+}
+
 TEST(StatusTest, ComparisonOperators) {
     Status ok(Status::OK);
     EXPECT_TRUE(ok == Status::OK);

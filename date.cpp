@@ -71,7 +71,11 @@ two_digits(int num) {
 
 std::optional<std::chrono::system_clock::time_point>
 make_time_point_utc(int year, int month, int day, int hour, int minute, int second) noexcept {
-    if (month < 0 || month > 11 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    // Range-check the year too: from_chars accepts a leading '-', so a malformed HTTP-date like
+    // "... -999 ..." would otherwise yield a valid-but-nonsensical time_point (the round-trip
+    // below still passes for it). 4-digit HTTP-date years fall inside [1, 9999].
+    if (year < 1 || year > 9999 || month < 0 || month > 11 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59
+        || second < 0 || second > 59) {
         return std::nullopt;
     }
 

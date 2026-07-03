@@ -177,7 +177,10 @@ Decoder::decode_string_literal(const uint8_t *&current_pos, const uint8_t *end_p
 
 bool
 Decoder::get_dynamic_table_entry(uint64_t index, std::string &name, std::string &value) const {
-    if (index <= STATIC_TABLE.size()) {
+    // index != 0 guards the STATIC_TABLE[index - 1] access below: index 0 is invalid in
+    // HPACK (callers reject it), but without this an index of 0 would compute
+    // STATIC_TABLE[(size_t)-1] — a wild OOB read. Defense-in-depth against a future caller.
+    if (index != 0 && index <= STATIC_TABLE.size()) {
         const auto &entry = STATIC_TABLE[index - 1];
         name              = std::string(entry.first);
         value             = std::string(entry.second);
@@ -198,7 +201,9 @@ Decoder::get_dynamic_table_entry(uint64_t index, std::string &name, std::string 
 
 bool
 Decoder::get_name_from_index(uint64_t index, std::string &name) const {
-    if (index <= STATIC_TABLE.size()) {
+    // index != 0 guards STATIC_TABLE[index - 1] against a (size_t)-1 OOB read (see
+    // get_dynamic_table_entry). Defense-in-depth; current callers already reject index 0.
+    if (index != 0 && index <= STATIC_TABLE.size()) {
         name = std::string(STATIC_TABLE[index - 1].first);
         _stats.static_table_hits++;
         return true;

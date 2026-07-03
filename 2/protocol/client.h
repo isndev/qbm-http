@@ -218,6 +218,11 @@ public:
         // Reset HPACK state
         _hpack_decoder.reset();
         _hpack_encoder.reset();
+        // Bound the DECODED header-list size we accept from the server. Without this the
+        // decoder keeps its 4 GiB no-op default and a malicious server can expand a
+        // ≤1 MB encoded block into ~4 GiB of decoded HeaderFields (HPACK decompression
+        // bomb) via repeated indexed references to a large dynamic-table entry.
+        _hpack_decoder.set_max_header_list_size(::qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE);
         // Apply our SETTINGS_HEADER_TABLE_SIZE to the encoder
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
         if (it_table_size != _our_settings.end()) {
@@ -660,7 +665,10 @@ public:
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM received from peer"};
                 this->_io.on(stream_error_event);
             }
-            try_close_stream_context_by_id(stream.id, ErrorCode::STREAM_CLOSED, "RST_STREAM received from peer"); // Pass stream.id
+            // Use the local `stream_id`, NOT `stream.id`: the user error handler above can
+            // synchronously send_request() → _client_streams.emplace(), relocating the flat
+            // (ska) map in release builds and dangling `stream` (UAF, ASan-invisible).
+            try_close_stream_context_by_id(stream_id, ErrorCode::STREAM_CLOSED, "RST_STREAM received from peer");
         } else if (stream_id % 2 != 0 && stream_id > _last_initiated_stream_id) {
             send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "RST_STREAM frame received on idle stream");
         }
@@ -1598,44 +1606,11 @@ private:
         return true; // Return true if operations were successful or gracefully blocked by flow control
     }
 
-    void
-    dispatch_complete_response(uint32_t stream_id, Http2ClientStream &stream) {
-        if (stream.response_dispatched || stream.rst_stream_sent || stream.rst_stream_received) {
-            return; // Already dispatched, or stream was reset (error already dispatched or will be).
-        }
-
-        if (this->ok() && _connection_active) {
-            // Ensure response status is not 0 unless it's an informational one (which this path shouldn't hit for final dispatch)
-            if (stream.assembled_response.status().code() == 0
-                && !(stream.assembled_response.status().code() >= 100 && stream.assembled_response.status().code() < 200)) {
-                // This would be an internal logic error, trying to dispatch an uninitialized response.
-                // Or server sent invalid response not caught earlier.
-                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Attempt to dispatch incomplete response");
-                return;
-            }
-
-            // Final check for HEAD method: ensure body is empty if we auto-stripped it.
-            // The qb::http::Response itself should handle body constraints for HEAD if it was set.
-            // Here, we just dispatch what we assembled.
-            stream.assembled_response.parse_set_cookie_headers();
-            // The response callback is user code reached from the noexcept frame
-            // handlers; contain a throw so it cannot call std::terminate.
-            try {
-                this->_io.on(std::move(stream.assembled_response), stream.application_request_id);
-            } catch (const std::exception &e) {
-                LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw: " << e.what());
-            } catch (...) {
-                LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw an unknown exception");
-            }
-            stream.response_dispatched = true;
-        }
-
-        // If stream is now fully closed, try to clean up its context.
-        // This might be redundant if try_close_stream_context is called from state transition points.
-        if (stream.state == Http2StreamConcreteState::CLOSED) {
-            try_close_stream_context_by_id(stream.id, ErrorCode::NO_ERROR);
-        }
-    }
+    // (dispatch_complete_response was removed: it had zero callers and carried the exact
+    //  capture-before-dispatch UAF the H5 fix closes — it did `_io.on(std::move(...))` and then
+    //  wrote/read the possibly-relocated `stream` ref. Deleted so it cannot be resurrected as a
+    //  landmine; the live completion path is process_complete_response_if_ready, which snapshots
+    //  first. See git history if a client-side final-dispatch helper is ever needed again.)
 
     void
     try_close_stream_context(uint32_t stream_id) noexcept {
@@ -1969,41 +1944,56 @@ private:
             return;
         }
 
-        // Response is complete - dispatch it
+        // Response is complete - dispatch it.
         stream.response_dispatched = true;
         stream.assembled_response.parse_set_cookie_headers();
-        // The response handlers below run user code reached from the noexcept
-        // frame handlers; contain a throw so it cannot call std::terminate.
-        try {
-            if (stream.rst_stream_received) {
-                // Dispatch error response
-                if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t, ErrorCode>) {
-                    this->get_io_handler().on(std::move(stream.assembled_response), stream.application_request_id, stream.error_code);
-                } else if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t>) {
-                    this->get_io_handler().on(std::move(stream.assembled_response), stream.application_request_id);
-                }
-            } else {
-                // Dispatch successful response
-                if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t, ErrorCode>) {
-                    this->get_io_handler().on(std::move(stream.assembled_response), stream.application_request_id, ErrorCode::NO_ERROR);
-                } else if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t>) {
-                    this->get_io_handler().on(std::move(stream.assembled_response), stream.application_request_id);
-                }
-            }
-        } catch (const std::exception &e) {
-            LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw: " << e.what());
-        } catch (...) {
-            LOG_HTTP_ERROR_PA(stream.id, "HTTP/2 response handler threw an unknown exception");
-        }
 
-        // Update stream state
+        // CAUTION: the user handler below can synchronously re-enter send_request(),
+        // which emplace()s into `_client_streams` — a flat (ska) map that RELOCATES
+        // its entries on rehash in release builds (a node-stable std::unordered_map
+        // under sanitizers, so this is ASan-invisible). Any use of the `stream`
+        // reference after the dispatch would be a use-after-free. Snapshot everything
+        // we need and apply the terminal state transition BEFORE handing control to
+        // user code; touch only locals afterwards. Mirrors the server-side
+        // dispatch_complete_request hardening.
+        const auto sid            = stream.id;
+        const auto app_request_id = stream.application_request_id;
+        const auto rst_received   = stream.rst_stream_received;
+        const auto err_code       = stream.error_code;
+        auto       response       = std::move(stream.assembled_response);
+
         if (stream.end_stream_sent && stream.end_stream_received) {
             stream.state = Http2StreamConcreteState::CLOSED;
         } else if (stream.end_stream_received) {
             stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
         }
 
-        try_close_stream_context_by_id(stream.id);
+        // The response handlers below run user code reached from the noexcept
+        // frame handlers; contain a throw so it cannot call std::terminate. After
+        // this point `stream` may be dangling (see above) — use only locals.
+        try {
+            if (rst_received) {
+                // Dispatch error response
+                if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t, ErrorCode>) {
+                    this->get_io_handler().on(std::move(response), app_request_id, err_code);
+                } else if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t>) {
+                    this->get_io_handler().on(std::move(response), app_request_id);
+                }
+            } else {
+                // Dispatch successful response
+                if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t, ErrorCode>) {
+                    this->get_io_handler().on(std::move(response), app_request_id, ErrorCode::NO_ERROR);
+                } else if constexpr (qb::has_on<IO_Handler, qb::http::Response, uint64_t>) {
+                    this->get_io_handler().on(std::move(response), app_request_id);
+                }
+            }
+        } catch (const std::exception &e) {
+            LOG_HTTP_ERROR_PA(sid, "HTTP/2 response handler threw: " << e.what());
+        } catch (...) {
+            LOG_HTTP_ERROR_PA(sid, "HTTP/2 response handler threw an unknown exception");
+        }
+
+        try_close_stream_context_by_id(sid);
     }
 
     /**

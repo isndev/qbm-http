@@ -49,6 +49,17 @@ header_value(const qb::http::Response &resp, const std::string &name) {
     return std::string(resp.header(name));
 }
 
+/// @brief Session that exposes a socket peer IP — like a real transport-backed session, and
+///        unlike MockMiddlewareSession — so the built-in extractor's secure `session->ip()`
+///        default (rather than the header fallback) is exercised.
+struct MockSessionWithIp : qb::http::test::MockMiddlewareSession {
+    std::string _ip;
+    [[nodiscard]] std::string
+    ip() const {
+        return _ip;
+    }
+};
+
 } // namespace
 
 /**
@@ -70,6 +81,55 @@ protected:
         return req;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Secure default: key on the socket peer IP, not spoofable forwarding headers.
+// ---------------------------------------------------------------------------
+
+class RateLimitPeerIpTest : public MiddlewareTestFixture<MockSessionWithIp> {
+protected:
+    qb::http::Request
+    request_with_xff(const std::string &spoofed_ip) {
+        qb::http::Request req = create_request(qb::http::method::GET, "/mw_test");
+        if (!spoofed_ip.empty()) {
+            req.set_header(std::string("X-Forwarded-For"), spoofed_ip);
+        }
+        return req;
+    }
+};
+
+TEST_F(RateLimitPeerIpTest, PeerIpIsDefaultKeyAndSpoofedForwardedForIsIgnored) {
+    _session->_ip = "10.0.0.1";
+    qb::http::RateLimitOptions options;
+    options.max_requests(3).window(std::chrono::minutes(5));
+    auto mw = qb::http::rate_limit_middleware<MockSessionWithIp>(options);
+
+    // Each request forges a DIFFERENT X-Forwarded-For. With the secure default they all key on the
+    // real peer IP (10.0.0.1), so the 4th is limited — forging the header buys no fresh bucket.
+    for (int i = 1; i <= 3; ++i) {
+        configure_router_and_run(mw, request_with_xff("1.1.1." + std::to_string(i)));
+        EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "request " << i;
+    }
+    configure_router_and_run(mw, request_with_xff("1.1.1.99"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
+}
+
+TEST_F(RateLimitPeerIpTest, TrustForwardedHeadersOptInKeysOnForwardedForNotPeerIp) {
+    _session->_ip = "10.0.0.1";
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(std::chrono::minutes(5)).trust_forwarded_headers(true);
+    auto mw = qb::http::rate_limit_middleware<MockSessionWithIp>(options);
+
+    // trust_forwarded_headers(true): each distinct X-Forwarded-For is its own bucket despite the
+    // shared peer IP, so two different forwarded IPs each pass their single allowed request.
+    configure_router_and_run(mw, request_with_xff("203.0.113.1"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    configure_router_and_run(mw, request_with_xff("203.0.113.2"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    // The first forwarded IP again -> now limited.
+    configure_router_and_run(mw, request_with_xff("203.0.113.1"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
+}
 
 // ---------------------------------------------------------------------------
 // Fixed-window counting + header emission (no window crossing).

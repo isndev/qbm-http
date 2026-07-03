@@ -748,7 +748,11 @@ public:
                 auto mask              = reinterpret_cast<const unsigned char *>(buffer.cbegin() + _parsed);
                 auto begin_buffer_data = buffer.begin() + _parsed + 4;
                 auto begin_data        = current_frame_message._data.allocate_back(_expected_size);
-                for (auto i = 0u; i < _expected_size; ++i)
+                // std::size_t counter: `_expected_size` is 64-bit, so a 32-bit `unsigned`
+                // index would wrap before reaching it for a frame ≥ 4 GiB and loop forever
+                // (only reachable if an app raises max_payload_size past 4 GiB, but the
+                // narrowing is wrong regardless).
+                for (std::size_t i = 0; i < _expected_size; ++i)
                     begin_data[i] = begin_buffer_data[i] ^ mask[i % 4];
             } else {
                 std::memcpy(current_frame_message._data.allocate_back(_expected_size), buffer.begin() + _parsed, _expected_size);
@@ -1012,8 +1016,15 @@ class ws_client : public ws_internal::base<IO_> {
         if (res_key.empty())
             return false;
 
-        std::string expected = detail::compute_accept_key(key);
-        return detail::constant_time_equal(res_key, expected);
+        // compute_accept_key allocates (string + SHA-1 + base64). This function is noexcept and
+        // runs from the noexcept handshake path, so a std::bad_alloc escaping here would
+        // std::terminate — contain it. An allocation failure is a failed handshake, not a crash.
+        try {
+            const std::string expected = detail::compute_accept_key(key);
+            return detail::constant_time_equal(res_key, expected);
+        } catch (...) {
+            return false;
+        }
     }
 
 public:

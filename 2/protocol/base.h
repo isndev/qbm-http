@@ -95,6 +95,23 @@ constexpr std::size_t MAX_CONCURRENT_STREAMS = 1000;
 
 /** @brief Maximum connection idle time before GOAWAY (seconds) */
 constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
+
+/** @brief Absolute floor of client RST_STREAMs tolerated before the Rapid Reset
+ *  (CVE-2023-44487) guard can trip. A legitimate client resets very few streams, so the
+ *  guard only fires once resets ALSO outnumber half the streams opened — see the check in
+ *  ServerHttp2Protocol::on(RstStreamFrame). */
+constexpr std::uint32_t MAX_RAPID_RESETS = 100;
+
+/** @brief Cap on unacknowledged peer-triggered control-frame replies (PING PONGs +
+ *  SETTINGS ACKs) queued in one drain window, bounding the PING/SETTINGS flood amplification
+ *  (CVE-2019-9512 / CVE-2019-9515) that control frames' flow-control exemption otherwise allows. */
+constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 1000;
+
+/** @brief Cap on CONTINUATION frames per header block. The 1 MB header-block BYTE cap does not
+ *  bound a flood of ZERO-length CONTINUATION frames (each adds 0 bytes yet keeps the block open),
+ *  so a peer could stream them forever (CONTINUATION-flood variant of CVE-2024-27316). A full
+ *  1 MB block in 16 KB frames needs ~64; 512 is generous headroom while still bounding the flood. */
+constexpr std::uint32_t MAX_CONTINUATION_FRAMES = 512;
 } // namespace qb::http2::protocol_limits
 
 namespace qb::protocol::http2 {

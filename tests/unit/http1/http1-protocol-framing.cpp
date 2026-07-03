@@ -364,6 +364,48 @@ TEST(Http1ProtocolFraming, ResponseContentLengthFramesAndCapturesStatusAndBody) 
     EXPECT_EQ(res.header("Content-Type"), "text/plain");
 }
 
+TEST(Http1ProtocolFraming, ResponseCloseDelimitedBodyAccumulatesAndFlushesOnEof) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+
+    // No Content-Length, no Transfer-Encoding, body-bearing 200: the body is delimited by the
+    // connection close (RFC 9112 §6.3). getMessageSize must NOT frame this as an empty body (the
+    // old behaviour, which dropped the payload) — it returns 0 (keep buffering) and flush_eof()
+    // delivers the accumulated body when the connection closes.
+    feed(io, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nHELLO-CLOSE-DELIMITED-BODY");
+
+    EXPECT_EQ(step(proto, io), 0u); // buffered, not dispatched yet
+    EXPECT_EQ(io.response_count, 0);
+
+    proto.flush_eof(); // connection closed -> deliver the body
+    EXPECT_EQ(io.response_count, 1);
+    ASSERT_TRUE(io.last_response.has_value());
+    EXPECT_EQ(io.last_response->status(), 200);
+    EXPECT_EQ(io.last_response->body().as<std::string>(), "HELLO-CLOSE-DELIMITED-BODY");
+
+    // Idempotent: a second flush (teardown re-entry) must not re-dispatch.
+    proto.flush_eof();
+    EXPECT_EQ(io.response_count, 1);
+}
+
+TEST(Http1ProtocolFraming, ResponseCloseDelimitedBodyAccumulatesAcrossStreamedFeeds) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+
+    feed(io, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n");
+    EXPECT_EQ(step(proto, io), 0u); // headers complete, close-delimited -> accumulate
+    feed(io, "part-one;");
+    EXPECT_EQ(step(proto, io), 0u);
+    feed(io, "part-two");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.response_count, 0);
+
+    proto.flush_eof();
+    EXPECT_EQ(io.response_count, 1);
+    ASSERT_TRUE(io.last_response.has_value());
+    EXPECT_EQ(io.last_response->body().as<std::string>(), "part-one;part-two");
+}
+
 TEST(Http1ProtocolFraming, ResponseChunkedBodyFramesAndDechunks) {
     ClientFakeIO                             io;
     qb::protocol::http::client<ClientFakeIO> proto(io);

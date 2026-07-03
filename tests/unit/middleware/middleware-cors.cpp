@@ -268,6 +268,20 @@ TEST_F(CorsMiddlewareTest, WildcardOriginWithCredentialsReflectsSpecificOrigin) 
     EXPECT_TRUE(_session->_final_handler_called);
 }
 
+TEST_F(CorsMiddlewareTest, DefaultPermissiveDoesNotReflectOriginOrSendCredentials) {
+    // The DEFAULT middleware (permissive) must be safe: allow any origin via a LITERAL '*'
+    // and send NO Access-Control-Allow-Credentials. The old default paired origins({"*"})
+    // with credentials(Yes), which made process() reflect the caller's Origin and add
+    // Allow-Credentials:true — letting any site read a logged-in victim's authenticated
+    // responses. cors_middleware() with no options uses CorsOptions::permissive().
+    auto cors_mw = qb::http::cors_middleware<MockMiddlewareSession>(); // default == permissive()
+
+    run_cors(cors_mw, cors_request(qb::http::method::GET, "http://evil.example.com"));
+
+    EXPECT_EQ(header("Access-Control-Allow-Origin"), "*");           // literal wildcard, NOT the reflected origin
+    EXPECT_TRUE(header("Access-Control-Allow-Credentials").empty()); // credentials never sent with '*'
+}
+
 TEST_F(CorsMiddlewareTest, ActualRequestExposesHeaders) {
     qb::http::CorsOptions options;
     options.origins({"http://example.com"}).expose_headers({"X-My-Custom-Header", "Content-Length"});

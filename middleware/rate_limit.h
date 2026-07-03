@@ -153,6 +153,23 @@ public:
     }
 
     /**
+     * @brief Opt into deriving the client identifier from proxy forwarding headers.
+     *
+     * OFF by default (secure): the built-in extractor keys on the real socket peer IP, which a
+     * client cannot forge. Enable this ONLY when the server sits behind a trusted proxy that sets
+     * CF-Connecting-IP / True-Client-IP / X-Forwarded-For to the real client IP (and strips any
+     * client-supplied copies) — otherwise every request keys to the single proxy IP. When on, the
+     * forwarding headers take precedence over the peer IP.
+     * @param enabled Whether to trust the forwarding headers.
+     * @return Reference to this `RateLimitOptions` for chaining.
+     */
+    RateLimitOptions &
+    trust_forwarded_headers(bool enabled = true) noexcept {
+        _trust_forwarded_headers = enabled;
+        return *this;
+    }
+
+    /**
      * @brief Provides a pre-configured `RateLimitOptions` instance with permissive settings.
      * Suitable for development or internal services where rate limiting is less strict.
      * Defaults: 1000 requests per minute.
@@ -222,10 +239,27 @@ public:
             }
         }
 
-        // Default extraction logic - SECURITY FIX: Improved X-Forwarded-For handling
+        // Secure default: key on the REAL socket peer IP unless the caller opted into trusting
+        // proxy forwarding headers. The peer IP is the actual TCP source — unspoofable — so a
+        // client cannot get a fresh rate-limit bucket per request by forging a header. Only a
+        // real transport-backed session exposes ip(); a session type without it (e.g. a unit-test
+        // mock, or a deployment that genuinely has no socket) falls through to the header logic.
+        // Behind a trusted proxy the peer IP is the proxy's, so operators set
+        // trust_forwarded_headers(true) to key on the proxy-supplied client IP instead.
+        if (!_trust_forwarded_headers) {
+            if (auto session = ctx.session()) {
+                if constexpr (requires { session->ip(); }) {
+                    std::string peer_ip(session->ip());
+                    if (!peer_ip.empty()) {
+                        return peer_ip;
+                    }
+                }
+            }
+        }
+
+        // Fallback / trusted-proxy path: derive the id from forwarding headers.
         std::string client_id_str;
 
-        // SECURITY FIX: Prefer more secure headers over X-Forwarded-For when available
         // Order of preference (most secure to least):
         // 1. CF-Connecting-IP (Cloudflare) - set by trusted proxy
         // 2. True-Client-IP (Akamai) - set by trusted proxy
@@ -291,6 +325,7 @@ private:
     std::string                              _message;
     std::function<std::string(const void *)> _client_id_extractor_fn;                 // Type-erased client ID extractor
     std::type_index                          _client_id_extractor_type{typeid(void)}; // SessionType the extractor was configured for
+    bool                                     _trust_forwarded_headers = false;        // Opt-in: key on proxy forwarding headers instead of the socket peer IP
 };
 
 /**

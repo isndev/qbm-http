@@ -231,6 +231,18 @@ TEST_F(AuthMiddlewareTest, ValidTokenAuthentication) {
     EXPECT_EQ(_session->_user_in_context->id, "user123");
 }
 
+TEST_F(AuthMiddlewareTest, JwtFactoryRejectsUnknownAlgorithmInsteadOfSilentHsFallback) {
+    // An unrecognised algorithm string used to silently fall back to HMAC_SHA256, routing the
+    // `secret` argument into the HMAC secret slot. If the caller intended an asymmetric
+    // algorithm and passed a PEM PUBLIC key, that public key became the HMAC secret and the
+    // server would accept attacker-forged HS256 tokens (classic RS→HS key confusion). The
+    // factory must now fail loudly at construction instead.
+    EXPECT_THROW((void) qb::http::jwt_auth_middleware<AuthSession>("public-key-or-secret", "RS256_TYPO"), std::invalid_argument);
+    EXPECT_THROW((void) qb::http::jwt_auth_middleware<AuthSession>("public-key-or-secret", ""), std::invalid_argument);
+    // A valid, case-insensitive algorithm still constructs fine (unchanged behavior).
+    EXPECT_NO_THROW((void) qb::http::jwt_auth_middleware<AuthSession>("secret", "hs256"));
+}
+
 TEST_F(AuthMiddlewareTest, MissingToken) {
     _auth_mw->with_auth_required(true);
     run(_auth_mw, create_request(qb::http::method::GET, "/test"));

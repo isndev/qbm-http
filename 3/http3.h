@@ -263,6 +263,14 @@ private:
     qb::unordered_map<stream_key, std::shared_ptr<SessionType>, stream_key_hash> _sessions;
     qb::unordered_set<std::uint64_t>                                             _shutdown_connections;
     std::vector<std::uint64_t>                                                   _closed_connections;
+    // >0 while an HTTP/3 read (nghttp3_conn_read_stream2) is on the stack. A request callback
+    // reached from that read can synchronously fail a connection — a send larger than the QUIC
+    // TX cap makes the backend queue a close and reentrantly deliver dispatch(connection_closed),
+    // which schedules the connection into _closed_connections. Erasing (freeing) it while its
+    // read is on the stack calls nghttp3_conn_del mid-read (use-after-free), so
+    // after_dispatch_events DEFERS the reap while this is >0; dispatch(stream_data) reaps once
+    // the outermost read unwinds.
+    int                                                                          _read_depth = 0;
     std::size_t                                                                  _max_body_size = 64 * 1024 * 1024;
 
     [[nodiscard]] h3_connection *
@@ -366,7 +374,25 @@ protected:
     void
     dispatch(qb::io::async::quic::event::stream_data const &ev) override {
         auto &conn = ensure_connection(ev.connection_id);
-        conn.read_stream(ev.id, ev.payload, ev.fin);
+        // Guard the read: a request callback reached from nghttp3_conn_read_stream2 can
+        // reentrantly close this (or another) connection. While the read is on the stack the
+        // erase is deferred (after_dispatch_events becomes a no-op); reap once it unwinds.
+        // `conn` stays valid across the read — _connections holds unique_ptr (heap-stable), so
+        // a deferred-but-not-yet-erased connection is not freed here. The RAII guard restores
+        // _read_depth on every exit (including an exception escaping read_stream) so a throw
+        // cannot wedge the counter ≥1 and leak every future closed connection.
+        struct DepthGuard {
+            int &d;
+            explicit DepthGuard(int &d_) noexcept : d(d_) { ++d; }
+            ~DepthGuard() { --d; }
+        };
+        {
+            DepthGuard guard(_read_depth);
+            conn.read_stream(ev.id, ev.payload, ev.fin);
+        }
+        if (_read_depth == 0) {
+            reap_closed_connections();
+        }
     }
 
     void
@@ -388,6 +414,18 @@ protected:
 
     void
     after_dispatch_events() override {
+        // Defer the reap while an HTTP/3 read is on the stack: this hook runs at the end of
+        // EVERY drain_backend_events(), including one re-entered from a send inside
+        // nghttp3_conn_read_stream2. Erasing a connection there frees it mid-read (UAF). The
+        // outermost dispatch(stream_data) reaps once _read_depth returns to 0.
+        if (_read_depth > 0) {
+            return;
+        }
+        reap_closed_connections();
+    }
+
+    void
+    reap_closed_connections() {
         for (auto connection_id : _closed_connections) {
             _connections.erase(connection_id);
         }

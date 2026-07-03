@@ -1091,13 +1091,26 @@ public:
     bool
     read_stream(std::uint64_t stream_id, std::string_view data, bool fin) {
         (void) state_for(stream_id);
-        auto rv = nghttp3_conn_read_stream2(_conn, static_cast<int64_t>(stream_id), reinterpret_cast<const uint8_t *>(data.data()), data.size(),
-                                            fin ? 1 : 0, now_ts());
+        // Hold the alive flag across the read. nghttp3_conn_read_stream2 runs owner callbacks
+        // (on_http3_response / on_http3_request) that can synchronously trigger a send large
+        // enough to overflow the QUIC TX cap, which makes the backend queue a connection close
+        // and reentrantly tear this connection down (nghttp3_conn_del + `*_alive = false` in
+        // ~connection). The owner defers that teardown while a read is on the stack (see the
+        // read-depth guards in Client::dispatch(stream_data) and server::after_dispatch_events),
+        // so *alive should remain true here — these checks are the defense-in-depth backstop
+        // against any teardown path that slips through, so we never touch freed _conn/this.
+        const auto alive = _alive;
+        auto       rv    = nghttp3_conn_read_stream2(_conn, static_cast<int64_t>(stream_id), reinterpret_cast<const uint8_t *>(data.data()),
+                                                     data.size(), fin ? 1 : 0, now_ts());
+        if (!*alive)
+            return false; // connection destroyed mid-read; _conn and *this are gone
         if (rv < 0) {
             _owner.close_http3_connection(_connection_id, static_cast<std::uint64_t>(-rv), "HTTP/3 protocol read error");
             return false;
         }
         _owner.extend_http3_stream_credit(_connection_id, stream_id, static_cast<std::uint64_t>(rv));
+        if (!*alive)
+            return false;
         drain();
         return true;
     }

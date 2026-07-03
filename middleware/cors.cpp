@@ -29,11 +29,20 @@ regex_match_with_timeout(const std::string &origin, const std::regex &pattern, q
 
 CorsOptions
 CorsOptions::permissive() {
+    // credentials(No) is deliberate and load-bearing: this is the DEFAULT config
+    // (CorsMiddleware()/cors_middleware()/dev()), and combining a wildcard origin with
+    // credentials is a genuine cross-origin credential-theft hole. The CORS spec forbids
+    // Access-Control-Allow-Origin:* together with Allow-Credentials:true; the old
+    // credentials(Yes) here made process() work around that ban by REFLECTING the caller's
+    // Origin and adding Allow-Credentials:true, so any site could read a logged-in victim's
+    // authenticated responses. A permissive default is for PUBLIC (non-credentialed)
+    // resources: allow every origin, emit a literal '*', send no credentials. Apps that need
+    // credentialed cross-origin must enumerate their origins via CorsOptions::secure().
     return CorsOptions()
         .origins({"*"})
         .all_methods()
         .common_headers()
-        .credentials(AllowCredentials::Yes)
+        .credentials(AllowCredentials::No)
         .expose_headers({"Content-Length", "X-Request-Id", "X-Response-Time"}); // Renamed from expose
 }
 

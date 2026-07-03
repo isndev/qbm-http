@@ -149,8 +149,12 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
                     value_quote_character = '\0'; // Reset for new value
                     cookie_value.clear();
                     parse_state = CookieParseState::COOKIE_PARSE_VALUE;
-                } else if (current_char == ';' || current_char == ',') {
+                } else if (current_char == ';' || (set_cookie_header && current_char == ',')) {
                     // Separator found before '=', means empty value for previous name (if any).
+                    // For a request Cookie header (set_cookie_header=false) the ONLY separator is
+                    // ';' (RFC 6265 §4.2.1); ',' is a legal cookie-octet, so splitting on it would
+                    // corrupt a value containing a comma. Comma stays a separator only for
+                    // Set-Cookie parsing (unchanged).
                     if (!cookie_name.empty()) {
                         // If a name was parsed
                         if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
@@ -172,8 +176,10 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
             case CookieParseState::COOKIE_PARSE_VALUE:
                 if (value_quote_character == '\0') {
                     // Value is not (yet) quoted
-                    if (current_char == ';' || current_char == ',') {
-                        // End of value (unquoted)
+                    if (current_char == ';' || (set_cookie_header && current_char == ',')) {
+                        // End of value (unquoted). ',' separates only for Set-Cookie; in a request
+                        // Cookie header it is a legal cookie-octet (RFC 6265 §4.2.1), so a value
+                        // like "a,b" must stay intact rather than split into a bogus extra cookie.
                         if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
                             dict.emplace(cookie_name, cookie_value); // Value might be empty
                         }

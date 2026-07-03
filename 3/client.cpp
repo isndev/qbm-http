@@ -274,6 +274,15 @@ Client::process_pending_requests() {
         return;
     }
     while (!_pending_requests.empty() && _active_requests.size() < _max_concurrent_streams) {
+        // A prior iteration's submit_request / reset_stream drains output; a >TX-cap send can
+        // have reentrantly scheduled a connection teardown (deferred until the read unwinds —
+        // see dispatch(stream_data)). Stop enqueuing onto a connection that is going away: the
+        // deferred fail_all_requests will fail everything already in _active_requests. Checking
+        // at the loop top covers BOTH the submit-success and the submit-failure (reset_stream)
+        // paths below, either of which can set _deferred_close.
+        if (_deferred_close) {
+            return;
+        }
         auto ctx = std::move(_pending_requests.front());
         _pending_requests.pop_front();
 
@@ -559,6 +568,16 @@ Client::dispatch(qb::io::async::quic::event::connection_closed const &ev) {
     if (ev.error_code != 0) {
         reason += " (" + std::to_string(ev.error_code) + ")";
     }
+    // If a read is on the stack, this close was delivered reentrantly from a send inside
+    // nghttp3_conn_read_stream2. Tearing _h3 down now would call nghttp3_conn_del mid-read
+    // (UAF) and reconnect on a live-but-doomed stack. Defer: dispatch(stream_data) runs the
+    // teardown + reconnect once the outermost read unwinds. First reason wins.
+    if (_read_depth > 0) {
+        if (!_deferred_close) {
+            _deferred_close = std::move(reason);
+        }
+        return;
+    }
     handle_connection_failure(reason);
     if (_auto_reconnect && has_pending_or_active_work()) {
         connect(nullptr);
@@ -567,8 +586,31 @@ Client::dispatch(qb::io::async::quic::event::connection_closed const &ev) {
 
 void
 Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
-    if (_h3) {
+    if (!_h3) {
+        return;
+    }
+    // Guard the read: a response callback reached from nghttp3_conn_read_stream2 can
+    // reentrantly fail the connection (see _read_depth in client.h). While the read is on
+    // the stack the teardown is deferred; run it here, after the outermost read unwinds and
+    // the stack (including nghttp3's own frames) is clear. The RAII guard restores _read_depth
+    // on EVERY exit — including an exception escaping read_stream — so a throw can never wedge
+    // the counter ≥1 and permanently freeze the deferral / reconnect.
+    struct DepthGuard {
+        int &d;
+        explicit DepthGuard(int &d_) noexcept : d(d_) { ++d; }
+        ~DepthGuard() { --d; }
+    };
+    {
+        DepthGuard guard(_read_depth);
         _h3->read_stream(ev.id, ev.payload, ev.fin);
+    }
+    if (_read_depth == 0 && _deferred_close) {
+        const std::string reason = std::move(*_deferred_close);
+        _deferred_close.reset();
+        handle_connection_failure(reason);
+        if (_auto_reconnect && has_pending_or_active_work()) {
+            connect(nullptr);
+        }
     }
 }
 

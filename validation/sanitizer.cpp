@@ -200,9 +200,12 @@ escape_html() noexcept {
 SanitizerFunction
 strip_html_tags() noexcept {
     return [](const std::string &input) -> std::string {
-        // SECURITY FIX: State-machine based HTML tag removal
-        // Replaces vulnerable regex approach with proper parsing
-        // Handles nested tags, attributes with '>' in quotes, and comments
+        // Best-effort state-machine HTML tag removal (handles quoted '>' inside a tag and
+        // <!-- comments -->). This is NOT an XSS sanitizer and must not be relied on as one
+        // (see the contract note on strip_html_tags() in sanitizer.h): adversarial input can
+        // survive — e.g. a stray second '<' as in "<<img onerror=...>" leaves live markup,
+        // because the parser emits the first '<' verbatim and resumes in TEXT. For untrusted
+        // output use escape_html() (context-correct escaping), not tag stripping.
 
         std::string output;
         output.reserve(input.size()); // Pre-allocate for performance

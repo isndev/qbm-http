@@ -2988,3 +2988,135 @@ TEST(HTTP2ServerProtocol, WindowUpdateOnClosedStreamWithoutOverflowIsIgnored) {
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(count_frames(io.output, FrameType::RST_STREAM), rst_before);
 }
+
+// ---------------------------------------------------------------------------
+// DoS guards: HTTP/2 Rapid Reset (CVE-2023-44487) and PING flood (CVE-2019-9512).
+// Both must terminate the connection with GOAWAY(ENHANCE_YOUR_CALM) rather than
+// amplify application work / grow the output pipe without bound.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, RapidResetFloodTriggersEnhanceYourCalmGoaway) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // HEADERS(END_STREAM) then an immediate RST_STREAM: each dispatches the request yet frees
+    // the concurrency slot before it counts, so SETTINGS_MAX_CONCURRENT_STREAMS never bounds
+    // the work. Past MAX_RAPID_RESETS, with resets outnumbering half the streams opened, the
+    // server must GOAWAY(ENHANCE_YOUR_CALM).
+    const std::vector<uint8_t> rst_cancel{0x00, 0x00, 0x00, 0x08}; // error_code = CANCEL (0x8)
+    uint32_t                   sid = 1;
+    for (int i = 0; i < 400 && io.goaway_count == 0; ++i, sid += 2) {
+        const auto encoded = encode_hpack_headers(default_request_headers("/"));
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, encoded);
+        push_frame(io, FrameType::RST_STREAM, 0, sid, rst_cancel);
+        drive(protocol, io);
+    }
+
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+TEST(HTTP2ServerProtocol, RapidResetSurvivesSynchronousResponsesThatEraseTheStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // The synchronous-response Rapid Reset shape: HEADERS(END_STREAM) dispatches the request; the
+    // server answers IN-CALL via send_response, which completes AND ERASES the stream; the paired
+    // RST_STREAM then arrives for a stream no longer resident. The guard must count the reset
+    // anyway (it targets any recently-live, non-idle stream id, not only resident ones) —
+    // otherwise this common configuration bypasses the CVE-2023-44487 mitigation entirely.
+    const std::vector<uint8_t> rst_cancel{0x00, 0x00, 0x00, 0x08}; // error_code = CANCEL
+    uint32_t                   sid = 1;
+    for (int i = 0; i < 400 && io.goaway_count == 0; ++i, sid += 2) {
+        const auto encoded = encode_hpack_headers(default_request_headers("/"));
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, encoded);
+        drive(protocol, io);
+
+        qb::http::Response res;
+        res.status() = qb::http::status::OK;
+        protocol.send_response(sid, res); // completes + erases the stream before the RST arrives
+
+        push_frame(io, FrameType::RST_STREAM, 0, sid, rst_cancel);
+        drive(protocol, io);
+    }
+
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+TEST(HTTP2ServerProtocol, PingFloodTriggersEnhanceYourCalmGoaway) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // PING is exempt from HTTP/2 flow control; a flood with no real request progress must not
+    // grow the PONG output without bound. Past MAX_QUEUED_CONTROL_REPLIES the server GOAWAYs.
+    const std::vector<uint8_t> ping_payload(8, 0x00);
+    for (int i = 0; i < 1200 && io.goaway_count == 0; ++i) {
+        push_frame(io, FrameType::PING, 0, 0, ping_payload);
+        drive(protocol, io);
+    }
+
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+// Regression: a DATA frame on a stream the client already closed (END_STREAM) is rejected with
+// RST_STREAM but keeps the connection alive — it is NOT request progress and must NOT forgive the
+// queued control-reply flood budget. Otherwise a peer interleaves such DATA frames with a PING
+// flood to hold the budget at zero and defeats the PING/SETTINGS flood guard (CVE-2019-9512/9515).
+// Guards the placement of the _control_reply_count reset (must be past the DATA rejection paths).
+TEST(HTTP2ServerProtocol, DataOnClosedStreamDoesNotForgiveControlReplyFloodBudget) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Open stream 1 and close the client's send side (END_STREAM); no response is sent, so later
+    // DATA on it is rejected (RST), not accepted.
+    const auto encoded = encode_hpack_headers(default_request_headers("/"));
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
+    drive(protocol, io);
+
+    // Interleave DATA-on-closed-stream (RST, survives) with a PING flood. Pre-fix each DATA reset the
+    // control-reply budget to 0 and the flood never tripped; post-fix the ping flood still GOAWAYs.
+    const std::vector<uint8_t> data_payload(4, 0x41);
+    const std::vector<uint8_t> ping_payload(8, 0x00);
+    for (int i = 0; i < 1200 && io.goaway_count == 0; ++i) {
+        push_frame(io, FrameType::DATA, 0, 1, data_payload);
+        push_frame(io, FrameType::PING, 0, 0, ping_payload);
+        drive(protocol, io);
+    }
+
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+TEST(HTTP2ServerProtocol, ContinuationFloodTriggersEnhanceYourCalmGoaway) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // HEADERS without END_HEADERS opens a header block awaiting CONTINUATION.
+    const auto encoded = encode_hpack_headers(default_request_headers("/"));
+    push_frame(io, FrameType::HEADERS, 0 /* no END_HEADERS, no END_STREAM */, 1, encoded);
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // Flood zero-length CONTINUATION frames that never set END_HEADERS: each adds 0 bytes, so the
+    // 1 MB header-block byte cap never trips. Past MAX_CONTINUATION_FRAMES the server GOAWAYs.
+    const std::vector<uint8_t> empty;
+    for (int i = 0; i < 600 && io.goaway_count == 0; ++i) {
+        push_frame(io, FrameType::CONTINUATION, 0 /* no END_HEADERS */, 1, empty);
+        drive(protocol, io);
+    }
+
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
