@@ -122,10 +122,14 @@ constexpr uint32_t DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE   = 0xFFFFFFFF;
  */
 #pragma pack(push, 1)
 struct FrameHeader {
-    std::array<uint8_t, 3> length_bytes;    ///< 24-bit payload length in network byte order
-    uint8_t                type;            ///< Frame type
-    uint8_t                flags;           ///< Frame flags
-    std::array<uint8_t, 4> stream_id_bytes; ///< 31-bit stream ID + 1 reserved bit
+    // Zero-initialized by default so a hand-constructed header (tests / synthetic frames) that sets
+    // only some fields never reads an UNINITIALIZED `flags`/`type` — a stray garbage ACK bit would
+    // route a frame down the wrong handler path (a build/stack-layout-dependent flake). Wire parsing
+    // overwrites all four; the initializers change neither sizeof (9 octets) nor trivial-copyability.
+    std::array<uint8_t, 3> length_bytes{};    ///< 24-bit payload length in network byte order
+    uint8_t                type{};            ///< Frame type
+    uint8_t                flags{};           ///< Frame flags
+    std::array<uint8_t, 4> stream_id_bytes{}; ///< 31-bit stream ID + 1 reserved bit
 
     /**
      * @brief Get the payload length from the header
@@ -187,9 +191,9 @@ constexpr std::size_t FRAME_HEADER_SIZE = sizeof(FrameHeader); ///< Frame header
  * @brief Priority information for stream dependency
  */
 struct Http2PriorityData {
-    uint32_t stream_dependency;    ///< Stream dependency ID
-    uint8_t  weight;               ///< Priority weight (1-256)
-    bool     exclusive_dependency; ///< Exclusive flag for dependency
+    uint32_t stream_dependency{};    ///< Stream dependency ID
+    uint8_t  weight{};               ///< Priority weight (1-256)
+    bool     exclusive_dependency{}; ///< Exclusive flag for dependency
 };
 
 /**
@@ -221,7 +225,7 @@ struct HeadersFrame {
  * PRIORITY frames specify the sender-advised priority of a stream.
  */
 struct PriorityFrame {
-    Http2PriorityData priority_data; ///< Priority information
+    Http2PriorityData priority_data{}; ///< Priority information
 };
 
 /**
@@ -230,15 +234,15 @@ struct PriorityFrame {
  * RST_STREAM frames allow for immediate termination of a stream.
  */
 struct RstStreamFrame {
-    ErrorCode error_code; ///< Error code indicating why the stream is being terminated
+    ErrorCode error_code{}; ///< Error code indicating why the stream is being terminated
 };
 
 /**
  * @brief Single SETTINGS parameter
  */
 struct SettingsFrameEntry {
-    Http2SettingIdentifier identifier; ///< Setting identifier
-    uint32_t               value;      ///< Setting value
+    Http2SettingIdentifier identifier{}; ///< Setting identifier
+    uint32_t               value{};      ///< Setting value
 };
 
 /**
@@ -258,7 +262,7 @@ struct SettingsFrame {
  * of streams the sender intends to initiate.
  */
 struct PushPromiseFrame {
-    uint32_t             promised_stream_id;    ///< Promised stream identifier
+    uint32_t             promised_stream_id{};  ///< Promised stream identifier
     std::vector<uint8_t> header_block_fragment; ///< HPACK-encoded header data
 };
 
@@ -268,7 +272,7 @@ struct PushPromiseFrame {
  * PING frames are used to measure round-trip time and check connection liveness.
  */
 struct PingFrame {
-    std::array<uint8_t, 8> opaque_data; ///< Opaque data (echoed in response)
+    std::array<uint8_t, 8> opaque_data{}; ///< Opaque data (echoed in response)
 };
 
 /**
@@ -277,8 +281,8 @@ struct PingFrame {
  * GOAWAY frames inform the remote peer to stop creating streams on this connection.
  */
 struct GoAwayFrame {
-    uint32_t             last_stream_id;        ///< Last peer-initiated stream ID
-    ErrorCode            error_code;            ///< Error code
+    uint32_t             last_stream_id{};      ///< Last peer-initiated stream ID
+    ErrorCode            error_code{};          ///< Error code
     std::vector<uint8_t> additional_debug_data; ///< Additional debug information
 };
 
@@ -288,7 +292,7 @@ struct GoAwayFrame {
  * WINDOW_UPDATE frames are used to implement flow control.
  */
 struct WindowUpdateFrame {
-    uint32_t window_size_increment; ///< Window size increment (1 to 2^31-1)
+    uint32_t window_size_increment{}; ///< Window size increment (1 to 2^31-1)
 };
 
 /**

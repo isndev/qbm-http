@@ -467,6 +467,37 @@ TEST(HTTP2ClientProtocol, ContinuationFrameSplitHeaderBlockIsReassembled) {
 }
 
 // ===========================================================================
+// CONTINUATION flood (CVE-2024-27316 class, hostile server): a peer opens a
+// header block then sends many tiny CONTINUATION frames that each stay under the
+// header-block BYTE cap but exhaust CPU/memory reassembling one block. Past
+// MAX_CONTINUATION_FRAMES the client must GOAWAY(ENHANCE_YOUR_CALM).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, ContinuationFloodFromServerTriggersGoaway) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/flood");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 17)); // opens stream 1
+
+    // HEADERS without END_HEADERS opens a response header block for stream 1.
+    push_raw_header_carrier(io, h2::FrameType::HEADERS, 0 /*no END_HEADERS*/, 1, encode_hpack_headers({{":status", "200"}}));
+    drive(protocol, io);
+    ASSERT_EQ(io.goaway_count, 0) << "opening the header block must not itself trip the guard";
+
+    // Flood tiny CONTINUATION frames (no END_HEADERS): each is well under the byte cap, so only the
+    // per-block frame-count guard (MAX_CONTINUATION_FRAMES=512) can stop it. 700 > 512 must trip it.
+    const std::vector<uint8_t> tiny(1, 0x00);
+    for (int i = 0; i < 700 && io.goaway_count == 0; ++i) {
+        push_raw_header_carrier(io, h2::FrameType::CONTINUATION, 0 /*no END_HEADERS*/, 1, tiny);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+// ===========================================================================
 // CONTINUATION for the wrong stream id (interleaved with the open header block)
 // is a connection PROTOCOL_ERROR: the framer enforces that the CONTINUATION must
 // be on the same stream as the unterminated HEADERS block.
@@ -752,6 +783,38 @@ TEST(HTTP2ClientProtocol, ServerSettingsInitialWindowSizeAppliesAndAcks) {
 }
 
 // ===========================================================================
+// SETTINGS_INITIAL_WINDOW_SIZE raised mid-connection adjusts the live stream by the
+// delta and flushes a body that a smaller initial window had stalled. Exercises the
+// deferred-flush path of on(SettingsFrame)'s per-stream window adjustment (loop 1829):
+// that flush can close+erase a stream, so it runs over a snapshotted id list, not a
+// live map iterator. Guards the refactor's flush semantics (both bytes eventually sent).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, RaisingInitialWindowSizeFlushesStalledStreamBody) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    // Server starts with a tiny per-stream initial window so the request body stalls.
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 10}}));
+
+    const std::size_t before = io.output.size();
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/stalled");
+    req.body()   = std::string(100, 'z');
+    ASSERT_TRUE(protocol.send_request(std::move(req), 1));
+
+    // Only the first 10 bytes fit the stream window; the remaining 90 stay pending.
+    EXPECT_EQ(sum_data_payload_for_stream(io.output, 1, before), 10u);
+
+    // Raising the initial window size adjusts the live stream by the delta and flushes it.
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100000}}));
+    EXPECT_TRUE(protocol.ok());
+
+    EXPECT_EQ(sum_data_payload_for_stream(io.output, 1, before), 100u);
+}
+
+// ===========================================================================
 // SETTINGS ACK with a non-empty payload is a FRAME_SIZE_ERROR connection error.
 // ===========================================================================
 TEST(HTTP2ClientProtocol, SettingsAckWithPayloadIsFrameSizeError) {
@@ -771,10 +834,14 @@ TEST(HTTP2ClientProtocol, SettingsAckWithPayloadIsFrameSizeError) {
 }
 
 // ===========================================================================
-// PUSH_PROMISE refused by default (ENABLE_PUSH=0): RST_STREAM(REFUSED_STREAM) on
-// the promised id, no push event dispatched.
+// PUSH_PROMISE while push is disabled (ENABLE_PUSH=0, the client default) is a
+// connection error of type PROTOCOL_ERROR — RFC 9113 §8.4, matching the server's
+// mirror on(PushPromiseFrame). GOAWAY-and-close, no push event dispatched.
+// Regression guard: the old behavior was a lenient RST-and-continue, which diverged
+// from the RFC and the server and let a hostile server flood pushes for an unbounded
+// (flow-control-exempt) RST_STREAM reply stream.
 // ===========================================================================
-TEST(HTTP2ClientProtocol, PushPromiseRefusedWhenPushDisabledByDefault) {
+TEST(HTTP2ClientProtocol, PushPromiseWhenPushDisabledIsConnectionError) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
 
@@ -786,8 +853,6 @@ TEST(HTTP2ClientProtocol, PushPromiseRefusedWhenPushDisabledByDefault) {
     protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
     ASSERT_TRUE(protocol.ok());
 
-    const std::size_t output_before = io.output.size();
-
     h2::Http2FrameData<h2::PushPromiseFrame> pp;
     pp.header.type  = static_cast<uint8_t>(h2::FrameType::PUSH_PROMISE);
     pp.header.flags = h2::FLAG_END_HEADERS;
@@ -797,13 +862,11 @@ TEST(HTTP2ClientProtocol, PushPromiseRefusedWhenPushDisabledByDefault) {
         encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/pushed"}});
     protocol.on(std::move(pp));
 
-    EXPECT_TRUE(protocol.ok());
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.push_promise_count, 0);
-
-    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, output_before);
-    ASSERT_NE(rst_off, SIZE_MAX);
-    const auto rst_fh = peek_frame_header(io.output, rst_off);
-    EXPECT_EQ(rst_fh.get_stream_id(), 2u);
 }
 
 // ===========================================================================
@@ -1302,14 +1365,13 @@ TEST(HTTP2ClientProtocol, PushPromiseWithZeroPromisedStreamIdIsConnectionError) 
 }
 
 // ===========================================================================
-// PUSH_PROMISE while push is disabled for an unknown association: refused at the
-// push-disabled gate with RST(REFUSED_STREAM) before the association check.
+// PUSH_PROMISE while push is disabled, with an association that was never opened:
+// the push-disabled gate (RFC 9113 §8.4) fires first, so this is a clean PROTOCOL_ERROR
+// connection error — the handler must not fall through to dereference the missing parent.
 // ===========================================================================
-TEST(HTTP2ClientProtocol, PushPromiseRefusedBeforeAssociatedStreamCheck) {
+TEST(HTTP2ClientProtocol, PushPromiseWhenPushDisabledWithUnknownAssociationIsConnectionError) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
-
-    const std::size_t before = io.output.size();
 
     h2::Http2FrameData<h2::PushPromiseFrame> pp;
     pp.header.type  = static_cast<uint8_t>(h2::FrameType::PUSH_PROMISE);
@@ -1319,13 +1381,11 @@ TEST(HTTP2ClientProtocol, PushPromiseRefusedBeforeAssociatedStreamCheck) {
     pp.payload.header_block_fragment = encode_hpack_headers({{":method", "GET"}, {":path", "/x"}});
     protocol.on(std::move(pp));
 
-    EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.push_promise_count, 0);
-
-    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
-    ASSERT_NE(rst_off, SIZE_MAX);
-    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 2u);
 }
 
 // ===========================================================================

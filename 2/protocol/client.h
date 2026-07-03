@@ -137,6 +137,15 @@ private:
 
     uint32_t _active_header_block_stream_id = 0;
 
+    // Server-flood guards (mirror the server, hostile-server threat): a peer can flood a client with
+    // PING / empty-SETTINGS frames — each begets a PONG / ACK that is exempt from flow control, so
+    // the output pipe grows without bound (CVE-2019-9512/9515) — or with many tiny CONTINUATION
+    // frames that stay under the header-block byte cap. Bound both: _control_reply_count is forgiven
+    // on real response progress; _continuation_frame_count is per-header-block (reset in
+    // clear_header_assembly_state).
+    std::uint32_t _control_reply_count      = 0;
+    std::uint32_t _continuation_frame_count = 0;
+
     bool _initial_settings_ack_received_placeholder = false; // Placeholder for actual ACK tracking.
 
     std::optional<OpaqueDataArray> _outstanding_ping_data;
@@ -198,6 +207,8 @@ public:
         _connection_active           = true;
         _graceful_shutdown_initiated = false;
         _initial_settings_sent       = false;
+        _control_reply_count         = 0;
+        _continuation_frame_count    = 0;
 
         // Reset our settings and derived values
         this->initialize_our_settings_map();
@@ -345,6 +356,7 @@ public:
         }
         _connection_receive_window -= payload_size;
         _connection_processed_bytes_for_window_update += payload_size;
+        _control_reply_count = 0; // real response progress (accepted DATA) forgives the flood budget
 
         if (!data_payload.empty()) {
             stream.assembled_response.body().raw().write(reinterpret_cast<const char *>(data_payload.data()), data_payload.size());
@@ -471,6 +483,14 @@ public:
         if (!stream.expecting_continuation) {
             send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Unexpected CONTINUATION");
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Unexpected CONTINUATION frame."); // Connection error
+            clear_header_assembly_state();
+            return;
+        }
+
+        // Bound CONTINUATION amplification (CVE-2024-27316 class): a flood of tiny frames stays under
+        // the byte cap yet exhausts CPU/memory reassembling one header block. Cap the per-block count.
+        if (++_continuation_frame_count > qb::http2::protocol_limits::MAX_CONTINUATION_FRAMES) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive CONTINUATION frames (server flood)");
             clear_header_assembly_state();
             return;
         }
@@ -629,6 +649,12 @@ public:
             }
         }
 
+        // Bound SETTINGS-ACK amplification (CVE-2019-9515): like PONGs, ACKs are exempt from flow
+        // control, so a flood of empty SETTINGS grows the output pipe without limit. Same budget.
+        if (++_control_reply_count > qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive SETTINGS control frames (server flood)");
+            return;
+        }
         // Send SETTINGS ACK
         LOG_HTTP_DEBUG_PA(0, "Client: Sending SETTINGS ACK to server");
         Http2FrameData<SettingsFrame> ack_frame;
@@ -694,13 +720,18 @@ public:
         }
 
         // Check if this client instance is configured to accept pushes generally.
-        // This is based on the SETTINGS_ENABLE_PUSH value *we* would send to the server.
-        bool client_allows_push_globally = this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1) == 1;
+        // This is based on the SETTINGS_ENABLE_PUSH value *we* would send to the server (default 0 —
+        // DEFAULT_SETTINGS_ENABLE_PUSH_CLIENT — so a bare map with no explicit entry stays push-off).
+        bool client_allows_push_globally = this->get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 0) == 1;
         if (!client_allows_push_globally) {
-            // We have push disabled, so we must refuse the stream.
-            // Server should not have sent it if we set SETTINGS_ENABLE_PUSH to 0.
-            // If it did, it's a protocol error on server side, but we still RST.
-            send_rst_stream(promised_stream_id, ErrorCode::REFUSED_STREAM, "Client has SETTINGS_ENABLE_PUSH disabled");
+            // We advertised SETTINGS_ENABLE_PUSH=0, so a PUSH_PROMISE is illegal — RFC 9113 §8.4: "An
+            // endpoint that has ... set this parameter to 0 ... MUST treat the receipt of a PUSH_PROMISE
+            // frame as a connection error (Section 5.4.1) of type PROTOCOL_ERROR." GOAWAY-and-close
+            // (matching the server's mirror handler on(PushPromiseFrame) and nghttp2) rather than the old
+            // RST-and-continue, which (a) diverged from the server and the RFC, (b) let a hostile server
+            // flood pushes for an unbounded RST_STREAM reply stream (RST is exempt from flow control),
+            // and (c) skipped the promised header block below, desyncing the HPACK decoder table.
+            send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "PUSH_PROMISE received while SETTINGS_ENABLE_PUSH=0");
             return;
         }
 
@@ -938,10 +969,25 @@ public:
             _connection_send_window += wu_event.payload.window_size_increment;
             // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Connection send window updated to " << _connection_send_window);
 
-            // Try to send pending data on any stream that might have been blocked
+            // Try to send pending data on any stream that might have been blocked.
+            // Snapshot candidate stream ids first: try_send_pending_data_for_stream may flush a
+            // stream to CLOSED and erase it from _client_streams, which would invalidate a live
+            // iterator into the map mid-loop (a release-mode flat-map relocation UAF). Mirrors the
+            // server's connection-WINDOW_UPDATE flush.
+            std::vector<uint32_t> pending_ids;
+            pending_ids.reserve(_client_streams.size());
             for (auto &pair : _client_streams) {
-                if (pair.second.has_pending_data_to_send) {
-                    try_send_pending_data_for_stream(pair.first, pair.second);
+                if (pair.second.has_pending_data_to_send)
+                    pending_ids.push_back(pair.first);
+            }
+            for (uint32_t pending_id : pending_ids) {
+                auto it = _client_streams.find(pending_id);
+                if (it == _client_streams.end())
+                    continue; // erased by an earlier flush in this loop
+                if (it->second.has_pending_data_to_send) {
+                    try_send_pending_data_for_stream(it->first, it->second);
+                    if (!this->_connection_active)
+                        break;
                 }
             }
         } else { // Stream-level window update
@@ -1302,6 +1348,7 @@ private:
     clear_header_assembly_state() noexcept {
         _current_header_block_fragment.clear();
         _active_header_block_stream_id = 0;
+        _continuation_frame_count      = 0; // per-header-block CONTINUATION flood budget
     }
 
     /**
@@ -1792,8 +1839,12 @@ private:
         int32_t delta             = static_cast<int32_t>(new_size) - static_cast<int32_t>(_initial_peer_window_size);
         _initial_peer_window_size = new_size;
 
-        // Update all stream windows
+        // Update all stream windows. The per-stream window bump is an in-place field mutation (safe
+        // during iteration); but flushing a newly-unblocked stream can flush it to CLOSED and erase it
+        // from _client_streams, invalidating the iterator mid-loop (a release-mode flat-map relocation
+        // UAF). So defer the flushes: bump every window in-loop, collect the unblocked ids, flush after.
         if (delta != 0) {
+            std::vector<uint32_t> unblocked_ids;
             for (auto &[stream_id, stream] : _client_streams) {
                 if (stream_id % 2 != 0) { // Client-initiated streams
                     int64_t old_stream_peer_window = stream.peer_window_size;
@@ -1805,9 +1856,18 @@ private:
                         return;
                     }
 
-                    if (old_stream_peer_window <= 0 && stream.peer_window_size > 0 && stream.has_pending_data_to_send) {
-                        try_send_pending_data_for_stream(stream.id, stream);
-                    }
+                    if (old_stream_peer_window <= 0 && stream.peer_window_size > 0 && stream.has_pending_data_to_send)
+                        unblocked_ids.push_back(stream_id);
+                }
+            }
+            for (uint32_t unblocked_id : unblocked_ids) {
+                auto it = _client_streams.find(unblocked_id);
+                if (it == _client_streams.end())
+                    continue; // erased by an earlier flush in this loop
+                if (it->second.has_pending_data_to_send) {
+                    try_send_pending_data_for_stream(it->first, it->second);
+                    if (!this->_connection_active)
+                        break;
                 }
             }
         }
@@ -1946,6 +2006,7 @@ private:
 
         // Response is complete - dispatch it.
         stream.response_dispatched = true;
+        _control_reply_count       = 0; // a completed response is real progress — forgive the flood budget
         stream.assembled_response.parse_set_cookie_headers();
 
         // CAUTION: the user handler below can synchronously re-enter send_request(),
@@ -2384,6 +2445,12 @@ private:
     on(Http2FrameData<PingFrame> ping_event) noexcept {
         // If this is a PING request (ACK flag not set), send PING response
         if (!(ping_event.header.flags & 0x01)) { // ACK flag is bit 0
+            // A PING flood (each begets an exempt-from-flow-control PONG) must not grow the output
+            // pipe without bound (CVE-2019-9512). Bound it; the budget is forgiven on real progress.
+            if (++_control_reply_count > qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive PING control frames (server flood)");
+                return;
+            }
             Http2FrameData<PingFrame> ping_response;
             ping_response.header.type  = static_cast<uint8_t>(FrameType::PING);
             ping_response.header.flags = 0x01; // ACK flag
