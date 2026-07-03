@@ -46,10 +46,13 @@ effective_port(qb::io::uri const &uri) noexcept {
     if (!uri.port().empty()) {
         return uri.port();
     }
-    if (scheme_eq(uri.scheme(), "http")) {
+    // Resolve default ports case-insensitively for ws/wss too (not just http/https): otherwise
+    // an upper-cased scheme like "WS://" yields no port and same("ws://x","WS://x") spuriously
+    // returns false. ws shares http's default (80), wss shares https's (443).
+    if (scheme_eq(uri.scheme(), "http") || scheme_eq(uri.scheme(), "ws")) {
         return "80";
     }
-    if (scheme_eq(uri.scheme(), "https")) {
+    if (scheme_eq(uri.scheme(), "https") || scheme_eq(uri.scheme(), "wss")) {
         return "443";
     }
     return {};

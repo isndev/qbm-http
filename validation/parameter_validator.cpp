@@ -62,8 +62,15 @@ ParameterValidator::parse_value(const std::string &input_value, DataType target_
                 }
 
                 // Preserve integer values as integer JSON when representable.
-                if (val_double >= static_cast<double>(std::numeric_limits<long long>::min())
-                    && val_double <= static_cast<double>(std::numeric_limits<long long>::max())) {
+                // NB: (double)LLONG_MAX rounds UP to 2^63, which is NOT representable as a
+                // long long, so a naive `val_double <= (double)LLONG_MAX` admits exactly
+                // 2^63 and the subsequent static_cast<long long> is undefined behavior
+                // (UBSan-flagged; -O2 yields garbage). Use a STRICT upper bound of 2^63,
+                // expressed as -(double)LLONG_MIN (LLONG_MIN == -2^63 is exact, so its
+                // negation is the exact 2^63). Only [-2^63, 2^63) — all representable —
+                // reaches the cast.
+                constexpr double ll_min_as_double = static_cast<double>(std::numeric_limits<long long>::min());
+                if (val_double >= ll_min_as_double && val_double < -ll_min_as_double) {
                     const long long val_ll = static_cast<long long>(val_double);
                     if (static_cast<double>(val_ll) == val_double) {
                         return val_ll;

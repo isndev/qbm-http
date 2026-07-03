@@ -160,6 +160,20 @@ SchemaValidator::apply_primitive_rules(const qb::json &value, const qb::json &sc
 bool
 SchemaValidator::validate_recursive(const qb::json &current_value, const qb::json &current_schema, const std::string &current_path,
                                     Result &result) const {
+    // Bound recursion depth: properties/items/allOf/anyOf/oneOf/not nest one level per call,
+    // so a pathologically deep schema could overflow the stack. The RAII guard restores the
+    // counter on every return path (this function never throws).
+    struct DepthGuard {
+        int &d;
+        explicit DepthGuard(int &d_) noexcept : d(d_) { ++d; }
+        ~DepthGuard() { --d; }
+    } depth_guard(_recursion_depth);
+    if (_recursion_depth > MAX_SCHEMA_DEPTH) {
+        result.add_error(current_path.empty() ? "_schema" : current_path, "schemaTooDeep",
+                         "Schema nesting exceeds the maximum supported depth.", std::nullopt);
+        return false;
+    }
+
     size_t errors_before_this_level = result.errors().size();
 
     if (!current_schema.is_object()) {

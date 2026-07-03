@@ -402,14 +402,20 @@ jwt_auth_middleware(const std::string &secret,
                     const std::string &name          = "JwtAuthMiddleware") {
     auth::Options options;
 
-    // Resolve the algorithm first via the centralised (case-insensitive) parser
-    // (see F51); fall back to the constructor default (`HMAC_SHA256`) for unknown
-    // strings so the middleware stays usable with legacy config.
+    // Resolve the algorithm via the centralised (case-insensitive) parser (see F51). An
+    // UNRECOGNISED string must fail loudly, NOT silently fall back to HMAC_SHA256: if the
+    // caller meant an asymmetric algorithm and passed a PEM *public* key as `secret`, a
+    // silent HS fallback would route that public key to secret_key() below and then verify
+    // attacker-forged HS256 tokens keyed by a public value — the classic RS→HS key-confusion
+    // forgery. A bad algorithm string is a wiring error; surface it at construction (mirrors
+    // ValidationMiddleware rejecting a null validator).
     const auto resolved = auth::Options::algorithm_from_string(algorithm_str);
-    const auto alg      = resolved.value_or(auth::Options::Algorithm::HMAC_SHA256);
-    if (resolved) {
-        options.algorithm(*resolved);
+    if (!resolved) {
+        throw std::invalid_argument("jwt_auth_middleware: unrecognised JWT algorithm '" + algorithm_str
+                                    + "' (expected e.g. HS256/HS384/HS512, RS256/384/512, ES256/384/512, PS256/384/512 — case-insensitive).");
     }
+    const auto alg = *resolved;
+    options.algorithm(alg);
 
     // Choose the key slot off the resolved enum (not a raw string prefix): HMAC
     // families need a symmetric secret, asymmetric algorithms expect a public key.

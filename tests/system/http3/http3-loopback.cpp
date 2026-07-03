@@ -198,6 +198,65 @@ TEST_F(Http3LoopbackTest, SimpleGetRequest) {
     server->close();
 }
 
+// H7/H8 reentrancy repro: a routed handler emits a response far larger than a tiny configured
+// QUIC stream TX budget. Serializing it overflows send_stream_data (quic.cpp), which queues a
+// connection close and reentrantly delivers dispatch(connection_closed) WHILE the server is still
+// inside nghttp3_conn_read_stream2 for this request. Before the fix, that reentrant close ran
+// _connections.erase (→ nghttp3_conn_del) mid-read = use-after-free. The fix defers the connection
+// free until the read unwinds. The load-bearing assertion here is IMPLICIT: under ASan this test
+// must not use-after-free / crash. The follow-up request proves the server is not wedged (a leaked
+// _read_depth from the exception-safety path would freeze every future connection).
+TEST_F(Http3LoopbackTest, OversizedResponseReentrantCloseDuringReadIsUseAfterFreeSafe) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+
+    auto st                     = server->settings();
+    st.max_pending_stream_bytes = 16 * 1024; // enough for handshake/QPACK, far below the response
+    server->set_settings(st);
+
+    std::atomic<int> handled{0};
+    server->router().get("/big", [&handled](auto ctx) {
+        ++handled;
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = std::string(256 * 1024, 'x'); // >> the 16 KB TX budget
+        ctx->complete();
+    });
+    server->router().get("/ok", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "ok";
+        ctx->complete();
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    std::atomic<bool> settled{false};
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(https_origin(port) + "/big")},
+                                     [&](qb::http::Response) { settled = true; }));
+    pump([&] { return settled.load(); }, 5s);
+    EXPECT_TRUE(settled.load());
+    EXPECT_GE(handled.load(), 1) << "the request must have reached the handler (reentrancy path taken)";
+
+    // Server survived and is not wedged: a fresh connection still serves.
+    auto client2 = qb::http3::make_client(https_origin(port));
+    client2->set_verify_peer(false);
+    std::atomic<bool> settled2{false};
+    qb::http::Response r2;
+    ASSERT_TRUE(client2->push_request(qb::http::Request{qb::io::uri(https_origin(port) + "/ok")}, [&](qb::http::Response res) {
+        r2       = std::move(res);
+        settled2 = true;
+    }));
+    pump([&] { return settled2.load(); }, 5s);
+    EXPECT_TRUE(settled2.load());
+    EXPECT_EQ(r2.status(), qb::http::status::OK);
+    EXPECT_EQ(r2.body().as<std::string>(), "ok");
+
+    client->disconnect();
+    client2->disconnect();
+    server->close();
+}
+
 TEST_F(Http3LoopbackTest, RelativeUriUsesClientBaseUri) {
     const auto port   = next_port();
     auto       server = qb::http3::make_server();

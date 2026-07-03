@@ -350,6 +350,70 @@ TEST(HTTP2ClientProtocol, AssemblesResponseFromHeadersAndData) {
 }
 
 // ===========================================================================
+// H5/H6 regression: a response handler that synchronously re-enters send_request
+// relocates the _client_streams flat map (ska rehash) WHILE
+// process_complete_response_if_ready still holds the `stream` reference. The fix
+// snapshots sid/response into locals before dispatch; without it the post-dispatch
+// `stream.state=...` / try_close_stream_context_by_id(stream.id) is a use-after-free
+// (release-only, ska map; ASan-invisible under the node-stable debug map). This
+// exercises the exact path — previously untested — and asserts the response is
+// delivered correctly and the connection stays usable afterward.
+// ===========================================================================
+namespace {
+struct ReentrantSendClientFakeIO : Http2ClientFakeIO {
+    using Http2ClientFakeIO::on; // keep all base on(...) overloads visible (name-hiding guard)
+
+    h2::ClientHttp2Protocol<ReentrantSendClientFakeIO> *proto     = nullptr;
+    bool                                                reentered = false;
+
+    void
+    on(qb::http::Response &&response, uint64_t app_id, h2::ErrorCode ec) {
+        Http2ClientFakeIO::on(std::move(response), app_id, ec);
+        // Open many streams during the dispatch to force the flat map to rehash/relocate.
+        if (proto && !reentered) {
+            reentered = true;
+            for (int i = 0; i < 256; ++i) {
+                qb::http::Request r;
+                r.method() = qb::http::method::GET;
+                r.uri()    = qb::io::uri("https://example.test/x");
+                (void) proto->send_request(std::move(r), 2000 + static_cast<uint64_t>(i));
+            }
+        }
+    }
+};
+} // namespace
+
+TEST(HTTP2ClientProtocol, ResponseHandlerReenteringSendRequestKeepsResponseAndConnectionIntact) {
+    ReentrantSendClientFakeIO                          io;
+    h2::ClientHttp2Protocol<ReentrantSendClientFakeIO> protocol(io);
+    io.proto = &protocol;
+
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/r");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 5)); // stream 1, app id 5
+
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+    // END_STREAM completes stream 1 → process_complete_response_if_ready dispatches; the handler
+    // re-enters send_request 256× (relocating _client_streams) while the stream ref is live.
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "body-1"));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 1);
+    ASSERT_TRUE(io.last_status.has_value());
+    EXPECT_EQ(*io.last_status, 200);
+    ASSERT_TRUE(io.last_body.has_value());
+    EXPECT_EQ(*io.last_body, "body-1");
+    EXPECT_EQ(io.last_app_id, 5u);
+
+    // The connection is not wedged/corrupted: a response for one of the re-entrant streams
+    // (stream 3, the first opened during the callback) still round-trips.
+    protocol.on(make_headers_frame(3, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "204"}}));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 2);
+}
+
+// ===========================================================================
 // CONTINUATION split: a header block delivered as HEADERS (no END_HEADERS) +
 // CONTINUATION (END_HEADERS) must be reassembled and the response dispatched.
 // The HPACK-encoded :status/content-type block is split byte-wise across the two

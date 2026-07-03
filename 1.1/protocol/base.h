@@ -603,6 +603,12 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     using String            = typename qb::http::Parser<std::remove_const_t<Trait>>::String;
     std::size_t body_offset = 0; ///< Current offset for body parsing
 
+    /// True while accumulating a close-delimited response body (no Content-Length, no
+    /// Transfer-Encoding, body-bearing status — RFC 9112 §6.3). getMessageSize cannot know
+    /// the length until the connection closes, so it returns 0 (keep buffering) and flush_eof()
+    /// delivers the accumulated body on disconnect.
+    bool _close_delimited = false;
+
 protected:
     qb::http::Parser<std::remove_const_t<Trait>> _http_obj; ///< HTTP parser
 
@@ -712,6 +718,28 @@ public:
             return 0;
         }
 
+        if constexpr (std::remove_const_t<Trait>::type == HTTP_RESPONSE) {
+            // Close-delimited response body (RFC 9112 §6.3): no Content-Length AND no
+            // Transfer-Encoding on a body-bearing status → the body runs until the server closes
+            // the connection. llhttp flags exactly this via http_message_needs_eof (0 for
+            // Content-Length / chunked / bodyless-status responses, so the normal paths below are
+            // untouched). We can't frame by size, so keep buffering and let flush_eof() deliver
+            // the body on disconnect. Bound the accumulation so a server cannot stream forever.
+            if (http_message_needs_eof(&_http_obj)) {
+                if (this->_io.in().size() - body_offset > ::qb::http::protocol_limits::MAX_BODY_SIZE) {
+                    // Oversize: fail the message. Clear _close_delimited so flush_eof does NOT
+                    // deliver the truncated buffer as a successful response — the caller must see
+                    // a failed request, not a silently cut body. (The flag may already be set from
+                    // an earlier under-cap read of this same body.)
+                    _close_delimited = false;
+                    this->not_ok();
+                    return 0;
+                }
+                _close_delimited = true;
+                return 0;
+            }
+        }
+
         const auto full_size = body_offset + _http_obj.content_length;
         if (this->_io.in().size() < full_size) {
             return 0; // incomplete body, keep accumulating
@@ -726,6 +754,34 @@ public:
     }
 
     /**
+     * @brief Deliver a close-delimited response body on connection EOF.
+     *
+     * A response with no Content-Length and no Transfer-Encoding (RFC 9112 §6.3) has its body
+     * delimited by the connection close; getMessageSize() buffered it (returning 0) rather than
+     * framing an empty body. The client calls this on disconnect to hand the accumulated body to
+     * the message handler exactly once. No-op unless such a body is pending.
+     */
+    void
+    flush_eof() noexcept {
+        // this->ok() guards the oversize/error path: getMessageSize calls not_ok() (and clears
+        // _close_delimited) when the accumulated body exceeds MAX_BODY_SIZE, so a failed message
+        // is never delivered as a truncated success.
+        if (!_close_delimited || !_http_obj.headers_completed() || !this->ok()) {
+            return;
+        }
+        _close_delimited = false; // deliver exactly once
+        auto      &msg   = _http_obj.get_parsed_message();
+        const auto total = this->_io.in().size();
+        if (total > body_offset) {
+            // OWNING copy: the input buffer is discarded once the socket closes, and the async
+            // pipeline requires the body to outlive the read that produced it.
+            msg.body() = std::string(this->_io.in().cbegin() + body_offset, this->_io.in().cbegin() + total);
+        }
+        body_offset = 0;
+        this->onMessage(total); // derived onMessage: parse cookies, dispatch to handler, reset()
+    }
+
+    /**
      * @brief Reset the protocol handler
      *
      * Resets the internal state of the protocol handler, clearing
@@ -734,7 +790,8 @@ public:
      */
     void
     reset() noexcept final {
-        body_offset = 0;
+        body_offset      = 0;
+        _close_delimited = false;
         _http_obj.reset();
     }
 };

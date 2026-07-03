@@ -184,8 +184,19 @@ PatternRule::validate(const qb::json &value, const std::string &field_path, Resu
         return false;
     }
 
-    if (!std::regex_match(str_val, _regex)) {
-        result.add_error(field_path, rule_name(), "String does not match pattern: " + _pattern_str, std::make_optional(value));
+    // std::regex_match can THROW std::regex_error at match time — on libc++ its
+    // catastrophic-backtracking guard throws "complexity exceeded" (libstdc++ has no such
+    // guard, but the MAX_REGEX_INPUT_LENGTH cap above bounds its backtracking). This is
+    // reached from the body-schema path (SchemaValidator::apply_primitive_rules), which has
+    // NO try/catch up to ValidationMiddleware and the noexcept I/O boundary — an uncaught
+    // regex_error would cross it. Treat an engine failure as a validation failure.
+    try {
+        if (!std::regex_match(str_val, _regex)) {
+            result.add_error(field_path, rule_name(), "String does not match pattern: " + _pattern_str, std::make_optional(value));
+            return false;
+        }
+    } catch (const std::regex_error &) {
+        result.add_error(field_path, rule_name(), "Pattern could not be evaluated (regex complexity limit exceeded).", std::make_optional(value));
         return false;
     }
     return true;

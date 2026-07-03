@@ -83,6 +83,9 @@ private:
     qb::unordered_map<uint32_t, Http2ServerStream> _server_streams;                      ///< Active stream contexts
     uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
     uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
+    std::uint32_t                                  _rst_stream_count        = 0; ///< Client RST_STREAMs seen (Rapid Reset guard)
+    std::uint32_t                                  _control_reply_count     = 0; ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
+    std::uint32_t                                  _continuation_frame_count = 0; ///< CONTINUATION frames in the current header block (flood guard)
 
     std::vector<uint8_t> _current_header_block_fragment; ///< Header block assembly buffer
     uint32_t             _current_header_stream_id = 0;  ///< Stream ID for header assembly
@@ -185,6 +188,9 @@ public:
         _current_header_stream_id        = 0;
         _last_client_initiated_stream_id = 0;
         _next_server_initiated_stream_id = 2;
+        _rst_stream_count                = 0;
+        _control_reply_count             = 0;
+        _continuation_frame_count        = 0;
         _connection_active               = true;
         _graceful_shutdown_initiated     = false;
         _initial_settings_sent           = false;
@@ -203,6 +209,13 @@ public:
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
+        // Bound the DECODED header-list size we will accept. Without this the decoder
+        // keeps its 4 GiB no-op default (HPACK_DEFAULT_MAX_HEADER_LIST_SIZE), so a peer
+        // can expand a ≤1 MB encoded block into ~4 GiB of decoded HeaderFields via
+        // repeated single-byte indexed references to a large dynamic-table entry (an
+        // HPACK decompression bomb). The per-header enforcement in Decoder::decode is
+        // already correct — it just needs a sane limit.
+        _hpack_decoder.set_max_header_list_size(::qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE);
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
         if (it_table_size != _our_settings.end()) {
             _hpack_encoder.set_max_capacity(it_table_size->second);
@@ -311,6 +324,13 @@ public:
         this->_connection_receive_window -= data_payload_size;
 
         stream.local_window_size -= data_payload_size;
+
+        // Real request progress (a DATA frame ACCEPTED onto an open stream) forgives the queued
+        // control-reply flood budget. This MUST sit after every rejection / RST-and-return path above
+        // — mirroring the HEADERS reset, which was deliberately placed past its rejections — otherwise
+        // DATA on a closed/idle/reset stream (which sends RST but keeps the connection alive) could
+        // repeatedly zero the budget and defeat the PING/SETTINGS flood guard (CVE-2019-9512/9515).
+        _control_reply_count = 0;
 
         auto &body_pipe = stream.assembled_request.body().raw();
         body_pipe.put(reinterpret_cast<const char *>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
@@ -455,6 +475,15 @@ public:
                                   "Unexpected HEADERS frame after client sent END_STREAM (no trailers expected)");
             return;
         }
+
+        // The HEADERS is now accepted onto a valid, active stream (a new request or a trailers
+        // block) — genuine request progress. Reset the control-reply flood budget and start a
+        // fresh CONTINUATION budget for this header block HERE, past every rejection check above,
+        // so a REJECTED HEADERS (old/closed/refused stream) can no longer zero the flood counter
+        // and let an interleaved PING/SETTINGS flood slip through.
+        _control_reply_count      = 0;
+        _continuation_frame_count = 0;
+
         bool is_current_block_trailers = stream.headers_received_main;
 
         if (_current_header_stream_id != 0 && _current_header_stream_id != stream_id) {
@@ -534,6 +563,15 @@ public:
 
         if (!stream.expecting_continuation) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "Unexpected CONTINUATION frame");
+            this->clear_header_assembly_state();
+            return;
+        }
+
+        // Bound the CONTINUATION count per header block. The 1 MB byte cap below does NOT bound
+        // a stream of ZERO-length CONTINUATION frames (each adds 0 bytes yet keeps END_HEADERS
+        // pending), which would otherwise be processed forever (CVE-2024-27316 variant).
+        if (++_continuation_frame_count > qb::http2::protocol_limits::MAX_CONTINUATION_FRAMES) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive CONTINUATION frames in header block");
             this->clear_header_assembly_state();
             return;
         }
@@ -669,6 +707,13 @@ public:
             }
         }
 
+        // Bound SETTINGS-ACK amplification (CVE-2019-9515): like PONGs, ACKs are exempt from
+        // flow control, so a flood of empty SETTINGS frames grows the output pipe without limit.
+        // Same counter/reset discipline as the PING guard.
+        if (++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive SETTINGS control frames (flood)");
+            return;
+        }
         // Send SETTINGS ACK using centralized frame sending
         Http2FrameData<SettingsFrame> ack_frame;
         ack_frame.header.type  = static_cast<uint8_t>(FrameType::SETTINGS);
@@ -695,6 +740,24 @@ public:
             return;
         }
 
+        // Rapid Reset (CVE-2023-44487): HEADERS(+END_STREAM) then an immediate RST_STREAM
+        // dispatches the request to the application yet frees the concurrency slot before it
+        // counts, so SETTINGS_MAX_CONCURRENT_STREAMS never bounds the work — unbounded CPU
+        // amplification on the single-threaded core. Count the reset for ANY non-idle stream
+        // (id at or below the highest client-initiated id) WHETHER OR NOT it is still resident:
+        // a synchronous-response server erases the stream inside the HEADERS handler (dispatch →
+        // send_response → close) before the paired RST arrives, so gating the count on the
+        // _server_streams.find() below would let that (common) configuration bypass the guard.
+        // Idle streams (id > highest opened) are a protocol error handled further down, not here.
+        if (stream_id <= _last_client_initiated_stream_id) {
+            ++_rst_stream_count;
+            const std::uint32_t streams_opened = static_cast<std::uint32_t>((_last_client_initiated_stream_id + 1u) / 2u);
+            if (_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS && _rst_stream_count * 2u > streams_opened) {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets (HTTP/2 Rapid Reset)");
+                return;
+            }
+        }
+
         auto it = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
             Http2ServerStream &stream  = it->second;
@@ -712,7 +775,7 @@ public:
         } else if (stream_id > _last_client_initiated_stream_id) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "RST_STREAM frame received on idle stream");
         }
-        // If stream not found, RST is for an unknown/already closed stream. Can be ignored.
+        // If stream not found (already closed), the reset was still counted above.
     }
 
     /**
@@ -944,7 +1007,15 @@ public:
             // This is an application integration point.
         } else {
             // This is a PING from client, send PONG (PING with ACK).
-            // QB_LOG_TRACE_PA(this->getName(), "Server: Received PING from client, sending PONG.");
+            // Bound PONG amplification (CVE-2019-9512): control frames are exempt from HTTP/2
+            // flow control, so a peer flooding PINGs while stalling its own reads makes the
+            // output pipe grow without limit. _control_reply_count is reset whenever the peer
+            // makes real request progress (HEADERS/DATA); if control replies pile up past the
+            // cap without any, treat it as a flood and close.
+            if (++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive PING control frames (flood)");
+                return;
+            }
             Http2FrameData<PingFrame> pong_frame;
             pong_frame.header.type  = static_cast<uint8_t>(FrameType::PING);
             pong_frame.header.flags = FLAG_ACK;

@@ -120,6 +120,16 @@ private:
     bool        _h3_ready        = false;
     bool        _remote_shutdown = false;
 
+    // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
+    // dispatch(stream_data)) runs response callbacks that can synchronously fail the
+    // connection — a send larger than the QUIC TX cap makes the backend queue a close and
+    // reentrantly delivers dispatch(connection_closed). Tearing _h3 down there would call
+    // nghttp3_conn_del while the outer read is still on the stack (use-after-free), and fire
+    // user callbacks reentrantly. While _read_depth > 0 the teardown is DEFERRED into
+    // _deferred_close and executed once the outermost read returns.
+    int                        _read_depth = 0;
+    std::optional<std::string> _deferred_close;
+
     std::unique_ptr<h3_connection>                                         _h3;
     std::deque<std::unique_ptr<RequestContext>>                            _pending_requests;
     qb::unordered_map<std::uint64_t, std::unique_ptr<RequestContext>>      _active_requests;

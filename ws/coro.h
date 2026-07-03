@@ -324,11 +324,14 @@ public:
 
     void
     on(closed &&event) {
-        if (!_close_sent) {
-            ::qb::http::ws::Message echo = event.ws;
-            _close_sent                  = true;
-            *this << echo;
-        }
+        // Do NOT echo the peer's Close frame here: the CRTP base WebSocket::on(closed) has
+        // ALREADY queued the masked Close echo (guarded by its own _close_sent) before
+        // forwarding to this derived handler. Echoing again from here — which tracks a
+        // SEPARATE _close_sent member — put two Close frames on the wire for one peer close
+        // (RFC 6455 §5.5.1: respond with exactly one). Mark our close-state so a later
+        // coroutine-initiated close() is a no-op, and just deliver the frame — matching the
+        // callback `Client`, which likewise relies on the base echo.
+        _close_sent = true;
         deliver_frame(make_close_frame(event.size, event.data));
         if (_close_complete) {
             auto cb = std::exchange(_close_complete, {});

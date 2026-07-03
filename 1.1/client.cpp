@@ -65,9 +65,14 @@ class Client::connection final
 public:
     using http_protocol = qb::protocol::http::client<connection<Transport>>;
 
+    /// Typed protocol handle, captured from switch_protocol so on(disconnected) can flush a
+    /// close-delimited response body (no Content-Length / Transfer-Encoding) that the parser
+    /// buffered until EOF. Owned by the io base's protocol list; not freed here.
+    http_protocol *_http_protocol = nullptr;
+
     explicit connection(Client &owner)
         : _owner(owner) {
-        this->template switch_protocol<http_protocol>(*this);
+        _http_protocol = this->template switch_protocol<http_protocol>(*this);
         this->setTimeout(qb::duration::zero());
     }
 
@@ -162,6 +167,13 @@ public:
     void
     on(qb::io::async::event::disconnected const &event) {
         auto owner_guard = _owner.weak_from_this().lock();
+        // A close-delimited response (no Content-Length, no Transfer-Encoding) is framed by the
+        // connection close: deliver its buffered body NOW, before the disconnect tears the active
+        // request down. flush_eof dispatches through on(response) → handle_response, completing
+        // the request, so handle_disconnected below then finds nothing to fail. No-op otherwise.
+        if (_http_protocol) {
+            _http_protocol->flush_eof();
+        }
         _owner.handle_disconnected(event.reason);
     }
 

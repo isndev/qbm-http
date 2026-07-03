@@ -153,6 +153,16 @@ private:
     /// `rules_for_schema_node` returns those references into recursion.
     mutable std::unordered_map<const qb::json *, std::vector<std::shared_ptr<IRule>>> _rules_cache;
 
+    /// Maximum schema nesting depth accepted by validate_recursive. Guards against stack
+    /// overflow from a pathologically deep schema (properties/items/allOf/anyOf/oneOf/not
+    /// nesting). Schemas are developer/config-controlled, but may be loaded from external
+    /// config, so a bound is prudent. Real schemas nest well under this.
+    static constexpr int MAX_SCHEMA_DEPTH = 64;
+
+    /// Live recursion depth of the current validate() call. `mutable` because the recursion
+    /// runs through const methods; always returns to 0 via the RAII guard in validate_recursive.
+    mutable int _recursion_depth = 0;
+
     /// F48 &mdash; offending-value policy. Default is `Full` (legacy).
     ErrorValuePolicy _error_value_policy{ErrorValuePolicy::Full};
     std::size_t      _offending_value_preview_bytes{256};

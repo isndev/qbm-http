@@ -34,6 +34,31 @@ namespace detail {
  * would dangle once the call's full-expression ends. Defaulting to this static avoids that entirely.
  */
 inline const std::string empty_string_value{};
+
+/**
+ * @brief Reason phrase for an HTTP status code, or nullptr if the code is not one of the
+ *        standard codes in llhttp's HTTP_STATUS_MAP.
+ *
+ * llhttp's own `http_status_name()` calls `abort()` on any unmapped code — and its map is
+ * sparse (e.g. 209-213, 227, 399, 512, 550 are absent). Because `Status` accepts any int
+ * and a peer can put an arbitrary 3-digit code on the wire (llhttp's parser stores it raw),
+ * stringifying such a status — on every response serialization, every access log, even the
+ * HTTP/2 "invalid status code" warning — would `abort()` the whole process. This qb-owned
+ * lookup reuses llhttp's authoritative map (so mapped codes yield byte-identical phrases)
+ * but returns nullptr instead of aborting, letting callers fall back to "Unknown Status".
+ */
+[[nodiscard]] inline const char *
+status_reason(int code) noexcept {
+#define QB_HTTP_STATUS_GEN(NUM, NAME, STRING) \
+    case NUM:                                 \
+        return #STRING;
+    switch (code) {
+        HTTP_STATUS_MAP(QB_HTTP_STATUS_GEN)
+        default:
+            return nullptr;
+    }
+#undef QB_HTTP_STATUS_GEN
+}
 } // namespace detail
 
 /**
@@ -525,14 +550,14 @@ public:
     /// Convert to std::string (e.g., "OK", "Not Found").
     [[nodiscard]]
     operator std::string() const {
-        const char *name = ::http_status_name(static_cast<::http_status>(_value));
+        const char *name = detail::status_reason(code());
         return name ? name : "Unknown Status";
     }
 
     /// Convert to std::string_view (e.g., "OK", "Not Found").
     [[nodiscard]]
     operator std::string_view() const {
-        const char *name = ::http_status_name(static_cast<::http_status>(_value));
+        const char *name = detail::status_reason(code());
         return name ? name : "Unknown Status";
     }
 
@@ -769,10 +794,10 @@ to_string(qb::http::method m) noexcept {
  */
 [[nodiscard]] inline std::string
 to_string(qb::http::status s) noexcept {
-    // llhttp_status_name can return nullptr if the status is unknown
-    // however, our status type is an enum, so it should always be valid.
-    // Still, it's good practice to handle potential nullptrs from C libraries.
-    const char *name = ::http_status_name(s);
+    // Use qb's own status→reason lookup, NOT llhttp's http_status_name (which abort()s on
+    // any code absent from its sparse map — a remote-triggerable process crash, since a peer
+    // can put an arbitrary 3-digit status on the wire). Returns "Unknown Status" for gaps.
+    const char *name = qb::http::detail::status_reason(s.code());
     return name ? name : "Unknown Status";
 }
 } // namespace std

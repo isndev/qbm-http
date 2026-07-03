@@ -333,8 +333,17 @@ pipe<char>::put<qb::http::Response>(const qb::http::Response &r) {
             }
             *this << qb::http::endl << r.body().raw();
         }
-    } else
+    } else {
+        // Empty body: still emit "Content-Length: 0" so the message is self-delimiting on a
+        // keep-alive connection (RFC 9112 §6.2). Without it, a peer with no Content-Length and no
+        // Transfer-Encoding treats the response as close-delimited (read-until-EOF) and blocks on a
+        // connection that never closes. Omit it for statuses that must not carry a body (1xx/204/304)
+        // and when Content-Length / Transfer-Encoding is already declared.
+        if (!transfer.chunked && !content_length && !response_must_not_carry_body(r)) {
+            *this << "content-length: 0" << qb::http::endl;
+        }
         *this << qb::http::endl;
+    }
     return *this;
 }
 } // namespace qb::allocator
