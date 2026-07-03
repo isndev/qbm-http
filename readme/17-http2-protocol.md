@@ -290,6 +290,11 @@ if (!client->push_request(std::move(req), cb)) {
 ```
 <!-- src: qbm/http/2/client.h:277,300,359-366 -->
 
+### Flood protection against a hostile server
+
+Control frames (`PING`, `SETTINGS`) and `CONTINUATION` frames are exempt from HTTP/2 flow control, so a malicious server could otherwise stream them without bound and either grow the client's output pipe (each `PING`/`SETTINGS` demands an ACK reply) or hold a header block open forever with zero-length `CONTINUATION` frames. The client bounds all three the same way the server does: past `qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES` (1000) queued PONG + SETTINGS-ACK replies in one drain window, or past `MAX_CONTINUATION_FRAMES` (512) `CONTINUATION` frames in a single header block, it closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`. Real response progress (accepted `DATA`, a completed response) resets the control-reply budget, so a busy but well-behaved server never trips it. These caps cover the PING/SETTINGS-flood (CVE-2019-9512 / CVE-2019-9515) and CONTINUATION-flood (CVE-2024-27316) classes.
+<!-- src: qbm/http/2/protocol/client.h:492-493,654-655,2450-2451; qbm/http/2/protocol/base.h:105-114 -->
+
 ### Coroutine API
 
 Each entry point has a `co_await`-able overload. `connect()` yields a `ConnectResult` (boolean-convertible), `push_request(Request)` yields a `Response`, and `push_requests(...)` yields a `std::vector<Response>`.
@@ -315,8 +320,8 @@ The coroutine `connect()` overload has **no default-argument callback overload**
 
 ### Server push
 
-The client receives `PUSH_PROMISE` frames at the protocol level and **auto-rejects** pushes by default, matching modern browser behavior. On the server, push is **disabled by default** (`SETTINGS_ENABLE_PUSH = 0`) and there is no first-class router API for it; `ServerHttp2Protocol::send_push_promise` exists for low-level integration and additionally requires the peer to have enabled push and a valid even, non-zero promised stream ID, returning a `PushPromiseFailureReason` otherwise. Treat server push as advanced/optional rather than a primary feature.
-<!-- src: qbm/http/2/protocol/server.h:1151-1184,1401; qbm/http/2/protocol/frames.h:317-330 -->
+The client advertises `SETTINGS_ENABLE_PUSH = 0` by default, so per RFC 9113 §8.4 it treats any received `PUSH_PROMISE` as a **connection error** and answers with `GOAWAY(PROTOCOL_ERROR)` — it does not RST the pushed stream and keep the connection alive. On the server, push is **disabled by default** (`SETTINGS_ENABLE_PUSH = 0`) and there is no first-class router API for it; `ServerHttp2Protocol::send_push_promise` exists for low-level integration and additionally requires the peer to have enabled push and a valid even, non-zero promised stream ID, returning a `PushPromiseFailureReason` otherwise. Treat server push as advanced/optional rather than a primary feature.
+<!-- src: qbm/http/2/protocol/client.h:725-735; qbm/http/2/protocol/server.h:1151-1184,1401; qbm/http/2/protocol/frames.h:317-330 -->
 
 ## Protocol-layer reference
 
@@ -357,8 +362,8 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
   <!-- src: qbm/http/2/client.h:330-337 -->
 - **Coroutine `connect()` has no default callback.** For fire-and-forget, write `connect(nullptr)`; bare `connect()` is the coroutine awaiter overload.
   <!-- src: qbm/http/2/client.h:214-219 -->
-- **Server push is off by default and not a router feature.** Do not design around server-initiated pushes; the client auto-rejects them and the server disables `SETTINGS_ENABLE_PUSH`.
-  <!-- src: qbm/http/2/protocol/server.h:1401 -->
+- **Server push is off by default and not a router feature.** Do not design around server-initiated pushes; the client advertises `SETTINGS_ENABLE_PUSH = 0` and tears the connection down with `GOAWAY(PROTOCOL_ERROR)` on any `PUSH_PROMISE` (RFC 9113 §8.4), and the server disables `SETTINGS_ENABLE_PUSH`.
+  <!-- src: qbm/http/2/protocol/client.h:725-735; qbm/http/2/protocol/server.h:1401 -->
 
 ## See also
 

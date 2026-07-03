@@ -265,7 +265,7 @@ The facade exposes the same `get/post/put/del/patch/options/head/add_route` verb
 
 Important behaviors to design around:
 
-- `listen()` `start()`s the **HTTP/2** server internally but does **not** start the HTTP/3 server — the QUIC endpoint is driven by the surrounding qb-io event loop. `listen()` returns `true` only when both listeners bind.
+- `listen()` `start()`s the **HTTP/2** server internally but does **not** start the HTTP/3 server — the QUIC endpoint is driven by the surrounding qb-io event loop. `listen()` returns `true` only when both listeners bind, and it is **all-or-nothing**: if one stack binds but the other fails (for example TCP comes up but the QUIC UDP port is taken), it rolls back the side that came up and returns `false` — you never end up with one stack silently listening while `listen()` reports failure.
 - The two sides close independently: `close_http2()`, `close_http3()`, or `close()` (both). Closing one transport does not imply the other.
 
 ## Lifecycle and graceful shutdown
