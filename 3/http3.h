@@ -668,8 +668,15 @@ public:
      */
     bool
     send_response(std::uint64_t connection_id, std::uint64_t stream_id, qb::http::Response const &response) {
-        auto &conn = ensure_connection(connection_id);
-        if (conn.submit_response(stream_id, response)) {
+        // Lookup-only, NOT ensure_connection(): if the connection was reaped (peer closed) before the
+        // app produced its response, drop the response. Resurrecting it via create-if-absent would
+        // emplace a dead entry and bind_local_streams() on a nonexistent QUIC connection (a zombie
+        // that never reaps), or open control streams on whichever connection now holds that id.
+        auto *conn = connection(connection_id);
+        if (!conn) {
+            return false;
+        }
+        if (conn->submit_response(stream_id, response)) {
             maybe_finish_graceful_shutdown(connection_id);
             return true;
         }
