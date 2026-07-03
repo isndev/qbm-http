@@ -340,7 +340,10 @@ TEST(HTTP2ProtocolCoverage, ClientSendRequestRefusedAtConcurrencyLimit) {
 
     // Server SETTINGS restricting the client to a single concurrent stream.
     h2::Http2FrameData<h2::SettingsFrame> settings;
-    settings.header.type = static_cast<uint8_t>(FT::SETTINGS);
+    settings.header.type  = static_cast<uint8_t>(FT::SETTINGS);
+    settings.header.flags = 0; // NOT an ACK — must be set explicitly; a garbage ACK bit would send the
+                               // SETTINGS down the ACK-with-payload path (GOAWAY), which is exactly the
+                               // long-standing order/build-dependent flake this pins down.
     settings.header.set_stream_id(0);
     settings.payload.entries.push_back({h2::Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, 1});
     client.on(std::move(settings));
@@ -380,4 +383,38 @@ TEST(HTTP2ProtocolCoverage, ClientPingAckIsNotEchoed) {
 
     EXPECT_TRUE(client.ok());
     EXPECT_EQ(io.output.size(), baseline) << "PING ACK must not produce any output frame";
+}
+
+// ===========================================================================
+// Client-side flood guards (hostile server): a peer that floods a client with
+// PING / empty-SETTINGS begets an unbounded stream of exempt-from-flow-control
+// PONG / ACK frames (CVE-2019-9512/9515). The client must GOAWAY like the server.
+// ===========================================================================
+
+TEST(HTTP2ProtocolCoverage, ClientPingFloodFromServerTriggersGoaway) {
+    Http2ClientFakeIO io;
+    Client            client(io);
+
+    // A flood of PING requests (no ACK) with no real response progress in between: each begets a
+    // PONG. Past MAX_QUEUED_CONTROL_REPLIES the client must GOAWAY(ENHANCE_YOUR_CALM).
+    const std::vector<uint8_t> ping_payload(8, 0x00);
+    for (int i = 0; i < 1200 && io.goaway_count == 0; ++i) {
+        push_frame(io, FT::PING, 0 /*not ACK*/, 0, ping_payload);
+        drive(client, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+TEST(HTTP2ProtocolCoverage, ClientSettingsFloodFromServerTriggersGoaway) {
+    Http2ClientFakeIO io;
+    Client            client(io);
+
+    // A flood of empty (non-ACK) SETTINGS frames: each begets a SETTINGS ACK. Same budget/guard.
+    for (int i = 0; i < 1200 && io.goaway_count == 0; ++i) {
+        push_frame(io, FT::SETTINGS, 0 /*not ACK, empty*/, 0, {});
+        drive(client, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
 }
