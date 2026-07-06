@@ -534,7 +534,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
     msg_count_client_side = 0;
 
     TestSecureServer server;
-    server.transport().init(ssl::create_server_context(TLS_server_method(), cert_path.string(), key_path.string()));
+    server.transport().init(ssl::Context::server(cert_path, key_path));
     ASSERT_EQ(server.transport().listen_v6(port), 0);
     server.start();
 
