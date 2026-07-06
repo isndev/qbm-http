@@ -358,8 +358,8 @@ TEST(WsClientEcho, TlsHandshakeUpgrades) {
 
     // The TLS server is configured on its own worker thread before it listens.
     WsServerThread<SecureEchoServer> server{port, [](SecureEchoServer &s) {
-                                                s.transport().init(qb::io::ssl::create_server_context(
-                                                    TLS_server_method(), qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()));
+                                                s.transport().init(qb::io::ssl::Context::server(
+                                                    qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()));
                                             }};
 
     SecureEchoClient client{port};

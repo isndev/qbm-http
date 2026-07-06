@@ -128,8 +128,7 @@ protected:
         const std::uint16_t port = _port;
 
         _server = std::make_unique<ServerThread>([cert, key, port](CoroH2Server &srv) -> bool {
-            srv.transport().init(qb::io::ssl::create_server_context(SSLv23_server_method(), cert.c_str(), key.c_str()));
-            srv.transport().set_supported_alpn_protocols({"h2", "http/1.1"});
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
             if (srv.transport().listen_v4(port) != 0) {
                 return false;
             }

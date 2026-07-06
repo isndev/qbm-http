@@ -145,11 +145,11 @@ protected:
         const std::uint16_t port = _port;
 
         _server = std::make_unique<SecureServerThread>([cert, key, port](SecureServer &srv) -> bool {
-            auto ssl_ctx = qb::io::ssl::create_server_context(TLS_server_method(), cert.c_str(), key.c_str());
-            if (!ssl_ctx) {
+            auto tls = qb::io::ssl::Context::server(cert, key);
+            if (!tls.ok()) {
                 return false;
             }
-            srv.transport().init(std::move(ssl_ctx));
+            srv.transport().init(std::move(tls));
             srv.router().get("/ping_ssl", [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
                 ++g_https_server_requests;
                 ctx->response().status() = qb::http::status::OK;
@@ -216,12 +216,11 @@ protected:
         const std::uint16_t port = _port;
 
         _server = std::make_unique<Http2FactoryServerThread>([cert, key, port](Http2FactoryServer &srv) -> bool {
-            auto ssl_ctx = qb::io::ssl::create_server_context(TLS_server_method(), cert.c_str(), key.c_str());
-            if (!ssl_ctx) {
+            auto tls = qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"});
+            if (!tls.ok()) {
                 return false;
             }
-            srv.transport().init(std::move(ssl_ctx));
-            srv.transport().set_supported_alpn_protocols({"h2", "http/1.1"});
+            srv.transport().init(std::move(tls));
             srv.router().get("/ping_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
                 ++g_http2_server_requests;
                 ctx->response().status() = qb::http::status::OK;

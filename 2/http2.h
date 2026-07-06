@@ -490,12 +490,11 @@ public:
      */
     bool
     listen(qb::io::uri uri, std::filesystem::path cert_file, std::filesystem::path key_file) {
-        this->transport().init(qb::io::ssl::create_server_context(TLS_server_method(), std::move(cert_file), std::move(key_file)));
-        if (!this->transport().ssl_handle()) {
-            LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context.");
+        this->transport().init(qb::io::ssl::Context::server(std::move(cert_file), std::move(key_file)).alpn({"h2", "http/1.1"}));
+        if (!this->transport().context().ok()) {
+            LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context: " << this->transport().context().error());
             return false;
         }
-        this->transport().set_supported_alpn_protocols({"h2", "http/1.1"});
         return !this->transport().listen(std::move(uri));
     }
 };

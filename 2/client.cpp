@@ -328,9 +328,9 @@ Client::start_connection() {
 
     // Switch to handshake protocol first
     this->template switch_protocol<HandshakeProtocol>(*this);
-    qb::io::transport::stcp::transport_io_type socket;
-    socket.init();
-    socket.set_alpn_protocols({"h2"});
+    // Value-semantic client context: TLS 1.2+, secure-by-default verification, ALPN "h2" carried on the
+    // context (inherited by the minted SSL — no per-connection re-set needed after the connector moves it).
+    qb::io::transport::stcp::transport_io_type socket{qb::io::ssl::Context::client().alpn({"h2"})};
     auto weak_self = weak_from_this();
     qb::io::async::tcp::connect<qb::io::transport::stcp::transport_io_type>(
         std::move(socket), _base_uri,
@@ -343,7 +343,6 @@ Client::start_connection() {
                 self->handle_connection_failure("TCP/SSL connection failed");
                 return;
             }
-            transport_socket.set_alpn_protocols({"h2"});
             LOG_HTTP_DEBUG_PA(self->_client_id, "TCP/SSL connection established, starting handshake");
             self->transport() = std::move(transport_socket);
             self->start(); // Start handshake protocol
