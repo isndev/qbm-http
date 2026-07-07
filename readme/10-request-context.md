@@ -248,8 +248,9 @@ It sets the sticky cancellation flag, records the reason, calls `cancel()` on th
 The asymmetry to remember: a **handler or middleware** signals failure with `complete(AsyncTaskResult::ERROR)`; a task's own **`cancel()` override must not call `complete()`** — the context owns the cancellation-and-finalization sequence, and a second completion would double-finalize. For async work, check `is_cancelled()` in your completion callback before doing anything further; if it's set, clean up and return — the context is already finalizing.
 
 ```cpp
-// inside an async handler's callback
-qb::io::async::callback([ctx]() {
+// A deferred continuation of the handler (defer = next loop turn; a bare callback(fn)
+// would run inline here instead). For a timed wait use callback(fn, delay).
+qb::io::async::defer([ctx]() {
     if (ctx->is_cancelled())
         return;                      // already finalized elsewhere; do NOT complete()
     ctx->json(load_result());        // terminal helper completes for us

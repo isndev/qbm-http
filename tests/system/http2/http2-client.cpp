@@ -793,4 +793,175 @@ TEST_F(Http2ClientTest, ConnectToRefusedPortFails) {
     EXPECT_FALSE(client->is_connected());
 }
 
+// ---------------------------------------------------------------------------
+// Synchronous request-validation / limit guards (no connection, no event loop):
+// each of these exercises a push_request/push_requests early-return branch that
+// fires its callback in-line before any TCP/TLS work.
+// ---------------------------------------------------------------------------
+
+// A single request that would exceed the outstanding-request bound is rejected
+// synchronously with a 503 and push_request returns false — the single-request
+// twin of BatchExceedingPendingLimitIsRejectedWith503.
+TEST_F(Http2ClientTest, SingleRequestOverPendingLimitIsRejectedWith503) {
+    auto client = make_test_client();
+    client->set_max_pending_requests(0); // the very first push already exceeds the bound
+
+    std::atomic<bool>  done{false};
+    qb::http::Response response;
+    qb::http::Request  request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/test");
+
+    EXPECT_FALSE(client->push_request(request, [&](qb::http::Response r) {
+        response = std::move(r);
+        done     = true;
+    }));
+    ASSERT_TRUE(done.load()); // the error callback fired synchronously
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(client->is_connecting()); // rejected before any connect attempt
+}
+
+// push_request / push_requests with an EMPTY callback are rejected up front
+// (return false) and never touch the request counters.
+TEST_F(Http2ClientTest, NullCallbackRequestsAreRejectedWithoutSideEffects) {
+    auto              client = make_test_client();
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/test");
+
+    EXPECT_FALSE(client->push_request(request, qb::http2::ResponseCallback{}));
+
+    std::vector<qb::http::Request> reqs;
+    reqs.push_back(request);
+    EXPECT_FALSE(client->push_requests(std::move(reqs), qb::http2::BatchResponseCallback{}));
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 0u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 0u);
+}
+
+// An empty batch completes immediately by invoking the callback with an empty
+// vector (the requests.empty() early-out), no connection required.
+TEST_F(Http2ClientTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
+    auto client = make_test_client();
+
+    bool                            done = false;
+    std::vector<qb::http::Response> out{qb::http::Response{}}; // pre-seed non-empty
+    EXPECT_TRUE(client->push_requests(std::vector<qb::http::Request>{}, [&](std::vector<qb::http::Response> rs) {
+        out  = std::move(rs);
+        done = true;
+    }));
+    ASSERT_TRUE(done);
+    EXPECT_TRUE(out.empty());
+}
+
+// A request whose (absolute) URI uses a non-https scheme is rejected with a
+// synthesized BAD_REQUEST (prepare_request https guard) before it hits the wire.
+TEST_F(Http2ClientTest, NonHttpsRequestIsRejectedWithBadRequest) {
+    auto client = make_test_client();
+
+    std::atomic<bool>  done{false};
+    qb::http::Response response;
+    qb::http::Request  request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("http://localhost:" + std::to_string(_port) + "/api/test");
+
+    EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response = std::move(r);
+        done     = true;
+    }));
+    ASSERT_TRUE(done.load());
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_NE(response.body().template as<std::string>().find("https"), std::string::npos);
+}
+
+// An absolute request whose origin differs from the client's base origin is
+// rejected with BAD_REQUEST (prepare_request same-origin guard).
+TEST_F(Http2ClientTest, CrossOriginRequestIsRejectedWithBadRequest) {
+    auto client = make_test_client();
+
+    std::atomic<bool>  done{false};
+    qb::http::Response response;
+    qb::http::Request  request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("https://example.invalid:8443/api/test");
+
+    EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response = std::move(r);
+        done     = true;
+    }));
+    ASSERT_TRUE(done.load());
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_NE(response.body().template as<std::string>().find("same-origin"), std::string::npos);
+}
+
+// A batch mixing an invalid (cross-origin) member with a valid one completes
+// with per-request results in submission order: the invalid member is filled
+// with a synthesized BAD_REQUEST during queueing (prepare_request error path
+// inside the batch loop), the valid member round-trips a real 200 over the live
+// h2 connection. Exercises the batch's partial-error accounting.
+TEST_F(Http2ClientTest, BatchWithInvalidMemberPreservesOrderAndErrors) {
+    auto client = make_test_client();
+
+    std::vector<qb::http::Request> reqs;
+    {
+        qb::http::Request bad;
+        bad.method() = qb::http::Method::GET;
+        bad.uri()    = qb::io::uri("https://example.invalid:8443/api/test");
+        reqs.push_back(std::move(bad));
+    }
+    {
+        qb::http::Request good;
+        good.method() = qb::http::Method::GET;
+        good.uri()    = qb::io::uri("/api/test");
+        reqs.push_back(std::move(good));
+    }
+
+    std::atomic<bool>               done{false};
+    std::vector<qb::http::Response> out;
+    ASSERT_TRUE(client->push_requests(std::move(reqs), [&](std::vector<qb::http::Response> rs) {
+        out  = std::move(rs);
+        done = true;
+    }));
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return done.load(); }));
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(out[1].status(), qb::http::status::OK);
+    EXPECT_EQ(out[1].body().template as<std::string>(), "HTTP/2 GET Success");
+    client->disconnect();
+}
+
+// With the concurrent-stream cap set to 1, three requests drain one at a time:
+// process_pending_requests submits a single stream, then re-drives from
+// complete_request as each response lands (the _active_requests.size() <
+// _max_concurrent_streams loop bound). All three still complete over the one
+// connection.
+TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
+    auto client = make_test_client();
+    client->set_max_concurrent_streams(1);
+
+    std::atomic<int>                received{0};
+    std::vector<qb::http::Response> responses(3);
+    for (int i = 0; i < 3; ++i) {
+        qb::http::Request request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri("/api/users/" + std::to_string(300 + i));
+        ASSERT_TRUE(client->push_request(request, [&, i](qb::http::Response r) {
+            responses[i] = std::move(r);
+            ++received;
+        }));
+    }
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return received.load() == 3; }));
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(responses[i].status(), qb::http::status::OK);
+        EXPECT_EQ(responses[i].body().template as<std::string>(), "User ID: " + std::to_string(300 + i) + " (via HTTP/2)");
+    }
+    client->disconnect();
+}
+
 } // namespace

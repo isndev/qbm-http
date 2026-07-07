@@ -2184,4 +2184,103 @@ TEST_F(Http3LoopbackTest, DualStackClosingHttp2SideKeepsHttp3SideServing) {
     qb::io::async::listener::current.clear();
 }
 
+// ---------------------------------------------------------------------------
+// Synchronous request-validation / limit guards + awaiter self-expiry.
+// Each of these exercises a push_request/push_requests early-return branch that
+// fires (or resolves) in-line without connecting: no QUIC handshake, no server.
+// ---------------------------------------------------------------------------
+
+// push_request / push_request_with_id / push_requests with an EMPTY callback are
+// rejected up front (false / 0 / false) and never touch the request counters.
+TEST_F(Http3LoopbackTest, NullCallbackRequestsAreRejectedWithoutSideEffects) {
+    auto client = qb::http3::make_client(https_origin(next_port()));
+
+    EXPECT_FALSE(client->push_request(qb::http::Request{qb::io::uri("/x")}, qb::http3::ResponseCallback{}));
+    EXPECT_EQ(client->push_request_with_id(qb::http::Request{qb::io::uri("/x")}, qb::http3::ResponseCallback{}), 0u);
+
+    std::vector<qb::http::Request> reqs;
+    reqs.push_back(qb::http::Request{qb::io::uri("/x")});
+    EXPECT_FALSE(client->push_requests(std::move(reqs), qb::http3::BatchResponseCallback{}));
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 0u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 0u);
+}
+
+// An empty batch completes immediately by invoking the callback with an empty
+// vector (the requests.empty() early-out), no connection required.
+TEST_F(Http3LoopbackTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
+    auto client = qb::http3::make_client(https_origin(next_port()));
+
+    bool                            done = false;
+    std::vector<qb::http::Response> out{qb::http::Response{}}; // pre-seed non-empty
+    EXPECT_TRUE(client->push_requests(std::vector<qb::http::Request>{}, [&](std::vector<qb::http::Response> rs) {
+        out  = std::move(rs);
+        done = true;
+    }));
+    ASSERT_TRUE(done);
+    EXPECT_TRUE(out.empty());
+}
+
+// set_max_pending_requests(0) makes the first push exceed the bound, so the
+// request is failed synchronously with a 503 ("pending request limit reached")
+// before any connect attempt is started.
+TEST_F(Http3LoopbackTest, PendingRequestLimitRejectsWith503) {
+    auto client = qb::http3::make_client(https_origin(next_port()));
+    client->set_max_pending_requests(0);
+
+    std::atomic<bool>  done{false};
+    qb::http::Response response;
+    EXPECT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/x")}, [&](qb::http::Response r) {
+        response = std::move(r);
+        done     = true;
+    }));
+    ASSERT_TRUE(done.load());
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_NE(response.body().as<std::string>().find("limit"), std::string::npos);
+    EXPECT_FALSE(client->is_connecting()); // rejected before any connect attempt
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 1u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 1u);
+}
+
+// Cancelling an id that matches no pending or active request returns false
+// (both find_if lookups miss).
+TEST_F(Http3LoopbackTest, CancelUnknownRequestReturnsFalse) {
+    auto client = qb::http3::make_client(https_origin(next_port()));
+    EXPECT_FALSE(client->cancel_request(4242u, "no such request"));
+}
+
+// The coroutine connect() awaiter, given a client destroyed before the await
+// runs, resolves to a failed ConnectResult (weak_self.lock()==nullptr branch)
+// instead of dereferencing the gone client.
+TEST_F(Http3LoopbackTest, ConnectAwaiterErrorsWhenClientExpiresBeforeAwait) {
+    auto result = qb::io::async::run_sync([]() -> qb::io::async::task<qb::http3::ConnectResult> {
+        auto client  = qb::http3::make_client("https://127.0.0.1:1");
+        auto awaiter = client->connect();
+        client.reset(); // drop the last strong ref before awaiting
+        co_return co_await awaiter;
+    }());
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_FALSE(result.error_message.empty());
+}
+
+// Same self-expiry contract for the push_request awaiter: a destroyed client
+// resolves the awaiter with a synthesized 503.
+TEST_F(Http3LoopbackTest, PushRequestAwaiterErrorsWhenClientExpiresBeforeAwait) {
+    auto response = qb::io::async::run_sync([]() -> qb::io::async::task<qb::http::Response> {
+        auto client  = qb::http3::make_client("https://127.0.0.1:1");
+        auto awaiter = client->push_request(qb::http::Request{qb::io::uri("/x")});
+        client.reset();
+        co_return co_await awaiter;
+    }());
+
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(response.body().empty());
+}
+
 #endif // QBM_HTTP_HAS_HTTP3

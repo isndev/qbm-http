@@ -110,10 +110,9 @@ class Client : public std::enable_shared_from_this<Client> {
 
     qb::io::uri             _base_uri;
     std::string             _host;
-    bool                    _is_connected               = false;
-    bool                    _is_connecting              = false;
-    bool                    _intentional_disconnect     = false;
-    bool                    _reconnect_after_disconnect = false;
+    bool                    _is_connected           = false;
+    bool                    _is_connecting          = false;
+    bool                    _intentional_disconnect = false;
     std::shared_ptr<Client> _callback_self_guard;
     std::size_t             _callback_depth            = 0;
     bool                    _deferred_connection_reset = false;

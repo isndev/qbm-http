@@ -645,6 +645,85 @@ TEST(AuthManagerUnverified, NonObjectPayloadIsRejected) {
     EXPECT_FALSE(mgr.verify_token(token).has_value());
 }
 
+// verify_audience(true) but the token carries NO `aud` claim at all: the
+// `!contains("aud")` guard rejects it. Every other audience test presents an aud
+// that mismatches or matches; none exercises the missing-claim arm.
+TEST(AuthManagerUnverified, MissingAudienceWhenRequiredIsRejected) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    opts.token_audience("required-svc"); // also enables verify_audience
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"] = "u";
+    // No "aud" claim.
+    std::string token = forge_token(payload, "irrelevant_secret");
+
+    EXPECT_FALSE(mgr.verify_token(token).has_value());
+}
+
+// An `aud` claim that is neither a string nor an array (here a native JSON number)
+// is malformed: the final `else` of the audience check rejects it. A raw payload
+// keeps the number NATIVE — forge_token would stringify it into the is_string()
+// arm instead, which is the wrong branch.
+TEST(AuthManagerUnverified, AudienceOfWrongJsonTypeIsRejected) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    opts.token_audience("required-svc");
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"] = "u";
+    payload["aud"] = 1234; // native JSON number: not string, not array
+    std::string token = forge_token_raw_payload(payload);
+
+    EXPECT_FALSE(mgr.verify_token(token).has_value());
+}
+
+// verify_not_before(true) with a non-numeric `nbf`: parse_time_claim_as_int64
+// fails to parse the string and the nbf branch rejects the token. The existing
+// NotYetValidNbfIsRejected drives a well-formed FUTURE nbf (parses, then now < nbf);
+// this closes the parse-FAILURE arm of the nbf path instead.
+TEST(AuthManagerUnverified, NonNumericNbfIsRejected) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    opts.verify_not_before(true); // default is already true; explicit for intent
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"] = "u";
+    payload["nbf"] = "not-a-number"; // parse_time_claim_as_int64 -> nullopt
+    std::string token = forge_token(payload, "irrelevant_secret");
+
+    EXPECT_FALSE(mgr.verify_token(token).has_value());
+}
+
+// A NATIVE integer `exp` drives the is_number_integer() arm of
+// parse_time_claim_as_int64 — distinct from the stringified exp qb::jwt::create
+// emits (is_string arm) and the float exp covered elsewhere (rejected). A future
+// integer exp parses cleanly and the token is accepted, pinning the integer-claim
+// path the other exp tests never reach.
+//
+// NOTE: the sibling `is_number_unsigned() && > INT64_MAX` block in
+// parse_time_claim_as_int64 is dead code — nlohmann's is_number_integer() already
+// returns true for unsigned values, so an unsigned claim is consumed by the arm
+// above before the unsigned branch is ever reached. There is therefore no input
+// that exercises it, and no test is written for it.
+TEST(AuthManagerUnverified, NativeIntegerExpClaimIsAccepted) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"] = "u";
+    payload["exp"] = now_epoch() + 3600; // native JSON integer, well in the future
+    std::string token = forge_token_raw_payload(payload);
+
+    auto out = mgr.verify_token(token);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(out->id, "u");
+}
+
 // ---------------------------------------------------------------------------
 // extract_token_from_header
 // ---------------------------------------------------------------------------
@@ -671,6 +750,19 @@ TEST(AuthManagerExtract, CustomScheme) {
     Manager mgr(opts);
     EXPECT_EQ(mgr.extract_token_from_header("Token xyz"), "xyz");
     EXPECT_TRUE(mgr.extract_token_from_header("Bearer xyz").empty());
+}
+
+// A header whose whitespace-trimmed length is below scheme.length()+2 (the scheme
+// plus its separator plus at least one token char) is rejected up front by the
+// length guard, before any scheme comparison. The RejectsBadHeaders cases are all
+// at least that long (or whitespace-only, caught earlier); these are genuinely
+// shorter and drive the length-guard arm.
+TEST(AuthManagerExtract, HeaderShorterThanSchemePlusTwoIsRejected) {
+    Manager mgr(hmac_options()); // default scheme "Bearer" (len 6) -> minimum length 8
+
+    EXPECT_TRUE(mgr.extract_token_from_header("Bear").empty());   // 4 < 8
+    EXPECT_TRUE(mgr.extract_token_from_header("Bearer").empty()); // 6 < 8 (scheme alone, no token)
+    EXPECT_TRUE(mgr.extract_token_from_header("x").empty());      // 1 < 8
 }
 
 // ---------------------------------------------------------------------------
