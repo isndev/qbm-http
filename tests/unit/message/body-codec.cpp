@@ -721,6 +721,9 @@ TEST_F(BodyTest, DecompressionMultipleEncodingsError) {
     // get_decompressor_from_header throws if multiple actual compression algorithms are found
     EXPECT_THROW(body.uncompress("gzip, deflate"), std::runtime_error);
     EXPECT_THROW(body.uncompress("deflate, gzip"), std::runtime_error);
+    // The SAME codec named twice is still two decompressors -> the "Multiple
+    // compression algorithms not supported" guard fires just the same.
+    EXPECT_THROW(body.uncompress("gzip, gzip"), std::runtime_error);
 }
 #endif // QB_HAS_COMPRESSION
 
@@ -760,3 +763,27 @@ TEST_F(BodyTest, CompressOnlyChunkedSelectsNoCompressor) {
     EXPECT_EQ(body.as<std::string>(), "payload data");
 }
 #endif
+
+// Body::as<Multipart>() recovers the boundary from the body's first line: the
+// characters after the leading "--" up to the first CR or LF (qb::http::endl is
+// "\r\n"). Two shapes carry no usable boundary and must raise
+// std::runtime_error("boundary not found or empty") BEFORE any part parsing:
+//   * a body with no CR/LF at all -> find_first_of(endl) == npos (no first line);
+//   * a first line of "--" (or shorter) -> the CR/LF sits at index <= 2, so the
+//     boundary slice is empty, which RFC 2046 forbids (1-70 chars).
+// Neither throw arm was exercised before; both are pinned here. (Not gated on
+// QB_HAS_COMPRESSION: as<Multipart>() is always compiled.)
+TEST_F(BodyTest, AsMultipartThrowsWhenBoundaryMissingOrEmpty) {
+    // No CR or LF anywhere -> the first-line scan finds nothing.
+    body = std::string("no crlf so there is no boundary line to read");
+    EXPECT_THROW((void) body.as<Multipart>(), std::runtime_error);
+
+    // Leading "--" immediately followed by CRLF -> zero-length boundary (pos == 2).
+    body = std::string("--\r\nrest of an otherwise well formed body");
+    EXPECT_THROW((void) body.as<Multipart>(), std::runtime_error);
+
+    // A single dash then CRLF -> CR at index 1 (pos <= 2), also rejected before
+    // the boundary slice is ever constructed.
+    body = std::string("-\r\n");
+    EXPECT_THROW((void) body.as<Multipart>(), std::runtime_error);
+}

@@ -241,6 +241,12 @@ public:
     set_max_concurrent_streams(std::size_t value) noexcept {
         _max_concurrent_streams = value;
     }
+    /// Set the cap on queued+active requests (bounds `_pending_requests`); a push past the
+    /// bound is failed synchronously with 503. Mirrors `http2::Client` for API parity.
+    void
+    set_max_pending_requests(std::size_t value) noexcept {
+        _max_pending_requests = value;
+    }
     /// Set the maximum accepted response body size, in bytes.
     void
     set_max_body_size(std::size_t value) noexcept {

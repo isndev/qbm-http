@@ -236,7 +236,9 @@ public:
     void cancel() override { /* abort pending work if possible */ }
 
     void process(std::shared_ptr<qb::http::Context<MySession>> ctx) override {
-        qb::io::async::callback([ctx]() {
+        // defer() runs on the NEXT loop turn — a bare callback(fn) would run inline,
+        // right here (not deferred). For a real timed wait use callback(fn, delay).
+        qb::io::async::defer([ctx]() {
             if (ctx->is_cancelled())
                 return;  // cancelled while we were parked; Context already finalized
             ctx->response().set_header("X-Async-Checked", "true");

@@ -878,6 +878,65 @@ TEST(Http1ClientTest, CrossOriginRequestIsRejected) {
     drain_client_callbacks();
 }
 
+// A batch whose FIRST request draws a "Connection: close" response while a later
+// request is still pending drives the deferred-reconnect path: handle_response tears
+// the connection down (it must NOT reconnect inline — that would free the connection
+// mid-onMessage/dispose, a UAF), and the ensuing on(disconnected) -> handle_disconnected
+// finds pending work (has_pending_work()==true) and posts a next-turn async::defer()
+// that opens a FRESH connection and drains the remaining request. (The sequential
+// ConnectionClose... test never has pending work at teardown, so it exercises the
+// other, connect-on-next-push path — this one exercises the deferred-reconnect path.)
+TEST(Http1ClientTest, ConnectionCloseWithPendingBatchAutoReconnectsForRemainder) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+
+    std::vector<qb::http::Request> requests;
+    requests.emplace_back(request(qb::http::method::GET, "/close")); // responds Connection: close
+    requests.emplace_back(request(qb::http::method::GET, "/ping"));  // still pending when /close returns
+
+    auto responses = qb::http::run_sync(client->push_requests(std::move(requests)));
+    ASSERT_EQ(responses.size(), 2u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::OK);
+    EXPECT_EQ(responses[0].body().template as<std::string>(), "bye");
+    EXPECT_EQ(responses[1].status(), qb::http::status::OK);
+    EXPECT_EQ(responses[1].body().template as<std::string>(), "pong");
+    // The close forced a teardown while /ping was pending, so the client
+    // reconnected to finish it: at least two server-side connections observed.
+    EXPECT_GE(server.connection_count(), 2);
+    drain_client_callbacks();
+}
+
+// The coroutine push_request awaiter, given a client destroyed before the await
+// runs, must resolve to a synthesized 503 rather than dereference the gone client
+// (the weak_self.lock()==nullptr branch in the awaiter factory). Mirrors the
+// existing connect() self-expiry test on the single-request awaiter.
+TEST(Http1ClientTest, PushRequestAwaiterErrorsWhenClientExpiresBeforeAwait) {
+    auto response = qb::io::async::run_sync([]() -> qb::io::async::task<qb::http::Response> {
+        auto client  = qb::http1::make_client("http://127.0.0.1:1");
+        auto awaiter = client->push_request(request(qb::http::method::GET, "/ping"));
+        client.reset(); // drop the last strong ref before awaiting
+        co_return co_await awaiter;
+    }());
+
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(response.body().empty());
+}
+
+// Same self-expiry contract for the batch awaiter: a destroyed client resolves
+// the awaiter with an EMPTY response vector (complete({})).
+TEST(Http1ClientTest, PushRequestsBatchAwaiterErrorsWhenClientExpiresBeforeAwait) {
+    auto responses = qb::io::async::run_sync([]() -> qb::io::async::task<std::vector<qb::http::Response>> {
+        auto                           client = qb::http1::make_client("http://127.0.0.1:1");
+        std::vector<qb::http::Request> reqs;
+        reqs.emplace_back(request(qb::http::method::GET, "/ping"));
+        auto awaiter = client->push_requests(std::move(reqs));
+        client.reset();
+        co_return co_await awaiter;
+    }());
+
+    EXPECT_TRUE(responses.empty());
+}
+
 #ifdef QB_HAS_COMPRESSION
 // A request carrying Content-Encoding: gzip has its body compressed by the client
 // transport BEFORE it hits the wire (client.cpp connection::send compress block).

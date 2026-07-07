@@ -16,6 +16,7 @@
 #include "./client.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -302,10 +303,9 @@ Client::connect() {
 
 void
 Client::disconnect() {
-    _intentional_disconnect     = true;
-    _is_connected               = false;
-    _is_connecting              = false;
-    _reconnect_after_disconnect = false;
+    _intentional_disconnect = true;
+    _is_connected           = false;
+    _is_connecting          = false;
     fail_active_request("Connection closed", qb::http::status::SERVICE_UNAVAILABLE);
     fail_all_requests("Connection closed", qb::http::status::SERVICE_UNAVAILABLE);
     if (_connection) {
@@ -495,14 +495,15 @@ Client::hold_through_current_tick() {
     }
     _callback_self_guard = std::move(self);
     auto weak_self       = weak_from_this();
-    qb::io::async::callback(
-        [weak_self]() {
-            if (auto self = weak_self.lock()) {
-                self->reset_deferred_connection_if_ready();
-                self->_callback_self_guard.reset();
-            }
-        },
-        std::chrono::microseconds(1));
+    // Defer to the tail of this loop turn (not a magic 1µs timer): once the current
+    // user callback has fully unwound, reset the deferred connection and drop the
+    // self-hold. defer() runs after the dispatch, never inline.
+    qb::io::async::defer([weak_self]() {
+        if (auto self = weak_self.lock()) {
+            self->reset_deferred_connection_if_ready();
+            self->_callback_self_guard.reset();
+        }
+    });
 }
 
 void
@@ -613,21 +614,16 @@ Client::handle_response(qb::http::Response response) {
         return;
     }
     if (!keep_alive) {
-        _is_connected               = false;
-        _reconnect_after_disconnect = has_pending_work();
+        _is_connected = false;
+        // Tear the connection down but DO NOT reconnect synchronously here: handle_response runs
+        // INSIDE the protocol's onMessage(), which reset()s the parser right after we return.
+        // qb::io::async::callback() executes its lambda IMMEDIATELY (not next-tick), so a reconnect
+        // here would create_connection() and free THIS connection's protocol mid-dispatch → a
+        // heap-use-after-free when onMessage() then touches the freed parser. The reconnect for
+        // still-pending work is owned by the ensuing on(disconnected) → handle_disconnected (a
+        // fresh, safe dispatch), exactly as for an unexpected server-side close.
         if (_connection) {
             _connection->disconnect();
-        }
-        if (_reconnect_after_disconnect && _auto_reconnect && !_is_connecting) {
-            auto weak_self = weak_from_this();
-            qb::io::async::callback([weak_self]() {
-                auto self = weak_self.lock();
-                if (!self || self->_is_connected || self->_is_connecting || !self->has_pending_work()) {
-                    return;
-                }
-                self->create_connection();
-                self->connect(nullptr);
-            });
         }
         return;
     }
@@ -659,7 +655,12 @@ Client::handle_disconnected(int reason) {
     }
     if (has_pending_work() && _auto_reconnect) {
         auto weak_self = weak_from_this();
-        qb::io::async::callback([weak_self]() {
+        // Defer, do NOT reconnect inline. handle_disconnected() runs inside the connection's
+        // on(disconnected) → io::dispose() dispatch; create_connection() below reassigns _connection
+        // and frees THIS connection, so running it synchronously is a use-after-free once dispose()
+        // resumes. defer() posts it to the tail of the loop turn — it runs only after the whole
+        // dispatch has unwound, so the connection is no longer on the stack.
+        qb::io::async::defer([weak_self]() {
             auto self = weak_self.lock();
             if (!self || self->_is_connected || self->_is_connecting || !self->has_pending_work()) {
                 return;

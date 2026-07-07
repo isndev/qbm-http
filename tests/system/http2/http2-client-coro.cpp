@@ -373,4 +373,26 @@ TEST_F(CoroH2ClientTest, InteropWithCallbackApiUnchanged) {
     client->disconnect();
 }
 
+// ---------------------------------------------------------------------------
+// Awaiter self-expiry: a client dropped before the await runs must resolve the
+// push_request awaiter to a synthesized 503 (the weak_self.lock()==nullptr
+// branch), never dereferencing the gone client. No server/cert needed — the
+// awaiter never touches the transport.
+// ---------------------------------------------------------------------------
+
+TEST(CoroH2ClientExpiry, PushRequestAwaiterErrorsWhenClientExpiresBeforeAwait) {
+    auto response = qb::io::async::run_sync([]() -> qb::io::async::task<qb::http::Response> {
+        auto              client = qb::http2::make_client("https://127.0.0.1:1");
+        qb::http::Request req;
+        req.method() = qb::http::Method::GET;
+        req.uri()    = qb::io::uri("/ping");
+        auto awaiter = client->push_request(std::move(req));
+        client.reset(); // drop the last strong ref before awaiting
+        co_return co_await awaiter;
+    }());
+
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(response.body().empty());
+}
+
 } // namespace

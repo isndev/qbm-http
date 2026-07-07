@@ -293,6 +293,105 @@ TEST_F(RateLimitFastTest, EmptyClientIdIsASingleTrackedBucket) {
 }
 
 // ---------------------------------------------------------------------------
+// Forwarding-header client-id extraction.
+//
+// MockMiddlewareSession exposes no ip(), so the built-in extractor's secure
+// peer-IP default is unavailable and it falls through to the forwarding-header
+// logic even at the default trust_forwarded_headers=false. These cases cover the
+// CF-Connecting-IP / True-Client-IP precedence arms and the X-Forwarded-For
+// rightmost-IP extraction, none of which the single-token XFF tests above reach.
+// ---------------------------------------------------------------------------
+
+TEST_F(RateLimitFastTest, CfConnectingIpIsPreferredClientKey) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(std::chrono::minutes(5));
+    auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
+
+    auto with_cf = [this](const std::string &cf, const std::string &xff) {
+        auto req = create_request(qb::http::method::GET, "/mw_test");
+        req.set_header(std::string("CF-Connecting-IP"), cf);
+        if (!xff.empty()) {
+            req.set_header(std::string("X-Forwarded-For"), xff);
+        }
+        return req;
+    };
+
+    // First request keyed on CF-Connecting-IP -> OK.
+    configure_router_and_run(mw, with_cf("cf-1.2.3.4", "9.9.9.9"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+
+    // Same CF, DIFFERENT X-Forwarded-For -> still the same bucket (CF wins) -> 429.
+    configure_router_and_run(mw, with_cf("cf-1.2.3.4", "8.8.8.8"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
+
+    // Different CF -> independent bucket -> OK.
+    configure_router_and_run(mw, with_cf("cf-5.6.7.8", "9.9.9.9"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+}
+
+TEST_F(RateLimitFastTest, TrueClientIpUsedWhenCfAbsent) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(std::chrono::minutes(5));
+    auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
+
+    auto with_true_client = [this](const std::string &tci, const std::string &xff) {
+        auto req = create_request(qb::http::method::GET, "/mw_test");
+        req.set_header(std::string("True-Client-IP"), tci);
+        if (!xff.empty()) {
+            req.set_header(std::string("X-Forwarded-For"), xff);
+        }
+        return req;
+    };
+
+    // No CF header present: True-Client-IP is the key.
+    configure_router_and_run(mw, with_true_client("akamai-1.1.1.1", "9.9.9.9"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+
+    // Same True-Client-IP, different XFF -> same bucket -> 429.
+    configure_router_and_run(mw, with_true_client("akamai-1.1.1.1", "7.7.7.7"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
+
+    // Different True-Client-IP -> independent bucket -> OK.
+    configure_router_and_run(mw, with_true_client("akamai-2.2.2.2", "9.9.9.9"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+}
+
+TEST_F(RateLimitFastTest, XForwardedForKeysOnRightmostIp) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(std::chrono::minutes(5));
+    auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
+
+    // Only X-Forwarded-For set: the extractor takes the RIGHTMOST IP (closest to
+    // the server, least spoofable) and trims the leading whitespace after the comma.
+    configure_router_and_run(mw, request_for("/mw_test", "1.1.1.1, 203.0.113.7"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+
+    // Different leftmost, SAME rightmost -> same bucket -> 429.
+    configure_router_and_run(mw, request_for("/mw_test", "2.2.2.2, 203.0.113.7"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
+
+    // Different rightmost -> independent bucket -> OK.
+    configure_router_and_run(mw, request_for("/mw_test", "2.2.2.2, 198.51.100.9"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+}
+
+// A client id longer than MAX_CLIENT_ID_LENGTH (256) is rejected with 400 before
+// any counting, via a custom extractor that returns a 300-char string.
+TEST_F(RateLimitFastTest, OverlongClientIdIsRejectedWithBadRequest) {
+    qb::http::RateLimitOptions options;
+    options.max_requests(100).window(std::chrono::minutes(5));
+    options.client_id_extractor<MockMiddlewareSession>(
+        [](const qb::http::Context<MockMiddlewareSession> & /*ctx*/) -> std::string { return std::string(300, 'x'); });
+    auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
+
+    configure_router_and_run(mw, request_for("/mw_test"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_FALSE(_session->_final_handler_called);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Invalid client identifier");
+    EXPECT_EQ(header_value(_session->_response, "Content-Type"), "text/plain; charset=utf-8");
+}
+
+// ---------------------------------------------------------------------------
 // Admin reset API.
 // ---------------------------------------------------------------------------
 
