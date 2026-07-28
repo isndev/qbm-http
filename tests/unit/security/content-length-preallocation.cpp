@@ -51,6 +51,10 @@
 #include <new>
 #include <string>
 
+#ifdef _MSC_VER
+#include <malloc.h> // _aligned_malloc / _aligned_free (see the aligned pair below)
+#endif
+
 #include <gtest/gtest.h>
 
 #include "../1.1/protocol/base.h"
@@ -77,16 +81,40 @@ tracked_alloc(std::size_t n) {
     return p;
 }
 
-// Aligned storage must be released by the same family, and std::free accepts
-// std::aligned_alloc memory on every platform qb targets.
+// Aligned storage must be released by the SAME family as it was allocated from, and there is no
+// one portable pair. MSVC's UCRT deliberately ships no C11 `std::aligned_alloc`: on Windows
+// `free()` cannot release an over-aligned block, so `_aligned_malloc` must be paired with
+// `_aligned_free`. Elsewhere `std::free` does accept `std::aligned_alloc` memory. Both halves are
+// selected together here; the aligned `operator delete` overloads below route to
+// qb_aligned_free(), never to std::free().
+// NOTE the argument order differs between the two (`_aligned_malloc(size, align)` vs
+// `aligned_alloc(align, size)`), which is why this is a function and not a bare macro.
+inline void *
+qb_aligned_alloc(std::size_t align, std::size_t size) noexcept {
+#ifdef _MSC_VER
+    return _aligned_malloc(size, align);
+#else
+    return std::aligned_alloc(align, size);
+#endif
+}
+inline void
+qb_aligned_free(void *p) noexcept {
+#ifdef _MSC_VER
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+}
+
 inline void *
 tracked_alloc_aligned_nothrow(std::size_t n, std::align_val_t a) noexcept {
     const std::size_t align = static_cast<std::size_t>(a);
-    // aligned_alloc requires a size that is a multiple of the alignment.
+    // aligned_alloc requires a size that is a multiple of the alignment (harmless for
+    // _aligned_malloc, which does not).
     const std::size_t size = ((n ? n : 1) + align - 1) / align * align;
     if (g_counting.load(std::memory_order_relaxed))
         g_bytes.fetch_add(size, std::memory_order_relaxed);
-    return std::aligned_alloc(align, size);
+    return qb_aligned_alloc(align, size);
 }
 
 inline void *
@@ -177,29 +205,32 @@ void
 operator delete[](void *p, const std::nothrow_t &) noexcept {
     std::free(p);
 }
+// Every ALIGNED form pairs with qb_aligned_free -- std::free here would be an
+// allocator-family mismatch (heap corruption on Windows, where the aligned block carries a
+// header std::free knows nothing about).
 void
 operator delete(void *p, std::align_val_t) noexcept {
-    std::free(p);
+    qb_aligned_free(p);
 }
 void
 operator delete[](void *p, std::align_val_t) noexcept {
-    std::free(p);
+    qb_aligned_free(p);
 }
 void
 operator delete(void *p, std::size_t, std::align_val_t) noexcept {
-    std::free(p);
+    qb_aligned_free(p);
 }
 void
 operator delete[](void *p, std::size_t, std::align_val_t) noexcept {
-    std::free(p);
+    qb_aligned_free(p);
 }
 void
 operator delete(void *p, std::align_val_t, const std::nothrow_t &) noexcept {
-    std::free(p);
+    qb_aligned_free(p);
 }
 void
 operator delete[](void *p, std::align_val_t, const std::nothrow_t &) noexcept {
-    std::free(p);
+    qb_aligned_free(p);
 }
 
 namespace {
