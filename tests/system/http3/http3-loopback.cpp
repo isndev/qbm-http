@@ -106,10 +106,27 @@ protected:
         qb::io::async::init();
     }
 
-    /** @brief A fresh kernel-assigned loopback port (no fixed magic ports). */
+    /** @brief A fresh kernel-assigned loopback port, probed in the UDP space (QUIC binds UDP). */
     static std::uint16_t
     next_port() {
         return qb::http::test::ephemeral_udp_port();
+    }
+
+    /**
+     * @brief A fresh kernel-assigned loopback port, probed in the TCP space.
+     *
+     * The dual-stack cases below bind BOTH an HTTP/2 listener (TCP) and an HTTP/3 endpoint
+     * (UDP). @ref next_port() probes UDP, which is exactly right for the HTTP/3 half and says
+     * NOTHING about the same number in the TCP space — the two are independent, which is the
+     * very reason this file has two probes at all. Handing a UDP-probed number to a TCP listener
+     * therefore binds a port nothing verified was free, and when it was not,
+     * `server->listen(...)` simply returned false:
+     *   http3-loopback.cpp(2080): Value of: server->listen(...)  Actual: false  Expected: true
+     * observed on all three dual-stack cases in one run. Probe the space you are going to bind.
+     */
+    static std::uint16_t
+    next_tcp_port() {
+        return qb::http::test::ephemeral_port();
     }
 
     /** @brief "https://127.0.0.1:<port>" base origin for a server/client pair. */
@@ -2066,7 +2083,7 @@ TEST_F(Http3LoopbackTest, LifecycleHooksFollowHttpSessionSemantics) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http3LoopbackTest, DualStackSameRouteServesHttp2AndHttp3OnSeparateSockets) {
-    const auto h2_port = next_port();
+    const auto h2_port = next_tcp_port(); // TCP side: probe the TCP space (see next_tcp_port)
     const auto h3_port = next_port();
     auto       server  = qb::http::make_dual_stack_server();
     server->router().get("/shared", [](auto ctx) {
@@ -2119,7 +2136,7 @@ TEST_F(Http3LoopbackTest, DualStackSameRouteServesHttp2AndHttp3OnSeparateSockets
 }
 
 TEST_F(Http3LoopbackTest, DualStackClosingHttp3SideKeepsHttp2SideServing) {
-    const auto h2_port = next_port();
+    const auto h2_port = next_tcp_port(); // TCP side: probe the TCP space (see next_tcp_port)
     const auto h3_port = next_port();
     auto       server  = qb::http::make_dual_stack_server();
     server->router().get("/h2-only-after-h3-close", [](auto ctx) {
@@ -2157,7 +2174,7 @@ TEST_F(Http3LoopbackTest, DualStackClosingHttp3SideKeepsHttp2SideServing) {
 }
 
 TEST_F(Http3LoopbackTest, DualStackClosingHttp2SideKeepsHttp3SideServing) {
-    const auto h2_port = next_port();
+    const auto h2_port = next_tcp_port(); // TCP side: probe the TCP space (see next_tcp_port)
     const auto h3_port = next_port();
     auto       server  = qb::http::make_dual_stack_server();
     server->router().get("/h3-only-after-h2-close", [](auto ctx) {
