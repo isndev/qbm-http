@@ -18,7 +18,7 @@
  *   - The TLS cert is a HARD prerequisite via @c shared/ssl_test_resource.h:
  *     a missing cert FAILS @c SetUp loudly rather than silently @c GTEST_SKIP.
  *   - Every fixed magic port (31943, 31987, ...) is replaced by an
- *     @c ephemeral_port() bind-and-read-back, so concurrent CTest never collides.
+ *     @c ephemeral_udp_port() bind-and-read-back on a UDP probe (QUIC binds UDP; a TCP probe says nothing about the same number on UDP).
  *   - The four weak @c EXPECT_NE(status, OK) body/content-length-limit negatives
  *     are pinned to their exact contract (413 PAYLOAD_TOO_LARGE / 502 BAD_GATEWAY).
  *   - The fixed @c for(i<20) pump in the graceful-shutdown test is replaced by a
@@ -51,7 +51,7 @@
 using namespace std::chrono_literals;
 
 namespace {
-using qb::http::test::ephemeral_port;
+using qb::http::test::ephemeral_udp_port;
 
 // ---------------------------------------------------------------------------
 // Custom-session / connection-observer server types used by a couple of tests.
@@ -109,7 +109,7 @@ protected:
     /** @brief A fresh kernel-assigned loopback port (no fixed magic ports). */
     static std::uint16_t
     next_port() {
-        return qb::http::test::ephemeral_port();
+        return qb::http::test::ephemeral_udp_port();
     }
 
     /** @brief "https://127.0.0.1:<port>" base origin for a server/client pair. */
@@ -2284,3 +2284,52 @@ TEST_F(Http3LoopbackTest, PushRequestAwaiterErrorsWhenClientExpiresBeforeAwait) 
 }
 
 #endif // QBM_HTTP_HAS_HTTP3
+
+// ---------------------------------------------------------------------------
+// A batch whose requests ALL fail prepare_request must still invoke the callback.
+//
+// push_requests() moves the caller's callback into the batch context
+// (`batch->callback = std::move(callback)`) and then, if every request failed validation
+// synchronously, took an early-completion path that invoked the ORIGINAL `callback` — by then a
+// moved-from std::function, i.e. empty. Calling it throws std::bad_function_call, so the caller
+// never receives the per-request error responses it was promised, precisely in the case where it
+// most needs them.
+//
+// prepare_request rejects a missing host, a non-https scheme, or a cross-origin URI — so a single
+// off-origin request is enough, and the whole path is synchronous and pre-network: no server, no
+// connection, no pumping required.
+//
+// Found by clang-analyzer-cplusplus.Move + bugprone-use-after-move. The same use-after-move shape
+// exists in the HTTP/1.1 and HTTP/2 clients' connect() awaiters, but there it is unreachable
+// (their connect(callback) never returns false when a callback is supplied), so only this one is a
+// live defect; the others were hardened defensively.
+//
+// PLATFORM NOTE, so a green run here is not over-read: a moved-from std::function is "valid but
+// unspecified". libstdc++ ALWAYS empties it — verified with a direct probe, including for this
+// exact signature — so the pre-fix code throws bad_function_call on Linux (and, by the same
+// mechanism, very likely MSVC). libc++ leaves a small-buffer callable intact, so on macOS the old
+// code happened to work and this case passes with OR without the fix. It still earns its place
+// everywhere as coverage of the all-rejected batch path; the use-after-move half only
+// discriminates on an implementation that empties the source.
+// ---------------------------------------------------------------------------
+TEST_F(Http3LoopbackTest, BatchOfFullyRejectedRequestsStillInvokesTheCallback) {
+    auto client = qb::http3::make_client(https_origin(ephemeral_udp_port()));
+    client->set_verify_peer(false);
+
+    // Cross-origin (different host) => prepare_request rejects it before any I/O.
+    std::vector<qb::http::Request> requests;
+    requests.emplace_back(qb::io::uri("https://not-the-configured-origin.invalid:443/nope"));
+
+    bool                            fired = false;
+    std::vector<qb::http::Response> got;
+    EXPECT_NO_THROW({
+        client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> responses) {
+            fired = true;
+            got   = std::move(responses);
+        });
+    }) << "an all-rejected batch threw instead of delivering its error responses";
+
+    EXPECT_TRUE(fired) << "the batch callback must fire even when every request is rejected up front";
+    ASSERT_EQ(got.size(), 1u);
+    EXPECT_EQ(got[0].status(), qb::http::status::BAD_REQUEST);
+}

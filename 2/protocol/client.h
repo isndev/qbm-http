@@ -143,6 +143,11 @@ private:
     // frames that stay under the header-block byte cap. Bound both: _control_reply_count is forgiven
     // on real response progress; _continuation_frame_count is per-header-block (reset in
     // clear_header_assembly_state).
+    /// Highest even (server-initiated) stream id ever promised to us. RFC 9113 §5.1.1 requires
+    /// promised ids to increase monotonically; closed streams are erased from `_client_streams`,
+    /// so that map alone cannot detect a re-promised id. Mirrors the server's
+    /// `_last_client_initiated_stream_id`.
+    std::uint32_t _last_promised_stream_id = 0;
     std::uint32_t _control_reply_count      = 0;
     std::uint32_t _continuation_frame_count = 0;
 
@@ -207,6 +212,7 @@ public:
         _connection_active           = true;
         _graceful_shutdown_initiated = false;
         _initial_settings_sent       = false;
+        _last_promised_stream_id     = 0;
         _control_reply_count         = 0;
         _continuation_frame_count    = 0;
 
@@ -753,18 +759,39 @@ public:
             return;
         }
 
-        // Check against our SETTINGS_MAX_CONCURRENT_STREAMS that we would advertise to the server.
-        // This limits how many concurrent streams the server can push to us.
-        uint32_t our_advertised_max_concurrent_server_initiated_streams =
-            get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS);
-        if (get_active_stream_count(true)
-            >= our_advertised_max_concurrent_server_initiated_streams) { // true for server-initiated (even) streams
-            send_rst_stream(promised_stream_id, ErrorCode::REFUSED_STREAM,
-                            "Client refusing PUSH_PROMISE due to its own MAX_CONCURRENT_STREAMS limit for incoming pushes");
+        // RFC 9113 §5.1.1: "The identifier of a newly established stream MUST be numerically greater
+        // than all streams that the initiating endpoint has opened or reserved... An endpoint that
+        // receives an unexpected stream identifier MUST respond with a connection error of type
+        // PROTOCOL_ERROR." The `_client_streams.count()` check above cannot enforce this: a closed
+        // stream is ERASED from that map, so a server could re-promise an even id it had already
+        // used, or promise ids out of order (100 then 4). The server side enforces the mirror rule
+        // for client-initiated streams via `_last_client_initiated_stream_id`; this is the half that
+        // was missing here.
+        //
+        // NOTE ON REACHABILITY: everything from here down is currently DEAD CODE. The client
+        // hardcodes `_our_settings[SETTINGS_ENABLE_PUSH] = 0` in initialize_our_settings_map(),
+        // `_our_settings` is private, and no constructor or setter exposes it — so the
+        // `client_allows_push_globally` test above always fails and every PUSH_PROMISE takes the
+        // GOAWAY branch. This guard is defensive, for the day push becomes configurable; it is not
+        // fixing a reachable defect today.
+        if (promised_stream_id <= _last_promised_stream_id) {
+            send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "PUSH_PROMISE with a non-monotonic promised stream id");
             return;
         }
 
-        // Decode headers from PUSH_PROMISE payload
+        // Decode headers from PUSH_PROMISE payload.
+        //
+        // This MUST happen before any refusal that returns. HPACK is a CONNECTION-WIDE stateful
+        // compression context: skipping a header block leaves our decoder's dynamic table out of
+        // sync with the server's encoder, and every subsequent header block on the connection then
+        // decodes to garbage. The SETTINGS_ENABLE_PUSH=0 branch above was already restructured for
+        // exactly this reason; the MAX_CONCURRENT_STREAMS refusal (now moved below, after this
+        // decode) used to return early and skip it — so once push is enabled, a server merely
+        // pushing more than our advertised limit (legitimate behaviour, answered with
+        // REFUSED_STREAM) would corrupt the connection.
+        //
+        // Same reachability caveat as the monotonicity guard above: this path is unreachable while
+        // the client hardcodes SETTINGS_ENABLE_PUSH = 0. Corrected defensively, not a live fix.
         std::vector<hpack::HeaderField> temp_decoded_hpack_fields;
         bool                            is_incomplete_dummy = false;
         if (!_hpack_decoder.decode(pp_event.payload.header_block_fragment, temp_decoded_hpack_fields, is_incomplete_dummy)) {
@@ -777,6 +804,21 @@ public:
             send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decode incomplete for PUSH_PROMISE headers");
             return;
         }
+
+        // The header block is now decoded and the HPACK table is in sync, so it is safe to refuse.
+        // Check against our SETTINGS_MAX_CONCURRENT_STREAMS: this bounds how many concurrent streams
+        // the server may push to us. RFC 9113 §8.4 — REFUSED_STREAM on the promised stream, which
+        // leaves the connection healthy.
+        const uint32_t our_advertised_max_concurrent_server_initiated_streams =
+            get_setting_value_or_default(Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS);
+        if (get_active_stream_count(true) >= our_advertised_max_concurrent_server_initiated_streams) {
+            _last_promised_stream_id = promised_stream_id; // the id is spent either way
+            send_rst_stream(promised_stream_id, ErrorCode::REFUSED_STREAM,
+                            "Client refusing PUSH_PROMISE due to its own MAX_CONCURRENT_STREAMS limit for incoming pushes");
+            return;
+        }
+
+        _last_promised_stream_id = promised_stream_id;
 
         // Create and store the new stream in RESERVED_REMOTE state
         Http2ClientStream pushed_stream_obj(

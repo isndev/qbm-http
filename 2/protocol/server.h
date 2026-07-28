@@ -2121,13 +2121,22 @@ private:
                                                 "Client SETTINGS_INITIAL_WINDOW_SIZE change caused stream window overflow (conn error)");
                     return;
                 }
-                if (stream.peer_window_size < 0) {
-                    this->send_rst_stream(stream.id, ErrorCode::FLOW_CONTROL_ERROR,
-                                          "Stream window negative (server side) due to client SETTINGS_INITIAL_WINDOW_SIZE change");
-                    this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR,
-                                                "Client SETTINGS_INITIAL_WINDOW_SIZE change caused negative stream window (conn error)");
-                    return;
-                }
+                // A NEGATIVE window is legal and MUST NOT be an error. RFC 9113 §6.9.2: "A change to
+                // SETTINGS_INITIAL_WINDOW_SIZE can cause the available space in a flow-control
+                // window to become negative. A sender MUST track the negative flow-control window
+                // and MUST NOT send new flow-controlled frames until it receives WINDOW_UPDATE
+                // frames that cause the flow-control window to become positive." — the RFC even
+                // works the example through (60 KB sent, initial size lowered to 16 KB, window
+                // becomes -44 KB). Only EXCEEDING the maximum is a connection error, and that is
+                // handled above.
+                //
+                // This used to RST the stream and GOAWAY the connection, so any peer that lowered
+                // its initial window size after data had flowed — ordinary adaptive flow control —
+                // had its connection killed, and a peer could trigger it deliberately with one
+                // SETTINGS frame. Tracking it needs no new machinery: the send path already
+                // declines while `peer_window_size <= 0`, and the resume below already fires when a
+                // WINDOW_UPDATE brings it back positive. The client side (client.h) has always got
+                // this right; this brings the server in line with it and with the RFC.
                 if (old_stream_peer_window <= 0 && stream.peer_window_size > 0 && stream.has_pending_data_to_send) {
                     this->try_send_pending_data_for_stream(stream.id, stream);
                 }

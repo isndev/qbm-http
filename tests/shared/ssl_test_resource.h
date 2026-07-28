@@ -64,7 +64,20 @@ find_ssl_test_resource(const char *file_name) {
     namespace fs = std::filesystem;
 
     // .../qbm/http/tests/shared/<this header>  ->  workspace (qb-dev) root.
+    //
+    // `lexically_normal()` is LOAD-BEARING. `__FILE__` expands to the include path as WRITTEN,
+    // so for a test under `system/<subdir>/` (which includes this header as
+    // "../../shared/ssl_test_resource.h") it is the UNNORMALISED
+    // `.../tests/system/http3/../../shared/ssl_test_resource.h`. `parent_path()` is purely
+    // lexical: five of them peel the trailing components one at a time and land on
+    // `.../qbm/http/tests/system` instead of the workspace root — so all three source-tree
+    // candidates below pointed at `.../qbm/http/tests/system/qb/resources/ssl/…`, which never
+    // exists. Resolution then depended entirely on the CWD-relative candidates, which is how an
+    // intermittent `certs_available() == false` could abort the HTTP/3 system tests under a
+    // parallel `ctest` run. Normalising first collapses the `..` components so the canonical
+    // candidate resolves for every test, at any nesting depth, regardless of CWD.
     const fs::path repo_root = fs::path(__FILE__)
+                                   .lexically_normal()
                                    .parent_path()  // shared/
                                    .parent_path()  // tests/
                                    .parent_path()  // http/

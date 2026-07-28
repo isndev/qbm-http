@@ -113,6 +113,17 @@ data_end_stream_seen(const qb::allocator::pipe<char> &output, uint32_t stream_id
     return false;
 }
 
+// True if any frame of the given type was emitted.
+[[nodiscard]] bool
+frame_type_seen(const qb::allocator::pipe<char> &output, FrameType type) {
+    for (const auto &f : parse_emitted_frames(output)) {
+        if (f.type == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Parse the first emitted frame of the given type AT OR AFTER `from_offset` and
 // return its decoded view, or std::nullopt if none. Used to pin the *exact*
 // next emitted frame (type+stream+flags) rather than a relative count delta.
@@ -2869,12 +2880,16 @@ TEST(HTTP2ServerProtocol, GoAwayWithErrorImplicitlyClosesHigherOpenClientStream)
 
 // ---------------------------------------------------------------------------
 // SETTINGS_INITIAL_WINDOW_SIZE reflow that drives a stream window negative.
-// The server has a stream whose peer_window_size was already consumed; a
-// client SETTINGS lowering INITIAL_WINDOW_SIZE pushes it below zero, which is a
-// stream + connection FLOW_CONTROL_ERROR (server.h:2049-2055).
+//
+// This case used to assert a stream + connection FLOW_CONTROL_ERROR, mirroring what the server
+// then did. That was a spec violation, and the assertion was describing the implementation rather
+// than the protocol. RFC 9113 6.9.2 is explicit that the negative window is legal and must simply
+// be tracked -- only EXCEEDING the maximum is a connection error -- and it works the very same
+// scenario through as its example. The client half of this codebase already tracked it correctly;
+// the server now matches.
 // ---------------------------------------------------------------------------
 
-TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsFlowControlError) {
+TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTracked) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     push_preface(io);
@@ -2898,9 +2913,9 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsFl
     push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1u}}));
     drive(protocol, io);
 
-    EXPECT_FALSE(protocol.ok());
-    ASSERT_TRUE(protocol.get_last_error_code().has_value());
-    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::FLOW_CONTROL_ERROR);
+    EXPECT_TRUE(protocol.ok()) << "a negative flow-control window is legal (RFC 9113 6.9.2): the connection "
+                                  "must keep running and simply stop sending on that stream";
+    EXPECT_FALSE(protocol.get_last_error_code().has_value()) << "no connection error may be raised for a negative window";
 }
 
 // ---------------------------------------------------------------------------
@@ -3119,4 +3134,92 @@ TEST(HTTP2ServerProtocol, ContinuationFloodTriggersEnhanceYourCalmGoaway) {
 
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 9113 6.9.2 — lowering SETTINGS_INITIAL_WINDOW_SIZE after data has flowed drives a
+// stream's send window NEGATIVE, and that is explicitly legal:
+//
+//   "A change to SETTINGS_INITIAL_WINDOW_SIZE can cause the available space in a flow-control
+//    window to become negative. A sender MUST track the negative flow-control window and MUST NOT
+//    send new flow-controlled frames until it receives WINDOW_UPDATE frames that cause the
+//    flow-control window to become positive."
+//
+// Only a change that makes a window EXCEED the maximum is a connection error. The server used to
+// RST_STREAM + GOAWAY(FLOW_CONTROL_ERROR) on the negative case, so any peer performing ordinary
+// adaptive flow control — lowering its initial window mid-connection — had its connection killed,
+// and a peer could trigger it deliberately with a single SETTINGS frame after one response body.
+// The client side has always tracked it correctly; these cases pin the server to the same rule.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, LoweringInitialWindowBelowConsumedIsNotAnError) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 1000);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/adaptive");
+    ASSERT_TRUE(protocol.ok());
+
+    // Consume 600 of the 1000-octet stream window.
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(600, 'a');
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 600u);
+    io.output.clear();
+
+    // Peer lowers its initial window to 100: delta = 100 - 1000 = -900, so the stream's send
+    // window goes 400 -> -500. Legal, and MUST be tracked rather than reported.
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100}}));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok()) << "a negative flow-control window is legal per RFC 9113 6.9.2 — the "
+                                  "connection must survive it";
+    EXPECT_FALSE(frame_type_seen(io.output, FrameType::GOAWAY)) << "the server must not GOAWAY on a negative window";
+    EXPECT_FALSE(frame_type_seen(io.output, FrameType::RST_STREAM)) << "the server must not RST the stream on a negative window";
+}
+
+TEST(HTTP2ServerProtocol, NegativeWindowBlocksSendsThenWindowUpdateResumesThem) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 1000);
+    ASSERT_TRUE(protocol.ok());
+
+    open_post_stream_open(protocol, io, 1, "/resume");
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Response first;
+    first.status() = qb::http::status::OK;
+    first.body()   = std::string(600, 'a');
+    ASSERT_TRUE(protocol.send_response(1, first));
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 600u);
+    io.output.clear();
+
+    // Drive the window to -500.
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100}}));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    io.output.clear();
+
+    // Open a second stream and queue a body on it. Its window starts at the new initial size, but
+    // the connection-level window is what we exercise here: the point is that the negative stream
+    // stays quiet until credited.
+    open_post_stream_open(protocol, io, 3, "/other");
+    ASSERT_TRUE(protocol.ok());
+    io.output.clear();
+
+    // A WINDOW_UPDATE smaller than the deficit must NOT unblock stream 1 (-500 + 200 = -300).
+    make_window_update_frame(io, 1, 200);
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 0u) << "still negative — nothing may be sent";
+
+    // Credit past zero: -300 + 900 = +600, which must let queued data flow again.
+    io.output.clear();
+    make_window_update_frame(io, 0, 100000); // lift the connection window too
+    drive(protocol, io);
+    make_window_update_frame(io, 1, 900);
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
 }

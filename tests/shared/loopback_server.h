@@ -52,40 +52,119 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
+#include <algorithm>
 
 #include <gtest/gtest.h>
 
 #include <qb/io/async.h>
 #include <qb/io/tcp/listener.h>
+#include <qb/io/udp/socket.h>
 
 namespace qb::http::test {
 
 /**
  * @brief Bind a fresh TCP listener to an ephemeral port and return the port.
  *
- * Asks the kernel for an unused port by binding to :0 on the loopback-capable
- * wildcard address, reads the assigned port back via `local_endpoint().port()`,
- * then closes the probe listener. There is an inherent (small) TOCTOU window
- * between the probe close and the server's bind, but on a loopback test host the
- * kernel does not immediately recycle the port, so this is dramatically more
- * robust than fixed magic ports under parallel CTest.
+ * Asks the kernel for an unused port by binding to :0, reads the assigned port back via
+ * `local_endpoint().port()`, then closes the probe listener.
+ *
+ * **Never returns the same port twice in one process.** The kernel readily re-hands a
+ * just-released ephemeral port to the next `bind(:0)`, and several suites call this more than
+ * once — `http2-client.cpp` takes one port for its live server and another that must stay
+ * CLOSED so a connect is refused. When the two collided, the "dead" port was the live server's
+ * and the connect succeeded, failing the test for reasons nothing in it could explain. So each
+ * handed-out port is remembered for the life of the process and re-probed past.
+ *
+ * @warning A TOCTOU window remains BETWEEN PROCESSES: the probe must close before the caller
+ *          binds, so a concurrently running test process can take the port in between. Under
+ *          `ctest -j`, that is a real if infrequent flake. Closing it properly means the server
+ *          binding `:0` itself and publishing the port it got — there is no way to reserve a port
+ *          for a later bind by a different socket. That is a change to every `ServerThread`
+ *          configure callback (22 files), deliberately not attempted here; this fixes the
+ *          in-process half, which is the deterministic one.
  *
  * @param host IPv4 bind address for the probe (default "127.0.0.1").
- * @return A kernel-assigned ephemeral port number.
+ * @return A kernel-assigned ephemeral port number, distinct from every previous return.
  * @throws std::runtime_error if the probe listener cannot bind.
  */
 inline std::uint16_t
 ephemeral_port(const std::string &host = "127.0.0.1") {
-    qb::io::tcp::listener probe;
-    if (probe.listen_v4(0, host) != 0) {
-        throw std::runtime_error("ephemeral_port: failed to bind probe listener on " + host + ":0");
+    // Process-wide, guarded: gtest suites may probe from more than one thread.
+    static std::mutex                    handed_out_mutex;
+    static std::vector<std::uint16_t>    handed_out;
+    constexpr int                        kMaxAttempts = 64;
+
+    std::lock_guard<std::mutex> lock(handed_out_mutex);
+    // Probes are kept OPEN across attempts so the kernel cannot hand the same port back on the
+    // next iteration; they are all closed when this vector goes out of scope, after a distinct
+    // port has been chosen.
+    std::vector<qb::io::tcp::listener> rejected;
+
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        qb::io::tcp::listener probe;
+        if (probe.listen_v4(0, host) != 0) {
+            throw std::runtime_error("ephemeral_port: failed to bind probe listener on " + host + ":0");
+        }
+        const std::uint16_t port = probe.local_endpoint().port();
+        if (port == 0) {
+            throw std::runtime_error("ephemeral_port: kernel returned port 0 after bind");
+        }
+        if (std::find(handed_out.begin(), handed_out.end(), port) != handed_out.end()) {
+            rejected.push_back(std::move(probe)); // hold it so the kernel offers a different one
+            continue;
+        }
+        probe.close();
+        handed_out.push_back(port);
+        return port;
     }
-    const std::uint16_t port = probe.local_endpoint().port();
-    probe.close();
-    if (port == 0) {
-        throw std::runtime_error("ephemeral_port: kernel returned port 0 after bind");
+    throw std::runtime_error("ephemeral_port: could not obtain a port distinct from those already issued");
+}
+
+/**
+ * @brief Same as @ref ephemeral_port, but probes a **UDP** socket.
+ *
+ * TCP and UDP port spaces are INDEPENDENT: a free TCP port says nothing about the same number on
+ * UDP. The HTTP/3 suites take their port from `ephemeral_port()` — a TCP probe — and then bind it
+ * on UDP for QUIC, so the probe validated nothing for them and `server->listen(...)` could fail
+ * outright when another process already held that UDP port. That is exactly how it failed:
+ * `Http3LoopbackTest` reported `listen(...)` = false under parallel CTest while every standalone
+ * run passed.
+ *
+ * Same in-process no-repeat guarantee as @ref ephemeral_port, and the same residual between-process
+ * window documented there.
+ *
+ * @param host IPv4 bind address for the probe (default "127.0.0.1").
+ * @return A kernel-assigned UDP port, distinct from every previous return of this function.
+ * @throws std::runtime_error if the probe socket cannot bind.
+ */
+inline std::uint16_t
+ephemeral_udp_port(const std::string &host = "127.0.0.1") {
+    static std::mutex                 handed_out_mutex;
+    static std::vector<std::uint16_t> handed_out;
+    constexpr int                     kMaxAttempts = 64;
+
+    std::lock_guard<std::mutex>      lock(handed_out_mutex);
+    std::vector<qb::io::udp::socket> rejected; // held open so the kernel offers a different port
+
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        qb::io::udp::socket probe;
+        if (!probe.init(AF_INET) || probe.bind_v4(0, host) != 0) {
+            throw std::runtime_error("ephemeral_udp_port: failed to bind probe socket on " + host + ":0");
+        }
+        const std::uint16_t port = probe.local_endpoint().port();
+        if (port == 0) {
+            throw std::runtime_error("ephemeral_udp_port: kernel returned port 0 after bind");
+        }
+        if (std::find(handed_out.begin(), handed_out.end(), port) != handed_out.end()) {
+            rejected.push_back(std::move(probe));
+            continue;
+        }
+        probe.close();
+        handed_out.push_back(port);
+        return port;
     }
-    return port;
+    throw std::runtime_error("ephemeral_udp_port: could not obtain a port distinct from those already issued");
 }
 
 /**

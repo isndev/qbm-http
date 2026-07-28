@@ -58,6 +58,21 @@ constexpr std::size_t MAX_CHUNK_SIZE = 16 * 1024 * 1024;
 
 /** @brief Maximum total body size (100MB) - default upload limit */
 constexpr std::size_t MAX_BODY_SIZE = 100 * 1024 * 1024;
+
+/**
+ * @brief Upper bound (64KB) on how much body buffer a declared `Content-Length` may pre-reserve.
+ * @details `Content-Length` is attacker-controlled all the way up to `MAX_BODY_SIZE`, and it is
+ *          known at headers-complete — i.e. before a single body byte has arrived. Honouring it
+ *          verbatim lets a ~40-byte request that then sends nothing pin `MAX_BODY_SIZE` of heap
+ *          per connection until the idle timeout: ~2.6 million times amplification, and trivially
+ *          multiplied by the connection count.
+ *
+ *          Capping the hint keeps the optimisation that matters — the overwhelming majority of
+ *          real bodies fit in one allocation and never regrow — while making the pre-body
+ *          commitment independent of what the peer claims. Anything larger simply grows
+ *          geometrically as bytes actually arrive, so memory tracks delivered traffic.
+ */
+constexpr std::size_t MAX_BODY_RESERVE_HINT = 64 * 1024;
 } // namespace qb::http::protocol_limits
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
@@ -347,7 +362,15 @@ private:
             if (parser->content_length > protocol_limits::MAX_BODY_SIZE) {
                 return fail_with_reason(parser, "HTTP Content-Length exceeds configured body size limit");
             }
-            msg.body().raw().reserve(parser->content_length);
+            // Reserve on `_chunked` — the buffer that actually receives the body. `msg.body().raw()`
+            // is MOVE-ASSIGNED from `_chunked` in on_message_complete, which deallocates whatever
+            // was reserved here, so reserving on it was both dangerous and pure waste.
+            //
+            // And cap the hint: see MAX_BODY_RESERVE_HINT. `content_length` is peer-supplied and is
+            // known before any body byte arrives, so an unbounded reserve turns a ~40-byte request
+            // into a 100 MB allocation held for the connection's lifetime.
+            self->_chunked.reserve(std::min<std::size_t>(static_cast<std::size_t>(parser->content_length),
+                                                         protocol_limits::MAX_BODY_RESERVE_HINT));
         }
         msg.upgrade              = static_cast<bool>(parser->upgrade);
         msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));
@@ -603,6 +626,12 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     using String            = typename qb::http::Parser<std::remove_const_t<Trait>>::String;
     std::size_t body_offset = 0; ///< Current offset for body parsing
 
+    /// How many bytes of the *current* header block have already been handed to llhttp.
+    /// The header block is parsed INCREMENTALLY: each call feeds only the bytes that arrived
+    /// since the last one. Re-feeding the whole buffer every time is quadratic in the header
+    /// size — see getMessageSize().
+    std::size_t header_parsed = 0;
+
     /// True while accumulating a close-delimited response body (no Content-Length, no
     /// Transfer-Encoding, body-bearing status — RFC 9112 §6.3). getMessageSize cannot know
     /// the length until the connection closes, so it returns 0 (keep buffering) and flush_eof()
@@ -663,31 +692,51 @@ public:
         //   * llhttp can invoke `on_header_field` / `on_header_value`
         //     multiple times per logical header when a field spans
         //     two `http_execute` calls (see llhttp docs: "may be
-        //     called with a partial value"). Our callbacks copy into
-        //     owning `std::string` by assignment / push_back, which
-        //     overwrites rather than appends — so we must guarantee
-        //     that each header is parsed in a single `http_execute`
-        //     call. The simplest correct strategy is to reset the
-        //     parser whenever the header block is incomplete and
-        //     re-feed it the full current buffer on the next call.
-        //     Once headers are complete the body is parsed
-        //     incrementally (chunked branch / Content-Length check),
-        //     where the callback contract allows partial calls
-        //     because `on_body` already appends.
+        //     called with a partial value"). Our callbacks handle
+        //     that: `on_header_field` / `on_header_value` APPEND to
+        //     `_last_header_key` / `_last_header_value` and clear
+        //     only on a field<->value transition (committing the
+        //     completed pair into `msg.headers()` exactly once), and
+        //     `on_url` accumulates through `_url_buffer`. So the
+        //     header block can be — and is — fed incrementally.
+        //
+        //     This used to `reset()` the parser and re-feed the WHOLE
+        //     buffer on every arrival while the header block was
+        //     incomplete. That is O(n^2) in the header size, and the
+        //     peer controls the segmentation: a well-formed 793 KB
+        //     header block (99 headers, all inside the configured
+        //     limits) delivered in 64-byte segments cost 1.5 SECONDS
+        //     of parsing for a single request, ~95 s extrapolated to
+        //     byte-at-a-time. A `VirtualCore` is single-threaded, so
+        //     that stalls every actor on the core — a remote CPU
+        //     denial of service out of one legal request per
+        //     connection. Feeding only the new bytes makes the cost
+        //     linear and keeps llhttp's incremental state, which is
+        //     what it is designed for.
         //
         if (!_http_obj.headers_completed()) {
-            const auto ret = _http_obj.parse(this->_io.in().begin(), this->_io.in().size());
+            const auto *const buf   = this->_io.in().begin();
+            const auto        total = this->_io.in().size();
+            // Nothing new since the last call (the buffer may be memmoved/reallocated between
+            // calls, but the logical position of every unread byte relative to begin() is stable).
+            if (total <= header_parsed) {
+                return 0;
+            }
+            const auto ret = _http_obj.parse(buf + header_parsed, total - header_parsed);
             if (ret == HPE_OK) {
-                // Headers still incomplete — reset to guarantee the
-                // next pass sees every header in one shot.
-                _http_obj.reset();
+                // Header block still incomplete — remember how far llhttp has consumed so the
+                // next arrival feeds only what is new.
+                header_parsed = total;
                 return 0;
             }
             if (!_http_obj.headers_completed()) {
                 this->not_ok();
                 return 0;
             }
-            body_offset = _http_obj.error_pos - this->_io.in().begin();
+            // `error_pos` is an absolute pointer into the same buffer, so it stays correct
+            // regardless of where this pass started.
+            body_offset   = static_cast<std::size_t>(_http_obj.error_pos - buf);
+            header_parsed = 0;
         }
 
         auto &msg = _http_obj.get_parsed_message();
@@ -791,6 +840,7 @@ public:
     void
     reset() noexcept final {
         body_offset      = 0;
+        header_parsed    = 0;
         _close_delimited = false;
         _http_obj.reset();
     }

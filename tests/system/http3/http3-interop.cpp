@@ -51,7 +51,7 @@
 using namespace std::chrono_literals;
 
 namespace {
-using qb::http::test::ephemeral_port;
+using qb::http::test::ephemeral_udp_port;
 
 std::filesystem::path
 cert_path() {
@@ -62,7 +62,7 @@ key_path() {
     return qb::http::test::ssl_key_path();
 }
 using qb::http::test::certs_available;
-using qb::http::test::ephemeral_port;
+using qb::http::test::ephemeral_udp_port;
 
 std::string
 https_origin(std::uint16_t port) {
@@ -202,7 +202,7 @@ TEST(Http3InteropTest, HomebrewCurlCanCallQbHttp3ServerWhenAvailable) {
 
     qb::io::async::init();
 
-    const auto port   = ephemeral_port();
+    const auto port   = ephemeral_udp_port();
     auto       server = qb::http3::make_server();
     server->router().get("/interop", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
@@ -260,7 +260,7 @@ TEST(Http3InteropTest, ConfiguredNghttp3ClientCanCallQbHttp3Server) {
 
     qb::io::async::init();
 
-    const auto port   = ephemeral_port();
+    const auto port   = ephemeral_udp_port();
     auto       server = qb::http3::make_server();
     server->router().get("/nghttp3", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
@@ -305,7 +305,7 @@ TEST(Http3InteropTest, ConfiguredH3SpecCanProbeQbHttp3Server) {
 
     qb::io::async::init();
 
-    const auto port   = ephemeral_port();
+    const auto port   = ephemeral_udp_port();
     auto       server = qb::http3::make_server();
     server->router().get("/", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;

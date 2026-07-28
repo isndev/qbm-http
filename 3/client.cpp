@@ -254,7 +254,11 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     }
 
     if (batch->completed_count == batch->responses.size()) {
-        callback(std::move(batch->responses));
+        // Call through `batch->callback`, NOT `callback`: ownership moved to the batch above, so
+        // `callback` is an empty std::function here and invoking it throws std::bad_function_call.
+        // Reached whenever every request in the batch fails prepare_request synchronously (a batch
+        // of malformed URIs), i.e. exactly when the caller most needs its error results.
+        batch->callback(std::move(batch->responses));
         return true;
     }
 
