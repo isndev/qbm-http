@@ -555,3 +555,95 @@ TEST(Http1ProtocolFraming, ChunkedSerializerRoundTripsThroughParser) {
 }
 
 } // namespace
+
+// ===========================================================================
+// Header-block parsing must be LINEAR in the header size, not quadratic.
+//
+// While the header block is incomplete, getMessageSize() used to reset() the parser and re-feed
+// it the ENTIRE accumulated buffer on every arrival — so a header block delivered in N segments
+// was parsed N times, over a growing prefix each time. The peer chooses the segmentation, and the
+// header block can legally reach ~793 KB (99 headers at the configured name/value ceilings), so a
+// single well-formed request delivered in 64-byte segments cost 1.5 SECONDS of parsing, ~95 s
+// extrapolated to byte-at-a-time. A VirtualCore is single-threaded: that stalls every actor on the
+// core. One legal request per connection is a remote CPU denial of service.
+//
+// The parser's callbacks were already fragmentation-safe (on_header_field / on_header_value append
+// and commit a pair exactly once on the field<->value transition; on_url accumulates), so the reset
+// was not needed — only its stale rationale comment said otherwise. getMessageSize() now feeds only
+// the bytes that arrived since the previous call.
+//
+// The oracle is llhttp's own consumption, not wall-clock: `total_parsed` sums how many bytes the
+// parser was handed across the whole delivery. Linear means it stays within a small constant of the
+// header block size; the quadratic shape makes it O(size^2 / segment), which for these numbers is
+// four orders of magnitude larger. That is deterministic and cannot flake on a loaded machine.
+// ===========================================================================
+
+namespace {
+
+std::string
+big_header_block(std::size_t headers, std::size_t value_len) {
+    std::string raw = "GET /linear HTTP/1.1\r\nHost: x\r\n";
+    for (std::size_t i = 0; i < headers; ++i)
+        raw += "X-Pad-" + std::to_string(i) + ": " + std::string(value_len, 'v') + "\r\n";
+    raw += "\r\n";
+    return raw;
+}
+
+/// Exposes the protected parser so the test can observe PARTIAL header state between arrivals —
+/// the deterministic signal that separates incremental parsing from reset-and-re-feed.
+struct PeekableServer : qb::protocol::http::server<ServerFakeIO> {
+    using qb::protocol::http::server<ServerFakeIO>::server;
+    [[nodiscard]] const qb::http::Request &
+    peek() const noexcept {
+        return const_cast<PeekableServer *>(this)->_http_obj.get_parsed_message();
+    }
+};
+
+} // namespace
+
+TEST(Http1ProtocolFraming, LargeHeaderBlockInSmallSegmentsIsParsedOnce) {
+    // 90 headers x 8000 bytes — comfortably inside MAX_HEADERS_COUNT (100) and
+    // MAX_HEADER_VALUE_LENGTH (8192), i.e. a request the server must accept.
+    const std::string raw = big_header_block(90, 8000);
+    ASSERT_GT(raw.size(), std::size_t{700000});
+
+    ServerFakeIO   io;
+    PeekableServer proto(io);
+
+    constexpr std::size_t kSegment = 64;
+
+    // --- half the block, one segment at a time -----------------------------------------------
+    const std::size_t half = raw.size() / 2;
+    for (std::size_t off = 0; off < half; off += kSegment) {
+        const auto n = std::min(kSegment, half - off);
+        feed(io, std::string_view(raw.data() + off, n));
+        ASSERT_EQ(step(proto, io), 0u) << "the header block is not complete yet";
+    }
+
+    // THE oracle: parsing is incremental, so roughly half the headers are already committed.
+    // Reset-and-re-feed throws this state away on every arrival, leaving it empty — which is
+    // exactly the shape whose cost is quadratic.
+    EXPECT_GT(proto.peek().headers().size(), std::size_t{10})
+        << "the parser was reset between arrivals: the whole buffer is being re-parsed every time, "
+           "which is O(n^2) in the header-block size and remotely triggerable";
+
+    // --- the rest ------------------------------------------------------------------------------
+    std::size_t framed = 0;
+    for (std::size_t off = half; off < raw.size(); off += kSegment) {
+        const auto n = std::min(kSegment, raw.size() - off);
+        feed(io, std::string_view(raw.data() + off, n));
+        framed = step(proto, io);
+        if (framed)
+            break;
+    }
+
+    ASSERT_GT(framed, 0u) << "the request must frame once its header block is complete";
+    ASSERT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.last_request->uri().path(), "/linear");
+    // Every header survived the incremental parse exactly once — the property the old reset() was
+    // there to protect, now upheld by the append-based callbacks instead.
+    EXPECT_EQ(io.last_request->header("X-Pad-0"), std::string(8000, 'v'));
+    EXPECT_EQ(io.last_request->header("X-Pad-89"), std::string(8000, 'v'));
+    EXPECT_EQ(io.last_request->headers().find("X-Pad-42")->second.size(), 1u)
+        << "a header must be committed once, not once per re-parse";
+}
