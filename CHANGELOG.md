@@ -3,7 +3,7 @@
 All notable changes to the qbm-http module are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the module tracks the qb framework's
 [Semantic Versioning](https://semver.org/). Framework-wide policy is in the qb
-[VERSIONING](../../qb/VERSIONING.md) document.
+[VERSIONING](https://github.com/isndev/cube/blob/c++23/VERSIONING.md) document.
 
 ## [Unreleased]
 

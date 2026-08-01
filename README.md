@@ -231,7 +231,7 @@ The full guide lives under [`readme/`](./readme/README.md):
 | WebSocket (RFC 6455, WSS) | [20-websocket.md](./readme/20-websocket.md) |
 | WebSocket coroutines | [21-websocket-coroutines.md](./readme/21-websocket-coroutines.md) |
 
-Runnable examples are under [`examples/qbm/http/`](../../examples/qbm/http) in the repository.
+Runnable examples are under [`examples/qbm/http/`](https://github.com/isndev/qb-examples/tree/c++23/qbm/http) in the repository.
 
 ## License
 
