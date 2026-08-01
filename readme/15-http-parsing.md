@@ -129,7 +129,7 @@ assert(parser.get_parsed_message().header("X-Custom-Header") == "value-part-1par
 
 ## The framing layer: `qb::protocol::http::base`
 
-`qb::protocol::http::base<IO_Handler, Trait>` is a `qb::io::async::AProtocol`. A protocol's job in qb-io is to answer one question — *does the input buffer hold a complete message yet, and if so how big is it?* — via `getMessageSize()`, and then to hand that message to the I/O component via `onMessage()`. See the [protocol interface](../../../qb/include/qb/io/async/protocol.h) for the full contract.
+`qb::protocol::http::base<IO_Handler, Trait>` is a `qb::io::async::AProtocol`. A protocol's job in qb-io is to answer one question — *does the input buffer hold a complete message yet, and if so how big is it?* — via `getMessageSize()`, and then to hand that message to the I/O component via `onMessage()`. See the [protocol interface](https://github.com/isndev/cube/blob/c++23/include/qb/io/async/protocol.h) for the full contract.
 
 The two specializations are:
 

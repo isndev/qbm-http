@@ -3,7 +3,7 @@
 
 qbm-http is a module of the qb actor framework. General contribution guidelines — branch and pull-request
 flow, code style (`.clang-format` / `.clang-tidy`), the Developer Certificate of Origin sign-off, and the
-Code of Conduct — follow the framework's [CONTRIBUTING guide](../../qb/CONTRIBUTING.md). Security
+Code of Conduct — follow the framework's [CONTRIBUTING guide](https://github.com/isndev/cube/blob/c++23/CONTRIBUTING.md). Security
 vulnerabilities must not be filed as public issues; see [SECURITY.md](./SECURITY.md).
 
 This document covers what is specific to building and testing the module.
