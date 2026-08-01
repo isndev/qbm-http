@@ -564,7 +564,18 @@ public:
             if (stream.state == Http2StreamConcreteState::IDLE && stream.id != 0) {
                 stream.state = Http2StreamConcreteState::OPEN;
             } else if (stream.state == Http2StreamConcreteState::RESERVED_REMOTE) {
-                stream.state = Http2StreamConcreteState::OPEN;
+                // RFC 9113 §5.1: HEADERS on a stream in "reserved (remote)" transitions it to
+                // "half-closed (local)", not to "open". "open" means either peer may send; on a
+                // server-pushed stream only the server sends the response (§8.4), and §5.1 limits
+                // this endpoint there to WINDOW_UPDATE, PRIORITY and RST_STREAM. This corrects the
+                // state name only; it changes nothing about how the pushed stream is torn down:
+                // process_complete_response_if_ready() below re-derives the state from
+                // end_stream_sent/end_stream_received, so a completed pushed response still ends in
+                // HALF_CLOSED_REMOTE, which try_close_stream_context() does not erase — exactly as
+                // before this change. Unreachable while the client hardcodes SETTINGS_ENABLE_PUSH = 0
+                // in initialize_our_settings_map(); corrected defensively, like the rest of this
+                // push path, not a live fix.
+                stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
             }
         }
         // Note: CONTINUATION frames do not carry END_STREAM flag. That flag is on the initial HEADERS.
@@ -1014,7 +1025,8 @@ public:
             // Try to send pending data on any stream that might have been blocked.
             // Snapshot candidate stream ids first: try_send_pending_data_for_stream may flush a
             // stream to CLOSED and erase it from _client_streams, which would invalidate a live
-            // iterator into the map mid-loop (a release-mode flat-map relocation UAF). Mirrors the
+            // iterator into the map mid-loop — erase() unlinks the pointed-to node, so that
+            // iterator (not the others) dies. Mirrors the
             // server's connection-WINDOW_UPDATE flush.
             std::vector<uint32_t> pending_ids;
             pending_ids.reserve(_client_streams.size());
@@ -1697,63 +1709,20 @@ private:
 
     // (dispatch_complete_response was removed: it had zero callers and carried the exact
     //  capture-before-dispatch UAF the H5 fix closes — it did `_io.on(std::move(...))` and then
-    //  wrote/read the possibly-relocated `stream` ref. Deleted so it cannot be resurrected as a
+    //  wrote/read the `stream` ref, which a handler that re-entrantly closes that stream has
+    //  already erased (see the CAUTION in process_complete_response_if_ready: with ska's chained
+    //  map the hazard is the erase, not a relocation). Deleted so it cannot be resurrected as a
     //  landmine; the live completion path is process_complete_response_if_ready, which snapshots
     //  first. See git history if a client-side final-dispatch helper is ever needed again.)
 
-    void
-    try_close_stream_context(uint32_t stream_id) noexcept {
-        auto it = _client_streams.find(stream_id);
-        if (it == _client_streams.end()) {
-            return; // Already removed or never existed
-        }
-
-        Http2ClientStream &stream = it->second;
-
-        // More robust check for stream closure based on HTTP/2 state transitions
-        bool can_close = false;
-        if (stream.state == Http2StreamConcreteState::CLOSED) {
-            can_close = true;
-        } else if (stream.rst_stream_sent || stream.rst_stream_received) {
-            can_close = true;
-        } else if (stream.end_stream_sent && stream.end_stream_received) {
-            // Both sides have finished sending
-            can_close = true;
-        }
-
-        if (can_close) {
-            // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Closing stream context for stream ID: " << stream_id);
-            // Notify IO_Handler about stream closure before erasing.
-            // This allows the application to clean up its own state related to the stream.
-            if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
-                // Re-evaluate if Http2StreamErrorEvent is the right event for graceful closure.
-                // Perhaps a new event like Http2StreamClosedEvent. For now, using existing.
-                // If rst_stream_sent or rst_stream_received, stream.error_code would be set.
-                // If not, NO_ERROR is appropriate for graceful closure.
-                ErrorCode final_error_code = stream.error_code;
-                if (stream.rst_stream_sent && stream.error_code == ErrorCode::NO_ERROR) {
-                    final_error_code = ErrorCode::CANCEL; // Example if we sent RST due to local cancellation
-                } else if (stream.rst_stream_received && stream.error_code == ErrorCode::NO_ERROR) {
-                    // If peer sent RST, it should have included an error code.
-                    // If error_code is still NO_ERROR, it might be a bug or a very specific scenario.
-                    // For now, assume stream.error_code is correctly populated from RST_STREAM frame.
-                }
-
-                if (final_error_code != ErrorCode::NO_ERROR) {
-                    this->get_io_handler().on(Http2StreamErrorEvent{stream_id, final_error_code, "Stream closed"});
-                }
-            }
-            _client_streams.erase(it);
-            // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Stream " << stream_id << " context erased. Count: " <<
-            // _client_streams.size());
-        } else {
-            // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Stream " << stream_id << " not yet fully closed. State: "
-            // << static_cast<int>(stream.state) << ", end_sent: " << stream.end_stream_sent
-            // << ", end_recv: " << stream.end_stream_received
-            // << ", rst_sent: " << stream.rst_stream_sent
-            // << ", rst_recv: " << stream.rst_stream_received);
-        }
-    }
+    // (the try_close_stream_context(uint32_t) overload was removed: it had zero callers, and its
+    //  erase rule diverged from the live try_close_stream_context(Http2ClientStream &) above — it
+    //  additionally erased on `end_stream_sent && end_stream_received` without the state having
+    //  reached CLOSED, and it dispatched an Http2StreamErrorEvent before erasing, which the live
+    //  overload never does. Two same-named overloads with different semantics, picked by whether a
+    //  caller happened to hold an id or a reference, is a landmine; deleted so it cannot be called
+    //  by accident. See git history if a by-id close helper is ever needed again — the by-id entry
+    //  point is try_close_stream_context_by_id(), which forwards to the reference overload.)
 
     /**
      * @brief Send RST_STREAM frame
@@ -1882,9 +1851,11 @@ private:
         _initial_peer_window_size = new_size;
 
         // Update all stream windows. The per-stream window bump is an in-place field mutation (safe
-        // during iteration); but flushing a newly-unblocked stream can flush it to CLOSED and erase it
-        // from _client_streams, invalidating the iterator mid-loop (a release-mode flat-map relocation
-        // UAF). So defer the flushes: bump every window in-loop, collect the unblocked ids, flush after.
+        // during iteration); but flushing a newly-unblocked stream can flush it to CLOSED and erase
+        // it from _client_streams, and erase() unlinks the node the loop iterator points at — so the
+        // iteration would resume from a freed node. So defer the flushes: bump every window in-loop,
+        // collect the unblocked ids, flush after (re-find()ing each, since an earlier flush may have
+        // erased it).
         if (delta != 0) {
             std::vector<uint32_t> unblocked_ids;
             for (auto &[stream_id, stream] : _client_streams) {
@@ -2051,14 +2022,19 @@ private:
         _control_reply_count       = 0; // a completed response is real progress — forgive the flood budget
         stream.assembled_response.parse_set_cookie_headers();
 
-        // CAUTION: the user handler below can synchronously re-enter send_request(),
-        // which emplace()s into `_client_streams` — a flat (ska) map that RELOCATES
-        // its entries on rehash in release builds (a node-stable std::unordered_map
-        // under sanitizers, so this is ASan-invisible). Any use of the `stream`
-        // reference after the dispatch would be a use-after-free. Snapshot everything
-        // we need and apply the terminal state transition BEFORE handing control to
-        // user code; touch only locals afterwards. Mirrors the server-side
+        // CAUTION: the user handler below runs arbitrary code and can synchronously re-enter this
+        // protocol — send_request(), close, RST — so `stream` must not be touched afterwards.
+        // Snapshot everything needed and apply the terminal state transition BEFORE handing control
+        // to user code; touch only locals after. Mirrors the server-side
         // dispatch_complete_request hardening.
+        //
+        // The hazard is the re-entrant ERASE of this very stream, NOT a container relocation:
+        // `qb::unordered_map` is `ska::unordered_map`, which chains (see
+        // qb/modules/ska_hash/unordered_map.hpp) — `rehash()` re-links the existing nodes into a
+        // fresh bucket array and frees only that array, so value references survive a rehash, and
+        // `erase()` unlinks and frees exactly one node, leaving other references intact. What does
+        // NOT survive is a reference to a stream the handler closed, and iterators, which hold a
+        // pointer into the bucket array. Reserving capacity would therefore NOT make this safe.
         const auto sid            = stream.id;
         const auto app_request_id = stream.application_request_id;
         const auto rst_received   = stream.rst_stream_received;
@@ -2175,7 +2151,18 @@ private:
             if (stream.state == Http2StreamConcreteState::IDLE && stream.id != 0) {
                 stream.state = Http2StreamConcreteState::OPEN;
             } else if (stream.state == Http2StreamConcreteState::RESERVED_REMOTE) {
-                stream.state = Http2StreamConcreteState::OPEN;
+                // RFC 9113 §5.1: HEADERS on a stream in "reserved (remote)" transitions it to
+                // "half-closed (local)", not to "open". "open" means either peer may send; on a
+                // server-pushed stream only the server sends the response (§8.4), and §5.1 limits
+                // this endpoint there to WINDOW_UPDATE, PRIORITY and RST_STREAM. This corrects the
+                // state name only; it changes nothing about how the pushed stream is torn down:
+                // process_complete_response_if_ready() below re-derives the state from
+                // end_stream_sent/end_stream_received, so a completed pushed response still ends in
+                // HALF_CLOSED_REMOTE, which try_close_stream_context() does not erase — exactly as
+                // before this change. Unreachable while the client hardcodes SETTINGS_ENABLE_PUSH = 0
+                // in initialize_our_settings_map(); corrected defensively, like the rest of this
+                // push path, not a live fix.
+                stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
             }
 
         } else {

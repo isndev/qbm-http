@@ -2145,31 +2145,6 @@ private:
     }
 
     /**
-     * @brief Try to send pending data for all streams
-     *
-     * Attempts to resume sending for all streams with pending data.
-     */
-    void
-    try_send_pending_data_all_streams() noexcept {
-        if (!this->ok() || !_connection_active)
-            return; // Removed .load(std::memory_order_relaxed)
-        for (auto &pair : _server_streams) {
-            Http2ServerStream &stream = pair.second;
-            if (stream.has_pending_data_to_send
-                && (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE)) {
-                // Reconstruct or retrieve pending qb::http::Response associated with stream.application_response_id
-                // This is complex as the original Response object might be gone.
-                // A robust pending data queue is needed, storing actual data segments.
-                // For now, this is a placeholder for that logic.
-                // Example: if (stream.application_response_id != 0) {
-                //    qb::http::Response pending_response = get_pending_response_by_id(stream.application_response_id);
-                //    send_response_body(stream, pending_response);
-                // }
-            }
-        }
-    }
-
-    /**
      * @brief Try to send pending data for a specific stream
      *
      * Attempts to send buffered data when flow control window permits.

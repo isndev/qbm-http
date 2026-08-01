@@ -213,7 +213,6 @@ strip_html_tags() noexcept {
         enum class State { TEXT, TAG_START, TAG_NAME, IN_TAG, COMMENT, COMMENT_END };
         State  state             = State::TEXT;
         size_t i                 = 0;
-        size_t pending_tag_start = std::string::npos;
 
         while (i < input.size()) {
             char c = input[i];
@@ -222,7 +221,6 @@ strip_html_tags() noexcept {
                 case State::TEXT:
                     if (c == '<') {
                         state             = State::TAG_START;
-                        pending_tag_start = i;
                     } else {
                         output.push_back(c);
                     }
@@ -244,7 +242,6 @@ strip_html_tags() noexcept {
                         output.push_back('<');
                         output.push_back(c);
                         state             = State::TEXT;
-                        pending_tag_start = std::string::npos;
                     }
                     break;
 
@@ -261,7 +258,6 @@ strip_html_tags() noexcept {
                     } else if (c == '>') {
                         // End of tag
                         state             = State::TEXT;
-                        pending_tag_start = std::string::npos;
                     }
                     // Otherwise stay in tag state
                     break;
@@ -276,7 +272,6 @@ strip_html_tags() noexcept {
                 case State::COMMENT_END:
                     if (c == '>') {
                         state             = State::TEXT;
-                        pending_tag_start = std::string::npos;
                     } else if (c != '-') {
                         // Not actually end of comment, back to comment state
                         state = State::COMMENT;
@@ -286,10 +281,26 @@ strip_html_tags() noexcept {
             ++i;
         }
 
-        // Handle unclosed tags/comments by preserving the original tail.
-        if (state != State::TEXT && pending_tag_start != std::string::npos) {
-            output.append(input.substr(pending_tag_start));
-        }
+        // An unterminated tag or comment at end of input must be DROPPED, not preserved.
+        //
+        // Appending the raw tail defeated the whole point of this sanitizer:
+        // `strip_html_tags("hello <img src=x onerror=alert(1)")` returned that markup verbatim,
+        // because only the CLOSED form ever reached the strip logic. Sanitized output is normally
+        // interpolated into a page, so the very next `>` in the surrounding document (a `</div>`,
+        // say) terminates the attacker's tag for them — the browser builds the `<img>` and the
+        // onerror handler fires. Losing text is the correct failure mode for a sanitizer; emitting
+        // markup is not.
+        //
+        // TAG_START is NOT an exception. An earlier revision kept a lone trailing `<`, reasoning
+        // that with no tag name yet it is inert text. That is wrong: sanitized output is
+        // interpolated into a surrounding page, and the HTML tokenizer opens a tag on `<` followed
+        // by an ASCII letter, `/`, `!` or `?` — characters that routinely begin the *template* text
+        // after the insertion point. The `<` and the template's own bytes then form a tag the
+        // sanitizer never saw. Dropping it costs one character in the rare input that ends on `<`,
+        // which is the cheap side of this trade.
+        //
+        // So: every state other than TEXT means markup was being consumed, and all of it is
+        // dropped. No tail is ever emitted here.
 
         return output;
     };
