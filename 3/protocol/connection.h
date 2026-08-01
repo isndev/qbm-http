@@ -577,6 +577,9 @@ private:
         bool                         main_headers_seen     = false;
         bool                         response_headers_seen = false;
         bool                         output_drained        = false;
+        /// Set once a body buffer has been handed to nghttp3; @c tx_body must
+        /// never be reassigned afterwards (see @c read_data_cb).
+        bool                         body_submitted        = false;
     };
 
     Owner                                                          &_owner;
@@ -1182,7 +1185,15 @@ public:
      */
     bool
     submit_response(std::uint64_t stream_id, qb::http::Response const &response) {
-        auto      &st              = state_for(stream_id);
+        auto &st = state_for(stream_id);
+        // A second response on one stream is a protocol error (RFC 9114 section 4.1).
+        // Refuse it *before* `tx_body` is touched: nghttp3 keeps the `nghttp3_vec`
+        // handed out by `read_data_cb` — a raw pointer into that buffer — until the
+        // data is acknowledged, so reassigning it here would free memory the library
+        // is still scheduled to put on the wire.
+        if (st.body_submitted) {
+            return false;
+        }
         const auto declared_length = detail::declared_content_length(response);
         if (!declared_length.ok
             || (declared_length.value && detail::response_body_length_must_match(response, st.request.method())
@@ -1200,6 +1211,7 @@ public:
         if (rv != 0) {
             return false;
         }
+        st.body_submitted = true;
         if (auto trailers = detail::make_trailers(response)) {
             if (nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
                 return false;
@@ -1223,7 +1235,13 @@ public:
      */
     bool
     submit_request(std::uint64_t stream_id, qb::http::Request const &request) {
-        auto &st     = state_for(stream_id);
+        auto &st = state_for(stream_id);
+        // Same invariant as `submit_response`: nghttp3 holds a raw pointer into
+        // `tx_body` until the body is acknowledged, so a second submission on one
+        // stream must be refused before that buffer is reassigned.
+        if (st.body_submitted) {
+            return false;
+        }
         st.request   = request;
         st.tx_body   = request.body().template as<std::string>();
         st.tx_offset = 0;
@@ -1236,6 +1254,7 @@ public:
         if (rv != 0) {
             return false;
         }
+        st.body_submitted = true;
         if (auto trailers = detail::make_trailers(request)) {
             if (nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
                 return false;
@@ -1260,19 +1279,31 @@ public:
     drain() {
         nghttp3_vec                vec[16];
         std::vector<std::uint64_t> drained_streams;
-        auto                       notify_drained = [&]() {
+        // Reentrancy guard: every owner callback below may synchronously destroy this
+        // connection (the owner erases it on a transport close). Hold a copy of the alive flag
+        // on the stack so we can detect that and stop touching freed members. Declared BEFORE
+        // notify_drained so that lambda can consult it too.
+        const auto alive          = _alive;
+        auto       notify_drained = [&]() {
             for (auto stream_id : drained_streams) {
                 if constexpr (requires(Owner &owner, std::uint64_t connection_id, std::uint64_t sid) {
                                   owner.on_http3_stream_output_drained(connection_id, sid);
                               }) {
+                    // `on_http3_stream_output_drained` is NOT inert: the default server
+                    // implementation calls maybe_finish_graceful_shutdown(), which — once the
+                    // last stream of a connection that is shutting down drains — reaches
+                    // close_http3_connection() → endpoint::close_connection() →
+                    // drain_backend_events() → reap_closed_connections() → `_connections.erase()`,
+                    // destroying *this. `_owner` and `_connection_id` are members, so a second
+                    // iteration would read them through a freed object. Re-check the flag every
+                    // round, exactly as the send loop below does — the rest of drain() was
+                    // already guarded this way and this lambda was the one path that was not.
+                    if (!*alive)
+                        return;
                     _owner.on_http3_stream_output_drained(_connection_id, stream_id);
                 }
             }
         };
-        // Reentrancy guard: each send_http3_stream_data() below may synchronously destroy
-        // this connection (owner erases it on a transport close). Hold a copy of the alive
-        // flag on the stack so we can detect that and stop touching freed members.
-        const auto alive = _alive;
         for (std::size_t budget = 0; budget < 256; ++budget) {
             int64_t    stream_id = -1;
             int        fin       = 0;

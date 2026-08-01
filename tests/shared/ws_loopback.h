@@ -244,20 +244,39 @@ make_client_frame(std::uint8_t opcode_with_flags, std::string_view payload) {
 /**
  * @brief Read up to @p max bytes from @p sock, polling to tolerate loop cadence.
  *
- * Returns whatever arrived before @p deadline elapses or the peer closes.
+ * Returns whatever arrived before @p deadline elapses, the peer closes, or the stream goes quiet
+ * for @p quiet after delivering something.
+ *
+ * @note The quiet-period exit is what keeps this cheap. Most callers pass a deliberately generous
+ *       @p max (`read_some(sock, 128)`) meaning "whatever arrived", and a peer that sends its
+ *       frame without closing the TCP connection leaves `read()` returning EAGAIN forever — so
+ *       those calls used to burn the entire @p deadline every time. That was the single biggest
+ *       cost in the whole test suite: `ws-framing-edge` alone spent 27.3 s waiting for bytes that
+ *       were never coming. Exiting once the stream has been silent for @p quiet returns the same
+ *       bytes; @p deadline now only bounds the case where *nothing* ever arrives, which is the
+ *       one a test asserting silence actually needs.
+ *
+ *       @p quiet is deliberately ~40 event-loop turns rather than the few a loopback frame takes,
+ *       so shaving the wait cannot reintroduce timing flakiness — the failure mode this suite is
+ *       least allowed to have.
  */
 [[nodiscard]] inline std::string
-read_some(qb::io::tcp::socket &sock, std::size_t max, std::chrono::milliseconds deadline = 1500ms) {
+read_some(qb::io::tcp::socket &sock, std::size_t max, std::chrono::milliseconds deadline = 1500ms,
+          std::chrono::milliseconds quiet = 200ms) {
     std::string out;
-    const auto  start = std::chrono::steady_clock::now();
+    const auto  start     = std::chrono::steady_clock::now();
+    auto        last_byte = start;
     char        buf[256];
     while (out.size() < max && std::chrono::steady_clock::now() - start < deadline) {
         int n = sock.read(buf, sizeof(buf));
         if (n > 0) {
             out.append(buf, static_cast<std::size_t>(n));
+            last_byte = std::chrono::steady_clock::now();
         } else if (n == 0) {
-            break;
+            break; // peer closed: nothing more is coming
         } else {
+            if (!out.empty() && std::chrono::steady_clock::now() - last_byte >= quiet)
+                break; // delivered, then went silent
             std::this_thread::sleep_for(5ms);
         }
     }

@@ -1342,6 +1342,11 @@ private:
             return report_frame_error(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with zero increment", _current_frame_header.get_stream_id());
         }
 
+        // Unreachable while `extract_uint31_be` masks the reserved bit, and kept only
+        // as a guard should that ever change. It is NOT the RFC 9113 section 6.9.1
+        // check: that rule is about the window *after* the increment is applied, so it
+        // necessarily lives at the application sites (see the `MAX_WINDOW_SIZE_LIMIT -
+        // increment` tests in server.h/client.h), never here.
         if (wu_f.payload.window_size_increment > 0x7FFFFFFF) {
             return report_frame_error(ErrorCode::FLOW_CONTROL_ERROR, "WINDOW_UPDATE increment exceeds maximum",
                                       _current_frame_header.get_stream_id());

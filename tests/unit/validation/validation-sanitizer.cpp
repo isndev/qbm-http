@@ -231,17 +231,34 @@ TEST_F(ValidationSanitizerTest, StripHtmlTagsEdgeCases) {
     EXPECT_EQ(data4["content"].get<std::string>(), "Plain text without HTML");
 }
 
-TEST_F(ValidationSanitizerTest, StripHtmlTagsPreservesUnclosedTagLikeText) {
+// CHANGED (security): this case used to assert that an unterminated tag is "tag-like TEXT" and is
+// echoed back verbatim — `"prefix <div class=\"x\""` in, the same string out. It is not text: it is
+// a tag start with a name and an attribute, and it was the ONLY strip_html_tags input that escaped
+// the strip logic, because every other case in this file closes its tags.
+//
+// Sanitized output is interpolated into a page, so the surrounding document supplies the closing
+// `>` the attacker omitted (a `</div>` is enough): the browser then builds the element and fires
+// any `onerror` / `onload` it carries. A sanitizer may lose text; it may not emit markup.
+//
+// A trailing lone `<` is dropped too. An earlier revision kept it, reasoning that with no tag name
+// seen it cannot start an element — but that reasoning ignores the interpolation the rest of this
+// comment relies on. The HTML tokenizer opens a tag on `<` followed by an ASCII letter, `/`, `!` or
+// `?`, and those are exactly the characters that begin the *template* text after the insertion
+// point: sanitized `"text<"` dropped into `<p>VALUE div></p>` yields `<p>text< div></p>` — harmless
+// — but into `<p>VALUEdiv></p>` it yields `text<div>`, an element the sanitizer never inspected.
+TEST_F(ValidationSanitizerTest, StripHtmlTagsDropsUnterminatedTagIncludingBareLessThan) {
     Sanitizer s;
     s.add_rule("content", PredefinedSanitizers::strip_html_tags());
 
     qb::json trailing_lt = {{"content", "text<"}};
     s.sanitize(trailing_lt);
-    EXPECT_EQ(trailing_lt["content"].get<std::string>(), "text<");
+    EXPECT_EQ(trailing_lt["content"].get<std::string>(), "text")
+        << "a trailing '<' must not survive: the template text after the insertion point can complete it into a tag";
 
     qb::json unclosed_tag = {{"content", "prefix <div class=\"x\""}};
     s.sanitize(unclosed_tag);
-    EXPECT_EQ(unclosed_tag["content"].get<std::string>(), "prefix <div class=\"x\"");
+    EXPECT_EQ(unclosed_tag["content"].get<std::string>(), "prefix ")
+        << "an unterminated tag must be dropped, not echoed: the page around this value closes it";
 }
 
 TEST_F(ValidationSanitizerTest, StripHtmlTagsSpecialChars) {
@@ -328,4 +345,46 @@ TEST_F(ValidationSanitizerTest, AlphanumericOnlyStripsNonAlnum) {
     qb::json data = {{"c", "a1! b2 @c3#"}};
     s.sanitize(data);
     EXPECT_EQ(data["c"].get<std::string>(), "a1b2c3") << "only letters and digits survive";
+}
+
+// --- strip_html_tags: unterminated markup must be DROPPED, not echoed back ----
+//
+// Every case above feeds WELL-FORMED markup, so they only ever exercise the path where a tag is
+// closed. The state machine used to end with "handle unclosed tags by preserving the original
+// tail", which appended the raw remainder — so `strip_html_tags("<img src=x onerror=alert(1)")`
+// returned that markup verbatim while the closed form was stripped correctly.
+//
+// That is exploitable, because sanitized output is interpolated into a page: the next `>` in the
+// surrounding document (a `</div>`, say) terminates the attacker's tag for them, the browser builds
+// the <img>, and onerror fires. Losing text is the correct failure mode for a sanitizer; emitting
+// markup is not.
+
+TEST_F(ValidationSanitizerTest, StripHtmlTagsDropsUnterminatedMarkup) {
+    Sanitizer s;
+    s.add_rule("content", PredefinedSanitizers::strip_html_tags());
+
+    const auto strip = [&s](std::string in) {
+        qb::json d = {{"content", std::move(in)}};
+        s.sanitize(d);
+        return d["content"].get<std::string>();
+    };
+
+    // The payload: identical to a case the suite already covers, minus the closing '>'.
+    EXPECT_EQ(strip("hello <img src=x onerror=alert(1)>"), "hello ") << "precondition: the closed form is stripped";
+    EXPECT_EQ(strip("hello <img src=x onerror=alert(1)"), "hello ")
+        << "an unterminated tag was echoed back verbatim: the surrounding page supplies the closing "
+           "'>' and the browser executes the handler";
+
+    EXPECT_EQ(strip("safe <script"), "safe ") << "an unterminated tag name must not survive";
+    EXPECT_EQ(strip("<!-- unterminated comment"), "") << "an unterminated comment must not survive";
+    EXPECT_EQ(strip("text <div attr='unclosed"), "text ") << "an unterminated quoted attribute must not survive";
+
+    // A '<' whose next character rules out a tag is resolved IN THE INPUT and stays: the scanner
+    // sees the space, returns to TEXT and emits both characters. Nothing is guessed.
+    EXPECT_EQ(strip("5 < 10"), "5 < 10") << "a lone '<' followed by a space is text, not markup";
+
+    // A '<' at END of input is the opposite case: what follows it is not in the input at all, it is
+    // whatever template text the caller interpolates this value into. `<` + a letter, '/', '!' or
+    // '?' opens a tag, so the only safe reading of an unresolved trailing '<' is to drop it.
+    EXPECT_EQ(strip("trailing <"), "trailing ") << "a trailing '<' is unresolved and must not be handed to the page";
 }

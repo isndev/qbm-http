@@ -19,6 +19,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic> // std::atomic — one-shot wildcard+credentials warning flag
 #include <chrono> // For regex timeout protection
 #include <functional>
 #include <memory>
@@ -369,8 +370,30 @@ public:
             if (_options->should_allow_all_origins_via_wildcard() && _options->get_allow_credentials() != CorsOptions::AllowCredentials::Yes) {
                 allow_origin_value = "*";
             } else {
+                // Reflect the requesting origin: either it matched a specific rule, or the operator
+                // configured '*' together with credentials — where the spec forbids a literal '*'
+                // and a concrete origin is the only conformant answer.
                 allow_origin_value = origin;
-                // Reflect the requesting origin if allowed and not "*" or if credentials are yes
+
+                // Say it out loud, once. `origins({"*"}) + credentials(Yes)` means EVERY site may
+                // read this server's authenticated responses: the browser's own safety net (it
+                // rejects `Allow-Origin: *` alongside credentials) is precisely what reflecting
+                // works around. It is a legitimate explicit choice, but it should never be a silent
+                // one — the same treatment pgsql gives `ssl_verify=none`. The default
+                // (`CorsOptions::permissive()`) is unaffected: it pairs '*' with credentials(No)
+                // and takes the literal-'*' branch above.
+                if (_options->should_allow_all_origins_via_wildcard()) {
+                    // Atomic, not a plain bool: this runs on every VirtualCore serving CORS, so a
+                    // read-modify-write here would be a data race on shared mutable state — the
+                    // exact class this codebase audits for. `exchange` also makes it genuinely
+                    // once rather than once-per-racing-core.
+                    static std::atomic<bool> warned_wildcard_with_credentials{false};
+                    if (!warned_wildcard_with_credentials.exchange(true, std::memory_order_relaxed)) {
+                        LOG_WARN("[qbm][http][cors] origins(\"*\") combined with credentials(Yes): the requesting Origin is "
+                                 "reflected and Access-Control-Allow-Credentials is sent, so ANY site can read authenticated "
+                                 "responses from this server. Restrict origins, or set credentials(No).");
+                    }
+                }
             }
             ctx->response().set_header("Access-Control-Allow-Origin", allow_origin_value);
             if (_options->get_allow_credentials() == CorsOptions::AllowCredentials::Yes) {
