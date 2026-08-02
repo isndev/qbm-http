@@ -189,20 +189,28 @@ public:
  */
 class Http1LoopbackBasicTest : public ::testing::Test {
 protected:
-    std::uint16_t                                      port = ephemeral_port();
+    std::uint16_t                                      port = 0;
     std::unique_ptr<ServerThread<BasicLoopbackServer>> server;
 
     void
     SetUp() override {
         qb::io::async::init(); // client side runs on the main/test thread
-        server = std::make_unique<ServerThread<BasicLoopbackServer>>([this](BasicLoopbackServer &s) {
-            if (s.transport().listen_v4(port) != 0) {
+        // Bind :0 and read the port BACK, rather than probing for a free one and binding it a
+        // moment later. `ephemeral_port()` documents the hole this closes: its probe must be shut
+        // before the caller can bind, so under `ctest -j` another test PROCESS can take the port in
+        // that window. Measured here at 2 failures in 12 full-suite runs, across two different
+        // tests in this directory. Binding :0 on the socket that actually serves leaves no window
+        // at all -- the kernel hands out a port and we keep it.
+        server = std::make_unique<ServerThread<BasicLoopbackServer>>([](BasicLoopbackServer &s) {
+            if (s.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             s.start();
             return true;
         });
         ASSERT_TRUE(server->ready());
+        port = server->server().transport().local_endpoint().port();
+        ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void
