@@ -27,8 +27,9 @@
  *                                  count), proving no listener/session leak.
  *
  * All servers run on their own qb-io event-loop thread (`WsServerThread`) bound to
- * a kernel-assigned ephemeral port (`ephemeral_port()`), so concurrent CTest
- * shards never collide. The client side is driven on the main thread by a
+ * `:0`, taking the kernel-assigned port read back from the serving listener, so
+ * concurrent CTest shards never collide — not even in the window a probe-then-bind
+ * helper would leave open. The client side is driven on the main thread by a
  * `pump_until(pred, budget)` helper that FAILS LOUD on timeout instead of
  * silently passing. Per-test state lives in the client/server objects; there are
  * no module-global counters. Cross-thread assertions are read on the main thread
@@ -66,8 +67,20 @@
 namespace ws_lifecycle_test {
 
 using namespace std::chrono_literals;
-using qb::http::test::ephemeral_port;
 using qb::http::test::WsServerThread;
+
+/**
+ * @brief Port argument that makes @ref WsServerThread bind `:0` and publish what the kernel gave.
+ *
+ * NOT `ephemeral_port()`. That helper probes a free port with a throwaway listener and must close
+ * it before the caller can bind, so between the probe closing and the server binding, another test
+ * PROCESS can take the port — a real flake under `ctest -j` (measured at 2 failures in 12
+ * full-suite runs in the http1 suites, and documented in `ephemeral_port()`'s own @warning).
+ * Binding `:0` on the socket that actually serves leaves no window: `WsServerThread` reads the
+ * assigned port back from the bound listener and publishes it in `server.port` before signalling
+ * readiness, so the ctor returning means `server.port` is the live port.
+ */
+constexpr int kBindEphemeral = 0;
 
 // ===========================================================================
 // Deterministic main-thread pump
@@ -247,8 +260,9 @@ private:
 // the actual echoed content, not just a count, and require an exact match on
 // both the number and the bytes — no tolerance band.
 TEST(WsLifecycle, EchoPreservesContent) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     constexpr std::size_t    kCount = 32;
     std::vector<std::string> sent;
@@ -281,8 +295,9 @@ TEST(WsLifecycle, EchoPreservesContent) {
 // A binary payload with embedded NULs and the full 0..255 byte range round-trips
 // intact and is delivered as binary (opcode 0x2), never reinterpreted as text.
 TEST(WsLifecycle, BinaryRoundTripExact) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     std::string payload;
     payload.reserve(120);
@@ -312,8 +327,9 @@ TEST(WsLifecycle, BinaryRoundTripExact) {
 // echoes the ping payload into its pong, so the last pong must equal the last
 // ping payload, and pongs == pings exactly.
 TEST(WsLifecycle, PongsEqualPings) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     LifecycleClient client{port};
     ASSERT_EQ(qb::io::SocketStatus::Done, client.transport().connect_v4("127.0.0.1", port));
@@ -341,8 +357,9 @@ TEST(WsLifecycle, PongsEqualPings) {
 // A client-initiated Close(1000) is answered by the server, which disconnects;
 // the client observes the TCP teardown. No tolerance, no early exit.
 TEST(WsLifecycle, GracefulCloseExchange) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     LifecycleClient client{port};
     ASSERT_EQ(qb::io::SocketStatus::Done, client.transport().connect_v4("127.0.0.1", port));
@@ -363,8 +380,9 @@ TEST(WsLifecycle, GracefulCloseExchange) {
 // listener/session leak across rapid churn (the de-flaked replacement for
 // ws-stress's RAPID_CONNECTIONS, which tolerated mismatched counts).
 TEST(WsLifecycle, RapidConnectDisconnect) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     constexpr std::size_t kConnections = 25;
     for (std::size_t i = 0; i < kConnections; ++i) {

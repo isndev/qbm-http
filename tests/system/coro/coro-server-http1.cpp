@@ -25,8 +25,8 @@
  * hanging the whole suite.
  *
  * De-flake notes (vs the pre-restructure `test-coro-server.cpp`):
- *   - magic port 19897 + `sleep_for(40ms)` warmup -> `ephemeral_port()` + the
- *     readiness barrier inside `ServerThread`.
+ *   - magic port 19897 + `sleep_for(40ms)` warmup -> `listen_v4(0)` on the socket
+ *     that actually serves + the readiness barrier inside `ServerThread`.
  *   - `run_sync(GET(...))` with no deadline -> every client GET carries an
  *     explicit timeout (`kClientTimeout`); a stuck coroutine yields 504, never a
  *     hang.
@@ -190,17 +190,24 @@ protected:
     void
     SetUp() override {
         qb::io::async::init();
-        _port = qb::http::test::ephemeral_port();
 
-        const std::uint16_t port = _port;
-        _server                  = std::make_unique<ServerThread>([port](CoroServer &srv) -> bool {
-            if (srv.transport().listen_v4(port) != 0) {
+        // Bind :0 on the socket that ACTUALLY SERVES and read the port back, rather than probing
+        // for a free port and binding it a moment later. `ephemeral_port()` documents the hole
+        // this closes: its probe must be shut before the caller can bind, so under `ctest -j`
+        // another test PROCESS can take the port in that window (measured: 2 failures in 12
+        // full-suite runs). Binding :0 here leaves no window at all.
+        _server = std::make_unique<ServerThread>([](CoroServer &srv) -> bool {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "coro HTTP/1.1 server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "coro HTTP/1.1 server failed to start";
+        // The ServerThread ctor already blocked on the readiness barrier, so the transport is
+        // bound and its assigned port is visible to this thread.
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void

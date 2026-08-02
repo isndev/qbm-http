@@ -121,21 +121,26 @@ protected:
             << "). The HTTP/2 coro system suite REQUIRES them.";
 
         qb::io::async::init();
-        _port = qb::http::test::ephemeral_port();
 
-        const std::string   cert = qb::http::test::ssl_cert_path().string();
-        const std::string   key  = qb::http::test::ssl_key_path().string();
-        const std::uint16_t port = _port;
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
 
-        _server = std::make_unique<ServerThread>([cert, key, port](CoroH2Server &srv) -> bool {
+        // Bind :0 and read the port BACK, rather than probing for a free one and binding it a
+        // moment later. `ephemeral_port()` documents the hole this closes: its probe must be shut
+        // before the caller can bind, so under `ctest -j` another test PROCESS can take the port in
+        // that window. Binding :0 on the socket that actually serves leaves no window at all.
+        _server = std::make_unique<ServerThread>([cert, key](CoroH2Server &srv) -> bool {
             srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
-            if (srv.transport().listen_v4(port) != 0) {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start";
+        // The ServerThread ctor already blocked on the readiness barrier, so the transport is bound.
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void

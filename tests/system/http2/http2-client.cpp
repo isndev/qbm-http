@@ -195,21 +195,26 @@ protected:
             << "). The HTTP/2 client system suite REQUIRES them.";
 
         qb::io::async::init();
-        _port = qb::http::test::ephemeral_port();
 
-        const std::string   cert = qb::http::test::ssl_cert_path().string();
-        const std::string   key  = qb::http::test::ssl_key_path().string();
-        const std::uint16_t port = _port;
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
 
-        _server = std::make_unique<ServerThread>([cert, key, port](H2Server &srv) -> bool {
+        // Bind :0 and read the port BACK, rather than probing for a free one and binding it a
+        // moment later. `ephemeral_port()` documents the hole this closes: its probe must be shut
+        // before the caller can bind, so under `ctest -j` another test PROCESS can take the port in
+        // that window. Binding :0 on the socket that actually serves leaves no window at all.
+        _server = std::make_unique<ServerThread>([cert, key](H2Server &srv) -> bool {
             srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
-            if (srv.transport().listen_v4(port) != 0) {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start";
+        // The ServerThread ctor already blocked on the readiness barrier, so the transport is bound.
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void
@@ -573,19 +578,22 @@ TEST_F(Http2ClientTest, GracefulDisconnectDrainsInflightRequest) {
 
 TEST_F(Http2ClientTest, ConnectFailsWhenServerDoesNotOfferH2) {
     // A second, independent server that advertises ONLY http/1.1 over ALPN.
-    const std::string   cert = qb::http::test::ssl_cert_path().string();
-    const std::string   key  = qb::http::test::ssl_key_path().string();
-    const std::uint16_t port = qb::http::test::ephemeral_port();
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
 
-    ServerThread http1_only_server([cert, key, port](H2Server &srv) -> bool {
+    // Bind :0 on the serving socket and read the port back — no probe-then-bind window for another
+    // test process to slip into (see `ephemeral_port()`'s @warning).
+    ServerThread http1_only_server([cert, key](H2Server &srv) -> bool {
         srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"http/1.1"})); // no "h2"
-        if (srv.transport().listen_v4(port) != 0) {
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
             return false;
         }
         srv.start();
         return true;
     });
     ASSERT_TRUE(http1_only_server.ready());
+    const std::uint16_t port = http1_only_server.server().transport().local_endpoint().port();
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
     auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
     client->set_verify_peer(false);

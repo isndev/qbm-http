@@ -31,7 +31,9 @@
 
 using namespace qb::io;
 using namespace std::chrono_literals;
-using qb::http::test::ephemeral_port;
+// NOTE: no `ephemeral_port()` here on purpose — every server in this file binds :0 on the socket
+// it actually serves on and reads the assigned port back, which leaves no window for another test
+// process to steal the port (see that helper's @warning).
 using qb::http::test::ServerThread;
 
 namespace {
@@ -95,14 +97,18 @@ std::string       HostHeaderCaptureClient::captured_host_header;
 } // namespace
 
 TEST(Http1Loopback, ClientSetsHostHeaderWithNonDefaultPort) {
-    const std::uint16_t port = ephemeral_port();
-
     async::init();
     HostHeaderCaptureClient::captured_host_header.clear();
     HostHeaderCaptureClient::got_request.store(false);
 
     HostHeaderCaptureServer server;
-    ASSERT_EQ(server.transport().listen_v4(port), 0);
+    // Bind :0 and read the port BACK, rather than probing for a free one and binding it a moment
+    // later. `ephemeral_port()` documents the hole this closes: its probe must be shut before the
+    // caller can bind, so under `ctest -j` another test PROCESS can take the port in that window.
+    // Binding :0 on the socket that actually serves leaves no window at all.
+    ASSERT_EQ(server.transport().listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = server.transport().local_endpoint().port();
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     server.start();
 
     qb::http::Request req{{"http://localhost:" + std::to_string(port) + "/host-check"}};
@@ -199,8 +205,6 @@ public:
 } // namespace
 
 TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
-    const std::uint16_t port = ephemeral_port();
-
     async::init();
     msg_count_server_side = 0;
     msg_count_client_side = 0;
@@ -210,7 +214,12 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
     server_bad_query      = 0;
 
     TestServer server;
-    ASSERT_EQ(server.transport().listen_v4(port), 0);
+    // Bind :0 on the socket that actually serves and read the port back — see the note on the
+    // first test in this file (and `ephemeral_port()`'s @warning) for the cross-process window
+    // that probing-then-binding leaves open.
+    ASSERT_EQ(server.transport().listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = server.transport().local_endpoint().port();
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     server.start();
 
     std::atomic<bool>  client_saw_non_ok{false};
@@ -264,14 +273,15 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
 }
 
 TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {
-    const std::uint16_t port = ephemeral_port();
-
     async::init();
     msg_count_server_side = 0;
     msg_count_client_side = 0;
 
     TestServer server;
-    ASSERT_EQ(server.transport().listen_v4(port), 0);
+    // Bind :0 on the serving socket, then read the assigned port back (no probe/bind window).
+    ASSERT_EQ(server.transport().listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = server.transport().local_endpoint().port();
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     server.start();
 
     std::atomic<bool>  any_status_mismatch{false};
@@ -382,15 +392,16 @@ raw_request_response(std::uint16_t port, const std::string &raw) {
 } // namespace
 
 TEST(Http1Loopback, ValidCookieHeaderIsParsedAndVisibleToHandler) {
-    const std::uint16_t port = ephemeral_port();
-
     async::init();
     CookieEchoClient::requests_seen.store(0);
     CookieEchoClient::cookie_count_seen.store(0);
     CookieEchoClient::session_cookie_seen.clear();
 
     CookieEchoServer server;
-    ASSERT_EQ(server.transport().listen_v4(port), 0);
+    // Bind :0 on the serving socket, then read the assigned port back (no probe/bind window).
+    ASSERT_EQ(server.transport().listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = server.transport().local_endpoint().port();
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     server.start();
 
     std::string response;
@@ -416,15 +427,16 @@ TEST(Http1Loopback, ValidCookieHeaderIsParsedAndVisibleToHandler) {
 }
 
 TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
-    const std::uint16_t port = ephemeral_port();
-
     async::init();
     CookieEchoClient::requests_seen.store(0);
     CookieEchoClient::cookie_count_seen.store(999); // sentinel; handler overwrites
     CookieEchoClient::session_cookie_seen = "SENTINEL";
 
     CookieEchoServer server;
-    ASSERT_EQ(server.transport().listen_v4(port), 0);
+    // Bind :0 on the serving socket, then read the assigned port back (no probe/bind window).
+    ASSERT_EQ(server.transport().listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = server.transport().local_endpoint().port();
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     server.start();
 
     std::string response;
@@ -525,9 +537,8 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
     ASSERT_TRUE(qb::http::test::certs_available())
         << "Missing TLS test resources: " << qb::http::test::ssl_cert_path() << " / " << qb::http::test::ssl_key_path();
 
-    const auto          cert_path = qb::http::test::ssl_cert_path();
-    const auto          key_path  = qb::http::test::ssl_key_path();
-    const std::uint16_t port      = ephemeral_port("::1");
+    const auto cert_path = qb::http::test::ssl_cert_path();
+    const auto key_path  = qb::http::test::ssl_key_path();
 
     async::init();
     msg_count_server_side = 0;
@@ -535,7 +546,11 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
 
     TestSecureServer server;
     server.transport().init(ssl::Context::server(cert_path, key_path));
-    ASSERT_EQ(server.transport().listen_v6(port), 0);
+    // Bind :0 on the serving socket (IPv6 loopback here) and read the assigned port back, so no
+    // other test PROCESS can take it between a probe's close and this bind.
+    ASSERT_EQ(server.transport().listen_v6(0, "::1"), 0);
+    const std::uint16_t port = server.transport().local_endpoint().port();
+    ASSERT_NE(port, 0) << "listen_v6(0) did not yield a kernel-assigned port";
     server.start();
 
     std::atomic<bool>  client_saw_non_ok{false};

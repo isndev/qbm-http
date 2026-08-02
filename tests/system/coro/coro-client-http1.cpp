@@ -19,8 +19,9 @@
  * event loop. All assertions are on observable response state.
  *
  * De-flake notes (vs the pre-restructure `test-coro-client.cpp`):
- *   - magic port 29879 + `sleep_for(40ms)` warmup -> `ephemeral_port()` + the
- *     condition-variable readiness barrier inside `ServerThread`.
+ *   - magic port 29879 + `sleep_for(40ms)` warmup -> `listen_v4(0)` on the socket
+ *     that actually serves + the condition-variable readiness barrier inside
+ *     `ServerThread`.
  *   - busy-spin callback poll -> bounded `pump_until(pred, budget)` that fails
  *     loud on timeout instead of looping with a 3s wall deadline.
  *   - `TimeoutYieldsGatewayTimeout` previously asserted only `status != OK`
@@ -165,17 +166,24 @@ protected:
     void
     SetUp() override {
         qb::io::async::init();
-        _port = qb::http::test::ephemeral_port();
 
-        const std::uint16_t port = _port;
-        _server                  = std::make_unique<ServerThread>([port](CoroTestServer &srv) -> bool {
-            if (srv.transport().listen_v4(port) != 0) {
+        // Bind :0 on the socket that ACTUALLY SERVES and read the port back, rather than probing
+        // for a free port and binding it a moment later. `ephemeral_port()` documents the hole
+        // this closes: its probe must be shut before the caller can bind, so under `ctest -j`
+        // another test PROCESS can take the port in that window (measured: 2 failures in 12
+        // full-suite runs). Binding :0 here leaves no window at all.
+        _server = std::make_unique<ServerThread>([](CoroTestServer &srv) -> bool {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "coro HTTP/1.1 loopback server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "coro HTTP/1.1 loopback server failed to start";
+        // The ServerThread ctor already blocked on the readiness barrier, so the transport is
+        // bound and its assigned port is visible to this thread.
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void

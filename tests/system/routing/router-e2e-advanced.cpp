@@ -29,8 +29,9 @@
  *     accounting. They counted "this code ran", not "it produced a correct
  *     value". Every assertion here is on OBSERVABLE response state (status /
  *     body / headers / the deterministic `X-MW-Trace` header).
- *   - magic port 29887 + `sleep_for(250ms)` warmup -> `ephemeral_port()` + the
- *     condition-variable readiness barrier inside the shared `ServerThread<>`.
+ *   - magic port 29887 + `sleep_for(250ms)` warmup -> `listen_v4(0)` on the socket
+ *     that actually serves + the condition-variable readiness barrier inside the
+ *     shared `ServerThread<>`.
  *   - dropped the misleading `integration-` prefix and the `qb::io::cout` spam.
  *
  * @author qb - C++ Actor Framework
@@ -238,17 +239,24 @@ protected:
     void
     SetUp() override {
         qb::io::async::init();
-        _port = qb::http::test::ephemeral_port();
 
-        const std::uint16_t port = _port;
-        _server                  = std::make_unique<ServerThread>([port](RouterE2EServer &srv) -> bool {
-            if (srv.transport().listen_v4(port) != 0) {
+        // Bind :0 on the socket that ACTUALLY SERVES and read the port back, rather than probing
+        // for a free port and binding it a moment later. `ephemeral_port()` documents the hole
+        // this closes: its probe must be shut before the caller can bind, so under `ctest -j`
+        // another test PROCESS can take the port in that window (measured: 2 failures in 12
+        // full-suite runs). Binding :0 here leaves no window at all.
+        _server = std::make_unique<ServerThread>([](RouterE2EServer &srv) -> bool {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "router e2e server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "router e2e server failed to start";
+        // The ServerThread ctor already blocked on the readiness barrier, so the transport is
+        // bound and its assigned port is visible to this thread.
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void

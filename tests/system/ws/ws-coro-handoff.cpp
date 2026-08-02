@@ -21,8 +21,9 @@
  * than via a cross-thread `EXPECT` on the server thread.
  *
  * Runs plaintext `ws://`; REQUIRES the SSL/crypto library only to LINK
- * (`ws/ws.h` uses `qb::io::crypto` for `Sec-WebSocket-Accept`). The listener
- * port is ephemeral and readiness is a barrier flag — no `sleep_for` warmup.
+ * (`ws/ws.h` uses `qb::io::crypto` for `Sec-WebSocket-Accept`). The listener binds
+ * `:0` and publishes the kernel-assigned port (see @ref HandoffFixture::port), and
+ * readiness is a barrier flag — no `sleep_for` warmup.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -50,7 +51,6 @@
 namespace {
 
 using namespace std::chrono_literals;
-using qb::http::test::ephemeral_port;
 
 // ---------------------------------------------------------------------------
 // WS side: server + coroutine session doing a simple text echo.
@@ -86,6 +86,15 @@ class IntegrationWsServer : public qb::io::use<IntegrationWsServer>::tcp::io_han
 // Readiness is signalled through a barrier flag (no sleep_for settle); the
 // listener is bound before the flag flips, so a client connecting right after
 // construction will not race the bind.
+//
+// The listener binds `:0` and the fixture publishes the port the kernel handed it,
+// rather than taking a port from `ephemeral_port()` and binding it a moment later.
+// That helper documents the hole in its own `@warning`: its probe listener must
+// CLOSE before the caller can bind, so under `ctest -j` another test PROCESS can
+// take the port in that window — measured at 2 failures in 12 full-suite runs
+// elsewhere in this suite. No workaround closes it (holding the probe open stops
+// the caller binding; SO_REUSEADDR does not make a listening port shareable), so
+// the port comes from the socket that actually serves and there is no window.
 // ---------------------------------------------------------------------------
 
 struct HandoffFixture {
@@ -95,13 +104,15 @@ struct HandoffFixture {
     std::atomic<bool>                    saw_null_registration{false};
     std::unique_ptr<qb::http::Server<>>  http_server;
     std::unique_ptr<IntegrationWsServer> ws_server;
-    std::uint16_t                        port;
+
+    /// Kernel-assigned listener port. Written on the worker BEFORE `ready` flips, so
+    /// the release/acquire edge on `ready` publishes it to the test thread.
+    std::uint16_t port{0};
 
     // force_registry_full: when true, the WS io_handler is capped at one slot so
     // a second concurrent handoff exercises the registerSession()==nullptr dead
     // path, giving that previously-untested branch real coverage.
-    explicit HandoffFixture(std::uint16_t port_, bool force_registry_full = false)
-        : port(port_) {
+    explicit HandoffFixture(bool force_registry_full = false) {
         thread = std::thread([this, force_registry_full] {
             qb::io::async::init();
 
@@ -151,7 +162,10 @@ struct HandoffFixture {
             });
             http_server->router().compile();
 
-            http_server->transport().listen_v4(port);
+            http_server->transport().listen_v4(0, "127.0.0.1");
+            // Read the port BACK off the listener that will actually serve; nothing
+            // else ever gets a chance to take it.
+            const std::uint16_t bound_port = http_server->transport().local_endpoint().port();
             http_server->start();
 
             if (force_registry_full) {
@@ -162,11 +176,12 @@ struct HandoffFixture {
                 // Every subsequent /ws handoff then hits the cap → nullptr, with
                 // no race and no risk of a hang.
                 qb::io::tcp::socket filler;
-                if (filler.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(port)}) == 0) {
+                if (filler.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(bound_port)}) == 0) {
                     (void) ws_server->registerSession(std::move(filler));
                 }
             }
 
+            port = bound_port; // published by the release store below
             ready.store(true, std::memory_order_release);
             while (running.load(std::memory_order_acquire)) {
                 if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
@@ -203,8 +218,9 @@ protected:
 // ---------------------------------------------------------------------------
 
 TEST_F(WsCoroHandoff, RouterHandoffAndCoroEcho) {
-    const std::uint16_t port = ephemeral_port();
-    HandoffFixture      fixture{port};
+    HandoffFixture      fixture;
+    const std::uint16_t port = fixture.port;
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
     auto scenario = [&]() -> qb::io::async::task<std::string> {
         qb::http::ws::coro_client ws;
@@ -235,8 +251,9 @@ TEST_F(WsCoroHandoff, RouterHandoffAndCoroEcho) {
 // router — proving the handoff is opt-in and doesn't leak into unrelated
 // traffic.
 TEST_F(WsCoroHandoff, NonUpgradeRouteStaysOnHttp) {
-    const std::uint16_t port = ephemeral_port();
-    HandoffFixture      fixture{port};
+    HandoffFixture      fixture;
+    const std::uint16_t port = fixture.port;
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
     qb::http::Request request;
     request.uri()    = qb::io::uri{"http://localhost:" + std::to_string(port) + "/ping"};
@@ -252,8 +269,9 @@ TEST_F(WsCoroHandoff, NonUpgradeRouteStaysOnHttp) {
 // fails on the missing handshake headers, so the client never sees a 101 and
 // the request resolves as a non-OK / closed connection rather than an echo.
 TEST_F(WsCoroHandoff, NonWebSocketRequestToWsRouteIsNotUpgraded) {
-    const std::uint16_t port = ephemeral_port();
-    HandoffFixture      fixture{port};
+    HandoffFixture      fixture;
+    const std::uint16_t port = fixture.port;
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
     qb::io::tcp::socket sock;
     ASSERT_EQ(sock.connect(qb::io::uri{"tcp://localhost:" + std::to_string(port)}), 0);
@@ -297,8 +315,9 @@ TEST_F(WsCoroHandoff, NonWebSocketRequestToWsRouteIsNotUpgraded) {
 // hang. We assert the client is cleanly disconnected and the server actually
 // executed the nullptr branch.
 TEST_F(WsCoroHandoff, RegisterSessionNullptrIsHandledGracefully) {
-    const std::uint16_t port = ephemeral_port();
-    HandoffFixture      fixture{port, /*force_registry_full=*/true};
+    HandoffFixture      fixture{/*force_registry_full=*/true};
+    const std::uint16_t port = fixture.port;
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
     const std::string url = "ws://localhost:" + std::to_string(port) + "/ws";
 
@@ -320,8 +339,9 @@ TEST_F(WsCoroHandoff, RegisterSessionNullptrIsHandledGracefully) {
 }
 
 TEST_F(WsCoroHandoff, PersistentHttp1ClientCanReuseConnectionBeforeUpgrade) {
-    const std::uint16_t port = ephemeral_port();
-    HandoffFixture      fixture{port};
+    HandoffFixture      fixture;
+    const std::uint16_t port = fixture.port;
+    ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
     auto              client = qb::http1::make_client("http://localhost:" + std::to_string(port));
     qb::http::Request first;

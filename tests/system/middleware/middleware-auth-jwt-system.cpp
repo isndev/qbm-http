@@ -72,18 +72,35 @@ public:
 
 using ServerThread = qb::http::test::ServerThread<AuthServer>;
 
+/**
+ * @brief Build a loopback ServerThread that installs @p build_routes then listens.
+ *
+ * @param port OUT: receives the kernel-assigned port the server actually bound.
+ *             The server binds `:0` and the port is read BACK off the listening
+ *             socket, rather than probing a free port with `ephemeral_port()` and
+ *             binding it a moment later. `ephemeral_port()` documents the hole
+ *             this closes: its probe must be shut before the caller can bind, so
+ *             under `ctest -j` another test PROCESS can take the port in that
+ *             window (measured: 2 failures in 12 full-suite runs). Binding `:0` on
+ *             the socket that actually serves leaves no window at all. Set to 0 if
+ *             startup failed — callers assert `ready()` immediately after.
+ */
 template <typename BuildFn>
 std::unique_ptr<ServerThread>
-start_auth_server(std::uint16_t port, BuildFn build_routes) {
-    return std::make_unique<ServerThread>([port, build_routes](AuthServer &srv) -> bool {
+start_auth_server(std::uint16_t &port, BuildFn build_routes) {
+    auto server = std::make_unique<ServerThread>([build_routes](AuthServer &srv) -> bool {
         build_routes(srv);
         srv.router().compile();
-        if (srv.transport().listen_v4(port) != 0) {
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
             return false;
         }
         srv.start();
         return true;
     });
+    // The ServerThread ctor already blocked on the readiness barrier, so on success the
+    // transport is bound and its assigned port is visible to this thread.
+    port = server->ready() ? server->server().transport().local_endpoint().port() : 0;
+    return server;
 }
 
 // Forge a signed JWT carrying sub/iat/nbf/exp plus extra string claims, matching
@@ -112,7 +129,7 @@ protected:
     void
     SetUp() override {
         qb::io::async::init();
-        _port = qb::http::test::ephemeral_port();
+        // No port is taken here: each test's server binds :0 and publishes the port it got.
     }
 
     [[nodiscard]] std::string

@@ -25,11 +25,12 @@
  *                                     assertion preserved from `ws-session`'s
  *                                     `WEBSOCKET_OVER_SECURE_TCP`.
  *
- * Each test uses its own ephemeral port (`ephemeral_port()`), its own server on a
- * worker-thread event loop (`WsServerThread`), and per-test client state — no
- * module-global counters. The main thread is pumped with `pump_until(pred,
- * budget)` which FAILS LOUD on timeout. There is no per-file `main()`; the shared
- * gtest_main drives the suite.
+ * Each test uses its own server on a worker-thread event loop (`WsServerThread`)
+ * bound to `:0` — the port is the kernel-assigned one read back from the serving
+ * listener, not one probed and re-bound a moment later — and per-test client
+ * state, no module-global counters. The main thread is pumped with
+ * `pump_until(pred, budget)` which FAILS LOUD on timeout. There is no per-file
+ * `main()`; the shared gtest_main drives the suite.
  *
  * `ws/ws.h` `#error`s without `QB_HAS_SSL` (crypto-link for `generateKey()` /
  * `Sec-WebSocket-Accept`); the plaintext tests still run over `ws://`, while the
@@ -58,8 +59,20 @@
 namespace ws_client_echo_test {
 
 using namespace std::chrono_literals;
-using qb::http::test::ephemeral_port;
 using qb::http::test::WsServerThread;
+
+/**
+ * @brief Port argument that makes @ref WsServerThread bind `:0` and publish what the kernel gave.
+ *
+ * NOT `ephemeral_port()`. That helper probes a free port with a throwaway listener and must close
+ * it before the caller can bind, so between the probe closing and the server binding, another test
+ * PROCESS can take the port — a real flake under `ctest -j` (measured at 2 failures in 12
+ * full-suite runs in the http1 suites, and documented in `ephemeral_port()`'s own @warning).
+ * Binding `:0` on the socket that actually serves leaves no window: `WsServerThread` reads the
+ * assigned port back from the bound listener and publishes it in `server.port` before signalling
+ * readiness, so the ctor returning means `server.port` is the live port.
+ */
+constexpr int kBindEphemeral = 0;
 
 // ===========================================================================
 // Deterministic main-thread pump
@@ -188,8 +201,9 @@ public:
 // The CRTP client sends N distinct text frames; every echo must match the sent
 // payload exactly (content compared, not just a received count).
 TEST(WsClientEcho, CrtpClientEchoesContent) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     constexpr std::size_t    kCount = 24;
     std::vector<std::string> sent;
@@ -220,8 +234,9 @@ TEST(WsClientEcho, CrtpClientEchoesContent) {
 // The high-level callback `ws::client` round-trips the same content. on_connected
 // must fire exactly once; the collected echoes must match the sent payloads.
 TEST(WsClientEcho, CallbackClientEchoesContent) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     constexpr std::size_t    kCount = 16;
     std::vector<std::string> sent;
@@ -354,13 +369,15 @@ public:
 TEST(WsClientEcho, TlsHandshakeUpgrades) {
     ASSERT_TRUE(qb::http::test::certs_available()) << "TLS test certificate/key not found; secure WS coverage cannot run";
 
-    const int port = ephemeral_port();
-
-    // The TLS server is configured on its own worker thread before it listens.
-    WsServerThread<SecureEchoServer> server{port, [](SecureEchoServer &s) {
-                                                s.transport().init(qb::io::ssl::Context::server(
-                                                    qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()));
+    // The TLS server is configured on its own worker thread before it listens; the config callback
+    // runs BEFORE listen_v4, so binding `:0` and reading the port back works exactly as it does for
+    // the plaintext servers above.
+    WsServerThread<SecureEchoServer> server{kBindEphemeral, [](SecureEchoServer &s) {
+                                                s.transport().init(qb::io::ssl::Context::server(qb::http::test::ssl_cert_path(),
+                                                                                                qb::http::test::ssl_key_path()));
                                             }};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     SecureEchoClient client{port};
     // Self-signed test certificate: opt out of qb-io's secure-by-default peer
