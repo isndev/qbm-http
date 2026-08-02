@@ -221,19 +221,27 @@ struct LoopbackHttp1Server {
     // making every connection_count()/request_count() read return -1. The
     // worker's write is safely visible to the test thread because the
     // ServerThread ctor's readiness wait establishes a happens-before edge.
-    std::uint16_t                       port = ephemeral_port();
+    std::uint16_t                       port = 0;
     Http1ClientTestServer              *srv  = nullptr;
     ServerThread<Http1ClientTestServer> thread;
 
+    // Bind :0 and read the port BACK, rather than probing for a free one and binding it a moment
+    // later. `ephemeral_port()` documents the hole this closes: its probe must be shut before the
+    // caller can bind, so under `ctest -j` another test PROCESS can take the port in that window.
+    // Measured at 2 failures in 12 full-suite runs, across two different tests in this directory.
+    // Binding :0 on the socket that actually serves leaves no window at all.
     LoopbackHttp1Server()
         : thread([this](Http1ClientTestServer &server) {
             srv = &server;
-            if (server.transport().listen_v4(port) != 0) {
+            if (server.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             server.start();
             return true;
-        }) {}
+        }) {
+        // `thread`'s ctor already blocked on the readiness barrier, so the transport is bound.
+        port = thread.server().transport().local_endpoint().port();
+    }
 
     [[nodiscard]] std::string
     url(std::string const &path) const {
