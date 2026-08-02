@@ -89,23 +89,37 @@ using ServerThread = qb::http::test::ServerThread<PipelineServer>;
  *
  * @p build_routes runs on the worker thread and receives the live server; it
  * registers middleware + routes and must NOT compile (this helper compiles).
+ *
+ * @param port OUT: receives the kernel-assigned port the server actually bound.
+ *             The server binds `:0` and the port is read BACK off the listening
+ *             socket, rather than probing a free port with `ephemeral_port()` and
+ *             binding it a moment later. `ephemeral_port()` documents the hole
+ *             this closes: its probe must be shut before the caller can bind, so
+ *             under `ctest -j` another test PROCESS can take the port in that
+ *             window (measured: 2 failures in 12 full-suite runs). Binding `:0` on
+ *             the socket that actually serves leaves no window at all. Set to 0 if
+ *             startup failed — callers assert `ready()` immediately after.
  */
 template <typename BuildFn>
 std::unique_ptr<ServerThread>
-start_pipeline_server(std::uint16_t port, BuildFn build_routes) {
-    return std::make_unique<ServerThread>([port, build_routes](PipelineServer &srv) -> bool {
+start_pipeline_server(std::uint16_t &port, BuildFn build_routes) {
+    auto server = std::make_unique<ServerThread>([build_routes](PipelineServer &srv) -> bool {
         build_routes(srv);
         srv.router().compile();
-        if (srv.transport().listen_v4(port) != 0) {
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
             return false;
         }
         srv.start();
         return true;
     });
+    // The ServerThread ctor already blocked on the readiness barrier, so on success the
+    // transport is bound and its assigned port is visible to this thread.
+    port = server->ready() ? server->server().transport().local_endpoint().port() : 0;
+    return server;
 }
 
-// Common fixture: just an ephemeral port + async init. Each test starts its own
-// server with the middleware under test.
+// Common fixture: async init only. Each test starts its own server with the
+// middleware under test; the server binds :0 and publishes the port it got.
 class MiddlewarePipelineTest : public ::testing::Test {
 protected:
     std::uint16_t _port{0};
@@ -113,7 +127,6 @@ protected:
     void
     SetUp() override {
         qb::io::async::init();
-        _port = qb::http::test::ephemeral_port();
     }
 
     [[nodiscard]] std::string
@@ -700,7 +713,11 @@ protected:
     SetUp() override {
         MiddlewarePipelineTest::SetUp();
         std::error_code ec;
-        _root = std::filesystem::temp_directory_path(ec) / ("static_files_system_" + std::to_string(_port));
+        // The root is created BEFORE the server binds, so it can no longer be named after the
+        // port (the port is only known once the server has bound :0). A monotonic timestamp keeps
+        // the name unique across concurrent processes, which is all the port ever provided here.
+        _root = std::filesystem::temp_directory_path(ec)
+                / ("static_files_system_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::remove_all(_root, ec);
         ASSERT_TRUE(std::filesystem::create_directories(_root, ec)) << ec.message();
 

@@ -18,9 +18,12 @@
  * `Sec-WebSocket-Accept` use `qb::io::crypto` (SHA-1/base64). The dependency is a
  * crypto-library *link* requirement, NOT a TLS transport; tag `ws`, REQUIRES ssl.
  *
- * Ports are ephemeral (kernel-assigned) so the suite is parallel-safe; the
- * loopback loops are driven by a fail-loud @ref pump_until rather than fixed-iter
- * sleeps; no module globals — every test owns its server-side result struct.
+ * Ports are ephemeral and come from the listener that ACTUALLY SERVES — every
+ * @ref qb::http::test::WsServerThread here is constructed with port 0 and publishes
+ * the kernel-assigned port (see @ref bound_port), so the suite is parallel-safe
+ * across processes as well as within one; the loopback loops are driven by a
+ * fail-loud @ref pump_until rather than fixed-iter sleeps; no module globals —
+ * every test owns its server-side result struct.
  *
  * Split out of the former `tests/test-ws-api-hardening.cpp` (the 9 adversarial
  * loopback cases). The 7 pure serializer / token-validation cases moved to
@@ -44,13 +47,42 @@
 
 #include <qb/io/async.h>
 
-#include "../../shared/loopback_server.h" // ephemeral_port
+#include "../../shared/loopback_server.h" // shared system-tier fixtures
 #include "../../shared/ws_loopback.h"     // WsServerThread
 #include "../ws.h"
 
 using namespace std::chrono_literals;
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Ephemeral port: bind :0 on the socket that actually serves.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Port a started @ref qb::http::test::WsServerThread is really listening on.
+ *
+ * Every adversarial server in this file is constructed with port **0**: the kernel
+ * assigns the port at `bind()` time and `WsServerThread` publishes it under its
+ * readiness barrier, so by the time its ctor returns `server.port` is the real one.
+ *
+ * This is deliberately NOT `ephemeral_port()`. That helper documents the hole in its
+ * own `@warning`: its probe listener must CLOSE before the caller can bind, so under
+ * `ctest -j` another test PROCESS can take the port in that window — measured at 2
+ * failures in 12 full-suite runs elsewhere in this suite. No workaround closes it
+ * (holding the probe open stops the caller binding; SO_REUSEADDR does not make a
+ * listening port shareable). Binding :0 on the socket that actually serves and reading
+ * the assigned port back leaves no window at all.
+ *
+ * @return The kernel-assigned port; a 0 here fails the test loudly rather than sending
+ *         the client at port 0.
+ */
+template <typename ServerT>
+[[nodiscard]] int
+bound_port(const qb::http::test::WsServerThread<ServerT> &server) {
+    EXPECT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    return server.port;
+}
 
 // ---------------------------------------------------------------------------
 // Fail-loud loop pump for the client side (runs on the main thread's listener).
@@ -155,8 +187,8 @@ TEST(WebSocketClientHardening, ClientControlFramesAreMaskedAndAcceptedByServer) 
     qb::io::async::init();
 
     ServerProbeResult                                  result;
-    const int                                          port = static_cast<int>(qb::http::test::ephemeral_port());
-    qb::http::test::WsServerThread<ControlProbeServer> server(port, [&](ControlProbeServer &s) { s.results = &result; });
+    qb::http::test::WsServerThread<ControlProbeServer> server(0, [&](ControlProbeServer &s) { s.results = &result; });
+    const int                                          port = bound_port(server);
 
     bool connected = false;
 
@@ -245,8 +277,8 @@ drive_bad_key_handshake(int port, std::string_view key) {
 TEST(WebSocketClientHardening, ServerRejectsMalformedSecWebSocketKey) {
     qb::io::async::init();
 
-    const int                                                 port = static_cast<int>(qb::http::test::ephemeral_port());
-    qb::http::test::WsServerThread<HandshakeValidationServer> server(port);
+    qb::http::test::WsServerThread<HandshakeValidationServer> server(0);
+    const int                                                 port = bound_port(server);
 
     // 24 'a' chars: valid base64 length but not a 16-byte nonce decode.
     const std::string response = drive_bad_key_handshake(port, "aaaaaaaaaaaaaaaaaaaaaaaa");
@@ -258,8 +290,8 @@ TEST(WebSocketClientHardening, ServerRejectsMalformedSecWebSocketKey) {
 TEST(WebSocketClientHardening, ServerRejectsNonBase64SecWebSocketKey) {
     qb::io::async::init();
 
-    const int                                                 port = static_cast<int>(qb::http::test::ephemeral_port());
-    qb::http::test::WsServerThread<HandshakeValidationServer> server(port);
+    qb::http::test::WsServerThread<HandshakeValidationServer> server(0);
+    const int                                                 port = bound_port(server);
 
     const std::string response = drive_bad_key_handshake(port, "!!!!!!!!!!!!!!!!!!!!!!!!");
 
@@ -312,8 +344,8 @@ public:
 TEST(WebSocketClientHardening, ClientRejectsServerSubprotocolNotOffered) {
     qb::io::async::init();
 
-    const int                                            port = static_cast<int>(qb::http::test::ephemeral_port());
-    qb::http::test::WsServerThread<BadSubprotocolServer> server(port);
+    qb::http::test::WsServerThread<BadSubprotocolServer> server(0);
+    const int                                            port = bound_port(server);
 
     bool connected = false;
     bool errored   = false;
@@ -376,8 +408,8 @@ public:
 TEST(WebSocketClientHardening, ClientRejectsMalformedConnectionTokenInResponse) {
     qb::io::async::init();
 
-    const int                                                port = static_cast<int>(qb::http::test::ephemeral_port());
-    qb::http::test::WsServerThread<BadConnectionTokenServer> server(port);
+    qb::http::test::WsServerThread<BadConnectionTokenServer> server(0);
+    const int                                                port = bound_port(server);
 
     bool connected = false;
     bool errored   = false;
@@ -511,8 +543,8 @@ run_bad_frame_scenario(std::uint16_t expected_close_code) {
     qb::io::async::init();
 
     ServerProbeResult                       result;
-    const int                               port = static_cast<int>(qb::http::test::ephemeral_port());
-    qb::http::test::WsServerThread<ServerT> server(port, [&](ServerT &s) { s.results = &result; });
+    qb::http::test::WsServerThread<ServerT> server(0, [&](ServerT &s) { s.results = &result; });
+    const int                               port = bound_port(server);
 
     bool        errored  = false;
     std::size_t messages = 0;
@@ -613,8 +645,8 @@ TEST(WebSocketClientHardening, ClientEchoesPeerCloseFrameExactlyOnce) {
     qb::io::async::init();
 
     ServerProbeResult                                    result;
-    const int                                            port = static_cast<int>(qb::http::test::ephemeral_port());
-    qb::http::test::WsServerThread<CloseEchoProbeServer> server(port, [&](CloseEchoProbeServer &s) { s.results = &result; });
+    qb::http::test::WsServerThread<CloseEchoProbeServer> server(0, [&](CloseEchoProbeServer &s) { s.results = &result; });
+    const int                                            port = bound_port(server);
 
     std::size_t closes_seen = 0;
 

@@ -232,27 +232,30 @@ protected:
     SetUp() override {
         qb::io::async::init();
 
-        _upstream_port = qb::http::test::ephemeral_port();
-        _gateway_port  = qb::http::test::ephemeral_port();
-        _dead_port     = qb::http::test::ephemeral_port(); // reserved + released = refused target
-
-        // The three probes are independent draws and could (rarely) collide. The
-        // UpstreamRefusedFallback test only proves anything if _dead_port really is
-        // a refused target distinct from the live upstream/gateway — otherwise it
-        // would pass for the wrong reason. Pin all three distinct up front.
-        ASSERT_NE(_dead_port, _upstream_port);
-        ASSERT_NE(_dead_port, _gateway_port);
-        ASSERT_NE(_upstream_port, _gateway_port);
-
-        const std::uint16_t up_port = _upstream_port;
-        _upstream                   = std::make_unique<UpstreamThread>([up_port](UpstreamServer &srv) -> bool {
-            if (srv.transport().listen_v4(up_port) != 0) {
+        // The two LIVE servers bind :0 on the socket that actually serves and read the port back,
+        // rather than probing for a free port and binding it a moment later. `ephemeral_port()`
+        // documents the hole that closes: its probe must be shut before the caller can bind, so
+        // under `ctest -j` another test PROCESS can take the port in that window (measured: 2
+        // failures in 12 full-suite runs).
+        _upstream = std::make_unique<UpstreamThread>([](UpstreamServer &srv) -> bool {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_upstream->ready()) << "upstream loopback server failed to start on port " << _upstream_port;
+        ASSERT_TRUE(_upstream->ready()) << "upstream loopback server failed to start";
+        // The UpstreamThread ctor already blocked on the readiness barrier, so the transport is
+        // bound and its assigned port is visible to this thread.
+        _upstream_port = _upstream->server().transport().local_endpoint().port();
+        ASSERT_NE(_upstream_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+
+        // _dead_port is the ONE port here that must never be bound — `UpstreamRefusedFallback`
+        // needs a connect to it to be REFUSED — so it cannot use the bind-and-read-back pattern:
+        // there is no serving socket to read a port off. It keeps the probe-and-release draw, and
+        // is drawn AFTER the upstream is listening so the kernel cannot hand out that port.
+        _dead_port = qb::http::test::ephemeral_port(); // reserved + released = refused target
+        ASSERT_NE(_dead_port, _upstream_port);
 
         const std::string upstream_base = "http://localhost:" + std::to_string(_upstream_port);
         const std::string dead_base     = "http://localhost:" + std::to_string(_dead_port);
@@ -261,23 +264,34 @@ protected:
         // generic ServerThread<> default-construct path does not support, so the
         // gateway runs on a manually-managed worker thread below. It still uses
         // an observable condition-variable readiness barrier (no sleep_for warmup).
-        start_gateway(_gateway_port, upstream_base, dead_base);
+        start_gateway(upstream_base, dead_base);
+        ASSERT_NE(_gateway_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+        // The gateway's :0 bind happened after _dead_port's probe was released, so the kernel
+        // could in principle re-hand that number. UpstreamRefusedFallback only proves anything if
+        // the dead target really is distinct from both live servers — pin it rather than let the
+        // test pass for the wrong reason.
+        ASSERT_NE(_gateway_port, _dead_port);
+        ASSERT_NE(_gateway_port, _upstream_port);
     }
 
     // Run the gateway on a worker thread with a condition-variable readiness
     // barrier (mirrors ServerThread<>'s contract for the ctor-arg case).
+    // Publishes the kernel-assigned port into _gateway_port under _gateway_mtx.
     void
-    start_gateway(std::uint16_t port, std::string upstream_base, std::string dead_base) {
+    start_gateway(std::string upstream_base, std::string dead_base) {
         _gateway_running.store(true, std::memory_order_release);
-        _gateway_thread = std::thread([this, port, upstream_base, dead_base] {
+        _gateway_thread = std::thread([this, upstream_base, dead_base] {
             qb::io::async::init();
             GatewayServer server{upstream_base, dead_base};
-            const bool    listening = server.transport().listen_v4(port) == 0;
+            const bool    listening = server.transport().listen_v4(0, "127.0.0.1") == 0;
             if (listening) {
                 server.start();
             }
             {
                 std::lock_guard<std::mutex> lock(_gateway_mtx);
+                // Published under the same lock as the readiness flag the ctor waits on, so the
+                // test thread's read below is ordered after this write.
+                _gateway_port   = listening ? server.transport().local_endpoint().port() : 0;
                 _gateway_ready  = listening;
                 _gateway_failed = !listening;
             }
@@ -295,7 +309,7 @@ protected:
         std::unique_lock<std::mutex> lock(_gateway_mtx);
         const bool signalled = _gateway_cv.wait_for(lock, std::chrono::seconds(5), [this] { return _gateway_ready || _gateway_failed; });
         ASSERT_TRUE(signalled) << "gateway server did not become ready in time";
-        ASSERT_TRUE(_gateway_ready) << "gateway server failed to listen on port " << port;
+        ASSERT_TRUE(_gateway_ready) << "gateway server failed to listen on an ephemeral port";
     }
 
     void

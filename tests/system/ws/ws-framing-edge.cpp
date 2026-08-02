@@ -26,8 +26,10 @@
  *
  * The server harness, `perform_upgrade()`, `make_client_frame()`, `read_some()`
  * and `extract_close_code()` all come from the shared loopback header so the
- * inline copies that used to live here are gone. Ports are ephemeral (assigned
- * by the OS) so cases never collide and can run in parallel.
+ * inline copies that used to live here are gone. Each case's server binds :0
+ * ITSELF and publishes the port the kernel assigned it (see @ref EphemeralWsServer),
+ * so cases never collide — not with each other and not with another test process
+ * under `ctest -j`.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -49,12 +51,37 @@
 namespace {
 
 using namespace std::chrono_literals;
-using qb::http::test::ephemeral_port;
 using qb::http::test::extract_close_code;
 using qb::http::test::make_client_frame;
 using qb::http::test::perform_upgrade;
 using qb::http::test::read_some;
 using qb::http::test::WsServerThread;
+
+// ---------------------------------------------------------------------------
+// Server fixture: the SERVING socket takes the ephemeral port itself
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A @ref WsServerThread whose own listener is bound to :0.
+ *
+ * Passing port 0 makes the harness `listen_v4(0)` and publish the kernel-assigned port
+ * under its readiness lock before signalling ready (shared/ws_loopback.h), so `port` is
+ * the real, bound port by the time this constructor returns.
+ *
+ * This replaces `WsServerThread<T>{ephemeral_port()}`. `ephemeral_port()` probed a free
+ * port on a THROWAWAY listener and had to close it before the server could bind: in that
+ * window another test PROCESS can take the port, which under `ctest -j` is a measured
+ * flake (2 failures in 12 full-suite runs across the qbm-http system suites). Binding :0
+ * on the socket that actually serves leaves no window at all — the kernel hands out a port
+ * and this socket keeps it.
+ */
+template <typename ServerT>
+struct EphemeralWsServer : WsServerThread<ServerT> {
+    EphemeralWsServer()
+        : WsServerThread<ServerT>(0) {
+        EXPECT_NE(this->port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Test sessions/servers
@@ -153,7 +180,7 @@ expect_close_code_after_frames(WsServerThread<ServerT> &server, std::vector<std:
 // ===========================================================================
 
 TEST(WsFramingEdge, MaxPayloadSizeEnforced) {
-    WsServerThread<BoundedServer> server{ephemeral_port()};
+    EphemeralWsServer<BoundedServer> server;
 
     auto scenario = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
         qb::http::ws::coro_client ws;
@@ -179,7 +206,7 @@ TEST(WsFramingEdge, MaxPayloadSizeEnforced) {
 }
 
 TEST(WsFramingEdge, FragmentedPayloadLimitIsEnforcedOnAggregateMessageSize) {
-    WsServerThread<BoundedServer> server{ephemeral_port()};
+    EphemeralWsServer<BoundedServer> server;
     // 40 + 40: each frame is under 64 but the reassembled message is not.
     expect_close_code_after_frames(server, {make_client_frame(0x01, std::string(40, 'A')), make_client_frame(0x80, std::string(40, 'B'))},
                                    qb::http::ws::CloseStatus::MessageTooBig);
@@ -190,7 +217,7 @@ TEST(WsFramingEdge, FragmentedPayloadLimitIsEnforcedOnAggregateMessageSize) {
 // ===========================================================================
 
 TEST(WsFramingEdge, InterleavedPingDuringFragmented) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -228,7 +255,7 @@ TEST(WsFramingEdge, InterleavedPingDuringFragmented) {
 // ===========================================================================
 
 TEST(WsFramingEdge, ZeroLengthTextFrameIsDeliveredAndEchoed) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -248,7 +275,7 @@ TEST(WsFramingEdge, ZeroLengthTextFrameIsDeliveredAndEchoed) {
 }
 
 TEST(WsFramingEdge, ZeroLengthPingGetsZeroLengthPong) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -272,7 +299,7 @@ TEST(WsFramingEdge, ZeroLengthPingGetsZeroLengthPong) {
 // ===========================================================================
 
 TEST(WsFramingEdge, NonMinimalPayloadLengthEncodingIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -299,25 +326,25 @@ TEST(WsFramingEdge, NonMinimalPayloadLengthEncodingIsRejected) {
 }
 
 TEST(WsFramingEdge, RsvBitsAreRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     expect_close_code_after_frames(server, {make_client_frame(0xC1, "x")}, // FIN + RSV1 + text
                                    qb::http::ws::CloseStatus::ProtocolError);
 }
 
 TEST(WsFramingEdge, FragmentedControlFrameIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     expect_close_code_after_frames(server, {make_client_frame(0x09, "p")}, // Ping with FIN=0
                                    qb::http::ws::CloseStatus::ProtocolError);
 }
 
 TEST(WsFramingEdge, ContinuationWithoutInitialDataFrameIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     expect_close_code_after_frames(server, {make_client_frame(0x80, "x")}, // FIN + continuation, no prior data
                                    qb::http::ws::CloseStatus::ProtocolError);
 }
 
 TEST(WsFramingEdge, NewDataFrameBeforeFinalContinuationIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     expect_close_code_after_frames(server,
                                    {make_client_frame(0x01, "hel"),  // Text, FIN=0
                                     make_client_frame(0x82, "bin")}, // Binary, FIN=1 mid-fragment
@@ -325,7 +352,7 @@ TEST(WsFramingEdge, NewDataFrameBeforeFinalContinuationIsRejected) {
 }
 
 TEST(WsFramingEdge, PayloadLength64MostSignificantBitIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     std::vector<std::uint8_t>  bad;
     bad.reserve(2 + 8 + 4);
     bad.push_back(0x81u);        // FIN + text
@@ -340,7 +367,7 @@ TEST(WsFramingEdge, PayloadLength64MostSignificantBitIsRejected) {
 
 // NEW: an unmasked client text frame must be rejected (RFC 6455 §5.1).
 TEST(WsFramingEdge, UnmaskedClientFrameIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -370,7 +397,7 @@ TEST(WsFramingEdge, UnmaskedClientFrameIsRejected) {
 // NEW: a Close frame carrying an out-of-range status code must be rejected
 // with 1002 (ws.h:500 "Invalid close status code").
 TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     // Close payload = status 999 (below the lowest valid 1000) + no reason.
     std::string close_payload;
@@ -397,7 +424,7 @@ TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
 // A Close frame whose payload is exactly ONE byte is malformed: a close code is
 // two bytes, so a lone byte can never be a valid status (ws.h:492 → 1002).
 TEST(WsFramingEdge, OneByteCloseFramePayloadIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     // Close (0x88) with a single payload byte.
     expect_close_code_after_frames(server, {make_client_frame(0x88, std::string(1, '\x03'))}, qb::http::ws::CloseStatus::ProtocolError);
 }
@@ -406,7 +433,7 @@ TEST(WsFramingEdge, OneByteCloseFramePayloadIsRejected) {
 // must be failed with 1007 DataNotConsistent (ws.h:504). This is distinct from
 // the out-of-range-code path (1002) already covered above.
 TEST(WsFramingEdge, CloseFrameWithInvalidUtf8ReasonIsRejectedWith1007) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     // Payload = status 1000 (Normal, valid) + invalid UTF-8 reason (lone 0x80
     // continuation byte → not a valid scalar).
@@ -423,7 +450,7 @@ TEST(WsFramingEdge, CloseFrameWithInvalidUtf8ReasonIsRejectedWith1007) {
 // (ws.h:674 → 1002): 126 is read as a length value > 125 before the ext16 path
 // is taken. make_client_frame only emits the 7-bit form, so build it by hand.
 TEST(WsFramingEdge, ControlFrameAnnouncingOversizeLengthIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -453,7 +480,7 @@ TEST(WsFramingEdge, ControlFrameAnnouncingOversizeLengthIsRejected) {
 // ===========================================================================
 
 TEST(WsFramingEdge, InvalidUtf8TextFrameIsRejectedWith1007) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -479,7 +506,7 @@ TEST(WsFramingEdge, InvalidUtf8TextFrameIsRejectedWith1007) {
 // ===========================================================================
 
 TEST(WsFramingEdge, LargeSingleFramePayloadUsesExt16LengthPath) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -552,7 +579,7 @@ public:
 };
 
 TEST(WsFramingEdge, ThrowingMessageHandlerDoesNotTerminate) {
-    WsServerThread<ThrowServer> server{ephemeral_port()};
+    EphemeralWsServer<ThrowServer> server;
 
     auto scenario = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
         qb::http::ws::coro_client ws;
@@ -607,7 +634,7 @@ static const std::string kAllUtf8Forms = []() {
 }();
 
 TEST(WsFramingEdge, ValidMultiByteUtf8TextIsAcceptedAndEchoed) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -634,7 +661,7 @@ TEST(WsFramingEdge, ValidMultiByteUtf8TextIsAcceptedAndEchoed) {
 // validate as one scalar (ws.h:572 final-fragment UTF-8 check on the joined
 // buffer). The euro sign (E2 82 AC) is split 1+2 between two frames.
 TEST(WsFramingEdge, MultiByteUtf8SplitAcrossFragmentsReassemblesAndValidates) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -665,7 +692,7 @@ TEST(WsFramingEdge, MultiByteUtf8SplitAcrossFragmentsReassemblesAndValidates) {
 // path in ws.h (processControlFrame line 504 accept branch) and round-trip back
 // in the echoed close frame.
 TEST(WsFramingEdge, CloseFrameWithValidMultiByteUtf8ReasonIsEchoed) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
 
     qb::io::tcp::socket sock;
     const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
@@ -697,27 +724,27 @@ TEST(WsFramingEdge, CloseFrameWithValidMultiByteUtf8ReasonIsEchoed) {
 // (b1 < 0xA0), and an F0 lead with an out-of-range second byte (b1 < 0x90).
 // Each is sent as a standalone text frame and must close with 1007.
 TEST(WsFramingEdge, Utf8TruncatedTwoByteLeadAtEndIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     // "A" + lone 2-byte lead 0xC3 with no continuation byte. is_utf8: i+1>=n.
     expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("A\xC3", 2))}, qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
 TEST(WsFramingEdge, Utf8E0OverlongSecondByteIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     // E0 80 80 is an overlong encoding (b1 must be >= 0xA0). is_utf8 rejects it.
     expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("\xE0\x80\x80", 3))},
                                    qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
 TEST(WsFramingEdge, Utf8F0OverlongSecondByteIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     // F0 80 80 80 is an overlong 4-byte encoding (b1 must be >= 0x90).
     expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("\xF0\x80\x80\x80", 4))},
                                    qb::http::ws::CloseStatus::DataNotConsistent);
 }
 
 TEST(WsFramingEdge, Utf8F4OutOfRangeSecondByteIsRejected) {
-    WsServerThread<EchoServer> server{ephemeral_port()};
+    EphemeralWsServer<EchoServer> server;
     // F4 90 80 80 would encode > U+10FFFF (b1 must be <= 0x8F). Rejected.
     expect_close_code_after_frames(server, {make_client_frame(0x81, std::string("\xF4\x90\x80\x80", 4))},
                                    qb::http::ws::CloseStatus::DataNotConsistent);

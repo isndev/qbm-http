@@ -22,8 +22,10 @@
  *                                reads the unmasked Close frame and decodes the
  *                                EXACT code and reason text (§5.5.1 / §7.4).
  *
- * Each test owns an ephemeral port (`ephemeral_port()`) and a server on a worker
- * thread (`WsServerThread`). The CRTP-client tests are driven on the main thread
+ * Each test owns a server on a worker thread (`WsServerThread`) bound to `:0`, so
+ * the port is the kernel-assigned one read back from the serving listener — there
+ * is no probe-then-bind window for a concurrent test process to steal. The
+ * CRTP-client tests are driven on the main thread
  * with `pump_until(pred, budget)` (FAILS LOUD on timeout). The framing-sensitive
  * tests use a raw loopback socket via the shared `perform_upgrade` /
  * `make_client_frame` / `read_some` / `extract_close_code` helpers so the test
@@ -55,7 +57,6 @@
 namespace ws_robustness_test {
 
 using namespace std::chrono_literals;
-using qb::http::test::ephemeral_port;
 using qb::http::test::extract_close_code;
 using qb::http::test::make_client_frame;
 using qb::http::test::perform_upgrade;
@@ -63,6 +64,19 @@ using qb::http::test::read_some;
 using qb::http::test::WsServerThread;
 
 constexpr std::size_t kLargeSize = 16u * 1024u;
+
+/**
+ * @brief Port argument that makes @ref WsServerThread bind `:0` and publish what the kernel gave.
+ *
+ * NOT `ephemeral_port()`. That helper probes a free port with a throwaway listener and must close
+ * it before the caller can bind, so between the probe closing and the server binding, another test
+ * PROCESS can take the port — a real flake under `ctest -j` (measured at 2 failures in 12
+ * full-suite runs in the http1 suites, and documented in `ephemeral_port()`'s own @warning).
+ * Binding `:0` on the socket that actually serves leaves no window: `WsServerThread` reads the
+ * assigned port back from the bound listener and publishes it in `server.port` before signalling
+ * readiness, so the ctor returning means `server.port` is the live port.
+ */
+constexpr int kBindEphemeral = 0;
 
 template <typename Pred>
 bool
@@ -238,8 +252,9 @@ public:
 // ===========================================================================
 
 TEST(WsRobustness, LargeTextEchoExact) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     const std::string payload = make_payload(kLargeSize);
 
@@ -257,8 +272,9 @@ TEST(WsRobustness, LargeTextEchoExact) {
 }
 
 TEST(WsRobustness, LargeBinaryEchoExact) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     const std::string payload = make_binary(kLargeSize);
 
@@ -278,8 +294,9 @@ TEST(WsRobustness, LargeBinaryEchoExact) {
 }
 
 TEST(WsRobustness, PingPongPayloadFidelity) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     RobustClient client{port};
     ASSERT_EQ(qb::io::SocketStatus::Done, client.transport().connect_v4("127.0.0.1", port));
@@ -304,8 +321,9 @@ TEST(WsRobustness, PingPongPayloadFidelity) {
 //   [FIN=0, text "Frag-"] [FIN=0, continuation "ment-"] [FIN=1, continuation "end"]
 // The server must reassemble and echo the full "Frag-ment-end" payload (§5.4).
 TEST(WsRobustness, FragmentedTextReassembled) {
-    const int                  port = ephemeral_port();
-    WsServerThread<EchoServer> server{port};
+    WsServerThread<EchoServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     qb::io::tcp::socket sock;
     ASSERT_EQ(sock.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(port)}), 0);
@@ -368,8 +386,9 @@ public:
 };
 
 TEST(WsRobustness, ServerClosePropagatesCodeAndReason) {
-    const int                   port = ephemeral_port();
-    WsServerThread<CloseServer> server{port};
+    WsServerThread<CloseServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    const int port = server.port;
 
     qb::io::tcp::socket sock;
     ASSERT_EQ(sock.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(port)}), 0);

@@ -17,8 +17,10 @@
  *
  * Compared with the monolith it replaces (`test-ws-security.cpp`), every shared
  * piece of machinery — server thread, `perform_upgrade`-style raw socket — now
- * comes from `shared/ws_loopback.h`, ports are ephemeral (no fixed `20160`), the
- * dead `condition_variable` scaffolding is gone, the custom `main()` is gone, and
+ * comes from `shared/ws_loopback.h`, ports are kernel-assigned by binding `:0` on
+ * the serving listener itself and reading it back (no fixed `20160`, and no
+ * probe-then-bind window another process can steal), the dead
+ * `condition_variable` scaffolding is gone, the custom `main()` is gone, and
  * connection/rejection counts are owned per-server (no module globals).
  *
  * @author qb - C++ Actor Framework
@@ -43,9 +45,21 @@
 namespace {
 
 using namespace std::chrono_literals;
-using qb::http::test::ephemeral_port;
 using qb::http::test::read_http_response;
 using qb::http::test::WsServerThread;
+
+/**
+ * @brief Port argument that makes @ref WsServerThread bind `:0` and publish what the kernel gave.
+ *
+ * NOT `ephemeral_port()`. That helper probes a free port with a throwaway listener and must close
+ * it before the caller can bind, so between the probe closing and the server binding, another test
+ * PROCESS can take the port — a real flake under `ctest -j` (measured at 2 failures in 12
+ * full-suite runs in the http1 suites, and documented in `ephemeral_port()`'s own @warning).
+ * Binding `:0` on the socket that actually serves leaves no window: `WsServerThread` reads the
+ * assigned port back from the bound listener and publishes it in `server.port` before signalling
+ * readiness, so the ctor returning means `server.port` is the live port.
+ */
+constexpr int kBindEphemeral = 0;
 
 // ---------------------------------------------------------------------------
 // Security server: per-instance counters (NO module globals).
@@ -171,8 +185,9 @@ write_all(qb::io::tcp::socket &sock, std::string_view bytes) {
 // ===========================================================================
 
 TEST(WsHandshakeSecurity, ValidHandshake) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     const auto key = qb::http::ws::generateKey();
     write_all(sock, raw_handshake_request(server.port, key));
@@ -184,8 +199,9 @@ TEST(WsHandshakeSecurity, ValidHandshake) {
 }
 
 TEST(WsHandshakeSecurity, MissingKeyIsRejected) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, ""));
 
@@ -195,8 +211,9 @@ TEST(WsHandshakeSecurity, MissingKeyIsRejected) {
 }
 
 TEST(WsHandshakeSecurity, InvalidVersionIsRejected) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, qb::http::ws::generateKey(), "12"));
 
@@ -206,8 +223,9 @@ TEST(WsHandshakeSecurity, InvalidVersionIsRejected) {
 }
 
 TEST(WsHandshakeSecurity, NonGetMethodIsRejected) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, qb::http::ws::generateKey(), "13", "POST"));
 
@@ -228,8 +246,9 @@ TEST(WsHandshakeSecurity, NonGetMethodIsRejected) {
 // ---------------------------------------------------------------------------
 
 TEST(WsHandshakeSecurity, WrongLengthKeyIsRejected) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     // 8-char key: non-empty (passes session gate) but != 24 chars (ws.h:915).
     write_all(sock, raw_handshake_request(server.port, "shortkey"));
@@ -240,8 +259,9 @@ TEST(WsHandshakeSecurity, WrongLengthKeyIsRejected) {
 }
 
 TEST(WsHandshakeSecurity, NonBase64KeyOfCorrectLengthIsRejected) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     // Exactly 24 chars but contains characters illegal in base64 ('*','!','@'),
     // so base64::decode either throws or yields the wrong byte count
@@ -254,8 +274,9 @@ TEST(WsHandshakeSecurity, NonBase64KeyOfCorrectLengthIsRejected) {
 }
 
 TEST(WsHandshakeSecurity, WellFormedButWrongDecodedSizeKeyIsRejected) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     // 24 valid base64 chars decoding to 18 bytes (not 16). "AAAAAAAAAAAAAAAAAAAAAAAA"
     // is 24 'A's = 18 zero bytes when base64-decoded, so the size check at
@@ -272,8 +293,9 @@ TEST(WsHandshakeSecurity, WellFormedButWrongDecodedSizeKeyIsRejected) {
 // ===========================================================================
 
 TEST(WsHandshakeSecurity, UnmaskedClientFrameIsClosed) {
-    WsServerThread<SecurityServer> server{ephemeral_port()};
-    auto                           sock = connect_raw(server.port);
+    WsServerThread<SecurityServer> server{kBindEphemeral};
+    ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+    auto sock = connect_raw(server.port);
 
     write_all(sock, raw_handshake_request(server.port, qb::http::ws::generateKey()));
     const auto response = read_http_response(sock);

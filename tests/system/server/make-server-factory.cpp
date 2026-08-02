@@ -74,10 +74,13 @@ protected:
     SetUp() override {
         qb::io::async::init();
         g_plain_server_requests = 0;
-        _port                   = qb::http::test::ephemeral_port();
 
-        const std::uint16_t port = _port;
-        _server                  = std::make_unique<PlainServerThread>([port](PlainServer &srv) -> bool {
+        // Bind :0 on the socket that ACTUALLY SERVES and read the port back, rather than probing
+        // for a free port and binding it a moment later. `ephemeral_port()` documents the hole
+        // this closes: its probe must be shut before the caller can bind, so under `ctest -j`
+        // another test PROCESS can take the port in that window (measured: 2 failures in 12
+        // full-suite runs). Binding :0 here leaves no window at all.
+        _server = std::make_unique<PlainServerThread>([](PlainServer &srv) -> bool {
             srv.router().get("/ping", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
                 ++g_plain_server_requests;
                 ctx->response().status() = qb::http::status::OK;
@@ -85,13 +88,17 @@ protected:
                 ctx->complete();
             });
             srv.router().compile();
-            if (srv.transport().listen_v4(port) != 0) {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "plaintext HTTP/1.1 loopback server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "plaintext HTTP/1.1 loopback server failed to start";
+        // The ServerThread ctor already blocked on the readiness barrier, so the transport is
+        // bound and its assigned port is visible to this thread.
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void
@@ -138,13 +145,14 @@ protected:
 
         qb::io::async::init();
         g_https_server_requests = 0;
-        _port                   = qb::http::test::ephemeral_port();
 
-        const std::string   cert = qb::http::test::ssl_cert_path().string();
-        const std::string   key  = qb::http::test::ssl_key_path().string();
-        const std::uint16_t port = _port;
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
 
-        _server = std::make_unique<SecureServerThread>([cert, key, port](SecureServer &srv) -> bool {
+        // Bind :0 on the socket that ACTUALLY SERVES and read the port back (see the plaintext
+        // fixture above for why): the probe-then-bind window is a cross-process race under
+        // `ctest -j`, and binding :0 on the serving socket removes it entirely.
+        _server = std::make_unique<SecureServerThread>([cert, key](SecureServer &srv) -> bool {
             auto tls = qb::io::ssl::Context::server(cert, key);
             if (!tls.ok()) {
                 return false;
@@ -157,13 +165,15 @@ protected:
                 ctx->complete();
             });
             srv.router().compile();
-            if (srv.transport().listen_v4(port) != 0) {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "HTTPS loopback server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "HTTPS loopback server failed to start";
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void
@@ -209,13 +219,14 @@ protected:
 
         qb::io::async::init();
         g_http2_server_requests = 0;
-        _port                   = qb::http::test::ephemeral_port();
 
-        const std::string   cert = qb::http::test::ssl_cert_path().string();
-        const std::string   key  = qb::http::test::ssl_key_path().string();
-        const std::uint16_t port = _port;
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
 
-        _server = std::make_unique<Http2FactoryServerThread>([cert, key, port](Http2FactoryServer &srv) -> bool {
+        // Bind :0 on the socket that ACTUALLY SERVES and read the port back (see the plaintext
+        // fixture above for why): the probe-then-bind window is a cross-process race under
+        // `ctest -j`, and binding :0 on the serving socket removes it entirely.
+        _server = std::make_unique<Http2FactoryServerThread>([cert, key](Http2FactoryServer &srv) -> bool {
             auto tls = qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"});
             if (!tls.ok()) {
                 return false;
@@ -243,13 +254,15 @@ protected:
                 ctx->complete();
             });
             srv.router().compile();
-            if (srv.transport().listen_v4(port) != 0) {
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                 return false;
             }
             srv.start();
             return true;
         });
-        ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start on port " << _port;
+        ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start";
+        _port = _server->server().transport().local_endpoint().port();
+        ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
     void
