@@ -37,7 +37,7 @@
 
 #include <gtest/gtest.h>
 
-#include "../../http.h" // qb::http::Router, Request, Response, Context, RouteHandlerFn, method, status
+#include <qbm/http/http.h> // qb::http::Router, Request, Response, Context, RouteHandlerFn, method, status
 
 namespace qb::http::test {
 

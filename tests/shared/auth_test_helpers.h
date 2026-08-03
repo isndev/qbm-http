@@ -43,7 +43,7 @@
 #include <qb/io/crypto_jwt.h> // qb::jwt::{create, CreateOptions, Algorithm}
 #include <qb/json.h>          // qb::json
 
-#include "../../auth.h" // qb::http::auth::{Options, User}
+#include <qbm/http/auth.h> // qb::http::auth::{Options, User}
 
 namespace qb::http::test {
 
