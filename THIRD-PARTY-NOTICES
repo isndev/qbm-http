@@ -1,0 +1,45 @@
+qbm-http — Third-Party Notices
+==============================
+
+qbm-http itself is licensed under the Apache License 2.0 (see LICENSE).
+
+qbm-http bundles the third-party component listed below. It remains under the
+license of its own author; nothing here relicenses it. This file is the
+authoritative inventory for the qbm-http package, and the check in
+qb/scripts/check-vendor-attribution.py fails the guard battery when a vendored
+unit is missing its attribution.
+
+INSTALLED LOCATION
+------------------
+When qbm-http is installed (cmake --install), this file and the license text
+referenced below are copied to:
+
+    <prefix>/share/licenses/qbm-http/
+
+so a downstream redistributor can discharge their own notice obligations from the
+installed tree alone, without going back to the source repository.
+
+
+1. llhttp
+   ------
+   Upstream    https://github.com/nodejs/llhttp
+   Author      Fedor Indutny
+   Version     9.2.1 (http_VERSION_MAJOR/MINOR/PATCH in vendor/llhttp.h)
+   License     MIT
+   Vendored    not-qb/llhttp/   (sources, compiled into libllhttp.a)
+               vendor/llhttp.h  (the single public header)
+   Installed   the compiled parser inside libllhttp.a, and the public header at
+               <prefix>/include/qbm/http/vendor/llhttp.h
+   License at  <prefix>/share/licenses/qbm-http/third-party/llhttp/LICENSE-MIT
+               and in-header — every vendored llhttp file, including the installed
+               public header, now opens with the full MIT notice.
+
+   This is a FORK, not a swappable dependency: it is llhttp 9.2.1 regenerated with
+   the `http_` symbol prefix (http_t, http_errno, http_init/http_execute) so it
+   cannot collide with, or be substituted by, a system llhttp. Only the symbol
+   prefix differs; the parser logic is upstream's, which is why upstream's MIT
+   notice and Fedor Indutny's copyright apply to it unchanged.
+
+   Both the static archive and the public header reach the consumer, so the MIT
+   permission notice is distributed two ways: inside every source file (and thus
+   inside the installed header) and as the standalone LICENSE-MIT above.
