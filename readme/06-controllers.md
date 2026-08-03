@@ -1,6 +1,6 @@
 # Controllers
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 Group related route handlers, their shared state, and their middleware into a single class that mounts onto the router under a base path.
 

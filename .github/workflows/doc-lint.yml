@@ -5,8 +5,7 @@ name: doc-lint
 
 on:
   push:
-    branches:
-      - 'c\+\+23'
+    branches: [ main, develop ]
     paths:
       - 'README.md'
       - 'readme/**'
@@ -15,8 +14,7 @@ on:
       - 'CONTRIBUTING.md'
       - 'scripts/doc-lint.sh'
   pull_request:
-    branches:
-      - 'c\+\+23'
+    branches: [ main ]
     paths:
       - 'README.md'
       - 'readme/**'

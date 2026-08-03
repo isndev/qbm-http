@@ -1,6 +1,6 @@
 # Core HTTP concepts
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 The value types every other page builds on: `Request`, `Response`, the case-insensitive multi-value `Headers` map, the `Body` payload, and the `Method`/`Status` wrappers — all in the `qb::http` namespace, all riding on qb-io's asynchronous sessions.
 

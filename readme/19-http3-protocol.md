@@ -1,6 +1,6 @@
 # HTTP/3 over QUIC
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 `qb::http3` delivers native HTTP/3 — a same-origin async client, a Router-integrated server, and a dual-stack wrapper — layered on the qb-io QUIC transport and `libnghttp3`, and gated behind the `QBM_HTTP_HAS_HTTP3` build macro.
 

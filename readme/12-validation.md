@@ -1,6 +1,6 @@
 # Request validation
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 A composable pipeline for sanitizing and validating the body, query parameters, headers, and path parameters of an incoming request — JSON-Schema-subset rules for bodies, typed-and-coerced rule sets for parameters, in-place string sanitizers, and a middleware that turns a failed validation into a `400 Bad Request` with a structured JSON error list.
 

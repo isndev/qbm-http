@@ -1,6 +1,6 @@
 # Defining routes
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 Bind an HTTP method and a path pattern to a handler, extract path parameters from the URL, and drive each request through the `Context` it receives.
 

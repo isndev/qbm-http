@@ -1,6 +1,6 @@
 # Error handling strategies
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 How an HTTP request fails, what the client sees, and where you intervene: status codes on the response, the `AsyncTaskResult::ERROR` task outcome and the router error chain, contained handler exceptions, and the protocol-level `not_ok()` framing-error path that closes a malformed connection before routing ever runs.
 
