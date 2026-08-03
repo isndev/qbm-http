@@ -110,7 +110,7 @@ public:
 - **`switch_protocol<ws_protocol>(*this, request)`** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the one-call form shown above. <!-- src: ws/ws.h:952-967 -->
 - **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: ws/ws.h:969-978, examples/qbm/ws/01_chat_server.cpp:537-555 -->
 
-`switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/include/qb/io/async/io.h:862-873 -->
+`switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/src/qb/io/async/io.h:862-873 -->
 
 ### What the handshake validator enforces
 
@@ -118,7 +118,7 @@ public:
 
 ### Broadcasting from a server
 
-A server (or `io_handler`) owns its sessions, so `stream(...)` fans a frame out to every connected session and `stream_if(predicate, ...)` to a filtered subset. Build the frame once and pass it by value: <!-- src: qb/include/qb/io/async/io_handler.h:284-329, examples/qbm/ws/01_chat_server.cpp:587-593 -->
+A server (or `io_handler`) owns its sessions, so `stream(...)` fans a frame out to every connected session and `stream_if(predicate, ...)` to a filtered subset. Build the frame once and pass it by value: <!-- src: qb/src/qb/io/async/io_handler.h:284-329, examples/qbm/ws/01_chat_server.cpp:587-593 -->
 
 ```cpp
 qb::http::ws::MessageText msg;

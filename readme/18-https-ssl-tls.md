@@ -33,7 +33,7 @@ Gate your own SSL-dependent code on `QB_HAS_SSL`, never on `QBM_HTTP_HAS_SSL` �
 
 A TLS server needs a certificate chain and the matching private key, both PEM-encoded. `create_server_context` loads them from files by path (a `std::filesystem::path` — the same type `listen(uri, cert, key)` forwards). Each path is resolved through `qb::io::sys::resolve_resource()` before OpenSSL opens it: an absolute path is used unchanged, while a relative path is looked up against the current working directory first, then against the running executable's own directory. A server shipped next to its `cert.pem` / `key.pem` therefore loads them regardless of the cwd it was launched from — the same resolution applies to the CA, client-certificate, and DH-parameter helpers below.
 
-<!-- src: qb/source/io/src/tcp/ssl/socket.cpp:186-204; qb/include/qb/io/system/file.h:377-387 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.cpp:186-204; qb/src/qb/io/system/file.h:377-387 -->
 
 - **Production** — obtain a certificate from a trusted CA (Let's Encrypt, your internal PKI, a commercial CA). Deploy the leaf certificate (concatenated with any intermediates) and the private key as PEM files.
 - **Development** — a self-signed certificate is fine for local testing. Browsers and verifying clients reject it unless you add it to a trust store or disable verification (see [Peer verification](#peer-verification-and-trust)).
@@ -56,11 +56,11 @@ qbm-http never touches OpenSSL directly for the common path. Two qb-io transport
 | `qb::io::transport::saccept` | Secure acceptor — accepts a TCP connection and drives the TLS handshake, yielding a `qb::io::tcp::ssl::socket` per client. | `qb::http::ssl::Server`, `qb::http2::Server` |
 | `qb::io::transport::stcp` | Secure stream — an SSL/TLS socket as a read/write stream, including SSL-buffer draining on read. | `qb::http::async::HTTPS`, the persistent `http1::Client` (https), `qb::http2::Client` |
 
-<!-- src: qb/include/qb/io/transport/saccept.h:44-50; qb/include/qb/io/transport/stcp.h:44-47 -->
+<!-- src: qb/src/qb/io/transport/saccept.h:44-50; qb/src/qb/io/transport/stcp.h:44-47 -->
 
 Both expose `static constexpr bool is_secure()` returning `true`, which is how the server `listen` method (below) decides whether to build an `SSL_CTX` at all. The context factories live in `qb::io::ssl`:
 
-<!-- src: qb/include/qb/io/tcp/ssl/socket.h:83-95 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.h:83-95 -->
 ```cpp
 namespace qb::io::ssl {
     // Server: load this server's certificate chain and private key.
@@ -132,7 +132,7 @@ this->transport().set_supported_alpn_protocols({"http/1.1"});
 
 The convenience `listen` covers the common case. When you need cipher policy, a minimum TLS version, mTLS, or a custom ALPN set, build and configure the context yourself, install it with `transport().init(...)`, then call the plain `transport().listen(uri)`. The configuration helpers in `qb::io::ssl` all take the raw `SSL_CTX*`:
 
-<!-- src: qb/include/qb/io/tcp/ssl/socket.h:134-154, 173 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.h:134-154, 173 -->
 ```cpp
 #include <http/http.h>
 #include <qb/io/tcp/ssl/socket.h>
@@ -152,7 +152,7 @@ server->transport().listen(qb::io::uri("https://0.0.0.0:8443"));
 server->start();
 ```
 
-The listener also exposes the same knobs as members once a context is installed — `set_cipher_list`, `set_ciphersuites_tls13`, `configure_mtls`, and `set_supported_alpn_protocols` on `qb::io::tcp::ssl::listener`. Further helpers cover OCSP stapling, SNI host selection, DH/ECDH parameters, session caching, and a TLS keylog callback for debugging; see `qb/include/qb/io/tcp/ssl/socket.h`.
+The listener also exposes the same knobs as members once a context is installed — `set_cipher_list`, `set_ciphersuites_tls13`, `configure_mtls`, and `set_supported_alpn_protocols` on `qb::io::tcp::ssl::listener`. Further helpers cover OCSP stapling, SNI host selection, DH/ECDH parameters, session caching, and a TLS keylog callback for debugging; see `qb/src/qb/io/tcp/ssl/socket.h`.
 
 The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the connection upgrades over TLS exactly as plaintext WebSocket upgrades over TCP. See [WebSocket](./20-websocket.md).
 
@@ -258,7 +258,7 @@ Client-side certificate verification is **secure by default** across every clien
 - Disable verification (`verify_peer=false` / `set_verify_peer(false)`) **only** for endpoints you trust and control, typically self-signed development servers. It turns off both chain and hostname checks and exposes the connection to interception.
 - For private PKI, prefer adding your CA to the trust store over disabling verification. At the qb-io level you can load CAs into a client `SSL_CTX` with `qb::io::ssl::load_ca_certificates(ctx, path)` or `load_ca_directory(ctx, dir)`, set SNI/ALPN on the socket (`set_sni_hostname`, `set_alpn_protocols`), and present a client certificate (`configure_client_certificate`) for mTLS.
 
-<!-- src: qb/include/qb/io/tcp/ssl/socket.h:104-114, 164, 685-739 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.h:104-114, 164, 685-739 -->
 
 ## Pitfalls
 

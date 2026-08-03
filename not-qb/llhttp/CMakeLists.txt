@@ -11,7 +11,7 @@ add_library(llhttp STATIC
 # This is a FORK, not a swappable dependency: it is llhttp 9.2.1 regenerated with the `http_`
 # symbol prefix (http_t, http_errno, http_init/http_execute), and a system llhttp cannot
 # substitute for it. So it gets the same treatment as qb's own forks under
-# qb/include/qb/vendor/ -- qbm-http OWNS the name and ships it inside its own header root:
+# qb/src/qb/vendor/ -- qbm-http OWNS the name and ships it inside its own header root:
 # the single public header now lives at qbm/http/vendor/llhttp.h and is included as
 # <http/vendor/llhttp.h> (qbm/http/types.h). Two consequences:
 #
