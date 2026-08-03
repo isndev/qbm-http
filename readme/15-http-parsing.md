@@ -1,6 +1,6 @@
 # HTTP message parsing and framing
 
-> **Audience:** Contributor · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Contributor · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 How raw bytes off a qb-io socket become a `qb::http::Request` or `qb::http::Response`: the llhttp-backed `qb::http::Parser`, the `qb::protocol::http` framing layer that drives it, and the security limits that gate every message.
 

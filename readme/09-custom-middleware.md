@@ -1,6 +1,6 @@
 # Writing custom middleware
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 How to write your own middleware: the `IMiddleware` interface, the functional `(ctx, next)` form, the coroutine form, how each one drives the task chain, how to share state through the context, and where ordering is decided.
 

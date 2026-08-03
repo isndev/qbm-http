@@ -18,6 +18,50 @@ red(){ printf '\033[31m%s\033[0m\n' "$1"; }; grn(){ printf '\033[32m%s\033[0m\n'
 
 doc_files(){ { echo "README.md"; echo "CHANGELOG.md"; echo "SECURITY.md"; echo "CONTRIBUTING.md"; find readme -name '*.md' 2>/dev/null; } | sort -u | while read -r f; do [ -f "$f" ] && echo "$f"; done; }
 
+# Expected qb version for the "Verified-against" markers.
+#
+# WHERE THIS COMES FROM, and why it is not qb's file directly: this repo is independent and
+# its own CI checks out ONLY this repo -- there is no qb tree to read. So the expected value
+# has to be derivable from this repo alone, and the one authoritative version here is
+# project(qbm-http VERSION ...) in CMakeLists.txt. That is a legitimate source rather than a
+# convenient one: the module is not standalone-configurable (it calls qb_register_module /
+# qb_add_test, which an installed qb does not ship), so its version only ever means "the qb
+# this module was built against", and the modules are versioned in lockstep with the framework
+# by policy.
+#
+# When a qb checkout IS reachable -- the qb-dev superproject layout, or an explicit QB_ROOT --
+# the two are cross-checked below, so lockstep drift fails in the one place it can actually be
+# observed. Being unable to determine the version is a HARD STOP, never a skip: a lint that
+# quietly passes when it cannot find its expected value is indistinguishable from the
+# unvalidated marker it replaces, which is the exact state this closes (129 markers sat at
+# "qb 2.6.0" across two version bumps, because only their EXISTENCE was ever checked).
+EXPECTED_VERSION="$(sed -n 's/^[[:space:]]*project(qbm-http[[:space:]]\{1,\}VERSION[[:space:]]\{1,\}\([0-9][0-9.]*\)).*/\1/p' \
+                    CMakeLists.txt 2>/dev/null | head -1)"
+if [ -z "${EXPECTED_VERSION}" ]; then
+  red "doc-lint: cannot read project(qbm-http VERSION ...) from CMakeLists.txt"
+  red "          refusing to validate Verified-against markers against an unknown version"
+  exit 2
+fi
+VERSION_SOURCE="CMakeLists.txt"
+QB_CONFIG=""
+for _cand in "${QB_ROOT:-}/cmake/qbConfig.cmake" "../../qb/cmake/qbConfig.cmake"; do
+  case "${_cand}" in /cmake/qbConfig.cmake) continue ;; esac      # QB_ROOT unset
+  [ -f "${_cand}" ] && { QB_CONFIG="${_cand}"; break; }
+done
+if [ -n "${QB_CONFIG}" ]; then
+  _qbver="$(sed -n 's/^[[:space:]]*set(QB_FRAMEWORK_VERSION[[:space:]]*"\([0-9][0-9.]*\)").*/\1/p' "${QB_CONFIG}" | head -1)"
+  if [ -z "${_qbver}" ]; then
+    red "doc-lint: ${QB_CONFIG} is present but QB_FRAMEWORK_VERSION could not be parsed"
+    exit 2
+  fi
+  if [ "${_qbver}" != "${EXPECTED_VERSION}" ]; then
+    red "doc-lint: lockstep drift -- CMakeLists.txt says qbm-http ${EXPECTED_VERSION},"
+    red "          but ${QB_CONFIG} says qb ${_qbver}"
+    exit 2
+  fi
+  VERSION_SOURCE="${QB_CONFIG}"
+fi
+
 echo "== 1. Forbidden token scan =="
 FORBIDDEN='qb::Timestamp|qb::Duration|qb::TimePoint|to_timestamp\(|to_time_point\(|get_ptr<|create_[a-z_]+_middleware\(|coro_handler<|coro_middleware<|MEMBER_HANDLER\('
 is_allowed(){ case "$1" in CHANGELOG.md|CONTRIBUTING.md) return 0;; *) return 1;; esac; }
@@ -59,13 +103,32 @@ for g in README.md CHANGELOG.md SECURITY.md CONTRIBUTING.md LICENSE; do
 done
 [ "$missing" -eq 0 ] && grn "  module governance present" || fail=1
 
-echo "== 4. Verified-against marker (warning) =="
-nomarker=0
+echo "== 4. Verified-against marker (missing: warning, wrong version: error) =="
+nomarker=0; badmarker=0
 while read -r f; do
   case "$f" in CHANGELOG.md) continue;; esac
-  grep -q 'Verified-against' "$f" 2>/dev/null || { ylw "  no Verified-against: ${f}"; nomarker=$((nomarker+1)); }
+  marker="$(grep -m1 'Verified-against' "$f" 2>/dev/null)"
+  if [ -z "${marker}" ]; then
+    ylw "  no Verified-against: ${f}"; nomarker=$((nomarker+1)); continue
+  fi
+  # Rightmost "qb <x.y.z>": this module's marker form is "qbm-http @ qb 3.0.0", and "qbm"
+  # never matches because the pattern requires the space after "qb".
+  found="$(printf '%s\n' "${marker}" | grep -oE 'qb [0-9]+\.[0-9]+\.[0-9]+' | tail -1 | awk '{print $2}')"
+  if [ -z "${found}" ]; then
+    red "  ${f}: Verified-against names no qb version (expected qb ${EXPECTED_VERSION}): ${marker}"
+    badmarker=$((badmarker+1))
+  elif [ "${found}" != "${EXPECTED_VERSION}" ]; then
+    red "  ${f}: Verified-against says qb ${found}, but ${VERSION_SOURCE} says qb ${EXPECTED_VERSION}"
+    badmarker=$((badmarker+1))
+  fi
 done < <(doc_files)
-[ "$nomarker" -eq 0 ] && grn "  all pages carry a Verified-against marker" || warn=1
+[ "$nomarker" -ne 0 ] && warn=1
+if [ "$badmarker" -ne 0 ]; then
+  red "  ${badmarker} page(s) verified against a qb version that is not ${EXPECTED_VERSION}"
+  fail=1
+elif [ "$nomarker" -eq 0 ]; then
+  grn "  all pages carry a Verified-against marker naming qb ${EXPECTED_VERSION}"
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then red "doc-lint: FAILED"; exit 1; fi

@@ -1,6 +1,6 @@
 # The middleware model
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 Middleware is the cross-cutting layer of the router: a chain of tasks that run before (and, for synchronous functional middleware, around) a route handler, each free to inspect the request, mutate the response, short-circuit the request, or pass control onward.
 

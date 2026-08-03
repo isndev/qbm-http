@@ -1,6 +1,6 @@
 # Standard middleware
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 The middleware that ships with the module — CORS, JWT, rate limiting, compression, timing, static files, full authentication, and security headers — together with the exact configuration options each exposes and the time type each duration field uses.
 

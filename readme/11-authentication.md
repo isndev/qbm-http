@@ -1,6 +1,6 @@
 # Authentication system
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 The `qb::http::auth` triad — `Options`, `User`, and `Manager` — issues and verifies JSON Web Tokens, turns a valid token into a typed principal, and feeds the two authentication middleware that gate your routes.
 

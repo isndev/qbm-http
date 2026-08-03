@@ -1,6 +1,6 @@
 # HTTP message body: a deep dive
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 `qb::http::Body` is the payload of every request and response: a `qb::allocator::pipe<char>` buffer with typed views (`as<T>()`), constrained append/assign, chunked-transfer helpers, and optional gzip/deflate (de)compression.
 

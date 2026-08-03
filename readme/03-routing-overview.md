@@ -1,6 +1,6 @@
 # Routing overview
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 How `qb::http::Router` turns a tree of route, group, and controller definitions into a compiled radix tree, and how an incoming request is matched and dispatched to a chain of tasks.
 

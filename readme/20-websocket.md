@@ -1,6 +1,6 @@
 # WebSocket (RFC 6455)
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 Upgrade an HTTP/1.1 connection to a full-duplex RFC 6455 WebSocket — server-side handshake validation, the CRTP/callback client, automatic ping keepalive, strict framing, and WSS over TLS.
 

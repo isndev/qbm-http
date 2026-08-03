@@ -1,6 +1,6 @@
 # WebSocket coroutines
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 Write a WebSocket conversation as a single straight-line coroutine — `co_await` the connect, each inbound frame, and the close handshake — instead of scattering the logic across CRTP `on(...)` callbacks.
 
