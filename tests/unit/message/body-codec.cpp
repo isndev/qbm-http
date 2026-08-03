@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <qb/json.h>
-#include "../http.h" // Should include body.h, multipart.h, etc.
+#include <qbm/http/http.h> // Should include body.h, multipart.h, etc.
 
 // Conditional include for compression tests
 #ifdef QB_HAS_COMPRESSION

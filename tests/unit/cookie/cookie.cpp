@@ -1,7 +1,7 @@
 #include <chrono>
 #include <gtest/gtest.h>
-#include "../date.h" // qb::http::date::format_http_date (expiry ground-truth asserts)
-#include "../http.h"
+#include <qbm/http/date.h> // qb::http::date::format_http_date (expiry ground-truth asserts)
+#include <qbm/http/http.h>
 
 using namespace qb::http;
 

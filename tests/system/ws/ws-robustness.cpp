@@ -52,7 +52,7 @@
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ws_loopback.h"
-#include "../ws/ws.h"
+#include <qbm/http/ws/ws.h>
 
 namespace ws_robustness_test {
 

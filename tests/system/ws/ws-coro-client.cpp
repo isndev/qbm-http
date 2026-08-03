@@ -47,7 +47,7 @@
 
 #include <gtest/gtest.h>
 
-#include "../ws.h"
+#include <qbm/http/ws.h>
 
 #include "../../shared/ws_loopback.h"
 

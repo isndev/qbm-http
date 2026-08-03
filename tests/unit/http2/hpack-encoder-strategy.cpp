@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 #include <qb/io/crypto.h>
-#include "../2/protocol/hpack.h"
-#include "../2/protocol/hpack_huffman.h"
+#include <qbm/http/2/protocol/hpack.h>
+#include <qbm/http/2/protocol/hpack_huffman.h>
 
 using namespace qb::protocol::hpack;
 using namespace qb::protocol::hpack::huffman;

@@ -12,8 +12,8 @@ This page is the reference for the authentication *system*: the three value type
 
 Two facts to keep in mind throughout:
 
-- **The whole auth path is SSL-gated.** `auth/manager.cpp` is one of the SSL-only sources, and `<http/middleware/all.h>` and `make.h` guard the JWT and auth includes behind `#ifdef QB_HAS_SSL`. In a build without `QB_HAS_SSL`, `qb::jwt` and the auth middleware are not compiled in. See [feature gates](./08-standard-middleware.md#feature-gates-and-includes).
-- **The module is a compiled library, not header-only.** You link `qbm::http`; the umbrella `<http/auth.h>` brings the declarations in. The JWT machinery lives in `qb-io`'s crypto library (`qb::jwt`), which `auth.h` pulls in via `<qb/io/crypto_jwt.h>`.
+- **The whole auth path is SSL-gated.** `src/qbm/http/auth/manager.cpp` is one of the SSL-only sources, and `<qbm/http/middleware/all.h>` and `make.h` guard the JWT and auth includes behind `#ifdef QB_HAS_SSL`. In a build without `QB_HAS_SSL`, `qb::jwt` and the auth middleware are not compiled in. See [feature gates](./08-standard-middleware.md#feature-gates-and-includes).
+- **The module is a compiled library, not header-only.** You link `qbm::http`; the umbrella `<qbm/http/auth.h>` brings the declarations in. The JWT machinery lives in `qb-io`'s crypto library (`qb::jwt`), which `auth.h` pulls in via `<qb/io/crypto_jwt.h>`.
 
 ## The three types
 
@@ -26,17 +26,17 @@ Two facts to keep in mind throughout:
 Include them all through the convenience header:
 
 ```cpp
-#include <http/auth.h>   // qb::http::auth::Options, User, Manager
+#include <qbm/http/auth.h>   // qb::http::auth::Options, User, Manager
 ```
 
-<!-- src: qbm/http/auth.h:14-23 -->
+<!-- src: qbm/http/src/qbm/http/auth.h:14-23 -->
 
 ## auth::Options
 
 `Options` is a fluent configuration object. Every setter returns `Options&`, so you build it in a chain. Defaults are production-safe: HMAC-SHA256, a one-hour expiry, signature verification on, and `Bearer` extraction from the `Authorization` header.
 
 ```cpp
-#include <http/auth.h>
+#include <qbm/http/auth.h>
 #include <chrono>
 
 qb::http::auth::Options opts;
@@ -47,7 +47,7 @@ opts.secret_key("a-strong-32-byte-minimum-hmac-secret")
     .clock_skew_tolerance(std::chrono::seconds(30));
 ```
 
-<!-- src: qbm/http/auth/options.h:92-246 -->
+<!-- src: qbm/http/src/qbm/http/auth/options.h:92-246 -->
 
 ### Supported algorithms
 
@@ -60,7 +60,7 @@ opts.secret_key("a-strong-32-byte-minimum-hmac-secret")
 | `ECDSA_SHA256` / `ECDSA_SHA384` / `ECDSA_SHA512` | `ES256` / `ES384` / `ES512` | `private_key` / `public_key` (PEM) |
 | `ED25519` | `EdDSA` | `private_key` / `public_key` (PEM) |
 
-<!-- src: qbm/http/auth/options.h:41-52,358 ; qbm/http/auth/options.cpp:21-44 -->
+<!-- src: qbm/http/src/qbm/http/auth/options.h:41-52,358 ; qbm/http/src/qbm/http/auth/options.cpp:21-44 -->
 
 For HMAC, set `secret_key` (a `std::string` is reinterpreted as raw bytes, or pass a `std::vector<unsigned char>`). For the asymmetric families, set `private_key` (PEM) for signing and `public_key` (PEM) for verification — a verify-only service needs only the public key.
 
@@ -71,7 +71,7 @@ Two of the `Options` durations are `std::chrono::seconds`, not `qb::duration`. T
 - `token_expiration(std::chrono::seconds)` — validity of an issued token; default `3600` s. Only emitted as an `exp` claim when expiration verification is on.
 - `clock_skew_tolerance(std::chrono::seconds)` — widens both the `exp` and `nbf` windows during verification; default `0`.
 
-<!-- src: qbm/http/auth/options.h:62-64,154-157,257-261 -->
+<!-- src: qbm/http/src/qbm/http/auth/options.h:62-64,154-157,257-261 -->
 
 ### Verification-policy flags
 
@@ -87,7 +87,7 @@ Two of the `Options` durations are `std::chrono::seconds`, not `qb::duration`. T
 
 There is no separate boolean to enable issuer or audience checks independently of the expected value: setting `token_issuer("my-api")` both records the expected `iss` and turns the check on; `token_issuer("")` turns it off.
 
-<!-- src: qbm/http/auth/options.h:75-79,165-205 -->
+<!-- src: qbm/http/src/qbm/http/auth/options.h:75-79,165-205 -->
 
 ## auth::User
 
@@ -106,7 +106,7 @@ struct User {
 };
 ```
 
-<!-- src: qbm/http/auth/user.h:33-68 -->
+<!-- src: qbm/http/src/qbm/http/auth/user.h:33-68 -->
 
 Role comparison is case-sensitive. The empty-list semantics matter for authorization gates: `has_any_role({})` is `false` (no role can satisfy an empty allow-list), while `has_all_roles({})` is `true` (no requirement to violate).
 
@@ -125,7 +125,7 @@ const Options &get_options() const noexcept;
 void           set_options(const Options &) noexcept;
 ```
 
-<!-- src: qbm/http/auth/manager.h:60-111 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.h:60-111 -->
 
 ### Issuing a token
 
@@ -142,7 +142,7 @@ void           set_options(const Options &) noexcept;
 | `roles` | `user.roles` (JSON array) | always |
 | `metadata` | `user.metadata` (JSON object) | when non-empty |
 
-<!-- src: qbm/http/auth/manager.cpp:99-135 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:99-135 -->
 
 ### Verifying a token
 
@@ -153,18 +153,18 @@ Two security properties are worth stating explicitly:
 - **The algorithm and key come from `Options`, never from the token header.** `verify_token` selects HMAC-secret or asymmetric-public-key based on the configured algorithm family, pinning verification and defeating `alg`-confusion attacks driven by an attacker-controlled JWT header.
 - **A verified `User` must have a usable identity.** If a signature-valid token resolves to an empty `id` *and* empty `username`, verification still fails (logged and `nullopt`). Malformed `roles`/`metadata` JSON is tolerated — those fields are left empty and a warning is logged — because only a missing subject/username is fatal.
 
-<!-- src: qbm/http/auth/manager.cpp:259-457 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:259-457 -->
 
 ### Extracting from a header
 
 `extract_token_from_header` strips the configured scheme and returns the bare token, or an empty string on a format mismatch. The scheme match is case-insensitive and requires whitespace after it: `"bearer <token>"` is accepted, but `"Bearertoken"` (no separator) is rejected.
 
-<!-- src: qbm/http/auth/manager.cpp:235-255 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:235-255 -->
 
 ### End-to-end with the Manager
 
 ```cpp
-#include <http/auth.h>
+#include <qbm/http/auth.h>
 #include <chrono>
 
 qb::http::auth::Options opts;
@@ -198,7 +198,7 @@ You rarely call the `Manager` from a handler. Two middleware drive it; both are 
 
 ### AuthMiddleware — full authentication and roles
 
-`qb::http::AuthMiddleware<Session>` (`<http/middleware/auth.h>`) wraps an `auth::Manager`. On each request it:
+`qb::http::AuthMiddleware<Session>` (`<qbm/http/middleware/auth.h>`) wraps an `auth::Manager`. On each request it:
 
 1. Looks in the context (default key `"user"`) for a pre-authenticated `auth::User`, then for a `"jwt_payload"` left by a preceding `JwtMiddleware`.
 2. Otherwise extracts a token from the configured header and calls `verify_token`.
@@ -228,12 +228,12 @@ Four factories cover the common shapes — all `<Session>`-templated:
 | `role_auth_middleware<S>(roles, require_all = false, name)` | Pure role gate; assumes an upstream middleware already populated the user. |
 | `optional_auth_middleware<S>(options, name)` | Auth optional — proceeds when no credentials are sent, but still rejects an *invalid* token. |
 
-<!-- src: qbm/http/middleware/auth.h:371-462 -->
+<!-- src: qbm/http/src/qbm/http/middleware/auth.h:371-462 -->
 
 ```cpp
-#include <http/http.h>
-#include <http/auth.h>
-#include <http/middleware/auth.h>
+#include <qbm/http/http.h>
+#include <qbm/http/auth.h>
+#include <qbm/http/middleware/auth.h>
 
 using MySession = qb::http::DefaultSession;  // the shipped server session
 qb::http::Router<MySession> router;
@@ -258,15 +258,15 @@ router.get("/admin", [](auto ctx) {
 
 Reach for the equivalent tag dispatch when you prefer the unified entry point. With `namespace mw = qb::http::middleware;`, `mw::make<mw::tags::auth, MySession>(opts)` forwards to the same factory; the other tags are `mw::tags::jwt_auth`, `mw::tags::role_auth`, and `mw::tags::optional_auth`.
 
-<!-- src: qbm/http/middleware/make.h:64-68,116-134 -->
+<!-- src: qbm/http/src/qbm/http/middleware/make.h:64-68,116-134 -->
 
 ### JwtMiddleware — raw payload, no User
 
-`qb::http::JwtMiddleware<Session>` (`<http/middleware/jwt.h>`) verifies a JWT and stores the decoded payload as a `qb::json` under `"jwt_payload"` — it does not build an `auth::User`. Use it when you want the raw claims, when the token can sit in a cookie or query parameter (`from_header`/`from_cookie`/`from_query`), or as the verification stage in front of a `role_auth_middleware` gate.
+`qb::http::JwtMiddleware<Session>` (`<qbm/http/middleware/jwt.h>`) verifies a JWT and stores the decoded payload as a `qb::json` under `"jwt_payload"` — it does not build an `auth::User`. Use it when you want the raw claims, when the token can sit in a cookie or query parameter (`from_header`/`from_cookie`/`from_query`), or as the verification stage in front of a `role_auth_middleware` gate.
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/jwt.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/jwt.h>
 
 qb::http::JwtOptions jwt_opts;
 jwt_opts.secret    = "a-strong-hmac-secret";
@@ -287,7 +287,7 @@ router.get("/data", [](auto ctx) {
 });
 ```
 
-<!-- src: qbm/http/middleware/jwt.h:48-64,156-160,234,541-545 -->
+<!-- src: qbm/http/src/qbm/http/middleware/jwt.h:48-64,156-160,234,541-545 -->
 
 `JwtOptions::leeway` is `std::chrono::seconds` for the same NumericDate reason as `auth::Options`. The full `JwtOptions` table and the fluent setters (`from_cookie`, `with_validator`, `with_error_handler`, `with_success_handler`) are on [the standard-middleware page](./08-standard-middleware.md#jwt).
 
@@ -299,7 +299,7 @@ router.get("/data", [](auto ctx) {
 
 ## Pitfalls
 
-- **Never ship `require_signature_verification(false)`.** With it off, `verify_token` decodes the payload *without* a signature check and validates only `exp`/`nbf`/`iss`/`aud` against forgeable claims — any token with the right claims is accepted. The default is `true`; keep it `true` in production. (`qbm/http/auth/manager.cpp:261,336-398`)
+- **Never ship `require_signature_verification(false)`.** With it off, `verify_token` decodes the payload *without* a signature check and validates only `exp`/`nbf`/`iss`/`aud` against forgeable claims — any token with the right claims is accepted. The default is `true`; keep it `true` in production. (`qbm/http/src/qbm/http/auth/manager.cpp:261,336-398`)
 - **`verify_expiration(false)` mints non-expiring tokens.** `generate_token` only writes an `exp` claim when expiration verification is on, so disabling it produces tokens that never expire and are never rejected for age.
 - **The key must match the algorithm family.** An HMAC secret under an `RS*`/`ES*`/`EdDSA` algorithm (or vice versa) does not throw — `verify_token` simply returns `std::nullopt`. A verify-only service still needs the `public_key` set for asymmetric algorithms.
 - **`"Bearertoken"` is not a token.** `extract_token_from_header` always requires a scheme prefix followed by whitespace, so a missing separator yields an empty string. It cannot extract a bare/scheme-less token: `auth_scheme("")` does not enable that — it makes the whitespace check fall on the token's first character and reject every header.

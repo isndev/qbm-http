@@ -37,9 +37,9 @@
 
 #include "../../shared/mock_session.h" // qb::http::test::MockSession + the http umbrella
 
-#include "../routing/async_task.h"
-#include "../routing/handler_node.h"
-#include "../routing/route.h" // RouteLambdaTask — a concrete IAsyncTask for middleware ordering
+#include <qbm/http/routing/async_task.h>
+#include <qbm/http/routing/handler_node.h>
+#include <qbm/http/routing/route.h> // RouteLambdaTask — a concrete IAsyncTask for middleware ordering
 
 using qb::http::test::MockSession;
 using Node = qb::http::IHandlerNode<MockSession>;

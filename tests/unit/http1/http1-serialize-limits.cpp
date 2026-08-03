@@ -34,8 +34,8 @@
 #include <stdexcept>
 #include <string>
 #include <qb/system/allocator/pipe.h>
-#include "../1.1/protocol/base.h"
-#include "../http.h"
+#include <qbm/http/1.1/protocol/base.h>
+#include <qbm/http/http.h>
 
 using namespace qb::http;
 

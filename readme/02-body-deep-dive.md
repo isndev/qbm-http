@@ -28,7 +28,7 @@ flowchart LR
 
 A `Body` holds exactly one private member:
 
-<!-- src: qbm/http/body.h:56-57 -->
+<!-- src: qbm/http/src/qbm/http/body.h:56-57 -->
 ```cpp
 class Body {
     qb::allocator::pipe<char> _data;
@@ -38,7 +38,7 @@ class Body {
 
 `pipe<char>` is the same growable byte buffer qb-io uses for socket I/O (defined in `qb/system/allocator/pipe.h`). Reusing it here means a body can be appended to the output pipe without an intermediate copy, and an inbound body is constructed directly from parser output. You reach it through `raw()`:
 
-<!-- src: qbm/http/body.h:318-330 -->
+<!-- src: qbm/http/src/qbm/http/body.h:318-330 -->
 ```cpp
 [[nodiscard]] qb::allocator::pipe<char> const &raw() const noexcept;
 [[nodiscard]] qb::allocator::pipe<char>       &raw()       noexcept;
@@ -55,7 +55,7 @@ class Body {
 
 Copies are explicit and deep — the copy constructor and copy-assignment delegate to the pipe's copy semantics; move is defaulted and cheap:
 
-<!-- src: qbm/http/body.h:65-71, body.cpp:65-75 -->
+<!-- src: qbm/http/src/qbm/http/body.h:65-71, body.cpp:65-75 -->
 ```cpp
 Body(Body &&) noexcept = default;          // move: steals the pipe
 Body(Body const &);                        // copy: deep-copies the pipe
@@ -71,7 +71,7 @@ Prefer moving a `Body` into a message when you own it; the copy path duplicates 
 
 Both the variadic constructor and `operator<<` are constrained by a single compile-time predicate, `Body::is_body_appendable_v<T>`. The accepted categories are fixed:
 
-<!-- src: qbm/http/body.h:105-115 -->
+<!-- src: qbm/http/src/qbm/http/body.h:105-115 -->
 ```cpp
 // << / ctor-appendable: Body, Chunk, Multipart, qb::json,
 //           std::string, std::string_view, std::vector<char>,
@@ -87,7 +87,7 @@ This is deliberate. A generic `pipe::put` fallback would compile `Body(42)` into
 `Form` is deliberately excluded from `is_body_appendable_v` (so `is_body_appendable_v<Form>` is false): it has no `pipe<char>::put<Form>` serializer, unlike `Chunk`, `Multipart`, and `qb::json`, which each have one. It is reachable only through the dedicated `operator=<Form>` assignment overloads (copy and move) below — `body << form` and `Body{..., form}` fail to compile.
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Body body;
 body << "id=" << 42 << ";name=" << std::string_view{"qb"};
@@ -99,7 +99,7 @@ body << "id=" << 42 << ";name=" << std::string_view{"qb"};
 
 The variadic constructor folds the same way, so you can build a body in one expression:
 
-<!-- src: qbm/http/body.h:127-132 -->
+<!-- src: qbm/http/src/qbm/http/body.h:127-132 -->
 ```cpp
 qb::http::Body body{"chunk-", 1, "-of-", 3};   // "chunk-1-of-3"
 ```
@@ -125,7 +125,7 @@ qb::http::Body body{"chunk-", 1, "-of-", 3};   // "chunk-1-of-3"
 | `Multipart const &` | serialize the full multipart wire form | no |
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Body body;
 
@@ -146,7 +146,7 @@ A `std::string_view` never owns its data, so the rvalue overload is a copy in di
 
 `as<T>()` is a member template with exactly five specializations. Calling it with any other type is a compile error — the static_assert names the supported set. A non-throwing companion, `try_as<T>()`, wraps `as<T>()` in a `try`/`catch` and returns `std::optional<T>` (`std::nullopt` on conversion failure):
 
-<!-- src: qbm/http/body.h:364-390 -->
+<!-- src: qbm/http/src/qbm/http/body.h:364-390 -->
 ```cpp
 template<typename T>
 [[nodiscard]] T as() const;                   // throwing; only: string_view, string, qb::json, Multipart, Form
@@ -159,7 +159,7 @@ Prefer `try_as<T>()` when parsing client-supplied bodies: a malformed payload yi
 
 ### `as<std::string_view>()` and `as<std::string>()`
 
-<!-- src: qbm/http/body.cpp:693-709 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:693-709 -->
 ```cpp
 std::string_view sv  = body.as<std::string_view>();   // zero-copy view of the pipe
 std::string      str = body.as<std::string>();         // owning copy
@@ -169,7 +169,7 @@ std::string      str = body.as<std::string>();         // owning copy
 
 ### `as<qb::json>()`
 
-<!-- src: qbm/http/body.cpp:717-721 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:717-721 -->
 ```cpp
 qb::json doc = body.as<qb::json>();   // qb::json::parse over the pipe view
 ```
@@ -177,7 +177,7 @@ qb::json doc = body.as<qb::json>();   // qb::json::parse over the pipe view
 This calls `qb::json::parse` on the body bytes. On malformed input it throws `qb::json::parse_error` (the nlohmann-json exception type re-exported by qb). Wrap untrusted bodies, or use `try_as` to avoid the explicit `catch`:
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 // Throwing form:
 try {
@@ -199,9 +199,9 @@ if (auto doc = req.body().try_as<qb::json>()) {
 
 Parses `application/x-www-form-urlencoded` bytes into a [`Form`](#the-form-container). Keys and values are URI-decoded (so `%40` becomes `@`); a `+` in form data decodes to a space, consistent with the encoding used on assignment. A pair with no `=` is stored with an empty value; empty keys are dropped. The parser does not throw on odd input — it does its best and returns what it found.
 
-<!-- src: qbm/http/body.cpp:836-875 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:836-875 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Body body = std::string{"user=alice&tags=a&tags=b&flag"};
 qb::http::Form form = body.as<qb::http::Form>();
@@ -215,9 +215,9 @@ form.get_first("flag").value_or("");    // ""          (key present, empty value
 
 Parses `multipart/form-data` into a [`Multipart`](#the-multipart-container). This overload extracts the boundary from the **first line of the body itself** (it expects the body to begin with `--<boundary>\r\n`), not from the `Content-Type` header. It throws `std::runtime_error` if no boundary is found, the boundary is empty, or the underlying state machine reports an error.
 
-<!-- src: qbm/http/body.cpp:736-772 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:736-772 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 try {
     qb::http::Multipart mp = req.body().as<qb::http::Multipart>();
@@ -238,7 +238,7 @@ If you have the boundary in a header instead, use [`parse_boundary`](#parsing-an
 
 `Chunk` models a single HTTP/1.1 chunked-transfer segment. It is a **non-owning** `{const char* data, std::size_t size}` view — it does not copy or own the bytes it points at, so the referenced memory must outlive the `Chunk` for as long as it is serialized.
 
-<!-- src: qbm/http/chunk.h:31-81 -->
+<!-- src: qbm/http/src/qbm/http/chunk.h:31-81 -->
 ```cpp
 namespace qb::http {
     class Chunk {
@@ -254,14 +254,14 @@ namespace qb::http {
 
 A default-constructed `Chunk{}` (size 0) is the **terminating** chunk: serialized, it emits `0\r\n\r\n`, which marks the end of a chunked stream. `Body` gives you two helpers so you do not have to construct the terminator by hand:
 
-<!-- src: qbm/http/body.h:224-238 -->
+<!-- src: qbm/http/src/qbm/http/body.h:224-238 -->
 ```cpp
 Body &add_chunk(Chunk const &c);   // append one segment
 Body &add_final_chunk();           // append the 0-length terminator
 ```
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 std::string a = "first";
 std::string b = "second";
@@ -274,7 +274,7 @@ body.add_final_chunk();   // 0\r\n\r\n terminator
 
 Serialization (the `pipe<char>::put<Chunk>` specialization) writes each segment as `<hex-size>\r\n<data>\r\n`, and the empty chunk as `0\r\n\r\n`:
 
-<!-- src: qbm/http/body.cpp:41-60 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:41-60 -->
 ```text
 5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n
 ```
@@ -285,7 +285,7 @@ Because `Chunk` borrows memory, keep `a` and `b` alive until the body is written
 
 `Form` is an `application/x-www-form-urlencoded` key→values map. Field names are **case-sensitive**, and a single key may hold multiple values (it is backed by `qb::unordered_map<std::string, std::vector<std::string>>`).
 
-<!-- src: qbm/http/form.h:30-113 -->
+<!-- src: qbm/http/src/qbm/http/form.h:30-113 -->
 ```cpp
 namespace qb::http {
     class Form {
@@ -307,7 +307,7 @@ namespace qb::http {
 Building a form and assigning it to a body URI-encodes both keys and values:
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Form form;
 form.add("user", "alice");
@@ -323,7 +323,7 @@ The pair order follows the underlying unordered map and is not guaranteed. Round
 
 `Multipart` builds and represents `multipart/form-data` (RFC 7578). Each part is a `Multipart::Part`, which **derives from `Headers`** and adds a `std::string body` — so you set a part's headers with the full `Headers` API (`set_header`, `set_content_type`, `header`, `has_header`).
 
-<!-- src: qbm/http/multipart.h:499-606 -->
+<!-- src: qbm/http/src/qbm/http/multipart.h:499-606 -->
 ```cpp
 namespace qb::http {
     class Multipart {
@@ -350,7 +350,7 @@ A default-constructed `Multipart` generates a random boundary (OpenSSL-backed se
 
 <!-- src: qbm/http/tests/unit/message/body-codec.cpp:15-23 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Multipart mp;
 
@@ -368,14 +368,14 @@ body = mp;   // serialize parts + boundaries
 // then set the request's Content-Type to: multipart/form-data; boundary=<mp.boundary()>
 ```
 
-<!-- src: qbm/http/multipart.cpp:448-500 -->
+<!-- src: qbm/http/src/qbm/http/multipart.cpp:448-500 -->
 Serialization writes, for each part, `--<boundary>\r\n`, the part headers as `Name: value\r\n`, a blank line, the part body, and `\r\n`; the message ends with `--<boundary>--`. The serializer validates the boundary and every part header name/value first, throwing `std::length_error` on an invalid boundary or header — so a hand-built `Multipart` with a malformed boundary fails loudly at write time rather than emitting a broken wire form.
 
 ### Parsing an inbound multipart with an explicit boundary
 
 `Body::as<Multipart>()` reads the boundary from the body's leading line. When you instead have the boundary in the `Content-Type` header, extract it with `parse_boundary` and drive the streaming `MultipartParser` yourself. The parser is a callback-driven state machine bounded by `multipart_limits`:
 
-<!-- src: qbm/http/multipart.h:50-65 -->
+<!-- src: qbm/http/src/qbm/http/multipart.h:50-65 -->
 | Limit | Constant | Value |
 | --- | --- | --- |
 | Boundary length | `multipart_limits::MAX_BOUNDARY_LENGTH` | 70 |
@@ -384,9 +384,9 @@ Serialization writes, for each part, `--<boundary>\r\n`, the part headers as `Na
 | Parts per message | `multipart_limits::MAX_PARTS_COUNT` | 1000 |
 | Total payload | `multipart_limits::MAX_TOTAL_SIZE` | 100 MB |
 
-<!-- src: qbm/http/multipart.h:374-413, 477 -->
+<!-- src: qbm/http/src/qbm/http/multipart.h:374-413, 477 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 std::string boundary = qb::http::parse_boundary(req.header("Content-Type"));
 // parse_boundary returns "" when the Content-Type is not multipart/form-data,
@@ -406,7 +406,7 @@ if (parser.hasError())
 
 Compression is **feature-gated** on `QB_HAS_COMPRESSION` (zlib, enabled via the qb `QB_WITH_COMPRESSION` build option). When the macro is defined, `Body` exposes:
 
-<!-- src: qbm/http/body.h:220-292 -->
+<!-- src: qbm/http/src/qbm/http/body.h:220-292 -->
 ```cpp
 #ifdef QB_HAS_COMPRESSION
 std::size_t compress(std::string const &encoding);     // returns compressed size
@@ -419,9 +419,9 @@ Both replace the body in place and return the new byte count. The `encoding` arg
 - `compress` with an empty body or empty encoding is a no-op (returns the current size). `identity` / `chunked` tokens select no compressor; an unknown token throws `std::runtime_error`.
 - `uncompress` throws `std::runtime_error` for an unsupported encoding or when more than one compression algorithm is stacked. It also caps decompressed output at `qb::http::protocol_limits::MAX_BODY_SIZE` and throws `std::length_error` if exceeded — an explicit zip-bomb guard.
 
-<!-- src: qbm/http/body.cpp:456-568 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:456-568 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 #ifdef QB_HAS_COMPRESSION
 qb::http::Body body = std::string(4096, 'x');

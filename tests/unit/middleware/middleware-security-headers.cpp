@@ -28,8 +28,8 @@
 
 #include "../../shared/middleware_test_fixture.h"
 
-#include "../middleware/security_headers.h"
-#include "../routing/middleware.h"
+#include <qbm/http/middleware/security_headers.h>
+#include <qbm/http/routing/middleware.h>
 
 using qb::http::test::MockMiddlewareSession;
 

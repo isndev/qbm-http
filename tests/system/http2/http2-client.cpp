@@ -45,9 +45,9 @@
 
 #include <gtest/gtest.h>
 
-#include "../2/client.h"
-#include "../2/http2.h"
-#include "../http.h" // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
+#include <qbm/http/2/client.h>
+#include <qbm/http/2/http2.h>
+#include <qbm/http/http.h> // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"

@@ -44,10 +44,10 @@
 
 #include <gtest/gtest.h>
 
-#include "../2/client.h"
-#include "../2/http2.h"
-#include "../coro.h"
-#include "../origin.h"
+#include <qbm/http/2/client.h>
+#include <qbm/http/2/http2.h>
+#include <qbm/http/coro.h>
+#include <qbm/http/origin.h>
 
 using namespace std::chrono_literals;
 

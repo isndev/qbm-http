@@ -29,7 +29,7 @@
 #include <vector>
 
 #include "../../shared/router_test_support.h" // qb::http::test::TaskExecutor
-#include "../http.h"
+#include <qbm/http/http.h>
 
 using qb::http::test::TaskExecutor;
 

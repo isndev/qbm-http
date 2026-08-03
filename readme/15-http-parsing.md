@@ -12,8 +12,8 @@ This is the HTTP/1.1 parsing internals. You almost never call any of it directly
 
 Two types do the work, both in the `1.1/protocol/` headers:
 
-- `qb::http::Parser<MessageType>` (`1.1/protocol/base.h`) — a thin C++ wrapper around the vendored **llhttp** C parser. It owns parser state and the in-progress message.
-- `qb::protocol::http::base<IO_Handler, Trait>` (same file) — a `qb::io::async::AProtocol` that frames a byte stream into discrete messages, with `server<IO_Handler>` and `client<IO_Handler>` specializations (`1.1/protocol/server.h`, `1.1/protocol/client.h`).
+- `qb::http::Parser<MessageType>` (`src/qbm/http/1.1/protocol/base.h`) — a thin C++ wrapper around the vendored **llhttp** C parser. It owns parser state and the in-progress message.
+- `qb::protocol::http::base<IO_Handler, Trait>` (same file) — a `qb::io::async::AProtocol` that frames a byte stream into discrete messages, with `server<IO_Handler>` and `client<IO_Handler>` specializations (`src/qbm/http/1.1/protocol/server.h`, `src/qbm/http/1.1/protocol/client.h`).
 
 HTTP/2 and HTTP/3 do **not** use this parser. HTTP/2 framing lives under `2/protocol/` (HPACK + RFC 9113 frames, see [HTTP/2 protocol specifics](./17-http2-protocol.md)); HTTP/3 framing is delegated to nghttp3 under `3/protocol/` (see [HTTP/3](./19-http3-protocol.md)). This page is HTTP/1.1 only.
 
@@ -21,7 +21,7 @@ This module is a **compiled library**, not header-only — the parser templates 
 
 ## The llhttp dependency
 
-`Parser` wraps **llhttp**, the parser that powers Node.js. Its C sources are vendored under `qbm/http/not-qb/llhttp` and built as a `STATIC` library target named `llhttp`; that target has **no public include directory**. Its single public header lives with the module's own headers, at `qbm/http/vendor/llhttp.h`.
+`Parser` wraps **llhttp**, the parser that powers Node.js. Its C sources are vendored under `qbm/http/not-qb/llhttp` and built as a `STATIC` library target named `llhttp`; that target has **no public include directory**. Its single public header lives with the module's own headers, at `qbm/http/src/qbm/http/vendor/llhttp.h`.
 
 <!-- src: qbm/http/CMakeLists.txt:35; qbm/http/not-qb/llhttp/CMakeLists.txt:3,29 -->
 
@@ -31,7 +31,7 @@ This module is a **compiled library**, not header-only — the parser templates 
 add_subdirectory(not-qb/llhttp)
 ```
 
-This is a **fork**, not a swappable dependency, so `qbm::http` owns the name rather than publishing it: the vendored copy renames llhttp's public symbols from the upstream `llhttp_*` prefix to a `http_*` prefix — the parser handle is `http_t`, the settings struct is `http_settings_s`, error codes are `http_errno_t`, and the entry points are `http_init` / `http_execute` / `http_resume`. A system llhttp cannot substitute for it, and conversely an installed `qbm-http` must not drop a file called `llhttp.h` on a consumer's include path. Hence the `vendor/` location and the spelling `<http/vendor/llhttp.h>` (`types.h`), which resolves through the same `qbm/` include root as every other qbm header, in the build tree and in an installed tree alike. It is pulled in transitively via `<http/http.h>` and used directly by `1.1/protocol/base.h`. The `http_method` and `http_status` enums that back `qb::http::Method` and `qb::http::Status` are the same llhttp enums (see [Core concepts](./01-core-concepts.md)).
+This is a **fork**, not a swappable dependency, so `qbm::http` owns the name rather than publishing it: the vendored copy renames llhttp's public symbols from the upstream `llhttp_*` prefix to a `http_*` prefix — the parser handle is `http_t`, the settings struct is `http_settings_s`, error codes are `http_errno_t`, and the entry points are `http_init` / `http_execute` / `http_resume`. A system llhttp cannot substitute for it, and conversely an installed `qbm-http` must not drop a file called `llhttp.h` on a consumer's include path. Hence the `vendor/` location and the spelling `<qbm/http/vendor/llhttp.h>` (`types.h`), which resolves through the same `qbm/` include root as every other qbm header, in the build tree and in an installed tree alike. It is pulled in transitively via `<qbm/http/http.h>` and used directly by `src/qbm/http/1.1/protocol/base.h`. The `http_method` and `http_status` enums that back `qb::http::Method` and `qb::http::Status` are the same llhttp enums (see [Core concepts](./01-core-concepts.md)).
 
 llhttp is event-driven: you feed it bytes with `http_execute`, and it invokes callbacks as it crosses each boundary of the message (message-begin, URL, status, header field, header value, headers-complete, body, message-complete). `Parser` registers a fixed `static const http_settings_s` table and translates those callbacks into mutations on the message it is building.
 
@@ -39,10 +39,10 @@ llhttp is event-driven: you feed it bytes with `http_execute`, and it invokes ca
 
 `Parser` is templated on the message type and lives in `namespace qb::http`:
 
-<!-- src: 1.1/protocol/base.h:110-111,482-578 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:110-111,482-578 -->
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 template <typename MessageType>      // qb::http::Request or qb::http::Response
 struct qb::http::Parser : public http_t {
@@ -82,7 +82,7 @@ Here is the contract exercised directly, taken from the test suite:
 <!-- src: tests/unit/http1/http1-parse-limits.cpp:122-130 -->
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 using namespace qb::http;
 
 Parser<Request> parser;
@@ -133,7 +133,7 @@ assert(parser.get_parsed_message().header("X-Custom-Header") == "value-part-1par
 
 The two specializations are:
 
-<!-- src: 1.1/protocol/server.h:45-46; 1.1/protocol/client.h:43-44 -->
+<!-- src: src/qbm/http/1.1/protocol/server.h:45-46; src/qbm/http/1.1/protocol/client.h:43-44 -->
 
 ```cpp
 namespace qb::protocol::http {
@@ -151,7 +151,7 @@ Both are wired in by the server/client session types as `using protocol = qb::pr
 
 `getMessageSize()` is called on the hot path every time bytes arrive. It runs the parser against the *unconsumed* portion of the I/O input pipe (`_io.in()`) and returns the size of one complete message, or `0` (`IProtocol::kNoMessage`) when more data is needed.
 
-<!-- src: 1.1/protocol/base.h:644-726 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:644-726 -->
 
 **Phase 1 — headers.** While `headers_completed()` is false, it parses the whole current buffer. If that returns `HPE_OK` (headers still incomplete), it **resets the parser and returns 0**, so the next call re-parses the full buffer from scratch. This is the deliberate consequence of the header-callback overwrite rule: each header must be seen in a single `http_execute` call, so the parser is re-fed the entire buffer on every pass until the header block is complete. It is O(n²) in header bytes for slowly-arriving headers — an intentional correctness-over-speed tradeoff, documented inline. Once the parser pauses (`HPE_PAUSED`), `body_offset` is computed from `error_pos` (llhttp's "where I stopped" pointer) relative to `begin()`.
 
@@ -168,7 +168,7 @@ When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that man
 
 `server::onMessage` and `client::onMessage` are the dispatch step. Both are `noexcept` (they sit on a noexcept `AProtocol` boundary), so each wraps cookie parsing in a `try/catch` — a malformed `Cookie` / `Set-Cookie` header is logged and ignored rather than escaping to `std::terminate`. They then **move** the parsed message into the I/O handler and reset the parser:
 
-<!-- src: 1.1/protocol/server.h:76-93 -->
+<!-- src: src/qbm/http/1.1/protocol/server.h:76-93 -->
 
 ```cpp
 void onMessage(std::size_t) noexcept final {
@@ -193,7 +193,7 @@ After `_io.on(...)`, server sessions apply pipelining and keep-alive: while a re
 
 `on_headers_complete` normalizes the body length so downstream framing never waits for an impossible body:
 
-<!-- src: 1.1/protocol/base.h:331-351 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:331-351 -->
 
 - **Header-only requests.** llhttp reports `ULLONG_MAX` ("unknown length") when neither `Content-Length` nor `Transfer-Encoding` is present. For requests this is normalized to `content_length = 0` (RFC 9112 framing — a request with no framing headers has an empty body).
 - **Bodyless responses.** Responses with a `1xx`, `204`, or `304` status force `content_length = 0` regardless of any declared `Content-Length` header (RFC 9112 §6.3). The test suite asserts this for both `304 Not Modified` and `204 No Content`.
@@ -201,9 +201,9 @@ After `_io.on(...)`, server sessions apply pipelining and keep-alive: while a re
 
 ## Security limits and rejected messages
 
-The parser is hardened against framing attacks. The limits live in `namespace qb::http::protocol_limits` (`1.1/protocol/base.h`) as compile-time constants, and each is enforced *during* parsing — a message that exceeds any limit fails with `HPE_USER` (via `http_set_error_reason`), which propagates as a parse error and a disconnect.
+The parser is hardened against framing attacks. The limits live in `namespace qb::http::protocol_limits` (`src/qbm/http/1.1/protocol/base.h`) as compile-time constants, and each is enforced *during* parsing — a message that exceeds any limit fails with `HPE_USER` (via `http_set_error_reason`), which propagates as a parse error and a disconnect.
 
-<!-- src: 1.1/protocol/base.h:43-61 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:43-61 -->
 
 | Constant | Value | Enforced on |
 | --- | --- | --- |
@@ -218,7 +218,7 @@ The parser is hardened against framing attacks. The limits live in `namespace qb
 
 Two framing defenses go beyond size limits, both in `on_headers_complete`:
 
-<!-- src: 1.1/protocol/base.h:121-139,323-330 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:121-139,323-330 -->
 
 - **Request smuggling.** A message carrying both `Transfer-Encoding` and `Content-Length` is rejected (`"HTTP Transfer-Encoding with Content-Length is forbidden"`). This is the classic TE.CL / CL.TE smuggling vector.
 - **Transfer-Encoding allowlist.** Only a single `chunked` token is accepted. Any other value — `gzip, chunked`, a second encoding, anything non-`chunked` — is rejected (`"Unsupported HTTP Transfer-Encoding"`).

@@ -42,9 +42,9 @@
 #include <qb/io/async.h>
 #include <qb/io/uri.h>
 
-#include "../2/client.h"
-#include "../2/http2.h"
-#include "../http.h"
+#include <qbm/http/2/client.h>
+#include <qbm/http/2/http2.h>
+#include <qbm/http/http.h>
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"

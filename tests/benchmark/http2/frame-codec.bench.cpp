@@ -42,7 +42,7 @@
 #include <cstring>
 #include <vector>
 
-#include "../2/protocol/base.h"
+#include <qbm/http/2/protocol/base.h>
 
 namespace h2 = qb::protocol::http2;
 

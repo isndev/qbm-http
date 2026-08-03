@@ -18,7 +18,7 @@
 
 #include <qb/json.h>
 
-#include "../validation.h" // pulls Request, PathParameters, io::uri transitively
+#include <qbm/http/validation.h> // pulls Request, PathParameters, io::uri transitively
 
 using namespace qb::http::validation;
 

@@ -22,7 +22,7 @@
 #include <string>
 #include <string_view>
 
-#include "../routing/path_parameters.h"
+#include <qbm/http/routing/path_parameters.h>
 
 using qb::http::PathParameters;
 

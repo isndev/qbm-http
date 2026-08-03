@@ -14,15 +14,15 @@ A `qb::http::RouteGroup<SessionType>` is a non-terminal node in the routing tree
 
 Groups are part of the routing tree, so they obey the same compile rule as routes: declare every group, route, controller, and middleware first, then call `router.compile()` once. Any definition mutation resets the compiled flag (`_is_compiled = false`); `route()` auto-compiles on first use if you forgot, but call `compile()` explicitly so the cost is paid at startup, not on the first request.
 
-<!-- src: qbm/http/routing/route_group.h:49-95 -->
+<!-- src: qbm/http/src/qbm/http/routing/route_group.h:49-95 -->
 
 ## Creating a group
 
 You create a top-level group from the router with `group(path_prefix)`, and a nested group from another group with the same method. Both return a `std::shared_ptr<RouteGroup<SessionType>>` — the result is `[[nodiscard]]`, so capture it and define routes against the pointer.
 
-<!-- src: qbm/http/routing/router.h:208, route_group.h:213-218 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:208, route_group.h:213-218 -->
 ```cpp
-#include <http/http.h>   // Router, RouteGroup, Context, method
+#include <qbm/http/http.h>   // Router, RouteGroup, Context, method
 
 // In a server actor (class Srv : public qb::Actor, public qb::http::Server<>),
 // router() is inherited from Server<> and called inside the actor's onInit().
@@ -52,9 +52,9 @@ When `compile()` runs, the router walks the tree from the root. Each node calls 
 - The result always starts with `"/"` and never contains a double slash.
 - An empty segment contributes nothing; the root group's prefix is `""`, which is why a route declared directly on the router keeps its own path.
 
-<!-- src: qbm/http/routing/handler_node.h:84-114, 262-264 -->
+<!-- src: qbm/http/src/qbm/http/routing/handler_node.h:84-114, 262-264 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 router().get("/health", h_health);            // -> /health   (root group prefix is "")
 
@@ -74,7 +74,7 @@ The reason groups matter beyond tidiness is shared middleware. Call `use()` on a
 
 `RouteGroup::use()` has the same three overloads as the router:
 
-<!-- src: qbm/http/routing/route_group.h:251-303 -->
+<!-- src: qbm/http/src/qbm/http/routing/route_group.h:251-303 -->
 ```cpp
 // 1. Lambda middleware (ctx, next) -> void; second arg names it for logs.
 group->use([](auto ctx, auto next) { /* ... */ next(); }, "trace");
@@ -92,9 +92,9 @@ The lambda form takes `(ctx, next)` — invoke `next()` to pass control down the
 
 Middleware composes top-down. At compile time each node runs `combine_tasks(inherited)`: it copies the tasks inherited from its parent, then appends its own. The resulting chain for any route is **parent middleware first, then this node's middleware, then the route handler** — in declaration order at each level.
 
-<!-- src: qbm/http/routing/handler_node.h:272-279, route_group.h:65-77 -->
+<!-- src: qbm/http/src/qbm/http/routing/handler_node.h:272-279, route_group.h:65-77 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 router().use(global_mw);                       // runs for every request
 
@@ -130,9 +130,9 @@ v2->get("/info", h_info);                        // no v1_logging_mw here
 
 A group can host a [`Controller`](./06-controllers.md) the same way the router can, with `controller<C>(path_prefix, ctor_args...)`. The controller's own routes are prefixed by the group's full path, and requests into them pass through the group's middleware stack in addition to the controller's own middleware.
 
-<!-- src: qbm/http/routing/route_group.h:232-240 -->
+<!-- src: qbm/http/src/qbm/http/routing/route_group.h:232-240 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 auto api = router().group("/api/users");
 api->use(user_group_auth_mw);

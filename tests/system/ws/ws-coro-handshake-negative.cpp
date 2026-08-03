@@ -35,7 +35,7 @@
 
 #include <gtest/gtest.h>
 
-#include "../ws/coro.h"
+#include <qbm/http/ws/coro.h>
 
 #include "../../shared/ws_loopback.h"
 

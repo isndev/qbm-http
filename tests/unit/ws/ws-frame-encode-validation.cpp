@@ -40,7 +40,7 @@
 
 #include <qb/system/allocator/pipe.h>
 
-#include "../ws.h"
+#include <qbm/http/ws.h>
 
 // ---------------------------------------------------------------------------
 // Control-frame size guard (RFC 6455 §5.5: control frames ≤ 125 bytes).

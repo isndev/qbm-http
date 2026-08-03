@@ -19,9 +19,9 @@
 #include <memory>
 #include <string>
 
-#include "../http.h"
-#include "../middleware/transform.h"
-#include "../routing/middleware.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/transform.h>
+#include <qbm/http/routing/middleware.h>
 
 #include "../../shared/middleware_test_fixture.h"
 

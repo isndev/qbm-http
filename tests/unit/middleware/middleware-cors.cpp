@@ -22,8 +22,8 @@
 
 #include <gtest/gtest.h>
 
-#include "../http.h"
-#include "../middleware/cors.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/cors.h>
 
 #include "../../shared/middleware_test_fixture.h"
 

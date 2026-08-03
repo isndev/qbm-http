@@ -19,9 +19,9 @@
 #include <sstream>
 #include <string>
 
-#include "../http.h"
-#include "../middleware/conditional.h"
-#include "../routing/middleware.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/conditional.h>
+#include <qbm/http/routing/middleware.h>
 
 #include "../../shared/middleware_test_fixture.h"
 

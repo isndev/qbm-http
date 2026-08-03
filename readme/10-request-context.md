@@ -13,12 +13,12 @@ When the router matches a request, it builds one `Context<Session>` and runs the
 Everything here is in the `qb::http` namespace and reachable through the umbrella header:
 
 ```cpp
-#include <http/http.h>   // pulls in qb::http::Context, Slot, HookPoint, AsyncTaskResult
+#include <qbm/http/http.h>   // pulls in qb::http::Context, Slot, HookPoint, AsyncTaskResult
 ```
 
 `Session` is your server's per-connection session type (for the bundled servers, `qb::http::DefaultSession` or `qb::http::ssl::DefaultSecureSession`). You almost never spell `Context<Session>` out in full; handlers and middleware receive a `std::shared_ptr<Context<Session>>` and you write the session type once at the server declaration.
 
-<!-- src: qbm/http/routing/context.h:68-108, routing/types.h:38-59, routing/slot.h:78-98 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:68-108, src/qbm/http/routing/types.h:38-59, src/qbm/http/routing/slot.h:78-98 -->
 
 ## Concepts
 
@@ -33,7 +33,7 @@ router.get("/users/:id", [](std::shared_ptr<qb::http::Context<MySession>> ctx) {
 });
 ```
 
-<!-- src: qbm/http/routing/context.h:68, 508 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:68, 508 -->
 
 ### The session is held weakly
 
@@ -47,13 +47,13 @@ if (auto s = ctx->session()) {
 
 In normal request handling you rarely call `session()` directly — completing the context sends the response for you. You reach for it only in advanced flows (streaming, server-sent events, protocol upgrades) where you drive the transport by hand.
 
-<!-- src: qbm/http/routing/context.h:113-114, 472-484 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:113-114, 472-484 -->
 
 ### Tasks are shared; per-request state lives on the context
 
 After `router.compile()`, the task objects in a chain (`IAsyncTask`, middleware, handlers) are **immutable and shared** across concurrent requests — HTTP/1.1 pipelining and HTTP/2 multiplexing run many requests against the same task instances on one listener. Never store per-request state on a task. All per-request bookkeeping — the current-task cursor, the in-flight flag, cancellation, your custom data — lives on the `Context`, which is the one object that is unique per request.
 
-<!-- src: qbm/http/routing/async_task.h:34-41 -->
+<!-- src: qbm/http/src/qbm/http/routing/async_task.h:34-41 -->
 
 ## What the context carries
 
@@ -74,7 +74,7 @@ After `router.compile()`, the task objects in a chain (`IAsyncTask`, middleware,
 | `query_param_or<T>(name, fallback)` | `T` | typed query-string value, or `fallback` on absent/empty/parse-fail |
 | `bind<T>()` | `std::optional<T>` | no-throw body deserializer; `nullopt` on failure (see below) |
 
-<!-- src: qbm/http/routing/context.h:472-617 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:472-617 -->
 
 ### Path parameters
 
@@ -91,7 +91,7 @@ router.get("/orders/:order_id/items/:item_id", [](auto ctx) {
 
 `PathParameters::get(name)` returns `std::optional<std::string_view>` (a view of the owned value string) if you want to distinguish "absent" from "empty". Note the lifetime contract: parameter **values are owned strings**, but parameter **keys are `string_view` into the route pattern** stored by the router. The router outlives every context, so this is safe by construction — but do not stash a parameter key `string_view` somewhere that outlives the router.
 
-<!-- src: qbm/http/routing/path_parameters.h:32-43, 79; context.h:488-510 -->
+<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-43, 79; context.h:488-510 -->
 
 ### Query parameters and body binding
 
@@ -116,7 +116,7 @@ if (!dto) { ctx->bad_request("invalid body"); return; }
 use(*dto);
 ```
 
-<!-- src: qbm/http/routing/context.h:571-617 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:571-617 -->
 
 ### Per-request custom data
 
@@ -167,7 +167,7 @@ ctx->remove("request.id");
 
 Why prefer slots: `ctx->set<int>("k", 1)` written one place and `ctx->get<std::size_t>("k")` read another **compiles and silently returns `std::nullopt`** at runtime. A slot makes that a compile error, documents at the declaration what gets stored under the key and by whom, and keeps the same `any_cast` read cost. Both APIs swallow `std::bad_any_cast` and return `nullopt` / `nullptr` on a type mismatch — a wrong-type read fails silently rather than throwing, which is exactly the footgun slots remove.
 
-<!-- src: qbm/http/routing/context.h:655-896; slot.h:56-104 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:655-896; slot.h:56-104 -->
 
 ## Completing a response
 
@@ -189,7 +189,7 @@ void complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE);
 
 `complete()` is **idempotent after finalization**: once the context is `Finalised` (or cancelled), further `complete()` calls are ignored — except `CANCELLED`, which is always honored. State only moves forward: `Ready → Running → Finalised`. This is what makes the late-arriving callback of an already-cancelled request harmless.
 
-<!-- src: qbm/http/routing/context.h:1068-1148 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1068-1148 -->
 
 ### Response helpers are terminal
 
@@ -224,13 +224,13 @@ router.post("/items", [](auto ctx) {
 
 Statuses are `qb::http::status` and JSON bodies are `qb::json` — see [Core HTTP concepts](./01-core-concepts.md).
 
-<!-- src: qbm/http/routing/context.h:900-1046 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:900-1046 -->
 
 ### Suppressing the response on ownership transfer
 
 If you hand the request or response off to another subsystem — most commonly a **WebSocket upgrade**, where the connection stops being an HTTP request/response exchange — call `ctx->suppress_response()`. It marks the context finalized *without* invoking the send callback, so the destructor won't push a stale or moved-from HTTP response back over a transport you no longer own. After this, `is_completed()` is `true` and neither the finalization callback nor `POST_HANDLER_EXECUTION` hooks run.
 
-<!-- src: qbm/http/routing/context.h:1250-1255 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1250-1255 -->
 
 ## Cancellation
 
@@ -257,7 +257,7 @@ qb::io::async::defer([ctx]() {
 });
 ```
 
-<!-- src: qbm/http/routing/context.h:1151-1226; async_task.h:64-76 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1151-1226; async_task.h:64-76 -->
 
 ## Lifecycle hooks
 
@@ -296,7 +296,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/routing/context.h:196-204, 226, 426, 626-641; router_core.h:328, 418; router.tpp:20; 2/http2.h:300,324 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:196-204, 226, 426, 626-641; router_core.h:328, 418; router.tpp:20; src/qbm/http/2/http2.h:300,324 -->
 
 ## Lifecycle in order
 
@@ -315,13 +315,13 @@ For a normal matched route, the context moves through these stages:
 
 When a route is not matched, or a task returns `ERROR`, the same machinery runs a different chain — `ProcessingPhase` records which one (`NORMAL_CHAIN`, `NOT_FOUND_CHAIN`, `METHOD_NOT_ALLOWED_CHAIN`, `ERROR_CHAIN`). See [Error handling](./13-error-handling.md) for how the error chain is wired.
 
-<!-- src: qbm/http/routing/context.h:76-95, 196-226, 406-426; router_core.h:291-328, 418; router.tpp:17-32 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:76-95, 196-226, 406-426; router_core.h:291-328, 418; router.tpp:17-32 -->
 
 ### Introspection (advanced)
 
 These read-only queries exist mainly for instrumentation, coroutine adapters, and tests — the normal request path never needs them: `is_completed()`, `state()`, `get_processing_phase()`, `last_task_result()`, and `completion_count()` (how many times `complete()` has been called). `defer_finalization_scope()` returns an RAII guard that holds back finalization until it leaves scope; it is the mechanism behind synchronous post-`next()` mutation in functional middleware, and you should not need it directly.
 
-<!-- src: qbm/http/routing/context.h:1221-1296, 385 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1221-1296, 385 -->
 
 ## Pitfalls
 

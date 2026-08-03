@@ -42,7 +42,7 @@ HTTP/3 is optional and triple-gated. The entire `3/` tree — client, server, du
 
 Detection lives in one place: `qbm/http/cmake/FindNghttp3.cmake`, which the module appends to `CMAKE_MODULE_PATH` and *also* installs, so `find_package(qbm-http)` re-runs the exact same module. It consults `pkg-config` for hints only, then resolves the header and the library with `find_path` / `find_library` — so a `libnghttp3` installed without a `.pc` file is still found — and publishes an `UNKNOWN IMPORTED` target `Nghttp3::nghttp3` carrying the absolute library path. That absolute path is what survives export intact; the link *directories* an inline `pkg_check_modules` target would carry do not.
 
-When all three are present, `qbm/http`'s CMake sets `QBM_HTTP_HAS_HTTP3`, adds `Nghttp3::nghttp3` to the module's link dependencies, appends `3/client.cpp` to the module sources, and — critically — defines `QBM_HTTP_HAS_HTTP3=1` **`PUBLIC`** on the `qbm-http` target so the `#ifdef` gate in `<http/http.h>` resolves the same way in your code as in the library:
+When all three are present, `qbm/http`'s CMake sets `QBM_HTTP_HAS_HTTP3`, adds `Nghttp3::nghttp3` to the module's link dependencies, appends `src/qbm/http/3/client.cpp` to the module sources, and — critically — defines `QBM_HTTP_HAS_HTTP3=1` **`PUBLIC`** on the `qbm-http` target so the `#ifdef` gate in `<qbm/http/http.h>` resolves the same way in your code as in the library:
 
 ```cmake
 # qbm/http/CMakeLists.txt
@@ -51,16 +51,16 @@ if(QBM_HTTP_HAS_HTTP3)
 endif()
 ```
 
-If any requirement is missing, the module still builds normally — HTTP/1.1, and (with SSL) HTTP/2 and WebSocket — but `QBM_HTTP_HAS_HTTP3` is never defined, and `<http/http.h>` does not include the `3/` headers. Including a `3/` header in that configuration is a hard error by design:
+If any requirement is missing, the module still builds normally — HTTP/1.1, and (with SSL) HTTP/2 and WebSocket — but `QBM_HTTP_HAS_HTTP3` is never defined, and `<qbm/http/http.h>` does not include the `3/` headers. Including a `3/` header in that configuration is a hard error by design:
 
 ```cpp
-// qbm/http/3/client.h:19-21 — and an equivalent guard in http3.h, dual_stack.h, protocol/connection.h
+// qbm/http/src/qbm/http/3/client.h:19-21 — and an equivalent guard in http3.h, dual_stack.h, protocol/connection.h
 #ifndef QBM_HTTP_HAS_HTTP3
 #error "HTTP/3 support is not enabled. Build qbm/http with QBM_HTTP_HAS_HTTP3."
 #endif
 ```
 
-> `qbm/http` is a **compiled** library (it registers with `qb_register_module` and a `SOURCES` list), not header-only. `3/client.cpp` is one of its translation units. Guard any HTTP/3-specific application code with `#ifdef QBM_HTTP_HAS_HTTP3` so it degrades cleanly on builds without QUIC or nghttp3.
+> `qbm/http` is a **compiled** library (it registers with `qb_register_module` and a `SOURCES` list), not header-only. `src/qbm/http/3/client.cpp` is one of its translation units. Guard any HTTP/3-specific application code with `#ifdef QBM_HTTP_HAS_HTTP3` so it degrades cleanly on builds without QUIC or nghttp3.
 
 ### Integration
 
@@ -74,10 +74,10 @@ add_executable(app main.cpp)
 target_link_libraries(app PRIVATE qbm::http)         # PUBLIC deps: qb::core, qb::io, vendored llhttp
 ```
 
-Because module dependencies link `PUBLIC`, the `QB_HAS_SSL=1` / `QB_HAS_QUIC=1` defines and the `QBM_HTTP_HAS_HTTP3=1` define reach your target — that is what makes the `#ifdef` gates in `<http/http.h>` resolve correctly in your own sources.
+Because module dependencies link `PUBLIC`, the `QB_HAS_SSL=1` / `QB_HAS_QUIC=1` defines and the `QBM_HTTP_HAS_HTTP3=1` define reach your target — that is what makes the `#ifdef` gates in `<qbm/http/http.h>` resolve correctly in your own sources.
 
 ```cpp
-#include <http/http.h>   // umbrella; pulls in qb::http3 when QBM_HTTP_HAS_HTTP3 is defined
+#include <qbm/http/http.h>   // umbrella; pulls in qb::http3 when QBM_HTTP_HAS_HTTP3 is defined
 ```
 
 ## Concepts
@@ -99,7 +99,7 @@ An HTTP/3 server is constructed with `qb::http3::make_server()`. It exposes the 
 
 ```cpp
 // src: qbm/http/tests/system/http3/http3-loopback.cpp:163-176 (adapted)
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 #ifdef QBM_HTTP_HAS_HTTP3
 qb::io::async::init();
@@ -165,10 +165,10 @@ client->push_request(std::move(request), [](qb::http::Response res) {
 
 ### Coroutine request
 
-The awaiter overloads integrate with the module's coroutine layer (`#include <http/http.h>` already pulls in `coro.h`):
+The awaiter overloads integrate with the module's coroutine layer (`#include <qbm/http/http.h>` already pulls in `coro.h`):
 
 ```cpp
-// src: qbm/http/3/client.h:173,214,227
+// src: qbm/http/src/qbm/http/3/client.h:173,214,227
 qb::http::async::awaiter<ConnectResult>            connect();
 qb::http::async::awaiter<qb::http::Response>       push_request(qb::http::Request request);
 qb::http::async::awaiter<std::vector<qb::http::Response>>
@@ -205,12 +205,12 @@ client->push_requests(std::move(requests), [](std::vector<qb::http::Response> re
 Queue a request with an id and cancel it while pending or active:
 
 ```cpp
-// src: qbm/http/3/client.h:201,208
+// src: qbm/http/src/qbm/http/3/client.h:201,208
 auto id = client->push_request_with_id(request, callback);
 client->cancel_request(id, "cancelled by application");
 ```
 
-Cancellation of an active request sends a QUIC stream reset with the HTTP/3 application error code `NGHTTP3_H3_REQUEST_CANCELLED` (`0x010c`) and completes the callback with status `CLIENT_CLOSED_REQUEST` (499). `cancel_request` returns `false` if the id is unknown. The same `REQUEST_CANCELLED` reset is used when the client abandons a request stream for any other reason — a request that fails to submit, or one that hits its timeout (`3/client.cpp`), per RFC 9114 §4.1.
+Cancellation of an active request sends a QUIC stream reset with the HTTP/3 application error code `NGHTTP3_H3_REQUEST_CANCELLED` (`0x010c`) and completes the callback with status `CLIENT_CLOSED_REQUEST` (499). `cancel_request` returns `false` if the id is unknown. The same `REQUEST_CANCELLED` reset is used when the client abandons a request stream for any other reason — a request that fails to submit, or one that hits its timeout (`src/qbm/http/3/client.cpp`), per RFC 9114 §4.1.
 
 ### Tuning
 
@@ -297,7 +297,7 @@ HTTP/3 enforces the same safety posture as HTTP/1.1 and HTTP/2, plus QUIC-specif
 
 ## Pitfalls
 
-- **Do not include `3/` headers on a non-HTTP/3 build.** Every header in `3/` is a hard `#error` unless `QBM_HTTP_HAS_HTTP3` is defined. Gate HTTP/3 application code with `#ifdef QBM_HTTP_HAS_HTTP3`. `<http/http.h>` already does this for you.
+- **Do not include `3/` headers on a non-HTTP/3 build.** Every header in `3/` is a hard `#error` unless `QBM_HTTP_HAS_HTTP3` is defined. Gate HTTP/3 application code with `#ifdef QBM_HTTP_HAS_HTTP3`. `<qbm/http/http.h>` already does this for you.
 - **The client is single-origin.** A request whose URI resolves to a different scheme, host, or port than the client's base URI fails with `400`. Use one client per origin. (Relative request URIs resolve against the bound origin, which is the idiomatic call.)
 - **Exceptions do not escape protocol callbacks.** nghttp3 invokes the adapter across a C ABI; every callback runs under a guard that converts any C++ exception into `NGHTTP3_ERR_CALLBACK_FAILURE` — a clean stream/connection failure, not a propagated throw. Handlers reached from these callbacks must not rely on exceptions unwinding out of the protocol layer.
 - **CSPRNG failure is fail-closed.** If OpenSSL `RAND_bytes` fails inside the nghttp3 rand callback, the process calls `std::abort()` rather than hand predictable material to QUIC. This is intentional.

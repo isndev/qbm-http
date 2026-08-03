@@ -38,7 +38,7 @@
 #include <qb/json.h>      // qb::json
 
 #include "../../shared/auth_test_helpers.h" // forge_token, forge_token_raw_payload, now_epoch, hmac_options, make_user
-#include "../auth.h"                        // qb::http::auth::{Manager, Options, User}
+#include <qbm/http/auth.h>                        // qb::http::auth::{Manager, Options, User}
 
 namespace {
 

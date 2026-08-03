@@ -43,9 +43,9 @@
 
 #include "../../shared/middleware_test_fixture.h"
 
-#include "../middleware/static_files.h"
-#include "../routing/context.h"
-#include "../routing/router.h"
+#include <qbm/http/middleware/static_files.h>
+#include <qbm/http/routing/context.h>
+#include <qbm/http/routing/router.h>
 
 using qb::http::test::MockMiddlewareSession;
 

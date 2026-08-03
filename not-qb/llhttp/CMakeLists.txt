@@ -12,8 +12,8 @@ add_library(llhttp STATIC
 # symbol prefix (http_t, http_errno, http_init/http_execute), and a system llhttp cannot
 # substitute for it. So it gets the same treatment as qb's own forks under
 # qb/src/qb/vendor/ -- qbm-http OWNS the name and ships it inside its own header root:
-# the single public header now lives at qbm/http/vendor/llhttp.h and is included as
-# <http/vendor/llhttp.h> (qbm/http/types.h). Two consequences:
+# the single public header lives at qbm/http/src/qbm/http/vendor/llhttp.h and is included as
+# <qbm/http/vendor/llhttp.h> (qbm/http/src/qbm/http/types.h). Two consequences:
 #
 #   * nothing named `llhttp.h` (nor the generator's `api.h` fragment left in include/, which
 #     no translation unit includes) ever lands on a consumer's include path, where it would
@@ -26,4 +26,4 @@ add_library(llhttp STATIC
 # working without editing vendored source. PRIVATE also means this target contributes no
 # include directory to the export set -- a relative, genex-free PUBLIC include directory
 # (what this line used to be) makes install(TARGETS llhttp EXPORT ...) a hard generate error.
-target_include_directories(llhttp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor")
+target_include_directories(llhttp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/qbm/http/vendor")

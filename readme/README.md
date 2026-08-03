@@ -8,13 +8,13 @@ This is the table of contents for the qbm-http narrative documentation: twenty-o
 
 ## What this module is
 
-qbm-http is a compiled library — not header-only — that adds HTTP and WebSocket to the qb framework. The build registers it through `qb_register_module` with a `SOURCES` list (`qbm/http/CMakeLists.txt`), so consuming it links a real archive rather than only including headers. The umbrella header is `<http/http.h>`.
+qbm-http is a compiled library — not header-only — that adds HTTP and WebSocket to the qb framework. The build registers it through `qb_register_module` with a `SOURCES` list (`qbm/http/CMakeLists.txt`), so consuming it links a real archive rather than only including headers. The umbrella header is `<qbm/http/http.h>`.
 
 The module is layered. HTTP/1.1 (client and server), the message types, routing, middleware, and validation are always available. Several capabilities are gated behind build features and are documented as such throughout these pages:
 
 | Feature | Build gate | Notes |
 |---|---|---|
-| WebSocket (and WSS), HTTPS, JWT, the `auth` subsystem, HTTP/2 | `QB_HAS_SSL` | Derived upstream from OpenSSL detection; propagated `PUBLIC` to consumers. WebSocket needs OpenSSL for the handshake hash, so `<ws/ws.h>` `#error`s without it — the whole subsystem is gated, not only the secure transport. |
+| WebSocket (and WSS), HTTPS, JWT, the `auth` subsystem, HTTP/2 | `QB_HAS_SSL` | Derived upstream from OpenSSL detection; propagated `PUBLIC` to consumers. WebSocket needs OpenSSL for the handshake hash, so `<src/qbm/http/ws/ws.h>` `#error`s without it — the whole subsystem is gated, not only the secure transport. |
 | HTTP/3 over QUIC | `QBM_HTTP_HAS_HTTP3` | Requires `QB_HAS_SSL` + `QB_HAS_QUIC` + libnghttp3. |
 
 If your build lacks `QB_HAS_SSL`, the SSL-backed pages still describe the API surface but the code will not compile until SSL is present. Each page states its gate where one applies.
@@ -32,7 +32,7 @@ target_link_libraries(your_app PRIVATE qbm::http)      # PUBLIC deps: qb::core, 
 ```
 
 ```cpp
-#include <http/http.h>   // umbrella: HTTP/1.1 always; HTTP/2 + WebSocket under QB_HAS_SSL;
+#include <qbm/http/http.h>   // umbrella: HTTP/1.1 always; HTTP/2 + WebSocket under QB_HAS_SSL;
                          //           HTTP/3 under QBM_HTTP_HAS_HTTP3
 ```
 

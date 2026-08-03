@@ -25,9 +25,9 @@
 
 #include <qb/system/parse.h>
 
-#include "../http.h"
-#include "../middleware/timing.h"
-#include "../routing/middleware.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/timing.h>
+#include <qbm/http/routing/middleware.h>
 
 #include "../../shared/middleware_test_fixture.h"
 

@@ -37,8 +37,8 @@
 
 #include <gtest/gtest.h>
 
-#include "../http.h"
-#include "../middleware/all.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/all.h>
 
 #include "../../shared/auth_test_helpers.h"
 #include "../../shared/loopback_server.h"

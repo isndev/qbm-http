@@ -62,7 +62,7 @@
 
 #include <gtest/gtest.h>
 
-#include "../ws/coro.h"
+#include <qbm/http/ws/coro.h>
 
 namespace qb::http::test {
 

@@ -41,7 +41,7 @@
 
 #include <qb/json.h>
 
-#include "../http.h" // qb::http::{Body, Form, Multipart} (resolves via tests/ include dir)
+#include <qbm/http/http.h> // qb::http::{Body, Form, Multipart} (resolves via tests/ include dir)
 
 namespace {
 

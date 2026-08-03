@@ -29,7 +29,7 @@
 #include <vector>
 
 #include "../../shared/http2_fake_io.h"
-#include "../2/protocol/base.h"
+#include <qbm/http/2/protocol/base.h>
 
 namespace h2 = qb::protocol::http2;
 

@@ -21,8 +21,8 @@
 
 #include <gtest/gtest.h>
 
-#include "../http.h"
-#include "../middleware/recaptcha.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/recaptcha.h>
 
 #include "../../shared/middleware_test_fixture.h"
 

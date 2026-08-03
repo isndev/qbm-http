@@ -44,10 +44,10 @@ set(QBM_HTTP_EXTRA_DEFINES)
 # 2/protocol/*.cpp files below do NOT — see the unconditional SOURCES list.
 if(QB_HAS_SSL)
     list(APPEND QBM_HTTP_EXTRA_SOURCES
-        auth/manager.cpp
-        ws/ws.cpp
-        2/http2.cpp
-        2/client.cpp
+        src/qbm/http/auth/manager.cpp
+        src/qbm/http/ws/ws.cpp
+        src/qbm/http/2/http2.cpp
+        src/qbm/http/2/client.cpp
     )
     list(APPEND QBM_HTTP_EXTRA_DEFINES QBM_HTTP_HAS_SSL=1)
 endif()
@@ -65,7 +65,7 @@ endif()
 if(QB_HAS_SSL AND QB_HAS_QUIC AND Nghttp3_FOUND)
     set(QBM_HTTP_HAS_HTTP3 TRUE)
     list(APPEND QBM_HTTP_EXTRA_SOURCES
-        3/client.cpp
+        src/qbm/http/3/client.cpp
     )
     list(APPEND QBM_HTTP_EXTRA_DEPENDS Nghttp3::nghttp3)
     # QBM_HTTP_HAS_HTTP3 is defined PUBLIC below (after the target exists) so it
@@ -83,16 +83,16 @@ qb_register_module(
     DEPENDS qb-core llhttp ${QBM_HTTP_EXTRA_DEPENDS}
     SOURCES
         # Core files
-        headers.cpp
-        date.cpp
-        cookie.cpp
-        multipart.cpp
+        src/qbm/http/headers.cpp
+        src/qbm/http/date.cpp
+        src/qbm/http/cookie.cpp
+        src/qbm/http/multipart.cpp
         # Body
-        request.cpp
-        response.cpp
-        body.cpp
-        1.1/http.cpp
-        1.1/client.cpp
+        src/qbm/http/request.cpp
+        src/qbm/http/response.cpp
+        src/qbm/http/body.cpp
+        src/qbm/http/1.1/http.cpp
+        src/qbm/http/1.1/client.cpp
         # HTTP/2 wire codec — frame layer, HPACK (+ Huffman) and the stream state
         # machine. Transport-independent and OpenSSL-free (verified: no stcp/saccept/
         # ssl::Context anywhere under 2/protocol/), so it is built UNCONDITIONALLY and
@@ -103,32 +103,32 @@ qb_register_module(
         # Cost, measured on the feature-gates preset (Debug, arm64, clang): 2289 KiB of
         # objects and 3.8 s of compile CPU across the four TUs. Paid ONLY by SSL-off
         # builds — every other preset already compiled these exact files.
-        2/protocol/base.cpp
-        2/protocol/hpack.cpp
-        2/protocol/hpack_huffman.cpp
-        2/protocol/stream.cpp
+        src/qbm/http/2/protocol/base.cpp
+        src/qbm/http/2/protocol/hpack.cpp
+        src/qbm/http/2/protocol/hpack_huffman.cpp
+        src/qbm/http/2/protocol/stream.cpp
         # Core (decl/def split)
-        message_base.cpp
-        types.cpp
-        utility.cpp
-        origin.cpp
+        src/qbm/http/message_base.cpp
+        src/qbm/http/types.cpp
+        src/qbm/http/utility.cpp
+        src/qbm/http/origin.cpp
         # Auth
-        auth/options.cpp
-        auth/user.cpp
+        src/qbm/http/auth/options.cpp
+        src/qbm/http/auth/user.cpp
         # Validation
-        validation/error.cpp
-        validation/parameter_validator.cpp
-        validation/request_validator.cpp
-        validation/rule.cpp
-        validation/sanitizer.cpp
-        validation/schema_validator.cpp
+        src/qbm/http/validation/error.cpp
+        src/qbm/http/validation/parameter_validator.cpp
+        src/qbm/http/validation/request_validator.cpp
+        src/qbm/http/validation/rule.cpp
+        src/qbm/http/validation/sanitizer.cpp
+        src/qbm/http/validation/schema_validator.cpp
         # Middleware (non-template helpers split out of headers)
-        middleware/cors.cpp
-        middleware/compression.cpp
-        middleware/rate_limit.cpp
-        middleware/recaptcha.cpp
-        middleware/security_headers.cpp
-        middleware/static_files.cpp
+        src/qbm/http/middleware/cors.cpp
+        src/qbm/http/middleware/compression.cpp
+        src/qbm/http/middleware/rate_limit.cpp
+        src/qbm/http/middleware/recaptcha.cpp
+        src/qbm/http/middleware/security_headers.cpp
+        src/qbm/http/middleware/static_files.cpp
         ${QBM_HTTP_EXTRA_SOURCES}
     DEFINES
         QBM_HTTP_VERSION="${PROJECT_VERSION}"

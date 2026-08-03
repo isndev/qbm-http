@@ -18,13 +18,13 @@ There are three ways to write one, in increasing order of ceremony:
 
 All three reduce to the same contract: every middleware **must eventually call `ctx->complete(AsyncTaskResult)` exactly once** (the functional form may instead call `next()`, which completes with `CONTINUE` on your behalf). Miss that call and the request hangs until the connection times out.
 
-This page is grounded in `qbm/http/routing/middleware.h`, `qbm/http/routing/types.h`, `qbm/http/routing/coro_task.h`, and `qbm/http/routing/context.h`. The standard middleware under `qbm/http/middleware/` are themselves `IMiddleware` implementations and serve as worked references.
+This page is grounded in `qbm/http/src/qbm/http/routing/middleware.h`, `qbm/http/src/qbm/http/routing/types.h`, `qbm/http/src/qbm/http/routing/coro_task.h`, and `qbm/http/src/qbm/http/routing/context.h`. The standard middleware under `qbm/http/middleware/` are themselves `IMiddleware` implementations and serve as worked references.
 
 ## The outcome enum
 
-Every task in the chain — middleware, route handler, error handler — reports its result through `ctx->complete(AsyncTaskResult)`. The enum lives in `routing/types.h`:
+Every task in the chain — middleware, route handler, error handler — reports its result through `ctx->complete(AsyncTaskResult)`. The enum lives in `src/qbm/http/routing/types.h`:
 
-<!-- src: qbm/http/routing/types.h:53-62 -->
+<!-- src: qbm/http/src/qbm/http/routing/types.h:53-62 -->
 
 | Outcome | Meaning |
 | --- | --- |
@@ -54,7 +54,7 @@ flowchart TD
 
 The least-ceremony middleware is a lambda matching `MiddlewareHandlerFn<SessionType>`:
 
-<!-- src: qbm/http/routing/types.h:107-108 -->
+<!-- src: qbm/http/src/qbm/http/routing/types.h:107-108 -->
 
 ```cpp
 namespace qb::http {
@@ -72,7 +72,7 @@ You receive the request context and a `next` callback. The rules:
 - **Fail:** do **not** call `next()`. Call `ctx->complete(AsyncTaskResult::ERROR)` to hand off to the error chain.
 
 ```cpp
-#include <http/http.h>   // Router, Context, AsyncTaskResult, status
+#include <qbm/http/http.h>   // Router, Context, AsyncTaskResult, status
 
 using Session = qb::http::DefaultSession;  // your session type
 qb::http::Router<Session> router;
@@ -97,7 +97,7 @@ The string second argument to `use()` names the task for logs and diagnostics. I
 
 When you register a `(ctx, next)` lambda, the router wraps it in a `FunctionalMiddleware<SessionType>` adapter (an `IMiddleware` itself). The adapter, not you, owns the completion call:
 
-<!-- src: qbm/http/routing/middleware.h:183-263 -->
+<!-- src: qbm/http/src/qbm/http/routing/middleware.h:183-263 -->
 
 1. The adapter opens a `defer_finalization_scope()` for the duration of your lambda. While that scope is open, the response is **not** published even if a downstream task completes.
 2. Your lambda runs. If you call `next()`, the adapter checks an atomic `next_called` flag, then — if the context is neither completed nor cancelled — calls `ctx->complete(AsyncTaskResult::CONTINUE)` to advance the chain.
@@ -129,7 +129,7 @@ router.use([](std::shared_ptr<qb::http::Context<Session>> ctx,
 
 This works only when everything downstream completes inline before your lambda returns. **If any downstream task suspends on real asynchronous work** (a database round-trip, an outbound HTTP call, a coroutine `co_await`), control returns from `next()` *before* the response exists, and your post-`next()` code runs too early. For that case, register a `PRE_RESPONSE_SEND` lifecycle hook instead — it fires at final send time regardless of how the chain unwound:
 
-<!-- src: qbm/http/routing/types.h:38-47 -->
+<!-- src: qbm/http/src/qbm/http/routing/types.h:38-47 -->
 
 ```cpp
 router.use([](std::shared_ptr<qb::http::Context<Session>> ctx,
@@ -144,16 +144,16 @@ router.use([](std::shared_ptr<qb::http::Context<Session>> ctx,
 }, "LateHeaderStamp");
 ```
 
-Lifecycle hooks are covered in [The request context](./10-request-context.md); `HookPoint` is defined in `routing/types.h`.
+Lifecycle hooks are covered in [The request context](./10-request-context.md); `HookPoint` is defined in `src/qbm/http/routing/types.h`.
 
 ## Form 2 — Coroutine middleware
 
 If your middleware does asynchronous work, the coroutine form expresses it directly. Pass a `task<void>(ctx)` lambda **directly** to `router.use(...)` — the router auto-detects the coroutine return type via the `CoroMiddlewareHandler` concept and wraps it automatically. No separate wrapper call is needed:
 
-<!-- src: qbm/http/routing/coro_task.h:75-82, qbm/http/routing/router.h:143-149 -->
+<!-- src: qbm/http/src/qbm/http/routing/coro_task.h:75-82, qbm/http/src/qbm/http/routing/router.h:143-149 -->
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 router.use([this](std::shared_ptr<qb::http::Context<Session>> ctx)
     -> qb::io::async::task<void> {
@@ -171,7 +171,7 @@ router.use([this](std::shared_ptr<qb::http::Context<Session>> ctx)
 
 The coroutine signature is `task<void>(ctx)` — there is **no `next` parameter**. The framework drives chaining itself when the coroutine finishes:
 
-<!-- src: qbm/http/routing/coro_task.h:113-185 -->
+<!-- src: qbm/http/src/qbm/http/routing/coro_task.h:113-185 -->
 
 - On **normal return** (`co_return` without having called `complete()`/`cancel()`), the wrapper completes the context with `AsyncTaskResult::CONTINUE`. To short-circuit, set the response and call `ctx->complete(AsyncTaskResult::COMPLETE)` before `co_return`.
 - If your body **already called** `ctx->complete(...)` or `ctx->cancel()`, the wrapper does **not** override it — the outcome you chose wins. (The wrapper compares `completion_count()` before and after to detect this.)
@@ -188,7 +188,7 @@ Coroutine route handlers follow the same pattern — pass a `task<void>(ctx)` la
 
 For stateful, configurable, or reusable middleware, derive from `qb::http::IMiddleware<SessionType>` and implement three pure-virtual methods:
 
-<!-- src: qbm/http/routing/middleware.h:36-59 -->
+<!-- src: qbm/http/src/qbm/http/routing/middleware.h:36-59 -->
 
 ```cpp
 namespace qb::http {
@@ -213,7 +213,7 @@ namespace qb::http {
 A complete, minimal example — add a header to every request:
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <string>
 #include <utility>
 
@@ -245,7 +245,7 @@ private:
 
 The router adapts your `IMiddleware` into the task chain through `MiddlewareTask<SessionType>`, which catches any exception from `process()`, logs it with method/path context, sets `500`, and completes with `AsyncTaskResult::ERROR` — the same safety net the functional adapter provides.
 
-`TransformMiddleware` in `qbm/http/middleware/transform.h` is a compact production example of this shape: it holds a user-supplied `std::function<void(Request&)>`, applies it inside a try/catch, and completes `CONTINUE` on success or `ERROR` on a thrown transformer.
+`TransformMiddleware` in `qbm/http/src/qbm/http/middleware/transform.h` is a compact production example of this shape: it holds a user-supplied `std::function<void(Request&)>`, applies it inside a try/catch, and completes `CONTINUE` on success or `ERROR` on a thrown transformer.
 
 ### Asynchronous class-based middleware
 
@@ -277,7 +277,7 @@ Middleware communicates with downstream middleware and the route handler through
 
 **String-keyed** access — quick, untyped:
 
-<!-- src: qbm/http/routing/context.h:659-747 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:659-747 -->
 
 ```cpp
 ctx->set("request_id", std::string("abc-123"));        // store
@@ -294,7 +294,7 @@ bool present = ctx->has("payload");                    // contains() is an alias
 
 **Typed slots** — compile-time keys, the safer choice for state that crosses module boundaries:
 
-<!-- src: qbm/http/routing/slot.h:79-95, qbm/http/routing/context.h:782-894 -->
+<!-- src: qbm/http/src/qbm/http/routing/slot.h:79-95, qbm/http/src/qbm/http/routing/context.h:782-894 -->
 
 ```cpp
 // Declare once, in a shared header.
@@ -316,7 +316,7 @@ A `Slot<T>` binds a string name to a static type, so producers and consumers agr
 
 You register middleware with `use()` on a `Router`, `RouteGroup`, or `Controller`. Three overloads exist:
 
-<!-- src: qbm/http/routing/router.h:224-252 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:224-252 -->
 
 ```cpp
 // 1. Functional (ctx, next) lambda, with an optional task name.

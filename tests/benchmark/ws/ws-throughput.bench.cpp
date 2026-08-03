@@ -57,7 +57,7 @@
 
 #include <qb/system/allocator/pipe.h>
 
-#include "../ws.h"
+#include <qbm/http/ws.h>
 
 namespace {
 

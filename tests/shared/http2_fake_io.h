@@ -61,9 +61,9 @@
 
 #include <gtest/gtest.h>
 
-#include "../2/protocol/base.h"
-#include "../2/protocol/client.h"
-#include "../2/protocol/server.h"
+#include <qbm/http/2/protocol/base.h>
+#include <qbm/http/2/protocol/client.h>
+#include <qbm/http/2/protocol/server.h>
 
 namespace qb::http::test {
 

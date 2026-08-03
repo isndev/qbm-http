@@ -38,7 +38,7 @@
  * @ingroup Http
  */
 
-#include "../http.h"
+#include <qbm/http/http.h>
 
 #if defined(QBM_HTTP_HAS_HTTP3)
 

@@ -29,7 +29,7 @@
 
 #include <qb/io/crypto.h>
 
-#include "../ws/ws.h"
+#include <qbm/http/ws/ws.h>
 
 namespace {
 

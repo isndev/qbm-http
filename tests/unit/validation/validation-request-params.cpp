@@ -31,7 +31,7 @@
 
 #include <qb/json.h>
 
-#include "../validation.h"
+#include <qbm/http/validation.h>
 
 using namespace qb::http::validation;
 

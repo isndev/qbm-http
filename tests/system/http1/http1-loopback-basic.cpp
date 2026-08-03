@@ -24,7 +24,7 @@
 
 #include "../../shared/loopback_server.h"
 
-#include "../http.h"
+#include <qbm/http/http.h>
 
 using namespace std::chrono_literals;
 using qb::http::test::ephemeral_port;

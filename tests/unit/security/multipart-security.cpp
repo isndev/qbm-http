@@ -25,9 +25,9 @@
 
 #include <gtest/gtest.h>
 #include <qb/system/allocator/pipe.h>
-#include "../body.h"
-#include "../headers.h"
-#include "../multipart.h"
+#include <qbm/http/body.h>
+#include <qbm/http/headers.h>
+#include <qbm/http/multipart.h>
 
 using namespace qb::http;
 
