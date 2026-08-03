@@ -13,6 +13,9 @@ on:
       - 'SECURITY.md'
       - 'CONTRIBUTING.md'
       - 'scripts/doc-lint.sh'
+      # The lint reads the expected Verified-against version from project(...
+      # VERSION) here, so a version-only bump must trigger it.
+      - 'CMakeLists.txt'
   pull_request:
     branches: [ main ]
     paths:
@@ -22,6 +25,9 @@ on:
       - 'SECURITY.md'
       - 'CONTRIBUTING.md'
       - 'scripts/doc-lint.sh'
+      # The lint reads the expected Verified-against version from project(...
+      # VERSION) here, so a version-only bump must trigger it.
+      - 'CMakeLists.txt'
 
 jobs:
   doc-lint:
