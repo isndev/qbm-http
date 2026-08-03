@@ -40,7 +40,7 @@
 #include <utility>
 #include <vector>
 
-#include "../../http.h" // qb::http::Router, Context, IMiddleware, AsyncTaskResult, status
+#include <qbm/http/http.h> // qb::http::Router, Context, IMiddleware, AsyncTaskResult, status
 
 namespace qb::http::test {
 

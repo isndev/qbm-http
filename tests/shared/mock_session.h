@@ -37,7 +37,7 @@
 
 #include <qb/uuid.h> // qb::uuid, qb::generate_random_uuid
 
-#include "../../http.h" // qb::http::Router, Request, Response, Context, PathParameters, method, status
+#include <qbm/http/http.h> // qb::http::Router, Request, Response, Context, PathParameters, method, status
 
 namespace qb::http::test {
 
