@@ -4,7 +4,7 @@
 
 The value types every other page builds on: `Request`, `Response`, the case-insensitive multi-value `Headers` map, the `Body` payload, and the `Method`/`Status` wrappers — all in the `qb::http` namespace, all riding on qb-io's asynchronous sessions.
 
-**Prerequisites:** working knowledge of the qb actor framework and `qb-io` async I/O — see [`qb/README.md`](https://github.com/isndev/cube/blob/c++23/README.md). **See also:** the doc map [`README.md`](./README.md), the [body deep dive](./02-body-deep-dive.md), and [the request context](./10-request-context.md) for how these types reach a handler.
+**Prerequisites:** working knowledge of the qb actor framework and `qb-io` async I/O — see [`qb/README.md`](https://github.com/isndev/qb/blob/main/README.md). **See also:** the doc map [`README.md`](./README.md), the [body deep dive](./02-body-deep-dive.md), and [the request context](./10-request-context.md) for how these types reach a handler.
 
 ## What this page covers
 

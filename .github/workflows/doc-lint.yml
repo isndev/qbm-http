@@ -17,7 +17,7 @@ on:
       # VERSION) here, so a version-only bump must trigger it.
       - 'CMakeLists.txt'
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
     paths:
       - 'README.md'
       - 'readme/**'
@@ -28,6 +28,10 @@ on:
       # The lint reads the expected Verified-against version from project(...
       # VERSION) here, so a version-only bump must trigger it.
       - 'CMakeLists.txt'
+
+concurrency:
+  group: doc-lint-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   doc-lint:
