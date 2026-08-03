@@ -96,6 +96,26 @@ using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
  */
 [[nodiscard]] std::string accept_encoding();
 
+// QB_VERSION is published by qb's CMake as a PUBLIC compile definition (see
+// qb/cmake/qbConfig.cmake), so it reaches every consumer of the qb targets through both the
+// BUILD_INTERFACE and the INSTALL_INTERFACE. Failing the build here is deliberate: the value
+// below used to be a hand-written "qb/2.6.0" literal in two places, which silently became a lie
+// the moment the framework version moved. A hard error is what stops that from happening again.
+#if !defined(QB_VERSION)
+#error "qbm-http requires QB_VERSION. Link the qb targets (qb::io / qb::core) so their usage requirements apply, rather than adding qbm's include directories by hand."
+#endif
+
+/**
+ * @brief The `User-Agent` value the built-in HTTP clients send when the caller sets none.
+ *
+ * Derived at compile time from the framework version, so it cannot drift from the version
+ * actually shipped. Callers that set their own `User-Agent` are never overridden.
+ *
+ * @return `"qb/"` followed by `QB_VERSION` (e.g. `qb/3.0.0`). Deliberately not restated as a
+ *         literal here: a doc comment naming a version is the same drift this constant removes.
+ */
+inline constexpr std::string_view default_user_agent = "qb/" QB_VERSION;
+
 /**
  * @brief Selects a suitable `Content-Encoding` for a response based on the client's `Accept-Encoding` header.
  *

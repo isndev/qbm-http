@@ -355,7 +355,7 @@ Client::prepare_request(qb::http::Request &request) {
         request.set_header("Host", _host);
     }
     if (!request.has_header("User-Agent")) {
-        request.set_header("User-Agent", "qb/2.6.0");
+        request.set_header("User-Agent", std::string(qb::http::default_user_agent));
     }
     if (!request.has_header("Accept-Encoding")) {
         request.set_header("Accept-Encoding", qb::http::accept_encoding());

@@ -1,6 +1,6 @@
 # Asynchronous HTTP client
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 2.6.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
 Make non-blocking outbound HTTP/1.1, HTTP/2, and HTTP/3 requests over the qb-io event loop — through one-shot callbacks, single-shot coroutine awaiters, or a persistent connection-reusing client.
 
@@ -78,7 +78,7 @@ post_req.body() = R"({"name":"test","value":123})";
 The clients fill in standard headers for you:
 
 - **Host** — set automatically from `request.uri()` (bracketed IPv6, default ports omitted for `http:80` / `https:443`).
-- **User-Agent** — the one-shot HTTP/1.1 sessions default to `qb/2.6.0` if you do not set one.
+- **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — added automatically when compression is compiled in (`QB_HAS_COMPRESSION`); matching `Content-Encoding` responses are decompressed transparently.
 - **Content-Length** — computed from the body for requests that carry one.
 
