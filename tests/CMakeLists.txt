@@ -20,7 +20,9 @@
 #
 # Targets: qbm-http-test-<tier>-<name> via qb_register_module_test(TIER LABELS REQUIRES).
 # REQUIRES gating decomposes the legacy single if(QB_HAS_SSL) bucket into its three real reasons:
-#   - pure-logic http2 units: NO ssl (were accidentally gated).
+#   - pure-logic http2 units: NO ssl (were accidentally gated) — they need only the
+#     2/protocol/ wire codec, which qbm/http/CMakeLists.txt compiles unconditionally.
+#     ONE exception: http2-client-validation REQUIRES ssl (its types ARE stcp/saccept).
 #   - ws units/system: REQUIRES ssl — CRYPTO-LINK only (ws/ws.h #errors without qb::io::crypto for
 #     Sec-WebSocket-Accept); they run plaintext ws://, not TLS.
 #   - crypto/TLS: REQUIRES ssl for real (auth/jwt link; http2/https/ws TLS handshake at runtime).
@@ -127,7 +129,11 @@ qhttp_test(unit hpack-codec            unit/http2/hpack-codec.cpp            EXT
 qhttp_test(unit hpack-encoder-strategy unit/http2/hpack-encoder-strategy.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-header-validation unit/http2/http2-header-validation.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-state    unit/http2/http2-protocol-state.cpp    EXTRA_LABELS http2)
-qhttp_test(unit http2-client-validation unit/http2/http2-client-validation.cpp EXTRA_LABELS http2)
+# ...except this one: it drives qb::http2::Client / qb::http2::DefaultSession, whose CLASS
+# DEFINITIONS derive from qb::io::async::tcp::client<..., qb::io::transport::stcp> and
+# ::acceptor<..., transport::saccept>. No handshake runs at test time, but the types do not
+# exist at all without OpenSSL, so this TU cannot compile on QB_HAS_SSL=OFF.
+qhttp_test(unit http2-client-validation unit/http2/http2-client-validation.cpp REQUIRES ssl EXTRA_LABELS http2 ssl)
 qhttp_test(unit http2-stream-state      unit/http2/http2-stream-state.cpp      EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-coverage unit/http2/http2-protocol-coverage.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-protocol-roundtrip unit/http2/http2-protocol-roundtrip.cpp EXTRA_LABELS http2)

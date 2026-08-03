@@ -15,9 +15,18 @@
  *   - awaiter lifetime when the client is destroyed before the coroutine is
  *     resumed (connect awaiter, and a request awaiter destroyed mid-flight).
  *
- * None of this touches OpenSSL, so the TU is intentionally UN-GATED from the
- * `if(QB_HAS_SSL)` block: it builds and runs on `QB_HAS_SSL=OFF`. The live
- * loopback+TLS half lives in `system/http2/http2-client-coro.cpp`.
+ * No TLS handshake RUNS here — but the TU is nonetheless `REQUIRES ssl`, and that is
+ * not a conservatism. `qb::http2::Client` is *defined* as
+ * `qb::io::async::tcp::client<Client, qb::io::transport::stcp>` and the `2/http2.h`
+ * server it pulls in as `::acceptor<..., qb::io::transport::saccept>`; neither transport
+ * type exists when `QB_HAS_SSL=OFF`, so this file does not compile there. (An earlier
+ * comment here claimed the opposite and the test was registered un-gated — which is
+ * exactly how the SSL-off lane broke.) The live loopback+TLS half lives in
+ * `system/http2/http2-client-coro.cpp`.
+ *
+ * The twelve sibling http2 unit TUs really are OpenSSL-free: they include only the
+ * `2/protocol/` wire codec (frame layer, HPACK, stream state), which is compiled
+ * unconditionally into libqbm-http.
  *
  * The `origin::same` comparison helper is also pinned here because the client's
  * same-origin rejection is built on it and these are the most direct, fixture-

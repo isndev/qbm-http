@@ -9,7 +9,7 @@ Run multiplexed HTTP/2 over TLS — `qb::http2::Server` and `qb::http2::Client` 
 HTTP/2 is a binary, multiplexed protocol: many concurrent request/response exchanges share one TCP connection, headers are compressed with HPACK, and per-stream flow control keeps a fast peer from overrunning a slow one. In qbm-http you get all of this without dropping down to frames — you write routes and handlers exactly as you do for HTTP/1.1, and the `qb::protocol::http2` layer does the framing. This page explains what that layer guarantees, how streams are created and torn down, and which knobs (concurrency limits, session timeout, cleanup interval) you can tune.
 
 > **SSL is mandatory.** HTTP/2 in qbm-http is TLS-only. `<http/http.h>` includes `2/http2.h` only under `#ifdef QB_HAS_SSL`, and the build compiles `2/http2.cpp` and `2/client.cpp` into the library only when `QB_HAS_SSL` is set. There is no plaintext h2c path. If your build lacks OpenSSL, `qb::http2::*` does not exist. See [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) for how `QB_HAS_SSL` is derived.
-<!-- src: qbm/http/http.h:45-48; qbm/http/CMakeLists.txt:39-47 -->
+<!-- src: qbm/http/http.h:45-48; qbm/http/CMakeLists.txt:45-53 -->
 
 ## Concepts
 
@@ -347,7 +347,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 - **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
   <!-- src: qbm/http/http.h:45-48; qbm/http/2/http2.h:491-500 -->
 - **The module is a compiled library, not header-only.** `2/http2.cpp` and `2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<http/http.h>`; do not `find_package` the headers alone.
-  <!-- src: qbm/http/CMakeLists.txt:39-47,77-95 -->
+  <!-- src: qbm/http/CMakeLists.txt:45-53,80-131 -->
 - **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).
   <!-- src: qbm/http/2/http2.h:177-185 -->
 - **The idle-stream sweep is opportunistic.** It runs only on write activity and no more than once per `CLEANUP_INTERVAL` (5 s). A fully idle connection relies on the 60 s session timeout instead — do not assume `STREAM_IDLE_TIMEOUT` fires on a silent connection.
