@@ -8,9 +8,9 @@
  */
 
 #include <gtest/gtest.h>
-#include "../http.h"
-#include "../routing/context.h"
-#include "../routing/slot.h"
+#include <qbm/http/http.h>
+#include <qbm/http/routing/context.h>
+#include <qbm/http/routing/slot.h>
 
 #include <memory>
 #include <stdexcept>

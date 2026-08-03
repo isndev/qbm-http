@@ -36,7 +36,7 @@
 #include <qb/system/parse.h>
 
 #include "../../shared/middleware_test_fixture.h"
-#include "../middleware/rate_limit.h"
+#include <qbm/http/middleware/rate_limit.h>
 
 using qb::http::test::MiddlewareTestFixture;
 using qb::http::test::MockMiddlewareSession;

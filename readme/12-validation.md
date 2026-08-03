@@ -8,18 +8,18 @@ A composable pipeline for sanitizing and validating the body, query parameters, 
 
 ## What this page covers
 
-Everything in this page lives in the `qb::http::validation` namespace (declared across `<http/validation.h>` and the headers under `http/validation/`). The umbrella header `<http/http.h>` already pulls it in transitively; `<http/validation.h>` is the focused include if you want only the validation surface.
+Everything in this page lives in the `qb::http::validation` namespace (declared across `<qbm/http/validation.h>` and the headers under `http/validation/`). The umbrella header `<qbm/http/http.h>` already pulls it in transitively; `<qbm/http/validation.h>` is the focused include if you want only the validation surface.
 
 The system has six layers, smallest to largest:
 
 | Component | Header | Role |
 | --- | --- | --- |
-| `Error`, `Result` | `validation/error.h` | One failure record; a collection of them with an offending-value policy. |
-| `IRule` + concrete rules | `validation/rule.h` | A single JSON-Schema-style constraint over one `qb::json` value. |
-| `SchemaValidator` | `validation/schema_validator.h` | Validates a `qb::json` document against a JSON-Schema-subset definition. |
-| `ParameterRuleSet`, `ParameterValidator` | `validation/parameter_validator.h` | Parses-then-validates a string-keyed parameter map (query/header/path). |
-| `Sanitizer`, `PredefinedSanitizers` | `validation/sanitizer.h` | Path-addressed, in-place string transforms over a `qb::json`. |
-| `RequestValidator` | `validation/request_validator.h` | The pipeline: sanitize, then validate every part of a `Request`. |
+| `Error`, `Result` | `src/qbm/http/validation/error.h` | One failure record; a collection of them with an offending-value policy. |
+| `IRule` + concrete rules | `src/qbm/http/validation/rule.h` | A single JSON-Schema-style constraint over one `qb::json` value. |
+| `SchemaValidator` | `src/qbm/http/validation/schema_validator.h` | Validates a `qb::json` document against a JSON-Schema-subset definition. |
+| `ParameterRuleSet`, `ParameterValidator` | `src/qbm/http/validation/parameter_validator.h` | Parses-then-validates a string-keyed parameter map (query/header/path). |
+| `Sanitizer`, `PredefinedSanitizers` | `src/qbm/http/validation/sanitizer.h` | Path-addressed, in-place string transforms over a `qb::json`. |
+| `RequestValidator` | `src/qbm/http/validation/request_validator.h` | The pipeline: sanitize, then validate every part of a `Request`. |
 
 You normally configure one `RequestValidator` per route (or route group) and hand it to `ValidationMiddleware`. The rules and validators underneath are also usable standalone — for example to validate a configuration document at startup.
 
@@ -27,10 +27,10 @@ You normally configure one `RequestValidator` per route (or route group) and han
 
 ## The error model
 
-A single failure is an `Error` (`validation/error.h`):
+A single failure is an `Error` (`src/qbm/http/validation/error.h`):
 
 ```cpp
-// <!-- src: qbm/http/validation/error.h -->
+// <!-- src: qbm/http/src/qbm/http/validation/error.h -->
 struct Error {
     std::string             field_path;       // e.g. "body.user.email" or "query.page"
     std::string             rule_violated;    // e.g. "minLength", "type", "required"
@@ -42,8 +42,8 @@ struct Error {
 Failures accumulate in a `Result`. It is a flat list — `success()` is true only when the list is empty — plus an `ErrorValuePolicy` that governs how much of each offending value is captured:
 
 ```cpp
-// <!-- src: qbm/http/validation/error.h -->
-#include <http/validation.h>
+// <!-- src: qbm/http/src/qbm/http/validation/error.h -->
+#include <qbm/http/validation.h>
 
 qb::http::validation::Result result;
 result.set_error_value_policy(
@@ -73,10 +73,10 @@ Two structural helpers matter when composing validators: `Result::make_child()` 
 
 ## Rules
 
-`IRule` is the leaf interface (`validation/rule.h`): one rule validates one `qb::json` value and appends any failure to a `Result`.
+`IRule` is the leaf interface (`src/qbm/http/validation/rule.h`): one rule validates one `qb::json` value and appends any failure to a `Result`.
 
 ```cpp
-// <!-- src: qbm/http/validation/rule.h -->
+// <!-- src: qbm/http/src/qbm/http/validation/rule.h -->
 class IRule {
 public:
     virtual ~IRule() = default;
@@ -108,8 +108,8 @@ The concrete rules below map one-to-one onto JSON-Schema keywords. You rarely in
 `CustomRule` expresses logic no built-in rule covers:
 
 ```cpp
-// <!-- src: qbm/http/validation/rule.h -->
-#include <http/validation.h>
+// <!-- src: qbm/http/src/qbm/http/validation/rule.h -->
+#include <qbm/http/validation.h>
 using namespace qb::http::validation;
 
 auto even_only = std::make_shared<CustomRule>(
@@ -133,7 +133,7 @@ auto even_only = std::make_shared<CustomRule>(
 
 ## Schema validation
 
-`SchemaValidator` (`validation/schema_validator.h`) validates a `qb::json` document against a JSON-Schema-subset definition supplied as `qb::json`. It supports:
+`SchemaValidator` (`src/qbm/http/validation/schema_validator.h`) validates a `qb::json` document against a JSON-Schema-subset definition supplied as `qb::json`. It supports:
 
 - **Type:** `type` (a single string or an array of allowed type names).
 - **Strings:** `minLength`, `maxLength`, `pattern`.
@@ -145,7 +145,7 @@ auto even_only = std::make_shared<CustomRule>(
 
 ```cpp
 // <!-- src: qbm/http/tests/unit/validation/validation-schema.cpp (schema shape) -->
-#include <http/validation.h>
+#include <qbm/http/validation.h>
 #include <qb/json.h>
 
 using namespace qb::http::validation;
@@ -186,10 +186,10 @@ if (validator.validate(data, result)) {
 
 ## Parameter validation
 
-Query parameters, headers, and path parameters arrive as strings. `ParameterValidator` (`validation/parameter_validator.h`) parses each value into a `qb::json` of the declared `DataType`, then applies the attached rules. Each parameter is described by a fluent `ParameterRuleSet`:
+Query parameters, headers, and path parameters arrive as strings. `ParameterValidator` (`src/qbm/http/validation/parameter_validator.h`) parses each value into a `qb::json` of the declared `DataType`, then applies the attached rules. Each parameter is described by a fluent `ParameterRuleSet`:
 
 ```cpp
-// <!-- src: qbm/http/validation/parameter_validator.h -->
+// <!-- src: qbm/http/src/qbm/http/validation/parameter_validator.h -->
 struct ParameterRuleSet {
     std::string name;
     DataType    expected_type = DataType::STRING;   // target type after parsing
@@ -204,7 +204,7 @@ struct ParameterRuleSet {
 
 ```cpp
 // <!-- src: qbm/http/tests/unit/validation/validation-parameter.cpp -->
-#include <http/validation.h>
+#include <qbm/http/validation.h>
 using namespace qb::http::validation;
 
 ParameterValidator query;                 // non-strict by default
@@ -243,11 +243,11 @@ A few behaviors worth pinning down, all confirmed against `parameter_validator.c
 
 ## Sanitization
 
-A `Sanitizer` (`validation/sanitizer.h`) applies `SanitizerFunction`s — `std::function<std::string(const std::string&)>` — to string nodes inside a `qb::json`, addressed by a JSON-pointer-like path. Sanitizers *transform*; they do not validate.
+A `Sanitizer` (`src/qbm/http/validation/sanitizer.h`) applies `SanitizerFunction`s — `std::function<std::string(const std::string&)>` — to string nodes inside a `qb::json`, addressed by a JSON-pointer-like path. Sanitizers *transform*; they do not validate.
 
 ```cpp
-// <!-- src: qbm/http/validation/sanitizer.h -->
-#include <http/validation.h>
+// <!-- src: qbm/http/src/qbm/http/validation/sanitizer.h -->
+#include <qbm/http/validation.h>
 using namespace qb::http::validation;
 
 Sanitizer sanitizer;
@@ -282,11 +282,11 @@ Path segments use dot notation for object keys, `[N]` for a specific array index
 
 ## The request validator: the full pipeline
 
-`RequestValidator` (`validation/request_validator.h`) ties the four parts together with a fluent builder. Each `for_*` method registers a validator; each `add_*_sanitizer` registers a transform:
+`RequestValidator` (`src/qbm/http/validation/request_validator.h`) ties the four parts together with a fluent builder. Each `for_*` method registers a validator; each `add_*_sanitizer` registers a transform:
 
 ```cpp
 // <!-- src: qbm/http/tests/unit/validation/validation-request.cpp -->
-#include <http/validation.h>
+#include <qbm/http/validation.h>
 using namespace qb::http::validation;
 
 auto rv = std::make_shared<RequestValidator>();
@@ -347,7 +347,7 @@ Attach it like any other middleware (see [the middleware model](./07-middleware.
 
 ```cpp
 // <!-- src: qbm/http/tests/unit/middleware/middleware-validator.cpp -->
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 auto rv = std::make_shared<qb::http::validation::RequestValidator>();
 rv->for_body({

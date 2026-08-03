@@ -46,7 +46,7 @@
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ws_loopback.h"
-#include "../ws/coro.h"
+#include <qbm/http/ws/coro.h>
 
 namespace {
 

@@ -49,8 +49,8 @@
 
 #include "../../shared/auth_test_helpers.h"       // now_epoch
 #include "../../shared/middleware_test_fixture.h" // MiddlewareTestFixture, MockMiddlewareSession
-#include "../http.h"                              // Router, Context, FunctionalMiddleware, status, method
-#include "../middleware/auth.h"                   // AuthMiddleware + factories
+#include <qbm/http/http.h>                              // Router, Context, FunctionalMiddleware, status, method
+#include <qbm/http/middleware/auth.h>                   // AuthMiddleware + factories
 
 namespace {
 

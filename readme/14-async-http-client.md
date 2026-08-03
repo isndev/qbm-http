@@ -12,7 +12,7 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 - **One-shot coroutine client** — the same verb names, overloaded to return an awaiter you `co_await`. Driven from a coroutine, or run to completion with `qb::http::run_sync(...)`.
 - **Persistent client** — `qb::http1::Client`, `qb::http2::Client`, and `qb::http3::Client`. Long-lived, same-origin, connection-reusing clients with a request queue, batching, configurable connect/request timeouts, and automatic reconnection. HTTP/2 and HTTP/3 are only available through their persistent clients.
 
-> **Feature gates.** HTTP/2 and the WebSocket subsystem require `QB_HAS_SSL` — `<http/http.h>` includes `2/http2.h` and `ws/ws.h` only under `#ifdef QB_HAS_SSL`, and `ws/ws.h` itself `#error`s without it (the handshake needs OpenSSL). HTTP/3 (`qb::http3`) requires `QBM_HTTP_HAS_HTTP3`, which CMake defines only when `QB_HAS_SSL`, `QB_HAS_QUIC`, and libnghttp3 are all present. The HTTP/1.1 client works without SSL; `https://` targets additionally require `QB_HAS_SSL`. Plaintext HTTP/1.1 is the only unconditional client.
+> **Feature gates.** HTTP/2 and the WebSocket subsystem require `QB_HAS_SSL` — `<qbm/http/http.h>` includes `src/qbm/http/2/http2.h` and `src/qbm/http/ws/ws.h` only under `#ifdef QB_HAS_SSL`, and `src/qbm/http/ws/ws.h` itself `#error`s without it (the handshake needs OpenSSL). HTTP/3 (`qb::http3`) requires `QBM_HTTP_HAS_HTTP3`, which CMake defines only when `QB_HAS_SSL`, `QB_HAS_QUIC`, and libnghttp3 are all present. The HTTP/1.1 client works without SSL; `https://` targets additionally require `QB_HAS_SSL`. Plaintext HTTP/1.1 is the only unconditional client.
 
 ## Concepts
 
@@ -20,7 +20,7 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 
 The one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the original request with the server response so you can correlate the two — useful for tracing or request IDs.
 
-<!-- src: qbm/http/1.1/http.h:652-655 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:652-655 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
@@ -60,7 +60,7 @@ The coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`co
 All three clients consume a `qb::http::Request`. Build it the same way regardless of protocol:
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <qb/io/uri.h>
 
 // A GET with custom headers.
@@ -88,7 +88,7 @@ To send a *compressed* request body, compress it yourself and set `Content-Encod
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`; it runs on the I/O thread when the response arrives or the request fails.
 
-<!-- src: qbm/http/1.1/http.h:869-874 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:869-874 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -98,7 +98,7 @@ GET(Request request, _Func&& func,
 ```
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <qb/io/uri.h>
 #include <qb/io/async.h>
 
@@ -132,7 +132,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/1.1/http.h:1003-1008 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1003-1008 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -146,7 +146,7 @@ From inside a coroutine, the call reads top to bottom — request out, response 
 
 <!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:284-302 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <qb/io/async/coroutine.h>
 
 qb::io::async::task<void> fetch() {
@@ -166,9 +166,9 @@ qb::io::async::task<void> fetch() {
 
 To drive a single call from synchronous code, wrap it in `run_sync`:
 
-<!-- src: qbm/http/coro.h:198-201 -->
+<!-- src: qbm/http/src/qbm/http/coro.h:198-201 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 int main() {
     qb::io::async::init();
@@ -185,7 +185,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/1.1/http.h:1003-1008 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1003-1008 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
@@ -217,7 +217,7 @@ When you make many requests to the *same origin*, the one-shot helpers reconnect
 
 The client must be owned by a `std::shared_ptr` — use `qb::http1::make_client`. Its callbacks, timers, and coroutines capture `weak_from_this()` and silently no-op if the client was destroyed, so stack-allocating one breaks `shared_from_this`.
 
-<!-- src: qbm/http/1.1/client.h:107-152,203-204 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:107-152,203-204 -->
 ```cpp
 namespace qb::http1 {
     std::shared_ptr<Client> make_client(std::string const& base_uri);
@@ -253,7 +253,7 @@ A typical coroutine flow — connect once, then fire requests against the same c
 
 <!-- src: qbm/http/tests/system/http1/http1-client.cpp:382-393 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 auto client = qb::http1::make_client("http://api.example.com");
 
@@ -280,7 +280,7 @@ HTTP/2 is TLS-only with ALPN. The client advertises only `h2` and fails the conn
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
-<!-- src: qbm/http/2/client.h:83-87,224-364,523 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:83-87,224-364,523 -->
 ```cpp
 namespace qb::http2 {
     struct ConnectResult {
@@ -342,7 +342,7 @@ For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol spec
 
 HTTP/3 runs over QUIC. The entire `qb::http3` slice is compile-time gated behind `QBM_HTTP_HAS_HTTP3` — including its header — so guard any HTTP/3 code with that macro. Only ALPN `h3` is accepted, the base URI must be `https`, and (as with HTTP/2) requests must be same-origin.
 
-<!-- src: qbm/http/3/client.h:105-150,206 -->
+<!-- src: qbm/http/src/qbm/http/3/client.h:105-150,206 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 namespace qb::http3 {

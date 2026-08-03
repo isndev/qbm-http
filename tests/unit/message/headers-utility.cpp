@@ -4,10 +4,10 @@
 #include <string>
 #include <vector>
 
-#include "../headers.h"
-#include "../request.h"
-#include "../response.h"
-#include "../utility.h"
+#include <qbm/http/headers.h>
+#include <qbm/http/request.h>
+#include <qbm/http/response.h>
+#include <qbm/http/utility.h>
 
 namespace {
 // Discover the encodings this build actually supports by parsing the codec

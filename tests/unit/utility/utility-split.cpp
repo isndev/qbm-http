@@ -16,7 +16,7 @@
 #include <string_view>
 #include <vector>
 
-#include "../utility.h"
+#include <qbm/http/utility.h>
 
 using namespace qb::http;
 

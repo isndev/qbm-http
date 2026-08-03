@@ -21,8 +21,8 @@
 
 #include <gtest/gtest.h>
 
-#include "../http.h"
-#include "../middleware/error_handling.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/error_handling.h>
 
 #include "../../shared/middleware_test_fixture.h"
 #include "../../shared/router_test_support.h"

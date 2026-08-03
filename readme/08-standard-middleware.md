@@ -12,20 +12,20 @@ Each shipped middleware is a class template parameterized on your session type, 
 
 Two corrections to keep in mind throughout:
 
-- **The module is a compiled library, not header-only.** You link `qbm::http`; the umbrella header `<http/http.h>` brings the declarations in. Middleware headers live under `<http/middleware/>`.
-- **Several of these are SSL-gated.** JWT and full authentication are only compiled when the framework is built with `QB_HAS_SSL`; CSP nonce generation in the security-headers middleware also requires `QB_HAS_SSL`. The umbrella `<http/middleware/all.h>` guards the JWT and auth includes behind `#ifdef QB_HAS_SSL`. Compression depends on a separate flag, `QB_HAS_COMPRESSION`. See [feature gates](#feature-gates-and-includes) below.
+- **The module is a compiled library, not header-only.** You link `qbm::http`; the umbrella header `<qbm/http/http.h>` brings the declarations in. Middleware headers live under `<qbm/http/middleware/>`.
+- **Several of these are SSL-gated.** JWT and full authentication are only compiled when the framework is built with `QB_HAS_SSL`; CSP nonce generation in the security-headers middleware also requires `QB_HAS_SSL`. The umbrella `<qbm/http/middleware/all.h>` guards the JWT and auth includes behind `#ifdef QB_HAS_SSL`. Compression depends on a separate flag, `QB_HAS_COMPRESSION`. See [feature gates](#feature-gates-and-includes) below.
 
 ## Including the middleware
 
 You can pull in everything with one header, or include only what you use.
 
 ```cpp
-#include <http/http.h>            // Router, Context, status, Request, Response
-#include <http/middleware/all.h>  // every standard middleware factory
+#include <qbm/http/http.h>            // Router, Context, status, Request, Response
+#include <qbm/http/middleware/all.h>  // every standard middleware factory
 ```
-<!-- src: qbm/http/middleware/all.h -->
+<!-- src: qbm/http/src/qbm/http/middleware/all.h -->
 
-The umbrella `all.h` also includes [`make.h`](#the-unified-make-entry-point), which exposes a single tag-dispatched factory over every standard middleware. To keep compile times down, include the individual header instead — for example `<http/middleware/cors.h>` or `<http/middleware/rate_limit.h>`.
+The umbrella `all.h` also includes [`make.h`](#the-unified-make-entry-point), which exposes a single tag-dispatched factory over every standard middleware. To keep compile times down, include the individual header instead — for example `<qbm/http/middleware/cors.h>` or `<qbm/http/middleware/rate_limit.h>`.
 
 All factories follow the same shape:
 
@@ -35,13 +35,13 @@ qb::http::Router<MySession> router;
 router.use(qb::http::cors_dev_middleware<MySession>());
 router.compile();
 ```
-<!-- src: qbm/http/middleware/cors.h:511 -->
+<!-- src: qbm/http/src/qbm/http/middleware/cors.h:511 -->
 
 `Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the three overloads.
 
 ## CORS
 
-- **Header:** `<http/middleware/cors.h>` · **Class:** `qb::http::CorsMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/cors.h>` · **Class:** `qb::http::CorsMiddleware<SessionType>`
 - **Purpose:** answer cross-origin preflight (`OPTIONS`) requests and add `Access-Control-*` headers to actual responses, per the W3C CORS model.
 
 Configuration lives in `qb::http::CorsOptions`, a fluent builder. The full surface:
@@ -60,8 +60,8 @@ Configuration lives in `qb::http::CorsOptions`, a fluent builder. The full surfa
 The `max_age` setter takes a **`qb::duration`** and stores it internally as whole seconds (it is emitted as `Access-Control-Max-Age`):
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/cors.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/cors.h>
 #include <chrono>
 
 using MySession = qb::http::DefaultSession;
@@ -75,7 +75,7 @@ opts.origins({"https://app.example.com"})
 
 router.use(qb::http::cors_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/middleware/cors.h:243 -->
+<!-- src: qbm/http/src/qbm/http/middleware/cors.h:243 -->
 
 **Presets and factories:**
 
@@ -91,7 +91,7 @@ router.use(qb::http::cors_middleware<MySession>(opts));
 
 ## JWT
 
-- **Header:** `<http/middleware/jwt.h>` · **Class:** `qb::http::JwtMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/jwt.h>` · **Class:** `qb::http::JwtMiddleware<SessionType>`
 - **Requires:** `QB_HAS_SSL` (the header includes `<qb/io/crypto_jwt.h>`).
 - **Purpose:** extract a JSON Web Token from a header, cookie, or query parameter, verify it, and stash the decoded payload in the context.
 
@@ -114,8 +114,8 @@ Configuration is the `qb::http::JwtOptions` struct:
 `leeway` is **`std::chrono::seconds`**, not `qb::duration`. JWT time claims (`exp`, `nbf`, `iat`) are RFC 7519 NumericDate values measured in seconds since the Unix epoch; the leeway is the clock-skew tolerance applied against them, so seconds is the correct, deliberate unit — keep it as seconds and do not convert it to `qb::duration`.
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/jwt.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/jwt.h>
 #include <chrono>
 
 using MySession = qb::http::DefaultSession;
@@ -135,7 +135,7 @@ jwt->require_claims({"sub", "role"})
    });
 router.use(jwt);
 ```
-<!-- src: qbm/http/middleware/jwt.h:49 -->
+<!-- src: qbm/http/src/qbm/http/middleware/jwt.h:49 -->
 
 **Factories:** `jwt_middleware<S>(secret, algorithm = "HS256")` for the common case, and `jwt_middleware_with_options<S>(JwtOptions)` for the full surface. Fluent setters on the instance — `from_header`, `from_cookie`, `from_query`, `require_claims`, `with_validator`, `with_error_handler`, `with_success_handler`, `with_options` — return `*this` for chaining.
 
@@ -143,7 +143,7 @@ For full token issuance, role checks, and an `auth::User` object, prefer the [au
 
 ## Rate limiting
 
-- **Header:** `<http/middleware/rate_limit.h>` · **Class:** `qb::http::RateLimitMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/rate_limit.h>` · **Class:** `qb::http::RateLimitMiddleware<SessionType>`
 - **Purpose:** cap requests per client identifier within a rolling window; emit `X-RateLimit-*` headers and reject over-limit requests.
 
 Configuration is `qb::http::RateLimitOptions`:
@@ -159,8 +159,8 @@ Configuration is `qb::http::RateLimitOptions`:
 The window is a **`qb::duration`**. When you do not supply a `client_id_extractor`, the default extractor consults, in order, `CF-Connecting-IP`, then `True-Client-IP`, then the rightmost (closest-to-server) hop of `X-Forwarded-For`; if none of those headers is present it falls back to a per-session placeholder id, and finally to `"unknown_client"`. The rightmost `X-Forwarded-For` hop is chosen deliberately because the leftmost entries are client-controlled and forgeable.
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/rate_limit.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/rate_limit.h>
 #include <chrono>
 
 using MySession = qb::http::DefaultSession;
@@ -172,7 +172,7 @@ opts.max_requests(100)
 
 router.use(qb::http::rate_limit_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/middleware/rate_limit.h:104 -->
+<!-- src: qbm/http/src/qbm/http/middleware/rate_limit.h:104 -->
 
 **Presets:** `RateLimitOptions::permissive()` (1000 req/min) and `RateLimitOptions::secure()` (60 req/min) are the option presets; `rate_limit_dev_middleware<S>()` and `rate_limit_secure_middleware<S>()` build the middleware directly from them. `rate_limit_middleware<S>(opts)` takes explicit options.
 
@@ -180,7 +180,7 @@ router.use(qb::http::rate_limit_middleware<MySession>(opts));
 
 ## Compression
 
-- **Header:** `<http/middleware/compression.h>` · **Class:** `qb::http::CompressionMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/compression.h>` · **Class:** `qb::http::CompressionMiddleware<SessionType>`
 - **Requires:** `QB_HAS_COMPRESSION` for the actual codec work. The middleware compiles without it but becomes a no-op for the compress/decompress steps.
 - **Purpose:** decompress request bodies by `Content-Encoding` and compress response bodies negotiated against `Accept-Encoding`, setting `Content-Encoding`, `Vary`, and `Content-Length`.
 
@@ -196,8 +196,8 @@ Configuration is `qb::http::CompressionOptions` (no time fields):
 The `CompressionOptions` builder and the `compression_middleware<S>(...)` factory compile in every build — they are *not* behind the `#ifdef`. Only the codec calls inside the middleware are gated, so attaching it in a build without `QB_HAS_COMPRESSION` is harmless: it simply passes bodies through untouched. You therefore do not need to guard the construction.
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/compression.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/compression.h>
 
 using MySession = qb::http::DefaultSession;
 
@@ -206,20 +206,20 @@ opts.min_size_to_compress(512)
     .preferred_encodings({"gzip", "deflate"});
 router.use(qb::http::compression_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/middleware/compression.h:40 -->
+<!-- src: qbm/http/src/qbm/http/middleware/compression.h:40 -->
 
 **Presets:** `CompressionOptions::max_compression()` (compress from 256 bytes) and `CompressionOptions::fast_compression()` (compress from 2048 bytes); the matching factories are `max_compression_middleware<S>()` and `fast_compression_middleware<S>()`. `compression_middleware<S>(opts)` takes explicit options.
 
 ## Timing
 
-- **Header:** `<http/middleware/timing.h>` · **Class:** `qb::http::TimingMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/timing.h>` · **Class:** `qb::http::TimingMiddleware<SessionType>`
 - **Purpose:** measure how long a request spends in the chain, add an `X-Response-Time` header (floating-point milliseconds), and report the duration to a callback.
 
 The middleware uses a monotonic `std::chrono::steady_clock` and reports `std::chrono::milliseconds` to your callback:
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/timing.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/timing.h>
 #include <chrono>
 
 using MySession = qb::http::DefaultSession;
@@ -230,13 +230,13 @@ auto timing = qb::http::timing_middleware<MySession>(
     });
 router.use(timing);
 ```
-<!-- src: qbm/http/middleware/timing.h:56 -->
+<!-- src: qbm/http/src/qbm/http/middleware/timing.h:56 -->
 
 The callback type is `TimingMiddleware<S>::TimingCallback = std::function<void(const std::chrono::milliseconds&)>`. The constructor throws `std::invalid_argument` if you pass a null callback.
 
 ## Static files
 
-- **Header:** `<http/middleware/static_files.h>` · **Class:** `qb::http::StaticFilesMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/static_files.h>` · **Class:** `qb::http::StaticFilesMiddleware<SessionType>`
 - **Purpose:** serve files from a filesystem root with index files, MIME types, conditional requests, range requests, and optional directory listing.
 
 Configuration is `qb::http::StaticFilesOptions`, constructed with the root directory and refined with `with_*` setters:
@@ -262,8 +262,8 @@ The freshness lifetime is **not** a duration type: `with_cache_control` takes a 
 `root_directory` is a `std::filesystem::path`, and a **relative** root is resolved through `qb::io::sys::resolve_resource` when the middleware is constructed: it is looked up against the current working directory first (historical behaviour), then against the executable's own directory, before being canonicalised. A binary shipped next to its asset directory therefore serves them from **any** working directory — no `cd`, no environment setup. An **absolute** root is used unchanged. The root must exist and be a directory at construction time, or the constructor throws.
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/static_files.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/static_files.h>
 
 using MySession = qb::http::DefaultSession;
 
@@ -275,13 +275,13 @@ opts.with_serve_index_file(true)
 
 router.use(qb::http::static_files_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/middleware/static_files.h:757 -->
+<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:757 -->
 
 `static_files_middleware<S>(StaticFilesOptions)` is the only factory; there is no default-constructed form because the root directory is required.
 
 ## Authentication
 
-- **Header:** `<http/middleware/auth.h>` · **Class:** `qb::http::AuthMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/auth.h>` · **Class:** `qb::http::AuthMiddleware<SessionType>`
 - **Requires:** `QB_HAS_SSL` (it wraps an `auth::Manager`).
 - **Purpose:** the full authentication and authorization path — token extraction, verification, building an `auth::User`, storing it in the context, and optional role checks.
 
@@ -302,9 +302,9 @@ The duration fields live on `auth::Options`, not on the middleware, and both are
 - `auth::Options::clock_skew_tolerance(std::chrono::seconds)` — verification skew, default `0`.
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/auth.h>
-#include <http/auth.h>              // qb::http::auth::Options
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/auth.h>
+#include <qbm/http/auth.h>              // qb::http::auth::Options
 #include <chrono>
 
 using MySession = qb::http::DefaultSession;
@@ -319,7 +319,7 @@ auth->with_roles({"admin", "editor"})   // any of these roles
     .with_auth_required(true);
 router.use(auth);
 ```
-<!-- src: qbm/http/middleware/auth.h:383; qbm/http/auth/options.h:161 -->
+<!-- src: qbm/http/src/qbm/http/middleware/auth.h:383; qbm/http/src/qbm/http/auth/options.h:161 -->
 
 **Factories:**
 
@@ -332,7 +332,7 @@ router.use(auth);
 
 ## Security headers
 
-- **Header:** `<http/middleware/security_headers.h>` · **Class:** `qb::http::SecurityHeadersMiddleware<SessionType>`
+- **Header:** `<qbm/http/middleware/security_headers.h>` · **Class:** `qb::http::SecurityHeadersMiddleware<SessionType>`
 - **Purpose:** add response headers that harden the browser side — HSTS, `X-Content-Type-Options`, `X-Frame-Options`, CSP, `Referrer-Policy`, `Permissions-Policy`, and the cross-origin isolation policies.
 
 Configuration is `qb::http::SecurityHeadersOptions`, a builder of optional string values. Each header is set by its literal value — there is **no** duration type here; HSTS `max-age` is part of the header string you supply.
@@ -354,8 +354,8 @@ Configuration is `qb::http::SecurityHeadersOptions`, a builder of optional strin
 `SecurityHeadersOptions::secure_defaults()` is a strong baseline: HSTS `max-age=31536000; includeSubDomains`, `nosniff`, `X-Frame-Options: SAMEORIGIN`, a restrictive CSP, `Referrer-Policy: strict-origin-when-cross-origin`, `Cross-Origin-Opener-Policy: same-origin`, and `X-Permitted-Cross-Domain-Policies: none`. COEP and `Permissions-Policy` are left unset because they are application-specific.
 
 ```cpp
-#include <http/http.h>
-#include <http/middleware/security_headers.h>
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/security_headers.h>
 
 using MySession = qb::http::DefaultSession;
 
@@ -363,7 +363,7 @@ auto sec = qb::http::security_headers_middleware<MySession>(
     qb::http::SecurityHeadersOptions::secure_defaults());
 router.use(sec);
 ```
-<!-- src: qbm/http/middleware/security_headers.h:408 -->
+<!-- src: qbm/http/src/qbm/http/middleware/security_headers.h:408 -->
 
 > **CSP nonce gate.** `with_csp_nonce(true)` requires `QB_HAS_SSL` — the per-request nonce comes from the framework CSPRNG. In a plain-HTTP build, leave nonce generation off; constructing the middleware with it enabled throws `std::logic_error`. The middleware itself remains available without SSL as long as you do not request nonces.
 
@@ -373,17 +373,17 @@ Four more middleware ship for flow control and instrumentation. They take callab
 
 | Middleware | Header · Class | Factory | Purpose |
 |---|---|---|---|
-| Conditional | `<http/middleware/conditional.h>` · `ConditionalMiddleware<S>` | `conditional_middleware<S>(predicate, if_mw, else_mw = nullptr)` | Run one of two child middleware on a `bool(Context)` predicate — the `if_` branch when true, the optional `else_` branch when false (continue otherwise). Throws `std::invalid_argument` if the predicate or `if_` middleware is null. |
-| Transform | `<http/middleware/transform.h>` · `TransformMiddleware<S>` | `transform_middleware<S>(request_transformer = nullptr)` | Apply a `RequestTransformer` to `ctx->request()` before the chain proceeds; a null transformer is a pass-through. |
-| Logging | `<http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
-| Error handling | `<http/middleware/error_handling.h>` · `ErrorHandlingMiddleware<S>` | `error_handling_middleware<S>(name = "ErrorHandlingMiddleware")` | Centralised error-to-response translation; register handlers for specific status codes / exception types with fluent setters. |
+| Conditional | `<qbm/http/middleware/conditional.h>` · `ConditionalMiddleware<S>` | `conditional_middleware<S>(predicate, if_mw, else_mw = nullptr)` | Run one of two child middleware on a `bool(Context)` predicate — the `if_` branch when true, the optional `else_` branch when false (continue otherwise). Throws `std::invalid_argument` if the predicate or `if_` middleware is null. |
+| Transform | `<qbm/http/middleware/transform.h>` · `TransformMiddleware<S>` | `transform_middleware<S>(request_transformer = nullptr)` | Apply a `RequestTransformer` to `ctx->request()` before the chain proceeds; a null transformer is a pass-through. |
+| Logging | `<qbm/http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
+| Error handling | `<qbm/http/middleware/error_handling.h>` · `ErrorHandlingMiddleware<S>` | `error_handling_middleware<S>(name = "ErrorHandlingMiddleware")` | Centralised error-to-response translation; register handlers for specific status codes / exception types with fluent setters. |
 
-<!-- src: qbm/http/middleware/conditional.h:147, transform.h:128, logging.h:213, error_handling.h:217 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:147, transform.h:128, logging.h:213, error_handling.h:217 -->
 
 ## reCAPTCHA
 
-- **Header:** `<http/middleware/recaptcha.h>` · **Class:** `qb::http::RecaptchaMiddleware<SessionType>`
-- **Gate:** the factories and the `RecaptchaMiddleware` class in `<http/middleware/recaptcha.h>` are always available once that header is included (it is not pulled in by `all.h` by default); only the unified `make` tags (`recaptcha`/`recaptcha_v3`/`recaptcha_strict`) are compiled behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
+- **Header:** `<qbm/http/middleware/recaptcha.h>` · **Class:** `qb::http::RecaptchaMiddleware<SessionType>`
+- **Gate:** the factories and the `RecaptchaMiddleware` class in `<qbm/http/middleware/recaptcha.h>` are always available once that header is included (it is not pulled in by `all.h` by default); only the unified `make` tags (`recaptcha`/`recaptcha_v3`/`recaptcha_strict`) are compiled behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
 - **Purpose:** verify a Google reCAPTCHA v2/v3 token (via an outbound verification call) before the chain proceeds.
 
 Configuration is `qb::http::RecaptchaOptions` (secret key, minimum score, etc.). Three factories cover the common presets:
@@ -394,16 +394,16 @@ Configuration is `qb::http::RecaptchaOptions` (secret key, minimum score, etc.).
 | `recaptcha_v3_middleware<S>(secret_key, min_score = 0.5f)` | reCAPTCHA v3 preset |
 | `recaptcha_strict_middleware<S>(secret_key)` | strict preset |
 
-<!-- src: qbm/http/middleware/recaptcha.h:579-626 -->
+<!-- src: qbm/http/src/qbm/http/middleware/recaptcha.h:579-626 -->
 
-Construction throws `std::invalid_argument` if the secret key is empty. The free factories and class compile without any define once `<http/middleware/recaptcha.h>` is included; only the `make` tags for them are gated behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
+Construction throws `std::invalid_argument` if the secret key is empty. The free factories and class compile without any define once `<qbm/http/middleware/recaptcha.h>` is included; only the `make` tags for them are gated behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
 
 ## The unified `make` entry point
 
-`<http/middleware/make.h>` (pulled in by `all.h`) exposes one tag-dispatched factory over every standard middleware, so you can build any of them through a single call:
+`<qbm/http/middleware/make.h>` (pulled in by `all.h`) exposes one tag-dispatched factory over every standard middleware, so you can build any of them through a single call:
 
 ```cpp
-#include <http/middleware/all.h>   // includes make.h
+#include <qbm/http/middleware/all.h>   // includes make.h
 
 namespace mw = qb::http::middleware;
 
@@ -413,7 +413,7 @@ auto rl   = mw::make<mw::tags::rate_limit_dev, MySession>();
 router.use(cors);
 router.use(rl);
 ```
-<!-- src: qbm/http/middleware/make.h:287 (make<>); tags at make.h:62-109 -->
+<!-- src: qbm/http/src/qbm/http/middleware/make.h:287 (make<>); tags at make.h:62-109 -->
 
 The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to the matching free factory. Tags mirror the factories above and live in `qb::http::middleware::tags`:
 
@@ -432,19 +432,19 @@ The `jwt`/`auth`/`jwt_auth`/`role_auth`/`optional_auth` tags are compiled only u
 
 | Middleware | Header | Build gate |
 |---|---|---|
-| CORS | `<http/middleware/cors.h>` | none |
-| Rate limiting | `<http/middleware/rate_limit.h>` | none |
-| Timing | `<http/middleware/timing.h>` | none |
-| Logging | `<http/middleware/logging.h>` | none |
-| Conditional | `<http/middleware/conditional.h>` | none |
-| Transform | `<http/middleware/transform.h>` | none |
-| Error handling | `<http/middleware/error_handling.h>` | none |
-| Static files | `<http/middleware/static_files.h>` | none |
-| Security headers | `<http/middleware/security_headers.h>` | none; CSP nonce needs `QB_HAS_SSL` |
-| Compression | `<http/middleware/compression.h>` | codec work needs `QB_HAS_COMPRESSION` |
-| JWT | `<http/middleware/jwt.h>` | `QB_HAS_SSL` |
-| Authentication | `<http/middleware/auth.h>` | `QB_HAS_SSL` |
-| reCAPTCHA | `<http/middleware/recaptcha.h>` | `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE` |
+| CORS | `<qbm/http/middleware/cors.h>` | none |
+| Rate limiting | `<qbm/http/middleware/rate_limit.h>` | none |
+| Timing | `<qbm/http/middleware/timing.h>` | none |
+| Logging | `<qbm/http/middleware/logging.h>` | none |
+| Conditional | `<qbm/http/middleware/conditional.h>` | none |
+| Transform | `<qbm/http/middleware/transform.h>` | none |
+| Error handling | `<qbm/http/middleware/error_handling.h>` | none |
+| Static files | `<qbm/http/middleware/static_files.h>` | none |
+| Security headers | `<qbm/http/middleware/security_headers.h>` | none; CSP nonce needs `QB_HAS_SSL` |
+| Compression | `<qbm/http/middleware/compression.h>` | codec work needs `QB_HAS_COMPRESSION` |
+| JWT | `<qbm/http/middleware/jwt.h>` | `QB_HAS_SSL` |
+| Authentication | `<qbm/http/middleware/auth.h>` | `QB_HAS_SSL` |
+| reCAPTCHA | `<qbm/http/middleware/recaptcha.h>` | `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE` |
 
 Because module dependencies are linked `PUBLIC`, the upstream `QB_HAS_SSL` and `QB_HAS_COMPRESSION` defines reach your translation units, so these `#ifdef` gates resolve correctly in your code. Guard SSL-only middleware accordingly:
 

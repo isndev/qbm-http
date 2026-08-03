@@ -33,10 +33,10 @@
 
 #include <qb/io/uri.h>
 
-#include "../origin.h"
-#include "../request.h"
-#include "../response.h"
-#include "../types.h"
+#include <qbm/http/origin.h>
+#include <qbm/http/request.h>
+#include <qbm/http/response.h>
+#include <qbm/http/types.h>
 
 using qb::http::Method;
 using qb::http::Request;

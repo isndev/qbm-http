@@ -53,10 +53,10 @@
 
 #include "../../shared/loopback_server.h"
 
-#include "../http.h"
-#include "../routing/context.h"
-#include "../routing/middleware.h"
-#include "../routing/router.h"
+#include <qbm/http/http.h>
+#include <qbm/http/routing/context.h>
+#include <qbm/http/routing/middleware.h>
+#include <qbm/http/routing/router.h>
 
 using namespace std::chrono_literals;
 

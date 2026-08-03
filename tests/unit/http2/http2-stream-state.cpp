@@ -34,7 +34,7 @@
 #include <cstdint>
 #include <thread>
 
-#include "../2/protocol/stream.h"
+#include <qbm/http/2/protocol/stream.h>
 
 namespace h2 = qb::protocol::http2;
 

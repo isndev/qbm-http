@@ -24,7 +24,7 @@
  *
  * @code
  * // Include HTTP/1.1 and optional SSL-backed protocol support
- * #include <http/http.h>
+ * #include <qbm/http/http.h>
  *
  * // Use HTTP/1.1 server
  * auto http1_server = qb::http::make_server();

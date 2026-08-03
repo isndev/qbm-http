@@ -27,7 +27,7 @@
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
 
-#include "../http.h"
+#include <qbm/http/http.h>
 
 using namespace qb::io;
 using namespace std::chrono_literals;

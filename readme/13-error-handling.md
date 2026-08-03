@@ -20,14 +20,14 @@ This page covers status codes, the four ways to produce an error response, the `
 `qb::http::status` is an alias for the `qb::http::Status` wrapper class (`types.h`), which carries a nested `enum class Value` backed by llhttp's `HTTP_STATUS_*` constants and re-exposes each code as a `static constexpr Value` member — so `qb::http::status::NOT_FOUND` names a value directly. The response status is plain mutable state: `ctx->response().status()` is an lvalue you assign.
 
 ```cpp
-// <!-- src: qbm/http/types.h:281-679 (class Status), routing/context.h:455-463 (response()), 989-993 (status()) -->
+// <!-- src: qbm/http/src/qbm/http/types.h:281-679 (class Status), src/qbm/http/routing/context.h:455-463 (response()), 989-993 (status()) -->
 ctx->response().status() = qb::http::status::NOT_FOUND;    // 404
 ctx->status(qb::http::status::FORBIDDEN);                  // 403, chainable, non-terminal
 ```
 
 `status()` is the one response helper that is **non-terminal** — it returns `Context&` for chaining and does not finalize. Every other helper (`json`, `text`, `html`, `redirect`, `no_content`, and the named `bad_request` / `unauthorized` / `forbidden` / `not_found` / `internal_server_error` shortcuts) is **terminal**: each ends in `complete(AsyncTaskResult::COMPLETE)` and sends the response. Set any custom headers or body *before* calling a terminal helper; mutations after it are ignored.
 
-Common codes you will set explicitly (full list in `qbm/http/types.h`):
+Common codes you will set explicitly (full list in `qbm/http/src/qbm/http/types.h`):
 
 | Code | `qb::http::status` | Typical cause |
 |------|--------------------|---------------|
@@ -49,8 +49,8 @@ The right tool depends on whether you want to send a final response immediately 
 The simplest path. The named helpers set the status, a plain-text body, and finalize in one call. The chain stops; the response goes out as written. The error chain is **not** involved.
 
 ```cpp
-// <!-- src: qbm/http/routing/context.h:1001-1041 (named helpers), 930-968 (json/text/html) -->
-#include <http/http.h>
+// <!-- src: qbm/http/src/qbm/http/routing/context.h:1001-1041 (named helpers), 930-968 (json/text/html) -->
+#include <qbm/http/http.h>
 
 router.get("/items/:id", [](auto ctx) {
     auto item = find_item(ctx->path_param("id"));
@@ -69,7 +69,7 @@ Use this when the handler already knows the exact response it wants. It is termi
 Set a status that gives downstream context, then call `complete(AsyncTaskResult::ERROR)`. The normal chain halts and the `Context` attempts to switch to the router's error chain. Use this when you want one place to format all error responses consistently.
 
 ```cpp
-// <!-- src: qbm/http/routing/types.h:53-62 (AsyncTaskResult), routing/context.h:1068-1140 (complete()) -->
+// <!-- src: qbm/http/src/qbm/http/routing/types.h:53-62 (AsyncTaskResult), src/qbm/http/routing/context.h:1068-1140 (complete()) -->
 router.get("/items/:id", [](auto ctx) {
     auto item = find_item(ctx->path_param("id"));
     if (!item) {
@@ -84,7 +84,7 @@ router.get("/items/:id", [](auto ctx) {
 });
 ```
 
-`AsyncTaskResult` is the outcome enum a task passes to `complete()` (`qbm/http/routing/types.h`):
+`AsyncTaskResult` is the outcome enum a task passes to `complete()` (`qbm/http/src/qbm/http/routing/types.h`):
 
 - `CONTINUE` — task succeeded; advance to the next task in the chain.
 - `COMPLETE` — request fully handled; finalize and send the current response.
@@ -97,7 +97,7 @@ router.get("/items/:id", [](auto ctx) {
 `Router::set_error_task_chain(...)` installs a `std::vector` of `IAsyncTask` shared pointers run when any task signals `AsyncTaskResult::ERROR`. The chain runs in full, in order; the last task is responsible for finalizing (`COMPLETE`).
 
 ```cpp
-// <!-- src: qbm/http/routing/router.h:272 (decl), router_core.h:265 (set_error_task_chain), 290 (get_compiled_error_tasks), 303 (is_error_chain_set) -->
+// <!-- src: qbm/http/src/qbm/http/routing/router.h:272 (decl), router_core.h:265 (set_error_task_chain), 290 (get_compiled_error_tasks), 303 (is_error_chain_set) -->
 std::vector<std::shared_ptr<qb::http::IAsyncTask<MySession>>> error_chain;
 error_chain.push_back(
     std::make_shared<qb::http::MiddlewareTask<MySession>>(my_error_formatter));
@@ -111,8 +111,8 @@ Note the parameter type is `std::vector`, not `std::list`. There is no auto-prep
 `qb::http::ErrorHandlingMiddleware` is the off-the-shelf task you put in the error chain. It dispatches on `ctx->response().status()` to a registered handler — exact code first, then any range that covers the code, then a generic fallback — and always finalizes with `complete(AsyncTaskResult::COMPLETE)` afterward.
 
 ```cpp
-// <!-- src: qbm/http/middleware/error_handling.h:92-218 -->
-#include <http/http.h>
+// <!-- src: qbm/http/src/qbm/http/middleware/error_handling.h:92-218 -->
+#include <qbm/http/http.h>
 
 auto error_mw = qb::http::error_handling_middleware<MySession>();
 
@@ -172,7 +172,7 @@ flowchart TD
 You do not have to wrap handler bodies in `try/catch` to keep the server alive. The chain driver in `Context` runs each task inside a `try/catch`; an exception that escapes a middleware or handler is caught, and — provided the context is not already finalized or cancelled — converted into `complete(AsyncTaskResult::ERROR)`. That routes through the error chain exactly as an explicit `ERROR` would, defaulting the status to 500.
 
 ```cpp
-// <!-- src: qbm/http/routing/context.h:240-264 (task try/catch), 1068-1140 (complete() backstop) -->
+// <!-- src: qbm/http/src/qbm/http/routing/context.h:240-264 (task try/catch), 1068-1140 (complete() backstop) -->
 router.get("/risky", [](auto ctx) {
     auto data = parse_or_throw(ctx->request().body().as<std::string_view>());
     // If parse_or_throw throws, the chain driver catches it,
@@ -194,7 +194,7 @@ Several behaviors produce error responses without any error chain:
 
 - **404 Not Found** — no route matches. A default handler writes `404 Not Found (Default)` unless you install your own via `Router::set_not_found_handler(...)`. Global middleware *is* prepended to this chain.
 - **405 Method Not Allowed** — the path exists but not for this method. The router sets the status, adds the RFC-required `Allow` header listing permitted methods, and runs the 405 chain.
-- **400 Bad Request (path too long)** — a request path over 4096 bytes short-circuits to 400 *before* any route matching, as a DoS guard. (`qbm/http/routing/router_core.h`.)
+- **400 Bad Request (path too long)** — a request path over 4096 bytes short-circuits to 400 *before* any route matching, as a DoS guard. (`qbm/http/src/qbm/http/routing/router_core.h`.)
 - **Validation failures** — `RequestValidator` / the validation middleware build a JSON error body and finalize with `complete(AsyncTaskResult::COMPLETE)` (default `400 BAD_REQUEST`, `422 UNPROCESSABLE_ENTITY` available). These do **not** divert to the error chain; they send their own response. See [Validation](./12-validation.md).
 - **Rate limiting** — `RateLimitMiddleware` finalizes a `429 TOO_MANY_REQUESTS` itself. See [Standard middleware](./08-standard-middleware.md).
 
@@ -202,7 +202,7 @@ Several behaviors produce error responses without any error chain:
 
 Everything above assumes a parsed request and a `Context`. When the bytes on the wire are not a valid HTTP message, there is no context to fail — the protocol layer rejects the connection itself.
 
-For HTTP/1.1, the parser enforces compile-time security limits and structural rules. Any violation makes a parser callback return `HPE_USER` (via `fail_with_reason`), which surfaces in `getMessageSize()` as a call to `this->not_ok()` (`qbm/http/1.1/protocol/base.h`). `not_ok()` is the qb-io `AProtocol` signal that the byte stream is unrecoverable; the connection is closed. Enforced limits include:
+For HTTP/1.1, the parser enforces compile-time security limits and structural rules. Any violation makes a parser callback return `HPE_USER` (via `fail_with_reason`), which surfaces in `getMessageSize()` as a call to `this->not_ok()` (`qbm/http/src/qbm/http/1.1/protocol/base.h`). `not_ok()` is the qb-io `AProtocol` signal that the byte stream is unrecoverable; the connection is closed. Enforced limits include:
 
 | Limit | Value |
 |-------|-------|
@@ -217,9 +217,9 @@ Structural rejections in the same path include `Transfer-Encoding` together with
 
 The other protocols follow the same `not_ok()` discipline at their own framers:
 
-- **WebSocket** — `onMessage` is a `noexcept` `AProtocol` boundary; any throw from frame allocation or a user frame handler is caught and turned into `not_ok()` rather than escaping to `std::terminate`. A protocol violation calls `fail_connection`, which queues a Close frame (appended after in-flight data, so queued frames still flush), notifies the error handler if the IO type defines `on(error)`, sets `not_ok()`, and resets reassembly state. A failed server handshake is rejected with `400` and the protocol goes `not_ok()`. (`qbm/http/ws/ws.h`.)
-- **HTTP/2** — application handler exceptions are contained in `dispatch_complete_request`, which wraps the synchronous dispatch in `try/catch` (it is reached from `noexcept` frame handlers) and, on catch, sends `RST_STREAM(INTERNAL_ERROR)` with `close_context=false` and keeps the connection alive. (`qbm/http/2/protocol/server.h`.)
-- **HTTP/3** — request callbacks always fire exactly once: with the server `Response` on success, or a synthesized error `Response` (`SERVICE_UNAVAILABLE` on shutdown, `REQUEST_TIMEOUT` on timeout, `BAD_GATEWAY` on stream close, `CLIENT_CLOSED_REQUEST` on cancel). (`qbm/http/3/client.cpp`.)
+- **WebSocket** — `onMessage` is a `noexcept` `AProtocol` boundary; any throw from frame allocation or a user frame handler is caught and turned into `not_ok()` rather than escaping to `std::terminate`. A protocol violation calls `fail_connection`, which queues a Close frame (appended after in-flight data, so queued frames still flush), notifies the error handler if the IO type defines `on(error)`, sets `not_ok()`, and resets reassembly state. A failed server handshake is rejected with `400` and the protocol goes `not_ok()`. (`qbm/http/src/qbm/http/ws/ws.h`.)
+- **HTTP/2** — application handler exceptions are contained in `dispatch_complete_request`, which wraps the synchronous dispatch in `try/catch` (it is reached from `noexcept` frame handlers) and, on catch, sends `RST_STREAM(INTERNAL_ERROR)` with `close_context=false` and keeps the connection alive. (`qbm/http/src/qbm/http/2/protocol/server.h`.)
+- **HTTP/3** — request callbacks always fire exactly once: with the server `Response` on success, or a synthesized error `Response` (`SERVICE_UNAVAILABLE` on shutdown, `REQUEST_TIMEOUT` on timeout, `BAD_GATEWAY` on stream close, `CLIENT_CLOSED_REQUEST` on cancel). (`qbm/http/src/qbm/http/3/client.cpp`.)
 
 You do not write `not_ok()` handling — it is the framework's. What you should know is that **framing errors never reach your router**, so do not look for them in your error chain; they manifest as a closed connection (and, where wired, an `on(error)` event). HTTP/2, secure WebSocket (WSS), and HTTP/3 are feature-gated (`QB_HAS_SSL`, and `QBM_HTTP_HAS_HTTP3` for HTTP/3); their framers only exist in builds with those gates enabled.
 

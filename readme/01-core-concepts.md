@@ -13,14 +13,14 @@ This page describes the data model. It is protocol-agnostic: the same `Request`,
 Everything here lives in the `qb::http` namespace and is reachable through the umbrella header. qbm-http is a **compiled library**, not header-only: the build registers it with `qb_register_module` and a `SOURCES` list (`qbm/http/CMakeLists.txt`), so consuming it links a real archive. You still include one header:
 
 ```cpp
-#include <http/http.h>   // pulls in qb::http::Request, Response, Headers, Body, Method, Status
+#include <qbm/http/http.h>   // pulls in qb::http::Request, Response, Headers, Body, Method, Status
 ```
 
 ## The message model
 
 Both message types derive from a single internal base.
 
-<!-- src: qbm/http/message_base.h -->
+<!-- src: qbm/http/src/qbm/http/message_base.h -->
 ```cpp
 namespace qb::http::internal {
     struct MessageBase
@@ -40,8 +40,8 @@ namespace qb::http::internal {
 
 | Type | Alias | Header | Adds over `MessageBase` |
 |---|---|---|---|
-| `qb::http::Request` | `qb::http::request` | `<http/http.h>` | `Method`, `qb::io::uri`, request `CookieJar` |
-| `qb::http::Response` | `qb::http::response` | `<http/http.h>` | `Status`, response `CookieJar` (serialized to `Set-Cookie`) |
+| `qb::http::Request` | `qb::http::request` | `<qbm/http/http.h>` | `Method`, `qb::io::uri`, request `CookieJar` |
+| `qb::http::Response` | `qb::http::response` | `<qbm/http/http.h>` | `Status`, response `CookieJar` (serialized to `Set-Cookie`) |
 
 ```mermaid
 flowchart TB
@@ -56,9 +56,9 @@ flowchart TB
 
 A `Request` carries a method, a target URI, headers, a body, and a jar of parsed `Cookie` headers. The default constructor leaves the method `UNINITIALIZED` with an empty URI; the single-argument `Request(qb::io::uri)` constructor defaults the method to `GET`, and the two-argument constructor takes an explicit method and a `qb::io::uri`. (`reset()` sets the method to `GET`.)
 
-<!-- src: qbm/http/request.h -->
+<!-- src: qbm/http/src/qbm/http/request.h -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 // method + URI; headers and body default-construct.
 qb::http::Request req{qb::http::method::POST, qb::io::uri("/submit?type=test")};
@@ -101,9 +101,9 @@ The `with_*` fluent setters (`with_method`, `with_uri`, `with_header`, `with_bod
 
 A `Response` carries a status, headers, a body, and a `CookieJar` whose entries serialize to `Set-Cookie` headers. The default constructor sets `200 OK`.
 
-<!-- src: qbm/http/response.h -->
+<!-- src: qbm/http/src/qbm/http/response.h -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Response res;                          // defaults to 200 OK
 res.status() = qb::http::status::OK;             // explicit, equivalent
@@ -142,9 +142,9 @@ Cookie attributes (`max_age`, `expires_in`, `Path`, `Domain`, `SameSite`) are co
 
 > Header values are owning `std::string`, not `std::string_view`. A zero-copy view mode existed historically but was retired: the qb input pipe relocates buffer bytes between reads, and the async request lifecycle (shared `Context`, middleware chain, coroutines) cannot guarantee a captured view outlives the socket read. Owning strings make the lifetime safe.
 
-<!-- src: qbm/http/headers.h -->
+<!-- src: qbm/http/src/qbm/http/headers.h -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Request req;
 
@@ -193,9 +193,9 @@ Defaults apply when the header is absent or unparseable: `application/octet-stre
 
 `qb::http::Body` is the message payload, backed by `qb::allocator::pipe<char>` — a dynamic buffer tuned for I/O that minimizes reallocation. Because `Request` and `Response` inherit `Body` through `MessageBase`, `req.body()` and `res.body()` hand you the `Body` subobject directly.
 
-<!-- src: qbm/http/body.h -->
+<!-- src: qbm/http/src/qbm/http/body.h -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Response res;
 
@@ -216,9 +216,9 @@ The body accepts a constrained set of types on assignment and append — `std::s
 
 `qb::http::Method` and `qb::http::Status` are value-type wrappers over llhttp's enums (`http_method`, `http_status`), aliased as `qb::http::method` and `qb::http::status`. They give you type safety, string conversion, and comparisons instead of raw integers.
 
-<!-- src: qbm/http/types.h -->
+<!-- src: qbm/http/src/qbm/http/types.h -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::Method m = qb::http::method::POST;
 std::string_view name = m;                 // "POST" (implicit conversion)
@@ -241,9 +241,9 @@ The header also defines `qb::http::endl` (`"\r\n"`) and `qb::http::sep` (a space
 
 The message types are pure data; the protocol layer moves them across qb-io's asynchronous transports. On the server side, a per-connection **session** is a CRTP type built on `qb::io::async::tcp::client`. The session's protocol parses inbound bytes into a `qb::http::Request`, hands it to the `Router`, and serializes the resulting `qb::http::Response` back onto the socket — all inside the qb event loop, never blocking.
 
-<!-- src: qbm/http/1.1/http.h -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 auto server = qb::http::make_server();              // DefaultSession over plain TCP
 server->router().get("/api/data", [](auto ctx) {

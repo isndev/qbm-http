@@ -43,7 +43,7 @@
 
 #include <qb/system/allocator/pipe.h>
 
-#include "../http.h" // qb::http::Request, Response, method, status
+#include <qbm/http/http.h> // qb::http::Request, Response, method, status
 
 namespace {
 

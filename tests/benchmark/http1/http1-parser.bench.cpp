@@ -42,8 +42,8 @@
 #include <cstdint>
 #include <string>
 
-#include "../1.1/protocol/base.h" // qb::http::Parser, HPE_* codes
-#include "../http.h"              // qb::http::Request
+#include <qbm/http/1.1/protocol/base.h> // qb::http::Parser, HPE_* codes
+#include <qbm/http/http.h>              // qb::http::Request
 
 namespace {
 

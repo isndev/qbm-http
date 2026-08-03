@@ -42,9 +42,9 @@
 
 #include <gtest/gtest.h>
 
-#include "../http.h"
+#include <qbm/http/http.h>
 
-#include "../ws/coro.h"
+#include <qbm/http/ws/coro.h>
 
 #include "../../shared/loopback_server.h"
 

@@ -44,8 +44,8 @@
 #include <qb/json.h>          // qb::json
 
 #include "../../shared/middleware_test_fixture.h" // MiddlewareTestFixture, MockMiddlewareSession
-#include "../http.h"                              // Router, Context, status, method
-#include "../middleware/jwt.h"                    // qb::http::JwtMiddleware + factories
+#include <qbm/http/http.h>                              // Router, Context, status, method
+#include <qbm/http/middleware/jwt.h>                    // qb::http::JwtMiddleware + factories
 
 namespace {
 

@@ -35,7 +35,7 @@ touches a gated feature.
 
 ## Conventions
 
-Use the `qb::http` namespace, include the umbrella header `<http/http.h>`, and express time with the
+Use the `qb::http` namespace, include the umbrella header `<qbm/http/http.h>`, and express time with the
 `qb::duration` / `qb::wall_time` vocabulary (cookie and middleware spans are `qb::duration`; the HTTP date
 API is `qb::wall_time`; JWT NumericDate fields are `std::chrono::seconds`). Never use the removed
 `qb::Timestamp` / `qb::Duration` types.

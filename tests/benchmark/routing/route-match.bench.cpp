@@ -47,8 +47,8 @@
 #include <memory>
 #include <string>
 
-#include "../http.h"    // qb::http::Request, Response, method, status
-#include "../routing.h" // qb::http::Router, Context
+#include <qbm/http/http.h>    // qb::http::Request, Response, method, status
+#include <qbm/http/routing.h> // qb::http::Router, Context
 
 namespace {
 

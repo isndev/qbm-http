@@ -43,7 +43,7 @@
 
 #include <gtest/gtest.h>
 
-#include "../ws.h"
+#include <qbm/http/ws.h>
 
 namespace {
 

@@ -15,7 +15,7 @@
 #include <optional>
 #include <string_view>
 
-#include "../auth.h" // qb::http::auth::Options
+#include <qbm/http/auth.h> // qb::http::auth::Options
 
 using Algorithm = qb::http::auth::Options::Algorithm;
 using qb::http::auth::Options;

@@ -28,8 +28,8 @@
 
 #include <gtest/gtest.h>
 
-#include "../2/protocol/base.h"
-#include "../2/protocol/client.h" // detail::parse_status_code lives here
+#include <qbm/http/2/protocol/base.h>
+#include <qbm/http/2/protocol/client.h> // detail::parse_status_code lives here
 
 namespace h2 = qb::protocol::http2;
 

@@ -14,7 +14,7 @@
 #pragma once
 
 #include <functional>                          // For std::hash
-#include <http/vendor/llhttp.h>                // For http_method, http_status, http_method_name, http_status_name
+#include <qbm/http/vendor/llhttp.h>                // For http_method, http_status, http_method_name, http_status_name
 #include <ostream>                             // For std::ostream
 #include <string>                              // For std::string, std::to_string
 #include <string_view>                         // For std::string_view

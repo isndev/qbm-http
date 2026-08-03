@@ -53,9 +53,9 @@
 
 #include <benchmark/benchmark.h>
 
-#include "../http.h"
-#include "../middleware/cors.h"
-#include "../routing/middleware.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/cors.h>
+#include <qbm/http/routing/middleware.h>
 
 namespace {
 

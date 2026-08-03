@@ -8,7 +8,7 @@
 
 ## What this module is
 
-`qbm-http` builds REST APIs, static-content servers, request clients, and WebSocket endpoints as qb actors. It is **not header-only**: the CMake build registers it as a compiled library (`qb_register_module` with a `SOURCES` list — `request.cpp`, `response.cpp`, `body.cpp`, the HTTP/1.1 protocol and client, the validation engine, and SSL-gated `auth/`, `ws/`, and HTTP/2 sources). You still consume it through a single umbrella header, `<http/http.h>`.
+`qbm-http` builds REST APIs, static-content servers, request clients, and WebSocket endpoints as qb actors. It is **not header-only**: the CMake build registers it as a compiled library (`qb_register_module` with a `SOURCES` list — `request.cpp`, `response.cpp`, `body.cpp`, the HTTP/1.1 protocol and client, the validation engine, and SSL-gated `auth/`, `ws/`, and HTTP/2 sources). You still consume it through a single umbrella header, `<qbm/http/http.h>`.
 
 On top of the wire protocols it ships a fluent routing engine (path parameters, groups, controllers), a middleware pipeline, request validation and sanitization, cookie and multipart handling, JWT-based authentication, and both callback and C++20-coroutine client APIs.
 
@@ -18,29 +18,29 @@ The protocol surface is gated by the underlying qb build:
 - **HTTPS, HTTP/2, WebSocket (both `ws://` and `wss://`), JWT, and `qb::http::auth`** — require `QB_HAS_SSL` (OpenSSL). Without it, CMake prints `HTTP SSL-backed features disabled: HTTPS/WSS/JWT/HTTP3 and the HTTP/2 transport (client + server session) will not be built; the HTTP/2 wire codec under 2/protocol/ still is, so its unit tests keep running`, and those translation units are not compiled. The transport-independent HTTP/2 wire codec (`2/protocol/`) *is* still compiled, but nothing in an SSL-off build can reach it — `qb::http2` remains undeclared.
 - **HTTP/3** — requires `QBM_HTTP_HAS_HTTP3`, which is set only when `QB_HAS_SSL`, `QB_HAS_QUIC`, and `libnghttp3` are all present. `libnghttp3` is located by the module's own `cmake/FindNghttp3.cmake`, which treats `pkg-config` as a hint and falls back to `find_path` / `find_library`, so an installation without a `.pc` file is still found.
 
-These gates are real `#ifdef` boundaries in the headers, so feature availability in your code matches what was compiled. `<http/http.h>` includes `2/http2.h` and `ws/ws.h` only under `#ifdef QB_HAS_SSL`, and the HTTP/3 headers only under `#ifdef QBM_HTTP_HAS_HTTP3`.
+These gates are real `#ifdef` boundaries in the headers, so feature availability in your code matches what was compiled. `<qbm/http/http.h>` includes `src/qbm/http/2/http2.h` and `src/qbm/http/ws/ws.h` only under `#ifdef QB_HAS_SSL`, and the HTTP/3 headers only under `#ifdef QBM_HTTP_HAS_HTTP3`.
 
 ## Feature and build matrix
 
-<!-- src: qbm/http/CMakeLists.txt:26-103, qbm/http/http.h:43-53 -->
+<!-- src: qbm/http/CMakeLists.txt:26-103, qbm/http/src/qbm/http/http.h:43-53 -->
 
 | Capability | Header / namespace | Compile gate | Required dependency |
 |---|---|---|---|
-| HTTP/1.1 server & client | `<http/http.h>` · `qb::http`, `qb::http1` | always | vendored `llhttp` |
-| Routing, middleware, controllers | `<http/http.h>` · `qb::http` | always | — |
-| Validation & sanitization | `<http/http.h>` · `qb::http::validation` | always | — |
-| Cookies, multipart, HTTP dates | `<http/http.h>` · `qb::http` | always | — |
+| HTTP/1.1 server & client | `<qbm/http/http.h>` · `qb::http`, `qb::http1` | always | vendored `llhttp` |
+| Routing, middleware, controllers | `<qbm/http/http.h>` · `qb::http` | always | — |
+| Validation & sanitization | `<qbm/http/http.h>` · `qb::http::validation` | always | — |
+| Cookies, multipart, HTTP dates | `<qbm/http/http.h>` · `qb::http` | always | — |
 | HTTPS server & client | `qb::http::ssl`, `qb::http1::Client` (TLS) | `QB_HAS_SSL` | OpenSSL |
 | HTTP/2 server & client | `qb::http2` | `QB_HAS_SSL` | OpenSSL (ALPN `h2`) |
-| WebSocket / WSS | `<http/ws.h>` · `qb::http::ws` | `QB_HAS_SSL` (both `ws://` and `wss://`) | OpenSSL (handshake crypto + TLS) |
-| JWT & authentication | `<http/auth.h>` · `qb::http::auth` | `QB_HAS_SSL` | OpenSSL |
+| WebSocket / WSS | `<qbm/http/ws.h>` · `qb::http::ws` | `QB_HAS_SSL` (both `ws://` and `wss://`) | OpenSSL (handshake crypto + TLS) |
+| JWT & authentication | `<qbm/http/auth.h>` · `qb::http::auth` | `QB_HAS_SSL` | OpenSSL |
 | HTTP/3 server & client | `qb::http3`, `qb::http::dual_stack_server` | `QBM_HTTP_HAS_HTTP3` | OpenSSL + QUIC + `libnghttp3` |
 
-The entire WebSocket surface requires `QB_HAS_SSL`, including plain `ws://` — `ws/ws.h` opens with `#error "websocket protocol requires OpenSSL crypto library"` because the RFC 6455 handshake (`qb::http::ws::generateKey`, the `base64(sha1(key + GUID))` accept, and CSPRNG frame masking) builds on qb-io's `crypto::sha1` / `crypto::base64`. The umbrella `<http/http.h>` pulls in `ws/ws.h` and `2/http2.h` only under `#ifdef QB_HAS_SSL`, so reach for `qb::http::ws` and `qb::http2` in SSL-enabled builds.
+The entire WebSocket surface requires `QB_HAS_SSL`, including plain `ws://` — `src/qbm/http/ws/ws.h` opens with `#error "websocket protocol requires OpenSSL crypto library"` because the RFC 6455 handshake (`qb::http::ws::generateKey`, the `base64(sha1(key + GUID))` accept, and CSPRNG frame masking) builds on qb-io's `crypto::sha1` / `crypto::base64`. The umbrella `<qbm/http/http.h>` pulls in `src/qbm/http/ws/ws.h` and `src/qbm/http/2/http2.h` only under `#ifdef QB_HAS_SSL`, so reach for `qb::http::ws` and `qb::http2` in SSL-enabled builds.
 
 ## Integration
 
-Two supported modes, both giving the same target (`qbm::http`) and the same header spelling (`<http/...>`).
+Two supported modes, both giving the same target (`qbm::http`) and the same header spelling (`<qbm/http/...>`).
 
 **Embedded** — add qb as a subdirectory, load the modules directory, link the target:
 
@@ -61,17 +61,17 @@ add_executable(app main.cpp)
 target_link_libraries(app PRIVATE qbm::http)
 ```
 
-The package lands headers under `<prefix>/include/qbm/http/...` and its CMake files under `<prefix>/lib/cmake/qbm-http/`; `<prefix>/include/qbm` is the installed spelling of the source tree's `qbm/` root, so `#include <http/http.h>` is unchanged between the two modes. `qbm-httpConfig.cmake` hard-fails at configure time if the installed qb is a different version than the one this module was compiled against, or disagrees with it about `QB_HAS_SSL` / `QB_HAS_QUIC` — the module's public headers are `#ifdef`-gated on those.
+The package lands headers under `<prefix>/include/qbm/http/...` and its CMake files under `<prefix>/lib/cmake/qbm-http/`; `<prefix>/include` is a verbatim copy of this repository's `src/`, so `#include <qbm/http/http.h>` is unchanged between the two modes. `qbm-httpConfig.cmake` hard-fails at configure time if the installed qb is a different version than the one this module was compiled against, or disagrees with it about `QB_HAS_SSL` / `QB_HAS_QUIC` — the module's public headers are `#ifdef`-gated on those.
 
 `qb_load_modules` globs and sorts the module subdirectories under the given path and `add_subdirectory`s each that has a `CMakeLists.txt`. The `http` module guards on `QB_FOUND` and returns early if qb has not been configured first, so the `add_subdirectory(qb)` line must come before `qb_load_modules`.
 
 Because module dependencies link `PUBLIC`, the `QB_HAS_SSL` / `QB_HAS_QUIC` compile definitions and the `qb::core` / `qb::io` headers propagate to your target — that is what makes the `#ifdef QB_HAS_SSL` and `#ifdef QBM_HTTP_HAS_HTTP3` gates resolve consistently in your own code. The module also propagates the framework C++ standard as a `PUBLIC` usage requirement — `cxx_std_${QB_CXX_STANDARD}`, i.e. `cxx_std_20` by default, or `cxx_std_23` when the build is configured with `QB_CXX_STANDARD=23`.
 
 ```cpp
-#include <http/http.h>            // umbrella: HTTP/1.1 always; HTTP/2 + WS under SSL; HTTP/3 under QUIC
-#include <http/ws.h>              // WebSocket message/protocol/coroutine surface (SSL build)
-#include <http/auth.h>            // qb::http::auth — JWT options, user, manager (SSL build)
-#include <http/middleware/all.h>  // built-in middleware (CORS, compression, security headers, ...)
+#include <qbm/http/http.h>            // umbrella: HTTP/1.1 always; HTTP/2 + WS under SSL; HTTP/3 under QUIC
+#include <qbm/http/ws.h>              // WebSocket message/protocol/coroutine surface (SSL build)
+#include <qbm/http/auth.h>            // qb::http::auth — JWT options, user, manager (SSL build)
+#include <qbm/http/middleware/all.h>  // built-in middleware (CORS, compression, security headers, ...)
 ```
 
 ## Quickstart: a server
@@ -81,7 +81,7 @@ An HTTP/1.1 server is an actor that mixes in `qb::http::Server<>`, defines route
 <!-- src: examples/qbm/http/03_basic_routing.cpp:23-56 -->
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <qb/main.h>
 #include <iostream>
 
@@ -127,10 +127,10 @@ For TLS, mix in `qb::http::ssl::Server<>` instead and pass certificate and key p
 
 The one-shot client free functions (`GET`, `POST`, `REQUEST`, ...) heap-allocate a self-deleting session, run a single request, and deliver an `qb::http::async::Reply` (the original request plus the response). The callback form takes a `qb::duration` timeout.
 
-<!-- src: qbm/http/1.1/http.h:858-872 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:858-872 -->
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <qb/main.h>
 
 class FetchActor : public qb::Actor {
@@ -154,7 +154,7 @@ The same `GET`/`POST`/`REQUEST` names also have coroutine overloads that return 
 <!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:196-200 -->
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 int main() {
     qb::io::async::init();                       // one event loop on this thread
@@ -175,8 +175,8 @@ WebSocket is part of `qbm-http` (namespace `qb::http::ws`); there is no separate
 <!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:100-119 -->
 
 ```cpp
-#include <http/http.h>
-#include <http/ws.h>
+#include <qbm/http/http.h>
+#include <qbm/http/ws.h>
 
 class WsSession : public qb::io::use<WsSession>::tcp::client<WsServer> {
 public:
@@ -247,7 +247,7 @@ Runnable examples are under [`examples/qbm/http/`](https://github.com/isndev/qb-
 
 ## License
 
-Apache License 2.0. See [LICENSE](./LICENSE). HTTP/1.1 parsing structures come from [llhttp](https://github.com/nodejs/llhttp) — a fork with the upstream `llhttp_*` symbols renamed to `http_*`, so it is owned rather than published: the C sources are vendored under `not-qb/llhttp` and its single public header is `vendor/llhttp.h`, reached as `<http/vendor/llhttp.h>`. I/O is handled entirely by qb-io.
+Apache License 2.0. See [LICENSE](./LICENSE). HTTP/1.1 parsing structures come from [llhttp](https://github.com/nodejs/llhttp) — a fork with the upstream `llhttp_*` symbols renamed to `http_*`, so it is owned rather than published: the C sources are vendored under `not-qb/llhttp` and its single public header is `src/qbm/http/vendor/llhttp.h`, reached as `<qbm/http/vendor/llhttp.h>`. I/O is handled entirely by qb-io.
 
 ---
 

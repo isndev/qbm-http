@@ -24,10 +24,10 @@ installed tree alone, without going back to the source repository.
    ------
    Upstream    https://github.com/nodejs/llhttp
    Author      Fedor Indutny
-   Version     9.2.1 (http_VERSION_MAJOR/MINOR/PATCH in vendor/llhttp.h)
+   Version     9.2.1 (http_VERSION_MAJOR/MINOR/PATCH in src/qbm/http/vendor/llhttp.h)
    License     MIT
    Vendored    not-qb/llhttp/   (sources, compiled into libllhttp.a)
-               vendor/llhttp.h  (the single public header)
+               src/qbm/http/vendor/llhttp.h  (the single public header)
    Installed   the compiled parser inside libllhttp.a, and the public header at
                <prefix>/include/qbm/http/vendor/llhttp.h
    License at  <prefix>/share/licenses/qbm-http/third-party/llhttp/LICENSE-MIT

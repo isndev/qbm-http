@@ -42,7 +42,7 @@
 #include <thread>
 
 #include <gtest/gtest.h>
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 #ifdef QB_WITH_COMPRESSION
 #include <zlib.h>

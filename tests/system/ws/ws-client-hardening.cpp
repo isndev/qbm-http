@@ -49,7 +49,7 @@
 
 #include "../../shared/loopback_server.h" // shared system-tier fixtures
 #include "../../shared/ws_loopback.h"     // WsServerThread
-#include "../ws.h"
+#include <qbm/http/ws.h>
 
 using namespace std::chrono_literals;
 

@@ -21,9 +21,9 @@
 #include <utility>
 #include <vector>
 
-#include "../http.h"
-#include "../middleware/logging.h"
-#include "../routing/middleware.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/logging.h>
+#include <qbm/http/routing/middleware.h>
 
 #include "../../shared/middleware_test_fixture.h"
 

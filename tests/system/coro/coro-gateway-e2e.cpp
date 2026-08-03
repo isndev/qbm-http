@@ -48,8 +48,8 @@
 
 #include "../../shared/loopback_server.h"
 
-#include "../coro.h"
-#include "../http.h"
+#include <qbm/http/coro.h>
+#include <qbm/http/http.h>
 
 using namespace std::chrono_literals;
 

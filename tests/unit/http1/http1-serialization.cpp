@@ -23,7 +23,7 @@
 
 #include <qb/system/allocator/pipe.h>
 
-#include "../http.h"
+#include <qbm/http/http.h>
 
 TEST(Http1Serialization, ContentTypeParsesTypeAndCharset) {
     auto res = qb::http::Request::ContentType("application/json;charset=utf-16");

@@ -30,8 +30,8 @@
 
 #include "../../shared/middleware_test_fixture.h"
 
-#include "../middleware/compression.h"
-#include "../routing/middleware.h"
+#include <qbm/http/middleware/compression.h>
+#include <qbm/http/routing/middleware.h>
 
 using qb::http::test::MockMiddlewareSession;
 

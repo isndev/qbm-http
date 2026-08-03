@@ -23,8 +23,8 @@
 #include <optional>
 #include <utility>
 
-#include "../http.h"
-#include "../middleware/static_files.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/static_files.h>
 
 namespace {
 

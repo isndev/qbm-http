@@ -58,9 +58,9 @@
 
 #include <qb/utility/build_macros.h>
 
-#include "../http.h"
-#include "../middleware/compression.h"
-#include "../routing/middleware.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/compression.h>
+#include <qbm/http/routing/middleware.h>
 
 #ifdef QB_HAS_COMPRESSION
 

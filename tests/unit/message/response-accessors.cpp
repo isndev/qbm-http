@@ -32,9 +32,9 @@
 #include <string>
 #include <vector>
 
-#include "../cookie.h"
-#include "../response.h"
-#include "../types.h"
+#include <qbm/http/cookie.h>
+#include <qbm/http/response.h>
+#include <qbm/http/types.h>
 
 using qb::http::Cookie;
 using qb::http::CookieJar;

@@ -6,13 +6,13 @@ Write a WebSocket conversation as a single straight-line coroutine — `co_await
 
 **Prerequisites:** [WebSocket](./20-websocket.md), [Asynchronous HTTP client](./14-async-http-client.md) (for the awaiter / `run_sync` model), and working knowledge of qb-io coroutines — see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/) docs. **See also:** [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) for `wss://`.
 
-The coroutine API in `<http/ws.h>` is a thin, allocation-light layer over the same RFC 6455 framing engine that drives the callback `WebSocket<T>` client and `ws::protocol` server. It exists for the common case where a WebSocket exchange is naturally sequential — connect, authenticate, subscribe, wait for frames, reply, close — and reads more clearly as a loop than as a handler bag. Resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the listener thread that owns the socket; the single-threaded qb-io model is preserved end to end.
+The coroutine API in `<qbm/http/ws.h>` is a thin, allocation-light layer over the same RFC 6455 framing engine that drives the callback `WebSocket<T>` client and `ws::protocol` server. It exists for the common case where a WebSocket exchange is naturally sequential — connect, authenticate, subscribe, wait for frames, reply, close — and reads more clearly as a loop than as a handler bag. Resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the listener thread that owns the socket; the single-threaded qb-io model is preserved end to end.
 
 This is not a separate module. The coroutine types live alongside the callback API under `qb::http::ws`; you link `qbm::http` and include the same umbrella header. The secure client variant (`wss://`) requires `QB_HAS_SSL`, exactly as the callback secure client does.
 
 ```cpp
-#include <http/http.h>
-#include <http/ws.h>
+#include <qbm/http/http.h>
+#include <qbm/http/ws.h>
 ```
 
 ## Concepts
@@ -26,7 +26,7 @@ This is not a separate module. The coroutine types live alongside the callback A
 | `qb::http::ws::ConnectResult` / `CloseResult` | Small `{ bool ok; }` outcomes for `connect` / `close_async`. |
 | `qb::http::ws::run_sync(awaitable)` | Drive a WebSocket awaitable to completion on the current I/O thread. |
 
-The coroutine entry points return awaiters built by `qb::http::async::make_awaiter<T>`, the same machinery the HTTP coroutine client uses. You consume them from any `qb::io::async::task<...>` coroutine, or drive a top-level one with `run_sync`. <!-- src: qbm/http/ws/coro.h:376-460 -->
+The coroutine entry points return awaiters built by `qb::http::async::make_awaiter<T>`, the same machinery the HTTP coroutine client uses. You consume them from any `qb::io::async::task<...>` coroutine, or drive a top-level one with `run_sync`. <!-- src: qbm/http/src/qbm/http/ws/coro.h:376-460 -->
 
 ### `IncomingFrame` — an owning event
 
@@ -48,7 +48,7 @@ struct IncomingFrame {
     std::string   close_reason{};  // human-readable close reason
 };
 ```
-<!-- src: qbm/http/ws/coro.h:110-124 -->
+<!-- src: qbm/http/src/qbm/http/ws/coro.h:110-124 -->
 
 `Ping` and `Pong` are surfaced for observation only — the framing engine already auto-replies to a Ping with a matching Pong before you see it, so you do not echo it yourself.
 
@@ -58,8 +58,8 @@ struct IncomingFrame {
 
 ```cpp
 // <!-- src: qbm/http/tests/system/ws/ws-coro-client.cpp:371-393 -->
-#include <http/http.h>
-#include <http/ws.h>
+#include <qbm/http/http.h>
+#include <qbm/http/ws.h>
 
 qb::io::async::task<std::string> echo_round_trip() {
     qb::http::ws::coro_client ws;
@@ -124,8 +124,8 @@ A reserved or out-of-range close code is fail-fast: `close_async` re-dispatches 
 
 ```cpp
 // <!-- src: qbm/http/tests/system/ws/ws-coro-server.cpp:59-89 -->
-#include <http/http.h>
-#include <http/ws.h>
+#include <qbm/http/http.h>
+#include <qbm/http/ws.h>
 
 class EchoServer;
 
@@ -201,24 +201,24 @@ set_handshake_hook(
 
 ### Driving the upgrade from a router
 
-If an HTTP router has already parsed the upgrade request, hand it to `accept_upgrade(request, response)`. This is the single integration point between an external router and a coroutine session: it applies the hook, runs `switch_protocol<WS_Protocol>`, sends the response, and spawns `run()`. Pass a freshly constructed `qb::http::Response` as scratch. Call it on the io-handler thread that owns the transport — calling it from elsewhere violates the qb-io single-thread invariant. <!-- src: qbm/http/ws/coro.h:717-751 -->
+If an HTTP router has already parsed the upgrade request, hand it to `accept_upgrade(request, response)`. This is the single integration point between an external router and a coroutine session: it applies the hook, runs `switch_protocol<WS_Protocol>`, sends the response, and spawns `run()`. Pass a freshly constructed `qb::http::Response` as scratch. Call it on the io-handler thread that owns the transport — calling it from elsewhere violates the qb-io single-thread invariant. <!-- src: qbm/http/src/qbm/http/ws/coro.h:717-751 -->
 
 ## Lifetimes
 
 The single sharpest rule of the server session: **`run()` must eventually return.**
 
-To keep `*this` valid across every suspension point inside `run()`, the base captures the session's `shared_ptr` from the server registry when it spawns the loop. That keeps the session alive for the entire life of the coroutine — which is what you want at each `co_await`, but it also means a `run()` that never returns silently keeps that `shared_ptr` alive and leaks the session. Always provide a terminal branch on a `Close` or `Disconnected` frame, as in the echo example above. <!-- src: qbm/http/ws/coro.h:606-651 -->
+To keep `*this` valid across every suspension point inside `run()`, the base captures the session's `shared_ptr` from the server registry when it spawns the loop. That keeps the session alive for the entire life of the coroutine — which is what you want at each `co_await`, but it also means a `run()` that never returns silently keeps that `shared_ptr` alive and leaks the session. Always provide a terminal branch on a `Close` or `Disconnected` frame, as in the echo example above. <!-- src: qbm/http/src/qbm/http/ws/coro.h:606-651 -->
 
-If `run()` throws, the base catches it, makes a best-effort `1011` (`CloseStatus::UnexpectedReason`) Close to notify the peer, and disconnects; any secondary failure during that shutdown is swallowed because the transport may already be gone. <!-- src: qbm/http/ws/coro.h:627-648 -->
+If `run()` throws, the base catches it, makes a best-effort `1011` (`CloseStatus::UnexpectedReason`) Close to notify the peer, and disconnects; any secondary failure during that shutdown is swallowed because the transport may already be gone. <!-- src: qbm/http/src/qbm/http/ws/coro.h:627-648 -->
 
 The client (`coro_client`) is a stack-owned object with deleted copy and move; it has no such retention model. You own its lifetime directly — keep it alive for as long as the coroutine that drives it is suspended on one of its awaiters.
 
 ### Driving a top-level awaitable
 
-For tests, tools, and `main()`, run a WebSocket coroutine to completion synchronously with `run_sync`. It is a thin re-export of `qb::io::async::run_sync`, provided so code that already includes `<http/ws.h>` need not reach into another namespace.
+For tests, tools, and `main()`, run a WebSocket coroutine to completion synchronously with `run_sync`. It is a thin re-export of `qb::io::async::run_sync`, provided so code that already includes `<qbm/http/ws.h>` need not reach into another namespace.
 
 ```cpp
-// <!-- src: qbm/http/ws/coro.h:55-58 -->
+// <!-- src: qbm/http/src/qbm/http/ws/coro.h:55-58 -->
 int main() {
     qb::io::async::init();
     auto out = qb::http::ws::run_sync(echo_round_trip());
@@ -228,11 +228,11 @@ int main() {
 
 ## Pitfalls
 
-- **One consumer at a time.** A second overlapping `receive()` / `next_frame()`, or a second pending `close_async()`, throws `std::logic_error`. The API fails fast rather than silently dropping the earlier awaiter. Never park two awaiters of the same kind on one client or session. <!-- src: qbm/http/ws/coro.h:248-250, 447-450, 856-859, 873-876 -->
+- **One consumer at a time.** A second overlapping `receive()` / `next_frame()`, or a second pending `close_async()`, throws `std::logic_error`. The API fails fast rather than silently dropping the earlier awaiter. Never park two awaiters of the same kind on one client or session. <!-- src: qbm/http/src/qbm/http/ws/coro.h:248-250, 447-450, 856-859, 873-876 -->
 - **`run()` that never returns leaks the session.** The base intentionally retains the session for the coroutine's lifetime; you must reach a `co_return`, normally on a `Close`/`Disconnected` frame.
 - **The close handshake does not close the socket.** `close_async` only queues a Close frame; the TCP stream stays up until the peer's echo or an explicit `disconnect()`. Do not assume the connection is gone the instant `close_async` resolves.
 - **Reserved close codes throw.** `1004/1005/1006/1015` and any code outside `1000..4999` raise `std::invalid_argument` from `close_async`. The exception surfaces inside your coroutine.
-- **Reconnecting a client resets it.** `connect()` on an already-used `coro_client` clears buffered frames and forcibly completes any parked `receive`/`close` awaiter with a `Disconnected`/failure result before reconnecting. A single instance can be reused, but an awaiter from the previous session is torn down. <!-- src: qbm/http/ws/coro.h:376-403 -->
+- **Reconnecting a client resets it.** `connect()` on an already-used `coro_client` clears buffered frames and forcibly completes any parked `receive`/`close` awaiter with a `Disconnected`/failure result before reconnecting. A single instance can be reused, but an awaiter from the previous session is torn down. <!-- src: qbm/http/src/qbm/http/ws/coro.h:376-403 -->
 - **Buffered frames are bounded.** See below; do not rely on an unbounded inbound queue.
 
 ### Back-pressure and the pending cap
@@ -242,7 +242,7 @@ Frames that arrive while no awaiter is parked are buffered, up to a per-client/p
 ```cpp
 ws.set_pending_cap(64);   // bound the inbound backlog; 0 disables buffering
 ```
-<!-- src: qbm/http/ws/coro.h:272-275, 213-230 -->
+<!-- src: qbm/http/src/qbm/http/ws/coro.h:272-275, 213-230 -->
 
 This cap governs only the coroutine adapter's inbound queue. The reassembled message-size limit and the wire-level RFC 6455 validation are unchanged from the callback path — see [WebSocket](./20-websocket.md).
 

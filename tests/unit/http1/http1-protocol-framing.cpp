@@ -50,9 +50,9 @@
 
 #include <qb/system/allocator/pipe.h>
 
-#include "../1.1/protocol/client.h"
-#include "../1.1/protocol/server.h"
-#include "../http.h"
+#include <qbm/http/1.1/protocol/client.h>
+#include <qbm/http/1.1/protocol/server.h>
+#include <qbm/http/http.h>
 
 using namespace qb::http;
 

@@ -22,9 +22,9 @@
 
 #include <qb/json.h>
 
-#include "../http.h"
-#include "../middleware/validation.h"
-#include "../validation.h"
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/validation.h>
+#include <qbm/http/validation.h>
 
 #include "../../shared/middleware_test_fixture.h"
 

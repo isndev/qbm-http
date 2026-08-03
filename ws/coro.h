@@ -36,7 +36,7 @@
  * -----------
  *
  * @code
- * #include <http/ws.h>
+ * #include <qbm/http/ws.h>
  *
  * qb::io::async::task<void> talk_to_echo() {
  *     qb::http::ws::coro_client ws;
@@ -477,7 +477,7 @@ using coro_client_secure = coro_client<::qb::io::transport::stcp>;
  *        I/O thread.
  *
  * Identical semantics to `qb::http::run_sync` / `qb::io::async::run_sync`
- * — lives here so that code that has already included `<http/ws.h>`
+ * — lives here so that code that has already included `<qbm/http/ws.h>`
  * can call `qb::http::ws::run_sync(...)` without reaching into another
  * namespace.
  */

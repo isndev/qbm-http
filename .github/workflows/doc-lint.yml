@@ -16,6 +16,10 @@ on:
       # The lint reads the expected Verified-against version from project(...
       # VERSION) here, so a version-only bump must trigger it.
       - 'CMakeLists.txt'
+      # cite-check.py validates every `src:` citation against the SOURCE it names, so a
+      # source-only commit -- a rename, a deletion, an insert that shifts line numbers --
+      # can invalidate hundreds of citations. Without this the guard never fires on it.
+      - 'src/**'
   pull_request:
     branches: [ main, develop ]
     paths:
@@ -28,6 +32,10 @@ on:
       # The lint reads the expected Verified-against version from project(...
       # VERSION) here, so a version-only bump must trigger it.
       - 'CMakeLists.txt'
+      # cite-check.py validates every `src:` citation against the SOURCE it names, so a
+      # source-only commit -- a rename, a deletion, an insert that shifts line numbers --
+      # can invalidate hundreds of citations. Without this the guard never fires on it.
+      - 'src/**'
 
 concurrency:
   group: doc-lint-${{ github.ref }}

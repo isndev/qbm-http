@@ -24,7 +24,7 @@ Tracks changes on the development branch not yet part of a tagged release. The m
   out alone, as it is in its own CI — and cross-checked against `QB_FRAMEWORK_VERSION` whenever a qb
   tree is reachable. A version it cannot determine is a hard stop, never a skip.
 - **The default outbound `User-Agent` is derived from the framework version.** It was the hard-coded
-  literal `"qb/2.6.0"` in two separate places (`1.1/client.cpp`, `1.1/http.h`), so every request from
+  literal `"qb/2.6.0"` in two separate places (`src/qbm/http/1.1/client.cpp`, `src/qbm/http/1.1/http.h`), so every request from
   a post-2.6.0 build advertised a version that was simply wrong. It is now
   `qb::http::default_user_agent` (`headers.h`), composed at compile time from `QB_VERSION`, so it
   cannot drift again; `headers.h` hard-`#error`s if `QB_VERSION` is absent. Callers that set their own
@@ -39,7 +39,7 @@ handler ergonomics, and hardens the request-stringify, http2 back-pressure, and 
 
 - Concept-driven routing verbs. Each verb (`get/post/put/del/patch/options/head`) on the router,
   route group, and controller now resolves through a single template constrained by
-  `RouteHandlerLike` (in `routing/coro_task.h`) plus a member-function overload:
+  `RouteHandlerLike` (in `src/qbm/http/routing/coro_task.h`) plus a member-function overload:
   ```cpp
   router().get("/users", [](auto ctx) { ctx->json(...); });          // sync lambda / fn-ptr / std::function
   router().get("/feed",  [](auto ctx) -> qb::io::async::task<void> { // coroutine, auto-detected

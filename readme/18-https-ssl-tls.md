@@ -10,11 +10,11 @@ TLS is not bolted onto qbm-http; it is the qb-io secure transport layer (`qb::io
 
 ## The SSL feature gate
 
-HTTPS, secure WebSocket (`wss://`), HTTP/2, HTTP/3, and JWT/auth are all **compiled only when the framework is built with OpenSSL**. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<http/http.h>` resolve the same way in your code as in the module.
+HTTPS, secure WebSocket (`wss://`), HTTP/2, HTTP/3, and JWT/auth are all **compiled only when the framework is built with OpenSSL**. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<qbm/http/http.h>` resolve the same way in your code as in the module.
 
-<!-- src: qbm/http/CMakeLists.txt:45-53; qbm/http/http.h:45-48 -->
+<!-- src: qbm/http/CMakeLists.txt:45-53; qbm/http/src/qbm/http/http.h:45-48 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 #ifndef QB_HAS_SSL
 #  error "This translation unit needs an OpenSSL-enabled qb build for HTTPS."
@@ -23,9 +23,9 @@ HTTPS, secure WebSocket (`wss://`), HTTP/2, HTTP/3, and JWT/auth are all **compi
 
 Practical consequences:
 
-- `qb::http::ssl::Server`, `qb::http::ssl::make_server`, the `qb::http::async::HTTPS` session type, `qb::http2::*`, and `qb::http::ws::*` exist **only** in an SSL build. Without `QB_HAS_SSL`, `<http/http.h>` does not even include `2/http2.h` or `ws/ws.h`.
+- `qb::http::ssl::Server`, `qb::http::ssl::make_server`, the `qb::http::async::HTTPS` session type, `qb::http2::*`, and `qb::http::ws::*` exist **only** in an SSL build. Without `QB_HAS_SSL`, `<qbm/http/http.h>` does not even include `src/qbm/http/2/http2.h` or `src/qbm/http/ws/ws.h`.
 - Plain HTTP/1.1 servers and clients still compile and run in an SSL-less build; you simply cannot open a secure listener or make an `https://` request.
-- This module is a **compiled library** (`qb_register_module` with a `SOURCES` list, not a header-only target). Exactly four translation units are SSL-only and appended to the build only when the gate is on: `auth/manager.cpp`, `ws/ws.cpp`, `2/http2.cpp`, `2/client.cpp`. The `2/protocol/*.cpp` files are **not** among them — the HTTP/2 wire codec (frame layer, HPACK, stream state machine) is transport-independent and compiles unconditionally, so its unit tests keep running in an SSL-less build even though no transport can reach it there. There is nothing to `#define` yourself; the gate follows the framework build.
+- This module is a **compiled library** (`qb_register_module` with a `SOURCES` list, not a header-only target). Exactly four translation units are SSL-only and appended to the build only when the gate is on: `src/qbm/http/auth/manager.cpp`, `src/qbm/http/ws/ws.cpp`, `src/qbm/http/2/http2.cpp`, `src/qbm/http/2/client.cpp`. The `2/protocol/*.cpp` files are **not** among them — the HTTP/2 wire codec (frame layer, HPACK, stream state machine) is transport-independent and compiles unconditionally, so its unit tests keep running in an SSL-less build even though no transport can reach it there. There is nothing to `#define` yourself; the gate follows the framework build.
 
 Gate your own SSL-dependent code on `QB_HAS_SSL`, never on `QBM_HTTP_HAS_SSL` — the latter is a `PRIVATE` module-internal marker and is not visible to consumers. See [the module front door](../README.md) for the full feature matrix.
 
@@ -79,9 +79,9 @@ Pass `TLS_server_method()` / `TLS_client_method()` (negotiate the highest mutual
 
 The secure HTTP/1.1 server is `qb::http::ssl::Server<Session>`, defaulting to `qb::http::ssl::DefaultSecureSession`. Use the `qb::http::ssl::make_server()` factory and the server's `listen(uri, cert, key)` overload — that one call builds the `SSL_CTX`, installs it on the `saccept` transport, sets ALPN to `{"http/1.1"}`, and starts listening.
 
-<!-- src: qbm/http/1.1/http.h:583-601 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:583-601 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <qb/io/async.h>
 #include <filesystem>
 #include <iostream>
@@ -119,7 +119,7 @@ int main(int argc, char *argv[]) {
 
 `listen` returns `false` if the certificate or key fails to load, so check the result. Under the hood it does exactly this for a secure transport:
 
-<!-- src: qbm/http/1.1/http.h:588-593 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:588-593 -->
 ```cpp
 this->transport().init(
     qb::io::ssl::create_server_context(TLS_server_method(), cert_file, key_file));
@@ -134,7 +134,7 @@ The convenience `listen` covers the common case. When you need cipher policy, a 
 
 <!-- src: qb/src/qb/io/tcp/ssl/socket.h:134-154, 173 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <qb/io/tcp/ssl/socket.h>
 
 auto server = qb::http::ssl::make_server();
@@ -160,9 +160,9 @@ The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the conn
 
 HTTP/2 in qbm-http is **TLS-only with ALPN** — there is no plaintext `h2c`. `qb::http2::Server::listen` mirrors the HTTP/1.1 overload but advertises `{"h2", "http/1.1"}`, so a client that negotiates `h2` gets HTTP/2 and one that does not falls back to HTTP/1.1 on the same port.
 
-<!-- src: qbm/http/2/http2.h:491-500 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:491-500 -->
 ```cpp
-#include <http/http.h>   // pulls in <http/2/http2.h> under QB_HAS_SSL
+#include <qbm/http/http.h>   // pulls in <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
 
 qb::io::async::init();
@@ -189,9 +189,9 @@ The protocol the session ends up speaking is decided after the handshake by insp
 
 The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically. A `https://` URI routes through the secure `async::HTTPS` session (`stcp` transport); `http://` routes through plaintext. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
 
-<!-- src: qbm/http/1.1/http.h:866-893, 905-907 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:866-893, 905-907 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 qb::http::GET(
     qb::http::Request{qb::io::uri("https://api.example.com/data")},
@@ -204,7 +204,7 @@ qb::http::GET(
 
 Every one-shot verb and the generic `REQUEST` take an optional trailing `bool verify_peer = true`. Leaving it at the default performs full certificate-chain and hostname verification; passing `false` disables both and **must only be used for trusted or self-signed endpoints you control**:
 
-<!-- src: qbm/http/1.1/http.h:858, 871 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:858, 871 -->
 ```cpp
 // Dev only: accept a self-signed server certificate.
 qb::http::GET(std::move(req), on_reply,
@@ -218,9 +218,9 @@ The coroutine overloads carry the same `verify_peer` parameter and `co_await` th
 
 `qb::http1::Client` reuses one connection across requests. It defaults `verify_peer` to `true`; toggle it with `set_verify_peer(bool)` **before** connecting, since it is applied when the secure connection opens. The connect timeout is a `qb::duration` (default 30 seconds).
 
-<!-- src: qbm/http/1.1/client.h:128, 132, 225, 250 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:128, 132, 225, 250 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 auto client = qb::http1::make_client("https://service.internal:8443");
 client->set_verify_peer(false);                       // self-signed internal endpoint
@@ -235,9 +235,9 @@ client->connect([client](bool ok, const std::string &err) {
 
 `qb::http2::Client` is HTTPS-only — `make_client` requires an `https://` base URI and the client offers **only** `{"h2"}` in ALPN, failing the connection if the server does not negotiate `h2`. It defaults `verify_peer` to `true`; call `set_verify_peer(false)` before `connect()` for trusted self-signed servers.
 
-<!-- src: qbm/http/2/client.h:176, 331 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:176, 331 -->
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 
 auto client = qb::http2::make_client("https://h2.example.com");
 client->set_verify_peer(true);                        // default; verify the chain

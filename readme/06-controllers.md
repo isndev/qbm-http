@@ -22,10 +22,10 @@ For a handful of stateless endpoints, an inline `RouteGroup` is lighter. Control
 
 ## Anatomy of a controller
 
-<!-- src: qbm/http/routing/controller.h:53-168, tests/unit/routing/router-controller.cpp:94-145 -->
+<!-- src: qbm/http/src/qbm/http/routing/controller.h:53-168, tests/unit/routing/router-controller.cpp:94-145 -->
 
 ```cpp
-#include <http/http.h>   // qb::http::Controller, Context, Router, status
+#include <qbm/http/http.h>   // qb::http::Controller, Context, Router, status
 #include <memory>
 #include <string>
 
@@ -102,7 +102,7 @@ Every verb method returns `Controller<MySession>&`, so calls chain. Paths are re
 
 ### Member-function handlers
 
-<!-- src: qbm/http/routing/controller.h (QB_HTTP_CTRL_VERB) -->
+<!-- src: qbm/http/src/qbm/http/routing/controller.h (QB_HTTP_CTRL_VERB) -->
 
 Pass the controller instance and a pointer-to-member to bind a method as the handler — no lambda, no wrapper:
 
@@ -115,12 +115,12 @@ The bound member takes `std::shared_ptr<Context>` and returns either `void` (syn
 
 ## Mounting a controller
 
-<!-- src: qbm/http/routing/router.h:219-220, route_group.h:230-232, tests/unit/routing/router-controller.cpp:572-583 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:219-220, route_group.h:230-232, tests/unit/routing/router-controller.cpp:572-583 -->
 
 Mount a controller on a `Router` or a `RouteGroup` with `controller<C>(path_prefix, ctor_args...)`:
 
 ```cpp
-#include <http/http.h>
+#include <qbm/http/http.h>
 #include <memory>
 
 qb::http::Router<MySession> router;
@@ -176,7 +176,7 @@ Effective path = `/api/v1/users/…`; middleware runs outermost-first: global �
 
 ## Controller-scoped middleware
 
-<!-- src: qbm/http/routing/controller.h:327-372, tests/unit/routing/router-controller.cpp:549-568, 763-786 -->
+<!-- src: qbm/http/src/qbm/http/routing/controller.h:327-372, tests/unit/routing/router-controller.cpp:549-568, 763-786 -->
 
 Middleware declared on a controller applies to **all** routes the controller defines, and only those routes. Declare it from inside `initialize_routes()` with `this->use(...)`, or add it after mounting through the returned handle. Three forms, matching the router and group APIs:
 
@@ -249,7 +249,7 @@ That shared mutable state is exactly why controllers carry a concurrency contrac
 
 ## How a controller compiles
 
-<!-- src: qbm/http/routing/controller.h:372-401 -->
+<!-- src: qbm/http/src/qbm/http/routing/controller.h:372-401 -->
 
 You rarely touch this, but the mechanics explain a few behaviors worth knowing. During `router.compile()`, each controller's `compile_tasks_and_register` runs once:
 
