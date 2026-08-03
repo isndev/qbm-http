@@ -15,7 +15,7 @@
 #         limitations under the License.
 #
 
-project(qbm-http VERSION 2.6.0)
+project(qbm-http VERSION 3.0.0)
 
 # Check if qb framework is available
 if(NOT QB_FOUND)
