@@ -12,6 +12,25 @@ Tracks changes on the development branch not yet part of a tagged release. The m
 
 ### Changed
 
+- **BREAKING — the public include prefix is now `<qbm/http/...>`** (was `<http/...>`). Every consumer
+  edits its `#include` lines: `#include <http/http.h>` becomes `#include <qbm/http/http.h>`. The CMake
+  target is unchanged (`qbm::http`), and so is the installed location `<prefix>/include/qbm/http/`.
+  The old spelling existed only because `qb_register_module` made this module's include root its
+  PARENT directory — the superproject's `qbm/`, which does not exist in this repository at all — and
+  mirrored it with `<prefix>/include/qbm` on the consumer's include path. That put the maximally
+  generic top-level name `http` in every consumer's include namespace. Now the module's own `src/`
+  IS the include root and is copied verbatim to `<prefix>/include`, so `<qbm/http/...>` is the same
+  string in this tree and in an installed prefix, and the two cannot drift.
+- **The source tree moved to `src/qbm/http/`** — one pure `git mv`, 100 % rename detection, zero
+  content change, so `git blame` and every line-numbered citation survive intact. `1.1/`, `2/`, `3/`, `auth/`, `middleware/`, `routing/`, `validation/`, `ws/` and the message types
+  at the root moved with it; `not-qb/llhttp/` deliberately did NOT — the fork's `.c` sources and its
+  generator-input `api.h` must not become reachable from an include root, and only its single public
+  header now sits at `src/qbm/http/vendor/llhttp.h`. `<prefix>/include/qbm/http/.github/workflows/`,
+  which the install really was creating as empty directories, is now structurally impossible.
+  `tests/`, `readme/`, `scripts/` and `cmake/` live BESIDE `src/`, never inside it, which is what
+  makes a stray `#include <tests/fixture.h>` impossible rather than merely unlikely.
+  The test suite now includes the shipped spelling instead of resolving `"../http.h"` by string
+  concatenation onto a `-I <mod>/tests` flag.
 - **`project(qbm-http VERSION ...)` is now `3.0.0`**, tracking `QB_FRAMEWORK_VERSION`. It had been
   left at `2.6.0` while the framework moved on. The module is not standalone-configurable (it calls
   `qb_register_module` / `qb_add_test`, which an installed qb does not ship), so its version can only
