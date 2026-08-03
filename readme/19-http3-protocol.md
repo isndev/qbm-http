@@ -36,11 +36,13 @@ HTTP/3 is optional and triple-gated. The entire `3/` tree — client, server, du
 | --- | --- |
 | `QB_HAS_SSL` (OpenSSL detected) | derived upstream from OpenSSL discovery; exposed `PUBLIC` to consumers |
 | `QB_HAS_QUIC` (qb-io QUIC transport, itself requiring SSL) | `qb/cmake/qbDependencies.cmake` |
-| `libnghttp3` discoverable via `pkg-config` | `pkg_check_modules(PC_NGHTTP3 libnghttp3)` |
+| `libnghttp3` discoverable by `find_package(Nghttp3 QUIET)` | `qbm/http/cmake/FindNghttp3.cmake` |
 
-<!-- src: qbm/http/CMakeLists.txt:53-74,121-122 -->
+<!-- src: qbm/http/CMakeLists.txt:55-77,147-149; qbm/http/cmake/FindNghttp3.cmake:23-60 -->
 
-When all three are present, `qbm/http`'s CMake sets `QBM_HTTP_HAS_HTTP3`, creates the imported target `Nghttp3::nghttp3`, appends `3/client.cpp` to the module sources, and — critically — defines `QBM_HTTP_HAS_HTTP3=1` **`PUBLIC`** on the `qbm-http` target so the `#ifdef` gate in `<http/http.h>` resolves the same way in your code as in the library:
+Detection lives in one place: `qbm/http/cmake/FindNghttp3.cmake`, which the module appends to `CMAKE_MODULE_PATH` and *also* installs, so `find_package(qbm-http)` re-runs the exact same module. It consults `pkg-config` for hints only, then resolves the header and the library with `find_path` / `find_library` — so a `libnghttp3` installed without a `.pc` file is still found — and publishes an `UNKNOWN IMPORTED` target `Nghttp3::nghttp3` carrying the absolute library path. That absolute path is what survives export intact; the link *directories* an inline `pkg_check_modules` target would carry do not.
+
+When all three are present, `qbm/http`'s CMake sets `QBM_HTTP_HAS_HTTP3`, adds `Nghttp3::nghttp3` to the module's link dependencies, appends `3/client.cpp` to the module sources, and — critically — defines `QBM_HTTP_HAS_HTTP3=1` **`PUBLIC`** on the `qbm-http` target so the `#ifdef` gate in `<http/http.h>` resolves the same way in your code as in the library:
 
 ```cmake
 # qbm/http/CMakeLists.txt

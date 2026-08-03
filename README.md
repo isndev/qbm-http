@@ -16,7 +16,7 @@ The protocol surface is gated by the underlying qb build:
 
 - **HTTP/1.1, routing, middleware, validation, cookies, multipart, the callback/coroutine HTTP/1.1 client** — always available.
 - **HTTPS, HTTP/2, WebSocket (both `ws://` and `wss://`), JWT, and `qb::http::auth`** — require `QB_HAS_SSL` (OpenSSL). Without it, CMake prints `HTTP SSL-backed features disabled: HTTPS/WSS/JWT/HTTP3 and the HTTP/2 transport (client + server session) will not be built; the HTTP/2 wire codec under 2/protocol/ still is, so its unit tests keep running`, and those translation units are not compiled. The transport-independent HTTP/2 wire codec (`2/protocol/`) *is* still compiled, but nothing in an SSL-off build can reach it — `qb::http2` remains undeclared.
-- **HTTP/3** — requires `QBM_HTTP_HAS_HTTP3`, which is set only when `QB_HAS_SSL`, `QB_HAS_QUIC`, and `libnghttp3` (via `pkg-config`) are all present.
+- **HTTP/3** — requires `QBM_HTTP_HAS_HTTP3`, which is set only when `QB_HAS_SSL`, `QB_HAS_QUIC`, and `libnghttp3` are all present. `libnghttp3` is located by the module's own `cmake/FindNghttp3.cmake`, which treats `pkg-config` as a hint and falls back to `find_path` / `find_library`, so an installation without a `.pc` file is still found.
 
 These gates are real `#ifdef` boundaries in the headers, so feature availability in your code matches what was compiled. `<http/http.h>` includes `2/http2.h` and `ws/ws.h` only under `#ifdef QB_HAS_SSL`, and the HTTP/3 headers only under `#ifdef QBM_HTTP_HAS_HTTP3`.
 
@@ -40,7 +40,9 @@ The entire WebSocket surface requires `QB_HAS_SSL`, including plain `ws://` — 
 
 ## Integration
 
-Add qb as a subdirectory, load the modules directory, link the target, and include the umbrella header. `qbm-http` is consumed through qb's module loader — **not** `find_package` directly.
+Two supported modes, both giving the same target (`qbm::http`) and the same header spelling (`<http/...>`).
+
+**Embedded** — add qb as a subdirectory, load the modules directory, link the target:
 
 ```cmake
 # CMakeLists.txt
@@ -50,6 +52,16 @@ qb_load_modules("${CMAKE_CURRENT_SOURCE_DIR}/qbm")    # discovers and registers 
 add_executable(app main.cpp)
 target_link_libraries(app PRIVATE qbm::http)          # PUBLIC-pulls qb::core, qb::io, llhttp
 ```
+
+**Installed** — consume a `cmake --install`ed tree. You do **not** need a `find_package(qb)` line: the module's package config resolves qb (and, for an HTTP/3 build, nghttp3) itself.
+
+```cmake
+find_package(qbm-http CONFIG REQUIRED)                # find_dependency(qb) happens inside
+add_executable(app main.cpp)
+target_link_libraries(app PRIVATE qbm::http)
+```
+
+The package lands headers under `<prefix>/include/qbm/http/...` and its CMake files under `<prefix>/lib/cmake/qbm-http/`; `<prefix>/include/qbm` is the installed spelling of the source tree's `qbm/` root, so `#include <http/http.h>` is unchanged between the two modes. `qbm-httpConfig.cmake` hard-fails at configure time if the installed qb is a different version than the one this module was compiled against, or disagrees with it about `QB_HAS_SSL` / `QB_HAS_QUIC` — the module's public headers are `#ifdef`-gated on those.
 
 `qb_load_modules` globs and sorts the module subdirectories under the given path and `add_subdirectory`s each that has a `CMakeLists.txt`. The `http` module guards on `QB_FOUND` and returns early if qb has not been configured first, so the `add_subdirectory(qb)` line must come before `qb_load_modules`.
 
@@ -235,7 +247,7 @@ Runnable examples are under [`examples/qbm/http/`](https://github.com/isndev/qb-
 
 ## License
 
-Apache License 2.0. See [LICENSE](./LICENSE). HTTP/1.1 parsing structures come from [llhttp](https://github.com/nodejs/llhttp) (vendored under `not-qb/llhttp`); I/O is handled entirely by qb-io.
+Apache License 2.0. See [LICENSE](./LICENSE). HTTP/1.1 parsing structures come from [llhttp](https://github.com/nodejs/llhttp) — a fork with the upstream `llhttp_*` symbols renamed to `http_*`, so it is owned rather than published: the C sources are vendored under `not-qb/llhttp` and its single public header is `vendor/llhttp.h`, reached as `<http/vendor/llhttp.h>`. I/O is handled entirely by qb-io.
 
 ---
 

@@ -21,9 +21,9 @@ This module is a **compiled library**, not header-only — the parser templates 
 
 ## The llhttp dependency
 
-`Parser` wraps **llhttp**, the parser that powers Node.js, vendored under `qbm/http/not-qb/llhttp` and built as a `STATIC` library target named `llhttp` with a `PUBLIC` include directory.
+`Parser` wraps **llhttp**, the parser that powers Node.js. Its C sources are vendored under `qbm/http/not-qb/llhttp` and built as a `STATIC` library target named `llhttp`; that target has **no public include directory**. Its single public header lives with the module's own headers, at `qbm/http/vendor/llhttp.h`.
 
-<!-- src: qbm/http/CMakeLists.txt:33; qbm/http/not-qb/llhttp/CMakeLists.txt:3,9 -->
+<!-- src: qbm/http/CMakeLists.txt:35; qbm/http/not-qb/llhttp/CMakeLists.txt:3,29 -->
 
 ```cmake
 # qbm/http/CMakeLists.txt — llhttp is a build dependency of qbm-http,
@@ -31,7 +31,7 @@ This module is a **compiled library**, not header-only — the parser templates 
 add_subdirectory(not-qb/llhttp)
 ```
 
-The vendored copy renames llhttp's public symbols from the upstream `llhttp_*` prefix to a `http_*` prefix: the parser handle is `http_t`, the settings struct is `http_settings_s`, error codes are `http_errno_t`, and the entry points are `http_init` / `http_execute` / `http_resume`. These come from `<llhttp.h>`, pulled in transitively via `<http/http.h>` and used directly by `1.1/protocol/base.h`. The `http_method` and `http_status` enums that back `qb::http::Method` and `qb::http::Status` are the same llhttp enums (see [Core concepts](./01-core-concepts.md)).
+This is a **fork**, not a swappable dependency, so `qbm::http` owns the name rather than publishing it: the vendored copy renames llhttp's public symbols from the upstream `llhttp_*` prefix to a `http_*` prefix — the parser handle is `http_t`, the settings struct is `http_settings_s`, error codes are `http_errno_t`, and the entry points are `http_init` / `http_execute` / `http_resume`. A system llhttp cannot substitute for it, and conversely an installed `qbm-http` must not drop a file called `llhttp.h` on a consumer's include path. Hence the `vendor/` location and the spelling `<http/vendor/llhttp.h>` (`types.h`), which resolves through the same `qbm/` include root as every other qbm header, in the build tree and in an installed tree alike. It is pulled in transitively via `<http/http.h>` and used directly by `1.1/protocol/base.h`. The `http_method` and `http_status` enums that back `qb::http::Method` and `qb::http::Status` are the same llhttp enums (see [Core concepts](./01-core-concepts.md)).
 
 llhttp is event-driven: you feed it bytes with `http_execute`, and it invokes callbacks as it crosses each boundary of the message (message-begin, URL, status, header field, header value, headers-complete, body, message-complete). `Parser` registers a fixed `static const http_settings_s` table and translates those callbacks into mutations on the message it is building.
 

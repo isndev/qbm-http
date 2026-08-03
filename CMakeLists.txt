@@ -15,7 +15,7 @@
 #         limitations under the License.
 #
 
-project(qbm-http)
+project(qbm-http VERSION 2.6.0)
 
 # Check if qb framework is available
 if(NOT QB_FOUND)
@@ -52,17 +52,18 @@ if(QB_HAS_SSL)
     list(APPEND QBM_HTTP_EXTRA_DEFINES QBM_HTTP_HAS_SSL=1)
 endif()
 
-find_package(PkgConfig QUIET)
-if(QB_HAS_QUIC AND PKG_CONFIG_FOUND)
-    pkg_check_modules(PC_NGHTTP3 QUIET libnghttp3)
+# Through the same FindNghttp3.cmake that this module installs for its find_package()
+# consumers, so "HTTP/3 is available" is decided by ONE piece of code in both trees. It also
+# produces an UNKNOWN IMPORTED target holding an absolute library path, which survives export
+# intact -- the previous inline pkg_check_modules target carried link *directories* plus a
+# bare `nghttp3` name, which does not.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+if(QB_HAS_QUIC)
+    find_package(Nghttp3 QUIET)
 endif()
 
-if(QB_HAS_SSL AND QB_HAS_QUIC AND PC_NGHTTP3_FOUND)
+if(QB_HAS_SSL AND QB_HAS_QUIC AND Nghttp3_FOUND)
     set(QBM_HTTP_HAS_HTTP3 TRUE)
-    add_library(Nghttp3::nghttp3 INTERFACE IMPORTED)
-    target_include_directories(Nghttp3::nghttp3 INTERFACE ${PC_NGHTTP3_INCLUDE_DIRS})
-    target_link_directories(Nghttp3::nghttp3 INTERFACE ${PC_NGHTTP3_LIBRARY_DIRS})
-    target_link_libraries(Nghttp3::nghttp3 INTERFACE ${PC_NGHTTP3_LIBRARIES})
     list(APPEND QBM_HTTP_EXTRA_SOURCES
         3/client.cpp
     )
@@ -78,7 +79,7 @@ endif()
 # Register the HTTP module using the new framework functions
 qb_register_module(
     NAME http
-    VERSION 2.6.0
+    VERSION ${PROJECT_VERSION}
     DEPENDS qb-core llhttp ${QBM_HTTP_EXTRA_DEPENDS}
     SOURCES
         # Core files
@@ -130,8 +131,17 @@ qb_register_module(
         middleware/static_files.cpp
         ${QBM_HTTP_EXTRA_SOURCES}
     DEFINES
-        QBM_HTTP_VERSION="2.6.0"
+        QBM_HTTP_VERSION="${PROJECT_VERSION}"
         ${QBM_HTTP_EXTRA_DEFINES}
+    # llhttp is a bundled STATIC target that qbm-http links PUBLIC (1.1/protocol/base.h calls
+    # http_init/http_execute inline), so its name appears in qbm-httpTargets.cmake and it must
+    # travel in the same export set.
+    EXPORT_EXTRA_TARGETS
+        llhttp
+    CONFIG_DEPENDENCIES
+        cmake/qbm-httpDependencies.cmake.in
+    INSTALL_CMAKE_FILES
+        cmake/FindNghttp3.cmake
 )
 
 if(QBM_HTTP_HAS_HTTP3)

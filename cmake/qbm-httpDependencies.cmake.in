@@ -1,0 +1,21 @@
+#
+# qbm-http - dependency recreation for find_package(qbm-http) consumers.
+#
+# Configured by _qb_module_install_rules() into <libdir>/cmake/qbm-http/qbm-httpDependencies.cmake
+# and included by qbm-httpConfig.cmake BEFORE qbm-httpTargets.cmake.
+#
+# Why this file has to exist: when HTTP/3 is compiled in, qbm-http links Nghttp3::nghttp3
+# PUBLICLY, and its public header 3/protocol/connection.h includes <nghttp3/nghttp3.h>. CMake
+# writes that target's NAME into qbm-httpTargets.cmake with no error and no recreation, so a
+# consumer would hit "target not found" on a name it has no way to invent. FindNghttp3.cmake
+# ships next to this file (CMAKE_MODULE_PATH is set up by qbm-httpConfig.cmake).
+#
+# OpenSSL and ZLIB are NOT resolved here: they arrive transitively through qb::io and are
+# already handled by qbConfig.cmake's own find_dependency() block. llhttp is a bundled static
+# fork travelling in qbm-http's own export set, so it needs nothing either.
+#
+
+if(@QBM_HTTP_HAS_HTTP3@)
+    include(CMakeFindDependencyMacro)
+    find_dependency(Nghttp3)
+endif()
