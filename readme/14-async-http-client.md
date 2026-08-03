@@ -51,7 +51,7 @@ For `https://` (and `wss://`, h2, h3) targets, `verify_peer` controls server-cer
 
 ### Single-shot awaiters and the mono-thread model
 
-The coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`coro.h`](../coro.h)). An awaiter is single-shot, non-copyable, and non-movable: you construct it as a prvalue from a factory and `co_await` it immediately. A `shared_ptr` alive sentinel guards against late callbacks if the awaiter is destroyed before the operation completes, and resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the I/O thread that started the call. This is the same mono-thread-per-listener contract as the rest of the framework — never share a client or drive its awaiters across threads.
+The coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`coro.h`](../src/qbm/http/coro.h)). An awaiter is single-shot, non-copyable, and non-movable: you construct it as a prvalue from a factory and `co_await` it immediately. A `shared_ptr` alive sentinel guards against late callbacks if the awaiter is destroyed before the operation completes, and resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the I/O thread that started the call. This is the same mono-thread-per-listener contract as the rest of the framework — never share a client or drive its awaiters across threads.
 
 `qb::http::run_sync(awaitable)` is a thin re-export of `qb::io::async::run_sync`. It pumps the *current* thread's event loop just enough to resolve one awaitable, without spawning threads or mutating the global scheduler. Use it from tests, `main`, or any synchronous bootstrap code.
 
