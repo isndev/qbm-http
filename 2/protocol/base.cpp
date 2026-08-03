@@ -2,11 +2,20 @@
  * @file qbm/http/2/protocol/base.cpp
  * @brief Out-of-line definitions for the HTTP/2 protocol base helpers
  *
- * This translation unit holds the non-template helper implementations declared
- * in @ref qbm/http/2/protocol/base.h (SETTINGS validation, header validation,
- * error reporting and stream-id validation). The template-based parser/framer
- * (@ref qb::protocol::http2::Http2Protocol) and the binary utilities remain
- * header-only by design.
+ * This translation unit holds the out-of-line definitions declared in
+ * @ref qbm/http/2/protocol/base.h:
+ *
+ * - the non-template helpers: SETTINGS validation, header validation, error
+ *   reporting and stream-id validation;
+ * - the ten frame serializers, `qb::allocator::pipe<char>::put<Http2FrameData<T>>`
+ *   (see the banner further down).
+ *
+ * The template-based parser/framer (@ref qb::protocol::http2::Http2Protocol) and
+ * the binary utilities remain header-only by design.
+ *
+ * Everything here is transport-independent and OpenSSL-free, which is what lets
+ * qbm-http compile it unconditionally and keeps the HTTP/2 wire-codec unit tests
+ * running in the QB_HAS_SSL=OFF lane.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -461,3 +470,365 @@ StreamIdValidator::get_frame_type_name(FrameType frame_type) {
 }
 
 } // namespace qb::protocol::http2
+
+// ---------------------------------------------------------------------------
+// Frame SERIALIZERS — the write half of the frame layer.
+//
+// These ten `qb::allocator::pipe<char>::put<Http2FrameData<T>>` explicit
+// specializations are DECLARED in ./base.h (bottom of file) alongside the
+// parser they mirror, so this — base.h's definition TU — is where they belong.
+// They lived in ../http2.cpp until the SSL-off lane was restored: that TU also
+// carries `template class qb::http2::Server<DefaultSession>`, which drags in
+// qb::io::transport::stcp/saccept and therefore cannot compile without OpenSSL.
+// Keeping the serializers there made the whole HTTP/2 wire codec unlinkable at
+// QB_HAS_SSL=OFF even though not one byte of it touches TLS. Pure RFC 9113
+// framing: header + payload into a byte pipe.
+// ---------------------------------------------------------------------------
+
+namespace qb::allocator {
+
+/**
+ * @brief Serialize DATA frame to output pipe
+ *
+ * DATA frames contain arbitrary variable-length sequences of octets
+ * associated with a stream. One or more DATA frames are used to carry
+ * HTTP request or response payloads.
+ *
+ * @param frame_to_send DATA frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::DataFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::DataFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header         = frame_to_send.header;
+    const auto                      &payload_struct = frame_to_send.payload;
+
+    header.set_payload_length(static_cast<uint32_t>(payload_struct.data_payload.size()));
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+
+    if (!payload_struct.data_payload.empty()) {
+        this->put(reinterpret_cast<const char *>(payload_struct.data_payload.data()), payload_struct.data_payload.size());
+    }
+    return *this;
+}
+
+/**
+ * @brief Serialize HEADERS frame to output pipe
+ *
+ * HEADERS frames open a stream and carry header block fragments.
+ * HEADERS frames can be sent on a stream in the "idle", "reserved (local)",
+ * "open", or "half-closed (remote)" state.
+ *
+ * @param frame_to_send HEADERS frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::HeadersFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::HeadersFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header         = frame_to_send.header;
+    const auto                      &payload_struct = frame_to_send.payload;
+
+    header.set_payload_length(static_cast<uint32_t>(payload_struct.header_block_fragment.size()));
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+
+    if (!payload_struct.header_block_fragment.empty()) {
+        this->put(reinterpret_cast<const char *>(payload_struct.header_block_fragment.data()), payload_struct.header_block_fragment.size());
+    }
+    return *this;
+}
+
+/**
+ * @brief Serialize PRIORITY frame to output pipe
+ *
+ * PRIORITY frames specify the sender-advised priority of a stream.
+ * Contains stream dependency and weight information.
+ *
+ * Frame format:
+ * +-----------------------------------------------+
+ * |E|                  Stream Dependency (31)     |
+ * +-+-------------+-------------------------------+
+ * |   Weight (8)  |
+ * +-+-------------+
+ *
+ * @param frame_to_send PRIORITY frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::PriorityFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::PriorityFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header         = frame_to_send.header;
+    const auto                      &payload_struct = frame_to_send.payload;
+    std::array<uint8_t, 5>           payload_bytes_arr;
+
+    // Pack stream dependency with exclusive bit
+    uint32_t stream_dep_val = payload_struct.priority_data.stream_dependency & 0x7FFFFFFF;
+    if (payload_struct.priority_data.exclusive_dependency) {
+        stream_dep_val |= (1U << 31);
+    }
+
+    // Serialize as big-endian
+    payload_bytes_arr[0] = static_cast<uint8_t>((stream_dep_val >> 24) & 0xFF);
+    payload_bytes_arr[1] = static_cast<uint8_t>((stream_dep_val >> 16) & 0xFF);
+    payload_bytes_arr[2] = static_cast<uint8_t>((stream_dep_val >> 8) & 0xFF);
+    payload_bytes_arr[3] = static_cast<uint8_t>(stream_dep_val & 0xFF);
+    payload_bytes_arr[4] = payload_struct.priority_data.weight;
+
+    header.set_payload_length(5);
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+    this->put(reinterpret_cast<const char *>(payload_bytes_arr.data()), payload_bytes_arr.size());
+    return *this;
+}
+
+/**
+ * @brief Serialize RST_STREAM frame to output pipe
+ *
+ * RST_STREAM frames allow for immediate termination of a stream.
+ * Contains a single 32-bit error code.
+ *
+ * @param frame_to_send RST_STREAM frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::RstStreamFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::RstStreamFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header  = frame_to_send.header;
+    const auto                      &payload = frame_to_send.payload;
+    std::array<uint8_t, 4>           payload_bytes_arr;
+
+    // Serialize error code as big-endian 32-bit
+    uint32_t error_code_val = static_cast<uint32_t>(payload.error_code);
+    payload_bytes_arr[0]    = static_cast<uint8_t>((error_code_val >> 24) & 0xFF);
+    payload_bytes_arr[1]    = static_cast<uint8_t>((error_code_val >> 16) & 0xFF);
+    payload_bytes_arr[2]    = static_cast<uint8_t>((error_code_val >> 8) & 0xFF);
+    payload_bytes_arr[3]    = static_cast<uint8_t>(error_code_val & 0xFF);
+
+    header.set_payload_length(4);
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+    this->put(reinterpret_cast<const char *>(payload_bytes_arr.data()), payload_bytes_arr.size());
+    return *this;
+}
+
+/**
+ * @brief Serialize SETTINGS frame to output pipe
+ *
+ * SETTINGS frames convey configuration parameters that affect how
+ * endpoints communicate. Each parameter is a 16-bit identifier followed
+ * by a 32-bit value.
+ *
+ * @param frame_to_send SETTINGS frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::SettingsFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::SettingsFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header         = frame_to_send.header;
+    const auto                      &payload_struct = frame_to_send.payload;
+    std::vector<uint8_t>             payload_bytes;
+
+    // SETTINGS ACK has no payload
+    if (!(header.flags & qb::protocol::http2::FLAG_ACK)) {
+        payload_bytes.reserve(payload_struct.entries.size() * 6);
+
+        for (const auto &entry : payload_struct.entries) {
+            // 16-bit identifier (big-endian)
+            uint16_t identifier_val = static_cast<uint16_t>(entry.identifier);
+            payload_bytes.push_back(static_cast<uint8_t>((identifier_val >> 8) & 0xFF));
+            payload_bytes.push_back(static_cast<uint8_t>(identifier_val & 0xFF));
+
+            // 32-bit value (big-endian)
+            payload_bytes.push_back(static_cast<uint8_t>((entry.value >> 24) & 0xFF));
+            payload_bytes.push_back(static_cast<uint8_t>((entry.value >> 16) & 0xFF));
+            payload_bytes.push_back(static_cast<uint8_t>((entry.value >> 8) & 0xFF));
+            payload_bytes.push_back(static_cast<uint8_t>(entry.value & 0xFF));
+        }
+    }
+
+    header.set_payload_length(static_cast<uint32_t>(payload_bytes.size()));
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+
+    if (!payload_bytes.empty()) {
+        this->put(reinterpret_cast<const char *>(payload_bytes.data()), payload_bytes.size());
+    }
+    return *this;
+}
+
+/**
+ * @brief Serialize PUSH_PROMISE frame to output pipe
+ *
+ * PUSH_PROMISE frames are used to notify the peer endpoint in advance
+ * of streams the sender intends to initiate.
+ *
+ * Frame format:
+ * +-----------------------------------------------+
+ * |R|                Promised Stream ID (31)      |
+ * +-+---------------------------------------------+
+ * |            Header Block Fragment (*)        ...
+ * +-----------------------------------------------+
+ *
+ * @param frame_to_send PUSH_PROMISE frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::PushPromiseFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::PushPromiseFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header         = frame_to_send.header;
+    const auto                      &payload_struct = frame_to_send.payload;
+    std::vector<uint8_t>             payload_bytes;
+
+    // Reserved bit (R) must be unset
+    uint32_t promised_id = payload_struct.promised_stream_id & 0x7FFFFFFF;
+    payload_bytes.push_back(static_cast<uint8_t>((promised_id >> 24) & 0xFF));
+    payload_bytes.push_back(static_cast<uint8_t>((promised_id >> 16) & 0xFF));
+    payload_bytes.push_back(static_cast<uint8_t>((promised_id >> 8) & 0xFF));
+    payload_bytes.push_back(static_cast<uint8_t>(promised_id & 0xFF));
+
+    // Append header block fragment
+    payload_bytes.insert(payload_bytes.end(), payload_struct.header_block_fragment.begin(), payload_struct.header_block_fragment.end());
+
+    // Note: PADDED flag handling would need to be implemented if supported
+
+    header.set_payload_length(static_cast<uint32_t>(payload_bytes.size()));
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+
+    if (!payload_bytes.empty()) {
+        this->put(reinterpret_cast<const char *>(payload_bytes.data()), payload_bytes.size());
+    }
+    return *this;
+}
+
+/**
+ * @brief Serialize PING frame to output pipe
+ *
+ * PING frames are used to measure round-trip time and check connection
+ * liveness. Must contain exactly 8 octets of opaque data.
+ *
+ * @param frame_to_send PING frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::PingFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::PingFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header  = frame_to_send.header;
+    const auto                      &payload = frame_to_send.payload;
+
+    header.set_payload_length(static_cast<uint32_t>(payload.opaque_data.size())); // Must be 8
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+    this->put(reinterpret_cast<const char *>(payload.opaque_data.data()), payload.opaque_data.size());
+    return *this;
+}
+
+/**
+ * @brief Serialize GOAWAY frame to output pipe
+ *
+ * GOAWAY frames inform the remote peer to stop creating streams on this
+ * connection. Contains the last stream ID that will be processed and
+ * an error code.
+ *
+ * Frame format:
+ * +-----------------------------------------------+
+ * |R|                  Last-Stream-ID (31)        |
+ * +-+---------------------------------------------+
+ * |                   Error Code (32)             |
+ * +-----------------------------------------------+
+ * |              Additional Debug Data (*)        |
+ * +-----------------------------------------------+
+ *
+ * @param frame_to_send GOAWAY frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::GoAwayFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::GoAwayFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header  = frame_to_send.header;
+    const auto                      &payload = frame_to_send.payload;
+
+    // Fixed 8-byte GOAWAY prefix: last stream id (reserved bit cleared) + error code.
+    // Built in a fixed std::array (no heap vector) so the optional debug data can be
+    // streamed directly afterwards.
+    const uint32_t               last_sid       = payload.last_stream_id & 0x7FFFFFFF;
+    const uint32_t               error_code_val = static_cast<uint32_t>(payload.error_code);
+    const std::array<uint8_t, 8> prefix{
+        static_cast<uint8_t>((last_sid >> 24) & 0xFF),       static_cast<uint8_t>((last_sid >> 16) & 0xFF),
+        static_cast<uint8_t>((last_sid >> 8) & 0xFF),        static_cast<uint8_t>(last_sid & 0xFF),
+        static_cast<uint8_t>((error_code_val >> 24) & 0xFF), static_cast<uint8_t>((error_code_val >> 16) & 0xFF),
+        static_cast<uint8_t>((error_code_val >> 8) & 0xFF),  static_cast<uint8_t>(error_code_val & 0xFF),
+    };
+
+    header.set_payload_length(static_cast<uint32_t>(prefix.size() + payload.additional_debug_data.size()));
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+    this->put(reinterpret_cast<const char *>(prefix.data()), prefix.size());
+
+    // Optional debug data, streamed directly from the frame.
+    if (!payload.additional_debug_data.empty()) {
+        this->put(reinterpret_cast<const char *>(payload.additional_debug_data.data()), payload.additional_debug_data.size());
+    }
+    return *this;
+}
+
+/**
+ * @brief Serialize WINDOW_UPDATE frame to output pipe
+ *
+ * WINDOW_UPDATE frames are used to implement flow control. The payload
+ * contains a 32-bit unsigned integer indicating the number of octets
+ * the sender can transmit in addition to the existing flow control window.
+ *
+ * @param frame_to_send WINDOW_UPDATE frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::WindowUpdateFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::WindowUpdateFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header  = frame_to_send.header;
+    const auto                      &payload = frame_to_send.payload;
+    std::array<uint8_t, 4>           payload_bytes_arr;
+
+    // Window increment with reserved bit cleared
+    uint32_t increment   = payload.window_size_increment & 0x7FFFFFFF;
+    payload_bytes_arr[0] = static_cast<uint8_t>((increment >> 24) & 0xFF);
+    payload_bytes_arr[1] = static_cast<uint8_t>((increment >> 16) & 0xFF);
+    payload_bytes_arr[2] = static_cast<uint8_t>((increment >> 8) & 0xFF);
+    payload_bytes_arr[3] = static_cast<uint8_t>(increment & 0xFF);
+
+    header.set_payload_length(4);
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+    this->put(reinterpret_cast<const char *>(payload_bytes_arr.data()), payload_bytes_arr.size());
+    return *this;
+}
+
+/**
+ * @brief Serialize CONTINUATION frame to output pipe
+ *
+ * CONTINUATION frames are used to continue a sequence of header block
+ * fragments. Any number of CONTINUATION frames can be sent, as long as
+ * the preceding frame is on the same stream and is HEADERS, PUSH_PROMISE,
+ * or CONTINUATION without the END_HEADERS flag set.
+ *
+ * @param frame_to_send CONTINUATION frame to serialize
+ * @return Reference to this pipe for chaining
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::protocol::http2::Http2FrameData<qb::protocol::http2::ContinuationFrame>>(
+    const qb::protocol::http2::Http2FrameData<qb::protocol::http2::ContinuationFrame> &frame_to_send) {
+    qb::protocol::http2::FrameHeader header         = frame_to_send.header;
+    const auto                      &payload_struct = frame_to_send.payload;
+
+    header.set_payload_length(static_cast<uint32_t>(payload_struct.header_block_fragment.size()));
+    this->put(reinterpret_cast<const char *>(&header), qb::protocol::http2::FRAME_HEADER_SIZE);
+
+    if (!payload_struct.header_block_fragment.empty()) {
+        this->put(reinterpret_cast<const char *>(payload_struct.header_block_fragment.data()), payload_struct.header_block_fragment.size());
+    }
+    return *this;
+}
+
+} // namespace qb::allocator

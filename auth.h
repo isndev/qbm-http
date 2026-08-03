@@ -13,6 +13,17 @@
  */
 #pragma once
 
+// HTTP authentication is JWT-based: qb::http::auth::Manager creates and verifies
+// tokens through qb::jwt (OpenSSL HMAC/RSA/ECDSA), and auth/manager.cpp is only
+// added to the module when QB_HAS_SSL is set -- see qbm/http/CMakeLists.txt:38-46,
+// whose configure-time message already states "JWT ... will not be built". Without
+// this guard a no-SSL build compiles every caller and then fails at link with
+// "undefined symbols: qb::http::auth::Manager::verify_token(...)". Mirrors the
+// same guard in ws/ws.h.
+#ifndef QB_HAS_SSL
+#error "HTTP authentication (JWT) requires OpenSSL crypto library"
+#endif
+
 // Core dependencies for the auth module
 #include <qb/io/crypto.h>     // For crypto operations used by AuthManager
 #include <qb/io/crypto_jwt.h> // For JWT creation and verification capabilities used by AuthManager

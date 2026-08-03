@@ -582,8 +582,11 @@ public:
      */
     bool
     listen(qb::io::uri uri, std::filesystem::path cert_file = {}, std::filesystem::path key_file = {}) {
-        using tpt = std::decay_t<decltype(this->transport())>;
 #ifdef QB_HAS_SSL
+        // Declared inside the guard, not above it: the alias is only ever consumed by the
+        // if constexpr below. Hoisted out, it is an unused local typedef in every SSL-off
+        // translation unit that includes this header -- one declaration, 47 warnings.
+        using tpt = std::decay_t<decltype(this->transport())>;
         if constexpr (tpt::is_secure()) {
             this->transport().init(qb::io::ssl::Context::server(std::move(cert_file), std::move(key_file)).alpn({"http/1.1"}));
             if (!this->transport().context().ok()) {

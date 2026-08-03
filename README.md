@@ -15,7 +15,7 @@ On top of the wire protocols it ships a fluent routing engine (path parameters, 
 The protocol surface is gated by the underlying qb build:
 
 - **HTTP/1.1, routing, middleware, validation, cookies, multipart, the callback/coroutine HTTP/1.1 client** — always available.
-- **HTTPS, HTTP/2, WebSocket (both `ws://` and `wss://`), JWT, and `qb::http::auth`** — require `QB_HAS_SSL` (OpenSSL). Without it, CMake prints `HTTP SSL-backed features disabled: HTTPS/WSS/JWT/HTTP2/HTTP3 will not be built` and these translation units are not compiled.
+- **HTTPS, HTTP/2, WebSocket (both `ws://` and `wss://`), JWT, and `qb::http::auth`** — require `QB_HAS_SSL` (OpenSSL). Without it, CMake prints `HTTP SSL-backed features disabled: HTTPS/WSS/JWT/HTTP3 and the HTTP/2 transport (client + server session) will not be built; the HTTP/2 wire codec under 2/protocol/ still is, so its unit tests keep running`, and those translation units are not compiled. The transport-independent HTTP/2 wire codec (`2/protocol/`) *is* still compiled, but nothing in an SSL-off build can reach it — `qb::http2` remains undeclared.
 - **HTTP/3** — requires `QBM_HTTP_HAS_HTTP3`, which is set only when `QB_HAS_SSL`, `QB_HAS_QUIC`, and `libnghttp3` (via `pkg-config`) are all present.
 
 These gates are real `#ifdef` boundaries in the headers, so feature availability in your code matches what was compiled. `<http/http.h>` includes `2/http2.h` and `ws/ws.h` only under `#ifdef QB_HAS_SSL`, and the HTTP/3 headers only under `#ifdef QBM_HTTP_HAS_HTTP3`.

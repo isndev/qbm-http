@@ -12,7 +12,7 @@ TLS is not bolted onto qbm-http; it is the qb-io secure transport layer (`qb::io
 
 HTTPS, secure WebSocket (`wss://`), HTTP/2, HTTP/3, and JWT/auth are all **compiled only when the framework is built with OpenSSL**. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<http/http.h>` resolve the same way in your code as in the module.
 
-<!-- src: qbm/http/CMakeLists.txt:39-48; qbm/http/http.h:45-48 -->
+<!-- src: qbm/http/CMakeLists.txt:45-53; qbm/http/http.h:45-48 -->
 ```cpp
 #include <http/http.h>
 
@@ -25,7 +25,7 @@ Practical consequences:
 
 - `qb::http::ssl::Server`, `qb::http::ssl::make_server`, the `qb::http::async::HTTPS` session type, `qb::http2::*`, and `qb::http::ws::*` exist **only** in an SSL build. Without `QB_HAS_SSL`, `<http/http.h>` does not even include `2/http2.h` or `ws/ws.h`.
 - Plain HTTP/1.1 servers and clients still compile and run in an SSL-less build; you simply cannot open a secure listener or make an `https://` request.
-- This module is a **compiled library** (`qb_register_module` with a `SOURCES` list, not a header-only target). The SSL-only translation units — `auth/manager.cpp`, `ws/ws.cpp`, `2/http2.cpp`, `2/client.cpp`, and the `2/protocol/*.cpp` HTTP/2 implementation files — are appended to the build only when the gate is on. There is nothing to `#define` yourself; the gate follows the framework build.
+- This module is a **compiled library** (`qb_register_module` with a `SOURCES` list, not a header-only target). Exactly four translation units are SSL-only and appended to the build only when the gate is on: `auth/manager.cpp`, `ws/ws.cpp`, `2/http2.cpp`, `2/client.cpp`. The `2/protocol/*.cpp` files are **not** among them — the HTTP/2 wire codec (frame layer, HPACK, stream state machine) is transport-independent and compiles unconditionally, so its unit tests keep running in an SSL-less build even though no transport can reach it there. There is nothing to `#define` yourself; the gate follows the framework build.
 
 Gate your own SSL-dependent code on `QB_HAS_SSL`, never on `QBM_HTTP_HAS_SSL` — the latter is a `PRIVATE` module-internal marker and is not visible to consumers. See [the module front door](../README.md) for the full feature matrix.
 

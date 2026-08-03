@@ -26,7 +26,9 @@ endif()
 if(QB_HAS_SSL)
     qb_status_message("HTTP SSL-backed features enabled")
 else()
-    qb_status_message("HTTP SSL-backed features disabled: HTTPS/WSS/JWT/HTTP2/HTTP3 will not be built")
+    qb_status_message("HTTP SSL-backed features disabled: HTTPS/WSS/JWT/HTTP3 and the HTTP/2 "
+                      "transport (client + server session) will not be built; the HTTP/2 wire "
+                      "codec under 2/protocol/ still is, so its unit tests keep running")
 endif()
 
 # Add the internal llhttp dependency
@@ -36,16 +38,16 @@ set(QBM_HTTP_EXTRA_SOURCES)
 set(QBM_HTTP_EXTRA_DEPENDS)
 set(QBM_HTTP_EXTRA_DEFINES)
 
+# SSL-only sources: the TRANSPORT halves of HTTP/2 only. 2/http2.cpp (server session +
+# acceptor) and 2/client.cpp name qb::io::transport::stcp / saccept and qb::io::ssl::Context
+# at class-definition scope, so they cannot even parse with QB_HAS_SSL=OFF. The four
+# 2/protocol/*.cpp files below do NOT — see the unconditional SOURCES list.
 if(QB_HAS_SSL)
     list(APPEND QBM_HTTP_EXTRA_SOURCES
         auth/manager.cpp
         ws/ws.cpp
         2/http2.cpp
         2/client.cpp
-        2/protocol/base.cpp
-        2/protocol/hpack.cpp
-        2/protocol/hpack_huffman.cpp
-        2/protocol/stream.cpp
     )
     list(APPEND QBM_HTTP_EXTRA_DEFINES QBM_HTTP_HAS_SSL=1)
 endif()
@@ -90,6 +92,20 @@ qb_register_module(
         body.cpp
         1.1/http.cpp
         1.1/client.cpp
+        # HTTP/2 wire codec — frame layer, HPACK (+ Huffman) and the stream state
+        # machine. Transport-independent and OpenSSL-free (verified: no stcp/saccept/
+        # ssl::Context anywhere under 2/protocol/), so it is built UNCONDITIONALLY and
+        # the 12 pure-logic http2 unit tests link on QB_HAS_SSL=OFF. The TLS-bound
+        # halves (2/http2.cpp, 2/client.cpp) stay in QBM_HTTP_EXTRA_SOURCES above.
+        # Trade-off, stated plainly: an SSL-off libqbm-http then carries a codec no
+        # transport can reach — h2 is TLS+ALPN only here, there is no h2c upgrade path.
+        # Cost, measured on the feature-gates preset (Debug, arm64, clang): 2289 KiB of
+        # objects and 3.8 s of compile CPU across the four TUs. Paid ONLY by SSL-off
+        # builds — every other preset already compiled these exact files.
+        2/protocol/base.cpp
+        2/protocol/hpack.cpp
+        2/protocol/hpack_huffman.cpp
+        2/protocol/stream.cpp
         # Core (decl/def split)
         message_base.cpp
         types.cpp
