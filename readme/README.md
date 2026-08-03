@@ -4,7 +4,7 @@
 
 This is the table of contents for the qbm-http narrative documentation: twenty-one numbered pages covering HTTP/1.1, HTTP/2, HTTP/3, WebSocket, routing, middleware, authentication, and validation, ordered as a learning path.
 
-**Prerequisites:** working knowledge of the qb actor framework — see [`qb/README.md`](https://github.com/isndev/cube/blob/c++23/README.md) and the qb [`readme/`](https://github.com/isndev/cube/tree/c++23/readme/) docs for actors, `qb-io` async, and coroutines. **See also:** the module front door [`../README.md`](../README.md) for positioning, the build/feature matrix, and a 60-second quickstart.
+**Prerequisites:** working knowledge of the qb actor framework — see [`qb/README.md`](https://github.com/isndev/qb/blob/main/README.md) and the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/) docs for actors, `qb-io` async, and coroutines. **See also:** the module front door [`../README.md`](../README.md) for positioning, the build/feature matrix, and a 60-second quickstart.
 
 ## What this module is
 
@@ -90,5 +90,5 @@ If you only want an async HTTP client, read 01, 02, and 14. If you are standing 
 ## See also
 
 - [`../README.md`](../README.md) — module positioning, build/feature matrix, quickstart.
-- [`qb/README.md`](https://github.com/isndev/cube/blob/c++23/README.md) — the actor framework these pages build on.
-- The qb framework [`readme/`](https://github.com/isndev/cube/tree/c++23/readme/) — actors, events, `qb-io` async, and coroutines.
+- [`qb/README.md`](https://github.com/isndev/qb/blob/main/README.md) — the actor framework these pages build on.
+- The qb framework [`readme/`](https://github.com/isndev/qb/tree/main/readme/) — actors, events, `qb-io` async, and coroutines.

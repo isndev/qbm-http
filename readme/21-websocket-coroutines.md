@@ -4,7 +4,7 @@
 
 Write a WebSocket conversation as a single straight-line coroutine — `co_await` the connect, each inbound frame, and the close handshake — instead of scattering the logic across CRTP `on(...)` callbacks.
 
-**Prerequisites:** [WebSocket](./20-websocket.md), [Asynchronous HTTP client](./14-async-http-client.md) (for the awaiter / `run_sync` model), and working knowledge of qb-io coroutines — see the qb [`readme/`](https://github.com/isndev/cube/tree/c++23/readme/) docs. **See also:** [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) for `wss://`.
+**Prerequisites:** [WebSocket](./20-websocket.md), [Asynchronous HTTP client](./14-async-http-client.md) (for the awaiter / `run_sync` model), and working knowledge of qb-io coroutines — see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/) docs. **See also:** [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) for `wss://`.
 
 The coroutine API in `<http/ws.h>` is a thin, allocation-light layer over the same RFC 6455 framing engine that drives the callback `WebSocket<T>` client and `ws::protocol` server. It exists for the common case where a WebSocket exchange is naturally sequential — connect, authenticate, subscribe, wait for frames, reply, close — and reads more clearly as a loop than as a handler bag. Resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the listener thread that owns the socket; the single-threaded qb-io model is preserved end to end.
 

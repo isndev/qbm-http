@@ -2,8 +2,8 @@
 #
 # doc-lint.sh — documentation anti-drift guard for the qbm-http module.
 #
-# Fails on: retired tokens in docs, broken internal Markdown links, missing module
-# governance files. Warns on: pages missing a "Verified-against" marker.
+# Fails on: retired tokens in docs, broken internal Markdown links, cross-repo URLs naming
+# a dead repo or a non-released ref, missing module governance files. Warns on: pages missing a "Verified-against" marker.
 # Module-wide policy (versioning, support) lives in the qb framework; this guard
 # checks only qbm-http's own Markdown (README.md, readme/**, CHANGELOG/SECURITY/CONTRIBUTING).
 #
@@ -95,6 +95,38 @@ while read -r f; do
 done < <(doc_files)
 broken=0; [ -f /tmp/qbmhttp-doclint-broken.$$ ] && { broken=$(wc -l < /tmp/qbmhttp-doclint-broken.$$); rm -f /tmp/qbmhttp-doclint-broken.$$; }
 [ "${broken:-0}" -eq 0 ] && grn "  all internal links resolve" || fail=1
+
+echo "== 2b. Cross-repo URL check (repo name + git ref of absolute isndev links) =="
+# Section 2 deliberately skips http(s) targets, so a link into a SIBLING repo was validated by
+# nothing at all. That blind spot shipped 35 dead URLs across the doc books: they named
+# github.com/isndev/cube -- the repo's old PRIVATE name, since published as isndev/qb -- on
+# branch c++23, which no longer exists. Both halves 404 for a reader of the released docs, and
+# four green doc-lint runs never saw them.
+#
+# The check stays offline (no network, no API rate limit, a few milliseconds): it does not
+# resolve the URL, it validates the only two parts that rot -- the repository name and the git
+# ref. Docs must cite the RELEASED line, so `main` or a 40-hex permalink; a link into a moving
+# development branch is rejected because it silently rots again on the next merge.
+ISNDEV_REPOS='qb qb-dev qb-ev qb-examples qbm-http qbm-pgsql qbm-redis'
+while read -r f; do
+  grep -oE 'https://github\.com/isndev/[A-Za-z0-9_.+-]+(/(blob|tree|raw)/[^/)" ]+)?' "$f" 2>/dev/null \
+    | while IFS= read -r u; do
+    repo="$(printf '%s\n' "$u" | cut -d/ -f5)"; repo="${repo%.git}"
+    ref="$(printf '%s\n' "$u" | cut -d/ -f7)"
+    case " ${ISNDEV_REPOS} " in
+      *" ${repo} "*) ;;
+      *) red "  ${f}: unknown repository 'isndev/${repo}' -> ${u}"; echo X >> /tmp/qbmhttp-doclint-badurl.$$ ;;
+    esac
+    [ -z "${ref}" ] && continue
+    [ "${ref}" = "main" ] && continue
+    if [ "${#ref}" -eq 40 ]; then
+      case "${ref}" in *[!0-9a-f]*) ;; *) continue ;; esac    # 40-hex commit permalink: pinned, fine
+    fi
+    red "  ${f}: ref '${ref}' is not main or a permalink -> ${u}"; echo X >> /tmp/qbmhttp-doclint-badurl.$$
+  done
+done < <(doc_files)
+badurl=0; [ -f /tmp/qbmhttp-doclint-badurl.$$ ] && { badurl=$(wc -l < /tmp/qbmhttp-doclint-badurl.$$); rm -f /tmp/qbmhttp-doclint-badurl.$$; }
+[ "${badurl:-0}" -eq 0 ] && grn "  all cross-repo URLs name a live repo on main" || fail=1
 
 echo "== 3. Module governance presence =="
 missing=0

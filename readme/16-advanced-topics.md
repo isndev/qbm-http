@@ -4,7 +4,7 @@
 
 How qbm-http handles chunked bodies, persistent connections and protocol upgrades, where the performance levers are, and how an HTTP server composes with the rest of your qb actor system.
 
-**Prerequisites:** [Core HTTP concepts](./01-core-concepts.md), [The request context](./10-request-context.md), the qb framework [`readme/`](https://github.com/isndev/cube/tree/c++23/readme/) (actors, `qb-io` async). — **See also:** [HTTP message body deep dive](./02-body-deep-dive.md), [Custom middleware](./09-custom-middleware.md), [HTTP/2 protocol specifics](./17-http2-protocol.md), [WebSocket](./20-websocket.md).
+**Prerequisites:** [Core HTTP concepts](./01-core-concepts.md), [The request context](./10-request-context.md), the qb framework [`readme/`](https://github.com/isndev/qb/tree/main/readme/) (actors, `qb-io` async). — **See also:** [HTTP message body deep dive](./02-body-deep-dive.md), [Custom middleware](./09-custom-middleware.md), [HTTP/2 protocol specifics](./17-http2-protocol.md), [WebSocket](./20-websocket.md).
 
 ## Summary
 
@@ -66,7 +66,7 @@ The session also normalizes the outgoing `Connection` header for you: it adds `C
 
 **Pipelining.** While a response is in flight, further requests on the same connection queue rather than interleave. The queue is bounded by `session::max_pipelined_requests(std::size_t)` (default 128). Exceeding the cap disconnects the connection with `DisconnectedReason::ByProtocolError` (`qbm/http/1.1/http.h:137,255-262`). Each queued request is routed in order once the active context finishes (`start_next_request_if_possible`), so handlers for one connection never run concurrently — they are serialized on the session's I/O thread.
 
-**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/1.1/http.h:426`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/cube/tree/c++23/readme/)).
+**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/1.1/http.h:426`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/)).
 
 **HEAD requests.** The session strips the response body for a `HEAD` request while preserving `Content-Length`, so a `HEAD` reply reports the size the corresponding `GET` would return without sending the bytes (`qbm/http/1.1/http.h:162-167`).
 
@@ -195,7 +195,7 @@ void on(WorkDone& ev) {
 }
 ```
 
-Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the context outlives the round-trip because every party holds a reference, and only the server actor's core ever calls `complete()` on it. See the qb [`readme/`](https://github.com/isndev/cube/tree/c++23/readme/) for actor referencing, events, and `push`.
+Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the context outlives the round-trip because every party holds a reference, and only the server actor's core ever calls `complete()` on it. See the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/) for actor referencing, events, and `push`.
 
 **Drive the client from any actor.** The one-shot `GET`/`POST`/`REQUEST` helpers and the persistent `qb::http1::Client` run on whatever core their actor lives on, using that core's event loop. An actor can be both an HTTP server and an HTTP client — handle inbound requests and fan out to upstream services from the same actor — because both sit on the one qb-io loop. See [Asynchronous HTTP client](./14-async-http-client.md).
 
@@ -226,7 +226,7 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 - [Asynchronous HTTP client](./14-async-http-client.md) — callback and coroutine clients, the persistent `http1::Client`.
 - [HTTP/2 protocol specifics](./17-http2-protocol.md) — streams, flow control, and DATA-frame streaming.
 - [WebSocket](./20-websocket.md) and [WebSocket coroutines](./21-websocket-coroutines.md) — the upgrade path and bidirectional framing.
-- The qb framework [`readme/`](https://github.com/isndev/cube/tree/c++23/readme/) — actors, events, `push`, `qb-io` async, and coroutines.
+- The qb framework [`readme/`](https://github.com/isndev/qb/tree/main/readme/) — actors, events, `push`, `qb-io` async, and coroutines.
 
 ---
 
