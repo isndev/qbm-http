@@ -2030,7 +2030,7 @@ private:
         //
         // The hazard is the re-entrant ERASE of this very stream, NOT a container relocation:
         // `qb::unordered_map` is `ska::unordered_map`, which chains (see
-        // qb/modules/ska_hash/unordered_map.hpp) — `rehash()` re-links the existing nodes into a
+        // qb/include/qb/vendor/ska_hash/unordered_map.hpp) — `rehash()` re-links the existing nodes into a
         // fresh bucket array and frees only that array, so value references survive a rehash, and
         // `erase()` unlinks and frees exactly one node, leaving other references intact. What does
         // NOT survive is a reference to a stream the handler closed, and iterators, which hold a
