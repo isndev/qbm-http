@@ -1,7 +1,7 @@
 #
 # qbm-http - dependency recreation for find_package(qbm-http) consumers.
 #
-# Configured by _qb_module_install_rules() into <libdir>/cmake/qbm-http/qbm-httpDependencies.cmake
+# Configured by qb_register_module() into <libdir>/cmake/qbm-http/qbm-httpDependencies.cmake
 # and included by qbm-httpConfig.cmake BEFORE qbm-httpTargets.cmake.
 #
 # Why this file has to exist: when HTTP/3 is compiled in, qbm-http links Nghttp3::nghttp3
