@@ -7,9 +7,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-Tracks changes on the development branch not yet part of a tagged release.
+Tracks changes on the development branch not yet part of a tagged release. The module version is
+**3.0.0**, in lockstep with the qb framework; see the qb CHANGELOG for what makes that release major.
 
-_Nothing yet._
+### Changed
+
+- **`project(qbm-http VERSION ...)` is now `3.0.0`**, tracking `QB_FRAMEWORK_VERSION`. It had been
+  left at `2.6.0` while the framework moved on. The module is not standalone-configurable (it calls
+  `qb_register_module` / `qb_add_test`, which an installed qb does not ship), so its version can only
+  ever mean "the qb this was built against" — and the structural breaks queued for 3.0.0 land hardest
+  in the modules, where a package still claiming `2.6.0` would be actively misleading.
+- **`scripts/doc-lint.sh` now validates the *value* of the `Verified-against:` markers**, not just
+  their presence. It previously checked only that the marker existed, which is how every page in this
+  module sat at `qb 2.6.0` across two version bumps unnoticed. The expected version is read from
+  `project(qbm-http VERSION ...)` — the one authoritative version available when this repo is checked
+  out alone, as it is in its own CI — and cross-checked against `QB_FRAMEWORK_VERSION` whenever a qb
+  tree is reachable. A version it cannot determine is a hard stop, never a skip.
+- **The default outbound `User-Agent` is derived from the framework version.** It was the hard-coded
+  literal `"qb/2.6.0"` in two separate places (`1.1/client.cpp`, `1.1/http.h`), so every request from
+  a post-2.6.0 build advertised a version that was simply wrong. It is now
+  `qb::http::default_user_agent` (`headers.h`), composed at compile time from `QB_VERSION`, so it
+  cannot drift again; `headers.h` hard-`#error`s if `QB_VERSION` is absent. Callers that set their own
+  `User-Agent` are still never overridden.
 
 ## [2.6.0] - 2026-06-29
 
