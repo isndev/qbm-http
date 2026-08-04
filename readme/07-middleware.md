@@ -113,7 +113,7 @@ Request
   -> route handler
 ```
 
-Compilation happens in `router.compile()` (or lazily on the first `route()` call). Any change to routes or middleware resets the compiled flag, so re-registering after serving requires a recompile. <!-- src: qbm/http/src/qbm/http/routing/router.tpp:281-283; router.h:238 -->
+Compilation happens in `router.compile()` (or lazily on the first `route()` call). Any change to routes or middleware resets the compiled flag, so re-registering after serving requires a recompile. <!-- src: qbm/http/src/qbm/http/routing/router.h:613-615, 238 -->
 
 ### Short-circuiting: `AsyncTaskResult`
 

@@ -19,6 +19,24 @@ Tracks changes on the development branch not yet part of a tagged release. The m
   (`qb/scripts/check-installed-headers.sh`), which compiles every installed header **alone** against
   an installed prefix; the superproject's `package-consume.yml` runs it over the whole `qbm` tree.
 
+### Removed
+
+- **BREAKING — `qbm/http/routing/router.tpp` no longer exists.** Its 39 template definitions moved
+  verbatim to the tail of `routing/router.h`, at exactly the position the `#include "./router.tpp"`
+  on that file's last line used to splice them into; the preprocessed token stream of `router.h` is
+  byte-identical, which is how the move was verified. Nothing is lost and no definition changed.
+
+  This only breaks a consumer who included the fragment **directly** — `#include
+  <qbm/http/routing/router.tpp>`. That was never a supported spelling (the file opened
+  `namespace qb::http` and defined members of a class it did not declare, so it could not compile
+  alone; qb's installed-header gate carried it as a named "by-design fragment" exclusion). Replace
+  it with `#include <qbm/http/routing/router.h>`, or with the `<qbm/http/http.h>` umbrella.
+
+  With this the tree contains zero `.tpp` — qb retired its own four in the same release. The
+  reason is the one recorded in the qb CHANGELOG: a file included by both the library TU and every
+  consumer TU is one non-template line away from a duplicate symbol, and a separate file cannot
+  supply what such definitions actually need, which is a *position*.
+
 ### Changed
 
 - **Logging call sites use qb's prefixed `QB_LOG_*` macros** (1 sites). qb 3.0.0 renamed
