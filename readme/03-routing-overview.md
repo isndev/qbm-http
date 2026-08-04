@@ -91,7 +91,7 @@ The assembled order for any endpoint is **parent middleware → this node's midd
 
 Calling `compile()` again recompiles from scratch — it is idempotent and safe to re-run after adding routes.
 
-<!-- src: qbm/http/src/qbm/http/routing/router.h:290,302; router.tpp:271-287 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:290,302,603-619 -->
 
 ### Request dispatch
 
