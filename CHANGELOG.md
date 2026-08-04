@@ -10,6 +10,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 Tracks changes on the development branch not yet part of a tagged release. The module version is
 **3.0.0**, in lockstep with the qb framework; see the qb CHANGELOG for what makes that release major.
 
+### Fixed
+
+- **`qbm/http/chunk.h` was not self-contained.** It specialises
+  `qb::allocator::pipe<char>::put<qb::http::Chunk>` while including only `<cstddef>`, so a TU whose
+  first http include was this header failed on `no template named 'pipe'`. It now includes
+  `<qb/system/allocator/pipe.h>`. Found by qb's new installed-header gate
+  (`qb/scripts/check-installed-headers.sh`), which compiles every installed header **alone** against
+  an installed prefix; the superproject's `package-consume.yml` runs it over the whole `qbm` tree.
+
 ### Changed
 
 - **Logging call sites use qb's prefixed `QB_LOG_*` macros** (1 sites). qb 3.0.0 renamed

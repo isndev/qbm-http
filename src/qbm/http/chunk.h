@@ -13,7 +13,8 @@
  */
 #pragma once
 
-#include <cstddef> // For std::size_t
+#include <cstddef>                      // For std::size_t
+#include <qb/system/allocator/pipe.h>    // qb::allocator::pipe<char> — specialised below
 
 namespace qb::http {
 /**
