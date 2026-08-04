@@ -389,7 +389,7 @@ public:
                     // once rather than once-per-racing-core.
                     static std::atomic<bool> warned_wildcard_with_credentials{false};
                     if (!warned_wildcard_with_credentials.exchange(true, std::memory_order_relaxed)) {
-                        LOG_WARN("[qbm][http][cors] origins(\"*\") combined with credentials(Yes): the requesting Origin is "
+                        QB_LOG_WARN("[qbm][http][cors] origins(\"*\") combined with credentials(Yes): the requesting Origin is "
                                  "reflected and Access-Control-Allow-Credentials is sent, so ANY site can read authenticated "
                                  "responses from this server. Restrict origins, or set credentials(No).");
                     }

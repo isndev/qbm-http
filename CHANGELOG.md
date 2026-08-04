@@ -12,6 +12,14 @@ Tracks changes on the development branch not yet part of a tagged release. The m
 
 ### Changed
 
+- **Logging call sites use qb's prefixed `QB_LOG_*` macros** (1 sites). qb 3.0.0 renamed
+  `LOG_DEBUG` / `LOG_VERB` / `LOG_INFO` / `LOG_WARN` / `LOG_CRIT` to `QB_LOG_*` because the
+  unprefixed spellings — three of which are also POSIX `<syslog.h>` names — reached every consumer
+  of this module's umbrella header and silently replaced a consumer's own. qb still defines the
+  unprefixed names as `#ifndef`-guarded aliases, and that guard is exactly why these call sites had
+  to move: a consumer who defines `LOG_INFO` first now keeps their definition, and this module's
+  headers would otherwise have started logging through *it*.
+
 - **BREAKING — the public include prefix is now `<qbm/http/...>`** (was `<http/...>`). Every consumer
   edits its `#include` lines: `#include <http/http.h>` becomes `#include <qbm/http/http.h>`. The CMake
   target is unchanged (`qbm::http`), and so is the installed location `<prefix>/include/qbm/http/`.

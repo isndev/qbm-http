@@ -27,7 +27,7 @@
 // The raw_socket harness below talks to the server over a plain TCP socket.
 // Use qb-io's cross-platform socket layer instead of the POSIX headers directly:
 // <qb/io/system/sys__socket.h> pulls in the right platform socket headers, the
-// `socket_type` alias and the `closesocket()` shim, so the harness builds on POSIX
+// `socket_type` alias and the `QB_CLOSESOCKET()` shim, so the harness builds on POSIX
 // and Windows alike. Winsock is initialised by qb-io's global ws2_32 guard, which
 // is linked in here because the test drives a qb HTTP server (qb-io sockets).
 #include <qb/io/system/sys__socket.h>
@@ -293,7 +293,7 @@ public:
 
     ~raw_socket() {
         if (_fd != qb::io::inet::invalid_socket) {
-            closesocket(_fd);
+            QB_CLOSESOCKET(_fd);
         }
     }
 
