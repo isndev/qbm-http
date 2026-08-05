@@ -261,7 +261,7 @@ There is one more asymmetry worth knowing: a router-level lifecycle hook is the 
 
 ### Conditional middleware
 
-You do not need a hand-rolled `if` inside a middleware to run one branch per request. `qb::http::conditional_middleware<Session>(predicate, if_mw[, else_mw])` wraps a predicate over the context and dispatches to one of two child middlewares; when the predicate is false and there is no else branch, the chain simply continues. The predicate is `std::function<bool(const std::shared_ptr<Context<Session>>&)>`. <!-- src: qbm/http/src/qbm/http/middleware/conditional.h:51, 146-153 -->
+You do not need a hand-rolled `if` inside a middleware to run one branch per request. `qb::http::conditional_middleware<Session>(predicate, if_middleware[, else_middleware])` wraps a predicate over the context and dispatches to one of two child middlewares; when the predicate is false and there is no else branch, the chain simply continues. The predicate is `std::function<bool(const std::shared_ptr<Context<Session>>&)>`. <!-- src: qbm/http/src/qbm/http/middleware/conditional.h:51, 146-153 -->
 
 ```cpp
 #include <qbm/http/http.h>

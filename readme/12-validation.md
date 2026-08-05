@@ -96,11 +96,11 @@ The concrete rules below map one-to-one onto JSON-Schema keywords. You rarely in
 | `PatternRule(std::string regex)` | `"pattern"` | strings — full `std::regex_match` |
 | `MinimumRule(double, bool exclusive=false)` | `"minimum"` / `"exclusiveMinimum"` | numbers |
 | `MaximumRule(double, bool exclusive=false)` | `"maximum"` / `"exclusiveMaximum"` | numbers |
-| `EnumRule(qb::json allowed_array)` | `"enum"` | any — membership in a set |
+| `EnumRule(qb::json allowed_values)` | `"enum"` | any — membership in a set |
 | `MinItemsRule(size_t)` / `MaxItemsRule(size_t)` | `"minItems"` / `"maxItems"` | arrays |
 | `UniqueItemsRule()` | `"uniqueItems"` | arrays |
 | `MinPropertiesRule(size_t)` / `MaxPropertiesRule(size_t)` | `"minProperties"` / `"maxProperties"` | objects |
-| `PropertyNamesRule(const qb::json& name_schema)` | `"propertyNames"` | objects — validates keys against a sub-schema |
+| `PropertyNamesRule(const qb::json& name_schema_definition)` | `"propertyNames"` | objects — validates keys against a sub-schema |
 | `CustomRule(CustomValidateFn, std::string name)` | your name | any — arbitrary lambda |
 
 `DataType` is the kind enum used by both rules and parameter coercion: `STRING`, `INTEGER`, `NUMBER`, `BOOLEAN`, `OBJECT`, `ARRAY`, `NUL`, `ANY`.
