@@ -51,7 +51,7 @@ sequenceDiagram
 ```
 - **Masking is directional and mandatory.** Every client-to-server frame (control frames included) must be masked; every server-to-client frame must not be. The framer enforces both directions: a server that receives an unmasked frame, or a client that receives a masked one, fails the connection with `ProtocolError`. On the send side `WebSocket::operator<<` forces `masked = true` on outbound frames regardless of what you set. <!-- src: src/qbm/http/ws/ws.h:654-666, src/qbm/http/ws/ws.h:1480-1483 -->
 - **Reassembly is bounded by default.** A message reassembled from continuation fragments is capped at `qb::http::protocol_limits::MAX_BODY_SIZE`; a peer streaming unbounded fragments is cut off with `CloseStatus::MessageTooBig`. Call `set_max_payload_size(0)` only deliberately to lift the cap. <!-- src: src/qbm/http/ws/ws.h:437, src/qbm/http/ws/ws.h:555-559, src/qbm/http/ws/ws.h:610-613 -->
-- **Ping keepalive is a `qb::duration`.** `set_ping_interval(qb::duration)` arms a timer on the client; on each tick it sends a `MessagePing`, and the framer auto-replies to inbound pings with a same-payload `MessagePong`. A zero interval disables it. <!-- src: src/qbm/http/ws/ws.h:1187-1189, src/qbm/http/ws/ws.h:522-528, src/qbm/http/ws/ws.h:1460-1465 -->
+- **Ping keepalive is a `qb::duration`.** `set_ping_interval(qb::duration)` arms a timer on the client; on each tick it sends a `MessagePing`, and the framer auto-replies to inbound pings with a same-payload `MessagePong`. A zero interval disables it. <!-- src: src/qbm/http/ws/ws.h:1198-1200, src/qbm/http/ws/ws.h:522-528, src/qbm/http/ws/ws.h:1460-1465 -->
 
 ## Server: upgrade an existing HTTP session
 
@@ -107,7 +107,7 @@ public:
 
 `switch_protocol` has two server overloads:
 
-- **`switch_protocol<ws_protocol>(*this, request)`** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the one-call form shown above. <!-- src: src/qbm/http/ws/ws.h:952-967 -->
+- **`switch_protocol<ws_protocol>(*this, request)`** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the one-call form shown above. <!-- src: src/qbm/http/ws/ws.h:957-964 -->
 - **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: src/qbm/http/ws/ws.h:969-978, examples/qbm/ws/01_chat_server.cpp:537-555 -->
 
 `switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/src/qb/io/async/io.h:862-873 -->
@@ -211,11 +211,11 @@ Client ws;
 ws.connect("ws://localhost:9000/chat");        // qb::io::uri; "wss://" for TLS
 ```
 
-The `connect(...)` signature is `connect(const qb::io::uri &remote, qb::duration timeout = qb::duration::zero(), bool verify_peer = true)`. It establishes the TCP (or TLS) connection, sends the upgrade `GET`, and verifies the `101` before firing `connected`. A nonzero `timeout` bounds the connect; `verify_peer` controls TLS certificate verification on the secure transport. <!-- src: src/qbm/http/ws/ws.h:1266 -->
+The `connect(...)` signature is `connect(const qb::io::uri &remote, qb::duration timeout = qb::duration::zero(), bool verify_peer = true)`. It establishes the TCP (or TLS) connection, sends the upgrade `GET`, and verifies the `101` before firing `connected`. A nonzero `timeout` bounds the connect; `verify_peer` controls TLS certificate verification on the secure transport. <!-- src: src/qbm/http/ws/ws.h:1277 -->
 
 ## Client: the callback form
 
-For compact, stateless clients, use `qb::http::ws::client` (or `client_secure` for WSS) and register lambdas. Each `on_*` returns `*this` so the calls chain. <!-- src: src/qbm/http/ws/ws.h:1512-1699 -->
+For compact, stateless clients, use `qb::http::ws::client` (or `client_secure` for WSS) and register lambdas. Each `on_*` returns `*this` so the calls chain. <!-- src: src/qbm/http/ws/ws.h:1709-1710 -->
 
 <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:222-258 -->
 ```cpp

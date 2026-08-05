@@ -83,7 +83,7 @@ router.use(qb::http::cors_middleware<MySession>(opts));
 |---|---|
 | `cors_middleware<S>(opts = CorsOptions::permissive())` | from explicit options |
 | `cors_dev_middleware<S>()` | `CorsOptions::permissive()` — all origins, all methods, credentials allowed; development only |
-| `cors_secure_middleware<S>(allowed_origins)` | `CorsOptions::secure(...)` — listed origins, `{GET,POST,OPTIONS}`, credentials off, 1 h preflight cache |
+| `cors_secure_middleware<S>(allowed_origins_list)` | `CorsOptions::secure(...)` — listed origins, `{GET,POST,OPTIONS}`, credentials off, 1 h preflight cache |
 
 `CorsOptions::permissive()` sets `origins({"*"})` *and* `credentials(Yes)`. That combination is rejected at response time by user agents and is intended for local development only; reach for `cors_secure_middleware` in production.
 
@@ -327,7 +327,7 @@ router.use(auth);
 |---|---|
 | `auth_middleware<S>(opts = auth::Options{})` | general case from options |
 | `jwt_auth_middleware<S>(secret, algorithm = "HS256")` | JWT-configured; `HS*` uses `secret_key`, otherwise `public_key` |
-| `role_auth_middleware<S>(roles, require_all = false)` | role check assuming a user is already in context; sets `auth_required(true)` |
+| `role_auth_middleware<S>(roles, require_all = false)` | role check assuming a user is already in context; sets `with_auth_required(true)` |
 | `optional_auth_middleware<S>(opts = auth::Options{})` | authentication optional: missing credentials pass, but malformed or invalid credentials are still rejected |
 
 ## Security headers
@@ -373,7 +373,7 @@ Four more middleware ship for flow control and instrumentation. They take callab
 
 | Middleware | Header · Class | Factory | Purpose |
 |---|---|---|---|
-| Conditional | `<qbm/http/middleware/conditional.h>` · `ConditionalMiddleware<S>` | `conditional_middleware<S>(predicate, if_mw, else_mw = nullptr)` | Run one of two child middleware on a `bool(Context)` predicate — the `if_` branch when true, the optional `else_` branch when false (continue otherwise). Throws `std::invalid_argument` if the predicate or `if_` middleware is null. |
+| Conditional | `<qbm/http/middleware/conditional.h>` · `ConditionalMiddleware<S>` | `conditional_middleware<S>(predicate, if_middleware, else_middleware = nullptr)` | Run one of two child middleware on a `bool(Context)` predicate — the `if_middleware` branch when true, the optional `else_middleware` branch when false (continue otherwise). Throws `std::invalid_argument` if the predicate or `if_middleware` is null. |
 | Transform | `<qbm/http/middleware/transform.h>` · `TransformMiddleware<S>` | `transform_middleware<S>(request_transformer = nullptr)` | Apply a `RequestTransformer` to `ctx->request()` before the chain proceeds; a null transformer is a pass-through. |
 | Logging | `<qbm/http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
 | Error handling | `<qbm/http/middleware/error_handling.h>` · `ErrorHandlingMiddleware<S>` | `error_handling_middleware<S>(name = "ErrorHandlingMiddleware")` | Centralised error-to-response translation; register handlers for specific status codes / exception types with fluent setters. |
