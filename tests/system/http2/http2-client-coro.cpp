@@ -290,6 +290,14 @@ TEST_F(CoroH2ClientTest, PushRequestsBatchAwaiterYieldsOrderedResponses) {
 
 TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackExactlyOnce) {
     auto client = make_test_client();
+    // Connect BEFORE arming the timeout. The request timeout starts at push_request(), so on an
+    // unconnected client its budget has to cover the TCP connect, the TLS handshake and the
+    // HTTP/2 preface as well — and when it does not, the request times out while still PENDING
+    // and reports "Request timeout while pending" instead of the active-path "Request timeout"
+    // this case is named for. That is not hypothetical: under `ctest -j 4` on the
+    // `sanitize-thread` preset it failed 10 runs out of 10 with the machine busy, and passed on
+    // an idle one — a latent load-sensitivity, not a flake in the product.
+    ASSERT_TRUE(qb::http::run_sync(client->connect())) << "handshake failed before the timeout case could start";
     client->set_request_timeout(50ms);
 
     std::atomic<int>   callbacks{0};
@@ -323,6 +331,9 @@ TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackExactlyOnce) {
 
 TEST_F(CoroH2ClientTest, MultipleActiveRequestTimeoutsEachCompleteOnce) {
     auto client = make_test_client();
+    // Same reason as the case above: the handshake must not be inside the 50 ms budget, or these
+    // requests time out on the PENDING path and stop testing the active one.
+    ASSERT_TRUE(qb::http::run_sync(client->connect())) << "handshake failed before the timeout case could start";
     client->set_request_timeout(50ms);
 
     std::atomic<int>                callbacks{0};
