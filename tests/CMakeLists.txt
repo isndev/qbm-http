@@ -56,6 +56,26 @@ qhttp_test(unit utility-split  unit/utility/utility-split.cpp  EXTRA_LABELS util
 qhttp_test(unit utility-chars  unit/utility/utility-chars.cpp  EXTRA_LABELS utility)
 qhttp_test(unit uri-parse      unit/uri/uri-parse.cpp          EXTRA_LABELS uri)
 qhttp_test(unit http1-serialize-limits unit/http1/http1-serialize-limits.cpp EXTRA_LABELS http1)
+# The >100MB body-rejection path is the ONLY place `protocol_limits::MAX_BODY_SIZE` is enforced
+# rather than compared against a literal, and it shipped opt-in behind `QBM_HTTP_RUN_HUGE_BODY` with
+# no lane and no CI job setting it — a security limit nothing exercised is a limit nobody knows is
+# broken. Register the opt-in as its own ctest entry so a plain `ctest` runs it.
+#
+# Separate entry, not a default-on env var on the parent test, for two reasons: the two cases
+# allocate ~100 MiB each, so `ctest -LE huge-body` drops them on a memory-constrained runner without
+# touching the other 20 cases in the same binary; and the PASS/FAIL regexes below make it
+# non-vacuous. Without them an env var that failed to propagate, or a `--gtest_filter` that matched
+# nothing, would exit 0 and read as coverage — which is exactly how this path came to have none.
+if (TARGET qbm-http-test-unit-http1-serialize-limits)
+    add_test(NAME qbm-http-test-unit-http1-serialize-limits-huge-body
+             COMMAND qbm-http-test-unit-http1-serialize-limits --gtest_filter=*SerializeLimitsTest.BodyExceedingLimitIsRejected)
+    set_tests_properties(qbm-http-test-unit-http1-serialize-limits-huge-body PROPERTIES
+            ENVIRONMENT "QBM_HTTP_RUN_HUGE_BODY=1"
+            LABELS "module:qbm-http;tier:unit;http1;huge-body"
+            PASS_REGULAR_EXPRESSION "\\[  PASSED  \\] 2 tests"
+            FAIL_REGULAR_EXPRESSION "\\[  FAILED  \\]|SKIPPED"
+            TIMEOUT 300)
+endif ()
 qhttp_test(unit http1-parse-limits     unit/http1/http1-parse-limits.cpp     EXTRA_LABELS http1)
 qhttp_test(unit http1-request-smuggling unit/http1/http1-request-smuggling.cpp EXTRA_LABELS http1)
 qhttp_test(unit http1-serialization unit/http1/http1-serialization.cpp EXTRA_LABELS http1)

@@ -12,6 +12,18 @@ Tracks changes on the development branch not yet part of a tagged release. The m
 
 ### Fixed
 
+- **The >100MB body-rejection path was exercised by no lane and no CI job.**
+  `{Request,Response}SerializeLimitsTest.BodyExceedingLimitIsRejected` are the only cases that
+  *enforce* `protocol_limits::MAX_BODY_SIZE` rather than compare it to a literal, and both sat
+  behind `QBM_HTTP_RUN_HUGE_BODY`, which nothing set — so both silently reported `SKIPPED` inside a
+  binary ctest called `Passed`. A security limit nothing exercises is a limit nobody knows is
+  broken. `tests/CMakeLists.txt` now registers
+  `qbm-http-test-unit-http1-serialize-limits-huge-body`, a ctest entry that sets the variable and
+  filters to those two cases, so a plain `ctest` runs them; `ctest -LE huge-body` opts back out on a
+  memory-constrained runner without dropping the other cases in the same binary. It carries
+  PASS/FAIL regexes requiring `2 tests` to have run, because an env var that failed to propagate or
+  a filter that matched nothing would otherwise exit 0 and read as coverage — which is how this path
+  came to have none.
 - **Two installed HTTP/2 headers failed with a raw template diagnostic in an SSL-off install.**
   `qbm/http/2/client.h` names `qb::io::transport::stcp` in its base-clause with no `QB_HAS_SSL`
   guard anywhere in the file, so `#include`ing it (or `2/http2.h`, which pulls it in) directly

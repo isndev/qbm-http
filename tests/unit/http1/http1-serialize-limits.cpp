@@ -176,13 +176,16 @@ TEST_F(RequestSerializeLimitsTest, Body10MBSucceeds) {
     EXPECT_GT(pipe.size(), body_size);
 }
 
-// Real >100MB rejection path. Allocating ~100MB is expensive, so it is opt-in:
-// export QBM_HTTP_RUN_HUGE_BODY=1 to exercise it. When enabled, it proves
-// serialization throws std::length_error and clears the pipe (not just that the
-// constant equals a literal).
+// Real >100MB rejection path — the only case that enforces MAX_BODY_SIZE rather than comparing it
+// to a literal. Allocating ~100MB is expensive, so the case stays gated on QBM_HTTP_RUN_HUGE_BODY;
+// `tests/CMakeLists.txt` registers a dedicated ctest entry
+// (`qbm-http-test-unit-http1-serialize-limits-huge-body`) that sets it, so a plain `ctest` DOES run
+// this. `ctest -LE huge-body` opts back out. When enabled it proves serialization throws
+// std::length_error and clears the pipe.
 TEST_F(RequestSerializeLimitsTest, BodyExceedingLimitIsRejected) {
     if (const char *flag = std::getenv("QBM_HTTP_RUN_HUGE_BODY"); !flag || std::string(flag) == "0") {
-        GTEST_SKIP() << "set QBM_HTTP_RUN_HUGE_BODY=1 to exercise the >100MB body rejection path";
+        GTEST_SKIP() << "set QBM_HTTP_RUN_HUGE_BODY=1 to exercise the >100MB body rejection path "
+                        "(the ctest entry `qbm-http-test-unit-http1-serialize-limits-huge-body` does)";
     }
 
     Request req;
@@ -376,7 +379,8 @@ TEST_F(ResponseSerializeLimitsTest, NormalBodySizeSucceeds) {
 
 TEST_F(ResponseSerializeLimitsTest, BodyExceedingLimitIsRejected) {
     if (const char *flag = std::getenv("QBM_HTTP_RUN_HUGE_BODY"); !flag || std::string(flag) == "0") {
-        GTEST_SKIP() << "set QBM_HTTP_RUN_HUGE_BODY=1 to exercise the >100MB body rejection path";
+        GTEST_SKIP() << "set QBM_HTTP_RUN_HUGE_BODY=1 to exercise the >100MB body rejection path "
+                        "(the ctest entry `qbm-http-test-unit-http1-serialize-limits-huge-body` does)";
     }
 
     Response resp;
