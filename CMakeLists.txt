@@ -15,7 +15,36 @@
 #         limitations under the License.
 #
 
+cmake_minimum_required(VERSION 3.24)
+
 project(qbm-http VERSION 3.0.0)
+
+# This module is NOT standalone-configurable, and it says so here rather than dying on whichever
+# qb_* command it happens to reach first.
+#
+# qbm modules are built as part of the qb-dev superproject, which include()s qb's cmake/ helpers
+# before add_subdirectory()ing them: this file calls qb_status_message(), qb_register_module() and
+# qb_add_test(), and an INSTALLED qb ships none of those (they are development-time helpers, not
+# package content -- lib/cmake/qb/ carries only qbConfig, qbConfigVersion, qbTargets and the
+# Find modules). Pointing CMAKE_PREFIX_PATH at an installed qb therefore does not help, which is
+# exactly the mistake this guard is here to name: without it the first symptom is
+#     CMake Error at CMakeLists.txt:22 (qb_status_message):
+#       Unknown CMake command "qb_status_message".
+# which reads like a missing include, not like "wrong entry point".
+#
+# To build this module: configure the qb-dev superproject root. To get an INSTALLABLE one:
+#     cmake --preset package && cmake --build --preset package
+#     cmake --install build/presets/package --prefix <prefix>
+# then consume it with find_package(qbm-http CONFIG REQUIRED) -> qbm::http.
+if(NOT COMMAND qb_status_message)
+    message(FATAL_ERROR
+        "[qbm-http] this module cannot be configured on its own.\n"
+        "     It is built from the qb-dev superproject, which loads qb's CMake helpers "
+        "(qb_status_message / qb_register_module / qb_add_test) first; an installed qb does not "
+        "ship them, so CMAKE_PREFIX_PATH will not fix this.\n"
+        "     Configure the superproject root instead, or use its `package` preset to produce an "
+        "installable qbm-http and consume that with find_package(qbm-http CONFIG REQUIRED).")
+endif()
 
 # Check if qb framework is available
 if(NOT QB_FOUND)

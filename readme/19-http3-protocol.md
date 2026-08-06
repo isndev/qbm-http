@@ -38,7 +38,7 @@ HTTP/3 is optional and triple-gated. The entire `3/` tree — client, server, du
 | `QB_HAS_QUIC` (qb-io QUIC transport, itself requiring SSL) | `qb/cmake/qbDependencies.cmake` |
 | `libnghttp3` discoverable by `find_package(Nghttp3 QUIET)` | `qbm/http/cmake/FindNghttp3.cmake` |
 
-<!-- src: qbm/http/CMakeLists.txt:55-77,147-149; qbm/http/cmake/FindNghttp3.cmake:23-60 -->
+<!-- src: qbm/http/CMakeLists.txt:84-106,176-178; qbm/http/cmake/FindNghttp3.cmake:23-60 -->
 
 Detection lives in one place: `qbm/http/cmake/FindNghttp3.cmake`, which the module appends to `CMAKE_MODULE_PATH` and *also* installs, so `find_package(qbm-http)` re-runs the exact same module. It consults `pkg-config` for hints only, then resolves the header and the library with `find_path` / `find_library` — so a `libnghttp3` installed without a `.pc` file is still found — and publishes an `UNKNOWN IMPORTED` target `Nghttp3::nghttp3` carrying the absolute library path. That absolute path is what survives export intact; the link *directories* an inline `pkg_check_modules` target would carry do not.
 

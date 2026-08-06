@@ -34,6 +34,19 @@
  */
 #pragma once
 
+// HTTP/2 is TLS-only here: qb::http2::Client derives from
+// qb::io::async::tcp::client<Client, qb::io::transport::stcp>, and `stcp` -- the SSL/TLS
+// transport -- only exists when qb was built with OpenSSL. Without this guard an SSL-off build
+// that includes this header DIRECTLY got a raw template diagnostic in the middle of a base-clause,
+//     2/client.h:144:68: error: no member named 'stcp' in namespace 'qb::io::transport'
+// naming neither SSL nor HTTP/2. It never fired through the umbrella (qbm/http/http.h wraps
+// ./2/http2.h in #ifdef QB_HAS_SSL) which is why the whole SSL-off consumer suite stayed green;
+// the installed-header sweep is what reaches it. Eleven sibling headers already self-diagnose
+// this way -- ws/ws.h, auth.h, the HTTP/3 set -- and these two were the exceptions.
+#ifndef QB_HAS_SSL
+#error "HTTP/2 requires OpenSSL crypto library (qb::io::transport::stcp)"
+#endif
+
 #include <chrono>
 #include <deque>
 #include <functional>

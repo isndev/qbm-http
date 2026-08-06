@@ -23,7 +23,7 @@ This module is a **compiled library**, not header-only — the parser templates 
 
 `Parser` wraps **llhttp**, the parser that powers Node.js. Its C sources are vendored under `qbm/http/not-qb/llhttp` and built as a `STATIC` library target named `llhttp`; that target has **no public include directory**. Its single public header lives with the module's own headers, at `qbm/http/src/qbm/http/vendor/llhttp.h`.
 
-<!-- src: qbm/http/CMakeLists.txt:35; qbm/http/not-qb/llhttp/CMakeLists.txt:3,29 -->
+<!-- src: qbm/http/CMakeLists.txt:64; qbm/http/not-qb/llhttp/CMakeLists.txt:3,29 -->
 
 ```cmake
 # qbm/http/CMakeLists.txt — llhttp is a build dependency of qbm-http,

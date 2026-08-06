@@ -12,7 +12,7 @@ TLS is not bolted onto qbm-http; it is the qb-io secure transport layer (`qb::io
 
 HTTPS, secure WebSocket (`wss://`), HTTP/2, HTTP/3, and JWT/auth are all **compiled only when the framework is built with OpenSSL**. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<qbm/http/http.h>` resolve the same way in your code as in the module.
 
-<!-- src: qbm/http/CMakeLists.txt:45-53; qbm/http/src/qbm/http/http.h:45-48 -->
+<!-- src: qbm/http/CMakeLists.txt:74-82; qbm/http/src/qbm/http/http.h:45-48 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -160,7 +160,7 @@ The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the conn
 
 HTTP/2 in qbm-http is **TLS-only with ALPN** — there is no plaintext `h2c`. `qb::http2::Server::listen` mirrors the HTTP/1.1 overload but advertises `{"h2", "http/1.1"}`, so a client that negotiates `h2` gets HTTP/2 and one that does not falls back to HTTP/1.1 on the same port.
 
-<!-- src: qbm/http/src/qbm/http/2/http2.h:491-500 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:499-508 -->
 ```cpp
 #include <qbm/http/http.h>   // pulls in <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
@@ -235,7 +235,7 @@ client->connect([client](bool ok, const std::string &err) {
 
 `qb::http2::Client` is HTTPS-only — `make_client` requires an `https://` base URI and the client offers **only** `{"h2"}` in ALPN, failing the connection if the server does not negotiate `h2`. It defaults `verify_peer` to `true`; call `set_verify_peer(false)` before `connect()` for trusted self-signed servers.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:176, 331 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:189, 331 -->
 ```cpp
 #include <qbm/http/http.h>
 
