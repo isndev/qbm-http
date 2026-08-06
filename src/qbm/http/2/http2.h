@@ -33,6 +33,14 @@
  * @ingroup Http
  */
 #pragma once
+
+// HTTP/2 here is TLS-only -- see the note in ./client.h, which this header pulls in. Guarding
+// both, rather than only the one that names qb::io::transport::stcp, so that a direct
+// #include of EITHER spelling self-diagnoses instead of failing inside a base-clause.
+#ifndef QB_HAS_SSL
+#error "HTTP/2 requires OpenSSL crypto library (qb::io::transport::stcp)"
+#endif
+
 #include <filesystem>
 #include <limits>
 #include <qb/io/protocol/handshake.h>

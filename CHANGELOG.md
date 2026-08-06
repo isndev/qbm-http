@@ -12,6 +12,25 @@ Tracks changes on the development branch not yet part of a tagged release. The m
 
 ### Fixed
 
+- **Two installed HTTP/2 headers failed with a raw template diagnostic in an SSL-off install.**
+  `qbm/http/2/client.h` names `qb::io::transport::stcp` in its base-clause with no `QB_HAS_SSL`
+  guard anywhere in the file, so `#include`ing it (or `2/http2.h`, which pulls it in) directly
+  against an SSL-off prefix produced
+  `error: no member named 'stcp' in namespace 'qb::io::transport'` — naming neither SSL nor
+  HTTP/2. It never fired through the umbrella, because `qbm/http/http.h` already wraps both in
+  `#ifdef QB_HAS_SSL`; the installed-header sweep is what reaches them. Eleven sibling headers
+  already self-diagnose with an `#error` (`ws/ws.h`, `auth.h`, the HTTP/3 set) — these two were the
+  exceptions, and now match.
+- **`CMakeLists.txt` had no `cmake_minimum_required()`, and a standalone configure died on an
+  unhelpful error.** CMake reported `No cmake_minimum_required command is present` alongside
+  `Unknown CMake command "qb_status_message"` — which reads like a missing include rather than
+  "wrong entry point". This module is built from the qb-dev superproject, which loads qb's CMake
+  helpers first; an *installed* qb ships none of them (`lib/cmake/qb/` carries only `qbConfig`,
+  `qbConfigVersion`, `qbTargets` and the `Find` modules), so pointing `CMAKE_PREFIX_PATH` at one
+  does not help — the exact mistake the old error invited. There is now a
+  `cmake_minimum_required(VERSION 3.24)` and a guard that names the constraint and points at the
+  superproject root and the `package` preset.
+
 - **`qbm/http/chunk.h` was not self-contained.** It specialises
   `qb::allocator::pipe<char>::put<qb::http::Chunk>` while including only `<cstddef>`, so a TU whose
   first http include was this header failed on `no template named 'pipe'`. It now includes

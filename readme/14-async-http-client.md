@@ -280,7 +280,7 @@ HTTP/2 is TLS-only with ALPN. The client advertises only `h2` and fails the conn
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:83-87,224-364,523 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:96-100,237-377,536 -->
 ```cpp
 namespace qb::http2 {
     struct ConnectResult {
