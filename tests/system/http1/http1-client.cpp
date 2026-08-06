@@ -43,11 +43,13 @@ using qb::http::test::ServerThread;
 namespace {
 
 // Drain the parent loop briefly so a Client's deferred self-guard release
-// (Client::hold_through_current_tick's ~1us callback) fires. A test that stops the loop
-// synchronously inside a user callback (run_sync / pump_until returns the instant the
-// awaited result is set) otherwise leaves _callback_self_guard holding the Client and the
-// connection's io watcher registered — leaking the Client + connection. Mirrors the drain
-// already used in DestroyingClientDuringConnectDoesNotLeaveDanglingCallback.
+// (Client::hold_through_current_tick's tail-of-turn defer) fires, and so the connection's
+// io watcher is unregistered. A test that stops the loop synchronously inside a user
+// callback (run_sync / pump_until returns the instant the awaited result is set) otherwise
+// leaves both queued. The self-hold itself is no longer at risk — it is owned by the
+// deferred closure, so dropping the queue releases it (see ClientIsReleasedWhenItsLoopEnds
+// WithoutAnotherTurn) — but draining is still the tidy way to let the turn finish. Mirrors
+// the drain already used in DestroyingClientDuringConnectDoesNotLeaveDanglingCallback.
 inline void
 drain_client_callbacks() {
     const auto deadline = std::chrono::steady_clock::now() + 200ms;
@@ -811,6 +813,45 @@ TEST(Http1ClientTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
     ASSERT_TRUE(done);
     EXPECT_TRUE(responses.empty());
     EXPECT_FALSE(client->is_connecting());
+}
+
+// Every user callback puts the client under a self-hold that must last to the tail of the
+// current loop turn. Nothing promises there IS another turn: the three cases above end
+// right after a synchronous callback, which is legitimate — the client's contract does not
+// require the caller to keep pumping. When that hold lived in a `shared_ptr<Client>` MEMBER
+// released only by the deferred callback, "no further turn" meant "released never": a
+// shared_ptr pointing at its own Client, uncollectable, taking the connection and the
+// protocol from switch_protocol() with it. LeakSanitizer measured 18 632 bytes in 15
+// allocations on exactly these cases — every block *Indirect*, not one Direct, which is the
+// signature of a cycle whose only inbound pointer is its own. macOS ships no LeakSanitizer,
+// so the whole class is invisible there.
+//
+// weak_ptr::expired() is the allocator-independent oracle, and it needs the real ending to
+// be meaningful: the hold legitimately survives the client's own scope (the queued closure
+// owns it), so the client must die when its LOOP dies. Running on a dedicated thread makes
+// that deterministic — `listener::current` is thread_local, and ~listener drops the deferred
+// queue with it — without disturbing this binary's main loop.
+TEST(Http1ClientTest, ClientIsReleasedWhenItsLoopEndsWithoutAnotherTurn) {
+    std::weak_ptr<qb::http1::Client> weak;
+    bool                             callback_fired = false;
+    bool                             queued         = true;
+
+    std::thread([&] {
+        qb::io::async::init();
+        auto client = qb::http1::make_client("http://127.0.0.1:1");
+        weak         = client;
+        // max_pending_requests(0) makes push_request synthesize its 503 and invoke the user
+        // callback SYNCHRONOUSLY, which is what arms the self-hold.
+        client->set_max_pending_requests(0);
+        queued = client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { callback_fired = true; });
+        // Deliberately no drain: this is the shape under test.
+    }).join(); // thread exit tears the listener down, dropping the still-queued defer
+
+    ASSERT_FALSE(queued);
+    ASSERT_TRUE(callback_fired) << "the user callback never ran, so no self-hold was ever taken and this case proves nothing";
+    EXPECT_TRUE(weak.expired()) << "the client outlived its own event loop: the self-hold taken for the current turn was never "
+                                   "released, so the Client holds the last reference to itself and neither it nor its connection "
+                                   "can ever be reclaimed";
 }
 
 // push_request/push_requests with an EMPTY callback are rejected up front
