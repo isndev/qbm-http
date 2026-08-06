@@ -27,6 +27,7 @@
  *      `allocation_counter_is_live()` verifies the instrument (opaque size, buffer touched) and the
  *      check self-skips rather than passing vacuously. Verified live under both `release` and
  *      `sanitize`; with the reserve restored, a 72-byte request committed 134 217 928 bytes in both.
+ *      Oracle 2 is compiled out under ThreadSanitizer — see QB_TEST_TSAN_ACTIVE below.
  *
  * qb - C++ Actor Framework
  * Copyright (C) 2011-2026 isndev (www.qbaf.io). All rights reserved.
@@ -66,6 +67,62 @@ namespace {
 std::atomic<bool>        g_counting{false};
 std::atomic<std::size_t> g_bytes{0};
 
+/// RAII arm/disarm so a throw inside the parser cannot leave counting on.
+struct AllocScope {
+    AllocScope() {
+        g_bytes.store(0, std::memory_order_relaxed);
+        g_counting.store(true, std::memory_order_relaxed);
+    }
+    ~AllocScope() {
+        g_counting.store(false, std::memory_order_relaxed);
+    }
+    [[nodiscard]] static std::size_t
+    bytes() {
+        return g_bytes.load(std::memory_order_relaxed);
+    }
+};
+} // namespace
+
+// ---------------------------------------------------------------------------------------------
+// ThreadSanitizer: the allocator replacement below must NOT be compiled.
+//
+// `libclang_rt.tsan_cxx.a(tsan_new_delete.cpp.o)` defines every global `operator new` /
+// `operator delete` form as a STRONG symbol (ASan's equivalents are weak, which is why the
+// `sanitize` preset links — and there the replacement even wins, so Oracle 2 stays live).
+// Defining them here too is a plain ODR collision the static linker rejects outright:
+//
+//   ld: multiple definition of `operator new[](unsigned long)';
+//       libclang_rt.tsan_cxx-aarch64.a(tsan_new_delete.cpp.o): first defined here
+//
+// — 20 such errors, one per replaced form. That link error is not local to this test: ninja stops
+// the build, so the ENTIRE `sanitize-thread` lane failed to build on Linux, and therefore had
+// never run there at all. (macOS links because the Apple TSan runtime resolves these through
+// interposition rather than a strong archive definition, so the collision is Linux-only and was
+// invisible here.)
+//
+// Compiling the replacement out — rather than excluding the test from the lane — is the right
+// trade because it costs the TSan lane nothing it could ever have had: with `tsan_cxx` owning
+// allocation there is no way for a replaced `operator new` to observe anything.
+// `allocation_counter_is_live()` therefore returns false here and Oracle 2 self-skips, exactly as
+// it already does on any toolchain that intercepts first. Oracle 1 — `body().raw().capacity()`,
+// allocator-independent — is asserted BEFORE that skip, so it still runs and still pins the defect
+// this file exists for; read the resulting `[ SKIPPED ]` as "Oracle 2 did not apply", not as
+// "nothing was checked". Keeping the test in the lane also keeps the parser under TSan's actual
+// instrumentation, which excluding the binary would forfeit.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define QB_TEST_TSAN_ACTIVE 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__) // GCC spelling
+#define QB_TEST_TSAN_ACTIVE 1
+#endif
+#ifndef QB_TEST_TSAN_ACTIVE
+#define QB_TEST_TSAN_ACTIVE 0
+#endif
+
+#if !QB_TEST_TSAN_ACTIVE
+namespace {
 inline void *
 tracked_alloc_nothrow(std::size_t n) noexcept {
     if (g_counting.load(std::memory_order_relaxed))
@@ -125,20 +182,6 @@ tracked_alloc_aligned(std::size_t n, std::align_val_t a) {
     return p;
 }
 
-/// RAII arm/disarm so a throw inside the parser cannot leave counting on.
-struct AllocScope {
-    AllocScope() {
-        g_bytes.store(0, std::memory_order_relaxed);
-        g_counting.store(true, std::memory_order_relaxed);
-    }
-    ~AllocScope() {
-        g_counting.store(false, std::memory_order_relaxed);
-    }
-    [[nodiscard]] static std::size_t
-    bytes() {
-        return g_bytes.load(std::memory_order_relaxed);
-    }
-};
 } // namespace
 
 // Replaced globally for this TU only. malloc/free keeps this compatible with the sanitizer
@@ -232,6 +275,7 @@ void
 operator delete[](void *p, std::align_val_t, const std::nothrow_t &) noexcept {
     qb_aligned_free(p);
 }
+#endif // !QB_TEST_TSAN_ACTIVE
 
 namespace {
 
@@ -241,8 +285,9 @@ namespace {
 constexpr std::size_t kPerRequestBudget = 1u * 1024u * 1024u;
 
 /// Does the replaced `operator new` above actually see allocations? Under ASan it does not (the
-/// sanitizer runtime intercepts first), and a counter stuck at zero would make every budget
-/// assertion below pass for the wrong reason.
+/// sanitizer runtime intercepts first), and under TSan it is not even compiled (see
+/// QB_TEST_TSAN_ACTIVE); a counter stuck at zero would make every budget assertion below pass for
+/// the wrong reason.
 bool
 allocation_counter_is_live() {
     // The size must be opaque and the buffer must be touched, or the compiler elides the whole
