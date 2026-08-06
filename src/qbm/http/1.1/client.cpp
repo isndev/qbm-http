@@ -497,18 +497,30 @@ void
 Client::hold_through_current_tick() {
     auto self = weak_from_this().lock();
     if (!self) {
-        return;
+        return; // called from ~Client: the control block is already at zero, nothing to hold
     }
-    _callback_self_guard = std::move(self);
-    auto weak_self       = weak_from_this();
     // Defer to the tail of this loop turn (not a magic 1µs timer): once the current
     // user callback has fully unwound, reset the deferred connection and drop the
     // self-hold. defer() runs after the dispatch, never inline.
-    qb::io::async::defer([weak_self]() {
-        if (auto self = weak_self.lock()) {
-            self->reset_deferred_connection_if_ready();
-            self->_callback_self_guard.reset();
-        }
+    //
+    // The self-hold lives in the CLOSURE, not in a member. That is the whole point: a
+    // deferred callback is not guaranteed to run. `listener::clear()` drops the pending
+    // queue outright, and a caller that simply stops turning the loop after its last
+    // callback (three cases in tests/system/http1/http1-client.cpp do exactly that, and
+    // it is legitimate — the client's contract does not promise another turn) leaves it
+    // queued forever. A `std::shared_ptr<Client>` member released only by that callback
+    // is therefore a self-referential cycle that nothing collects: the Client, its
+    // connection, and the protocol `switch_protocol()` allocated all leak. LeakSanitizer
+    // named it precisely — 15 blocks, every one of them *Indirect*, no Direct leak at all,
+    // which is the signature of a cycle whose only inbound pointer is its own.
+    //
+    // Owned by the closure, both endings reclaim it: the callback runs and the closure is
+    // destroyed, or the closure is destroyed unrun when the queue is dropped. It also
+    // makes the hold provably sufficient — the Client cannot expire before the callback,
+    // so there is no lock()-or-give-up path left to reason about.
+    qb::io::async::defer([self = std::move(self)]() mutable {
+        self->reset_deferred_connection_if_ready();
+        self.reset();
     });
 }
 

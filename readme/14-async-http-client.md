@@ -217,7 +217,7 @@ When you make many requests to the *same origin*, the one-shot helpers reconnect
 
 The client must be owned by a `std::shared_ptr` — use `qb::http1::make_client`. Its callbacks, timers, and coroutines capture `weak_from_this()` and silently no-op if the client was destroyed, so stack-allocating one breaks `shared_from_this`.
 
-<!-- src: qbm/http/src/qbm/http/1.1/client.h:107-152,203-204 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:107-155,206-207 -->
 ```cpp
 namespace qb::http1 {
     std::shared_ptr<Client> make_client(std::string const& base_uri);
@@ -251,7 +251,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:382-393 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:384-395 -->
 ```cpp
 #include <qbm/http/http.h>
 
