@@ -314,24 +314,28 @@ A `Slot<T>` binds a string name to a static type, so producers and consumers agr
 
 ## Registering middleware and ordering
 
-You register middleware with `use()` on a `Router`, `RouteGroup`, or `Controller`. Three overloads exist:
+You register middleware with `use()` on a `Router`, `RouteGroup`, or `Controller`. Four overloads exist:
 
-<!-- src: qbm/http/src/qbm/http/routing/router.h:224-252 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:154 (coro), :234 (sync functional), :248 (shared_ptr), :259 (in-place) -->
 
 ```cpp
-// 1. Functional (ctx, next) lambda, with an optional task name.
+// 1. Coroutine (ctx, next) -> task<void> handler — co_await inside the middleware.
+//    Selected by the CoroMiddlewareHandler concept (see the coroutine section above).
+router.use(my_coro_mw, "AuthGate");
+
+// 2. Sync functional (ctx, next) lambda, with an optional task name.
 router.use(my_functional_mw, "RequestLogger");
 
-// 2. A shared_ptr<IMiddleware<Session>> (e.g. from a factory), optional name override.
+// 3. A shared_ptr<IMiddleware<Session>> (e.g. from a factory), optional name override.
 router.use(std::make_shared<StampHeaderMiddleware<Session>>("X-App", "qbm-http"));
 router.use(qb::http::transform_middleware<Session>(my_transformer));
 
-// 3. Construct an IMiddleware in place. Constrained to types deriving from
+// 4. Construct an IMiddleware in place. Constrained to types deriving from
 //    IMiddleware<Session> via the DerivedFrom concept.
 router.use<StampHeaderMiddleware<Session>>("X-App", "qbm-http");
 ```
 
-`use()` returns a reference to the router (or group/controller) for chaining. Overload 3 is constrained by the `DerivedFrom<MiddlewareType, IMiddleware<SessionType>>` concept, so a mistyped middleware fails at compile time with a clear constraint error rather than a deep template diagnostic.
+`use()` returns a reference to the router (or group/controller) for chaining. Overloads 1 and 2 are **distinct** overloads selected by concept (`CoroMiddlewareHandler` vs `SyncMiddleware`) — unlike the verb methods (`get`, `post`, …), `use()` has no single unified overload spanning both. Overload 4 is constrained by the `DerivedFrom<MiddlewareType, IMiddleware<SessionType>>` concept, so a mistyped middleware fails at compile time with a clear constraint error rather than a deep template diagnostic.
 
 **Ordering is positional and scoped.** Middleware runs in the order you register it, and scope determines breadth:
 

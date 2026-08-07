@@ -663,7 +663,7 @@ Main router: a RouterCore + a root RouteGroup. **Must `compile()` before `route(
 - `template<typename C,typename...A> requires DerivedFrom<C,ICustomRoute<S>> add_custom_route(path, method, A&&...)` + typed `get<T>/post<T>/...` (`router.h:170`).
 - `[[nodiscard]] std::shared_ptr<RouteGroup<S>> group(path_prefix)` (`router.h:208`).
 - `template<typename C,typename...A> requires DerivedFrom<C,Controller<S>> [[nodiscard]] std::shared_ptr<C> controller(path_prefix, A&&...)` (`router.h:220`).
-- `use(MiddlewareHandlerFn, name="...")` / `use(std::shared_ptr<IMiddleware<S>>, name="")` / `template<typename MW,typename...A> use(A&&...)` — global middleware on the root group (`router.h:234`).
+- `use()` — global middleware on the root group. **FOUR overloads**, not three: `use(H&&, name="UnnamedCoroMiddleware")` gated on `CoroMiddlewareHandler` (`router.h:154`) / `use(H&&, name="UnnamedGlobalFunctionalMiddleware")` gated on `SyncMiddleware` (`router.h:234`) / `use(std::shared_ptr<IMiddleware<S>>, name_override="")` (`router.h:248`) / `template<typename MW,typename...A> requires DerivedFrom<MW,IMiddleware<S>> use(A&&...)` (`router.h:259`). The coro and sync forms are SEPARATE overloads — there is no union concept for `use()` (contrast the verbs, below). Same four at `RouteGroup` (`route_group.h:148`, `:251`, `:267`, `:297`) and `Controller` (`controller.h:218`, `:327`, `:342`, `:370`). `IHandlerNode` declares none (only `add_middleware`, `handler_node.h:205`).
 - `void set_not_found_handler(RouteHandlerFn)` (`router.h:265`) — global middleware still prepended.
 - `void set_error_task_chain(std::vector<std::shared_ptr<IAsyncTask<S>>>)` (`router.h:272`) — global middleware **not** auto-prepended.
 - `Router& add_lifecycle_hook(typename Context<S>::LifecycleHook)` (`router.h:282`) — only way to observe `PRE_ROUTING`.
@@ -725,7 +725,7 @@ Compile-time typed key for Context custom data; declare as `inline constexpr` gl
 Usage: `inline constexpr qb::http::Slot<int> kCount{"count"}; ctx->set(kCount, 1);`
 
 ### Coroutine route and middleware detection
-The verb methods (`get`, `post`, `put`, `del`, `patch`, `options`, `head`) and `use()` each have a **unified overload** that accepts sync OR coroutine handlers via concept-gating (`CoroRouteHandler<F,S>` / `CoroMiddlewareHandler<F,S>`). Pass the lambda directly — no wrapper needed.
+The verb methods (`get`, `post`, `put`, `del`, `patch`, `options`, `head`) have a **unified overload** gated on `RouteHandlerLike = SyncRouteHandler || CoroRouteHandler` (`coro_task.h:101`), dispatched by `if constexpr` — one overload accepts sync OR coroutine handlers. `use()` does **not**: `CoroMiddlewareHandler` (`coro_task.h:82`) and `SyncMiddleware` (`coro_task.h:109`) gate two **separate** overloads, with no union concept. Either way, pass the lambda directly — no wrapper needed.
 - Coroutine route handler: `task<void>(ctx)` lambda passed to a verb → auto-detected as `CoroRouteHandler`; normal return auto-completes `COMPLETE` (unless already completed/cancelled); exceptions → 500/ERROR; spawns on the thread-local `coro_scheduler`.
 - Coroutine middleware: `task<void>(ctx)` lambda passed to `use()` → auto-detected as `CoroMiddlewareHandler`; default outcome `CONTINUE`; short-circuit via `ctx->complete(COMPLETE)`.
 - Member-function binding: `verb(path, this, &MyActor::method)` — the bound member may be sync or coroutine.

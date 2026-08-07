@@ -348,6 +348,7 @@ Attach it like any other middleware (see [the middleware model](./07-middleware.
 ```cpp
 // <!-- src: qbm/http/tests/unit/middleware/middleware-validator.cpp -->
 #include <qbm/http/http.h>
+#include <qbm/http/middleware/all.h>   // required: http.h declares no middleware factory
 
 auto rv = std::make_shared<qb::http::validation::RequestValidator>();
 rv->for_body({

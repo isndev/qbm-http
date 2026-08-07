@@ -10,7 +10,7 @@ Mount a set of related routes under a shared path prefix, nest groups to any dep
 
 A `qb::http::RouteGroup<SessionType>` is a non-terminal node in the routing tree. It owns two things: a **path prefix** that is prepended to every route declared inside it, and a **middleware stack** that runs before any route declared inside it. Groups exist to keep large APIs organized — version namespaces (`/api/v1`), feature areas (`/admin`), and authentication boundaries are the typical reasons to reach for one.
 
-`RouteGroup` shares the same fluent route-definition API as the [`Router`](./03-routing-overview.md) and [`Controller`](./06-controllers.md): `get`, `post`, `put`, `del`, `patch`, `options`, `head`, `add_route`, the typed `ICustomRoute` overloads, and three `use()` overloads for middleware. Everything you can do at the router root, you can do on a group — relative to the group's prefix.
+`RouteGroup` shares the same fluent route-definition API as the [`Router`](./03-routing-overview.md) and [`Controller`](./06-controllers.md): `get`, `post`, `put`, `del`, `patch`, `options`, `head`, `add_route`, the typed `ICustomRoute` overloads, and four `use()` overloads for middleware. Everything you can do at the router root, you can do on a group — relative to the group's prefix.
 
 Groups are part of the routing tree, so they obey the same compile rule as routes: declare every group, route, controller, and middleware first, then call `router.compile()` once. Any definition mutation resets the compiled flag (`_is_compiled = false`); `route()` auto-compiles on first use if you forgot, but call `compile()` explicitly so the cost is paid at startup, not on the first request.
 
@@ -72,19 +72,24 @@ Because both arguments are normalized, `router().group("/api/")->group("/v1")` a
 
 The reason groups matter beyond tidiness is shared middleware. Call `use()` on a group and every route, nested group, and controller mounted under it inherits that middleware. This is the natural place to put authentication, logging, or rate limiting for a whole section of the API instead of repeating it on each route.
 
-`RouteGroup::use()` has the same three overloads as the router:
+`RouteGroup::use()` has the same four overloads as the router:
 
-<!-- src: qbm/http/src/qbm/http/routing/route_group.h:251-303 -->
+<!-- src: qbm/http/src/qbm/http/routing/route_group.h:148 (coro), :251 (sync functional), :267 (shared_ptr), :297 (in-place) -->
 ```cpp
-// 1. Lambda middleware (ctx, next) -> void; second arg names it for logs.
+// 1. Coroutine middleware (ctx, next) -> task<void>; co_await inside it.
+group->use([](auto ctx, auto next) -> qb::http::task<void> { /* co_await ... */ next(); }, "auth");
+
+// 2. Sync lambda middleware (ctx, next) -> void; second arg names it for logs.
 group->use([](auto ctx, auto next) { /* ... */ next(); }, "trace");
 
-// 2. A pre-built IMiddleware instance; name is taken from mw->name() if omitted.
+// 3. A pre-built IMiddleware instance; name is taken from mw->name() if omitted.
 group->use(std::make_shared<MyMiddleware>(/* ctor args */));
 
-// 3. Construct the middleware in place from its type and constructor args.
+// 4. Construct the middleware in place from its type and constructor args.
 group->use<MyMiddleware>(/* ctor args */);
 ```
+
+Overloads 1 and 2 are **separate** overloads, selected by concept (`CoroMiddlewareHandler` vs `SyncMiddleware`) — unlike the verb methods (`get`, `post`, …), there is no single unified overload covering both.
 
 The lambda form takes `(ctx, next)` — invoke `next()` to pass control down the chain, or set a response and call `ctx->complete(qb::http::AsyncTaskResult::COMPLETE)` to short-circuit. See [Middleware overview](./07-middleware.md) for the full contract and [Standard middleware](./08-standard-middleware.md) for the built-in handlers (auth, CORS, rate limiting) you typically mount on a group.
 

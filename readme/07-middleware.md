@@ -72,7 +72,7 @@ You rarely construct `MiddlewareTask` yourself — `use()` does it. But the wrap
 You attach middleware with `use()`, available at three levels with the same four overloads. All return a reference for chaining. Each form is concept-gated, so the right overload resolves automatically with no disambiguation tags.
 
 ```cpp
-// src: qbm/http/src/qbm/http/routing/router.h:143-149,224-252; route_group.h:147-153,252-302; controller.h:208-211,317-364
+// src: qbm/http/src/qbm/http/routing/router.h:151-156,234,248,259; route_group.h:148,251,267,297; controller.h:218,327,342,370
 // Functional form — a synchronous (ctx, next) lambda (SyncMiddleware concept):
 router.use(mw_fn, "OptionalName");
 
@@ -265,6 +265,7 @@ You do not need a hand-rolled `if` inside a middleware to run one branch per req
 
 ```cpp
 #include <qbm/http/http.h>
+#include <qbm/http/middleware/all.h>   // required: http.h declares no middleware factory
 
 // Pattern: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:643-649 (ConditionalMiddleware tests)
 auto predicate = [](const std::shared_ptr<qb::http::Context<MySession>> &ctx) -> bool {
