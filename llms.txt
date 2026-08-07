@@ -1,10 +1,10 @@
-# qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb actor framework
+# qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb Actor Framework (QBAF)
 
-> qbm-http is the HTTP stack of the qb C++20 actor framework: asynchronous HTTP/1.1, HTTP/2,
-> HTTP/3 and WebSocket servers and clients over qb-io's non-blocking, single-thread-per-listener
-> I/O, plus a fluent router (path parameters, groups, controllers), a middleware pipeline,
-> request validation and sanitization, cookies, multipart, JWT authentication, and both
-> callback and C++20-coroutine client APIs. A **compiled** library — link `qbm::http` — behind
+> qbm-http is the HTTP stack of the qb Actor Framework (QBAF), C++20-first: asynchronous
+> HTTP/1.1, HTTP/2, HTTP/3 and WebSocket servers and clients over qb-io's non-blocking,
+> single-thread-per-listener I/O, plus a fluent router (path parameters, groups, controllers),
+> a middleware pipeline, request validation and sanitization, cookies, multipart, JWT
+> authentication, and both callback and C++20-coroutine client APIs. A **compiled** library — link `qbm::http` — behind
 > one umbrella header, `<qbm/http/http.h>`.
 
 Six rules decide whether generated qbm-http code is correct; everything else is detail.
@@ -40,7 +40,7 @@ Six rules decide whether generated qbm-http code is correct; everything else is 
 
 ## Project
 
-- [qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb actor framework](https://raw.githubusercontent.com/isndev/qbm-http/main/README.md): qbm-http is a compiled qb module that gives an actor asynchronous HTTP servers and clients — HTTP/1.1 always, plus HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL and QUIC — over qb-io's non-blocking I/O.
+- [qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb Actor Framework (QBAF)](https://raw.githubusercontent.com/isndev/qbm-http/main/README.md): qbm-http is a compiled module of the qb Actor Framework (QBAF) that gives an actor asynchronous HTTP servers and clients — HTTP/1.1 always, plus HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL and QUIC — over qb
 
 ## Optional
 
