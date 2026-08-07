@@ -5,7 +5,12 @@
 # Fails on: retired tokens in docs, broken internal Markdown links, cross-repo URLs naming
 # a dead repo or a non-released ref, missing module governance files. Warns on: pages missing a "Verified-against" marker.
 # Module-wide policy (versioning, support) lives in the qb framework; this guard
-# checks only qbm-http's own Markdown (README.md, readme/**, CHANGELOG/SECURITY/CONTRIBUTING).
+# checks qbm-http's own Markdown (README.md, readme/**, CHANGELOG/SECURITY/CONTRIBUTING)
+# plus, through section 1c, the agent-facing llm/ docs that moved into this repo from
+# the qb-dev superproject. Those get scripts/llm-guard.py rather than doc_files(): they
+# need symbol-existence and content-digest rules this script does not have, and they
+# NAME retired tokens in order to warn agents off them, which section 1's cue-less scan
+# would report as usage.
 #
 # Usage:  ./scripts/doc-lint.sh   (from the qbm-http root)
 #
@@ -87,6 +92,27 @@ else
   # here, so its interpreter is not optional either.
   red "  python3 not found — cite-check.py cannot run, and this lint does not pass without it"
   red "  install python3 (>= 3.8) and re-run; do NOT treat a skipped citation check as green"
+  fail=1
+fi
+
+echo "== 1c. Agent-facing llm/ docs (symbols, citations, digest, paths, retired tokens, version marker) =="
+# `llm/*.llm.md` + `llm/*.llm.api.md` moved into this repo from the qb-dev superproject, so the
+# doc that describes this code now travels with it and this repo is independently indexable.
+#
+# doc_files() above deliberately does NOT list them, and that is measured rather than assumed:
+# its forbidden-token scan matches per line with no negation cue, and these files NAME retired
+# tokens in order to warn agents off them. Replaying each repo's own pattern and filter over its
+# own llm/*.md: 11 lines would be flagged across the four repos (qb 3, qbm-http 5, qbm-pgsql 2,
+# qbm-redis 1), every one the doc doing its job. scripts/llm-guard.py owns that surface instead, with the cue, plus the two rules
+# nothing else here has: does every documented symbol still EXIST, and do the cited lines still
+# SAY what they said. It also validates the `Verified-against:` marker by value, which for these
+# files reached no check at all before the move.
+if command -v python3 >/dev/null 2>&1; then
+  python3 "${SCRIPT_DIR}/llm-guard.py" || fail=1
+else
+  # Same hard-failure policy as 1b: a guard that degrades into a pass is the defect this
+  # battery exists to catch, so its interpreter is not optional either.
+  red "  python3 not found -- llm-guard.py cannot run, and this lint does not pass without it"
   fail=1
 fi
 

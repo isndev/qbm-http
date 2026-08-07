@@ -13,6 +13,16 @@ on:
       - 'SECURITY.md'
       - 'CONTRIBUTING.md'
       - 'scripts/doc-lint.sh'
+      # The agent-facing llm/ docs moved into this repo, and scripts/llm-guard.py (driven
+      # from doc-lint.sh section 1c) is the only guard that reads them in a STANDALONE
+      # checkout -- the superproject that used to hold them is private, so without these
+      # filters a commit touching llm/ would reach this repo's default branch unchecked.
+      # The two baselines are listed for the same reason the script is: an edit to either
+      # changes what the gate accepts.
+      - 'llm/**'
+      - 'scripts/llm-guard.py'
+      - 'scripts/llm-guard.baseline'
+      - 'scripts/llm-cite-digest.baseline'
       # The lint reads the expected Verified-against version from project(...
       # VERSION) here, so a version-only bump must trigger it.
       - 'CMakeLists.txt'
@@ -29,6 +39,16 @@ on:
       - 'SECURITY.md'
       - 'CONTRIBUTING.md'
       - 'scripts/doc-lint.sh'
+      # The agent-facing llm/ docs moved into this repo, and scripts/llm-guard.py (driven
+      # from doc-lint.sh section 1c) is the only guard that reads them in a STANDALONE
+      # checkout -- the superproject that used to hold them is private, so without these
+      # filters a commit touching llm/ would reach this repo's default branch unchecked.
+      # The two baselines are listed for the same reason the script is: an edit to either
+      # changes what the gate accepts.
+      - 'llm/**'
+      - 'scripts/llm-guard.py'
+      - 'scripts/llm-guard.baseline'
+      - 'scripts/llm-cite-digest.baseline'
       # The lint reads the expected Verified-against version from project(...
       # VERSION) here, so a version-only bump must trigger it.
       - 'CMakeLists.txt'

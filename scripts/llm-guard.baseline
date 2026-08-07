@@ -1,0 +1,28 @@
+# llm-guard.baseline — exceptions for scripts/llm-guard.py, each VERIFIED BY HAND.
+#
+# Format:  <doc>  TAB  <key>  TAB  <why this finding is not a defect>
+#   key = <cited-path>:<lo>-<hi>   for a `citations` finding
+#         symbol:<name>            for a `symbols` finding whose name belongs to another repo
+#
+# Only `citations` and cross-repo `symbols` findings can be listed here. `paths`, `forbidden`,
+# `phantom`, `version`, out-of-bounds and `vacuous` are deterministic and always fail.
+#
+# An entry matching nothing is reported as `baseline-stale` and FAILS, so this file cannot rot
+# into a blanket exemption.  Re-derive with: python3 scripts/llm-guard.py --no-baseline
+#
+# EVERY ENTRY HERE IS THE SAME SHAPE: a name that belongs to qb, not to qbm-http.  qbm-http is
+# built ON qb and its docs necessarily name qb's API, but this repo's CI checks out only this
+# repo, so those names cannot be resolved here.  See the CROSS-REPO block in llm-guard.py for
+# the two alternatives that were rejected and why.  Nothing is lost overall: the qb-dev
+# superproject's dev/agent/llm-guard.py sees qb and all three modules at once and verifies
+# every one of these against qb's actual headers.  This file states which names this repo is
+# taking on trust, by name, rather than letting them pass silently.
+#
+# Each was checked against qb 3.0.0 at the path named in its reason.
+
+llm/qbm-http.llm.api.md	symbol:qb_load_modules	qb's own CMake function, defined in qb/cmake/qbFunctions.cmake (and re-exported by qb/cmake/qbConfig.cmake). Named here because loading qbm-http is what it is for.
+llm/qbm-http.llm.md	symbol:qb_load_modules	as above — qb/cmake/qbFunctions.cmake.
+llm/qbm-http.llm.md	symbol:create_server_context	qb-io's TLS helper `qb::io::ssl::create_server_context`, declared in qb/src/qb/io/tcp/ssl/socket.h. qbm-http builds an SSL_CTX with it and hands it to the transport.
+llm/qbm-http.llm.md	symbol:set_supported_alpn_protocols	qb-io's ALPN setter on the SSL listener transport, declared in qb/src/qb/io/tcp/ssl/listener.h.
+llm/qbm-http.llm.md	symbol:TLS_server_method	OpenSSL, not qb and not qbm-http. Reached through qb-io's ssl API and used by qb itself at qb/src/qb/io/tcp/ssl/context.cpp:271. No repo in this family declares it.
+llm/qbm-http.llm.md	symbol:target_link_libraries	a CMake built-in command, declared by no C++ project. It appears in a build-integration snippet.
