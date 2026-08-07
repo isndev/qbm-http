@@ -7,8 +7,10 @@ through public GitHub issues, pull requests, or discussions.**
 
 ## Supported versions
 
-Security fixes target the module version that ships with the supported qb framework release (the `2.6.x`
-line). See the framework policy for details.
+Security fixes target the module version that ships with the **supported qb framework release**, which is
+the latest minor of the current major — the `3.0.x` line. The module is versioned in lockstep with the
+framework and is not standalone-configurable, so there is no separate module support window and no
+backport to a module version built against an unsupported framework. See the framework policy for details.
 
 ## Module attack surface
 
