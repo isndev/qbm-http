@@ -82,10 +82,17 @@ router.use(qb::http::cors_middleware<MySession>(opts));
 | Factory | Behavior |
 |---|---|
 | `cors_middleware<S>(opts = CorsOptions::permissive())` | from explicit options |
-| `cors_dev_middleware<S>()` | `CorsOptions::permissive()` — all origins, all methods, credentials allowed; development only |
+| `cors_dev_middleware<S>()` | `CorsOptions::permissive()` — all origins, all methods, **credentials off**; development only |
 | `cors_secure_middleware<S>(allowed_origins_list)` | `CorsOptions::secure(...)` — listed origins, `{GET,POST,OPTIONS}`, credentials off, 1 h preflight cache |
 
-`CorsOptions::permissive()` sets `origins({"*"})` *and* `credentials(Yes)`. That combination is rejected at response time by user agents and is intended for local development only; reach for `cors_secure_middleware` in production.
+`CorsOptions::permissive()` sets `origins({"*"})` and `credentials(AllowCredentials::No)`. The two are
+a package, and the `No` is load-bearing rather than incidental: `permissive()` is the **default** for
+`CorsMiddleware()` / `cors_middleware()` / `cors_dev_middleware()`, and a wildcard origin combined with
+`Allow-Credentials: true` is a cross-origin credential-theft hole — the CORS specification forbids the
+pair, and an implementation that "works around" the ban by reflecting the caller's `Origin` lets any
+site read a logged-in victim's authenticated responses. Do not restore `credentials(Yes)` here. A
+permissive policy is for **public, non-credentialed** resources; if you need credentialed cross-origin
+requests, enumerate the origins explicitly with `CorsOptions::secure(...)` / `cors_secure_middleware`.
 
 > **ReDoS note.** With `origin_patterns` (regex matching), the middleware bounds origin length (`MAX_ORIGIN_LENGTH = 2048`), pattern count, and pattern length to mitigate catastrophic backtracking. Keep your patterns linear — no nested quantifiers — because qb's HTTP stack is single-threaded per listener and cannot interrupt a runaway `std::regex` match.
 
