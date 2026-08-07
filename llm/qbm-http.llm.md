@@ -4,11 +4,11 @@
 > Audience: an LLM that must emit compiling, idiomatic qbm-http (qb actor framework, C++20-first; optional C++23). Every signature here is verified against the headers under `qbm/http/` and the FACTBOOK. When in doubt, the umbrella header `<qbm/http/http.h>` is your single include.
 
 <!-- llms-txt:lead -->
-> qbm-http is the HTTP stack of the qb C++20 actor framework: asynchronous HTTP/1.1, HTTP/2,
-> HTTP/3 and WebSocket servers and clients over qb-io's non-blocking, single-thread-per-listener
-> I/O, plus a fluent router (path parameters, groups, controllers), a middleware pipeline,
-> request validation and sanitization, cookies, multipart, JWT authentication, and both
-> callback and C++20-coroutine client APIs. A **compiled** library — link `qbm::http` — behind
+> qbm-http is the HTTP stack of the qb Actor Framework (QBAF), C++20-first: asynchronous
+> HTTP/1.1, HTTP/2, HTTP/3 and WebSocket servers and clients over qb-io's non-blocking,
+> single-thread-per-listener I/O, plus a fluent router (path parameters, groups, controllers),
+> a middleware pipeline, request validation and sanitization, cookies, multipart, JWT
+> authentication, and both callback and C++20-coroutine client APIs. A **compiled** library — link `qbm::http` — behind
 > one umbrella header, `<qbm/http/http.h>`.
 
 Six rules decide whether generated qbm-http code is correct; everything else is detail.

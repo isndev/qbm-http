@@ -1,8 +1,8 @@
-# qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb actor framework
+# qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb Actor Framework (QBAF)
 
 > **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
-`qbm-http` is a compiled qb module that gives an actor asynchronous HTTP servers and clients — HTTP/1.1 always, plus HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL and QUIC — over qb-io's non-blocking I/O.
+`qbm-http` is a compiled module of the qb Actor Framework (QBAF) that gives an actor asynchronous HTTP servers and clients — HTTP/1.1 always, plus HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL and QUIC — over qb-io's non-blocking I/O.
 
 **Prerequisites:** a working [qb framework](https://github.com/isndev/qb) checkout (`qb-core` + `qb-io`); a C++20 toolchain (C++23 optional); CMake 3.24+. — **See also:** [readme/README.md](./readme/README.md) (full guide), [routing](./readme/03-routing-overview.md), [async client](./readme/14-async-http-client.md), [WebSocket](./readme/20-websocket.md).
 

@@ -20,7 +20,7 @@ This page covers the HTTP/1.1 upgrade path only. WebSocket over HTTP/2 extended 
 
 ## Concepts
 
-The WebSocket subsystem is split across a few namespaces. You normally only touch `qb::http::ws`; the protocol templates re-export the rest. <!-- src: docs-overhaul/qbm-http/FACTBOOK.md:447 -->
+The WebSocket subsystem is split across a few namespaces. You normally only touch `qb::http::ws`; the protocol templates re-export the rest. <!-- src: src/qbm/http/ws/ws.h:1048-1065 -->
 
 | Symbol | Namespace | Role |
 | --- | --- | --- |
