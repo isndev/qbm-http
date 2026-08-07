@@ -3,6 +3,40 @@
 
 > Audience: an LLM that must emit compiling, idiomatic qbm-http (qb actor framework, C++20-first; optional C++23). Every signature here is verified against the headers under `qbm/http/` and the FACTBOOK. When in doubt, the umbrella header `<qbm/http/http.h>` is your single include.
 
+<!-- llms-txt:lead -->
+> qbm-http is the HTTP stack of the qb C++20 actor framework: asynchronous HTTP/1.1, HTTP/2,
+> HTTP/3 and WebSocket servers and clients over qb-io's non-blocking, single-thread-per-listener
+> I/O, plus a fluent router (path parameters, groups, controllers), a middleware pipeline,
+> request validation and sanitization, cookies, multipart, JWT authentication, and both
+> callback and C++20-coroutine client APIs. A **compiled** library — link `qbm::http` — behind
+> one umbrella header, `<qbm/http/http.h>`.
+
+Six rules decide whether generated qbm-http code is correct; everything else is detail.
+
+1. **Feature gates are real `#ifdef` boundaries.** HTTP/1.1, routing, middleware, validation,
+   cookies and multipart are always available. HTTPS, HTTP/2, WebSocket (`ws://` included),
+   JWT and `qb::http::auth` need `QB_HAS_SSL`; HTTP/3 needs `QBM_HTTP_HAS_HTTP3`. Gate on
+   those two, never on the private `QBM_HTTP_HAS_SSL`.
+2. **`router().compile()` after every route is declared, before serving.** Routes added after
+   compilation are not routed.
+3. **Every task completes exactly once.** A handler, `IMiddleware::process`,
+   `ICustomRoute::process` or async callback must call `ctx->complete(...)` on every path or
+   the request hangs; functional middleware may call `next()` instead. A `cancel()` override
+   must never call `ctx->complete()`. Capture `ctx` (a `shared_ptr`) into async callbacks,
+   complete from the callback, and guard on `ctx->is_cancelled()`.
+4. **Handlers and middleware are shared across concurrent requests.** Never store per-request
+   state on them — put it in the `Context` via `Slot<T>`. `ctx->session()` is weak-locked and
+   may be `nullptr` after a disconnect.
+5. **DELETE is `qb::http::method::DEL`** (`router().del(...)`); `method::DELETE` does not
+   exist. `Body` and `Headers` are base classes, so it is `req.set_header(...)` and
+   `req.body()`, not `req.headers().set(...)`.
+6. **Time is `std::chrono`.** Cookie `max_age`, CORS preflight, rate-limit windows and every
+   client or protocol timeout are `qb::duration` (`qb::duration::zero()` means *no* timeout,
+   not an immediate one); JWT `token_expiration` / `leeway` / `clock_skew_tolerance` are
+   `std::chrono::seconds` by RFC 7519. Never emit `qb::Timestamp`, `qb::Duration`,
+   `qb::TimePoint`, `to_timestamp(` or `to_time_point(`: they do not exist.
+<!-- /llms-txt:lead -->
+
 ## Purpose
 
 `qbm-http` gives a qb actor asynchronous HTTP servers and clients over qb-io's non-blocking, single-thread-per-listener I/O: **HTTP/1.1 always**, plus **HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL/QUIC**. It ships a fluent routing engine (path params, groups, controllers), a middleware pipeline, request validation/sanitization, cookies/multipart, and both callback and C++20-coroutine client APIs. WebSocket is part of this module (`qb::http::ws`, under `qbm/http/src/qbm/http/ws/`); there is no separate ws module.
@@ -267,7 +301,7 @@ rv->for_query_param("id", ParameterRuleSet("id").set_type(DataType::INTEGER).set
 rv->add_header_sanitizer("X-Custom-Input", PredefinedSanitizers::trim());
 rv->set_error_value_policy(Result::ErrorValuePolicy::Preview, 256);
 
-router().use(qb::http::validation_middleware<MySession>(rv));   // 400 + JSON error list on failure
+router().use(qb::http::validation_middleware<qb::http::DefaultSession>(rv));  // 400 + JSON error list on failure
 ```
 
 - `validate()` **mutates the request** (sanitizers rewrite query/header values in place; a sanitized body is re-serialized). Capture raw input before validating if you need it.
@@ -375,11 +409,11 @@ public:
     void on(message &&e)  { qb::io::cout() << std::string_view(e.data, e.size) << '\n'; }
     void on(closed &&) {} void on(error &&) {} void on(disconnected &&) {}
 };
-Client ws; ws.connect("ws://localhost:9000/chat");            // connect(uri, timeout=zero, verify_peer=true)
+Client ws; ws.connect(qb::io::uri("ws://localhost:9000/chat"));  // connect(uri, timeout=zero, verify_peer=true)
 
 qb::http::ws::client cb;                                      // callback form; client_secure for wss
 cb.on_connected([](auto&){}).on_message([](auto& e){}).on_error([](auto&){});
-cb.connect("ws://localhost:9000/");
+cb.connect(qb::io::uri("ws://localhost:9000/"));
 ```
 
 WebSocket notes: the masking direction is enforced (client→server masked, server→client not — `operator<<` forces `masked=true` on outbound, do not pre-mask). Reassembly is capped at `protocol_limits::MAX_BODY_SIZE`; `set_max_payload_size(0)` removes the guard. `MessageClose` throws on reserved (`1004/1005/1006/1015`) or out-of-`[1000,4999]` codes. When handing an upgrade off to another actor, call `ctx->suppress_response()` so the routing context destructor does not send a moved-from HTTP response. Coroutine API: `qb::http::ws::coro_client`/`coro_session` with `co_await connect/receive/close_async`.

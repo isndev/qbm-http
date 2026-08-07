@@ -1,0 +1,73 @@
+# qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb actor framework
+
+> qbm-http is the HTTP stack of the qb C++20 actor framework: asynchronous HTTP/1.1, HTTP/2,
+> HTTP/3 and WebSocket servers and clients over qb-io's non-blocking, single-thread-per-listener
+> I/O, plus a fluent router (path parameters, groups, controllers), a middleware pipeline,
+> request validation and sanitization, cookies, multipart, JWT authentication, and both
+> callback and C++20-coroutine client APIs. A **compiled** library — link `qbm::http` — behind
+> one umbrella header, `<qbm/http/http.h>`.
+
+Six rules decide whether generated qbm-http code is correct; everything else is detail.
+
+1. **Feature gates are real `#ifdef` boundaries.** HTTP/1.1, routing, middleware, validation,
+   cookies and multipart are always available. HTTPS, HTTP/2, WebSocket (`ws://` included),
+   JWT and `qb::http::auth` need `QB_HAS_SSL`; HTTP/3 needs `QBM_HTTP_HAS_HTTP3`. Gate on
+   those two, never on the private `QBM_HTTP_HAS_SSL`.
+2. **`router().compile()` after every route is declared, before serving.** Routes added after
+   compilation are not routed.
+3. **Every task completes exactly once.** A handler, `IMiddleware::process`,
+   `ICustomRoute::process` or async callback must call `ctx->complete(...)` on every path or
+   the request hangs; functional middleware may call `next()` instead. A `cancel()` override
+   must never call `ctx->complete()`. Capture `ctx` (a `shared_ptr`) into async callbacks,
+   complete from the callback, and guard on `ctx->is_cancelled()`.
+4. **Handlers and middleware are shared across concurrent requests.** Never store per-request
+   state on them — put it in the `Context` via `Slot<T>`. `ctx->session()` is weak-locked and
+   may be `nullptr` after a disconnect.
+5. **DELETE is `qb::http::method::DEL`** (`router().del(...)`); `method::DELETE` does not
+   exist. `Body` and `Headers` are base classes, so it is `req.set_header(...)` and
+   `req.body()`, not `req.headers().set(...)`.
+6. **Time is `std::chrono`.** Cookie `max_age`, CORS preflight, rate-limit windows and every
+   client or protocol timeout are `qb::duration` (`qb::duration::zero()` means *no* timeout,
+   not an immediate one); JWT `token_expiration` / `leeway` / `clock_skew_tolerance` are
+   `std::chrono::seconds` by RFC 7519. Never emit `qb::Timestamp`, `qb::Duration`,
+   `qb::TimePoint`, `to_timestamp(` or `to_time_point(`: they do not exist.
+
+## Agent reference
+
+- [llms-full.txt](https://raw.githubusercontent.com/isndev/qbm-http/main/llms-full.txt): both agent docs above, concatenated — one fetch, the whole machine-facing surface of this repo.
+- [qbm-http — concepts for writing correct code](https://raw.githubusercontent.com/isndev/qbm-http/main/llm/qbm-http.llm.md): Six rules decide whether generated qbm-http code is correct; everything else is detail.
+- [qbm-http — API Reference (deterministic)](https://raw.githubusercontent.com/isndev/qbm-http/main/llm/qbm-http.llm.api.md): Module: qbm/http — the HTTP/1.1/2/3 + WebSocket stack of the qb C++20-first actor framework (optional C++23).
+
+## Project
+
+- [qbm-http — HTTP/1.1, HTTP/2, HTTP/3, and WebSocket for the qb actor framework](https://raw.githubusercontent.com/isndev/qbm-http/main/README.md): qbm-http is a compiled qb module that gives an actor asynchronous HTTP servers and clients — HTTP/1.1 always, plus HTTP/2, HTTP/3, WebSocket, JWT, and authentication on builds that enable SSL and QUIC — over qb-io's non-blocking I/O.
+
+## Optional
+
+- [Core HTTP concepts](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/01-core-concepts.md): The value types every other page builds on: Request, Response, the case-insensitive multi-value Headers map, the Body payload, and the Method/Status wrappers — all in the qb::http namespace, all riding on qb-io's asynchronous sessions.
+- [HTTP message body: a deep dive](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/02-body-deep-dive.md): qb::http::Body is the payload of every request and response: a qb::allocator::pipe<char> buffer with typed views (as<T>()), constrained append/assign, chunked-transfer helpers, and optional gzip/deflate (de)compression.
+- [Routing overview](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/03-routing-overview.md): How qb::http::Router turns a tree of route, group, and controller definitions into a compiled radix tree, and how an incoming request is matched and dispatched to a chain of tasks.
+- [Defining routes](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/04-defining-routes.md): Bind an HTTP method and a path pattern to a handler, extract path parameters from the URL, and drive each request through the Context it receives.
+- [Route groups](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/05-route-groups.md): Mount a set of related routes under a shared path prefix, nest groups to any depth, and attach middleware that every route inside the group inherits.
+- [Controllers](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/06-controllers.md): Group related route handlers, their shared state, and their middleware into a single class that mounts onto the router under a base path.
+- [The middleware model](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/07-middleware.md): Middleware is the cross-cutting layer of the router: a chain of tasks that run before (and, for synchronous functional middleware, around) a route handler, each free to inspect the request, mutate the response, short-circuit the request, or
+- [Standard middleware](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/08-standard-middleware.md): The middleware that ships with the module — CORS, JWT, rate limiting, compression, timing, static files, full authentication, and security headers — together with the exact configuration options each exposes and the time type each duration 
+- [Writing custom middleware](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/09-custom-middleware.md): How to write your own middleware: the IMiddleware interface, the functional (ctx, next) form, the coroutine form, how each one drives the task chain, how to share state through the context, and where ordering is decided.
+- [The request context](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/10-request-context.md): qb::http::Context<Session> is the per-request object the router hands to every middleware and handler: it carries the request and response, the matched path parameters, a typed scratchpad shared across the chain, and the complete() / cancel
+- [Authentication system](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/11-authentication.md): The qb::http::auth triad — Options, User, and Manager — issues and verifies JSON Web Tokens, turns a valid token into a typed principal, and feeds the two authentication middleware that gate your routes.
+- [Request validation](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/12-validation.md): A composable pipeline for sanitizing and validating the body, query parameters, headers, and path parameters of an incoming request — JSON-Schema-subset rules for bodies, typed-and-coerced rule sets for parameters, in-place string sanitizer
+- [Error handling strategies](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/13-error-handling.md): How an HTTP request fails, what the client sees, and where you intervene: status codes on the response, the AsyncTaskResult::ERROR task outcome and the router error chain, contained handler exceptions, and the protocol-level not_ok() framin
+- [Asynchronous HTTP client](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/14-async-http-client.md): Make non-blocking outbound HTTP/1.1, HTTP/2, and HTTP/3 requests over the qb-io event loop — through one-shot callbacks, single-shot coroutine awaiters, or a persistent connection-reusing client.
+- [HTTP message parsing and framing](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/15-http-parsing.md): How raw bytes off a qb-io socket become a qb::http::Request or qb::http::Response: the llhttp-backed qb::http::Parser, the qb::protocol::http framing layer that drives it, and the security limits that gate every message.
+- [Advanced topics: streaming, connection lifecycle, performance, actor composition](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/16-advanced-topics.md): How qbm-http handles chunked bodies, persistent connections and protocol upgrades, where the performance levers are, and how an HTTP server composes with the rest of your qb actor system.
+- [HTTP/2 protocol specifics](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/17-http2-protocol.md): Run multiplexed HTTP/2 over TLS — qb::http2::Server and qb::http2::Client reuse the HTTP/1.1 router and message types while the protocol layer handles HPACK, streams, flow control, and per-stream cleanup.
+- [Enabling HTTPS (SSL/TLS)](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/18-https-ssl-tls.md): Serve and consume HTTPS by layering OpenSSL on top of the qb-io secure transports — server certificate setup, client trust and verification, and ALPN negotiation.
+- [HTTP/3 over QUIC](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/19-http3-protocol.md): qb::http3 delivers native HTTP/3 — a same-origin async client, a Router-integrated server, and a dual-stack wrapper — layered on the qb-io QUIC transport and libnghttp3, and gated behind the QBM_HTTP_HAS_HTTP3 build macro.
+- [WebSocket (RFC 6455)](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/20-websocket.md): Upgrade an HTTP/1.1 connection to a full-duplex RFC 6455 WebSocket — server-side handshake validation, the CRTP/callback client, automatic ping keepalive, strict framing, and WSS over TLS.
+- [WebSocket coroutines](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/21-websocket-coroutines.md): Write a WebSocket conversation as a single straight-line coroutine — co_await the connect, each inbound frame, and the close handshake — instead of scattering the logic across CRTP on(...) callbacks.
+- [qbm-http documentation map](https://raw.githubusercontent.com/isndev/qbm-http/main/readme/README.md): This is the table of contents for the qbm-http narrative documentation: twenty-one numbered pages covering HTTP/1.1, HTTP/2, HTTP/3, WebSocket, routing, middleware, authentication, and validation, ordered as a learning path.
+- [Changelog](https://raw.githubusercontent.com/isndev/qbm-http/main/CHANGELOG.md): All notable changes to the qbm-http module are documented here.
+- [Contributing to qbm-http](https://raw.githubusercontent.com/isndev/qbm-http/main/CONTRIBUTING.md): qbm-http is a module of the qb actor framework.
+- [Security policy](https://raw.githubusercontent.com/isndev/qbm-http/main/SECURITY.md): qbm-http is a module of the qb actor framework.
+
+<!-- generated by scripts/gen-llms-txt.py from llm/ + the files in this repo; run `python3 scripts/gen-llms-txt.py --write` after editing llm/ -->
