@@ -113,6 +113,7 @@ Note the parameter type is `std::vector`, not `std::list`. There is no auto-prep
 ```cpp
 // <!-- src: qbm/http/src/qbm/http/middleware/error_handling.h:92-218 -->
 #include <qbm/http/http.h>
+#include <qbm/http/middleware/all.h>   // required: http.h declares no middleware factory
 
 auto error_mw = qb::http::error_handling_middleware<MySession>();
 

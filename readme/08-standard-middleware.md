@@ -37,7 +37,7 @@ router.compile();
 ```
 <!-- src: qbm/http/src/qbm/http/middleware/cors.h:511 -->
 
-`Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the three overloads.
+`Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a coroutine `(ctx, next) -> task<void>` handler, a sync `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the four overloads.
 
 ## CORS
 
@@ -416,6 +416,7 @@ Construction throws `std::invalid_argument` if the secret key is empty. The free
 
 ```cpp
 #include <qbm/http/middleware/all.h>   // includes make.h
+#include <qb/io/async.h>               // required for qb::io::async::task<void>
 
 namespace mw = qb::http::middleware;
 

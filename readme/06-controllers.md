@@ -178,7 +178,9 @@ Effective path = `/api/v1/users/â€¦`; middleware runs outermost-first: global â†
 
 <!-- src: qbm/http/src/qbm/http/routing/controller.h:327-372, tests/unit/routing/router-controller.cpp:549-568, 763-786 -->
 
-Middleware declared on a controller applies to **all** routes the controller defines, and only those routes. Declare it from inside `initialize_routes()` with `this->use(...)`, or add it after mounting through the returned handle. Three forms, matching the router and group APIs:
+Middleware declared on a controller applies to **all** routes the controller defines, and only those routes. Declare it from inside `initialize_routes()` with `this->use(...)`, or add it after mounting through the returned handle. **Four** overloads, matching the router and group APIs: a coroutine `(ctx, next) -> task<void>` handler, a sync functional `(ctx, next)` lambda, a `shared_ptr<IMiddleware>`, and in-place construction from the middleware type and its ctor args. The coroutine and sync forms are *separate* overloads selected by concept, not one unified overload. The example below shows three of the four:
+
+<!-- src: qbm/http/src/qbm/http/routing/controller.h:218 (coro), :327 (sync functional), :342 (shared_ptr), :370 (in-place) -->
 
 ```cpp
 class AdminController : public qb::http::Controller<MySession> {
@@ -214,7 +216,7 @@ admin->use(std::make_shared<AuditMiddleware>("admin-audit"));   // 3) shared_ptr
 router.compile();
 ```
 
-All three `use` overloads return `Controller<MySession>&` for chaining. Within a single controller, middleware runs in declaration order, after any inherited parent middleware, and before the matched route's handler. The `(ctx, next)` functional form and the `IMiddleware`/`ICustomRoute` interfaces are documented in [Custom middleware](./09-custom-middleware.md); the bundled middleware (CORS, auth, rate limiting, compression, and so on) in [Standard middleware](./08-standard-middleware.md).
+All four `use` overloads return `Controller<MySession>&` for chaining. Within a single controller, middleware runs in declaration order, after any inherited parent middleware, and before the matched route's handler. The `(ctx, next)` functional form and the `IMiddleware`/`ICustomRoute` interfaces are documented in [Custom middleware](./09-custom-middleware.md); the bundled middleware (CORS, auth, rate limiting, compression, and so on) in [Standard middleware](./08-standard-middleware.md).
 
 ## State and reuse
 
