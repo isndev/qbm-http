@@ -208,7 +208,7 @@ public:
 
 // Drive it from an actor or a standalone qb-io listener:
 Client ws;
-ws.connect("ws://localhost:9000/chat");        // qb::io::uri; "wss://" for TLS
+ws.connect(qb::io::uri("ws://localhost:9000/chat"));  // takes a uri, not a string; "wss://" for TLS
 ```
 
 The `connect(...)` signature is `connect(const qb::io::uri &remote, qb::duration timeout = qb::duration::zero(), bool verify_peer = true)`. It establishes the TCP (or TLS) connection, sends the upgrade `GET`, and verifies the `101` before firing `connected`. A nonzero `timeout` bounds the connect; `verify_peer` controls TLS certificate verification on the secure transport. <!-- src: src/qbm/http/ws/ws.h:1277 -->
@@ -233,7 +233,7 @@ ws.on_connected([&](auto &) {
       qb::io::cout() << "handshake failed\n";
   });
 
-ws.connect("ws://localhost:9000/");
+ws.connect(qb::io::uri("ws://localhost:9000/"));
 ```
 
 Both client forms expose the same connection controls: `set_ping_interval(qb::duration)`, `close(CloseStatus, reason)`, and the subprotocol API below.
@@ -248,7 +248,7 @@ ws.set_subprotocols({"chat.v2", "chat.v1"});   // or add_subprotocol("chat.v1")
 ws.on_connected([&](auto &) {
     auto chosen = ws.negotiated_subprotocol();  // "chat.v2", "chat.v1", or ""
 });
-ws.connect("ws://localhost:9000/");
+ws.connect(qb::io::uri("ws://localhost:9000/"));
 ```
 
 Offers must be valid RFC 7230 tokens — `set_subprotocols` / `add_subprotocol` throw `std::invalid_argument` otherwise — and the negotiation check is strict: a server that returns multiple tokens, an unoffered token, or any token when the client offered none triggers `on(error)` and a disconnect. <!-- src: src/qbm/http/ws/ws.h:1226-1234, src/qbm/http/ws/ws.h:1240-1245, src/qbm/http/ws/ws.h:1330-1356 -->
