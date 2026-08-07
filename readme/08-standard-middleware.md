@@ -154,9 +154,14 @@ Configuration is `qb::http::RateLimitOptions`:
 | Window length | `window(qb::duration)` | `std::chrono::minutes(1)` |
 | Over-limit status | `status_code(qb::http::status)` | `TOO_MANY_REQUESTS` (429) |
 | Over-limit body | `message(std::string)` | "Rate limit exceeded…" |
-| Client identifier | `client_id_extractor(fn)` | trusted-proxy header chain, then a per-session placeholder |
+| Client identifier | `client_id_extractor(fn)` | the socket peer IP |
+| Trust proxy headers | `trust_forwarded_headers(bool)` | `false` — **opt-in** |
 
-The window is a **`qb::duration`**. When you do not supply a `client_id_extractor`, the default extractor consults, in order, `CF-Connecting-IP`, then `True-Client-IP`, then the rightmost (closest-to-server) hop of `X-Forwarded-For`; if none of those headers is present it falls back to a per-session placeholder id, and finally to `"unknown_client"`. The rightmost `X-Forwarded-For` hop is chosen deliberately because the leftmost entries are client-controlled and forgeable.
+The window is a **`qb::duration`**. With no `client_id_extractor`, the default extractor keys on the **socket peer IP** — the actual TCP source, which cannot be forged, so a client cannot mint a fresh bucket per request by inventing a header. It reads the forwarding headers **only** when you opt in with `trust_forwarded_headers(true)` (or when the session type exposes no `ip()`, as a test mock may not).
+
+> **Behind a reverse proxy this is the setting you must change.** nginx / ALB / Cloudflare terminate the connection, so the peer IP is the *proxy's* — every request in the fleet lands in one bucket and a single busy tenant 429s everyone. Call `trust_forwarded_headers(true)`, and only where the proxy is genuinely trusted: the headers are client-supplied on a direct connection.
+
+On the opt-in path the extractor consults, in order, `CF-Connecting-IP`, then `True-Client-IP`, then the rightmost (closest-to-server) hop of `X-Forwarded-For`; failing all three it falls back to a per-session placeholder id, and finally to `"unknown_client"`. The rightmost `X-Forwarded-For` hop is chosen deliberately because the leftmost entries are client-controlled and forgeable.
 
 ```cpp
 #include <qbm/http/http.h>
