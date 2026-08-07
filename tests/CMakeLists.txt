@@ -16,7 +16,7 @@
 #
 
 # -----------------------------------------------------------------------------
-# qbm-http test suite — tiered (unit / system / benchmark), per docs/tests-audit/_spec-qbm-http.md.
+# qbm-http test suite — tiered (unit / system / benchmark), per dev/tests-audit/_spec-qbm-http.md.
 #
 # Targets: qbm-http-test-<tier>-<name> via qb_register_module_test(TIER LABELS REQUIRES).
 # REQUIRES gating decomposes the legacy single if(QB_HAS_SSL) bucket into its three real reasons:
