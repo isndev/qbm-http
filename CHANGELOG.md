@@ -115,7 +115,7 @@ Tracks changes on the development branch not yet part of a tagged release. The m
   cannot drift again; `headers.h` hard-`#error`s if `QB_VERSION` is absent. Callers that set their own
   `User-Agent` are still never overridden.
 
-## [2.6.0] - 2026-06-29
+## [2.6.0] - 2026-08-02
 
 This cycle reworks the accessor surface, the routing/middleware registration API, and the coroutine
 handler ergonomics, and hardens the request-stringify, http2 back-pressure, and JWT/auth paths.
