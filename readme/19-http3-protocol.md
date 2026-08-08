@@ -36,9 +36,15 @@ HTTP/3 is optional and triple-gated. The entire `3/` tree — client, server, du
 | --- | --- |
 | `QB_HAS_SSL` (OpenSSL detected) | derived upstream from OpenSSL discovery; exposed `PUBLIC` to consumers |
 | `QB_HAS_QUIC` (qb-io QUIC transport, itself requiring SSL) | `qb/cmake/qbDependencies.cmake` |
-| `libnghttp3` discoverable by `find_package(Nghttp3 QUIET)` | `qbm/http/cmake/FindNghttp3.cmake` |
+| `libnghttp3` discoverable by `find_package(Nghttp3 QUIET)` **and new enough** | `qbm/http/cmake/FindNghttp3.cmake` |
 
-<!-- src: qbm/http/CMakeLists.txt:84-106,176-178; qbm/http/cmake/FindNghttp3.cmake:23-60 -->
+"New enough" is checked by API, not by version number: the module requires `nghttp3_tstamp`,
+`nghttp3_conn_read_stream2` and the `nghttp3_rand` callbacks field to be present in the header,
+because `3/protocol/connection.h` uses all three. A libnghttp3 that has the header and the
+library but not those — Debian's 1.8.0, for instance — leaves HTTP/3 **off** with a status
+message naming what is missing, rather than switching HTTP/3 on and then failing to compile.
+
+<!-- src: qbm/http/CMakeLists.txt:84-106,176-178; qbm/http/cmake/FindNghttp3.cmake:23-102 -->
 
 Detection lives in one place: `qbm/http/cmake/FindNghttp3.cmake`, which the module appends to `CMAKE_MODULE_PATH` and *also* installs, so `find_package(qbm-http)` re-runs the exact same module. It consults `pkg-config` for hints only, then resolves the header and the library with `find_path` / `find_library` — so a `libnghttp3` installed without a `.pc` file is still found — and publishes an `UNKNOWN IMPORTED` target `Nghttp3::nghttp3` carrying the absolute library path. That absolute path is what survives export intact; the link *directories* an inline `pkg_check_modules` target would carry do not.
 
