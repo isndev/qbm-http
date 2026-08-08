@@ -1,0 +1,70 @@
+name: Bug report
+description: A reproducible defect in qbm-http, including build and integration failures.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every field below is one a maintainer actually reads. If a defect is in the qb framework
+        rather than in this module, file it against [qb](https://github.com/isndev/qb/issues) —
+        but if you are unsure, file it here. Moving an issue is cheap.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what you expected instead
+      placeholder: |
+        Include the exact error, not a paraphrase.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: |
+        The smallest program, route, query or command that shows it. If the report involves TLS, HTTP/2 or HTTP/3, say which OpenSSL / nghttp2 / ngtcp2 versions the build found.
+      render: cpp
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: qbm-http version
+      description: A tag, a commit SHA, or the qb version it was built against.
+      placeholder: "v3.0.0, or a commit SHA"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: consumption
+    attributes:
+      label: How is the module built?
+      options:
+        - From the qb-dev superproject (cmake --preset dev / release)
+        - find_package(qbm-http CONFIG) against a prefix installed from the package preset
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform, compiler, standard library
+      placeholder: "Ubuntu 24.04, g++-14.2, CMake 3.31, libstdc++"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configure line and relevant options
+      description: The CMake preset or command line, and any QB_* / QBM_* options you changed.
+      render: shell
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Compiler, linker, or runtime output
+      render: text

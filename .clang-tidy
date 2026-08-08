@@ -1,0 +1,28 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  -bugprone-derived-method-shadowing-base-method,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-forward-declaration-namespace,
+  -bugprone-casting-through-void,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-macro-parentheses,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-reserved-identifier,
+  -bugprone-std-namespace-modification,
+  -bugprone-suspicious-include,
+  -bugprone-switch-missing-default-case,
+  -performance-avoid-endl,
+  -performance-enum-size,
+  -performance-noexcept-move-constructor,
+  -performance-unnecessary-value-param,
+  -portability-avoid-pragma-once
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '(^|.*/)(src/qb)(/|$).*'
+ExcludeHeaderFilterRegex: '(^|.*/)(build|modules|src/qb/vendor|tests)(/|$).*'
