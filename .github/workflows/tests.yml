@@ -1,0 +1,341 @@
+# The qbm-http test suite, run by THIS repository's own CI.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Until it landed, a pull request opened against isndev/qbm-http was gated by doc-lint.yml
+# and nothing else: 106 registered tests lived in this repository and protected no push to
+# it. They did run -- in the PRIVATE qb-dev superproject, whose qbm-tests.yml builds all
+# three modules together -- but that is maintainer-side coverage: it fires when the
+# superproject bumps its submodule pointer, days after the PR that broke something was
+# reviewed and merged here.
+#
+# WHY IT NEEDS A CHECKOUT OF isndev/qb
+# ------------------------------------
+# This module cannot be configured on its own, and says so with a FATAL_ERROR at the top of
+# CMakeLists.txt: it calls qb_status_message() / qb_register_module() / qb_add_test(), which
+# are development-time helpers in qb/cmake/qbFunctions.cmake that an INSTALLED qb does not
+# ship. CMAKE_PREFIX_PATH pointed at an installed qb does not help. What works -- verified,
+# not assumed -- is a minimal root that add_subdirectory()es a qb SOURCE tree first and this
+# module second. That root is committed here at .github/ci/superbuild/CMakeLists.txt, is
+# byte-identical in the three qbm repositories, and is documented in .github/ci/README.md.
+#
+# WHICH qb
+# --------
+# The branch of the same name: qb, the three modules and the superproject all carry `main`
+# (released) and `develop` (next version) and move together, so a PR against develop is
+# tested against qb's develop. The ref is resolved and then PROVEN to exist on the remote --
+# a silent fallback to some other branch would test the wrong pairing and still report green.
+#
+# WHAT THIS LANE DOES NOT COVER
+# -----------------------------
+# It answers "does this module still work with qb?", not "do all three modules still work
+# together?". A qb-side change lands with no push here, so nothing in this repository fires
+# for it; the superproject's qbm-tests.yml remains the lane that sees qb and all three
+# modules at once. This narrows the gap, it does not close it.
+#
+# ANTI-VACUITY
+# ------------
+# ctest counts `Skipped` as passed and still prints `100% tests passed`, and 24 of these
+# tests are `REQUIRES live` (they bind a loopback port). So this lane asserts, separately:
+# a registration floor before the build, a non-zero translation-unit count, an executable on
+# disk for every registered test, an EXECUTED floor, and skipped == 0. Same discipline as
+# the superproject's qbm-tests.yml, from which the checks are taken.
+name: tests
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'not-qb/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/ci/**'
+      - '.github/workflows/tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'not-qb/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/ci/**'
+      - '.github/workflows/tests.yml'
+  workflow_dispatch:
+    inputs:
+      qb_ref:
+        description: 'isndev/qb ref to build against (empty = the branch of the same name)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: qbm-http suite (superbuild against isndev/qb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      # Pinned, and the reason is measured rather than inherited: the ubuntu-latest default
+      # compiler is GNU 13.3.0, which this project targets nowhere, and which hits
+      # `internal compiler error: in build_special_member_call` on the coroutine ramps in the
+      # qbm test tree. clang-22 is what the superproject's qbm-tests.yml pins for exactly that
+      # reason, and it is installed by the same --profile build below.
+      LLVM_VERSION: '22'
+      QBM_MODULE: qbm-http
+
+    steps:
+      - name: Check out this module
+        uses: actions/checkout@v6
+        with:
+          path: module
+
+      # github.base_ref for a PR (the branch being merged INTO, which is main or develop by
+      # this workflow's triggers), github.ref_name otherwise. Never github.head_ref: on a fork
+      # PR that string is attacker-controlled, and it is also the wrong question -- what must
+      # be tested is the pairing this change is proposed to become part of.
+      #
+      # Passed through env: rather than interpolated into the script, so a branch name can
+      # never be shell.
+      - name: Resolve which isndev/qb to build against
+        env:
+          INPUT_REF: ${{ inputs.qb_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref="${INPUT_REF}"
+          if [ -z "${ref}" ]; then
+            if [ -n "${BASE_REF}" ]; then ref="${BASE_REF}"; else ref="${REF_NAME}"; fi
+          fi
+          echo "qb ref: ${ref}"
+          # Prove it exists rather than discovering it at checkout time as "couldn't find
+          # remote ref", and refuse to fall back: a lane that quietly tested develop while
+          # claiming to test main would be worse than no lane.
+          if ! git ls-remote --exit-code --heads --tags https://github.com/isndev/qb "${ref}" >/dev/null; then
+            echo "::error::isndev/qb has no branch or tag '${ref}'. qb and the qbm modules carry the same two branch names (main, develop); re-run this workflow manually with the qb_ref input if you need a different pairing."
+            exit 1
+          fi
+          echo "QB_REF=${ref}" >> "${GITHUB_ENV}"
+
+      - name: Check out isndev/qb
+        uses: actions/checkout@v6
+        with:
+          repository: isndev/qb
+          ref: ${{ env.QB_REF }}
+          path: qb
+
+      - name: Install dependencies
+        run: ./qb/scripts/ci-install-linux-dependencies.sh --profile build
+
+      # The configure output is teed because the registration step reads the HTTP/3 capability
+      # decision out of it. `set -o pipefail` is not the default in a `run:` block (it runs
+      # under `bash -e {0}`), and without it a failing cmake piped into tee reports success.
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S module/.github/ci/superbuild -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DQB_CXX_STANDARD=20 \
+                -DCMAKE_C_COMPILER="clang-${LLVM_VERSION}" \
+                -DCMAKE_CXX_COMPILER="clang++-${LLVM_VERSION}" \
+                -DQBM_CI_QB_DIR="${GITHUB_WORKSPACE}/qb" \
+                -DQBM_CI_MODULE_DIR="${GITHUB_WORKSPACE}/module" \
+                2>&1 | tee "${RUNNER_TEMP}/configure.log"
+          # Assert the cache, do not trust the command line: a toolchain file could override
+          # it, and this lane's whole compiler argument would then be decoration.
+          got="$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' build/CMakeCache.txt)"
+          echo "CMAKE_CXX_COMPILER = ${got}"
+          case "${got}" in
+            *clang++-${LLVM_VERSION}) ;;
+            *) echo "::error::configured with '${got}', not clang++-${LLVM_VERSION}"; exit 1 ;;
+          esac
+
+      # Registration floors need only the configure step, so a suite that vanished from
+      # registration fails here rather than being silently absent from the totals 20 minutes
+      # later.
+      #
+      # A FLOOR IS PER PLATFORM, AND HTTP/3 IS A CAPABILITY RATHER THAN A CONSTANT.
+      # tests/CMakeLists.txt wraps exactly four tests -- http3-validation,
+      # http3-connection-direct, http3-loopback, http3-interop, all carrying the `http3`
+      # label -- in if(QBM_HTTP_HAS_HTTP3), and CMakeLists.txt sets that only when QB_HAS_SSL
+      # AND QB_HAS_QUIC AND Nghttp3_FOUND. ubuntu-latest ships OpenSSL 3.0.13; qb's QUIC
+      # transport needs the ngtcp2 OpenSSL crypto helper, which needs OpenSSL >= 3.5, so
+      # ci-install-linux-dependencies.sh reports `libngtcp2-crypto-ossl-dev not available` and
+      # QUIC is auto-disabled. A maintainer's macOS box has all three and registers 106.
+      #
+      # So the floor is BUILT rather than written down, and is stronger than the constant it
+      # replaces: 102 non-http3 tests is host-independent -- it is what macOS registers too,
+      # minus the same four -- so it cannot be satisfied by the wrong host; and the http3
+      # group is checked against the capability the configure step actually reported, so `all
+      # four` and `none` are the only accepted shapes. Editing a floor DOWN to make this lane
+      # green is the one thing that must not happen here.
+      - name: Registration floor (before building)
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # Read the decision from the single line of CMake that makes it, not from a guess
+          # about the host.
+          if grep -q 'HTTP/3 support enabled' "${RUNNER_TEMP}/configure.log"; then
+            http3=4
+            echo "HTTP/3: available on this runner -> the 4 http3 tests must be registered"
+          elif grep -q 'HTTP/3 support disabled' "${RUNNER_TEMP}/configure.log"; then
+            http3=0
+            echo "HTTP/3: not available on this runner (no ngtcp2/nghttp3) -> 0 http3 tests"
+          else
+            echo "::error::the configure log states neither 'HTTP/3 support enabled' nor 'HTTP/3 support disabled'. That line is how this lane knows what to expect; refusing to guess."
+            exit 1
+          fi
+
+          count() { ctest --test-dir build -N "$@" | grep -cE '^ *Test +#[0-9]+:' || true; }
+
+          nonh3="$(count -L 'module:qbm-http' -LE http3)"
+          echo "qbm-http (non-http3) registered: ${nonh3} (floor 102)"
+          [ "${nonh3}" -ge 102 ] || { echo "::error::qbm-http registered ${nonh3} non-http3 tests, below its floor of 102"; fail=1; }
+
+          h3="$(count -L http3)"
+          echo "qbm-http http3-labelled registered: ${h3} (expected ${http3})"
+          if [ "${h3}" -ne "${http3}" ]; then
+            echo "::error::${h3} http3 tests registered but the configure step reported a capability implying ${http3}. Either the gate in tests/CMakeLists.txt changed or a test was lost."
+            fail=1
+          fi
+
+          floor=$((102 + http3))
+          total="$(ctest --test-dir build -N -L 'module:qbm-http' | sed -n 's/^Total Tests: //p')"
+          echo "qbm-http total registered: ${total} (floor ${floor} = 102 host-independent + ${http3} http3)"
+          [ "${total}" -ge "${floor}" ] || { echo "::error::qbm-http total ${total} below floor ${floor}"; fail=1; }
+
+          # Every later step gates on the same number; computing it twice is how the two drift.
+          echo "QBM_TEST_FLOOR=${floor}" >> "${GITHUB_ENV}"
+          exit "${fail}"
+
+      # Build this module's test binaries only -- not qb's own ~174, which this lane does not
+      # run and which qb's own CI already builds.
+      #
+      # A ctest name is a target name for every qb_register_module_test() entry, but NOT for
+      # every ctest entry: tests/CMakeLists.txt also registers one hand-written add_test() that
+      # re-runs an EXISTING binary under QBM_HTTP_RUN_HUGE_BODY=1. Feeding the names straight to
+      # ninja therefore dies on `unknown target
+      # qbm-http-test-unit-http1-serialize-limits-huge-body`. So the names are INTERSECTED with
+      # the real target list rather than trusted, and the entries that are not targets are
+      # printed rather than hidden. Nothing is weakened: a test whose binary genuinely never got
+      # built is caught twice below -- by the executables-exist step, and by ctest itself, which
+      # reports a missing executable as a FAILURE and never as a skip.
+      - name: Build the qbm-http test binaries
+        run: |
+          set -euo pipefail
+          mapfile -t names < <(ctest --test-dir build -N -L 'module:qbm-http' |
+                               sed -n 's/^ *Test *#[0-9]*: *//p' | sort -u)
+          mapfile -t all_targets < <(cmake --build build --target help |
+                                     sed 's/^\.\///; s/: phony$//' | sort -u)
+          mapfile -t targets < <(comm -12 <(printf '%s\n' "${names[@]}") <(printf '%s\n' "${all_targets[@]}"))
+          mapfile -t reruns  < <(comm -23 <(printf '%s\n' "${names[@]}") <(printf '%s\n' "${all_targets[@]}"))
+          echo "ctest entries: ${#names[@]} -> buildable targets: ${#targets[@]}"
+          if [ "${#reruns[@]}" -gt 0 ]; then
+            echo "entries that are not targets (they re-run a binary another entry builds):"
+            printf '  %s\n' "${reruns[@]}"
+          fi
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::no qbm-http test target resolved; refusing to run a build that compiles nothing"
+            exit 1
+          fi
+          # `-k 0` (ninja keep-going) is diagnostic, not lenient: ninja still exits non-zero on
+          # any failure and `set -o pipefail` still fails the step. It buys the FULL list of
+          # broken targets from one runner iteration instead of the first one only -- this lane
+          # compiles ~105 binaries with -Werror (QB_TESTS_WERROR defaults to QB_CI, so every
+          # runner is strict and a contributor's local build is not).
+          cmake --build build --parallel "$(nproc)" \
+                --target "${targets[@]}" -- -k 0 2>&1 | tee "${RUNNER_TEMP}/build.log"
+
+      # A build that compiled nothing cannot fail, and would make every number after it vacuous.
+      - name: Translation units compiled must be non-zero
+        run: |
+          set -euo pipefail
+          tus="$(grep -c 'Building CXX object' "${RUNNER_TEMP}/build.log" || true)"
+          echo "translation units compiled: ${tus}"
+          [ "${tus}" -gt 0 ] || { echo "::error::0 TUs compiled; every count below would be vacuous"; exit 1; }
+
+      # Every registered test must now have an executable on disk. This is the statement the
+      # intersection above cannot make on its own: after the build, `--show-only=json-v1` names
+      # the command of every test whose file exists, so a test left without a binary -- by the
+      # intersection, by a target renamed out from under a ctest entry, or by `-k 0` letting the
+      # build continue past a link failure -- is named here, while the reason is still legible.
+      - name: Every registered test has an executable
+        run: |
+          set -euo pipefail
+          ctest --test-dir build -L 'module:qbm-http' --show-only=json-v1 > "${RUNNER_TEMP}/tests.json"
+          python3 - "${RUNNER_TEMP}/tests.json" "${QBM_TEST_FLOOR}" <<'PY'
+          import json, os, sys
+          tests = json.load(open(sys.argv[1]))["tests"]
+          floor = int(sys.argv[2])
+          missing = [t["name"] for t in tests
+                     if not t.get("command") or not os.path.exists(t["command"][0])]
+          binaries = {os.path.basename(t["command"][0]) for t in tests if t.get("command")}
+          print(f"registered={len(tests)} distinct binaries={len(binaries)} without an executable={len(missing)}")
+          bad = False
+          if len(tests) < floor:
+              print(f"::error::{len(tests)} tests listed, floor is {floor}"); bad = True
+          for n in missing[:20]:
+              print(f"  NO EXECUTABLE: {n}")
+          if missing:
+              print(f"::error::{len(missing)} registered test(s) have no executable after the build"); bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Run the qbm-http suite
+        run: |
+          ctest --test-dir build -L 'module:qbm-http' \
+                --output-on-failure \
+                --output-junit "${RUNNER_TEMP}/results.xml"
+
+      # THE anti-vacuity gate. ctest already exited 0 above -- including in a world where every
+      # loopback test skipped itself. This reads the JUnit report and fails on any skip.
+      - name: Executed == registered, and skipped must be 0
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f "${RUNNER_TEMP}/results.xml" ]; then
+            echo "::error::no JUnit report at ${RUNNER_TEMP}/results.xml - the suite never ran. Look at the step that failed above, not here."
+            exit 1
+          fi
+          python3 - "${RUNNER_TEMP}/results.xml" "${QBM_TEST_FLOOR:-0}" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          floor = int(sys.argv[2])
+          cases = list(root.iter('testcase'))
+          skipped = [c.get('name') for c in cases if c.find('skipped') is not None]
+          failed  = [c.get('name') for c in cases if c.find('failure') is not None]
+          total, executed = len(cases), len(cases) - len(skipped)
+
+          print(f"registered={total} executed={executed} skipped={len(skipped)} failed={len(failed)} floor={floor}")
+          for n in skipped:
+              print(f"  SKIPPED: {n}")
+          for n in failed:
+              print(f"  FAILED:  {n}")
+
+          bad = False
+          # The floor is computed once, in the registration step, and carried here through
+          # GITHUB_ENV. A 0 means that step never ran, which is itself a failure: it would let
+          # an empty report satisfy `total >= floor`.
+          if floor < 102:
+              print(f"::error::floor is {floor}; the registration step did not run or did not export one"); bad = True
+          if total < floor:
+              print(f"::error::only {total} qbm-http tests in the report, floor is {floor}"); bad = True
+          if executed < floor:
+              print(f"::error::only {executed} qbm-http tests EXECUTED, floor is {floor}"); bad = True
+          if skipped:
+              print("::error::%d qbm-http test(s) self-skipped. ctest reports a skip as a pass." % len(skipped)); bad = True
+          if failed:
+              print(f"::error::{len(failed)} qbm-http test(s) failed"); bad = True
+          sys.exit(1 if bad else 0)
+          PY
