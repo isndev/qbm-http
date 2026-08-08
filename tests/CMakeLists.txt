@@ -67,8 +67,14 @@ qhttp_test(unit http1-serialize-limits unit/http1/http1-serialize-limits.cpp EXT
 # non-vacuous. Without them an env var that failed to propagate, or a `--gtest_filter` that matched
 # nothing, would exit 0 and read as coverage — which is exactly how this path came to have none.
 if (TARGET qbm-http-test-unit-http1-serialize-limits)
+    # WORKING_DIRECTORY, like every qb_add_test() entry: this is the ONE test in the tree
+    # registered by a hand-written add_test(), and the omission was invisible until a Windows
+    # multi-config build, where it hung in the DLL loader for its full 300 s TIMEOUT while its
+    # 350 siblings ran. Kept even though the deployer now puts the DLLs beside the executable --
+    # the point is that this entry should not differ from the others in the first place.
     add_test(NAME qbm-http-test-unit-http1-serialize-limits-huge-body
-             COMMAND qbm-http-test-unit-http1-serialize-limits --gtest_filter=*SerializeLimitsTest.BodyExceedingLimitIsRejected)
+             COMMAND qbm-http-test-unit-http1-serialize-limits --gtest_filter=*SerializeLimitsTest.BodyExceedingLimitIsRejected
+             WORKING_DIRECTORY "$<TARGET_FILE_DIR:qbm-http-test-unit-http1-serialize-limits>")
     set_tests_properties(qbm-http-test-unit-http1-serialize-limits-huge-body PROPERTIES
             ENVIRONMENT "QBM_HTTP_RUN_HUGE_BODY=1"
             LABELS "module:qbm-http;tier:unit;http1;huge-body"
