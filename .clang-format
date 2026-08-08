@@ -1,0 +1,69 @@
+---
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: Latest
+
+### Indentation
+IndentWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+IndentCaseLabels: true
+IndentPPDirectives: None
+LambdaBodyIndentation: Signature
+IndentRequiresClause: false
+RequiresExpressionIndentation: OuterScope
+
+### Column limit
+ColumnLimit: 144
+
+### Braces and blocks
+BreakBeforeBraces: Attach
+BreakAfterOpenBracketBracedList: true
+BreakBeforeCloseBracketBracedList: true
+AllowShortBlocksOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortLambdasOnASingleLine: Inline
+AllowShortCompoundRequirementOnASingleLine: true
+BreakBeforeBinaryOperators: NonAssignment
+
+### Functions, templates, constructors
+AllowShortFunctionsOnASingleLine: Empty
+AlwaysBreakTemplateDeclarations: Yes
+AlwaysBreakAfterReturnType: AllDefinitions
+BreakBeforeConceptDeclarations: Always
+RequiresClausePosition: OwnLine
+BreakConstructorInitializers: BeforeComma
+BreakInheritanceList: BeforeComma
+SpaceBeforeParens: ControlStatements
+SpaceAfterCStyleCast: true
+
+### Pointers and references
+PointerAlignment: Right
+DerivePointerAlignment: false
+
+### Includes
+SortIncludes: false
+IncludeBlocks: Preserve
+IncludeCategories:
+  - Regex: '^<.*>'
+    Priority: 1
+  - Regex: '^<qb/.*>'
+    Priority: 2
+  - Regex: '^".*"'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
+
+
+### Alignments
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: true
+AlignTrailingComments: true
+
+### Comments and spacing
+ReflowComments: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+EmptyLineBeforeAccessModifier: Always
+AlignEscapedNewlines: Left

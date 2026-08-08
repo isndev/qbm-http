@@ -1,0 +1,16 @@
+# Blank issues stay enabled on purpose — the same choice qb makes. The template is here
+# for people who want the prompts, not as a toll gate.
+blank_issues_enabled: true
+
+contact_links:
+  - name: Question, design help, or "how do I…"
+    url: https://github.com/isndev/qb/discussions
+    about: One Discussions space for the whole framework, modules included. Issues here are for reproducible bugs.
+
+  - name: Security vulnerability
+    url: https://github.com/isndev/qbm-http/security/advisories/new
+    about: Report privately, never as a public issue. See SECURITY.md for scope and what to expect.
+
+  - name: Bug in the qb framework itself
+    url: https://github.com/isndev/qb/issues/new/choose
+    about: Actors, the event loop, coroutines, qb-io transports, building or installing qb. File it against qb.
