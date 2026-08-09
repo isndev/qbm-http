@@ -71,6 +71,19 @@ qbm-http needs none. Its 24 `REQUIRES live` tests bind a **loopback port they op
 PostgreSQL, no Redis, no network egress. (`REQUIRES live` on a qbm module means "this test needs a
 real socket", and for pgsql/redis it additionally means a reachable server.)
 
+## One trap before you make this a required check
+
+`tests.yml` carries `paths:` filters — the same shape `doc-lint.yml` here already uses — so a
+pull request that touches only Markdown does not run it. That is deliberate: a docs-only PR cannot
+break a test, and the lane costs a full build of qbm-http's binaries.
+
+It has a consequence, and it is the classic one. If `tests` is ever added to this branch's
+protection rules as a **required** status check, a docs-only PR will sit forever on
+*"Expected — Waiting for status to be reported"*, because a filtered-out workflow reports nothing
+at all rather than reporting success. GitHub's answer is a companion job with the same check name
+that always runs and passes when the real one is filtered out; this repository does not have one
+yet. Decide that before turning the check on, not after.
+
 ## What this lane covers, and what it does not
 
 It answers **"does qbm-http still work with qb?"**. It does not answer *"do all three modules still
