@@ -33,16 +33,22 @@
 # qb-dev is private, so this file reproduces the handful of its lines that matter and
 # takes the two trees as cache variables instead of assuming a fixed layout.
 #
-# HOW TO USE IT -- this is verbatim what .github/workflows/tests.yml runs
+# HOW TO USE IT -- the same thing .github/workflows/tests.yml runs, from the module root
 #     git clone --depth 1 -b develop https://github.com/isndev/qb ../qb
 #     cmake -S .github/ci/superbuild -B ../build -G Ninja \
 #           -DCMAKE_BUILD_TYPE=Release \
 #           -DQBM_CI_QB_DIR="$PWD/../qb" \
 #           -DQBM_CI_MODULE_DIR="$PWD"
-#     cmake --build ../build --parallel
+#     ctest --test-dir ../build -N -L 'module:qbm-<mod>'    # what to build
+#     cmake --build ../build --parallel --target <those names>
 #     ctest --test-dir ../build -L 'module:qbm-<mod>'
-# Build the module's test targets only (not qb's own ~174) by naming them; `ctest -N -L
-# module:qbm-<mod>` lists them and every entry but one is also its target name.
+#
+# NAME the targets rather than running a plain `cmake --build`: QB_BUILD_TESTS reaches qb too,
+# so an unqualified build also compiles qb's own ~174 test binaries, which this root does not
+# run. Each ctest entry IS its target name, with one exception in the tree -- a module may
+# register a hand-written add_test() that re-runs a binary another entry builds (qbm-http has
+# exactly one, under QBM_HTTP_RUN_HUGE_BODY), and feeding that name to ninja fails. The
+# workflow intersects the two lists rather than trusting either.
 #
 # It is BYTE-IDENTICAL in qbm-http, qbm-pgsql and qbm-redis -- nothing in it names a
 # module -- so it is reviewed once, and qb-dev's dev/agent/verify.sh asserts the three
