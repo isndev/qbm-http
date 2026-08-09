@@ -48,7 +48,7 @@
 #include "../../shared/ws_loopback.h"
 #include <qbm/http/ws/coro.h>
 
-namespace ws_framing_edge_test {
+namespace {
 
 using namespace std::chrono_literals;
 using qb::http::test::extract_close_code;
@@ -864,4 +864,4 @@ TEST(WsFramingEdge, SerializingValidFrameSucceeds) {
     EXPECT_EQ(out.size(), 4u);
 }
 
-} // namespace ws_framing_edge_test
+} // namespace
