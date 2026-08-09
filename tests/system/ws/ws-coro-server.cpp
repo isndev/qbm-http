@@ -43,7 +43,7 @@
 
 #include "../../shared/ws_loopback.h"
 
-namespace {
+namespace ws_coro_server_test {
 
 using namespace std::chrono_literals;
 using qb::http::test::read_http_response;
@@ -398,4 +398,4 @@ TEST_F(WsCoroServer, CoroSessionClosesGracefully) {
     }
 }
 
-} // namespace
+} // namespace ws_coro_server_test

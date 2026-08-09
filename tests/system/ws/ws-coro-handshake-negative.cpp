@@ -39,7 +39,7 @@
 
 #include "../../shared/ws_loopback.h"
 
-namespace {
+namespace ws_coro_handshake_negative_test {
 
 using namespace std::chrono_literals;
 using qb::http::test::read_http_response;
@@ -219,4 +219,4 @@ TEST_F(WsCoroHandshakeNegative, CoroSessionCloseAsyncPropagatesClampedCode) {
     }
 }
 
-} // namespace
+} // namespace ws_coro_handshake_negative_test
