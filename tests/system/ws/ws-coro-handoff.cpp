@@ -48,7 +48,7 @@
 
 #include "../../shared/loopback_server.h"
 
-namespace ws_coro_handoff_test {
+namespace {
 
 using namespace std::chrono_literals;
 
@@ -369,4 +369,4 @@ TEST_F(WsCoroHandoff, PersistentHttp1ClientCanReuseConnectionBeforeUpgrade) {
         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
 }
 
-} // namespace ws_coro_handoff_test
+} // namespace

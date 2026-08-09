@@ -170,22 +170,12 @@ private:
     // so the 7-bit length form (no mask bit, server→client) is used.
     void
     send_unmasked_frame(std::uint8_t first_byte, std::string_view payload) {
-        // Written straight into the output pipe instead of through a reserve() +
-        // push_back() staging vector, and that is deliberate — do not "simplify" it
-        // back. GCC 14 at -O3 inlines reserve() and the two push_back()s into one
-        // chain, mis-tracks the _M_realloc_append guard's pointer, and emits
-        //     error: 'void operator delete(void*, std::size_t)' called on pointer
-        //            '<unknown>' with nonzero offset [-Werror=free-nonheap-object]
-        // naming the push_back at what used to be this function's fourth line. It is
-        // a false positive (reserve() guarantees the two push_backs never reallocate),
-        // but QB_TESTS_WERROR defaults to QB_CI so it is fatal on every runner and
-        // invisible on the maintainer's clang. allocate_back() already returns writable
-        // storage of exactly the requested size, so the staging vector bought nothing.
-        const std::size_t n   = payload.size() + 2u;
-        char *const       out = this->out().allocate_back(n);
-        out[0]                = static_cast<char>(first_byte);
-        out[1]                = static_cast<char>(payload.size()); // mask bit clear
-        std::memcpy(out + 2, payload.data(), payload.size());
+        std::vector<char> frame;
+        frame.reserve(payload.size() + 2);
+        frame.push_back(static_cast<char>(first_byte));
+        frame.push_back(static_cast<char>(payload.size())); // mask bit clear
+        frame.insert(frame.end(), payload.begin(), payload.end());
+        std::memcpy(this->out().allocate_back(frame.size()), frame.data(), frame.size());
         this->ready_to_write();
     }
 };
