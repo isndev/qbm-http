@@ -146,7 +146,7 @@ llm/qbm-http.llm.api.md	request.h:83-83	613e7625a2fd	explicit Request(qb::io::ur
 llm/qbm-http.llm.api.md	request.h:85-85	5ff6ee93407d	, _method(Method::GET)
 llm/qbm-http.llm.api.md	request.h:97-97	cfe7f2bcfdc6	method() const noexcept {
 llm/qbm-http.llm.api.md	response.h:36-36	3bbce570ed80	class Response : public internal::MessageBase {
-llm/qbm-http.llm.api.md	response.h:56-56	b06544b06939	Response() noexcept
+llm/qbm-http.llm.api.md	response.h:56-58	e5d0228cfdc0	Response() noexcept
 llm/qbm-http.llm.api.md	response.h:75-75	2705db5fe133	status() const noexcept {
 llm/qbm-http.llm.api.md	response.h:79-79	82246683f1d1	status() noexcept {
 llm/qbm-http.llm.api.md	route.h:139-139	b610b99d7dbc	class CustomRouteAdapterTask final : public IAsyncTask<SessionType> {

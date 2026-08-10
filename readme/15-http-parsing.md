@@ -39,7 +39,7 @@ llhttp is event-driven: you feed it bytes with `http_execute`, and it invokes ca
 
 `Parser` is templated on the message type and lives in `namespace qb::http`:
 
-<!-- src: src/qbm/http/1.1/protocol/base.h:110-111,482-578 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:103,125-126,505-506,524-525,562-563,579-580,598-599 -->
 
 ```cpp
 #include <qbm/http/http.h>

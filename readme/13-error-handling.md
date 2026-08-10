@@ -20,7 +20,7 @@ This page covers status codes, the four ways to produce an error response, the `
 `qb::http::status` is an alias for the `qb::http::Status` wrapper class (`types.h`), which carries a nested `enum class Value` backed by llhttp's `HTTP_STATUS_*` constants and re-exposes each code as a `static constexpr Value` member — so `qb::http::status::NOT_FOUND` names a value directly. The response status is plain mutable state: `ctx->response().status()` is an lvalue you assign.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/types.h:281-679 (class Status), src/qbm/http/routing/context.h:455-463 (response()), 989-993 (status()) -->
+// <!-- src: qbm/http/src/qbm/http/types.h:306-704 (class Status), :706 (using status = Status), src/qbm/http/routing/context.h:455-463 (response()), :989-993 (status()) -->
 ctx->response().status() = qb::http::status::NOT_FOUND;    // 404
 ctx->status(qb::http::status::FORBIDDEN);                  // 403, chainable, non-terminal
 ```
@@ -49,7 +49,7 @@ The right tool depends on whether you want to send a final response immediately 
 The simplest path. The named helpers set the status, a plain-text body, and finalize in one call. The chain stops; the response goes out as written. The error chain is **not** involved.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/context.h:1001-1041 (named helpers), 930-968 (json/text/html) -->
+// <!-- src: qbm/http/src/qbm/http/routing/context.h:1001-1041 (named helpers), :930-968 (json/text/html) -->
 #include <qbm/http/http.h>
 
 router.get("/items/:id", [](auto ctx) {
@@ -97,7 +97,7 @@ router.get("/items/:id", [](auto ctx) {
 `Router::set_error_task_chain(...)` installs a `std::vector` of `IAsyncTask` shared pointers run when any task signals `AsyncTaskResult::ERROR`. The chain runs in full, in order; the last task is responsible for finalizing (`COMPLETE`).
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/router.h:272 (decl), qbm/http/src/qbm/http/routing/router_core.h:265 (set_error_task_chain), 290 (get_compiled_error_tasks), 303 (is_error_chain_set) -->
+// <!-- src: qbm/http/src/qbm/http/routing/router.h:272 (decl), qbm/http/src/qbm/http/routing/router_core.h:265 (set_error_task_chain), :290 (get_compiled_error_tasks), :303 (is_error_chain_set) -->
 std::vector<std::shared_ptr<qb::http::IAsyncTask<MySession>>> error_chain;
 error_chain.push_back(
     std::make_shared<qb::http::MiddlewareTask<MySession>>(my_error_formatter));
@@ -173,7 +173,7 @@ flowchart TD
 You do not have to wrap handler bodies in `try/catch` to keep the server alive. The chain driver in `Context` runs each task inside a `try/catch`; an exception that escapes a middleware or handler is caught, and — provided the context is not already finalized or cancelled — converted into `complete(AsyncTaskResult::ERROR)`. That routes through the error chain exactly as an explicit `ERROR` would, defaulting the status to 500.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/context.h:240-264 (task try/catch), 1068-1140 (complete() backstop) -->
+// <!-- src: qbm/http/src/qbm/http/routing/context.h:240-264 (task try/catch), :1105-1106 (complete()), :1146-1172 (the ERROR case: reseat the error chain, else 500) -->
 router.get("/risky", [](auto ctx) {
     auto data = parse_or_throw(ctx->request().body().as<std::string_view>());
     // If parse_or_throw throws, the chain driver catches it,

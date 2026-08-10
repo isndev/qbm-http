@@ -228,10 +228,10 @@ int main() {
 
 ## Pitfalls
 
-- **One consumer at a time.** A second overlapping `receive()` / `next_frame()`, or a second pending `close_async()`, throws `std::logic_error`. The API fails fast rather than silently dropping the earlier awaiter. Never park two awaiters of the same kind on one client or session. <!-- src: qbm/http/src/qbm/http/ws/coro.h:248-250, 447-450, 856-859, 873-876 -->
+- **One consumer at a time.** A second overlapping `receive()` / `next_frame()`, or a second pending `close_async()`, throws `std::logic_error`. The API fails fast rather than silently dropping the earlier awaiter. Never park two awaiters of the same kind on one client or session. <!-- src: qbm/http/src/qbm/http/ws/coro.h:249-253,452-455,861-864,878-881 -->
 - **`run()` that never returns leaks the session.** The base intentionally retains the session for the coroutine's lifetime; you must reach a `co_return`, normally on a `Close`/`Disconnected` frame.
 - **The close handshake does not close the socket.** `close_async` only queues a Close frame; the TCP stream stays up until the peer's echo or an explicit `disconnect()`. Do not assume the connection is gone the instant `close_async` resolves.
-- **Reserved close codes throw.** `1004/1005/1006/1015` and any code outside `1000..4999` raise `std::invalid_argument` from `close_async`. The exception surfaces inside your coroutine.
+- **Reserved close codes throw.** `1004/1005/1006/1015` and any code outside `1000..4999` raise `std::invalid_argument` on the `close_async` path. The throw is not in `close_async` itself: it comes from the `MessageClose` constructor `close_async` builds, which rejects every code `is_sendable_close_code` refuses. The exception surfaces inside your coroutine. <!-- src: qbm/http/src/qbm/http/ws/coro.h:462,888; qbm/http/src/qbm/http/ws/ws.cpp:210-214; qbm/http/src/qbm/http/ws/ws.h:253-266 -->
 - **Reconnecting a client resets it.** `connect()` on an already-used `coro_client` clears buffered frames and forcibly completes any parked `receive`/`close` awaiter with a `Disconnected`/failure result before reconnecting. A single instance can be reused, but an awaiter from the previous session is torn down. <!-- src: qbm/http/src/qbm/http/ws/coro.h:376-403 -->
 - **Buffered frames are bounded.** See below; do not rely on an unbounded inbound queue.
 
