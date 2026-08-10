@@ -57,7 +57,7 @@ Usage: `qb::http::Request r{qb::http::method::GET, qb::io::uri{"https://h/x"}}; 
 
 ### `qb::http::Response` (alias `response`) — `response.h:36`
 `class Response : public internal::MessageBase { Response() noexcept; Response(Status s, headers_map h={}, Body b={}); const Status& status() const noexcept; Status& status() noexcept; void parse_set_cookie_headers(); void add_cookie(const Cookie&); Cookie& add_cookie(name,value); void remove_cookie(name); void update_cookie_header(name); void update_cookie_headers(); Response& with_status(Status) noexcept; Response& with_cookie(const Cookie&); Response& with_body(BodyType&&); void reset() noexcept; }`
-Owning response: default-constructs to 200 OK (`response.h:56`), CookieJar serialized to `Set-Cookie`. Mutating cookies directly needs `update_cookie_header(s)` to resync. Of the chainable `with_*`, only `with_status` is `noexcept`. `status()` has **both** a const and a mutating overload (`response.h:75, :79`) — `resp.status() = qb::http::status::CREATED;` is valid.
+Owning response: default-constructs to 200 OK (`response.h:56-58`), CookieJar serialized to `Set-Cookie`. Mutating cookies directly needs `update_cookie_header(s)` to resync. Of the chainable `with_*`, only `with_status` is `noexcept`. `status()` has **both** a const and a mutating overload (`response.h:75, :79`) — `resp.status() = qb::http::status::CREATED;` is valid.
 Usage: `qb::http::Response resp{qb::http::status::OK}; resp.with_body("hi");`
 
 ### `qb::http::Headers` (alias `headers`) — `headers.h:150`

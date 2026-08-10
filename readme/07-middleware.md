@@ -61,7 +61,7 @@ public:
 
 ### How a middleware becomes a task
 
-The router does not execute `IMiddleware` directly. It executes `IAsyncTask<Session>`, the generic unit of work in a request chain (a middleware *or* a handler). `qb::http::MiddlewareTask<Session>` is the adapter that bridges the two: its `execute()` calls your `process()` and, critically, **wraps it in a try/catch**. If `process()` throws, the adapter logs the method, path, and error, and — only if the context has not already completed or cancelled — sets the response status to `500` and calls `ctx->complete(AsyncTaskResult::ERROR)` for you. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:79-113 -->
+The router does not execute `IMiddleware` directly. It executes `IAsyncTask<Session>`, the generic unit of work in a request chain (a middleware *or* a handler). `qb::http::MiddlewareTask<Session>` is the adapter that bridges the two: its `execute()` calls your `process()` and, critically, **wraps it in a try/catch**. If `process()` throws, the adapter logs the method, path, and error, and — only if the context has not already completed or cancelled — sets the response status to `500` and calls `ctx->complete(AsyncTaskResult::ERROR)` for you. The `catch (...)` arm does the same for a non-`std::exception` throw. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:74-75,104-139 -->
 
 You rarely construct `MiddlewareTask` yourself — `use()` does it. But the wrapping is why an exception escaping your `process()` becomes a clean 500 + error chain rather than a hung request.
 
