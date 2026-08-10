@@ -83,46 +83,78 @@ using namespace std::chrono_literals;
  * that cv, NOT a busy-poll + fixed settle sleep, so there is no sleep-based race
  * with the bind and no wasted warmup time.
  *
+ * The wait is BOUNDED by @p ready_budget and the worker publishes a @c failed flag if startup
+ * throws, both mirroring ServerThread. That pairing is what makes a cv wait safe here: a startup
+ * that throws never reaches the notify, so an unbounded wait would block the test thread forever
+ * (and an escaping exception would std::terminate the process) — a defect that would surface as a
+ * tier timeout instead of a named failure.
+ *
  * @tparam ServerT a @c qb::io::use<...>::tcp::server<...> session host.
  */
 template <typename ServerT>
 struct WsServerThread {
     std::thread             thread;
     std::atomic<bool>       ready{false};
+    std::atomic<bool>       failed{false};
     std::atomic<bool>       running{true};
     int                     port{0};
     std::mutex              mutex;
     std::condition_variable cv;
 
-    explicit WsServerThread(int port_, std::function<void(ServerT &)> config = {})
+    explicit WsServerThread(int port_, std::function<void(ServerT &)> config = {},
+                            std::chrono::milliseconds ready_budget = std::chrono::seconds(5))
         : port(port_) {
         thread = std::thread([this, config = std::move(config)] {
-            qb::io::async::init();
-            ServerT server;
-            if (config) {
-                config(server);
-            }
-            server.transport().listen_v4(static_cast<std::uint16_t>(port));
-            // When the caller asked for an ephemeral port (port == 0), read the
-            // kernel-assigned port back from the now-bound listener and publish it
-            // under the lock BEFORE notifying, so the main thread (which reads
-            // `port` only after observing `ready`) sees the real port, not 0.
-            const int bound_port = static_cast<int>(server.transport().local_endpoint().port());
-            server.start();
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                port = bound_port;
-                ready.store(true, std::memory_order_release);
-            }
-            cv.notify_all();
-            while (running.load(std::memory_order_acquire)) {
-                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(1ms);
+            // Everything the worker does before it signals readiness runs under this try. A server
+            // ctor, a `config` callback or a bind that throws would otherwise leave `ready` false
+            // forever with no one to notify — and an exception escaping a std::thread is
+            // std::terminate. Either way the failure arrives as a hang or an abort with no
+            // diagnosis; `failed` turns it into a reported test failure. This is the half of
+            // shared/loopback_server.h's ServerThread design that was not copied over with its cv.
+            try {
+                qb::io::async::init();
+                ServerT server;
+                if (config) {
+                    config(server);
                 }
+                server.transport().listen_v4(static_cast<std::uint16_t>(port));
+                // When the caller asked for an ephemeral port (port == 0), read the
+                // kernel-assigned port back from the now-bound listener and publish it
+                // under the lock BEFORE notifying, so the main thread (which reads
+                // `port` only after observing `ready`) sees the real port, not 0.
+                const int bound_port = static_cast<int>(server.transport().local_endpoint().port());
+                server.start();
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    port = bound_port;
+                    ready.store(true, std::memory_order_release);
+                }
+                cv.notify_all();
+                while (running.load(std::memory_order_acquire)) {
+                    if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
+                        std::this_thread::sleep_for(1ms);
+                    }
+                }
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    failed.store(true, std::memory_order_release);
+                }
+                cv.notify_all();
             }
         });
         std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [this] { return ready.load(std::memory_order_acquire); });
+        // Bounded, like ServerThread's: an unbounded wait here turns "the server never came up"
+        // into a tier timeout with no message, which reads as infrastructure flake rather than the
+        // defect it is.
+        const bool signalled = cv.wait_for(lock, ready_budget, [this] {
+            return ready.load(std::memory_order_acquire) || failed.load(std::memory_order_acquire);
+        });
+        if (!signalled) {
+            ADD_FAILURE() << "WsServerThread: the server did not become ready within " << ready_budget.count() << " ms";
+        } else if (failed.load(std::memory_order_acquire)) {
+            ADD_FAILURE() << "WsServerThread: the server threw during startup — nothing is listening on port " << port;
+        }
     }
 
     ~WsServerThread() {
