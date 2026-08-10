@@ -189,7 +189,7 @@ The protocol the session ends up speaking is decided after the handshake by insp
 
 The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically. A `https://` URI routes through the secure `async::HTTPS` session (`stcp` transport); `http://` routes through plaintext. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:866-893, 905-907 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:866-893, 837-840, 808-809 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -235,7 +235,7 @@ client->connect([client](bool ok, const std::string &err) {
 
 `qb::http2::Client` is HTTPS-only — `make_client` requires an `https://` base URI and the client offers **only** `{"h2"}` in ALPN, failing the connection if the server does not negotiate `h2`. It defaults `verify_peer` to `true`; call `set_verify_peer(false)` before `connect()` for trusted self-signed servers.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:189, 331 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:189, 343-346 -->
 ```cpp
 #include <qbm/http/http.h>
 
