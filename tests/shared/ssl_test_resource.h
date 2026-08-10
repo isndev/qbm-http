@@ -87,10 +87,13 @@ find_ssl_test_resource(const char *file_name) {
     const fs::path cwd = fs::current_path();
 
     const std::array<fs::path, 7> candidates = {
-        // Canonical: the certs shipped inside the qb submodule.
+        // Canonical: the certs shipped inside the qb submodule (C=FR/O=ISNDEV, no CN, no SAN).
         repo_root / "qb" / "resources" / "ssl" / file_name,
-        // Alternate location used by the qb-io system tests.
-        repo_root / "qb" / "source" / "io" / "tests" / "system" / "resources" / "ssl" / file_name,
+        // The qb-io system tests' own committed pair (the CN=localhost one). This candidate
+        // named `qb/source/io/tests/system/resources/ssl` — the pre-3.0 layout. `qb/source`
+        // has not existed since the source restructure, so the candidate could never match
+        // and the list was silently one entry shorter than it reads.
+        repo_root / "qb" / "tests" / "io" / "system" / "resources" / "ssl" / file_name,
         // Common CMake/Visual Studio out-of-source build output layout.
         repo_root / "out" / "build" / "x64-Release" / "bin" / "tests" / "ssl" / file_name,
         // Working-directory copies (CTest often runs from the build dir).
