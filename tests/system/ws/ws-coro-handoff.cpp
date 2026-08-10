@@ -33,9 +33,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -100,8 +102,11 @@ class IntegrationWsServer : public qb::io::use<IntegrationWsServer>::tcp::io_han
 struct HandoffFixture {
     std::thread                          thread;
     std::atomic<bool>                    ready{false};
+    std::atomic<bool>                    failed{false};
     std::atomic<bool>                    running{true};
     std::atomic<bool>                    saw_null_registration{false};
+    std::mutex                           mutex;
+    std::condition_variable              cv;
     std::unique_ptr<qb::http::Server<>>  http_server;
     std::unique_ptr<IntegrationWsServer> ws_server;
 
@@ -112,89 +117,116 @@ struct HandoffFixture {
     // force_registry_full: when true, the WS io_handler is capped at one slot so
     // a second concurrent handoff exercises the registerSession()==nullptr dead
     // path, giving that previously-untested branch real coverage.
-    explicit HandoffFixture(bool force_registry_full = false) {
+    explicit HandoffFixture(bool force_registry_full = false, std::chrono::milliseconds ready_budget = std::chrono::seconds(5)) {
         thread = std::thread([this, force_registry_full] {
-            qb::io::async::init();
+            // Everything the worker does before it signals readiness runs under this try, and
+            // readiness is published through a cv the waiter times out on. This is the design
+            // shared/ws_loopback.h's WsServerThread already carries, and for the same two
+            // reasons: a ctor, a bind or a router compile that throws would otherwise leave
+            // `ready` false forever with nobody to notify, and an exception escaping a
+            // std::thread is std::terminate. The spin this replaces was
+            // `while (!ready.load()) yield();` -- unbounded, so either failure arrived as a
+            // hung binary or an abort, never as a reported test failure.
+            try {
+                qb::io::async::init();
 
-            http_server = qb::http::make_server();
-            ws_server   = std::make_unique<IntegrationWsServer>();
+                http_server = qb::http::make_server();
+                ws_server   = std::make_unique<IntegrationWsServer>();
 
-            if (force_registry_full) {
-                // Cap the WS io_handler's session registry at 1. The first
-                // handoff succeeds and that long-lived session occupies the slot;
-                // a concurrent SECOND handoff then hits the cap and
-                // registerSession() returns nullptr — driving the dead path.
-                ws_server->set_max_sessions(1u);
-            }
+                if (force_registry_full) {
+                    // Cap the WS io_handler's session registry at 1. The first
+                    // handoff succeeds and that long-lived session occupies the slot;
+                    // a concurrent SECOND handoff then hits the cap and
+                    // registerSession() returns nullptr — driving the dead path.
+                    ws_server->set_max_sessions(1u);
+                }
 
-            http_server->router().get("/ping", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
-                ctx->response().body() = "pong";
-                ctx->complete();
-            });
-
-            http_server->router().get("/ws", [this](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
-                auto session_id      = ctx->session()->id();
-                auto [transport, ok] = http_server->extractSession(session_id);
-                if (!ok) {
-                    ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
-                    ctx->response().body()   = "extractSession failed";
+                http_server->router().get("/ping", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+                    ctx->response().body() = "pong";
                     ctx->complete();
-                    return;
-                }
+                });
 
-                auto *sess = ws_server->registerSession(std::move(transport));
-                if (sess == nullptr) {
-                    // Registry full — the HTTP response pipe is already detached,
-                    // so we can only drop the FD. This is the dead path the
-                    // NullRegistration test forces.
-                    saw_null_registration.store(true, std::memory_order_release);
+                http_server->router().get("/ws", [this](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+                    auto session_id      = ctx->session()->id();
+                    auto [transport, ok] = http_server->extractSession(session_id);
+                    if (!ok) {
+                        ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
+                        ctx->response().body()   = "extractSession failed";
+                        ctx->complete();
+                        return;
+                    }
+
+                    auto *sess = ws_server->registerSession(std::move(transport));
+                    if (sess == nullptr) {
+                        // Registry full — the HTTP response pipe is already detached,
+                        // so we can only drop the FD. This is the dead path the
+                        // NullRegistration test forces.
+                        saw_null_registration.store(true, std::memory_order_release);
+                        ctx->suppress_response();
+                        return;
+                    }
+
+                    qb::http::Response response;
+                    const bool         upgraded = sess->accept_upgrade(ctx->request(), response);
+                    // Do NOT cross-thread EXPECT here; the echo round trip on the
+                    // client proves the upgrade. We still drop the connection if the
+                    // upgrade somehow failed so the client observes a clean failure.
+                    (void) upgraded;
                     ctx->suppress_response();
-                    return;
+                });
+                http_server->router().compile();
+
+                http_server->transport().listen_v4(0, "127.0.0.1");
+                // Read the port BACK off the listener that will actually serve; nothing
+                // else ever gets a chance to take it.
+                const std::uint16_t bound_port = http_server->transport().local_endpoint().port();
+                http_server->start();
+
+                if (force_registry_full) {
+                    // Deterministically occupy the single WS slot BEFORE any client
+                    // connects. We open a loopback socket to our own listener (the
+                    // HTTP side accepts it as an idle session that never sends a
+                    // request) and register the client end as a WS filler session.
+                    // Every subsequent /ws handoff then hits the cap → nullptr, with
+                    // no race and no risk of a hang.
+                    qb::io::tcp::socket filler;
+                    if (filler.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(bound_port)}) == 0) {
+                        (void) ws_server->registerSession(std::move(filler));
+                    }
                 }
 
-                qb::http::Response response;
-                const bool         upgraded = sess->accept_upgrade(ctx->request(), response);
-                // Do NOT cross-thread EXPECT here; the echo round trip on the
-                // client proves the upgrade. We still drop the connection if the
-                // upgrade somehow failed so the client observes a clean failure.
-                (void) upgraded;
-                ctx->suppress_response();
-            });
-            http_server->router().compile();
-
-            http_server->transport().listen_v4(0, "127.0.0.1");
-            // Read the port BACK off the listener that will actually serve; nothing
-            // else ever gets a chance to take it.
-            const std::uint16_t bound_port = http_server->transport().local_endpoint().port();
-            http_server->start();
-
-            if (force_registry_full) {
-                // Deterministically occupy the single WS slot BEFORE any client
-                // connects. We open a loopback socket to our own listener (the
-                // HTTP side accepts it as an idle session that never sends a
-                // request) and register the client end as a WS filler session.
-                // Every subsequent /ws handoff then hits the cap → nullptr, with
-                // no race and no risk of a hang.
-                qb::io::tcp::socket filler;
-                if (filler.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(bound_port)}) == 0) {
-                    (void) ws_server->registerSession(std::move(filler));
+                {
+                    // Publish the port under the lock BEFORE notifying, so a waiter that
+                    // observes `ready` cannot read a stale 0.
+                    std::lock_guard<std::mutex> lock(mutex);
+                    port = bound_port;
+                    ready.store(true, std::memory_order_release);
                 }
+                cv.notify_all();
+                while (running.load(std::memory_order_acquire)) {
+                    if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
+                        std::this_thread::sleep_for(2ms);
+                    }
+                }
+
+                ws_server.reset();
+                http_server.reset();
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    failed.store(true, std::memory_order_release);
+                }
+                cv.notify_all();
             }
-
-            port = bound_port; // published by the release store below
-            ready.store(true, std::memory_order_release);
-            while (running.load(std::memory_order_acquire)) {
-                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(2ms);
-                }
-            }
-
-            ws_server.reset();
-            http_server.reset();
         });
 
-        while (!ready.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
+        std::unique_lock<std::mutex> lock(mutex);
+        const bool                   signalled =
+            cv.wait_for(lock, ready_budget, [this] { return ready.load(std::memory_order_acquire) || failed.load(std::memory_order_acquire); });
+        if (!signalled) {
+            ADD_FAILURE() << "HandoffFixture: the servers did not become ready within " << ready_budget.count() << " ms";
+        } else if (failed.load(std::memory_order_acquire)) {
+            ADD_FAILURE() << "HandoffFixture: the worker threw during startup — nothing is listening";
         }
     }
 
