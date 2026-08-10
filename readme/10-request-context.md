@@ -296,7 +296,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:196-204, 226, 426, 626-641; router_core.h:328, 418; router.h:352; src/qbm/http/2/http2.h:308,332 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:196-204, 226, 426, 626-641; router_core.h:347-351, 442; router.h:352; src/qbm/http/2/http2.h:308,332 -->
 
 ## Lifecycle in order
 
@@ -315,7 +315,7 @@ For a normal matched route, the context moves through these stages:
 
 When a route is not matched, or a task returns `ERROR`, the same machinery runs a different chain — `ProcessingPhase` records which one (`NORMAL_CHAIN`, `NOT_FOUND_CHAIN`, `METHOD_NOT_ALLOWED_CHAIN`, `ERROR_CHAIN`). See [Error handling](./13-error-handling.md) for how the error chain is wired.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:76-95, 196-226, 406-426; router_core.h:291-328, 418; router.h:349-364 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:76-95, 196-226, 406-426; router_core.h:291-328, 442; router.h:349-364 -->
 
 ### Introspection (advanced)
 
