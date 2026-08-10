@@ -52,12 +52,12 @@ Common base for Request/Response; **multiply inherits Headers and Body** (so `re
 
 ### `qb::http::Request` (alias `request`) — `request.h:36`
 `class Request : public internal::MessageBase { Request() noexcept; Request(method m, qb::io::uri u, headers_map h={}, Body b={}); explicit Request(qb::io::uri u, headers_map h={}, Body b={}); const Method& method() const noexcept; Method& method() noexcept; const qb::io::uri& uri() const; const std::string& query(name, idx=0) const; std::string query_or(name, std::string fallback, idx=0) const; void parse_cookie_header(); const Cookie* cookie(name) const noexcept; bool has_cookie(name) const noexcept; const std::string& cookie_value(name) const noexcept; std::string cookie_value_or(name, std::string fallback) const; Request& with_method(Method) noexcept; Request& with_uri(uri); Request& with_header(string,string); Request& with_body(BodyType&&); void reset() noexcept; }`
-Owning request: method, `qb::io::uri`, query accessors, CookieJar (populated by `parse_cookie_header()`), chainable `with_*`. Of the chainable `with_*`, only `with_method` is `noexcept`. `method()` has **both** a const and a mutating overload (`request.h:97/101`) — `req.method() = qb::http::method::POST;` is valid. `Request{uri}` (the uri-only ctor, `request.h:83`) defaults the method to **GET** (`request.h:85`); the default ctor leaves it `UNINITIALIZED`. **Accessor model:** `query(name)` / `cookie_value(name)` return a `const std::string&` bound to a process-wide static empty string on a miss (never a temporary, always safe to keep) — for a custom fallback use the by-value `query_or(...)` / `cookie_value_or(...)` variants.
+Owning request: method, `qb::io::uri`, query accessors, CookieJar (populated by `parse_cookie_header()`), chainable `with_*`. Of the chainable `with_*`, only `with_method` is `noexcept`. `method()` has **both** a const and a mutating overload (`request.h:97, :101`) — `req.method() = qb::http::method::POST;` is valid. `Request{uri}` (the uri-only ctor, `request.h:83`) defaults the method to **GET** (`request.h:85`); the default ctor leaves it `UNINITIALIZED`. **Accessor model:** `query(name)` / `cookie_value(name)` return a `const std::string&` bound to a process-wide static empty string on a miss (never a temporary, always safe to keep) — for a custom fallback use the by-value `query_or(...)` / `cookie_value_or(...)` variants.
 Usage: `qb::http::Request r{qb::http::method::GET, qb::io::uri{"https://h/x"}}; r.with_header("Accept","*/*");`
 
 ### `qb::http::Response` (alias `response`) — `response.h:36`
 `class Response : public internal::MessageBase { Response() noexcept; Response(Status s, headers_map h={}, Body b={}); const Status& status() const noexcept; Status& status() noexcept; void parse_set_cookie_headers(); void add_cookie(const Cookie&); Cookie& add_cookie(name,value); void remove_cookie(name); void update_cookie_header(name); void update_cookie_headers(); Response& with_status(Status) noexcept; Response& with_cookie(const Cookie&); Response& with_body(BodyType&&); void reset() noexcept; }`
-Owning response: default-constructs to 200 OK (`response.h:56`), CookieJar serialized to `Set-Cookie`. Mutating cookies directly needs `update_cookie_header(s)` to resync. Of the chainable `with_*`, only `with_status` is `noexcept`. `status()` has **both** a const and a mutating overload (`response.h:75/79`) — `resp.status() = qb::http::status::CREATED;` is valid.
+Owning response: default-constructs to 200 OK (`response.h:56`), CookieJar serialized to `Set-Cookie`. Mutating cookies directly needs `update_cookie_header(s)` to resync. Of the chainable `with_*`, only `with_status` is `noexcept`. `status()` has **both** a const and a mutating overload (`response.h:75, :79`) — `resp.status() = qb::http::status::CREATED;` is valid.
 Usage: `qb::http::Response resp{qb::http::status::OK}; resp.with_body("hi");`
 
 ### `qb::http::Headers` (alias `headers`) — `headers.h:150`
@@ -75,7 +75,7 @@ Parses Content-Type into MIME type + charset; defaults to `application/octet-str
 
 ### `qb::http::Body` — `body.h:57`
 `class Body { template<typename...A> Body(A&&...); template<typename...A> Body& operator<<(A&&...); template<typename T> Body& operator=(...); template<typename T> T as() const; template<typename T> [[nodiscard]] std::optional<T> try_as() const noexcept; Body& add_chunk(const Chunk&); Body& add_final_chunk(); pipe<char>& raw(); std::size_t size() const; bool empty() const; void clear() noexcept; }`
-Backed by `qb::allocator::pipe<char>`. Append/assign constrained by `is_body_appendable` (string-like, Chunk/Multipart/Form/`qb::json`, arithmetic). The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460`. Conversions defined in `body.cpp`.
+Backed by `qb::allocator::pipe<char>`. Append/assign constrained by `is_body_appendable` (string-like, Chunk/Multipart/Form/`qb::json`, arithmetic). The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460-473`. Conversions defined in `body.cpp`.
 **Prefer `try_as<T>()` for client-supplied bodies** (`body.h:404`): it returns `std::optional<T>` and is `noexcept`, so a malformed JSON/multipart payload yields `std::nullopt` (→ reply 400) instead of an exception you must catch at the call site. `as<T>()` throws on malformed input; the string conversions never fail.
 Usage: `req.body() = "payload"; if (auto j = resp.body().try_as<qb::json>()) { /* use *j */ }`
 
@@ -84,7 +84,7 @@ Usage: `req.body() = "payload"; if (auto j = resp.body().try_as<qb::json>()) { /
 Lines: `compress` `body.h:272`, `uncompress` `body.h:311`, `get_compressor_from_header` `body.h:253`, `get_decompressor_from_header` `body.h:289`.
 `uncompress`/`get_decompressor` throw `std::runtime_error` on unsupported/multiple encodings.
 
-### `qb::http::Chunk` (alias `chunk`) — `chunk.h:31`
+### `qb::http::Chunk` (alias `chunk`) — `chunk.h:32`
 `class Chunk { Chunk() noexcept; Chunk(const char* data, std::size_t size) noexcept; const char* data() const; std::size_t size() const; }`
 Non-owning view of one chunked-transfer segment (caller owns bytes); a zero-size chunk marks end-of-chunks.
 
@@ -117,11 +117,11 @@ Case-insensitive-name container; `add` replaces an existing same-name cookie. Bo
 `bool scheme_eq(string_view,string_view) noexcept; bool host_eq(string_view,string_view) noexcept; std::string_view effective_port(const qb::io::uri&) noexcept; std::optional<std::uint32_t> effective_port_number(const qb::io::uri&) noexcept; bool same(const qb::io::uri& a, const qb::io::uri& b) noexcept;`
 Same-origin comparison: case-insensitive scheme/host, scheme-default ports (http=80, https=443); `same()` requires both ports resolvable and equal.
 
-### `qb::http::utility` — `utility.h:34` / `:256`
+### `qb::http::utility` — `utility.h:34` / `:258-260`
 Char/string helpers: `is_char/is_control/is_special/is_digit/is_hex_digit(int)`, `hex_value(char)`, `decode_path_component(string_view)`, `constexpr char ascii_to_lower(char)`, `bool iequals(string_view,string_view)`, `is_http_whitespace`, `trim_http_whitespace`, `escape_html`, `uri_encode_component`. Splitting/joining: `split_and_trim_header_list`, `split_string<String>(...)`, `split_string_by<...>`, lazy `class split_view`, `join(vector<T>, delim)`.
 Usage: `if (qb::http::utility::iequals(a,b)) ...;`
 
-### pipe serialization — `request.h:384` / `chunk.h:105` / `multipart.h:629`
+### pipe serialization — `request.h:384` / `chunk.h:106` / `multipart.h:629`
 `template<> pipe<char>& pipe<char>::put<Request>(const Request&); ...<Response>; ...<Chunk>; ...<Multipart>;`
 Wire-serialize into the qb pipe; Request/Response throw `std::length_error` if the message exceeds `protocol_limits`.
 
@@ -196,7 +196,7 @@ Terminal node binding one method+segment to a `RouteHandlerFn` or `ICustomRoute`
 - `IMiddleware<SessionType>` — `src/qbm/http/routing/middleware.h:39` — `virtual void process(ctx)=0; std::string name() const=0; void cancel()=0;`. `process()` must call `ctx->complete()` to advance.
 - `MiddlewareTask<SessionType>` — `middleware.h:75` — `explicit MiddlewareTask(std::shared_ptr<IMiddleware<S>>, name="MiddlewareTask")`. Adapts IMiddleware→IAsyncTask; on exception sets 500 + ERROR. Throws `std::invalid_argument` on null.
 - `FunctionalMiddleware<SessionType>` — `middleware.h:183` — `FunctionalMiddleware(MiddlewareHandlerFn, name)`. Adapts a `(ctx,next)` lambda; calling `next()` once completes CONTINUE; duplicate `next()` ignored.
-- `RouteLambdaTask<S>` / `CustomRouteAdapterTask<S>` — `route.h:51/139` — wrap a lambda handler / an ICustomRoute; thrown exceptions → 500 + ERROR; throw `std::invalid_argument` on null.
+- `RouteLambdaTask<S>` / `CustomRouteAdapterTask<S>` — `route.h:51, :139` — wrap a lambda handler / an ICustomRoute; thrown exceptions → 500 + ERROR; throw `std::invalid_argument` on null.
 
 ### `qb::http::Context<SessionType>` — `src/qbm/http/routing/context.h:68`
 `template<typename SessionType> class Context : public std::enable_shared_from_this<Context<SessionType>>`
@@ -232,10 +232,10 @@ The verb methods (`get`, `post`, `put`, `del`, `patch`, `options`, `head`) have 
 Usage: `router.get("/a", [](auto ctx)->qb::io::async::task<void>{ co_return; });`
 
 ### Routing aliases / enums — `src/qbm/http/routing/types.h`
-- `template<typename S> using RouteHandlerFn = std::function<void(std::shared_ptr<Context<S>>)>;` and `MiddlewareHandlerFn = std::function<void(std::shared_ptr<Context<S>>, std::function<void()> next)>` (`src/qbm/http/routing/types.h:83/108`).
+- `template<typename S> using RouteHandlerFn = std::function<void(std::shared_ptr<Context<S>>)>;` and `MiddlewareHandlerFn = std::function<void(std::shared_ptr<Context<S>>, std::function<void()> next)>` (`src/qbm/http/routing/types.h:83, :108`).
 - `enum class HookPoint { PRE_ROUTING, PRE_HANDLER_EXECUTION, POST_HANDLER_EXECUTION, PRE_RESPONSE_SEND, POST_RESPONSE_SEND, REQUEST_COMPLETE }` (`src/qbm/http/routing/types.h:38`).
 - `enum class AsyncTaskResult { CONTINUE, COMPLETE, CANCELLED, ERROR, FATAL_SPECIAL_HANDLER_ERROR }` (`src/qbm/http/routing/types.h:53`) — `src/qbm/http/routing/types.h` `#undef ERROR`s it first, at `:54` (Win32 clash).
-- concepts: `DerivedFrom<Derived,Base>=is_base_of_v<Base,Derived>` (`src/qbm/http/routing/types.h:123`); coroutine callable-matching concepts `CoroRouteHandler<F,S>` (`coro_task.h:69`), `CoroMiddlewareHandler<F,S>` (`coro_task.h:82`), `SyncRouteHandler`/`RouteHandlerLike`/`SyncMiddleware` (`coro_task.h:92/101/109`).
+- concepts: `DerivedFrom<Derived,Base>=is_base_of_v<Base,Derived>` (`src/qbm/http/routing/types.h:123`); coroutine callable-matching concepts `CoroRouteHandler<F,S>` (`coro_task.h:69`), `CoroMiddlewareHandler<F,S>` (`coro_task.h:82`), `SyncRouteHandler`/`RouteHandlerLike`/`SyncMiddleware` (`coro_task.h:92, :101, :109`).
 
 ---
 
@@ -244,13 +244,13 @@ Usage: `router.get("/a", [](auto ctx)->qb::io::async::task<void>{ co_return; });
 > All middleware are class templates over `SessionType`; each ships a `*_middleware<S>(...)` factory returning `std::shared_ptr<...>`. Register via `router.use(...)` / `group->use(...)`. Generic builder: `qb::http::middleware::make<Tag,S>(args...)` (`src/qbm/http/middleware/make.h`).
 
 ## CORS — `src/qbm/http/middleware/cors.h`
-### `qb::http::CorsOptions` — `cors.h:93`
+### `qb::http::CorsOptions` — `cors.h:94`
 Fluent config; setters return `CorsOptions&`:
 `CorsOptions(); explicit CorsOptions(std::vector<std::string> origins); origins(vector) / origin_patterns(vector) / origin_matcher(std::function<bool(const std::string&)>) ; methods(vector) / all_methods(); headers(vector) / common_headers(); expose_headers(vector); credentials(AllowCredentials); CorsOptions& max_age(qb::duration);`
 `enum class AllowCredentials{No,Yes}; enum class OriginMatchStrategy{Exact,Regex,Function};` Presets: `static CorsOptions permissive(); static CorsOptions secure(const std::vector<std::string>& origins);`. **`max_age` takes `qb::duration`** (serialized as integer seconds; default 86400s). Default methods `{GET,HEAD,POST}`, default credentials `No`.
 Usage: `auto opt = qb::http::CorsOptions::secure({"https://app"}).max_age(std::chrono::hours(1));`
 
-### `qb::http::CorsMiddleware<S>` — `cors.h:318`
+### `qb::http::CorsMiddleware<S>` — `cors.h:319`
 `CorsMiddleware(); explicit CorsMiddleware(const CorsOptions&, name="CorsMiddleware"); static std::shared_ptr<...> dev(name); static std::shared_ptr<...> secure(origins, name); const CorsOptions& get_cors_options() const; CorsMiddleware& update_options(const CorsOptions&);`
 Adds `Access-Control-*` headers; handles preflight OPTIONS. Default ctor = permissive.
 Factories (`cors.h:522`): `cors_middleware<S>(options=permissive(), name)`, `cors_dev_middleware<S>(name)`, `cors_secure_middleware<S>(origins, name)`.
@@ -259,7 +259,7 @@ Usage: `router.use(qb::http::cors_secure_middleware<S>({"https://app"}));`
 ## JWT — `src/qbm/http/middleware/jwt.h` · **needs `QB_HAS_SSL`**
 ### `qb::http::JwtOptions` — `jwt.h:48`
 `struct JwtOptions { std::string secret; std::string algorithm="HS256"; bool verify_exp=true,verify_nbf=true,verify_iat=true,verify_iss=false,verify_aud=false,verify_sub=false; std::string issuer,audience,subject; std::chrono::seconds leeway{0}; JwtTokenLocation token_location=HEADER; std::string token_name="Authorization"; std::string auth_scheme="Bearer"; }`
-**`leeway` is `std::chrono::seconds`** (clock-skew tolerance for exp/nbf). `enum class JwtTokenLocation{HEADER,COOKIE,QUERY}` (`jwt.h:39`). `enum class JwtError{NONE,MISSING_TOKEN,INVALID_TOKEN,TOKEN_EXPIRED,TOKEN_NOT_ACTIVE,INVALID_SIGNATURE,INVALID_CLAIM,ALGORITHM_MISMATCH}` + `struct JwtErrorInfo{JwtError code; std::string message;}` (`jwt.h:67/79`).
+**`leeway` is `std::chrono::seconds`** (clock-skew tolerance for exp/nbf). `enum class JwtTokenLocation{HEADER,COOKIE,QUERY}` (`jwt.h:39`). `enum class JwtError{NONE,MISSING_TOKEN,INVALID_TOKEN,TOKEN_EXPIRED,TOKEN_NOT_ACTIVE,INVALID_SIGNATURE,INVALID_CLAIM,ALGORITHM_MISMATCH}` + `struct JwtErrorInfo{JwtError code; std::string message;}` (`jwt.h:67, :79`).
 
 ### `qb::http::JwtMiddleware<S>` — `jwt.h:90`
 `explicit JwtMiddleware(const std::string& secret, const std::string& algorithm="HS256"); explicit JwtMiddleware(JwtOptions);`
@@ -269,7 +269,7 @@ Factories (`jwt.h:531`): `jwt_middleware<S>(secret, algorithm="HS256")`, `jwt_mi
 Usage: `router.use(qb::http::jwt_middleware<S>(secret));`
 
 ## Auth (token + roles) — `src/qbm/http/middleware/auth.h` · **needs `QB_HAS_SSL`**
-### `qb::http::AuthMiddleware<S>` — `auth.h:44`
+### `qb::http::AuthMiddleware<S>` — `middleware/auth.h:44`
 `AuthMiddleware(); explicit AuthMiddleware(const auth::Options&, name="AuthMiddleware");`
 Reads context `auth::User`/`"jwt_payload"` or extracts+verifies a token via an internal `auth::Manager`; stores `auth::User` in context. Fluent (return `AuthMiddleware&`): `with_user_context_key(key) /*default "user"*/; with_auth_required(bool); with_roles(std::vector<std::string>, require_all=false); with_options(const auth::Options&)`. Also `auth::Manager& auth_manager()`, `std::string generate_token(const auth::User&) const`, `std::optional<auth::User> verify_token(const std::string&) const`.
 Factories (`src/qbm/http/middleware/auth.h:383`): `auth_middleware<S>(options=auth::Options(), name)`, `jwt_auth_middleware<S>(secret, algorithm_str="HS256", name)` (HS*→secret_key, else public_key), `role_auth_middleware<S>(roles, require_all=false, name)`, `optional_auth_middleware<S>(options=auth::Options(), name)`.
@@ -357,7 +357,7 @@ Usage: `router.use(qb::http::transform_middleware<S>([](auto& req){ req.set_head
 Factory (`conditional.h:147`): `conditional_middleware<S>(predicate, if_middleware, else_middleware=nullptr, name)`.
 
 ## Validation (middleware) — `src/qbm/http/middleware/validation.h`
-### `qb::http::ValidationMiddleware<S>` — `validation.h:45`
+### `qb::http::ValidationMiddleware<S>` — `middleware/validation.h:45`
 `explicit ValidationMiddleware(std::shared_ptr<qb::http::validation::RequestValidator> validator, std::string name="ValidationMiddleware");` Throws `std::invalid_argument` if validator is null. Runs the `RequestValidator` (sanitize then validate); on failure replies with a JSON error body.
 Factory (`src/qbm/http/middleware/validation.h:141`): `validation_middleware<S>(validator, name)`.
 Usage: `router.use(qb::http::validation_middleware<S>(my_request_validator));`
@@ -375,12 +375,12 @@ Usage: `auto mw = qb::http::middleware::make<qb::http::middleware::tags::cors_se
 `class Options` — JWT config; fluent setters return `Options&`.
 `enum class Algorithm{HMAC_SHA256,HMAC_SHA384,HMAC_SHA512,RSA_SHA256,RSA_SHA384,RSA_SHA512,ECDSA_SHA256,ECDSA_SHA384,ECDSA_SHA512,ED25519}` (default HMAC_SHA256, `options.h:41`).
 - `secret_key(const std::string&) / secret_key(const std::vector<unsigned char>&) / secret_key(std::vector<unsigned char>&&) noexcept` (`options.h:93`).
-- `public_key(std::string)` / `private_key(std::string)` (PEM) (`options.h:126/138`).
+- `public_key(std::string)` / `private_key(std::string)` (PEM) (`options.h:126, :138`).
 - `algorithm(Algorithm) noexcept` (`options.h:150`).
 - **`token_expiration(std::chrono::seconds) noexcept`** (default 3600s) (`options.h:161`).
-- `token_issuer(std::string)` / `token_audience(std::string)` — non-empty auto-enables verification (`options.h:173/187`).
-- `auth_header_name(std::string)` (default `Authorization`) / `auth_scheme(std::string)` (default `Bearer`) (`options.h:200/212`).
-- `require_signature_verification(bool) noexcept` / `verify_expiration(bool) noexcept` / `verify_not_before(bool) noexcept` (`options.h:224/235/246`).
+- `token_issuer(std::string)` / `token_audience(std::string)` — non-empty auto-enables verification (`options.h:173, :187`).
+- `auth_header_name(std::string)` (default `Authorization`) / `auth_scheme(std::string)` (default `Bearer`) (`options.h:200, :212`).
+- `require_signature_verification(bool) noexcept` / `verify_expiration(bool) noexcept` / `verify_not_before(bool) noexcept` (`options.h:224, :235, :246`).
 - **`clock_skew_tolerance(std::chrono::seconds) noexcept`** (default 0s) (`options.h:258`).
 - getters (`options.h:267`): `get_secret_key()/get_public_key()/get_private_key()/get_token_issuer()/get_token_audience()/get_auth_header_name()/get_auth_scheme()/get_algorithm()/get_token_expiration() -> std::chrono::seconds/get_clock_skew_tolerance() -> std::chrono::seconds/get_require_signature_verification()/get_verify_expiration()/get_verify_not_before()/get_verify_issuer()/get_verify_audience()`.
 - `static std::optional<Algorithm> algorithm_from_string(std::string_view) noexcept` (`options.h:358`) — maps `"HS256"/"RS512"/"ES256"/"EdDSA"/...`.
@@ -485,12 +485,12 @@ Usage: `auto c = qb::http1::make_client("https://h"); co_await c->connect(); aut
 `namespace constants`: `DEFAULT_SESSION_TIMEOUT = std::chrono::seconds(60)` (qb::duration), `DEFAULT_MAX_CONCURRENT_STREAMS = 50`, `STREAM_IDLE_TIMEOUT = std::chrono::seconds(30)`, `STREAM_INCOMPLETE_TIMEOUT = std::chrono::seconds(10)`, `CLEANUP_INTERVAL = std::chrono::seconds(5)` (all `qb::duration`).
 
 ### Server
-- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:541`).
+- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:540`).
 - `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` — `Router& router()` (`http2.h:564`).
-- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:605`).
+- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:604`).
 - `internal::server::listen(qb::io::uri, std::filesystem::path cert, std::filesystem::path key) -> bool` — ALPN `{h2, http/1.1}` (`http2.h:500`).
 - `internal::session`: `[[nodiscard]] bool reset_stream(uint32_t stream_id, ErrorCode=CANCEL, const std::string& reason={})`; `auto& operator<<(qb::http::Response&)` (validates stream_id>0 + status 100..599); `Router& router()`.
-- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:518`).
+- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:516-526`).
 Usage: `auto s = qb::http2::make_server(); s->router().get("/", h); s->router().compile(); s->listen(uri,"cert.pem","key.pem");`
 
 ### `qb::http2::Client` (alias `client`) — `src/qbm/http/2/client.h:155`
@@ -558,7 +558,7 @@ Usage: `auto c = qb::http3::make_client("https://h"); auto resp = co_await c->pu
 ### Dual-stack (HTTP/2 + HTTP/3) — `src/qbm/http/3/dual_stack.h` · **namespace `qb::http`** (not `qb::http3`)
 - `template<typename Http2Session=qb::http2::DefaultSession, typename Http3Session=qb::http3::DefaultSession> class qb::http::dual_stack_server` (`dual_stack.h:47`) — runs HTTP/2 (TCP+TLS) and HTTP/3 (QUIC) side by side; `router()` returns a `router_facade` registering each route on **both** tables.
 - `class router_facade { add_route/get/post/put/del/patch/options/head(...); compile(); }`.
-- `bool listen(qb::io::uri tcp_tls_uri, qb::io::uri quic_uri, const std::filesystem::path& cert, const std::filesystem::path& key)` (also a `std::string`-uri overload) — true only if both bind; **all-or-nothing** (rolls back the side that came up and returns false if the other fails) (`dual_stack.h:263`).
+- `bool listen(qb::io::uri tcp_tls_uri, qb::io::uri quic_uri, const std::filesystem::path& cert, const std::filesystem::path& key)` (also a `std::string`-uri overload) — true only if both bind; **all-or-nothing** (rolls back the side that came up and returns false if the other fails) (`dual_stack.h:263-264`).
 - `template<...> std::unique_ptr<dual_stack_server<...>> qb::http::make_dual_stack_server();` (`dual_stack.h:341`).
 Usage: `auto s = qb::http::make_dual_stack_server(); s->router().get("/", h); s->router().compile(); s->listen(tcp_uri, quic_uri, "cert.pem","key.pem");`
 

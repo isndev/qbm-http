@@ -18,10 +18,10 @@ llm/qbm-http.llm.api.md	body.h:289-289	c60e797b9e48	static std::unique_ptr<qb::c
 llm/qbm-http.llm.api.md	body.h:311-311	34b3eec579d1	std::size_t uncompress(const std::string &encoding);
 llm/qbm-http.llm.api.md	body.h:387-387	bcf110ac1c69	static_assert(dependent_false<T>::value, "Body::as<T>() is not implem...
 llm/qbm-http.llm.api.md	body.h:404-404	11e30b5c8399	try_as() const noexcept {
-llm/qbm-http.llm.api.md	body.h:460-460	b4bd737c19f5	template <>
+llm/qbm-http.llm.api.md	body.h:460-473	504f0d4dfa48	template <>
 llm/qbm-http.llm.api.md	body.h:57-57	7f9976a908fe	class Body {
-llm/qbm-http.llm.api.md	chunk.h:105-105	b4bd737c19f5	template <>
-llm/qbm-http.llm.api.md	chunk.h:31-31	e5c3be79eca7	*/
+llm/qbm-http.llm.api.md	chunk.h:106-106	8b2020e847e8	pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
+llm/qbm-http.llm.api.md	chunk.h:32-32	50cb5b8d9d2c	class Chunk {
 llm/qbm-http.llm.api.md	compression.h:162-162	e1fb666ef806	class CompressionMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	compression.h:40-40	d3a697e2ad5b	class CompressionOptions {
 llm/qbm-http.llm.api.md	compression.h:536-536	0c5e06cc94a3	compression_middleware(CompressionOptions options = CompressionOption...
@@ -57,13 +57,13 @@ llm/qbm-http.llm.api.md	coro_task.h:109-109	aa0988233a2d	concept SyncMiddleware 
 llm/qbm-http.llm.api.md	coro_task.h:69-69	f5012c80287a	concept CoroRouteHandler = requires(F f, std::shared_ptr<Context<Sess...
 llm/qbm-http.llm.api.md	coro_task.h:82-82	b73dc1407d5f	concept CoroMiddlewareHandler = requires(F f, std::shared_ptr<Context...
 llm/qbm-http.llm.api.md	coro_task.h:92-92	6846bdc03b54	concept SyncRouteHandler = requires(F f, std::shared_ptr<Context<Sess...
-llm/qbm-http.llm.api.md	cors.h:318-318	0e54e6125279	template <typename SessionType>
+llm/qbm-http.llm.api.md	cors.h:319-319	da6ab2c062dd	class CorsMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	cors.h:522-522	2f2828472693	cors_middleware(const CorsOptions &options = CorsOptions::permissive(...
-llm/qbm-http.llm.api.md	cors.h:93-93	e5c3be79eca7	*/
+llm/qbm-http.llm.api.md	cors.h:94-94	4d5beb821149	class CorsOptions {
 llm/qbm-http.llm.api.md	date.h:114-114	94de38404990	[[nodiscard]] std::string now() noexcept;
 llm/qbm-http.llm.api.md	date.h:50-50	4d6feeddc5f9	[[nodiscard]] std::string format_http_date(std::chrono::system_clock:...
 llm/qbm-http.llm.api.md	date.h:75-75	9ae98a559596	[[nodiscard]] std::optional<std::chrono::system_clock::time_point> pa...
-llm/qbm-http.llm.api.md	dual_stack.h:263-263	5039d155a71c	bool
+llm/qbm-http.llm.api.md	dual_stack.h:263-264	c6f89027d684	bool
 llm/qbm-http.llm.api.md	dual_stack.h:341-341	69165bbcadd4	make_dual_stack_server() {
 llm/qbm-http.llm.api.md	dual_stack.h:47-47	427aa9dbb515	class dual_stack_server {
 llm/qbm-http.llm.api.md	error_handling.h:217-217	0a3271ece0ca	error_handling_middleware(const std::string &name = "ErrorHandlingMid...
@@ -78,10 +78,10 @@ llm/qbm-http.llm.api.md	headers.h:52-52	2e429ff5b2d6	using headers_map = qb::ica
 llm/qbm-http.llm.api.md	headers.h:67-67	4cc0ef18e2b1	[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attri...
 llm/qbm-http.llm.api.md	headers.h:97-97	f170c1837f39	[[nodiscard]] std::string accept_encoding();
 llm/qbm-http.llm.api.md	http2.h:500-500	781e01bb02bf	listen(qb::io::uri uri, std::filesystem::path cert_file, std::filesys...
-llm/qbm-http.llm.api.md	http2.h:518-518	39e0782b3c7c	template <typename ServerHandler>
-llm/qbm-http.llm.api.md	http2.h:541-541	5055bd28810c	public:
+llm/qbm-http.llm.api.md	http2.h:516-526	af88dc7f851b	template <typename Derived>
+llm/qbm-http.llm.api.md	http2.h:540-540	2cced357f1b7	class DefaultSession : public qb::http2::use<DefaultSession>::session...
 llm/qbm-http.llm.api.md	http2.h:564-564	b89da7e9262d	class Server : public qb::http2::internal::server<Server<SessionType>...
-llm/qbm-http.llm.api.md	http2.h:605-605	5d5fd8bbc43d	return std::make_unique<Server<Session>>();
+llm/qbm-http.llm.api.md	http2.h:604-604	9c663ba400dd	make_server() {
 llm/qbm-http.llm.api.md	http2.h:71-75	41df86e2f7ad	template <typename IO_Handler>
 llm/qbm-http.llm.api.md	http3.h:221-221	7a0febb9c291	operator<<(qb::http::Response &response) {
 llm/qbm-http.llm.api.md	http3.h:440-440	7bebae693231	router() noexcept {
@@ -96,23 +96,31 @@ llm/qbm-http.llm.api.md	jwt.h:39-39	7da601718f3d	enum class JwtTokenLocation {
 llm/qbm-http.llm.api.md	jwt.h:48-48	d7bf051de364	struct JwtOptions {
 llm/qbm-http.llm.api.md	jwt.h:531-531	a7b61a7b58c5	jwt_middleware(const std::string &secret, const std::string &algorith...
 llm/qbm-http.llm.api.md	jwt.h:67-67	0612d8a3173b	enum class JwtError {
+llm/qbm-http.llm.api.md	jwt.h:79-79	e77bfeaeb6c4	struct JwtErrorInfo {
 llm/qbm-http.llm.api.md	jwt.h:90-90	7bccd936c589	class JwtMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	logging.h:213-213	2ed6bbecf69a	logging_middleware(typename LoggingMiddleware<SessionType>::LogFuncti...
 llm/qbm-http.llm.api.md	logging.h:52-52	77af1e5a45be	class LoggingMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	message_base.h:37-37	236b70d493e9	struct MessageBase
 llm/qbm-http.llm.api.md	middleware.h:183-183	39b0b601e6f2	class FunctionalMiddleware : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	middleware.h:75-75	9d3f7e3cfdb1	class MiddlewareTask final : public IAsyncTask<SessionType> {
+llm/qbm-http.llm.api.md	middleware/auth.h:44-44	96bf24b031fa	class AuthMiddleware final : public IMiddleware<SessionType> {
+llm/qbm-http.llm.api.md	middleware/validation.h:45-45	50f27b28f1b4	class ValidationMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	multipart.h:462-462	4e9f14cdb5ca	[[nodiscard]] std::string::const_iterator find_boundary(std::string c...
 llm/qbm-http.llm.api.md	multipart.h:499-499	67d88f1e0a35	class Multipart {
 llm/qbm-http.llm.api.md	multipart.h:50-50	97a9c20b72e5	namespace multipart_limits {
 llm/qbm-http.llm.api.md	multipart.h:629-629	e6956c938cb9	pipe<char> &pipe<char>::put<qb::http::Multipart>(const qb::http::Mult...
 llm/qbm-http.llm.api.md	multipart.h:74-74	c55a2a090543	class MultipartParser {
 llm/qbm-http.llm.api.md	options.h:126-126	70641246d29a	public_key(std::string key) {
+llm/qbm-http.llm.api.md	options.h:138-138	6fb5f1008cc8	private_key(std::string key) {
 llm/qbm-http.llm.api.md	options.h:150-150	0ef70b96bb17	algorithm(Algorithm alg) noexcept {
 llm/qbm-http.llm.api.md	options.h:161-161	45b868c38a2a	token_expiration(std::chrono::seconds seconds) noexcept {
 llm/qbm-http.llm.api.md	options.h:173-173	f9513a39445c	token_issuer(std::string issuer) {
+llm/qbm-http.llm.api.md	options.h:187-187	9d2d04f356f5	token_audience(std::string audience) {
 llm/qbm-http.llm.api.md	options.h:200-200	76f6e4aced8b	auth_header_name(std::string name) {
+llm/qbm-http.llm.api.md	options.h:212-212	6314a911d805	auth_scheme(std::string scheme) {
 llm/qbm-http.llm.api.md	options.h:224-224	595e9f906c8a	require_signature_verification(bool verify) noexcept {
+llm/qbm-http.llm.api.md	options.h:235-235	31c3278d810e	verify_expiration(bool verify) noexcept {
+llm/qbm-http.llm.api.md	options.h:246-246	1b27af028031	verify_not_before(bool verify) noexcept {
 llm/qbm-http.llm.api.md	options.h:258-258	932619f73f3f	clock_skew_tolerance(std::chrono::seconds tolerance) noexcept {
 llm/qbm-http.llm.api.md	options.h:267-267	3d8a962e7727	get_secret_key() const noexcept {
 llm/qbm-http.llm.api.md	options.h:358-358	2d39edb3088f	[[nodiscard]] static std::optional<Algorithm> algorithm_from_string(s...
@@ -131,6 +139,7 @@ llm/qbm-http.llm.api.md	rate_limit.h:67-67	0e69a2307846	class RateLimitOptions {
 llm/qbm-http.llm.api.md	recaptcha.h:264-264	d187f14a6ec6	class RecaptchaMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	recaptcha.h:58-58	db6aa47d8759	class RecaptchaOptions {
 llm/qbm-http.llm.api.md	recaptcha.h:584-584	777e20bee6bc	recaptcha_middleware(RecaptchaOptions   options, // Pass by value for...
+llm/qbm-http.llm.api.md	request.h:101-101	6451167dda92	method() noexcept {
 llm/qbm-http.llm.api.md	request.h:36-36	be7b2909be72	class Request : public internal::MessageBase {
 llm/qbm-http.llm.api.md	request.h:384-384	b3f04e38bce8	pipe<char> &pipe<char>::put<qb::http::Request>(const qb::http::Reques...
 llm/qbm-http.llm.api.md	request.h:83-83	613e7625a2fd	explicit Request(qb::io::uri u, qb::icase_unordered_map<std::vector<s...
@@ -139,6 +148,8 @@ llm/qbm-http.llm.api.md	request.h:97-97	cfe7f2bcfdc6	method() const noexcept {
 llm/qbm-http.llm.api.md	response.h:36-36	3bbce570ed80	class Response : public internal::MessageBase {
 llm/qbm-http.llm.api.md	response.h:56-56	b06544b06939	Response() noexcept
 llm/qbm-http.llm.api.md	response.h:75-75	2705db5fe133	status() const noexcept {
+llm/qbm-http.llm.api.md	response.h:79-79	82246683f1d1	status() noexcept {
+llm/qbm-http.llm.api.md	route.h:139-139	b610b99d7dbc	class CustomRouteAdapterTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	route.h:51-51	ebbc59b09b09	class RouteLambdaTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	route_group.h:148-148	6fc21ea46c61	use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
 llm/qbm-http.llm.api.md	route_group.h:251-251	1a057117b00d	use(H &&mw_fn, std::string name = "UnnamedFunctionalMiddleware") {
@@ -192,6 +203,7 @@ llm/qbm-http.llm.api.md	src/qbm/http/routing/route.h:239-239	f405f34feaa5	class 
 llm/qbm-http.llm.api.md	src/qbm/http/routing/route_group.h:50-50	ed616d0a03dc	class RouteGroup : public IHandlerNode<Session> {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/router.h:54-54	45a1c2f12876	class Router {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/slot.h:79-79	01ae5fee1288	struct Slot {
+llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:108-108	c14ef1fc37ab	using MiddlewareHandlerFn = std::function<void(std::shared_ptr<Contex...
 llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:123-123	2f5f6aa81893	concept DerivedFrom = std::is_base_of_v<Base, Derived>;
 llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:38-38	f49eddea4f10	enum class HookPoint {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:53-53	145e7e92714c	enum class AsyncTaskResult {
@@ -215,5 +227,5 @@ llm/qbm-http.llm.api.md	types.h:713-713	8b48cea2d2f3	constexpr char endl[] = "\r
 llm/qbm-http.llm.api.md	types.h:721-721	544be3d5f78c	constexpr char sep = ' ';
 llm/qbm-http.llm.api.md	types.h:731-731	028e26dbdc36	enum DisconnectedReason : int {
 llm/qbm-http.llm.api.md	types.h:748-748	6c7c92a87174	struct hash<qb::http::method> {
-llm/qbm-http.llm.api.md	utility.h:256-256	9b5794b0f4b5	* @endcode
+llm/qbm-http.llm.api.md	utility.h:258-260	a316e8ede202	template <typename String>
 llm/qbm-http.llm.api.md	utility.h:34-34	8ee074414546	namespace utility {

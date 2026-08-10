@@ -35,7 +35,7 @@ qb::http::Router<MySession> router;
 router.use(qb::http::cors_dev_middleware<MySession>());
 router.compile();
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/cors.h:511 -->
+<!-- src: qbm/http/src/qbm/http/middleware/cors.h:534 -->
 
 `Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a coroutine `(ctx, next) -> task<void>` handler, a sync `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the four overloads.
 
@@ -75,7 +75,7 @@ opts.origins({"https://app.example.com"})
 
 router.use(qb::http::cors_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/cors.h:243 -->
+<!-- src: qbm/http/src/qbm/http/middleware/cors.h:127,171,190,222,234,522 -->
 
 **Presets and factories:**
 
@@ -390,7 +390,7 @@ Four more middleware ship for flow control and instrumentation. They take callab
 | Logging | `<qbm/http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
 | Error handling | `<qbm/http/middleware/error_handling.h>` · `ErrorHandlingMiddleware<S>` | `error_handling_middleware<S>(name = "ErrorHandlingMiddleware")` | Centralised error-to-response translation; register handlers for specific status codes / exception types with fluent setters. |
 
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:147, transform.h:128, logging.h:213, error_handling.h:217 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:147, qbm/http/src/qbm/http/middleware/transform.h:128, qbm/http/src/qbm/http/middleware/logging.h:213, qbm/http/src/qbm/http/middleware/error_handling.h:217 -->
 
 ## reCAPTCHA
 
@@ -406,7 +406,7 @@ Configuration is `qb::http::RecaptchaOptions` (secret key, minimum score, etc.).
 | `recaptcha_v3_middleware<S>(secret_key, min_score = 0.5f)` | reCAPTCHA v3 preset |
 | `recaptcha_strict_middleware<S>(secret_key)` | strict preset |
 
-<!-- src: qbm/http/src/qbm/http/middleware/recaptcha.h:579-626 -->
+<!-- src: qbm/http/src/qbm/http/middleware/recaptcha.h:579-633 -->
 
 Construction throws `std::invalid_argument` if the secret key is empty. The free factories and class compile without any define once `<qbm/http/middleware/recaptcha.h>` is included; only the `make` tags for them are gated behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
 
@@ -426,7 +426,7 @@ auto rl   = mw::make<mw::tags::rate_limit_dev, MySession>();
 router.use(cors);
 router.use(rl);
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/make.h:287 (make<>); tags at make.h:62-109 -->
+<!-- src: qbm/http/src/qbm/http/middleware/make.h:287 (make<>); tags at qbm/http/src/qbm/http/middleware/make.h:62-109 -->
 
 The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to the matching free factory. Tags mirror the factories above and live in `qb::http::middleware::tags`:
 

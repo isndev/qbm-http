@@ -125,7 +125,7 @@ assert(parser.get_parsed_message().header("X-Custom-Header") == "value-part-1par
 
 `msg.keep_alive` is computed here from llhttp's `http_should_keep_alive`; it is the HTTP/1.x persistence decision and is ignored by HTTP/2 and HTTP/3 (those set `stream_id` instead — see `message_base.h`).
 
-> **Header callbacks overwrite, they do not append across `http_execute` calls.** A header value that spans two `http_execute` calls would be silently truncated if the framing layer parsed it across two calls. The framing layer guarantees this never happens by re-feeding the whole buffer while the header block is incomplete (next section). Within a single `parse()` call, fragmentation is handled correctly.
+> **Header callbacks APPEND across `http_execute` calls — the header block really is fed incrementally.** `on_header_field` / `on_header_value` append into `_last_header_key` / `_last_header_value` and clear only on a field↔value transition, committing each completed pair into `msg.headers()` exactly once; `on_url` accumulates through `_url_buffer` the same way. A name or value split across any number of `parse()` calls therefore reassembles correctly, which is what lets the framing layer feed only the newly-arrived bytes (next section). Do not re-feed the whole buffer to "protect" a split header: that is the O(n²) shape this design replaced. <!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:692-701 -->
 
 ## The framing layer: `qb::protocol::http::base`
 
@@ -151,9 +151,9 @@ Both are wired in by the server/client session types as `using protocol = qb::pr
 
 `getMessageSize()` is called on the hot path every time bytes arrive. It runs the parser against the *unconsumed* portion of the I/O input pipe (`_io.in()`) and returns the size of one complete message, or `0` (`IProtocol::kNoMessage`) when more data is needed.
 
-<!-- src: src/qbm/http/1.1/protocol/base.h:644-726 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:679-681,717-740,744-752,754-768,792-800 -->
 
-**Phase 1 — headers.** While `headers_completed()` is false, it parses the whole current buffer. If that returns `HPE_OK` (headers still incomplete), it **resets the parser and returns 0**, so the next call re-parses the full buffer from scratch. This is the deliberate consequence of the header-callback overwrite rule: each header must be seen in a single `http_execute` call, so the parser is re-fed the entire buffer on every pass until the header block is complete. It is O(n²) in header bytes for slowly-arriving headers — an intentional correctness-over-speed tradeoff, documented inline. Once the parser pauses (`HPE_PAUSED`), `body_offset` is computed from `error_pos` (llhttp's "where I stopped" pointer) relative to `begin()`.
+**Phase 1 — headers.** While `headers_completed()` is false, it feeds **only the bytes that arrived since the last call** — `parse(buf + header_parsed, total - header_parsed)` — and returns 0 immediately when nothing is new (`total <= header_parsed`). If that returns `HPE_OK` (headers still incomplete), it records `header_parsed = total` and returns 0, keeping llhttp's incremental state rather than resetting it; the header callbacks append across calls, so a split name or value still reassembles. Cost is therefore **linear** in header bytes. (It formerly reset the parser and re-fed the whole buffer on every arrival: O(n²) in the header size with the *peer* controlling the segmentation — a 793 KB header block delivered in 64-byte segments cost ~1.5 s of parsing on a single-threaded `VirtualCore`, i.e. a remote CPU denial of service from one legal request. Do not reintroduce it.) If the parse ends without the headers completing and without `HPE_OK`, the protocol is marked `not_ok()`. Once the parser pauses (`HPE_PAUSED`), `body_offset` is computed from `error_pos` (llhttp's absolute "where I stopped" pointer) relative to `begin()`, and `header_parsed` is cleared.
 
 **Phase 2 — HEAD / bodyless responses.** On the client side, if the I/O handler exposes `http1_response_body_forbidden()` and it returns true (a response to a HEAD request, where the server sends headers describing a body that is not actually transmitted), framing stops at the end of the headers and returns the header size. This is detected with a `requires`-expression, so handlers that do not opt in are unaffected.
 
@@ -250,7 +250,7 @@ assert(err != HPE_OK && err != HPE_PAUSED);
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: request.h:384; response.h:357; request.cpp:161-163; response.cpp:228-230 -->
+<!-- src: qbm/http/src/qbm/http/request.h:384; qbm/http/src/qbm/http/response.h:357; qbm/http/src/qbm/http/request.cpp:161-163; qbm/http/src/qbm/http/response.cpp:228-230 -->
 
 ```cpp
 template <>

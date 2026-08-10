@@ -82,7 +82,7 @@ Path segmentation handles slashes for you:
 
 The assembled order for any endpoint is **parent middleware → this node's middleware → route handler**. Inherited tasks always run before a node's own, and a node's own before the final handler.
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:177-211; route.h:309-334; handler_node.h:262-274 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:177-211; qbm/http/src/qbm/http/routing/route.h:309-334; qbm/http/src/qbm/http/routing/handler_node.h:262-274 -->
 
 `compile()` **must** be called after all routes, groups, controllers, and middleware are defined and before serving requests. Two safety nets back this up:
 
@@ -150,7 +150,7 @@ server->listen(qb::io::uri("http://0.0.0.0:8080"));         // begin accepting c
 
 Every handler **must** eventually call a terminal: `ctx->complete(AsyncTaskResult)` (default `AsyncTaskResult::COMPLETE`) or one of the terminal response helpers (`json`, `text`, `html`, `redirect`, `no_content`, `bad_request`, …) — each of those ends in `complete(AsyncTaskResult::COMPLETE)` for you. Forget it and the request hangs. The `Context::status(code)` setter is the exception: it sets the status, returns `Context&`, and does **not** terminate, so you can chain it ahead of a terminal call.
 
-<!-- src: qbm/http/src/qbm/http/routing/async_task.h:62-76; context.h:913-1106 -->
+<!-- src: qbm/http/src/qbm/http/routing/async_task.h:62-76; qbm/http/src/qbm/http/routing/context.h:913-1106 -->
 
 ### Read captured parameters
 
@@ -174,7 +174,7 @@ server->router().get("/files/:bucket/*path", [](auto ctx) {
 
 Values arrive URI-decoded: a request to `/notes/My%20Note` matched by `/notes/:title` yields `title == "My Note"`. The parameter keys are `string_view`s into the route pattern held by the router, so the router must outlive the context — which it does by construction.
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:357-367; path_parameters.h:36-39,77-83 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:385-395; qbm/http/src/qbm/http/routing/path_parameters.h:36-39,77-83 -->
 
 ### Customize the not-found and error behavior
 
@@ -197,7 +197,7 @@ router.compile();
 
 Global middleware **is** prepended to the default and custom 404 and 405 chains, but it is **not** auto-prepended to the user error chain set via `set_error_task_chain` — include any cross-cutting behavior (logging, CORS) explicitly in that chain. See [Error handling](./13-error-handling.md).
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:104-142,232-250 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:112-142,232-250,256-268 -->
 
 ### Conceptual radix tree
 

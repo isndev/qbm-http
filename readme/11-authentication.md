@@ -71,7 +71,7 @@ Two of the `Options` durations are `std::chrono::seconds`, not `qb::duration`. T
 - `token_expiration(std::chrono::seconds)` — validity of an issued token; default `3600` s. Only emitted as an `exp` claim when expiration verification is on.
 - `clock_skew_tolerance(std::chrono::seconds)` — widens both the `exp` and `nbf` windows during verification; default `0`.
 
-<!-- src: qbm/http/src/qbm/http/auth/options.h:62-64,154-157,257-261 -->
+<!-- src: qbm/http/src/qbm/http/auth/options.h:62-64,160-164,257-261 -->
 
 ### Verification-policy flags
 
@@ -87,7 +87,7 @@ Two of the `Options` durations are `std::chrono::seconds`, not `qb::duration`. T
 
 There is no separate boolean to enable issuer or audience checks independently of the expected value: setting `token_issuer("my-api")` both records the expected `iss` and turns the check on; `token_issuer("")` turns it off.
 
-<!-- src: qbm/http/src/qbm/http/auth/options.h:75-79,165-205 -->
+<!-- src: qbm/http/src/qbm/http/auth/options.h:75-79,172-178,186-192,199-204,211-216,223-228,234-239,245-250 -->
 
 ## auth::User
 
@@ -299,7 +299,7 @@ router.get("/data", [](auto ctx) {
 
 ## Pitfalls
 
-- **Never ship `require_signature_verification(false)`.** With it off, `verify_token` decodes the payload *without* a signature check and validates only `exp`/`nbf`/`iss`/`aud` against forgeable claims — any token with the right claims is accepted. The default is `true`; keep it `true` in production. (`qbm/http/src/qbm/http/auth/manager.cpp:261,336-398`)
+- **Never ship `require_signature_verification(false)`.** With it off, `verify_token` decodes the payload *without* a signature check and validates only `exp`/`nbf`/`iss`/`aud` against forgeable claims — any token with the right claims is accepted. The default is `true`; keep it `true` in production. (`qbm/http/src/qbm/http/auth/manager.cpp:262,336-398`)
 - **`verify_expiration(false)` mints non-expiring tokens.** `generate_token` only writes an `exp` claim when expiration verification is on, so disabling it produces tokens that never expire and are never rejected for age.
 - **The key must match the algorithm family.** An HMAC secret under an `RS*`/`ES*`/`EdDSA` algorithm (or vice versa) does not throw — `verify_token` simply returns `std::nullopt`. A verify-only service still needs the `public_key` set for asymmetric algorithms.
 - **`"Bearertoken"` is not a token.** `extract_token_from_header` always requires a scheme prefix followed by whitespace, so a missing separator yields an empty string. It cannot extract a bare/scheme-less token: `auth_scheme("")` does not enable that — it makes the whitespace check fall on the token's first character and reject every header.

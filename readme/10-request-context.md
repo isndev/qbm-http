@@ -91,7 +91,7 @@ router.get("/orders/:order_id/items/:item_id", [](auto ctx) {
 
 `PathParameters::get(name)` returns `std::optional<std::string_view>` (a view of the owned value string) if you want to distinguish "absent" from "empty". Note the lifetime contract: parameter **values are owned strings**, but parameter **keys are `string_view` into the route pattern** stored by the router. The router outlives every context, so this is safe by construction — but do not stash a parameter key `string_view` somewhere that outlives the router.
 
-<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-43, 79; context.h:488-510 -->
+<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-43, 79; qbm/http/src/qbm/http/routing/context.h:488-510 -->
 
 ### Query parameters and body binding
 
@@ -167,7 +167,7 @@ ctx->remove("request.id");
 
 Why prefer slots: `ctx->set<int>("k", 1)` written one place and `ctx->get<std::size_t>("k")` read another **compiles and silently returns `std::nullopt`** at runtime. A slot makes that a compile error, documents at the declaration what gets stored under the key and by whom, and keeps the same `any_cast` read cost. Both APIs swallow `std::bad_any_cast` and return `nullopt` / `nullptr` on a type mismatch — a wrong-type read fails silently rather than throwing, which is exactly the footgun slots remove.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:655-896; slot.h:56-104 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:655-896; qbm/http/src/qbm/http/routing/slot.h:56-104 -->
 
 ## Completing a response
 
@@ -257,7 +257,7 @@ qb::io::async::defer([ctx]() {
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1151-1226; async_task.h:64-76 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1151-1226; qbm/http/src/qbm/http/routing/async_task.h:64-76 -->
 
 ## Lifecycle hooks
 
@@ -296,7 +296,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:196-204, 226, 426, 626-641; router_core.h:347-351, 442; router.h:352; src/qbm/http/2/http2.h:308,332 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:196-204, 226, 426, 626-641; qbm/http/src/qbm/http/routing/router_core.h:347-351, 442; qbm/http/src/qbm/http/routing/router.h:352; src/qbm/http/2/http2.h:308,332 -->
 
 ## Lifecycle in order
 
@@ -315,7 +315,7 @@ For a normal matched route, the context moves through these stages:
 
 When a route is not matched, or a task returns `ERROR`, the same machinery runs a different chain — `ProcessingPhase` records which one (`NORMAL_CHAIN`, `NOT_FOUND_CHAIN`, `METHOD_NOT_ALLOWED_CHAIN`, `ERROR_CHAIN`). See [Error handling](./13-error-handling.md) for how the error chain is wired.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:76-95, 196-226, 406-426; router_core.h:291-328, 442; router.h:349-364 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:76-95, 196-226, 406-426; qbm/http/src/qbm/http/routing/router_core.h:291-328, 442; qbm/http/src/qbm/http/routing/router.h:349-364 -->
 
 ### Introspection (advanced)
 
