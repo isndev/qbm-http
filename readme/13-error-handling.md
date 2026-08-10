@@ -97,7 +97,7 @@ router.get("/items/:id", [](auto ctx) {
 `Router::set_error_task_chain(...)` installs a `std::vector` of `IAsyncTask` shared pointers run when any task signals `AsyncTaskResult::ERROR`. The chain runs in full, in order; the last task is responsible for finalizing (`COMPLETE`).
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/router.h:272 (decl), router_core.h:265 (set_error_task_chain), 290 (get_compiled_error_tasks), 303 (is_error_chain_set) -->
+// <!-- src: qbm/http/src/qbm/http/routing/router.h:272 (decl), qbm/http/src/qbm/http/routing/router_core.h:265 (set_error_task_chain), 290 (get_compiled_error_tasks), 303 (is_error_chain_set) -->
 std::vector<std::shared_ptr<qb::http::IAsyncTask<MySession>>> error_chain;
 error_chain.push_back(
     std::make_shared<qb::http::MiddlewareTask<MySession>>(my_error_formatter));
@@ -108,10 +108,10 @@ Note the parameter type is `std::vector`, not `std::list`. There is no auto-prep
 
 ### 4. `ErrorHandlingMiddleware` (the standard formatter)
 
-`qb::http::ErrorHandlingMiddleware` is the off-the-shelf task you put in the error chain. It dispatches on `ctx->response().status()` to a registered handler — exact code first, then any range that covers the code, then a generic fallback — and always finalizes with `complete(AsyncTaskResult::COMPLETE)` afterward.
+`qb::http::ErrorHandlingMiddleware` is the off-the-shelf task you put in the error chain. It dispatches on `ctx->response().status()` and always finalizes with `complete(AsyncTaskResult::COMPLETE)` afterward. Dispatch is a **single lookup** in one `status -> handler` map, then the generic fallback: `on_status_range` does not create a second tier, it *expands the range at registration time* into one entry per code in that same map (via `try_emplace`, so it never overwrites an entry already bound by `on_status` or by an earlier overlapping range — while a later `on_status` assigns and therefore *does* replace a range-installed entry). The generic handler runs when the lookup misses **or** when the matched status handler throws.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/middleware/error_handling.h:92-218 -->
+// <!-- src: qbm/http/src/qbm/http/middleware/error_handling.h:92-98, 112-124, 134-141, 152-188 -->
 #include <qbm/http/http.h>
 #include <qbm/http/middleware/all.h>   // required: http.h declares no middleware factory
 

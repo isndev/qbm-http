@@ -251,7 +251,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:384-395 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:392-403 -->
 ```cpp
 #include <qbm/http/http.h>
 

@@ -20,7 +20,7 @@ Groups are part of the routing tree, so they obey the same compile rule as route
 
 You create a top-level group from the router with `group(path_prefix)`, and a nested group from another group with the same method. Both return a `std::shared_ptr<RouteGroup<SessionType>>` — the result is `[[nodiscard]]`, so capture it and define routes against the pointer.
 
-<!-- src: qbm/http/src/qbm/http/routing/router.h:208, route_group.h:213-218 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:208, qbm/http/src/qbm/http/routing/route_group.h:213-218 -->
 ```cpp
 #include <qbm/http/http.h>   // Router, RouteGroup, Context, method
 
@@ -97,7 +97,7 @@ The lambda form takes `(ctx, next)` — invoke `next()` to pass control down the
 
 Middleware composes top-down. At compile time each node runs `combine_tasks(inherited)`: it copies the tasks inherited from its parent, then appends its own. The resulting chain for any route is **parent middleware first, then this node's middleware, then the route handler** — in declaration order at each level.
 
-<!-- src: qbm/http/src/qbm/http/routing/handler_node.h:272-279, route_group.h:65-77 -->
+<!-- src: qbm/http/src/qbm/http/routing/handler_node.h:272-279, qbm/http/src/qbm/http/routing/route_group.h:65-77 -->
 ```cpp
 #include <qbm/http/http.h>
 

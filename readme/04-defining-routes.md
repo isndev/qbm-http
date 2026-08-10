@@ -96,7 +96,7 @@ Router<SessionType> &get(std::string path, Obj *obj, M member);  // (path, this,
 
 Pass the object pointer and a pointer-to-member; the member must be callable with `std::shared_ptr<Context<SessionType>>`. Both synchronous and coroutine members work — the overload forwards to the unified verb, which auto-detects the flavour:
 
-<!-- src: examples/qbm/http/03_basic_routing.cpp:88 (registration) + derived member -->
+<!-- src: examples/qbm/http/03_basic_routing.cpp:89-91 (registration) + derived member -->
 ```cpp
 router().get("/users/:id", this, &ApiServer::handle_get_user);
 
@@ -319,7 +319,7 @@ Coroutine handlers run on the listener's thread-local `qb::io::async` scheduler,
 
 Defining routes only builds the tree. Before the router can match anything, call `compile()` once, after all routes, groups, controllers, and middleware are declared:
 
-<!-- src: examples/qbm/http/03_basic_routing.cpp:42 -->
+<!-- src: examples/qbm/http/03_basic_routing.cpp:43 -->
 ```cpp
 router().compile();
 ```

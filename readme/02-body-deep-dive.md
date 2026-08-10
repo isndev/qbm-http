@@ -28,7 +28,7 @@ flowchart LR
 
 A `Body` holds exactly one private member:
 
-<!-- src: qbm/http/src/qbm/http/body.h:56-57 -->
+<!-- src: qbm/http/src/qbm/http/body.h:57-58 -->
 ```cpp
 class Body {
     qb::allocator::pipe<char> _data;
@@ -55,7 +55,7 @@ class Body {
 
 Copies are explicit and deep — the copy constructor and copy-assignment delegate to the pipe's copy semantics; move is defaulted and cheap:
 
-<!-- src: qbm/http/src/qbm/http/body.h:65-71, body.cpp:65-75 -->
+<!-- src: qbm/http/src/qbm/http/body.h:65-71, qbm/http/src/qbm/http/body.cpp:65-75 -->
 ```cpp
 Body(Body &&) noexcept = default;          // move: steals the pipe
 Body(Body const &);                        // copy: deep-copies the pipe
@@ -71,7 +71,7 @@ Prefer moving a `Body` into a message when you own it; the copy path duplicates 
 
 Both the variadic constructor and `operator<<` are constrained by a single compile-time predicate, `Body::is_body_appendable_v<T>`. The accepted categories are fixed:
 
-<!-- src: qbm/http/src/qbm/http/body.h:105-115 -->
+<!-- src: qbm/http/src/qbm/http/body.h:109-135 -->
 ```cpp
 // << / ctor-appendable: Body, Chunk, Multipart, qb::json,
 //           std::string, std::string_view, std::vector<char>,
@@ -99,7 +99,7 @@ body << "id=" << 42 << ";name=" << std::string_view{"qb"};
 
 The variadic constructor folds the same way, so you can build a body in one expression:
 
-<!-- src: qbm/http/src/qbm/http/body.h:127-132 -->
+<!-- src: qbm/http/src/qbm/http/body.h:137-152 -->
 ```cpp
 qb::http::Body body{"chunk-", 1, "-of-", 3};   // "chunk-1-of-3"
 ```
@@ -146,7 +146,7 @@ A `std::string_view` never owns its data, so the rvalue overload is a copy in di
 
 `as<T>()` is a member template with exactly five specializations. Calling it with any other type is a compile error — the static_assert names the supported set. A non-throwing companion, `try_as<T>()`, wraps `as<T>()` in a `try`/`catch` and returns `std::optional<T>` (`std::nullopt` on conversion failure):
 
-<!-- src: qbm/http/src/qbm/http/body.h:364-390 -->
+<!-- src: qbm/http/src/qbm/http/body.h:384-391,402-410 -->
 ```cpp
 template<typename T>
 [[nodiscard]] T as() const;                   // throwing; only: string_view, string, qb::json, Multipart, Form
@@ -238,7 +238,7 @@ If you have the boundary in a header instead, use [`parse_boundary`](#parsing-an
 
 `Chunk` models a single HTTP/1.1 chunked-transfer segment. It is a **non-owning** `{const char* data, std::size_t size}` view — it does not copy or own the bytes it points at, so the referenced memory must outlive the `Chunk` for as long as it is serialized.
 
-<!-- src: qbm/http/src/qbm/http/chunk.h:31-81 -->
+<!-- src: qbm/http/src/qbm/http/chunk.h:31-87 -->
 ```cpp
 namespace qb::http {
     class Chunk {
@@ -285,7 +285,7 @@ Because `Chunk` borrows memory, keep `a` and `b` alive until the body is written
 
 `Form` is an `application/x-www-form-urlencoded` key→values map. Field names are **case-sensitive**, and a single key may hold multiple values (it is backed by `qb::unordered_map<std::string, std::vector<std::string>>`).
 
-<!-- src: qbm/http/src/qbm/http/form.h:30-113 -->
+<!-- src: qbm/http/src/qbm/http/form.h:30-120,127 -->
 ```cpp
 namespace qb::http {
     class Form {
@@ -323,7 +323,7 @@ The pair order follows the underlying unordered map and is not guaranteed. Round
 
 `Multipart` builds and represents `multipart/form-data` (RFC 7578). Each part is a `Multipart::Part`, which **derives from `Headers`** and adds a `std::string body` — so you set a part's headers with the full `Headers` API (`set_header`, `set_content_type`, `header`, `has_header`).
 
-<!-- src: qbm/http/src/qbm/http/multipart.h:499-606 -->
+<!-- src: qbm/http/src/qbm/http/multipart.h:499-606,608 -->
 ```cpp
 namespace qb::http {
     class Multipart {
@@ -406,7 +406,7 @@ if (parser.hasError())
 
 Compression is **feature-gated** on `QB_HAS_COMPRESSION` (zlib, enabled via the qb `QB_WITH_COMPRESSION` build option). When the macro is defined, `Body` exposes:
 
-<!-- src: qbm/http/src/qbm/http/body.h:220-292 -->
+<!-- src: qbm/http/src/qbm/http/body.h:240-312 -->
 ```cpp
 #ifdef QB_HAS_COMPRESSION
 std::size_t compress(std::string const &encoding);     // returns compressed size

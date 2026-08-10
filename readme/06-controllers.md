@@ -115,7 +115,7 @@ The bound member takes `std::shared_ptr<Context>` and returns either `void` (syn
 
 ## Mounting a controller
 
-<!-- src: qbm/http/src/qbm/http/routing/router.h:219-220, route_group.h:230-232, tests/unit/routing/router-controller.cpp:572-583 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:219-220, qbm/http/src/qbm/http/routing/route_group.h:230-232, tests/unit/routing/router-controller.cpp:572-583 -->
 
 Mount a controller on a `Router` or a `RouteGroup` with `controller<C>(path_prefix, ctor_args...)`:
 

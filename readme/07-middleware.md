@@ -72,7 +72,7 @@ You rarely construct `MiddlewareTask` yourself — `use()` does it. But the wrap
 You attach middleware with `use()`, available at three levels with the same four overloads. All return a reference for chaining. Each form is concept-gated, so the right overload resolves automatically with no disambiguation tags.
 
 ```cpp
-// src: qbm/http/src/qbm/http/routing/router.h:151-156,234,248,259; route_group.h:148,251,267,297; controller.h:218,327,342,370
+// src: qbm/http/src/qbm/http/routing/router.h:151-156,234,248,259; qbm/http/src/qbm/http/routing/route_group.h:148,251,267,297; qbm/http/src/qbm/http/routing/controller.h:218,327,342,370
 // Functional form — a synchronous (ctx, next) lambda (SyncMiddleware concept):
 router.use(mw_fn, "OptionalName");
 
@@ -97,7 +97,7 @@ router.use<MyMiddleware<Session>>(arg1, arg2);
 | Group | `group->use(...)` on a `RouteGroup` | Every route nested under that group |
 | Controller | `use(...)` inside a controller's `initialize_routes()` | Every route on that controller |
 
-`RouteGroup::use` and `Controller::use` carry the same four overloads (all ultimately feed `IHandlerNode::add_middleware`); group middleware is inherited by *all* descendant routes, groups, and controllers. <!-- src: qbm/http/src/qbm/http/routing/route_group.h:147-302, controller.h:208-364 -->
+`RouteGroup::use` and `Controller::use` carry the same four overloads (all ultimately feed `IHandlerNode::add_middleware`); group middleware is inherited by *all* descendant routes, groups, and controllers. <!-- src: qbm/http/src/qbm/http/routing/route_group.h:147-302, qbm/http/src/qbm/http/routing/controller.h:208-373 -->
 
 ### Chaining and order
 
@@ -185,7 +185,7 @@ router.use(
 
 #### Post-`next()` mutation: synchronous only
 
-For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:214-215, context.h:337-385 -->
+For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:214-215, qbm/http/src/qbm/http/routing/context.h:337-385 -->
 
 ```cpp
 router.use(
@@ -254,7 +254,7 @@ Two rules make async middleware correct: capture `ctx` as a `std::shared_ptr` so
 
 Global (root-group) middleware is treated specially for the router's built-in chains:
 
-- It **is** prepended to the default and custom **404** and **405** handlers, so cross-cutting concerns (logging, security headers) still apply to not-found and method-not-allowed responses. <!-- src: qbm/http/src/qbm/http/routing/router_core.h:104-142, 194-210 -->
+- It **is** prepended to the default and custom **404** and **405** handlers, so cross-cutting concerns (logging, security headers) still apply to not-found and method-not-allowed responses. <!-- src: qbm/http/src/qbm/http/routing/router_core.h:112-156, 210-214, 224-226 -->
 - It is **not** automatically prepended to the **user-defined error chain** set via `Router::set_error_task_chain`. If you want global behaviors (error logging, CORS headers) on error responses, include them explicitly in the error chain. <!-- src: qbm/http/src/qbm/http/routing/router_core.h:256-268 -->
 
 There is one more asymmetry worth knowing: a router-level lifecycle hook is the only way to observe `HookPoint::PRE_ROUTING`, because router hooks are copied into each new `Context` before routing runs — a hook added *inside* a middleware is registered too late for that point.
@@ -267,7 +267,7 @@ You do not need a hand-rolled `if` inside a middleware to run one branch per req
 #include <qbm/http/http.h>
 #include <qbm/http/middleware/all.h>   // required: http.h declares no middleware factory
 
-// Pattern: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:643-649 (ConditionalMiddleware tests)
+// Pattern: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:656-662 (ConditionalMiddleware tests)
 auto predicate = [](const std::shared_ptr<qb::http::Context<MySession>> &ctx) -> bool {
     return ctx->request().uri().path().starts_with("/admin");
 };

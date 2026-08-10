@@ -104,7 +104,7 @@ All HTTP/3 work is **event-loop affine**: the client and server have no internal
 An HTTP/3 server is constructed with `qb::http3::make_server()`. It exposes the same `Router` as every other server in the module, so routes, middleware, controllers, and contexts behave identically — the transport is the only thing that differs.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:163-176 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:180-193 (adapted)
 #include <qbm/http/http.h>
 
 #ifdef QBM_HTTP_HAS_HTTP3
@@ -157,7 +157,7 @@ The server caps inbound request bodies via `set_max_body_size` (default 64 MiB);
 `push_request` connects lazily on the first request, multiplexes over the live QUIC connection thereafter, and invokes the callback on the I/O thread when the response (or an error response) is ready.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:178-190 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:195-206 (adapted)
 auto client = qb::http3::make_client("https://127.0.0.1:4433");
 client->set_verify_peer(false);   // self-signed dev certificate only
 
@@ -174,7 +174,7 @@ client->push_request(std::move(request), [](qb::http::Response res) {
 The awaiter overloads integrate with the module's coroutine layer (`#include <qbm/http/http.h>` already pulls in `coro.h`):
 
 ```cpp
-// src: qbm/http/src/qbm/http/3/client.h:173,214,227
+// src: qbm/http/src/qbm/http/3/client.h:183,224,237
 qb::http::async::awaiter<ConnectResult>            connect();
 qb::http::async::awaiter<qb::http::Response>       push_request(qb::http::Request request);
 qb::http::async::awaiter<std::vector<qb::http::Response>>
@@ -196,7 +196,7 @@ if (result) {
 `push_requests` issues a vector of requests concurrently over independent QUIC streams and completes once with the responses in submission order:
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:512-523 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:588-598 (adapted)
 std::vector<qb::http::Request> requests;
 requests.emplace_back(qb::io::uri("/item/1"));
 requests.emplace_back(qb::io::uri("/item/2"));
@@ -211,7 +211,7 @@ client->push_requests(std::move(requests), [](std::vector<qb::http::Response> re
 Queue a request with an id and cancel it while pending or active:
 
 ```cpp
-// src: qbm/http/src/qbm/http/3/client.h:201,208
+// src: qbm/http/src/qbm/http/3/client.h:211,218
 auto id = client->push_request_with_id(request, callback);
 client->cancel_request(id, "cancelled by application");
 ```

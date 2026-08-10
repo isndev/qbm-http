@@ -24,7 +24,7 @@ qb::http::Chunk last;                                // size 0 -> end of stream
 
 Because `Chunk` does not own its bytes, the referenced memory must stay valid for as long as the chunk is serialized — exactly the lifetime discipline described under [`string_view` lifetime](#string_view-and-lifetime) below.
 
-**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection (`qbm/http/src/qbm/http/1.1/protocol/base.h:56-57,373-374`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer.
+**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection (`qbm/http/src/qbm/http/1.1/protocol/base.h:56-57,394-402`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer.
 
 **Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as a *single* chunk followed by the terminating chunk, in one write:
 
@@ -77,7 +77,7 @@ A WebSocket connection begins life as an HTTP/1.1 session. The opening `GET` wit
 The lifecycle hazard is the request context. When you upgrade (or otherwise transfer ownership of the connection), call `ctx->suppress_response()` so the `Context` destructor does not send a stale, moved-from HTTP response over a transport that now speaks WebSocket (`qbm/http/src/qbm/http/routing/context.h:1250-1255`). If you reject a failed upgrade with an HTTP error response, send it and use `close_after_deliver()` so the connection closes cleanly after the rejection flushes. The full upgrade walkthrough — handshake validation, subprotocol negotiation, the callback and coroutine session APIs — is in [WebSocket](./20-websocket.md) and [WebSocket coroutines](./21-websocket-coroutines.md).
 
 ```cpp
-// src: qbm/http/tests/system/ws/ws-lifecycle.cpp:109-114 (shape)
+// src: qbm/http/tests/system/ws/ws-lifecycle.cpp:121-126 (shape)
 void on(Protocol::request&& request) {      // HTTP upgrade arrives
     if (!this->switch_protocol<WS_Protocol>(*this, request))
         disconnect();
