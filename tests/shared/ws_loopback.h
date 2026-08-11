@@ -147,9 +147,8 @@ struct WsServerThread {
         // Bounded, like ServerThread's: an unbounded wait here turns "the server never came up"
         // into a tier timeout with no message, which reads as infrastructure flake rather than the
         // defect it is.
-        const bool signalled = cv.wait_for(lock, ready_budget, [this] {
-            return ready.load(std::memory_order_acquire) || failed.load(std::memory_order_acquire);
-        });
+        const bool signalled =
+            cv.wait_for(lock, ready_budget, [this] { return ready.load(std::memory_order_acquire) || failed.load(std::memory_order_acquire); });
         if (!signalled) {
             ADD_FAILURE() << "WsServerThread: the server did not become ready within " << ready_budget.count() << " ms";
         } else if (failed.load(std::memory_order_acquire)) {
@@ -293,8 +292,7 @@ make_client_frame(std::uint8_t opcode_with_flags, std::string_view payload) {
  *       least allowed to have.
  */
 [[nodiscard]] inline std::string
-read_some(qb::io::tcp::socket &sock, std::size_t max, std::chrono::milliseconds deadline = 1500ms,
-          std::chrono::milliseconds quiet = 200ms) {
+read_some(qb::io::tcp::socket &sock, std::size_t max, std::chrono::milliseconds deadline = 1500ms, std::chrono::milliseconds quiet = 200ms) {
     std::string out;
     const auto  start     = std::chrono::steady_clock::now();
     auto        last_byte = start;

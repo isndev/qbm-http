@@ -353,7 +353,7 @@ TEST(WsFramingEdge, NewDataFrameBeforeFinalContinuationIsRejected) {
 
 TEST(WsFramingEdge, PayloadLength64MostSignificantBitIsRejected) {
     EphemeralWsServer<EchoServer> server;
-    std::vector<std::uint8_t>  bad;
+    std::vector<std::uint8_t>     bad;
     bad.reserve(2 + 8 + 4);
     bad.push_back(0x81u);        // FIN + text
     bad.push_back(0x80u | 127u); // masked + extended64
