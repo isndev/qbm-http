@@ -839,7 +839,7 @@ TEST(Http1ClientTest, ClientIsReleasedWhenItsLoopEndsWithoutAnotherTurn) {
     std::thread([&] {
         qb::io::async::init();
         auto client = qb::http1::make_client("http://127.0.0.1:1");
-        weak         = client;
+        weak        = client;
         // max_pending_requests(0) makes push_request synthesize its 503 and invoke the user
         // callback SYNCHRONOUSLY, which is what arms the self-hold.
         client->set_max_pending_requests(0);

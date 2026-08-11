@@ -165,8 +165,13 @@ SchemaValidator::validate_recursive(const qb::json &current_value, const qb::jso
     // counter on every return path (this function never throws).
     struct DepthGuard {
         int &d;
-        explicit DepthGuard(int &d_) noexcept : d(d_) { ++d; }
-        ~DepthGuard() { --d; }
+        explicit DepthGuard(int &d_) noexcept
+            : d(d_) {
+            ++d;
+        }
+        ~DepthGuard() {
+            --d;
+        }
     } depth_guard(_recursion_depth);
     if (_recursion_depth > MAX_SCHEMA_DEPTH) {
         result.add_error(current_path.empty() ? "_schema" : current_path, "schemaTooDeep",

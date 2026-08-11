@@ -325,7 +325,7 @@ private:
     std::string                              _message;
     std::function<std::string(const void *)> _client_id_extractor_fn;                 // Type-erased client ID extractor
     std::type_index                          _client_id_extractor_type{typeid(void)}; // SessionType the extractor was configured for
-    bool                                     _trust_forwarded_headers = false;        // Opt-in: key on proxy forwarding headers instead of the socket peer IP
+    bool _trust_forwarded_headers = false; // Opt-in: key on proxy forwarding headers instead of the socket peer IP
 };
 
 /**

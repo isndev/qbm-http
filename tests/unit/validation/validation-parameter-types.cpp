@@ -137,18 +137,20 @@ TEST_F(ParameterTypesTest, NumberRejectsTrailingGarbage) {
 // be handled cleanly (kept as double where the integer cast would be UB); under the sanitize
 // preset this test additionally proves no UBSan "outside the range of long long" trap fires.
 TEST_F(ParameterTypesTest, NumberAtLongLongBoundaryIsHandledWithoutUB) {
-    for (const char *s : {"9223372036854775808",     // 2^63 exactly (== (double)LLONG_MAX)
-                          "9223372036854775807",     // LLONG_MAX — also rounds to 2^63 as a double
-                          "-9223372036854775809"}) { // just past LLONG_MIN
+    for (const char *s :
+         {"9223372036854775808",     // 2^63 exactly (== (double)LLONG_MAX)
+          "9223372036854775807",     // LLONG_MAX — also rounds to 2^63 as a double
+          "-9223372036854775809"}) { // just past LLONG_MIN
         Result   r;
-        qb::json out = pv.validate_single("v", std::make_optional<std::string>(s), ParameterRuleSet("v").set_type(DataType::NUMBER), r, "query");
+        qb::json out =
+            pv.validate_single("v", std::make_optional<std::string>(s), ParameterRuleSet("v").set_type(DataType::NUMBER), r, "query");
         EXPECT_TRUE(r.success()) << s;
         EXPECT_TRUE(out.is_number()) << s; // representable as double → kept as number, never a UB cast
     }
     // A magnitude safely inside [-2^63, 2^63) is still preserved as a JSON integer.
     Result   r;
-    qb::json out = pv.validate_single("v", std::make_optional<std::string>("1000000000000"), ParameterRuleSet("v").set_type(DataType::NUMBER), r,
-                                      "query");
+    qb::json out =
+        pv.validate_single("v", std::make_optional<std::string>("1000000000000"), ParameterRuleSet("v").set_type(DataType::NUMBER), r, "query");
     EXPECT_TRUE(r.success());
     ASSERT_TRUE(out.is_number_integer());
     EXPECT_EQ(out.get<long long>(), 1000000000000LL);

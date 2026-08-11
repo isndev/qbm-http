@@ -42,7 +42,7 @@
 
 #include <benchmark/benchmark.h>
 
-#include <qbm/http/auth.h>                  // qb::http::auth::{Manager, Options, User}
+#include <qbm/http/auth.h>            // qb::http::auth::{Manager, Options, User}
 #include "shared/auth_test_helpers.h" // make_user, hmac_options (resolves via tests/ include dir)
 
 namespace {

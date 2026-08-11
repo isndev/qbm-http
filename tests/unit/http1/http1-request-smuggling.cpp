@@ -190,7 +190,9 @@ TEST_F(RequestSmugglingTest, HeaderInjectionVariantsAreRejectedAtSerialization) 
         {"value with bare LF", "X-Test", "safe\nInjected: bad"},
         {"value with bare CR", "X-Test", "safe\rInjected: bad"},
         {"value with NUL", "X-Test", std::string("safe\0bad", 8)},
-        {"value with DEL", "X-Test", "a\x7f" "b"},
+        {"value with DEL", "X-Test",
+         "a\x7f"
+         "b"},
         {"name with bare LF", "X-Test\nInjected", "v"},
         {"name with bare CR", "X-Test\rInjected", "v"},
         {"name with NUL", std::string("X-Test\0Inj", 10), "v"},
@@ -228,7 +230,7 @@ TEST_F(RequestSmugglingTest, ParserResetLeavesNoStateBetweenMessages) {
     ASSERT_EQ(parser.parse(second.data(), second.size()), HPE_PAUSED);
     auto &msg2 = parser.get_parsed_message();
     EXPECT_FALSE(msg2.has_header("X-Only-On-First")) << "a header from the previous message survived reset() — every later request on this "
-                                                       "connection would carry it";
+                                                        "connection would carry it";
     EXPECT_EQ(msg2.body().size(), 0u) << "the previous body survived reset()";
     EXPECT_EQ(parser.content_length, 0u);
 }
@@ -246,7 +248,8 @@ TEST_F(RequestSmugglingTest, PerMessageDosCountersDoNotAccumulateAcrossAConnecti
             raw += "X-H-" + std::to_string(i) + ": v\r\n";
         raw += "\r\n";
 
-        EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED) << "round " << round << " was rejected: a per-message limit is leaking across reset()";
+        EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED)
+            << "round " << round << " was rejected: a per-message limit is leaking across reset()";
         parser.reset();
     }
 }

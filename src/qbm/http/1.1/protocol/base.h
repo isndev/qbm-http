@@ -369,8 +369,8 @@ private:
             // And cap the hint: see MAX_BODY_RESERVE_HINT. `content_length` is peer-supplied and is
             // known before any body byte arrives, so an unbounded reserve turns a ~40-byte request
             // into a 100 MB allocation held for the connection's lifetime.
-            self->_chunked.reserve(std::min<std::size_t>(static_cast<std::size_t>(parser->content_length),
-                                                         protocol_limits::MAX_BODY_RESERVE_HINT));
+            self->_chunked.reserve(
+                std::min<std::size_t>(static_cast<std::size_t>(parser->content_length), protocol_limits::MAX_BODY_RESERVE_HINT));
         }
         msg.upgrade              = static_cast<bool>(parser->upgrade);
         msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));

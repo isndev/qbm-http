@@ -644,6 +644,5 @@ TEST(Http1ProtocolFraming, LargeHeaderBlockInSmallSegmentsIsParsedOnce) {
     // there to protect, now upheld by the append-based callbacks instead.
     EXPECT_EQ(io.last_request->header("X-Pad-0"), std::string(8000, 'v'));
     EXPECT_EQ(io.last_request->header("X-Pad-89"), std::string(8000, 'v'));
-    EXPECT_EQ(io.last_request->headers().find("X-Pad-42")->second.size(), 1u)
-        << "a header must be committed once, not once per re-parse";
+    EXPECT_EQ(io.last_request->headers().find("X-Pad-42")->second.size(), 1u) << "a header must be committed once, not once per re-parse";
 }

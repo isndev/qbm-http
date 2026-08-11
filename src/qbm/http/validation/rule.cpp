@@ -196,7 +196,8 @@ PatternRule::validate(const qb::json &value, const std::string &field_path, Resu
             return false;
         }
     } catch (const std::regex_error &) {
-        result.add_error(field_path, rule_name(), "Pattern could not be evaluated (regex complexity limit exceeded).", std::make_optional(value));
+        result.add_error(field_path, rule_name(), "Pattern could not be evaluated (regex complexity limit exceeded).",
+                         std::make_optional(value));
         return false;
     }
     return true;

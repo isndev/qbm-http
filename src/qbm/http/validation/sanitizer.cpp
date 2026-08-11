@@ -211,8 +211,8 @@ strip_html_tags() noexcept {
         output.reserve(input.size()); // Pre-allocate for performance
 
         enum class State { TEXT, TAG_START, TAG_NAME, IN_TAG, COMMENT, COMMENT_END };
-        State  state             = State::TEXT;
-        size_t i                 = 0;
+        State  state = State::TEXT;
+        size_t i     = 0;
 
         while (i < input.size()) {
             char c = input[i];
@@ -220,7 +220,7 @@ strip_html_tags() noexcept {
             switch (state) {
                 case State::TEXT:
                     if (c == '<') {
-                        state             = State::TAG_START;
+                        state = State::TAG_START;
                     } else {
                         output.push_back(c);
                     }
@@ -241,7 +241,7 @@ strip_html_tags() noexcept {
                         // Not a valid tag start, treat as text
                         output.push_back('<');
                         output.push_back(c);
-                        state             = State::TEXT;
+                        state = State::TEXT;
                     }
                     break;
 
@@ -257,7 +257,7 @@ strip_html_tags() noexcept {
                         // Continue in tag state
                     } else if (c == '>') {
                         // End of tag
-                        state             = State::TEXT;
+                        state = State::TEXT;
                     }
                     // Otherwise stay in tag state
                     break;
@@ -271,7 +271,7 @@ strip_html_tags() noexcept {
 
                 case State::COMMENT_END:
                     if (c == '>') {
-                        state             = State::TEXT;
+                        state = State::TEXT;
                     } else if (c != '-') {
                         // Not actually end of comment, back to comment state
                         state = State::COMMENT;

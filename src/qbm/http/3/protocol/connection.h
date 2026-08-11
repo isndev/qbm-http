@@ -579,7 +579,7 @@ private:
         bool                         output_drained        = false;
         /// Set once a body buffer has been handed to nghttp3; @c tx_body must
         /// never be reassigned afterwards (see @c read_data_cb).
-        bool                         body_submitted        = false;
+        bool body_submitted = false;
     };
 
     Owner                                                          &_owner;
@@ -1103,8 +1103,8 @@ public:
         // so *alive should remain true here — these checks are the defense-in-depth backstop
         // against any teardown path that slips through, so we never touch freed _conn/this.
         const auto alive = _alive;
-        auto       rv    = nghttp3_conn_read_stream2(_conn, static_cast<int64_t>(stream_id), reinterpret_cast<const uint8_t *>(data.data()),
-                                                     data.size(), fin ? 1 : 0, now_ts());
+        auto rv = nghttp3_conn_read_stream2(_conn, static_cast<int64_t>(stream_id), reinterpret_cast<const uint8_t *>(data.data()), data.size(),
+                                            fin ? 1 : 0, now_ts());
         if (!*alive)
             return false; // connection destroyed mid-read; _conn and *this are gone
         if (rv < 0) {

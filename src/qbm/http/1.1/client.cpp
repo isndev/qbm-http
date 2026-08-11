@@ -289,12 +289,12 @@ Client::connect() {
             complete(ConnectResult{false, "HTTP/1.1 client no longer available"});
             return;
         }
-            // `complete` was MOVED into the connect callback above. On this path connect()
-            // declined to start (already connected, already connecting, or unable to start) and
-            // never took ownership — but the std::function here is already empty, so calling it
-            // throws std::bad_function_call and the awaiter never receives its ConnectResult.
-            // Hand the lambda a COPY so the fallback below still has a live callable. The copy
-            // costs one std::function allocation on a connection attempt: a cold path.
+        // `complete` was MOVED into the connect callback above. On this path connect()
+        // declined to start (already connected, already connecting, or unable to start) and
+        // never took ownership — but the std::function here is already empty, so calling it
+        // throws std::bad_function_call and the awaiter never receives its ConnectResult.
+        // Hand the lambda a COPY so the fallback below still has a live callable. The copy
+        // costs one std::function allocation on a connection attempt: a cold path.
         if (!self->connect([complete](bool ok, std::string const &err) mutable { complete(ConnectResult{ok, err}); })) {
             if (self->is_connected()) {
                 complete(ConnectResult{true, ""});
