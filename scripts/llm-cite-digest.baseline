@@ -71,8 +71,8 @@ llm/qbm-http.llm.api.md	error_handling.h:54-54	f806429ff780	class ErrorHandlingM
 llm/qbm-http.llm.api.md	form.h:30-30	a1420e4d331e	class Form {
 llm/qbm-http.llm.api.md	handler_node.h:205-205	532ed46e8357	add_middleware(std::shared_ptr<IAsyncTask<Session>> middleware_task) {
 llm/qbm-http.llm.api.md	handler_node.h:84-84	361beee85d2c	join_paths(const std::string &parent, const std::string &segment) {
-llm/qbm-http.llm.api.md	headers.h:150-150	c2d70d82b78e	class Headers {
-llm/qbm-http.llm.api.md	headers.h:166-166	34482854bfbc	class ContentType {
+llm/qbm-http.llm.api.md	headers.h:151-151	c2d70d82b78e	class Headers {
+llm/qbm-http.llm.api.md	headers.h:167-167	34482854bfbc	class ContentType {
 llm/qbm-http.llm.api.md	headers.h:37-37	7587644456e1	constexpr uint32_t ATTRIBUTE_NAME_MAX = 1024; // 1 Kilobyte
 llm/qbm-http.llm.api.md	headers.h:52-52	2e429ff5b2d6	using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
 llm/qbm-http.llm.api.md	headers.h:67-67	4cc0ef18e2b1	[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attri...
@@ -84,14 +84,14 @@ llm/qbm-http.llm.api.md	http2.h:564-564	b89da7e9262d	class Server : public qb::h
 llm/qbm-http.llm.api.md	http2.h:604-604	9c663ba400dd	make_server() {
 llm/qbm-http.llm.api.md	http2.h:71-75	41df86e2f7ad	template <typename IO_Handler>
 llm/qbm-http.llm.api.md	http3.h:221-221	7a0febb9c291	operator<<(qb::http::Response &response) {
-llm/qbm-http.llm.api.md	http3.h:440-440	7bebae693231	router() noexcept {
-llm/qbm-http.llm.api.md	http3.h:453-453	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
-llm/qbm-http.llm.api.md	http3.h:472-472	585f2c11e6ed	listen(qb::io::uri const &uri, std::filesystem::path const &cert_file...
-llm/qbm-http.llm.api.md	http3.h:496-496	6f0b77b9efd5	graceful_shutdown() {
-llm/qbm-http.llm.api.md	http3.h:699-699	35afa5a9f39f	struct use {
-llm/qbm-http.llm.api.md	http3.h:715-715	0dbbd222011a	class DefaultSession : public qb::http3::use<DefaultSession>::session...
-llm/qbm-http.llm.api.md	http3.h:728-728	76ad77a3599b	class Server : public qb::http3::internal::server<Server<SessionType>...
-llm/qbm-http.llm.api.md	http3.h:741-741	9c663ba400dd	make_server() {
+llm/qbm-http.llm.api.md	http3.h:445-445	7bebae693231	router() noexcept {
+llm/qbm-http.llm.api.md	http3.h:458-458	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
+llm/qbm-http.llm.api.md	http3.h:477-477	585f2c11e6ed	listen(qb::io::uri const &uri, std::filesystem::path const &cert_file...
+llm/qbm-http.llm.api.md	http3.h:501-501	6f0b77b9efd5	graceful_shutdown() {
+llm/qbm-http.llm.api.md	http3.h:704-704	35afa5a9f39f	struct use {
+llm/qbm-http.llm.api.md	http3.h:720-720	0dbbd222011a	class DefaultSession : public qb::http3::use<DefaultSession>::session...
+llm/qbm-http.llm.api.md	http3.h:733-733	76ad77a3599b	class Server : public qb::http3::internal::server<Server<SessionType>...
+llm/qbm-http.llm.api.md	http3.h:746-746	9c663ba400dd	make_server() {
 llm/qbm-http.llm.api.md	jwt.h:39-39	7da601718f3d	enum class JwtTokenLocation {
 llm/qbm-http.llm.api.md	jwt.h:48-48	d7bf051de364	struct JwtOptions {
 llm/qbm-http.llm.api.md	jwt.h:531-531	a7b61a7b58c5	jwt_middleware(const std::string &secret, const std::string &algorith...
