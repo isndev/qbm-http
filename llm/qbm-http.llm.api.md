@@ -60,12 +60,12 @@ Usage: `qb::http::Request r{qb::http::method::GET, qb::io::uri{"https://h/x"}}; 
 Owning response: default-constructs to 200 OK (`response.h:56-58`), CookieJar serialized to `Set-Cookie`. Mutating cookies directly needs `update_cookie_header(s)` to resync. Of the chainable `with_*`, only `with_status` is `noexcept`. `status()` has **both** a const and a mutating overload (`response.h:75, :79`) — `resp.status() = qb::http::status::CREATED;` is valid.
 Usage: `qb::http::Response resp{qb::http::status::OK}; resp.with_body("hi");`
 
-### `qb::http::Headers` (alias `headers`) — `headers.h:150`
+### `qb::http::Headers` (alias `headers`) — `headers.h:151`
 `class Headers { headers_map_type& headers(); const std::string& header(name, idx=0) const; std::string header_or(name, std::string fallback, idx=0) const; bool has_header(name) const noexcept; qb::icase_unordered_map<std::string> attributes(name, idx=0, std::string_view default_to_parse="") const; void set_header(name,value); void add_header(name,value); void remove_header(name); void set_content_type(string_view); const ContentType& content_type() const; void refresh_content_type() noexcept; std::size_t header_count() const; bool exceeds_header_limit(max=100) const; }`
 Case-insensitive multi-value store; typed mutators keep the cached `ContentType` in sync — call `refresh_content_type()` after raw `headers()` mutation. **Accessor model:** `header(name, idx)` returns a `const std::string&` bound to a process-wide static empty string on a miss — never a temporary, always safe to keep for the message's lifetime. For a custom fallback use the by-value `header_or(name, fallback, idx)` (no lifetime caveat). `attributes(name, ...)` parses the header value's `name=value; n2="q v"` params via `parse_header_attributes`.
 `headers_map = qb::icase_unordered_map<std::vector<std::string>>` (`headers.h:52`).
 
-### `qb::http::Headers::ContentType` — `headers.h:166`
+### `qb::http::Headers::ContentType` — `headers.h:167`
 `class ContentType { static std::pair<std::string,std::string> parse(std::string_view); explicit ContentType(std::string_view=""); const std::string& type() const; const std::string& charset() const; }`
 Parses Content-Type into MIME type + charset; defaults to `application/octet-stream` / `utf-8` (never reports "no type").
 
@@ -549,11 +549,11 @@ Usage: `auto c = qb::http2::make_client("https://h"); auto resp = co_await c->pu
 Usage: `auto c = qb::http3::make_client("https://h"); auto resp = co_await c->push_request(req);`
 
 ### Server — `src/qbm/http/3/http3.h`
-- `class DefaultSession : public qb::http3::use<DefaultSession>::session<Server<DefaultSession>>` (`http3.h:715`).
-- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` (`http3.h:728`); `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http3.h:741`); alias `template<...> using server = Server<Session>`.
-- `internal::server::listen(const qb::io::uri&, const std::filesystem::path& cert, const std::filesystem::path& key) -> bool` (ALPN `{"h3"}`; also a `std::string`-uri overload) (`http3.h:472`); `[[nodiscard]] Router& router() noexcept` (`http3.h:440`); `void set_max_body_size(std::size_t) noexcept` (`http3.h:453`); `void graceful_shutdown()` (`http3.h:496`).
+- `class DefaultSession : public qb::http3::use<DefaultSession>::session<Server<DefaultSession>>` (`http3.h:720`).
+- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` (`http3.h:733`); `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http3.h:746`); alias `template<...> using server = Server<Session>`.
+- `internal::server::listen(const qb::io::uri&, const std::filesystem::path& cert, const std::filesystem::path& key) -> bool` (ALPN `{"h3"}`; also a `std::string`-uri overload) (`http3.h:477`); `[[nodiscard]] Router& router() noexcept` (`http3.h:445`); `void set_max_body_size(std::size_t) noexcept` (`http3.h:458`); `void graceful_shutdown()` (`http3.h:501`).
 - `internal::session`: per-stream server session; `operator<<(Response&)` (HEAD-aware) (`http3.h:221`).
-- `template<typename Derived> struct use { ... session/server ... }` (`http3.h:699`).
+- `template<typename Derived> struct use { ... session/server ... }` (`http3.h:704`).
 
 ### Dual-stack (HTTP/2 + HTTP/3) — `src/qbm/http/3/dual_stack.h` · **namespace `qb::http`** (not `qb::http3`)
 - `template<typename Http2Session=qb::http2::DefaultSession, typename Http3Session=qb::http3::DefaultSession> class qb::http::dual_stack_server` (`dual_stack.h:47`) — runs HTTP/2 (TCP+TLS) and HTTP/3 (QUIC) side by side; `router()` returns a `router_facade` registering each route on **both** tables.

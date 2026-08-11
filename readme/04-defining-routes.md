@@ -96,7 +96,7 @@ Router<SessionType> &get(std::string path, Obj *obj, M member);  // (path, this,
 
 Pass the object pointer and a pointer-to-member; the member must be callable with `std::shared_ptr<Context<SessionType>>`. Both synchronous and coroutine members work — the overload forwards to the unified verb, which auto-detects the flavour:
 
-<!-- src: examples/qbm/http/03_basic_routing.cpp:89-91 (registration) + derived member -->
+<!-- src: examples/qbm/http/03_basic_routing.cpp:86 (registration) + derived member -->
 ```cpp
 router().get("/users/:id", this, &ApiServer::handle_get_user);
 
@@ -199,7 +199,7 @@ template <class T> [[nodiscard]] T path_param_or(std::string_view name, T fallba
 
 The raw form returns the captured string, or a static empty string when the name was not part of the matched pattern — so it never throws for a missing key. The value is always a decoded `std::string`; convert it yourself (`qb::to_number<T>(...)`, which returns `std::optional<T>` and never throws) and validate, since a client can send any value the pattern shape allows, or use `path_param<T>` / `path_param_or<T>` to parse and supply a fallback in one call.
 
-<!-- src: derived from examples/qbm/http/03_basic_routing.cpp:88-113 (route shapes) -->
+<!-- src: derived from examples/qbm/http/03_basic_routing.cpp:85-99 (route shapes) -->
 ```cpp
 // One path parameter.
 router().get("/users/:id", [](auto ctx) {
@@ -319,7 +319,7 @@ Coroutine handlers run on the listener's thread-local `qb::io::async` scheduler,
 
 Defining routes only builds the tree. Before the router can match anything, call `compile()` once, after all routes, groups, controllers, and middleware are declared:
 
-<!-- src: examples/qbm/http/03_basic_routing.cpp:43 -->
+<!-- src: examples/qbm/http/03_basic_routing.cpp:46 -->
 ```cpp
 router().compile();
 ```
