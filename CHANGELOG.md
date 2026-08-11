@@ -7,8 +7,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-Tracks changes on the development branch not yet part of a tagged release. The module version is
-**3.0.0**, in lockstep with the qb framework; see the qb CHANGELOG for what makes that release major.
+Tracks changes not yet part of a tagged release. Since 2026-08-11 that is **both** branches:
+`main` was fast-forwarded to `develop` for the release, so the module version is **3.0.0** on either,
+in lockstep with the qb framework; see the qb CHANGELOG for what makes that release major.
 
 ### Fixed
 

@@ -57,7 +57,9 @@ ctest --test-dir ../build-qbm-http -L module:qbm-http
 ```
 
 Use the **branch of the same name**: qb, the three qbm modules and the superproject all carry
-`main` (the released line) and `develop` (the next version) and move together. `.github/workflows/tests.yml`
+`main` and `develop` and move together. Since 2026-08-11 the two point at the same commit in every
+repo — `main` was fast-forwarded to `develop` for the 3.0.0 release — so the branch of the same name
+resolves to the same tree either way until they diverge again after the tag. `.github/workflows/tests.yml`
 resolves that automatically and proves the ref exists before checking it out.
 
 Every ctest entry is also a build target here **except one** —
