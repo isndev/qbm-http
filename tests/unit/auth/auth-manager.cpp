@@ -38,7 +38,7 @@
 #include <qb/json.h>      // qb::json
 
 #include "../../shared/auth_test_helpers.h" // forge_token, forge_token_raw_payload, now_epoch, hmac_options, make_user
-#include <qbm/http/auth.h>                        // qb::http::auth::{Manager, Options, User}
+#include <qbm/http/auth.h>                  // qb::http::auth::{Manager, Options, User}
 
 namespace {
 
@@ -673,8 +673,8 @@ TEST(AuthManagerUnverified, AudienceOfWrongJsonTypeIsRejected) {
     Manager mgr(opts);
 
     qb::json payload;
-    payload["sub"] = "u";
-    payload["aud"] = 1234; // native JSON number: not string, not array
+    payload["sub"]    = "u";
+    payload["aud"]    = 1234; // native JSON number: not string, not array
     std::string token = forge_token_raw_payload(payload);
 
     EXPECT_FALSE(mgr.verify_token(token).has_value());
@@ -691,8 +691,8 @@ TEST(AuthManagerUnverified, NonNumericNbfIsRejected) {
     Manager mgr(opts);
 
     qb::json payload;
-    payload["sub"] = "u";
-    payload["nbf"] = "not-a-number"; // parse_time_claim_as_int64 -> nullopt
+    payload["sub"]    = "u";
+    payload["nbf"]    = "not-a-number"; // parse_time_claim_as_int64 -> nullopt
     std::string token = forge_token(payload, "irrelevant_secret");
 
     EXPECT_FALSE(mgr.verify_token(token).has_value());
@@ -715,8 +715,8 @@ TEST(AuthManagerUnverified, NativeIntegerExpClaimIsAccepted) {
     Manager mgr(opts);
 
     qb::json payload;
-    payload["sub"] = "u";
-    payload["exp"] = now_epoch() + 3600; // native JSON integer, well in the future
+    payload["sub"]    = "u";
+    payload["exp"]    = now_epoch() + 3600; // native JSON integer, well in the future
     std::string token = forge_token_raw_payload(payload);
 
     auto out = mgr.verify_token(token);

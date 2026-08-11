@@ -83,9 +83,9 @@ private:
     qb::unordered_map<uint32_t, Http2ServerStream> _server_streams;                      ///< Active stream contexts
     uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
     uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
-    std::uint32_t                                  _rst_stream_count        = 0; ///< Client RST_STREAMs seen (Rapid Reset guard)
-    std::uint32_t                                  _control_reply_count     = 0; ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
-    std::uint32_t                                  _continuation_frame_count = 0; ///< CONTINUATION frames in the current header block (flood guard)
+    std::uint32_t                                  _rst_stream_count                = 0; ///< Client RST_STREAMs seen (Rapid Reset guard)
+    std::uint32_t _control_reply_count      = 0; ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
+    std::uint32_t _continuation_frame_count = 0; ///< CONTINUATION frames in the current header block (flood guard)
 
     std::vector<uint8_t> _current_header_block_fragment; ///< Header block assembly buffer
     uint32_t             _current_header_stream_id = 0;  ///< Stream ID for header assembly

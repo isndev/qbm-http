@@ -296,10 +296,10 @@ allocation_counter_is_live() {
     const std::size_t           n      = opaque;
     AllocScope                  scope;
     auto                       *p = new char[n];
-    p[0] = 'x';
-    p[n - 1] = 'y';
-    const auto seen = AllocScope::bytes();
-    volatile char sink = static_cast<char>(p[0] + p[n - 1]);
+    p[0]                          = 'x';
+    p[n - 1]                      = 'y';
+    const auto    seen            = AllocScope::bytes();
+    volatile char sink            = static_cast<char>(p[0] + p[n - 1]);
     (void) sink;
     delete[] p;
     return seen >= n;
@@ -357,9 +357,8 @@ TEST(ContentLengthPreallocation, CommittedHeapDoesNotScaleWithTheDeclaredLength)
     const std::size_t small = measure(1024);
     const std::size_t huge  = measure(protocol_limits::MAX_BODY_SIZE);
 
-    EXPECT_LE(huge, small + kPerRequestBudget)
-        << "declaring " << protocol_limits::MAX_BODY_SIZE << " instead of 1024 cost " << (huge - small)
-        << " extra bytes: the parser is still sizing its buffers from an unverified peer claim";
+    EXPECT_LE(huge, small + kPerRequestBudget) << "declaring " << protocol_limits::MAX_BODY_SIZE << " instead of 1024 cost " << (huge - small)
+                                               << " extra bytes: the parser is still sizing its buffers from an unverified peer claim";
 }
 
 TEST(ContentLengthPreallocation, DeclaredBodyStillParsesCorrectlyWhenItActuallyArrives) {

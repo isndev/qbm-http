@@ -91,9 +91,9 @@ namespace qb::http::test {
 inline std::uint16_t
 ephemeral_port(const std::string &host = "127.0.0.1") {
     // Process-wide, guarded: gtest suites may probe from more than one thread.
-    static std::mutex                    handed_out_mutex;
-    static std::vector<std::uint16_t>    handed_out;
-    constexpr int                        kMaxAttempts = 64;
+    static std::mutex                 handed_out_mutex;
+    static std::vector<std::uint16_t> handed_out;
+    constexpr int                     kMaxAttempts = 64;
 
     std::lock_guard<std::mutex> lock(handed_out_mutex);
     // Probes are kept OPEN across attempts so the kernel cannot hand the same port back on the

@@ -270,8 +270,8 @@ private:
     // read is on the stack calls nghttp3_conn_del mid-read (use-after-free), so
     // after_dispatch_events DEFERS the reap while this is >0; dispatch(stream_data) reaps once
     // the outermost read unwinds.
-    int                                                                          _read_depth = 0;
-    std::size_t                                                                  _max_body_size = 64 * 1024 * 1024;
+    int         _read_depth    = 0;
+    std::size_t _max_body_size = 64 * 1024 * 1024;
 
     [[nodiscard]] h3_connection *
     connection(std::uint64_t connection_id) noexcept {
@@ -383,8 +383,13 @@ protected:
         // cannot wedge the counter ≥1 and leak every future closed connection.
         struct DepthGuard {
             int &d;
-            explicit DepthGuard(int &d_) noexcept : d(d_) { ++d; }
-            ~DepthGuard() { --d; }
+            explicit DepthGuard(int &d_) noexcept
+                : d(d_) {
+                ++d;
+            }
+            ~DepthGuard() {
+                --d;
+            }
         };
         {
             DepthGuard guard(_read_depth);

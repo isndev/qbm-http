@@ -108,11 +108,11 @@ class Client : public std::enable_shared_from_this<Client> {
     template <typename Transport>
     class connection;
 
-    qb::io::uri             _base_uri;
-    std::string             _host;
-    bool                    _is_connected           = false;
-    bool                    _is_connecting          = false;
-    bool _intentional_disconnect = false;
+    qb::io::uri _base_uri;
+    std::string _host;
+    bool        _is_connected           = false;
+    bool        _is_connecting          = false;
+    bool        _intentional_disconnect = false;
     // No `std::shared_ptr<Client> _callback_self_guard` member: the self-hold that keeps this
     // client alive through the current loop turn is owned by the deferred closure that releases
     // it (see `hold_through_current_tick`). Parking it in a member made it a self-referential

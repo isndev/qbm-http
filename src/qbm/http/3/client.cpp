@@ -601,8 +601,13 @@ Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
     // the counter ≥1 and permanently freeze the deferral / reconnect.
     struct DepthGuard {
         int &d;
-        explicit DepthGuard(int &d_) noexcept : d(d_) { ++d; }
-        ~DepthGuard() { --d; }
+        explicit DepthGuard(int &d_) noexcept
+            : d(d_) {
+            ++d;
+        }
+        ~DepthGuard() {
+            --d;
+        }
     };
     {
         DepthGuard guard(_read_depth);

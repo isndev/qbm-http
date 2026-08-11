@@ -331,7 +331,7 @@ Client::start_connection() {
     // Value-semantic client context: TLS 1.2+, secure-by-default verification, ALPN "h2" carried on the
     // context (inherited by the minted SSL — no per-connection re-set needed after the connector moves it).
     qb::io::transport::stcp::transport_io_type socket{qb::io::ssl::Context::client().alpn({"h2"})};
-    auto weak_self = weak_from_this();
+    auto                                       weak_self = weak_from_this();
     qb::io::async::tcp::connect<qb::io::transport::stcp::transport_io_type>(
         std::move(socket), _base_uri,
         [weak_self](qb::io::transport::stcp::transport_io_type &&transport_socket) {
@@ -893,12 +893,12 @@ Client::connect() {
             complete(ConnectResult{false, "HTTP/2 client no longer available"});
             return;
         }
-            // `complete` was MOVED into the connect callback above. On this path connect()
-            // declined to start (already connected, already connecting, or unable to start) and
-            // never took ownership — but the std::function here is already empty, so calling it
-            // throws std::bad_function_call and the awaiter never receives its ConnectResult.
-            // Hand the lambda a COPY so the fallback below still has a live callable. The copy
-            // costs one std::function allocation on a connection attempt: a cold path.
+        // `complete` was MOVED into the connect callback above. On this path connect()
+        // declined to start (already connected, already connecting, or unable to start) and
+        // never took ownership — but the std::function here is already empty, so calling it
+        // throws std::bad_function_call and the awaiter never receives its ConnectResult.
+        // Hand the lambda a COPY so the fallback below still has a live callable. The copy
+        // costs one std::function allocation on a connection attempt: a cold path.
         if (!self->connect([complete](bool ok, const std::string &err) mutable { complete(ConnectResult{ok, err}); })) {
             if (self->is_connected()) {
                 complete(ConnectResult{true, ""});

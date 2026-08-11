@@ -147,7 +147,7 @@ private:
     /// promised ids to increase monotonically; closed streams are erased from `_client_streams`,
     /// so that map alone cannot detect a re-promised id. Mirrors the server's
     /// `_last_client_initiated_stream_id`.
-    std::uint32_t _last_promised_stream_id = 0;
+    std::uint32_t _last_promised_stream_id  = 0;
     std::uint32_t _control_reply_count      = 0;
     std::uint32_t _continuation_frame_count = 0;
 

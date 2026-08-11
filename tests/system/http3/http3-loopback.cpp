@@ -249,8 +249,7 @@ TEST_F(Http3LoopbackTest, OversizedResponseReentrantCloseDuringReadIsUseAfterFre
     auto client = qb::http3::make_client(https_origin(port));
     client->set_verify_peer(false);
     std::atomic<bool> settled{false};
-    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(https_origin(port) + "/big")},
-                                     [&](qb::http::Response) { settled = true; }));
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(https_origin(port) + "/big")}, [&](qb::http::Response) { settled = true; }));
     pump([&] { return settled.load(); }, 5s);
     EXPECT_TRUE(settled.load());
     EXPECT_GE(handled.load(), 1) << "the request must have reached the handler (reentrancy path taken)";
@@ -258,7 +257,7 @@ TEST_F(Http3LoopbackTest, OversizedResponseReentrantCloseDuringReadIsUseAfterFre
     // Server survived and is not wedged: a fresh connection still serves.
     auto client2 = qb::http3::make_client(https_origin(port));
     client2->set_verify_peer(false);
-    std::atomic<bool> settled2{false};
+    std::atomic<bool>  settled2{false};
     qb::http::Response r2;
     ASSERT_TRUE(client2->push_request(qb::http::Request{qb::io::uri(https_origin(port) + "/ok")}, [&](qb::http::Response res) {
         r2       = std::move(res);

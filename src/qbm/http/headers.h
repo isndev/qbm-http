@@ -102,7 +102,8 @@ using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
 // below used to be a hand-written "qb/2.6.0" literal in two places, which silently became a lie
 // the moment the framework version moved. A hard error is what stops that from happening again.
 #if !defined(QB_VERSION)
-#error "qbm-http requires QB_VERSION. Link the qb targets (qb::io / qb::core) so their usage requirements apply, rather than adding qbm's include directories by hand."
+#error \
+    "qbm-http requires QB_VERSION. Link the qb targets (qb::io / qb::core) so their usage requirements apply, rather than adding qbm's include directories by hand."
 #endif
 
 /**
