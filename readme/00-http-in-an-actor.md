@@ -185,9 +185,12 @@ call goes inside a named coroutine first:
 ```cpp
 struct RefreshCatalog : qb::Event {};
 struct CatalogFetched : qb::Event {
-    int         status;
-    std::string body;
-    CatalogFetched(int s, std::string b) : status(s), body(std::move(b)) {}
+    // An event is relocated by memcpy, so a by-value std::string is not a legal payload:
+    // a short one addresses its own inline buffer on libstdc++. Box it, or use qb::string<N>.
+    int                          status;
+    std::shared_ptr<std::string> body;
+    CatalogFetched(int s, std::string b)
+        : status(s), body(std::make_shared<std::string>(std::move(b))) {}
 };
 
 // A named coroutine — not an immediately-invoked lambda, whose closure dies before the body runs.
@@ -216,6 +219,14 @@ On `kill()` the wrapper's `on_cancel` hook destroys the inner frame — which de
 its alive flag, so the late reply is dropped — and resumes this coroutine with `cancelled_error`. `spawn`'s own wrapper
 swallows that, so the `try`/`catch` is needed only when you have cleanup of your own. What it does **not** do is stop
 the upstream: the request completes on the far end regardless, which is why the timeout argument still matters.
+
+The boxed `body` above is the other rule showing through: **an event payload must be trivially *relocatable*, not
+merely copyable**, because the engine moves events with `memcpy` and never runs the source destructor. A by-value
+`std::string` is not — on libstdc++ a short one addresses its own inline buffer. It is **not** a cross-core-only
+concern either: the source pipe `memcpy`s what it already holds when it grows, and `reply`/`forward` byte-recycle the
+event, so a same-core `push` is exposed too. A response body is unbounded, so it goes behind a `std::shared_ptr`;
+bounded text goes in a `qb::string<N>`. See
+[Inter-actor messaging](https://github.com/isndev/qb/blob/main/readme/4_qb_core/messaging.md).
 
 ### The callback form — when you already have one
 
