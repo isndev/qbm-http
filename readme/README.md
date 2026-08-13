@@ -2,9 +2,9 @@
 
 > **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
 
-This is the table of contents for the qbm-http narrative documentation: twenty-one numbered pages covering HTTP/1.1, HTTP/2, HTTP/3, WebSocket, routing, middleware, authentication, and validation, ordered as a learning path.
+This is the table of contents for the qbm-http narrative documentation: twenty-two numbered pages covering HTTP/1.1, HTTP/2, HTTP/3, WebSocket, routing, middleware, authentication, and validation, ordered as a learning path.
 
-**Prerequisites:** working knowledge of the qb actor framework — see [`qb/README.md`](https://github.com/isndev/qb/blob/main/README.md) and the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/) docs for actors, `qb-io` async, and coroutines. **See also:** the module front door [`../README.md`](../README.md) for positioning, the build/feature matrix, and a 60-second quickstart.
+**Prerequisites:** working knowledge of the qb actor framework — [`qb/README.md`](https://github.com/isndev/qb/blob/main/README.md) for the shape of an actor, then [Writing actors](https://github.com/isndev/qb/blob/main/readme/4_qb_core/actor.md), [Asynchronous work inside an actor](https://github.com/isndev/qb/blob/main/readme/5_core_io_integration/async_in_actors.md) and [C++20 coroutines](https://github.com/isndev/qb/blob/main/readme/3_qb_io/coroutines.md). **See also:** the module front door [`../README.md`](../README.md) for positioning, the build/feature matrix, and a 60-second quickstart.
 
 ## What this module is
 
@@ -52,6 +52,7 @@ Read top to bottom for a first pass. Each row links the page and gives its one-l
 
 | # | Page | What it covers | Gate |
 |---|---|---|---|
+| 00 | [An HTTP server is an actor](./00-http-in-an-actor.md) | The shape every other page assumes: `qb::Actor` + `qb::http::Server<>`, one request end to end on one thread, coroutine routes, and what `run_sync` costs there. | — |
 | 01 | [Core HTTP concepts](./01-core-concepts.md) | `Request`, `Response`, `Method`, `Status`, `Headers`, and the shared message model. | — |
 | 02 | [HTTP message body deep dive](./02-body-deep-dive.md) | `qb::http::Body` over `qb::allocator::pipe<char>`: typed conversions, chunks, gzip/deflate. | — |
 | 03 | [Routing overview](./03-routing-overview.md) | The `Router`, path matching, path parameters, and the compiled handler tree. | — |
@@ -78,17 +79,19 @@ Read top to bottom for a first pass. Each row links the page and gives its one-l
 
 The numbering is the recommended path, but you do not need all of it for every task:
 
-1. **Foundations (01–02).** Start here regardless of role — every other page assumes the message and body model.
+0. **The shape (00).** Read it first whatever you are building. Every page after it writes code that runs on one `VirtualCore` thread, and page 00 is where that fact and its consequences live — including which calls stop the core.
+1. **Foundations (01–02).** Then here regardless of role — every other page assumes the message and body model.
 2. **Build a server (03–10).** Routing, middleware, and the request context are the core of server-side work. Read these in order; controllers and groups build on plain routes.
 3. **Harden it (11–13).** Authentication, validation, and error handling layer onto the routing model. Page 11 requires `QB_HAS_SSL`.
 4. **Talk to other services (14–15).** The client APIs and the parser stand alone; jump here directly if you only need an HTTP client.
 5. **Scale and modernize the transport (16–19).** Performance practices, then HTTP/2, HTTPS, and HTTP/3 in increasing build-requirement order.
 6. **Real-time (20–21).** WebSocket, callback-style first, then the coroutine API. Both pages require `QB_HAS_SSL`.
 
-If you only want an async HTTP client, read 01, 02, and 14. If you are standing up a JSON API server, read 01–13. For protocol upgrades and real-time, add 17–21 as your build features allow.
+If you only want an async HTTP client, read 00, 01, 02, and 14. If you are standing up a JSON API server, read 00–13. For protocol upgrades and real-time, add 17–21 as your build features allow.
 
 ## See also
 
 - [`../README.md`](../README.md) — module positioning, build/feature matrix, quickstart.
+- [An HTTP server is an actor](./00-http-in-an-actor.md) — the module's own actor page, and the entry point for everything below.
 - [`qb/README.md`](https://github.com/isndev/qb/blob/main/README.md) — the actor framework these pages build on.
 - The qb framework [`readme/`](https://github.com/isndev/qb/tree/main/readme/) — actors, events, `qb-io` async, and coroutines.

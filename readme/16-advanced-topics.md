@@ -4,7 +4,7 @@
 
 How qbm-http handles chunked bodies, persistent connections and protocol upgrades, where the performance levers are, and how an HTTP server composes with the rest of your qb actor system.
 
-**Prerequisites:** [Core HTTP concepts](./01-core-concepts.md), [The request context](./10-request-context.md), the qb framework [`readme/`](https://github.com/isndev/qb/tree/main/readme/) (actors, `qb-io` async). — **See also:** [HTTP message body deep dive](./02-body-deep-dive.md), [Custom middleware](./09-custom-middleware.md), [HTTP/2 protocol specifics](./17-http2-protocol.md), [WebSocket](./20-websocket.md).
+**Prerequisites:** [An HTTP server is an actor](./00-http-in-an-actor.md), [Core HTTP concepts](./01-core-concepts.md), [The request context](./10-request-context.md), the qb framework [`readme/`](https://github.com/isndev/qb/tree/main/readme/) (actors, `qb-io` async). — **See also:** [HTTP message body deep dive](./02-body-deep-dive.md), [Custom middleware](./09-custom-middleware.md), [HTTP/2 protocol specifics](./17-http2-protocol.md), [WebSocket](./20-websocket.md).
 
 ## Summary
 
@@ -142,39 +142,7 @@ Three rules carry real weight here, all enforced or documented in the headers:
 
 ## Composing with qb actors
 
-The HTTP server is an ordinary qb actor. You make one by mixing `qb::http::Server<>` into a `qb::Actor`, defining routes in `onInit`, compiling, then `listen` + `start`:
-
-```cpp
-// src: qbm/http/README.md (Quickstart: a server)
-#include <qbm/http/http.h>
-#include <qb/main.h>
-
-class ApiServer : public qb::Actor, public qb::http::Server<> {
-public:
-    qb::io::async::task<bool> onInit() override {
-        router().get("/health", [](auto ctx) {
-            ctx->response().body() = "ok";
-            ctx->complete();
-        });
-        router().compile();                       // once, before serving
-        if (listen({"tcp://0.0.0.0:8080"})) {     // qb::io::uri; returns "is listening"
-            start();
-            co_return true;
-        }
-        co_return false;
-    }
-};
-
-int main() {
-    qb::Main engine;
-    engine.addActor<ApiServer>(0);                // pin to core 0
-    engine.start();                               // async by default: returns immediately
-    engine.join();                                // blocks until every actor terminates
-    return 0;
-}
-```
-
-`make_server()` / `qb::http::make_server()` returns a `std::unique_ptr<Server<>>` for the cases where you want the server as a member rather than a base class — but the actor-mixin form above is the idiomatic one, because it puts the server's event loop on a `VirtualCore` you control.
+The server-actor shape itself — `qb::Actor` + `qb::http::Server<>`, routes and `listen()` in `onInit`, one request end to end on one thread — is owned by [An HTTP server is an actor](./00-http-in-an-actor.md). This section is what you build *on top* of it once you have more than one actor.
 
 Three composition patterns follow from the actor model:
 

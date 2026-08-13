@@ -4,7 +4,7 @@
 
 Write a WebSocket conversation as a single straight-line coroutine — `co_await` the connect, each inbound frame, and the close handshake — instead of scattering the logic across CRTP `on(...)` callbacks.
 
-**Prerequisites:** [WebSocket](./20-websocket.md), [Asynchronous HTTP client](./14-async-http-client.md) (for the awaiter / `run_sync` model), and working knowledge of qb-io coroutines — see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/) docs. **See also:** [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) for `wss://`.
+**Prerequisites:** [WebSocket](./20-websocket.md), [Asynchronous HTTP client](./14-async-http-client.md) (for the awaiter / `run_sync` model), [An HTTP server is an actor](./00-http-in-an-actor.md), and working knowledge of qb-io coroutines — see [C++20 coroutines](https://github.com/isndev/qb/blob/main/readme/3_qb_io/coroutines.md). **See also:** [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md) for `wss://`.
 
 The coroutine API in `<qbm/http/ws.h>` is a thin, allocation-light layer over the same RFC 6455 framing engine that drives the callback `WebSocket<T>` client and `ws::protocol` server. It exists for the common case where a WebSocket exchange is naturally sequential — connect, authenticate, subscribe, wait for frames, reply, close — and reads more clearly as a loop than as a handler bag. Resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the listener thread that owns the socket; the single-threaded qb-io model is preserved end to end.
 
@@ -27,6 +27,18 @@ This is not a separate module. The coroutine types live alongside the callback A
 | `qb::http::ws::run_sync(awaitable)` | Drive a WebSocket awaitable to completion on the current I/O thread. |
 
 The coroutine entry points return awaiters built by `qb::http::async::make_awaiter<T>`, the same machinery the HTTP coroutine client uses. You consume them from any `qb::io::async::task<...>` coroutine, or drive a top-level one with `run_sync`. <!-- src: qbm/http/src/qbm/http/ws/coro.h:376-460 -->
+
+### Inside an actor: what ends a `receive()` loop
+
+Two facts follow from that shared machinery, and together they are the whole lifetime story for a WebSocket coroutine running under `qb::Main`.
+
+**The awaiter is not cancellation-aware.** It registers no `on_cancel` hook, so `Actor::kill()` neither wakes nor unwinds a coroutine parked on `receive()` or `close_async()`. What *does* resolve it is the transport: once the session is disconnected, `receive()` completes immediately with `IncomingFrame::Kind::Disconnected` instead of parking, so a `while` loop over `receive()` terminates on its own the moment the peer or your own `disconnect()` ends the stream.
+<!-- src: qbm/http/src/qbm/http/ws/coro.h:421-438 (receive: buffered frame, else a Disconnected frame once _disconnected, else park) -->
+
+**`coro_session::run()` is spawned outside your actor's scope.** The base drives the upgrade and then hands `run()` to `qb::io::async::coro_scheduler()` — the current thread's scheduler, which is the `VirtualCore`'s — capturing a `std::shared_ptr<Self>` so the session outlives every suspension inside the body. Like a coroutine route handler, it is therefore **not** counted by `has_active_coroutines()` and **not** cancelled by `kill()`; it ends when `run()` ends, and an uncaught exception in it sends a `1011` Close and drops the transport.
+<!-- src: qbm/http/src/qbm/http/ws/coro.h:611-652 (spawn_run_loop: shared_ptr capture, scheduler spawn, 1011 on throw) -->
+
+The practical consequence for shutdown: to stop a WebSocket coroutine, **disconnect the session**; `kill()` alone will not reach it. See [An HTTP server is an actor](./00-http-in-an-actor.md#shutting-down).
 
 ### `IncomingFrame` — an owning event
 

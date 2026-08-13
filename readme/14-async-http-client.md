@@ -4,7 +4,7 @@
 
 Make non-blocking outbound HTTP/1.1, HTTP/2, and HTTP/3 requests over the qb-io event loop — through one-shot callbacks, single-shot coroutine awaiters, or a persistent connection-reusing client.
 
-**Prerequisites:** [Core concepts](./01-core-concepts.md), [Request and Response bodies](./02-body-deep-dive.md) — **See also:** [HTTP/2 protocol specifics](./17-http2-protocol.md), [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), [HTTP/3 protocol](./19-http3-protocol.md), [WebSocket](./20-websocket.md)
+**Prerequisites:** [An HTTP server is an actor](./00-http-in-an-actor.md), [Core concepts](./01-core-concepts.md), [Request and Response bodies](./02-body-deep-dive.md) — **See also:** [HTTP/2 protocol specifics](./17-http2-protocol.md), [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), [HTTP/3 protocol](./19-http3-protocol.md), [WebSocket](./20-websocket.md)
 
 The qbm-http client surface is non-blocking from the ground up. Every request is driven by the same per-thread qb-io reactor that powers the server side, so a single I/O thread can have hundreds of outbound calls in flight without one thread per request. There are three layers, from simplest to most capable:
 
@@ -54,6 +54,19 @@ For `https://` (and `wss://`, h2, h3) targets, `verify_peer` controls server-cer
 The coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`coro.h`](../src/qbm/http/coro.h)). An awaiter is single-shot, non-copyable, and non-movable: you construct it as a prvalue from a factory and `co_await` it immediately. A `shared_ptr` alive sentinel guards against late callbacks if the awaiter is destroyed before the operation completes, and resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the I/O thread that started the call. This is the same mono-thread-per-listener contract as the rest of the framework — never share a client or drive its awaiters across threads.
 
 `qb::http::run_sync(awaitable)` is a thin re-export of `qb::io::async::run_sync`. It pumps the *current* thread's event loop just enough to resolve one awaitable, without spawning threads or mutating the global scheduler. Use it from tests, `main`, or any synchronous bootstrap code.
+
+### Driving a request from inside an actor
+
+Inside a `qb::Main`, the "current thread's event loop" is a `VirtualCore`, which changes which of the three layers is correct — and makes one of them a defect:
+
+| From | Use | Why |
+|---|---|---|
+| A **coroutine route handler** | `co_await qb::http::GET(req, timeout)` directly | The router already drove your body as a coroutine; the `ctx` shared pointer keeps the request alive across the suspension. |
+| An **actor event handler** | `Actor::spawn`, then `co_await` inside it | A handler must return. Copy what the coroutine needs by value first, and answer through the context. |
+| An **actor**, anywhere | **never** `run_sync` | It stops the `VirtualCore` — every actor and every connection on that core — until the awaitable resolves, with no diagnostic. |
+| `main()`, a test, a CLI | `qb::http::run_sync(...)` | The thread it stops is yours. |
+
+The awaiter these entry points return is **not cancellation-aware**: it registers no `on_cancel` hook, so `Actor::kill()` neither wakes nor unwinds a coroutine parked on an in-flight request. The timeout argument is what bounds it — and the default is `qb::duration::zero()`, meaning none. [An HTTP server is an actor](./00-http-in-an-actor.md#what-cancellation-means-here) owns that rule and its consequences for shutdown; [C++20 coroutines](https://github.com/isndev/qb/blob/main/readme/3_qb_io/coroutines.md#every-awaitable-and-what-cancellation-does-to-it) owns the framework-wide inventory it belongs to.
 
 ## Preparing a request
 
