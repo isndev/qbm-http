@@ -10,7 +10,7 @@
 
 `qb::http::Server<>` is a mixin, not a runtime. It brings an acceptor and a session table; the `qb::Actor` it is mixed into brings the thread, the mailbox and the lifecycle. An HTTP/1.1 server is therefore an actor that mixes in `qb::http::Server<>`, defines routes on `router()`, compiles the router, then calls `listen` + `start`.
 
-<!-- src: examples/qbm/http/03_basic_routing.cpp:23-56 -->
+<!-- src: examples/06-modules/http/02-routing.cpp:32-65 -->
 
 ```cpp
 #include <qb/main.h>
@@ -90,7 +90,7 @@ For TLS, mix in `qb::http::ssl::Server<>` instead and pass certificate and key p
 
 Return `qb::io::async::task<void>` from the *same* verb method and the router detects it, wraps it, and drives it:
 
-<!-- src: examples/qbm/http/13_coroutine_handlers.cpp:43-48 -->
+<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:52-57 -->
 
 ```cpp
 router().get("/delay/:ms", [](auto ctx) -> qb::io::async::task<void> {

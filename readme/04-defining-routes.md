@@ -58,7 +58,7 @@ If a handler kicks off asynchronous work (a `qb::io::async::callback`, an actor 
 
 The fastest way to define a route is a lambda. It conforms to `RouteHandlerFn` automatically:
 
-<!-- src: derived from examples/qbm/http/03_basic_routing.cpp (setup_routes) -->
+<!-- src: derived from examples/06-modules/http/02-routing.cpp (setup_routes) -->
 ```cpp
 #include <qbm/http/http.h>  // Router, Context, status, method, Server — the whole qbm-http surface
 
@@ -96,7 +96,7 @@ Router<SessionType> &get(std::string path, Obj *obj, M member);  // (path, this,
 
 Pass the object pointer and a pointer-to-member; the member must be callable with `std::shared_ptr<Context<SessionType>>`. Both synchronous and coroutine members work — the overload forwards to the unified verb, which auto-detects the flavour:
 
-<!-- src: examples/qbm/http/03_basic_routing.cpp:93 (registration) + derived member -->
+<!-- src: examples/06-modules/http/02-routing.cpp:102 (registration) + derived member -->
 ```cpp
 router().get("/users/:id", this, &ApiServer::handle_get_user);
 
@@ -199,7 +199,7 @@ template <class T> [[nodiscard]] T path_param_or(std::string_view name, T fallba
 
 The raw form returns the captured string, or a static empty string when the name was not part of the matched pattern — so it never throws for a missing key. The value is always a decoded `std::string`; convert it yourself (`qb::to_number<T>(...)`, which returns `std::optional<T>` and never throws) and validate, since a client can send any value the pattern shape allows, or use `path_param<T>` / `path_param_or<T>` to parse and supply a fallback in one call.
 
-<!-- src: derived from examples/qbm/http/03_basic_routing.cpp:92-106 (route shapes) -->
+<!-- src: derived from examples/06-modules/http/02-routing.cpp:101-115 (route shapes) -->
 ```cpp
 // One path parameter.
 router().get("/users/:id", [](auto ctx) {
@@ -272,7 +272,7 @@ The request is held open until that `complete()` runs. If your async path can fa
 
 A handler that returns `qb::io::async::task<void>` is registered through the **same** verb method — no wrapper, no separate API. The verb auto-detects the coroutine flavour via the `CoroRouteHandler` concept and drives the coroutine for you: `co_await` async work inline, and when the body returns the framework calls `complete(AsyncTaskResult::COMPLETE)` automatically if you did not complete it yourself. Exceptions thrown from the body are translated to a `500` with `AsyncTaskResult::ERROR`.
 
-<!-- src: examples/qbm/http/13_coroutine_handlers.cpp:50-55 -->
+<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:59-64 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qbm/http/coro.h>  // co_await qb::http::GET (coroutine client) + run_sync
@@ -288,7 +288,7 @@ router().get("/delay/:ms", [](auto ctx) -> qb::io::async::task<void> {
 
 A coroutine handler can `co_await` the coroutine HTTP client to call an upstream and relay the result — note the reply exposes the response via `.response`:
 
-<!-- src: examples/qbm/http/13_coroutine_handlers.cpp:61-67 -->
+<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:70-76 -->
 ```cpp
 router().get("/proxy", [](auto ctx) -> qb::io::async::task<void> {
     auto reply               = co_await qb::http::GET(qb::http::Request{{"http://localhost:8080/hello"}});
@@ -301,7 +301,7 @@ router().get("/proxy", [](auto ctx) -> qb::io::async::task<void> {
 
 The member-function overload accepts coroutine members too — the same `(path, this, &T::method)` form, where the member returns `qb::io::async::task<void>`:
 
-<!-- src: examples/qbm/http/13_coroutine_handlers.cpp:80,94-99 -->
+<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:89,103-108 -->
 ```cpp
 router().get("/member", this, &CoroutineServer::handle_member);
 
@@ -319,7 +319,7 @@ Coroutine handlers run on the listener's thread-local `qb::io::async` scheduler,
 
 Defining routes only builds the tree. Before the router can match anything, call `compile()` once, after all routes, groups, controllers, and middleware are declared:
 
-<!-- src: examples/qbm/http/03_basic_routing.cpp:53 -->
+<!-- src: examples/06-modules/http/02-routing.cpp:62 -->
 ```cpp
 router().compile();
 ```

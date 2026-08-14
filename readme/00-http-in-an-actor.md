@@ -22,7 +22,7 @@ a handler that has to wait.
 into brings the thread, the mailbox and the lifecycle. All fourteen shipped examples under `examples/qbm/http/` are
 actors added to a `qb::Main` — thirteen are this class, and the fourteenth is a client actor:
 
-<!-- src: examples/qbm/http/01_hello_world_server.cpp:22-125 -->
+<!-- src: examples/06-modules/http/01-hello-server.cpp:31-134 -->
 
 ```cpp
 #include <qb/main.h>
@@ -139,7 +139,7 @@ Three forms, and the choice is not stylistic.
 A handler that returns `qb::io::async::task<void>` is registered through the *same* verb method. The router detects it,
 wraps it, and drives it for you:
 
-<!-- src: examples/qbm/http/13_coroutine_handlers.cpp:50-55 -->
+<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:59-64 -->
 
 ```cpp
 router().get("/delay/:ms", [](auto ctx) -> qb::io::async::task<void> {
@@ -310,7 +310,7 @@ router().get("/proxy", [](auto ctx) -> qb::io::async::task<void> {
     co_return;
 });
 ```
-<!-- src: examples/qbm/http/13_coroutine_handlers.cpp:61-67 -->
+<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:70-76 -->
 
 A persistent client is a member of the actor, connected in `onInit()` like any other resource. Keep it behind a
 `std::shared_ptr` if a coroutine that is *not* a route handler will await on it — the factories already hand you one

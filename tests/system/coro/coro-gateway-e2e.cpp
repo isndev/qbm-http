@@ -2,7 +2,7 @@
  * @file qbm/http/tests/system/coro/coro-gateway-e2e.cpp
  * @brief System tier: end-to-end coroutine gateway across two real HTTP/1.1 servers.
  *
- * Covers the realistic pattern from `examples/qbm/http/13_coroutine_handlers.cpp`:
+ * Covers the realistic pattern from `examples/06-modules/http/09-coroutine-handlers.cpp`:
  * a *gateway* HTTP/1.1 server whose route handlers are coroutines and delegate
  * to an *upstream* HTTP/1.1 server via `co_await qb::http::GET(...)`. The full
  * loop is validated end to end over real loopback sockets:
