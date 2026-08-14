@@ -108,7 +108,7 @@ public:
 `switch_protocol` has two server overloads:
 
 - **`switch_protocol<ws_protocol>(*this, request)`** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the one-call form shown above. <!-- src: src/qbm/http/ws/ws.h:957-964 -->
-- **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: src/qbm/http/ws/ws.h:973-982; examples/qbm/ws/01_chat_server.cpp:591-611 -->
+- **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: src/qbm/http/ws/ws.h:973-982; examples/06-modules/ws/01-chat-server.cpp:601-621 -->
 
 `switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/src/qb/io/async/io.h:862-873 -->
 
@@ -118,7 +118,7 @@ public:
 
 ### Broadcasting from a server
 
-A server (or `io_handler`) owns its sessions, so `stream(...)` fans a frame out to every connected session and `stream_if(predicate, ...)` to a filtered subset. Build the frame once and pass it by value: <!-- src: qb/src/qb/io/async/io_handler.h:284-329, examples/qbm/ws/01_chat_server.cpp:657-662 -->
+A server (or `io_handler`) owns its sessions, so `stream(...)` fans a frame out to every connected session and `stream_if(predicate, ...)` to a filtered subset. Build the frame once and pass it by value: <!-- src: qb/src/qb/io/async/io_handler.h:284-329, examples/06-modules/ws/01-chat-server.cpp:667-672 -->
 
 ```cpp
 qb::http::ws::MessageText msg;
@@ -132,7 +132,7 @@ server().stream_if([this](const WsSession &s) {        // a subset
 
 ### Handing the upgrade off to another actor
 
-A common pattern (see `examples/qbm/ws/01_chat_server.cpp`) keeps the HTTP listener separate from the WebSocket actor: the HTTP route extracts the transport with `extractSession(...)`, ships it to the WebSocket actor in a `qb::Event`, and calls `ctx->suppress_response()` so the routing context destructor does not send a stale, moved-from HTTP response over the now-transferred socket. The receiving actor calls `registerSession(...)`, then the three-argument `switch_protocol` overload, then flushes the `101`: <!-- src: examples/qbm/ws/01_chat_server.cpp:516,527-538,591-611; qbm/http/src/qbm/http/routing/context.h:1250-1255 -->
+A common pattern (see `examples/06-modules/ws/01-chat-server.cpp`) keeps the HTTP listener separate from the WebSocket actor: the HTTP route extracts the transport with `extractSession(...)`, ships it to the WebSocket actor in a `qb::Event`, and calls `ctx->suppress_response()` so the routing context destructor does not send a stale, moved-from HTTP response over the now-transferred socket. The receiving actor calls `registerSession(...)`, then the three-argument `switch_protocol` overload, then flushes the `101`: <!-- src: examples/06-modules/ws/01-chat-server.cpp:526,537-548,601-621; qbm/http/src/qbm/http/routing/context.h:1250-1255 -->
 
 ```cpp
 void on(TransferToWebSocketEvent &event) {
