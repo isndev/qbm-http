@@ -19,8 +19,12 @@ a handler that has to wait.
 ## The server
 
 `qb::http::Server<>` is a mixin, not a runtime. It brings an acceptor and a session table; the `qb::Actor` it is mixed
-into brings the thread, the mailbox and the lifecycle. All fourteen shipped examples under `examples/06-modules/http/` are
-actors added to a `qb::Main` — thirteen are this class, and the fourteenth is a client actor:
+into brings the thread, the mailbox and the lifecycle. Twelve of the fourteen shipped examples under
+`examples/06-modules/http/` are actors added to a `qb::Main` — eleven mix a server type in as a base (`Server<>` in
+`01`–`09`, `ssl::Server<>` in `11-https.cpp`, `http2::use<>::server<>` in `12-http2.cpp`), and `13-http3.cpp` owns a
+`dual_stack_server<>` member instead. The other two, `10-client.cpp` and `14-streaming-and-cookies.cpp`, are client
+programs with no engine at all: `qb::io::async::init()` then `run_until(...)` in `main()`, with their own upstream
+hosted on that same loop — which is what lets them assert the server's own counters rather than guess at them.
 
 <!-- src: examples/06-modules/http/01-hello-server.cpp:31-134 -->
 
