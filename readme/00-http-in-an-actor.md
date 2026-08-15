@@ -19,7 +19,7 @@ a handler that has to wait.
 ## The server
 
 `qb::http::Server<>` is a mixin, not a runtime. It brings an acceptor and a session table; the `qb::Actor` it is mixed
-into brings the thread, the mailbox and the lifecycle. All fourteen shipped examples under `examples/qbm/http/` are
+into brings the thread, the mailbox and the lifecycle. All fourteen shipped examples under `examples/06-modules/http/` are
 actors added to a `qb::Main` — thirteen are this class, and the fourteenth is a client actor:
 
 <!-- src: examples/06-modules/http/01-hello-server.cpp:31-134 -->

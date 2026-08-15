@@ -340,7 +340,7 @@ The full guide lives under [`readme/`](./readme/README.md). Read page 00 first w
 | WebSocket (RFC 6455, WSS) | [20-websocket.md](./readme/20-websocket.md) |
 | WebSocket coroutines | [21-websocket-coroutines.md](./readme/21-websocket-coroutines.md) |
 
-Runnable examples are under [`examples/qbm/http/`](https://github.com/isndev/qb-examples/tree/main/qbm/http) in the repository.
+Runnable examples are under `examples/06-modules/http/` — see the [qb-examples README](https://github.com/isndev/qb-examples/blob/main/README.md). The link points at the README rather than straight at the directory on purpose: that tree was reorganised by level for 3.0 (`qbm/http/` became `06-modules/http/`), and a deep link into it resolves only on the branches that already carry the new layout.
 
 ## For AI assistants
 
