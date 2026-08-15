@@ -90,7 +90,7 @@ For TLS, mix in `qb::http::ssl::Server<>` instead and pass certificate and key p
 
 Return `qb::io::async::task<void>` from the *same* verb method and the router detects it, wraps it, and drives it:
 
-<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:52-57 -->
+<!-- src: examples/06-modules/http/09-coroutine-handlers.cpp:59-64 -->
 
 ```cpp
 router().get("/delay/:ms", [](auto ctx) -> qb::io::async::task<void> {
