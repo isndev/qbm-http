@@ -47,7 +47,7 @@ public:
 
         if (!listen({"tcp://0.0.0.0:8080"}))      // qb::io::uri; returns "is listening"
             co_return false;                      // init fails, the actor never starts
-        start();                                  // arm the accept watcher
+        start();                                  // redundant since 3.0 (listen arms it), harmless
         co_return true;
     }
 
@@ -68,12 +68,14 @@ Three lines carry more than they look like they do:
 - **`onInit()` returns a coroutine.** Routes, `compile()` and `listen()` all happen before the actor is activated, so
   no connection is ever accepted against a half-built router. Returning `false` fails the init and the actor is
   destroyed without ever handling an event — which is what you want when the port is taken.
-- **`listen()` returns "is listening", not "no error", and it does not arm the watcher.** The value is
-  `!transport().listen(uri)` — the transport reports a syscall-style `0` for success, so the negation is the boolean
-  you want; check it. And note that this `listen()` *shadows* the one on the qb-io acceptor it derives from, which
-  **does** auto-start: here `start()` is a separate, required call. Forget it and the socket is bound, the actor
-  activates, and nothing is ever accepted.
-  <!-- src: qbm/http/src/qbm/http/1.1/http.h:600-619 (the module's listen: TLS context if secure, then bind — no start) -->
+- **`listen()` returns "is listening", not "no error" — check it.** The bind reports a syscall-style `0` for success,
+  so the value handed back is the negation; it is `[[nodiscard]]` for that reason. On success the accept watcher is
+  armed too: `listen()` binds **and** starts, the same contract as the qb-io acceptor it derives from, and
+  `listen_no_start()` is there for a server that must finish wiring before the first accept can fire. Until 3.0 this
+  method bound *without* starting, so a missing `start()` left the socket bound, the actor active, and nothing ever
+  accepted — a silent failure that cost a debugging session every time it was met. Calling `start()` yourself
+  afterwards is still harmless if you have code that does.
+  <!-- src: qbm/http/src/qbm/http/1.1/http.h:601-607 (bind then start), :618-636 (the bind-only opt-out) -->
 - **`addActor<…>(0)` picks the core.** The accept watcher, every session it creates, the router, and every coroutine a
   handler spawns all live on that one `VirtualCore` thread. That is the whole concurrency model of the module, and the
   next section is what follows from it.
@@ -287,7 +289,7 @@ default is `qb::duration::zero()`, which means *no timeout at all*:
 auto reply = co_await qb::http::GET(qb::http::Request{{"http://upstream/health"}},
                                     std::chrono::seconds(2));
 ```
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1016-1020 (REQUEST: qb::duration timeout = zero), :1023-1026 (GET) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1034-1038 (REQUEST: qb::duration timeout = zero), :1041-1044 (GET) -->
 
 Pass one. A route handler that `co_await`s an upstream with the default zero holds its `Context` — and the connection
 behind it — open for as long as the upstream is willing to be slow.

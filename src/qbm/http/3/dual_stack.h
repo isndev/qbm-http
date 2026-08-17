@@ -249,23 +249,25 @@ public:
     }
 
     /**
-     * @brief Listen on both stacks and start the HTTP/2 server.
+     * @brief Listen on both stacks.
      *
-     * Binds the HTTP/2 server to @p tcp_tls_uri (starting it on success) and the
-     * HTTP/3 server to @p quic_uri, both using the same TLS certificate and key.
+     * Binds the HTTP/2 server to @p tcp_tls_uri and the HTTP/3 server to @p quic_uri, both
+     * using the same TLS certificate and key, and starts accepting on each.
      *
      * @param tcp_tls_uri URI for the HTTP/2 (TCP/TLS) listener.
      * @param quic_uri    URI for the HTTP/3 (QUIC) listener.
      * @param cert_file   Path to the TLS certificate file.
      * @param key_file    Path to the TLS private key file.
      * @return `true` only if both listeners were established successfully.
+     *
+     * @note Until 3.0 this method called `_http2->start()` itself, because the HTTP/2
+     *       server's `listen()` bound without starting while the HTTP/3 one did both. That
+     *       compensation is gone: both now honour the base contract, so this method only
+     *       has to bind each side and roll back on a partial failure.
      */
     bool
     listen(qb::io::uri tcp_tls_uri, qb::io::uri quic_uri, std::filesystem::path const &cert_file, std::filesystem::path const &key_file) {
-        const bool tcp_ok = _http2->listen(std::move(tcp_tls_uri), cert_file, key_file);
-        if (tcp_ok) {
-            _http2->start();
-        }
+        const bool tcp_ok  = _http2->listen(std::move(tcp_tls_uri), cert_file, key_file);
         const bool quic_ok = _http3->listen(std::move(quic_uri), cert_file, key_file);
         if (tcp_ok && quic_ok) {
             return true;

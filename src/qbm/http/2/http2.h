@@ -490,37 +490,51 @@ public:
     server() = default;
 
     /**
-     * @brief Bind the listening socket. **Does not start accepting — call `start()`.**
+     * @brief Bind the listening socket **and start accepting**.
      *
      * @param uri The URI to listen on.
      * @param cert_file The path to the certificate file.
      * @param key_file The path to the key file.
-     * @return True if the socket is bound, false otherwise.
+     * @return True if the server is bound and accepting, false otherwise.
      *
-     * @warning **Binding is not accepting, and this name promises more elsewhere.** This
-     *          method *hides* `qb::io::async::tcp::acceptor::listen()`, whose contract is
-     *          bind **and** start ("Auto-start", `qb/src/qb/io/async/tcp/acceptor.h`) and
-     *          which offers `listen_no_start()` for the bind-only case. This override is
-     *          semantically that `listen_no_start()`, under the base's other name. Forgetting
-     *          the second step therefore fails *silently and expensively*: `listen()` returns
-     *          `true`, the port is bound so nothing else can take it, and no accept watcher is
-     *          ever registered — so every client `connect()` hangs to its own timeout with
-     *          nothing in any log naming the cause.
-     * @code
-     * if (!listen(uri, cert, key))   // binds
-     *     return false;
-     * start();                       // REQUIRED: registers the accept watcher
-     * @endcode
-     *          `qb::http::internal::server::listen()` (HTTP/1.1) behaves identically.
-     *          `qb::http3::internal::server::listen()` does **not**: it forwards to
-     *          `quic::endpoint::listen()`, which binds *and* starts, so the HTTP/3 server
-     *          needs no `start()` call. `dual_stack_server::listen()` papers over the
-     *          difference by calling `_http2->start()` itself.
+     * @note **Same contract as the base, with the ALPN this protocol requires.** This
+     *       shadows `qb::io::async::tcp::acceptor::listen()` only to pin `{"h2","http/1.1"}`
+     *       as the advertised ALPN — the base takes the list as a parameter and would
+     *       otherwise be called with none, leaving a server that cannot negotiate h2.
+     *       Binding *and* starting is what the base's `listen()` means ("Auto-start"), so
+     *       the pair here mirrors the pair there, and matches `qb::http3` — whose
+     *       `listen()` forwards to `quic::endpoint::listen()` and has always done both.
+     *
+     *       Until 3.0 this override bound *without* starting, under the base's other name.
+     *       Forgetting the second step failed silently and expensively: `listen()` returned
+     *       `true`, the port was held so nothing else could take it, and no accept watcher
+     *       was ever registered — every client `connect()` hung to its own timeout with
+     *       nothing in any log naming the cause. `dual_stack_server::listen()` compensated
+     *       by calling `_http2->start()` itself; it no longer needs to. Calling `start()`
+     *       yourself afterwards remains correct: `qev_io_start` returns early on an already
+     *       active watcher, so the redundant call is a no-op.
+     * @see listen_no_start
      * @see qb::io::async::tcp::acceptor::listen
-     * @see qb::io::async::tcp::acceptor::listen_no_start
      */
-    bool
+    [[nodiscard]] bool
     listen(qb::io::uri uri, std::filesystem::path cert_file, std::filesystem::path key_file) {
+        if (!listen_no_start(std::move(uri), std::move(cert_file), std::move(key_file)))
+            return false;
+        this->start();
+        return true;
+    }
+
+    /**
+     * @brief Bind the listening socket without registering the accept watcher.
+     *
+     * Identical to `listen()` but leaves the server idle until `start()` is called — for a
+     * server that must finish wiring (routers, hooks, session limits) before the first
+     * accept can fire. Mirrors `qb::io::async::tcp::acceptor::listen_no_start()`, and
+     * shadows it for the same reason `listen()` does: to pin the h2 ALPN.
+     * @see listen
+     */
+    [[nodiscard]] bool
+    listen_no_start(qb::io::uri uri, std::filesystem::path cert_file, std::filesystem::path key_file) {
         this->transport().init(qb::io::ssl::Context::server(std::move(cert_file), std::move(key_file)).alpn({"h2", "http/1.1"}));
         if (!this->transport().context().ok()) {
             LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context: " << this->transport().context().error());
