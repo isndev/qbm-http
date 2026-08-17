@@ -574,31 +574,49 @@ public:
     server() = default;
 
     /**
-     * @brief Bind the listening socket. **Does not start accepting — call `start()`.**
+     * @brief Bind the listening socket **and start accepting**.
      *
      * @param uri The URI to listen on.
      * @param cert_file The path to the certificate file.
      * @param key_file The path to the key file.
-     * @return True if the socket is bound, false otherwise.
+     * @return True if the server is bound and accepting, false otherwise.
      *
-     * @warning **Binding is not accepting.** This method *hides*
-     *          `qb::io::async::tcp::acceptor::listen()`, whose contract is bind **and** start
-     *          ("Auto-start", `qb/src/qb/io/async/tcp/acceptor.h`) and which offers
-     *          `listen_no_start()` for the bind-only case. This override is semantically that
-     *          `listen_no_start()`, under the base's other name — so omitting `start()`
-     *          returns `true`, holds the port, and accepts nothing.
-     * @code
-     * if (!listen(uri))   // binds
-     *     return false;
-     * start();            // REQUIRED: registers the accept watcher
-     * @endcode
-     *          `qb::http2::internal::server::listen()` behaves identically;
-     *          `qb::http3::internal::server::listen()` binds *and* starts.
+     * @note **Same contract as the base, with the ALPN this protocol requires.** This
+     *       shadows `qb::io::async::tcp::acceptor::listen()` only to pin `http/1.1` as the
+     *       advertised ALPN — the base takes the list as a parameter and would otherwise be
+     *       called with none. Binding and starting is what the base's `listen()` means
+     *       ("Auto-start"), so the pair here mirrors the pair there: `listen()` to serve,
+     *       `listen_no_start()` when the accept watcher must be armed later.
+     *
+     *       Until 3.0 this override bound *without* starting, under the base's other name.
+     *       Forgetting the second step failed silently and expensively: `listen()` returned
+     *       `true`, the port was held so nothing else could take it, and no accept watcher
+     *       was ever registered — every client `connect()` hung to its own timeout with
+     *       nothing in any log naming the cause. Calling `start()` yourself afterwards is
+     *       still correct and still supported: `qev_io_start` returns early on an already
+     *       active watcher, so the redundant call is a no-op.
+     * @see listen_no_start
      * @see qb::io::async::tcp::acceptor::listen
-     * @see qb::io::async::tcp::acceptor::listen_no_start
      */
-    bool
+    [[nodiscard]] bool
     listen(qb::io::uri uri, std::filesystem::path cert_file = {}, std::filesystem::path key_file = {}) {
+        if (!listen_no_start(std::move(uri), std::move(cert_file), std::move(key_file)))
+            return false;
+        this->start();
+        return true;
+    }
+
+    /**
+     * @brief Bind the listening socket without registering the accept watcher.
+     *
+     * Identical to `listen()` but leaves the server idle until `start()` is called — for a
+     * server that must finish wiring (routers, hooks, session limits) before the first
+     * accept can fire. Mirrors `qb::io::async::tcp::acceptor::listen_no_start()`, and
+     * shadows it for the same reason `listen()` does: to pin the `http/1.1` ALPN.
+     * @see listen
+     */
+    [[nodiscard]] bool
+    listen_no_start(qb::io::uri uri, std::filesystem::path cert_file = {}, std::filesystem::path key_file = {}) {
 #ifdef QB_HAS_SSL
         // Declared inside the guard, not above it: the alias is only ever consumed by the
         // if constexpr below. Hoisted out, it is an unused local typedef in every SSL-off

@@ -985,12 +985,12 @@ Usage: `auto c = qb::http1::make_client("https://h"); co_await c->connect(); aut
 `namespace constants`: `DEFAULT_SESSION_TIMEOUT = std::chrono::seconds(60)` (qb::duration), `DEFAULT_MAX_CONCURRENT_STREAMS = 50`, `STREAM_IDLE_TIMEOUT = std::chrono::seconds(30)`, `STREAM_INCOMPLETE_TIMEOUT = std::chrono::seconds(10)`, `CLEANUP_INTERVAL = std::chrono::seconds(5)` (all `qb::duration`).
 
 ### Server
-- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:563`).
-- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` — `Router& router()` (`http2.h:587`).
-- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:627`).
-- `internal::server::listen(qb::io::uri, std::filesystem::path cert, std::filesystem::path key) -> bool` — ALPN `{h2, http/1.1}` (`http2.h:523`).
+- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:577`).
+- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` — `Router& router()` (`http2.h:601`).
+- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:641`).
+- `internal::server::listen(qb::io::uri, std::filesystem::path cert, std::filesystem::path key) -> bool` — ALPN `{h2, http/1.1}`; binds **and** starts accepting, like the qb-io acceptor it derives from (`http2.h:520`). `listen_no_start(...)` is the bind-only opt-out (`http2.h:537`).
 - `internal::session`: `[[nodiscard]] bool reset_stream(uint32_t stream_id, ErrorCode=CANCEL, const std::string& reason={})`; `auto& operator<<(qb::http::Response&)` (validates stream_id>0 + status 100..599); `Router& router()`.
-- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:539-549`).
+- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:553-563`).
 Usage: `auto s = qb::http2::make_server(); s->router().get("/", h); s->router().compile(); s->listen(uri,"cert.pem","key.pem");`
 
 ### `qb::http2::Client` (alias `client`) — `src/qbm/http/2/client.h:155`
@@ -1058,8 +1058,8 @@ Usage: `auto c = qb::http3::make_client("https://h"); auto resp = co_await c->pu
 ### Dual-stack (HTTP/2 + HTTP/3) — `src/qbm/http/3/dual_stack.h` · **namespace `qb::http`** (not `qb::http3`)
 - `template<typename Http2Session=qb::http2::DefaultSession, typename Http3Session=qb::http3::DefaultSession> class qb::http::dual_stack_server` (`dual_stack.h:47`) — runs HTTP/2 (TCP+TLS) and HTTP/3 (QUIC) side by side; `router()` returns a `router_facade` registering each route on **both** tables.
 - `class router_facade { add_route/get/post/put/del/patch/options/head(...); compile(); }`.
-- `bool listen(qb::io::uri tcp_tls_uri, qb::io::uri quic_uri, const std::filesystem::path& cert, const std::filesystem::path& key)` (also a `std::string`-uri overload) — true only if both bind; **all-or-nothing** (rolls back the side that came up and returns false if the other fails) (`dual_stack.h:263-264`).
-- `template<...> std::unique_ptr<dual_stack_server<...>> qb::http::make_dual_stack_server();` (`dual_stack.h:341`).
+- `bool listen(qb::io::uri tcp_tls_uri, qb::io::uri quic_uri, const std::filesystem::path& cert, const std::filesystem::path& key)` (also a `std::string`-uri overload) — true only if both bind; **all-or-nothing** (rolls back the side that came up and returns false if the other fails) (`dual_stack.h:268-269`).
+- `template<...> std::unique_ptr<dual_stack_server<...>> qb::http::make_dual_stack_server();` (`dual_stack.h:343`).
 Usage: `auto s = qb::http::make_dual_stack_server(); s->router().get("/", h); s->router().compile(); s->listen(tcp_uri, quic_uri, "cert.pem","key.pem");`
 
 ### nghttp3 connection adapter — `src/qbm/http/3/protocol/connection.h`
