@@ -46,6 +46,7 @@
  * @ingroup Http
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -80,31 +81,38 @@ make_payload(std::size_t size) {
 // 4-byte mask is fixed (0xAA 0x55 0x01 0xFE) so frames are byte-deterministic.
 std::vector<std::uint8_t>
 make_masked_client_frame(std::uint8_t opcode_with_flags, std::string_view payload) {
-    std::vector<std::uint8_t>         out;
     const std::array<std::uint8_t, 4> mask{{0xAA, 0x55, 0x01, 0xFE}};
-    out.reserve(payload.size() + 14u);
-    out.push_back(opcode_with_flags);
+    const std::size_t                 len = payload.size();
 
-    const std::size_t len = payload.size();
+    // The header is written into a fixed buffer first and the vector is then sized ONCE, exactly.
+    // The previous shape was `reserve(len + 14)` followed by push_back: correct, but only because
+    // 14 is the largest header this function can emit, which the compiler cannot see. gcc-14 at
+    // -O3 therefore kept the reallocation path live and reported it as a possible
+    // `operator delete` on a non-heap pointer (-Wfree-nonheap-object). Sizing the vector to the
+    // amount actually needed removes the branch rather than the diagnostic, and drops the
+    // per-byte capacity check from the payload masking loop as well.
+    std::array<std::uint8_t, 10> header{};
+    std::size_t                  hdr = 0;
+    header[hdr++]                    = opcode_with_flags;
     if (len < 126u) {
-        out.push_back(static_cast<std::uint8_t>(0x80u | len));
+        header[hdr++] = static_cast<std::uint8_t>(0x80u | len);
     } else if (len <= 0xFFFFu) {
-        out.push_back(static_cast<std::uint8_t>(0x80u | 126u));
-        out.push_back(static_cast<std::uint8_t>((len >> 8) & 0xFFu));
-        out.push_back(static_cast<std::uint8_t>(len & 0xFFu));
+        header[hdr++] = static_cast<std::uint8_t>(0x80u | 126u);
+        header[hdr++] = static_cast<std::uint8_t>((len >> 8) & 0xFFu);
+        header[hdr++] = static_cast<std::uint8_t>(len & 0xFFu);
     } else {
-        out.push_back(static_cast<std::uint8_t>(0x80u | 127u));
-        for (int shift = 56; shift >= 0; shift -= 8) {
-            out.push_back(static_cast<std::uint8_t>((static_cast<std::uint64_t>(len) >> shift) & 0xFFu));
-        }
+        header[hdr++] = static_cast<std::uint8_t>(0x80u | 127u);
+        for (int shift = 56; shift >= 0; shift -= 8)
+            header[hdr++] = static_cast<std::uint8_t>((static_cast<std::uint64_t>(len) >> shift) & 0xFFu);
     }
 
-    for (auto b : mask) {
-        out.push_back(b);
-    }
-    for (std::size_t i = 0; i < len; ++i) {
-        out.push_back(static_cast<std::uint8_t>(static_cast<std::uint8_t>(payload[i]) ^ mask[i & 3u]));
-    }
+    std::vector<std::uint8_t> out(hdr + mask.size() + len);
+    std::copy_n(header.begin(), hdr, out.begin());
+    std::copy(mask.begin(), mask.end(), out.begin() + static_cast<std::ptrdiff_t>(hdr));
+
+    auto *body = out.data() + hdr + mask.size();
+    for (std::size_t i = 0; i < len; ++i)
+        body[i] = static_cast<std::uint8_t>(static_cast<std::uint8_t>(payload[i]) ^ mask[i & 3u]);
     return out;
 }
 
