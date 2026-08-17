@@ -16,7 +16,7 @@ HTTP/2 is a binary, multiplexed protocol: many concurrent request/response excha
 ### ALPN selects the protocol
 
 There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,501; qbm/http/src/qbm/http/2/client.cpp:333,346,724-743 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,524; qbm/http/src/qbm/http/2/client.cpp:333,346,724-743 -->
 
 ### Streams and multiplexing
 
@@ -96,7 +96,7 @@ The server is the same shape as the HTTP/1.1 server (acceptor + sessions + route
 `qb::http2::make_server()` returns a `std::unique_ptr<qb::http2::Server<>>` using the built-in `DefaultSession`. Define routes on its `router()`, call `compile()`, then `listen` with your certificate and key, `start()`, and drive the qb-io reactor.
 
 ```cpp
-// src: qbm/http/src/qbm/http/2/http2.h:563-572 (Server), :602-606 (make_server), :499-507 (listen)
+// src: qbm/http/src/qbm/http/2/http2.h:586-595 (Server), :625-629 (make_server), :522-530 (listen)
 #include <qbm/http/http.h>          // umbrella; pulls <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
 #include <filesystem>
@@ -133,7 +133,7 @@ int main(int argc, char *argv[]) {
 ```
 
 `listen` does three things for you: it creates the server SSL context from your cert/key, sets the ALPN list to `{"h2", "http/1.1"}`, and binds the listening socket. Routing is identical to HTTP/1.1 — groups, controllers, middleware, path parameters, and validation all work unchanged because the HTTP/2 session feeds the same `qb::http::Router`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:499-508,400-402 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:522-531,400-402 -->
 
 ### Custom sessions with the CRTP `use<>` template
 
@@ -168,7 +168,7 @@ public:
 ```
 
 `qb::http2::use<Derived>` exposes three CRTP aliases — `session<ServerHandler>`, `io_handler<SessionType>`, and `server<SessionType>` — and `make_server<MySession>()` constructs the matching server. The `DefaultSession` / `Server<>` pair used by `make_server()` is exactly this template instantiated for you.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:516-526,540-543,563-572,602-606 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:539-549,563-566,586-595,625-629 -->
 
 ### Sending responses and resetting streams
 
@@ -345,7 +345,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 ## Pitfalls
 
 - **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<qbm/http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
-  <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:499-508 -->
+  <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:522-531 -->
 - **The module is a compiled library, not header-only.** `src/qbm/http/2/http2.cpp` and `src/qbm/http/2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<qbm/http/http.h>`; do not `find_package` the headers alone.
   <!-- src: qbm/http/CMakeLists.txt:74-82,109-160 -->
 - **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).

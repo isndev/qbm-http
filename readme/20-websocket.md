@@ -118,7 +118,7 @@ public:
 
 ### Broadcasting from a server
 
-A server (or `io_handler`) owns its sessions, so `stream(...)` fans a frame out to every connected session and `stream_if(predicate, ...)` to a filtered subset. Build the frame once and pass it by value: <!-- src: qb/src/qb/io/async/io_handler.h:284-329, examples/06-modules/ws/01-chat-server.cpp:667-672 -->
+A server (or `io_handler`) owns its sessions, so `stream(...)` fans a frame out to every connected session and `stream_if(predicate, ...)` to a filtered subset. Build the frame once and pass it by value: <!-- src: qb/src/qb/io/async/io_handler.h:298-343, examples/06-modules/ws/01-chat-server.cpp:667-672 -->
 
 ```cpp
 qb::http::ws::MessageText msg;

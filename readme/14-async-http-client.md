@@ -20,7 +20,7 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 
 The one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the original request with the server response so you can correlate the two — useful for tracing or request IDs.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:652-655 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:669-672 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
@@ -101,7 +101,7 @@ To send a *compressed* request body, compress it yourself and set `Content-Encod
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`; it runs on the I/O thread when the response arrives or the request fails.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:869-874 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:886-891 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -145,7 +145,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1003-1008 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1020-1025 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -198,7 +198,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1003-1008 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1020-1025 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
