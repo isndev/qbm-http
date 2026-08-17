@@ -92,7 +92,7 @@ The caller owns the returned raw `SSL_CTX`. Handing one to `listener::init(SSL_C
 
 The secure HTTP/1.1 server is `qb::http::ssl::Server<Session>`, defaulting to `qb::http::ssl::DefaultSecureSession`. Use the `qb::http::ssl::make_server()` factory and the server's `listen(uri, cert, key)` overload — that one call builds a `qb::io::ssl::Context` from the cert and key with ALPN `{"http/1.1"}` folded in, installs it on the `saccept` transport, and starts listening.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:583-601 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:600-618 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
@@ -132,7 +132,7 @@ int main(int argc, char *argv[]) {
 
 `listen` returns `false` if the certificate or key fails to load, so check the result. Under the hood it does exactly this for a secure transport:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:589-596 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:606-613 -->
 ```cpp
 using tpt = std::decay_t<decltype(this->transport())>;
 if constexpr (tpt::is_secure()) {
@@ -153,7 +153,7 @@ Two details matter if you replicate this by hand. ALPN is **folded into the `Con
 
 The SSL-off build takes the `#else` arm, which discards `cert_file`/`key_file` and only listens.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:585,597-601 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:602,614-618 -->
 
 ### Tuning the context before listening
 
@@ -196,7 +196,7 @@ The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the conn
 
 HTTP/2 in qbm-http is **TLS-only with ALPN** — there is no plaintext `h2c`. `qb::http2::Server::listen` mirrors the HTTP/1.1 overload but advertises `{"h2", "http/1.1"}`, so a client that negotiates `h2` gets HTTP/2 and one that does not falls back to HTTP/1.1 on the same port.
 
-<!-- src: qbm/http/src/qbm/http/2/http2.h:499-508 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:522-531 -->
 ```cpp
 #include <qbm/http/http.h>   // pulls in <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
@@ -225,7 +225,7 @@ The protocol the session ends up speaking is decided after the handshake by insp
 
 The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically. A `https://` URI routes through the secure `async::HTTPS` session (`stcp` transport); `http://` routes through plaintext. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:866-893, 837-840, 808-809 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:883-910,854-857,825-826 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -240,7 +240,7 @@ qb::http::GET(
 
 Every one-shot verb and the generic `REQUEST` take an optional trailing `bool verify_peer = true`. Leaving it at the default performs full certificate-chain and hostname verification; passing `false` disables both and **must only be used for trusted or self-signed endpoints you control**:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:860, 873 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:877,890 -->
 ```cpp
 // Dev only: accept a self-signed server certificate.
 qb::http::GET(std::move(req), on_reply,
@@ -287,7 +287,7 @@ client->connect([client](bool connected, const std::string &/*err*/) {
 
 ALPN is a TLS extension where the client advertises the application protocols it supports and the server picks one during the handshake. qbm-http wires it for you: an HTTP/1.1 secure server advertises `{"http/1.1"}`, an HTTP/2 server advertises `{"h2", "http/1.1"}` and switches the session based on what was selected, the HTTP/2 client advertises `{"h2"}` only, and HTTP/3 negotiates `"h3"` over QUIC (a separate transport — see [HTTP/3 protocol](./19-http3-protocol.md)). You override the server's advertised set only when you build the context by hand: chain `.alpn({...})` on the `qb::io::ssl::Context` you pass to `transport().init(...)`, which is what both `listen` overloads do. `transport().set_supported_alpn_protocols({...})` is the raw-`SSL_CTX` counterpart, needed only on the `init(SSL_CTX*)` escape hatch.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:180-181; qb/src/qb/io/tcp/ssl/listener.h:271; qbm/http/src/qbm/http/1.1/http.h:591; qbm/http/src/qbm/http/2/http2.h:501 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:180-181; qb/src/qb/io/tcp/ssl/listener.h:271; qbm/http/src/qbm/http/1.1/http.h:608; qbm/http/src/qbm/http/2/http2.h:524 -->
 
 ## Peer verification and trust
 

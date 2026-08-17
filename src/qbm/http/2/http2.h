@@ -490,11 +490,34 @@ public:
     server() = default;
 
     /**
-     * @brief Listen for incoming connections on a given URI.
+     * @brief Bind the listening socket. **Does not start accepting — call `start()`.**
+     *
      * @param uri The URI to listen on.
      * @param cert_file The path to the certificate file.
      * @param key_file The path to the key file.
-     * @return True if the server is listening, false otherwise.
+     * @return True if the socket is bound, false otherwise.
+     *
+     * @warning **Binding is not accepting, and this name promises more elsewhere.** This
+     *          method *hides* `qb::io::async::tcp::acceptor::listen()`, whose contract is
+     *          bind **and** start ("Auto-start", `qb/src/qb/io/async/tcp/acceptor.h`) and
+     *          which offers `listen_no_start()` for the bind-only case. This override is
+     *          semantically that `listen_no_start()`, under the base's other name. Forgetting
+     *          the second step therefore fails *silently and expensively*: `listen()` returns
+     *          `true`, the port is bound so nothing else can take it, and no accept watcher is
+     *          ever registered — so every client `connect()` hangs to its own timeout with
+     *          nothing in any log naming the cause.
+     * @code
+     * if (!listen(uri, cert, key))   // binds
+     *     return false;
+     * start();                       // REQUIRED: registers the accept watcher
+     * @endcode
+     *          `qb::http::internal::server::listen()` (HTTP/1.1) behaves identically.
+     *          `qb::http3::internal::server::listen()` does **not**: it forwards to
+     *          `quic::endpoint::listen()`, which binds *and* starts, so the HTTP/3 server
+     *          needs no `start()` call. `dual_stack_server::listen()` papers over the
+     *          difference by calling `_http2->start()` itself.
+     * @see qb::io::async::tcp::acceptor::listen
+     * @see qb::io::async::tcp::acceptor::listen_no_start
      */
     bool
     listen(qb::io::uri uri, std::filesystem::path cert_file, std::filesystem::path key_file) {

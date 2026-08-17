@@ -106,7 +106,7 @@ These are the levers that matter, grounded in how the types are built rather tha
 
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
-- **Compression is opt-in and automatic where enabled.** With `QB_HAS_COMPRESSION`, the one-shot client sets `Accept-Encoding` and decompresses responses; setting `Content-Encoding` on a request body compresses it (`qbm/http/src/qbm/http/1.1/http.h:724-728,748-758`). On the server, set `Content-Encoding` on the response, or use the compression middleware ([Standard middleware](./08-standard-middleware.md)).
+- **Compression is opt-in and automatic where enabled.** With `QB_HAS_COMPRESSION`, the one-shot client sets `Accept-Encoding` and decompresses responses; setting `Content-Encoding` on a request body compresses it (`qbm/http/src/qbm/http/1.1/http.h:741-745,765-775`). On the server, set `Content-Encoding` on the response, or use the compression middleware ([Standard middleware](./08-standard-middleware.md)).
 
 ### Never block the event loop
 

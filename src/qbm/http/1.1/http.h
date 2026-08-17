@@ -574,11 +574,28 @@ public:
     server() = default;
 
     /**
-     * @brief Listen for incoming connections on a given URI.
+     * @brief Bind the listening socket. **Does not start accepting — call `start()`.**
+     *
      * @param uri The URI to listen on.
      * @param cert_file The path to the certificate file.
      * @param key_file The path to the key file.
-     * @return True if the server is listening, false otherwise.
+     * @return True if the socket is bound, false otherwise.
+     *
+     * @warning **Binding is not accepting.** This method *hides*
+     *          `qb::io::async::tcp::acceptor::listen()`, whose contract is bind **and** start
+     *          ("Auto-start", `qb/src/qb/io/async/tcp/acceptor.h`) and which offers
+     *          `listen_no_start()` for the bind-only case. This override is semantically that
+     *          `listen_no_start()`, under the base's other name — so omitting `start()`
+     *          returns `true`, holds the port, and accepts nothing.
+     * @code
+     * if (!listen(uri))   // binds
+     *     return false;
+     * start();            // REQUIRED: registers the accept watcher
+     * @endcode
+     *          `qb::http2::internal::server::listen()` behaves identically;
+     *          `qb::http3::internal::server::listen()` binds *and* starts.
+     * @see qb::io::async::tcp::acceptor::listen
+     * @see qb::io::async::tcp::acceptor::listen_no_start
      */
     bool
     listen(qb::io::uri uri, std::filesystem::path cert_file = {}, std::filesystem::path key_file = {}) {
