@@ -158,7 +158,7 @@ echo "== 2b. Cross-repo URL check (repo name + git ref of absolute isndev links)
 # resolve the URL, it validates the only two parts that rot -- the repository name and the git
 # ref. Docs must cite the RELEASED line, so `main` or a 40-hex permalink; a link into a moving
 # development branch is rejected because it silently rots again on the next merge.
-ISNDEV_REPOS='qb qb-dev qb-ev qb-examples qbm-http qbm-pgsql qbm-redis'
+ISNDEV_REPOS='qb qb-dev qev qb-examples qbm-http qbm-pgsql qbm-redis'
 while read -r f; do
   grep -oE 'https://github\.com/isndev/[A-Za-z0-9_.+-]+(/(blob|tree|raw)/[^/)" ]+)?' "$f" 2>/dev/null \
     | while IFS= read -r u; do

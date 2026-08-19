@@ -593,7 +593,7 @@ public:
      *       `true`, the port was held so nothing else could take it, and no accept watcher
      *       was ever registered — every client `connect()` hung to its own timeout with
      *       nothing in any log naming the cause. Calling `start()` yourself afterwards is
-     *       still correct and still supported: `qev_io_start` returns early on an already
+     *       still correct and still supported: `ev_io_start` returns early on an already
      *       active watcher, so the redundant call is a no-op.
      * @see listen_no_start
      * @see qb::io::async::tcp::acceptor::listen
