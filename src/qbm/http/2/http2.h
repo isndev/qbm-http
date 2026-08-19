@@ -511,7 +511,7 @@ public:
      *       was ever registered — every client `connect()` hung to its own timeout with
      *       nothing in any log naming the cause. `dual_stack_server::listen()` compensated
      *       by calling `_http2->start()` itself; it no longer needs to. Calling `start()`
-     *       yourself afterwards remains correct: `qev_io_start` returns early on an already
+     *       yourself afterwards remains correct: `ev_io_start` returns early on an already
      *       active watcher, so the redundant call is a no-op.
      * @see listen_no_start
      * @see qb::io::async::tcp::acceptor::listen

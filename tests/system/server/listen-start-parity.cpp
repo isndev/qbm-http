@@ -26,7 +26,7 @@
  *   - `listen_no_start()` still does NOT accept until `start()`, so the opt-out is real;
  *   - a redundant `start()` after `listen()` is harmless, which is what lets every existing
  *     caller keep its `listen(); start();` sequence across the change. That one is a claim
- *     about libev's idempotence (`qev_io_start` returns early on an active watcher), and a
+ *     about libev's idempotence (`ev_io_start` returns early on an active watcher), and a
  *     claim load-bearing for every user of this module is a claim that gets measured.
  *
  * Plaintext HTTP/1.1 deliberately: `qb::http2::internal::server` carries the identical
@@ -171,7 +171,7 @@ TEST_F(ListenStartParity, ListenNoStartDefersTheAcceptWatcher) {
 TEST_F(ListenStartParity, RedundantStartAfterListenIsHarmless) {
     // Every caller written before 3.0 says `listen(); start();`, and that sequence has to keep
     // working or the change is a silent breakage of every server in every downstream tree.
-    // The reason it is safe is libev's, not ours: qev_io_start() returns early when the
+    // The reason it is safe is libev's, not ours: ev_io_start() returns early when the
     // watcher is already active. Measured here rather than believed, because the failure mode
     // — a watcher stopped and not restarted — would look exactly like the defect this whole
     // file exists for.
