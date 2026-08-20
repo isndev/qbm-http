@@ -7,6 +7,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
+Nothing yet. Entries land here as they are merged, and move under a version heading when that
+version is tagged.
+
+## [3.0.0] - 2026-08-20
+
 Tracks changes not yet part of a tagged release. Since 2026-08-11 that is **both** branches:
 `main` was fast-forwarded to `develop` for the release, so the module version is **3.0.0** on either,
 in lockstep with the qb framework; see the qb CHANGELOG for what makes that release major.
@@ -229,5 +234,6 @@ Aligns qbm-http with the qb 2.0 framework and hardens the HTTP/2, HTTP/3, WebSoc
   pending-request queue.
 - Reject control characters in quoted header-attribute values.
 
-[Unreleased]: https://github.com/isndev/qbm-http/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/isndev/qbm-http/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/isndev/qbm-http/compare/v2.6.0...v3.0.0
 [2.6.0]: https://github.com/isndev/qbm-http/releases/tag/v2.6.0

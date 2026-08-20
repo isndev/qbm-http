@@ -71,6 +71,12 @@ on:
       # can invalidate hundreds of citations. Without this the guard never fires on it.
       - 'src/**'
 
+
+# Least privilege. Nothing in this workflow writes to the repository, so nothing
+# in it needs a token that can.
+permissions:
+  contents: read
+
 concurrency:
   group: doc-lint-${{ github.ref }}
   cancel-in-progress: true

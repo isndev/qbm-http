@@ -15,6 +15,11 @@
 # Usage:  ./scripts/doc-lint.sh   (from the qbm-http root)
 #
 set -uo pipefail
+# `python3` is not a given on Windows hosts (the launcher is `py`, the binary `python`);
+# resolve it once so a direct invocation of this script works everywhere verify.sh's shim
+# is not wrapping it. A no-op wherever python3 exists.
+command -v python3 >/dev/null 2>&1 || python3() { python "$@"; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT}" || exit 2
