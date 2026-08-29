@@ -63,6 +63,14 @@ on:
       - 'CMakeLists.txt'
       - '.github/ci/**'
       - '.github/workflows/tests.yml'
+  # Nightly, against whatever isndev/qb's develop is that day. The path filters above are
+  # correct for changes to THIS repository -- but a qb-side change lands with no push here, so
+  # nothing above fires for it, and this lane once sat two days stale while qb moved 38 commits
+  # (a real defect hid in the gap: the pg readiness race was found only when the lane was
+  # re-run by hand). A daily run bounds that staleness at 24h without needing a cross-repo
+  # token. Minute chosen off the hour, as GitHub asks.
+  schedule:
+    - cron: '17 5 * * *'
   workflow_dispatch:
     inputs:
       qb_ref:
