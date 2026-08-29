@@ -17,7 +17,7 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-project(qbm-http VERSION 3.0.0)
+project(qbm-http VERSION 3.0.1)
 
 # This module is NOT standalone-configurable, and it says so here rather than dying on whichever
 # qb_* command it happens to reach first.

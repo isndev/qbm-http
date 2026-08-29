@@ -1,4 +1,4 @@
-<!-- Verified-against: qbm-http @ qb 3.0.0. Source of truth: the headers under qbm/http/src/qbm/http/. -->
+<!-- Verified-against: qbm-http @ qb 3.0.1. Source of truth: the headers under qbm/http/src/qbm/http/. -->
 # qbm-http — API Reference (deterministic)
 
 Module: `qbm/http` — the HTTP/1.1/2/3 + WebSocket stack of the qb C++20-first actor framework (optional C++23).

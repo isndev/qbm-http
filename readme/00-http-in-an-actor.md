@@ -1,6 +1,6 @@
 # An HTTP server is an actor
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.0 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.1 (C++20 default, C++23 supported)
 
 The shape every other page in this book assumes: a `qb::Actor` that is also a `qb::http::Server<>`, the one thread that
 carries a request from the accept watcher to the last byte of the response, and what that thread being shared means for
