@@ -1,4 +1,4 @@
-<!-- Verified-against: qbm-http @ qb 3.0.1. Source of truth: the headers under qbm/http/src/qbm/http/. -->
+<!-- Verified-against: qbm-http @ qb 3.1.0. Source of truth: the headers under qbm/http/src/qbm/http/. -->
 # qbm-http — concepts for writing correct code
 
 > Audience: an LLM that must emit compiling, idiomatic qbm-http (qb actor framework, C++20-first; optional C++23). Every signature here is verified against the headers under `qbm/http/` and the FACTBOOK. When in doubt, the umbrella header `<qbm/http/http.h>` is your single include.

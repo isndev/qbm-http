@@ -1,6 +1,6 @@
 # Asynchronous HTTP client
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.0.1 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.1.0 (C++20 default, C++23 supported)
 
 Make non-blocking outbound HTTP/1.1, HTTP/2, and HTTP/3 requests over the qb-io event loop — through one-shot callbacks, single-shot coroutine awaiters, or a persistent connection-reusing client.
 
