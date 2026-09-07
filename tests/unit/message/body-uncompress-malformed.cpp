@@ -44,7 +44,7 @@
 #include <gtest/gtest.h>
 #include <qbm/http/http.h>
 
-#ifdef QB_WITH_COMPRESSION
+#ifdef QB_HAS_COMPRESSION
 #include <zlib.h>
 
 namespace {
@@ -162,4 +162,4 @@ TEST(BodyUncompressMalformed, ValidGzipStillRoundTrips) {
     EXPECT_EQ(body.as<std::string>(), plain);
 }
 
-#endif // QB_WITH_COMPRESSION
+#endif // QB_HAS_COMPRESSION
