@@ -16,7 +16,7 @@ HTTP/2 is a binary, multiplexed protocol: many concurrent request/response excha
 ### ALPN selects the protocol
 
 There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,538; qbm/http/src/qbm/http/2/client.cpp:415,435,887-906 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,538; qbm/http/src/qbm/http/2/client.cpp:419,439,893-912 -->
 
 ### Streams and multiplexing
 
@@ -85,7 +85,7 @@ A sender must not emit DATA that would exceed *either* window. The protocol laye
 
 - **`RST_STREAM`** abruptly terminates a single stream with an error code, moving it straight to `CLOSED`. The server sends it for refused, malformed, oversized, or idle streams; your handler can trigger one through `session::reset_stream(...)`.
 - **`GOAWAY`** announces connection shutdown and the last peer-initiated stream the sender will process, enabling a graceful drain. On a `NO_ERROR` GOAWAY the server keeps the connection until all in-range client-initiated streams close; a non-`NO_ERROR` GOAWAY deactivates immediately. The client fails any streams beyond `last_stream_id` and finishes its drain once active requests complete.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-779,795-894,884-893; qbm/http/src/qbm/http/2/http2.h:166; qbm/http/src/qbm/http/2/client.cpp:606-626,628-654,921-934 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-779,795-894,884-893; qbm/http/src/qbm/http/2/http2.h:166; qbm/http/src/qbm/http/2/client.cpp:610-630,632-660,927-940 -->
 
 ## Running an HTTP/2 server
 
@@ -140,7 +140,7 @@ int main(int argc, char *argv[]) {
 When you need per-connection state or custom event handling, define your own session and server through the `qb::http2::use<Derived>` template. The session derives from the internal HTTP/2 session machinery; the server derives from the internal acceptor and owns the router.
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:61-72 (server pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:72-83 (server pattern)
 #include <qbm/http/http.h>
 
 class MyServer;   // forward declaration
@@ -175,7 +175,7 @@ public:
 Inside a handler you set the response and call `ctx->complete()` as usual; the session writes it on the request's stream. To abort a single stream — for example to enforce an application policy — call `reset_stream` on the session, which sends `RST_STREAM` with the error code you choose:
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:146-154 (reset pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:157-165 (reset pattern)
 router().get("/api/cancel", [](auto ctx) {
     auto session = ctx->session();
     if (session) {
@@ -257,7 +257,7 @@ The persistent client is `qb::http2::Client`, created through `qb::http2::make_c
 ### Callback API
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:227-260 (client pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:242-275 (client pattern)
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
 
@@ -282,7 +282,7 @@ client->push_request(std::move(req), [](qb::http::Response res) {
 Beyond the stream-concurrency cap, the client bounds the **total outstanding request set** (queued + in-flight). The limit is `set_max_pending_requests(size_t)` (default `_max_pending_requests = 1024`); once the combined count of pending and active requests reaches it, `push_request()` and `push_requests()` **reject immediately with `503 Service Unavailable`** rather than growing the queue without bound. This is a DoS guard that matches the HTTP/1.1 and HTTP/3 clients — a disconnected or saturated client cannot accumulate work indefinitely. The callback (or the per-element responses for a batch) receives the synthesized 503; the coroutine overloads surface the same 503 as their resolved `Response`.
 
 ```cpp
-// src: qbm/http/src/qbm/http/2/client.h:412-419; qbm/http/src/qbm/http/2/client.cpp:254-259,311-316
+// src: qbm/http/src/qbm/http/2/client.h:412-419; qbm/http/src/qbm/http/2/client.cpp:258-263,315-320
 client->set_max_pending_requests(256);       // tighten the outstanding-work bound
 if (!client->push_request(std::move(req), cb)) {
     // false return == rejected; cb already fired with a 503 response
@@ -355,7 +355,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 - **Server concurrency defaults to 50, client to 100.** They are independent: the server's `SETTINGS_MAX_CONCURRENT_STREAMS = 50` bounds inbound client streams (excess gets `REFUSED_STREAM`); `client->set_max_concurrent_streams(...)` bounds the client's outbound *in-flight* streams (default 100). Raise the server limit only if you have measured headroom.
   <!-- src: qbm/http/src/qbm/http/2/protocol/server.h:445-450; qbm/http/src/qbm/http/2/client.h:216,406 -->
 - **The client also caps total outstanding requests.** Separate from stream concurrency, `set_max_pending_requests(...)` (default 1024) bounds queued + active requests; past it `push_request()`/`push_requests()` reject with `503 Service Unavailable` instead of queuing without limit. Tune it down for tighter backpressure, not up without a reason.
-  <!-- src: qbm/http/src/qbm/http/2/client.h:218,412-419; qbm/http/src/qbm/http/2/client.cpp:254-259 -->
+  <!-- src: qbm/http/src/qbm/http/2/client.h:218,412-419; qbm/http/src/qbm/http/2/client.cpp:258-263 -->
 - **The client is non-movable; keep the `shared_ptr`.** Constructing one on the stack or trying to move it will not compile. Use `make_client(...)` and store the returned `std::shared_ptr`.
   <!-- src: qbm/http/src/qbm/http/2/client.h:164,259-262,647 -->
 - **`set_verify_peer` must precede `connect`.** Changing it after the handshake has no effect. Leave it `true` in production; flip to `false` only for trusted self-signed test endpoints.
