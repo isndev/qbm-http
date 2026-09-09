@@ -16,7 +16,7 @@ HTTP/2 is a binary, multiplexed protocol: many concurrent request/response excha
 ### ALPN selects the protocol
 
 There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,538; qbm/http/src/qbm/http/2/client.cpp:402,422,878-897 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,538; qbm/http/src/qbm/http/2/client.cpp:415,435,887-906 -->
 
 ### Streams and multiplexing
 
@@ -85,7 +85,7 @@ A sender must not emit DATA that would exceed *either* window. The protocol laye
 
 - **`RST_STREAM`** abruptly terminates a single stream with an error code, moving it straight to `CLOSED`. The server sends it for refused, malformed, oversized, or idle streams; your handler can trigger one through `session::reset_stream(...)`.
 - **`GOAWAY`** announces connection shutdown and the last peer-initiated stream the sender will process, enabling a graceful drain. On a `NO_ERROR` GOAWAY the server keeps the connection until all in-range client-initiated streams close; a non-`NO_ERROR` GOAWAY deactivates immediately. The client fails any streams beyond `last_stream_id` and finishes its drain once active requests complete.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-779,795-894,884-893; qbm/http/src/qbm/http/2/http2.h:166; qbm/http/src/qbm/http/2/client.cpp:593-613,615-641,912-925 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-779,795-894,884-893; qbm/http/src/qbm/http/2/http2.h:166; qbm/http/src/qbm/http/2/client.cpp:606-626,628-654,921-934 -->
 
 ## Running an HTTP/2 server
 
