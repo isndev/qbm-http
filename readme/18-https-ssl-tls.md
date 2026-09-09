@@ -271,7 +271,7 @@ client->connect([client](bool ok, const std::string &err) {
 
 `qb::http2::Client` is HTTPS-only — `make_client` requires an `https://` base URI and the client offers **only** `{"h2"}` in ALPN, failing the connection if the server does not negotiate `h2`. It defaults `verify_peer` to `true`; call `set_verify_peer(false)` before `connect()` for trusted self-signed servers.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:209, 377-380 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:215, 383-386 -->
 ```cpp
 #include <qbm/http/http.h>
 

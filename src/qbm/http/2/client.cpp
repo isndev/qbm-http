@@ -118,6 +118,12 @@ Client::connect(ConnectionCallback callback) {
 
     LOG_HTTP_INFO_PA(_client_id, "Starting connection to " << _host << ":" << _port);
 
+    if (_transport_closing) {
+        // The previous transport's dispose is still pending: start once its `disconnected` has run
+        // (see _connect_after_close). The state already says "connecting", so pushes queue.
+        _connect_after_close = true;
+        return true;
+    }
     start_connection();
     return true;
 }
@@ -132,6 +138,7 @@ Client::disconnect() {
     _reconnect_attempts     = 0;
     _reconnect_scheduled    = false;
     _intentional_disconnect = true;
+    _connect_after_close    = false; // a connect() waiting for the previous close is given up too
     if (_connector_pending) {
         _connector_pending = false;
         ++_connect_epoch;
@@ -142,7 +149,7 @@ Client::disconnect() {
 void
 Client::close_connection(const std::string &error_message) {
     const bool was_connecting = _is_connecting;
-    _transport_closing        = _transport_started; // the disconnected the close raises is this transport's
+    _transport_closing        = _transport_closing || _transport_started; // the disconnected the close raises is this transport's
     _transport_started        = false;
     _is_connected             = false;
     _is_connecting            = false;
@@ -499,6 +506,7 @@ Client::handle_connection_failure(const std::string &error_message) {
     // pending work preserved, and the decision below is idempotent under it.
     const bool close_transport = _transport_started;
     _transport_started         = false;
+    _transport_closing         = _transport_closing || close_transport; // set BEFORE the callbacks: a connect() made from one defers
 
     _is_connected                        = false;
     _is_connecting                       = false;
@@ -981,7 +989,8 @@ Client::on(qb::io::async::event::disconnected const &event) {
         return;
     }
 
-    if (_is_connecting && !_connection_callbacks.empty()) {
+    if (_is_connecting && !_connect_after_close && !_connection_callbacks.empty()) {
+        // (the connecting state of a connect() waiting for this close is not this transport's)
         auto callbacks = std::move(_connection_callbacks);
         _connection_callbacks.clear();
         for (auto &callback : callbacks) {
@@ -1007,6 +1016,15 @@ Client::on(qb::io::async::event::disconnected const &event) {
         run_failure_pass(error_msg);
     }
 
+    if (_connect_after_close) {
+        // A connect() (explicit, or a push's own) was asked while this transport was closing: it
+        // starts now that the close has run, on a clean io state, with the run untouched.
+        _connect_after_close    = false;
+        _intentional_disconnect = false;
+        _is_connecting          = true;
+        start_connection();
+        return;
+    }
     if (_intentional_disconnect) {
         // The user asked out: no run. What a callback pushed back is waiting for the next
         // connect() -- explicit, or a push's own -- exactly as on the HTTP/1.1 client.

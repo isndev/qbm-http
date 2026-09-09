@@ -193,6 +193,12 @@ private:
     bool          _connector_pending = false;
     bool          _transport_started = false;
     bool          _transport_closing = false;
+    // A connect() asked while a transport is closing starts only once that transport's
+    // `disconnected` has run: libev invokes pending events LIFO, so a connector started now could
+    // complete -- and `start()` the new transport -- BEFORE the old transport's deferred dispose,
+    // which would then find `_reason` reset, dispose the NEW transport as "Connection lost" and stop
+    // its watcher. The HTTP/1.1 client defers its reconnects for the same reason.
+    bool _connect_after_close = false;
 
     // Protocol handlers
     H2Protocol *_h2_protocol = nullptr;

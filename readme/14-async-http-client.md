@@ -294,7 +294,7 @@ HTTP/2 is TLS-only with ALPN. The client advertises only `h2` and fails the conn
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,271-411,451-476,641 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,277-417,457-482,647 -->
 ```cpp
 namespace qb::http2 {
     struct ConnectResult {
@@ -358,7 +358,7 @@ Two cautions unique to the HTTP/2 client:
 
 A connection loss fails every outstanding request with a `503` whose body says why (`"Connection lost"`, `"Connection closed"`, `"Connection failed: ..."`), once. What the failure callbacks push back — the retry pattern — is what the automatic reconnection reconnects for, and it does so as a **run** shaped by a `qb::http::RetryPolicy` (`qb::http2::RetryPolicy` is the same type; the shape is `qb::redis::RetryPolicy`'s): attempt 1 at once, attempt 2 after `initial_delay`, every further one after a wait multiplied by `multiplier` up to `max_delay`, each wait jittered by up to a quarter either way, `on_retry(attempt, next_delay)` told before each wait how many attempts have failed. `max_attempts` bounds the run: exhausted, the waiting requests get `503` with the body `"Reconnection attempts exhausted (N)"` and the client stays down until the next `connect()` — explicit, or the auto-connect of a request pushed afterwards — which starts a fresh run. A connection that comes up ends the run and resets its count, as do an explicit `connect()` and an explicit `disconnect()` — which also cancels the scheduled attempt and starts no run: the user asked out, the outstanding work fails with `"Connection closed"`, and only a request pushed afterwards (from that verdict's callback included) connects again, on its own, exactly as on the HTTP/1.1 client.
 
-<!-- src: qbm/http/src/qbm/http/retry_policy.h:34-40; qbm/http/src/qbm/http/2/client.h:451-476 -->
+<!-- src: qbm/http/src/qbm/http/retry_policy.h:34-40; qbm/http/src/qbm/http/2/client.h:457-482 -->
 ```cpp
 client->enable_auto_reconnect(qb::http2::RetryPolicy{}
                                   .with_initial_delay(100ms)   // before attempt 2; attempt 1 is immediate
