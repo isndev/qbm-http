@@ -24,12 +24,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   rule): its verdict is `"Connection closed"` and a push after it connects on its own. The
   `connect_timeout` field of the redis policy is not carried: `set_connect_timeout()` applies to
   every attempt. Tests: `unit/retry-policy/retry-policy.cpp` (the arithmetic, its caps,
-  its jitter bounds, its pathological inputs) and nine system cases at the end of
+  its jitter bounds, its pathological inputs) and ten system cases at the end of
   `system/http2/http2-client.cpp` (the run observed end to end against a server that only speaks
   http/1.1: 40/80/160 ms waits measured, the verdict, the count; `max_attempts` 0; the server coming
-  back during a wait; a disconnect cancelling the scheduled attempt; jitter spreading a run; a
-  peer drop with a request in flight served by the run; an explicit disconnect failing it once and
-  starting none).
+  back during a wait; a disconnect cancelling the scheduled attempt; a disconnect while connecting;
+  jitter spreading a run; a peer drop with a request in flight served by the run; an explicit
+  disconnect failing it once and starting none; a deferred connect and a follow-up push both
+  served; auto-reconnect off).
 
 ### Fixed
 
