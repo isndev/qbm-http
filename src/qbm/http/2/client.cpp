@@ -142,6 +142,8 @@ Client::disconnect() {
 void
 Client::close_connection(const std::string &error_message) {
     const bool was_connecting = _is_connecting;
+    _transport_closing        = _transport_started; // the disconnected the close raises is this transport's
+    _transport_started        = false;
     _is_connected             = false;
     _is_connecting            = false;
     _handshake_completed      = false;
@@ -522,6 +524,7 @@ Client::handle_connection_failure(const std::string &error_message) {
     }
 
     if (close_transport) {
+        _transport_closing                   = true;
         _preserve_pending_on_next_disconnect = true;
         BaseTcpClient::disconnect();
     }
@@ -963,7 +966,9 @@ Client::on(qb::io::async::event::disconnected const &event) {
         error_msg += " (reason: " + std::to_string(event.reason) + ")";
     }
 
-    if (_connector_pending) {
+    const bool stale   = _connector_pending && _transport_closing;
+    _transport_closing = false;
+    if (stale) {
         // The transport that dropped is the PREVIOUS one: a newer attempt is already in flight
         // (a connect() made from a callback while the old transport was closing) and the pending
         // work is waiting for it. Only what rode the old transport is dead.

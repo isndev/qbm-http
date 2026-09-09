@@ -186,10 +186,13 @@ private:
     // on -- its own deadline fired first, or `disconnect()` was called while it was in flight --
     // is dropped (its socket closes with the callback's argument) instead of clobbering the state
     // of whatever came after it. `_transport_started` says the connector's socket was handed to
-    // the transport and `start()`ed, i.e. that a `disconnected` event will follow a close.
+    // the transport and `start()`ed, i.e. that a `disconnected` event will follow a close;
+    // `_transport_closing` says that close was asked and its `disconnected` has not run yet -- so
+    // a `disconnected` arriving while a NEWER connector is pending is the old transport's, stale.
     std::uint64_t _connect_epoch     = 0;
     bool          _connector_pending = false;
     bool          _transport_started = false;
+    bool          _transport_closing = false;
 
     // Protocol handlers
     H2Protocol *_h2_protocol = nullptr;
