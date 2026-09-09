@@ -62,6 +62,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   protocol) was left open, its watcher registered.** The next attempt's `start()` then found an
   active watcher on a dead fd. It is closed at the failure, and the `disconnected` it raises finds
   the state settled and the pending work preserved.
+- **A reconnection sent the previous connection's unflushed bytes ahead of the h2 preface.** The
+  client is the io object of every connection it makes and never reset its buffers: a request
+  pushed and disconnected in the same tick stayed in `out()`, went out first on the next
+  connection, and the server closed that connection with a protocol error (measured: the server
+  session's reason -1). `start_connection()` resets `in()`/`out()` now, as the pgsql client's
+  `prepare_reconnect()` does.
 - **Each attempt of a run leaked its protocol instances.** `start_connection()` switches to a fresh
   handshake protocol and a success to a fresh h2 one; the base keeps every instance until told
   otherwise, so an unlimited run against a dead server grew by two objects an attempt. The
