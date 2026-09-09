@@ -1363,6 +1363,51 @@ TEST_F(Http2ClientTest, ExplicitDisconnectFailsTheInFlightRequestOnceAndStartsNo
     client->disconnect();
 }
 
+// A connect() deferred behind a closing transport (see _connect_after_close), plus a second push
+// arriving while it waits, both reach the reconnected server: the deferred attempt starts from the
+// close's `disconnected`, and the request the outside push queued rides the same new connection.
+// The client is a few connect-timeouts old when the disconnect fires, so the deferred attempt also
+// runs on a freshly stamped deadline rather than the closed connection's.
+TEST_F(Http2ClientTest, ADeferredConnectAndAFollowUpPushBothReachTheReconnectedServer) {
+    auto client = make_test_client();
+    client->set_connect_timeout(200ms);
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_jitter(false));
+
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+    const auto older_than_the_timeout = std::chrono::steady_clock::now() + 350ms;
+    while (std::chrono::steady_clock::now() < older_than_the_timeout) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    ASSERT_TRUE(client->is_connected());
+
+    std::vector<std::string>          verdicts;
+    std::optional<qb::http::Response> served;
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
+        verdicts.push_back(r.body().template as<std::string>());
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response again) {
+            if (again.status() == qb::http::status::OK) {
+                served = std::move(again);
+            } else {
+                verdicts.push_back(again.body().template as<std::string>());
+            }
+        }));
+    }));
+    client->disconnect(); // the verdict's push connects, deferred behind this close
+    ASSERT_TRUE(client->is_connecting());
+    std::optional<qb::http::Response> second;
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) { second = std::move(r); }));
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return (served.has_value() && second.has_value()) || verdicts.size() > 1; }));
+    ASSERT_EQ(verdicts.size(), 1u) << "the deferred connect was failed with: " << (verdicts.size() > 1 ? verdicts[1] : "");
+    ASSERT_TRUE(served.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second->status(), qb::http::status::OK);
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+}
+
 // A PEER drop (not a disconnect() of ours) with a request in flight: the request fails once with
 // "Connection lost", what its callback pushes back queues behind the run's immediate attempt (it
 // does not connect on its own), and the run serves it once the server is back -- each failed

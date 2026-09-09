@@ -120,8 +120,12 @@ Client::connect(ConnectionCallback callback) {
 
     if (_transport_closing) {
         // The previous transport's dispose is still pending: start once its `disconnected` has run
-        // (see _connect_after_close). The state already says "connecting", so pushes queue.
+        // (see _connect_after_close). The state already says "connecting", so pushes queue -- and
+        // the connect deadline is stamped NOW, not carried over from the connection that just
+        // closed -- defensive: no pass reads it before start_connection() re-stamps it in the
+        // cases measured, but a deferred attempt owning a stale start time is simply wrong.
         _connect_after_close = true;
+        _connect_started_at  = std::chrono::steady_clock::now();
         return true;
     }
     start_connection();
