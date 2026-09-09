@@ -219,6 +219,7 @@ The three persistent clients share the connect / `push_request` / `push_requests
 | `push_request_with_id` / `cancel_request` | — | — | ✓ |
 | `set_max_body_size` | — | — | ✓ (default 64 MiB) |
 | `set_auto_reconnect` | ✓ (default true) | ✓ (default true) | ✓ (default true) |
+| `enable_auto_reconnect(RetryPolicy)` — backoff, cap, `on_retry` | — (immediate) | ✓ | — (immediate) |
 | Connect / request timeout | 30s / 60s | 30s / 60s | 30s / 60s |
 | `set_verify_peer` default | true | true | true |
 
@@ -293,7 +294,7 @@ HTTP/2 is TLS-only with ALPN. The client advertises only `h2` and fails the conn
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:96-100,237-377,536 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,267-407,444-469,634 -->
 ```cpp
 namespace qb::http2 {
     struct ConnectResult {
@@ -320,6 +321,10 @@ namespace qb::http2 {
         void set_request_timeout(qb::duration timeout);        // default 60s
         void set_max_concurrent_streams(size_t max_streams);   // default 100
         void set_auto_reconnect(bool enable);                  // default true
+        void enable_auto_reconnect(RetryPolicy policy = {}) noexcept;  // the backoff of the run
+        void disable_auto_reconnect() noexcept;
+        [[nodiscard]] bool is_reconnecting() const noexcept;
+        [[nodiscard]] int  reconnect_attempts() const noexcept;
         void set_verify_peer(bool value) noexcept;             // default true
     };
 
@@ -348,6 +353,23 @@ Two cautions unique to the HTTP/2 client:
   ```
 
 - **Same-origin only.** Cross-origin requests are rejected with `400 Bad Request` and the body `"HTTP/2 persistent client only accepts same-origin requests"`; a non-`https` request URI is rejected with `"HTTP/2 request URI must use https"`.
+
+### Reconnection is a run with a backoff
+
+A connection loss fails every outstanding request with a `503` whose body says why (`"Connection lost"`, `"Connection closed"`, `"Connection failed: ..."`), once. What the failure callbacks push back — the retry pattern — is what the automatic reconnection reconnects for, and it does so as a **run** shaped by a `qb::http::RetryPolicy` (`qb::http2::RetryPolicy` is the same type; the shape is `qb::redis::RetryPolicy`'s): attempt 1 at once, attempt 2 after `initial_delay`, every further one after a wait multiplied by `multiplier` up to `max_delay`, each wait jittered by up to a quarter either way, `on_retry(attempt, next_delay)` told before each wait how many attempts have failed. `max_attempts` bounds the run: exhausted, the waiting requests get `503` with the body `"Reconnection attempts exhausted (N)"` and the client stays down until the next `connect()` — explicit, or the auto-connect of a request pushed afterwards — which starts a fresh run. A connection that comes up ends the run and resets its count, as do an explicit `connect()` and an explicit `disconnect()` (which also cancels the scheduled attempt).
+
+<!-- src: qbm/http/src/qbm/http/retry_policy.h:34-40; qbm/http/src/qbm/http/2/client.h:444-469 -->
+```cpp
+client->enable_auto_reconnect(qb::http2::RetryPolicy{}
+                                  .with_initial_delay(100ms)   // before attempt 2; attempt 1 is immediate
+                                  .with_multiplier(2.0)
+                                  .with_max_delay(10s)
+                                  .with_jitter(true)           // +-25 % on every wait
+                                  .with_max_attempts(8)        // then "Reconnection attempts exhausted (8)"
+                                  .with_on_retry([](int failed, qb::duration next) { /* log it */ }));
+```
+
+Two things the run guarantees, and that a hand-rolled retry cannot: every attempt fires from the client's own timer after the transport that dropped has been disposed — never from inside the handler that saw the failure — and a request pushed from a failure callback **queues** behind the scheduled attempt instead of connecting on its own. So do not call `connect()` from a failure callback to "retry faster": it resets the run (an explicit `connect()` is a fresh intent) and hands you back the immediate, unbounded reconnection the policy exists to replace. `set_auto_reconnect(false)` / `disable_auto_reconnect()` disarm the run (a scheduled attempt still fires); with it disarmed a push from a failure callback connects at once, as it always did. `is_reconnecting()` and `reconnect_attempts()` are the observable state.
 
 For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol specifics](./17-http2-protocol.md).
 

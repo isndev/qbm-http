@@ -48,6 +48,7 @@
 #endif
 
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -65,6 +66,7 @@
 #include "../logger.h"
 #include "../request.h"
 #include "../response.h"
+#include "../retry_policy.h"
 #include "protocol/client.h"
 
 namespace qb::http2 {
@@ -83,6 +85,12 @@ using BatchResponseCallback = std::function<void(std::vector<qb::http::Response>
  * @brief Connection state callback
  */
 using ConnectionCallback = std::function<void(bool connected, const std::string &error_message)>;
+
+/**
+ * @brief The automatic reconnection's backoff (Huly QB-103): `qb::http::RetryPolicy`, the same
+ *        shape as `qb::redis::RetryPolicy` -- see `enable_auto_reconnect()` for the run it drives.
+ */
+using RetryPolicy = qb::http::RetryPolicy;
 
 /**
  * @brief Result returned by the coroutine-style `connect()` awaiter.
@@ -173,6 +181,15 @@ private:
     bool                                  _received_graceful_goaway            = false;
     bool                                  _preserve_pending_on_next_disconnect = false;
     std::chrono::steady_clock::time_point _connect_started_at{};
+    // The connector's epoch (Huly QB-103): `start_connection()` bumps it and the connector's
+    // completion carries the value it was started with, so a completion the client has given up
+    // on -- its own deadline fired first, or `disconnect()` was called while it was in flight --
+    // is dropped (its socket closes with the callback's argument) instead of clobbering the state
+    // of whatever came after it. `_transport_started` says the connector's socket was handed to
+    // the transport and `start()`ed, i.e. that a `disconnected` event will follow a close.
+    std::uint64_t _connect_epoch     = 0;
+    bool          _connector_pending = false;
+    bool          _transport_started = false;
 
     // Protocol handlers
     H2Protocol *_h2_protocol = nullptr;
@@ -191,6 +208,19 @@ private:
     size_t       _max_pending_requests =
         1024; /**< Bound on outstanding (pending + active) requests; rejects with 503 past this (DoS guard, matches http1/http3). */
     bool _auto_reconnect = true;
+    // The reconnection run (Huly QB-103): the policy, the attempts made since the last connection
+    // that came up, and the one scheduled attempt, timed by the same one-shot timeout the connect
+    // and request deadlines use (`arm_request_timeout` folds it in). `_reconnect_firing` marks a
+    // `connect()` made BY the run, which keeps its count; `_in_failure_pass` marks a failure
+    // handler failing the outstanding work, during which a request pushed from a callback queues
+    // and the handler decides once, through the policy, instead of the push connecting on its own.
+    RetryPolicy                           _reconnect_policy{};
+    int                                   _reconnect_attempts  = 0;
+    bool                                  _reconnect_scheduled = false;
+    bool                                  _reconnect_firing    = false;
+    bool                                  _in_failure_pass     = false;
+    std::chrono::steady_clock::time_point _reconnect_started_at{};
+    qb::duration                          _reconnect_delay{};
 
     // Callbacks
     std::vector<ConnectionCallback> _connection_callbacks;
@@ -388,6 +418,57 @@ public:
     }
 
     /**
+     * @brief Arm the automatic reconnection with its backoff (Huly QB-103); the same call as
+     *        `qb::redis::connector::enable_auto_reconnect`.
+     *
+     * A RUN is the sequence of attempts between a connection loss and the next connection that
+     * comes up, and it exists only while requests wait: the loss fails the outstanding work with a
+     * 503, and what the failure callbacks push back is what the run reconnects for (a request
+     * pushed while the client is down starts one the same way). Attempt 1 is immediate, attempt 2
+     * waits `initial_delay`, every further one multiplies the wait by `multiplier` up to
+     * `max_delay`, jittered; `max_attempts` bounds the run. Once exhausted, the waiting requests
+     * fail with a 503 whose body says so and the client stays disconnected until the next
+     * `connect()` -- explicit, or the auto-connect of a request pushed afterwards -- which starts a
+     * fresh run. A connection that comes up ends the run and resets its count; so do an explicit
+     * `connect()` and an explicit `disconnect()`. `on_retry(attempt, next_delay)` is called before
+     * each wait with the number of attempts failed so far. The connect timeout of every attempt is
+     * `set_connect_timeout()`'s -- the one redis field this policy does not carry.
+     *
+     * Every attempt fires from the client's own timer, after the transport that dropped has been
+     * disposed, never from inside the handler that observed the failure; a request pushed from a
+     * failure callback (the retry pattern) queues behind the attempt the run decides on instead
+     * of connecting on its own. Until 3.2 both were otherwise: the reconnection was immediate,
+     * unbounded, and started from inside the failing handler.
+     */
+    void
+    enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
+        _auto_reconnect   = true;
+        _reconnect_policy = std::move(policy);
+    }
+    /**
+     * @brief Disarm the automatic reconnection; an attempt already scheduled still fires (the
+     *        same rule as redis: in-flight reconnects finish). Keeps the policy.
+     */
+    void
+    disable_auto_reconnect() noexcept {
+        _auto_reconnect = false;
+    }
+    /** @brief True while a reconnection run has an attempt scheduled or in flight. */
+    [[nodiscard]] bool
+    is_reconnecting() const noexcept {
+        return _reconnect_scheduled || (_is_connecting && _reconnect_attempts > 0);
+    }
+    /**
+     * @brief Attempts made in the current reconnection run: since the last connection that came
+     *        up, or the last explicit `connect()` / `disconnect()`. An attempt counts when it is
+     *        scheduled, so this reads 1 while the immediate first attempt is in flight.
+     */
+    [[nodiscard]] int
+    reconnect_attempts() const noexcept {
+        return _reconnect_attempts;
+    }
+
+    /**
      * @brief Get client statistics
      * @return Tuple of (total_requests, successful_requests, failed_requests)
      */
@@ -514,9 +595,26 @@ private:
     [[nodiscard]] bool has_pending_or_active_work() const noexcept;
 
     /**
-     * @brief Attempt reconnection if auto-reconnect is enabled
+     * @brief Schedule the next attempt of the reconnection run through the policy, or fail the
+     *        outstanding work when the run is exhausted. Never connects synchronously: the attempt
+     *        fires from `on(timeout)`, after the transport that dropped has been disposed.
      */
     void attempt_reconnection();
+    /// The scheduled attempt is due: connect, unless something connected meanwhile or nothing waits.
+    void               fire_scheduled_reconnection();
+    [[nodiscard]] bool reconnect_due(std::chrono::steady_clock::time_point now) const noexcept;
+    /**
+     * @brief Tear the connection down with `error_message` as the verdict of the connect callbacks
+     *        and of every outstanding request, keeping what the failure callbacks re-queue for the
+     *        reconnection decision the transport's `disconnected` event makes. The body of
+     *        `disconnect()`, without the run reset an explicit disconnect implies.
+     */
+    void close_connection(const std::string &error_message);
+    /**
+     * @brief Fail the outstanding work as a failure pass: a request pushed from one of its
+     *        callbacks queues (auto-reconnect on) instead of connecting on its own.
+     */
+    void run_failure_pass(const std::string &error_message);
 
     /**
      * @brief Create error response

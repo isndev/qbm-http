@@ -342,6 +342,7 @@ qb::io::async::run();
 - Routing/middleware/controllers/validation are identical to HTTP/1.1 — the same `Router`.
 - Client is `qb::http2::Client` via `qb::http2::make_client("https://...")` (returns `std::shared_ptr`; non-copyable/non-movable — always keep the shared_ptr). `push_request(req, cb)`, `push_requests(vec, batch_cb)`, or coroutine overloads. Callback `connect` has no zero-arg overload — use `connect(nullptr)` for fire-and-forget.
 - There is no plaintext h2c. Never write a response with `stream_id == 0` (it is the HTTP/1.1 sentinel). Server caps concurrency at 50 streams; client at 100. Server push is off by default and not a router feature.
+- Reconnection is a RUN with a backoff, not a loop: `client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(100ms).with_max_attempts(5))` (`qb::http::RetryPolicy`, the redis shape; `set_auto_reconnect(bool)` keeps the policy). A loss fails the outstanding work with a 503 and what the failure callbacks push back is what the run reconnects for — attempt 1 at once, then the policy's waits, `on_retry(attempt, next_delay)` before each; exhausted, the waiting requests get `503 Reconnection attempts exhausted (N)` and nothing reconnects until the next `connect()` or push. A push made from a failure callback queues behind the scheduled attempt: never `connect()` from one to "retry faster". `is_reconnecting()` / `reconnect_attempts()` are the observable state. _(src/qbm/http/2/client.h:444-469)_
 
 ## HTTPS / TLS (needs `QB_HAS_SSL`)
 
@@ -993,18 +994,34 @@ Usage: `auto c = qb::http1::make_client("https://h"); co_await c->connect(); aut
 - `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:553-563`).
 Usage: `auto s = qb::http2::make_server(); s->router().get("/", h); s->router().compile(); s->listen(uri,"cert.pem","key.pem");`
 
-### `qb::http2::Client` (alias `client`) — `src/qbm/http/2/client.h:155`
+### `qb::http2::Client` (alias `client`) — `src/qbm/http/2/client.h:163`
 `class Client : public std::enable_shared_from_this<Client>, public qb::io::async::tcp::client<Client,qb::io::transport::stcp>, public qb::io::use<Client>::timeout` — TLS+ALPN-h2 only; **non-copyable, non-movable**; via `make_client`/`shared_ptr`.
 - `explicit Client(const std::string& base_uri); explicit Client(const qb::io::uri&);`
 - `bool connect(ConnectionCallback)` (pass `nullptr` for fire-and-forget; no default arg) / `[[nodiscard]] async::awaiter<ConnectResult> connect();`
 - `void disconnect(); bool is_connected()/is_connecting() const noexcept` (connected = TCP + h2 handshake).
 - `bool push_request(Request, ResponseCallback)` / `[[nodiscard]] async::awaiter<Response> push_request(Request)` (lazy connect). Past the pending cap both **reject with `503 Service Unavailable`** (DoS guard, matches http1/http3).
 - `bool push_requests(std::vector<Request>, BatchResponseCallback)` / `[[nodiscard]] async::awaiter<std::vector<Response>> push_requests(std::vector<Request>)` (separate streams, request order).
-- `void set_connect_timeout(qb::duration)` (default 30s); `set_request_timeout(qb::duration)` (default 60s); `void set_max_concurrent_streams(size_t)` (default 100); `void set_max_pending_requests(size_t) noexcept` (default 1024; bound on outstanding pending+active requests, 503 over-limit); `set_auto_reconnect(bool)` (default true); `void set_verify_peer(bool) noexcept` (default true) + `bool verify_peer() const noexcept`.
+- `void set_connect_timeout(qb::duration)` (default 30s); `set_request_timeout(qb::duration)` (default 60s); `void set_max_concurrent_streams(size_t)` (default 100); `void set_max_pending_requests(size_t) noexcept` (default 1024; bound on outstanding pending+active requests, 503 over-limit); `set_auto_reconnect(bool)` (default true; keeps the policy); `void set_verify_peer(bool) noexcept` (default true) + `bool verify_peer() const noexcept`.
+- Reconnection run (`src/qbm/http/2/client.h:444-469`): `void enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept` / `void disable_auto_reconnect() noexcept` (the redis names; a scheduled attempt still fires); `[[nodiscard]] bool is_reconnecting() const noexcept` (an attempt scheduled or in flight); `[[nodiscard]] int reconnect_attempts() const noexcept` (attempts in the current run: reset by a connection that comes up, an explicit `connect()`, an explicit `disconnect()`). `qb::http2::RetryPolicy` is `qb::http::RetryPolicy` (`src/qbm/http/2/client.h:93`). Attempt 1 immediate, then the policy's waits; exhausted -> the waiting requests get `503` with body `Reconnection attempts exhausted (N)` and the client stays down until the next `connect()` (explicit, or a later push's auto-connect). Every attempt fires from the client's timer, never from inside the failing handler; a push made from a failure callback queues behind the scheduled attempt.
 - `std::tuple<uint64_t,uint64_t,uint64_t> get_stats() const noexcept`; `get_active_request_count()`; `get_base_uri()`.
 - `struct ConnectResult { bool ok{false}; std::string error_message; explicit operator bool() const noexcept; }`; aliases `ResponseCallback/BatchResponseCallback/ConnectionCallback`.
 - `std::shared_ptr<Client> qb::http2::make_client(const std::string&);` / `make_client(const qb::io::uri&);`
 Usage: `auto c = qb::http2::make_client("https://h"); auto resp = co_await c->push_request(req);`
+
+### `qb::http::RetryPolicy` — `src/qbm/http/retry_policy.h:34`
+`struct`. The reconnection backoff shared by the qbm-http clients (the HTTP/2 client today); the same shape as `qb::redis::RetryPolicy` minus its `connect_timeout` (an HTTP client owns that setting). **All time fields are `qb::duration`.**
+
+```cpp
+struct RetryPolicy {
+  int           max_attempts  = -1;        // per run, -1 = unlimited
+  qb::duration  initial_delay = 100ms;     // the wait before attempt 2
+  qb::duration  max_delay     = 30s;       // the wait never grows past this
+  double        multiplier    = 2.0;       // below 1 reads as 1
+  bool          jitter        = true;      // +-25 % on every wait
+  std::function<void(int attempt, qb::duration next_delay)> on_retry;  // before each wait: attempts failed so far
+};
+```
+Fluent setters (each returns `RetryPolicy&`): `with_max_attempts(int)`, `with_initial_delay(qb::duration)`, `with_max_delay(qb::duration)`, `with_multiplier(double)`, `with_jitter(bool)`, `with_on_retry(std::function<void(int,qb::duration)>)`. Pure: `[[nodiscard]] qb::duration next_delay(int attempt, std::mt19937 *rng = nullptr) const` (`retry_policy.h:90`) — the wait after `attempt` failed attempts: 0 for `attempt < 1`, `initial_delay * multiplier^(attempt-1)` capped at `max_delay` (integer milliseconds, the redis arithmetic), jittered when `rng` is given and `jitter` is on, never below 1 ms once positive; a zero wait stays zero.
 
 ### HPACK (RFC 7541) — `src/qbm/http/2/protocol/hpack.h`
 - `class Encoder { bool encode(const std::vector<HeaderField>&, std::vector<uint8_t>&); void set_peer_max_dynamic_table_size(uint32_t); void set_max_capacity(uint32_t); void reset(); }` — value-owned; sensitive & pseudo headers never indexed.

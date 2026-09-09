@@ -29,6 +29,10 @@
  * New coverage added per spec: GOAWAY-adjacent graceful drain on disconnect,
  * the previously-dead `/api/large` route, and a bad-ALPN negative case (server
  * offers only `http/1.1`, so the `h2` client connect must fail observably).
+ * The automatic reconnection (Huly QB-103) has its own section at the end: the
+ * backoff run through `RetryPolicy`, its cap, its end on a connection that
+ * comes up, a disconnect while connecting, and the retry pattern -- a request
+ * pushed back from a failure callback -- queuing behind the scheduled attempt.
  *
  * REQUIRES: ssl + live. This TU stays inside the `if(QB_HAS_SSL)` block.
  *
@@ -37,10 +41,15 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -48,6 +57,8 @@
 #include <qbm/http/2/client.h>
 #include <qbm/http/2/http2.h>
 #include <qbm/http/http.h> // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
+
+#include <qb/io/tcp/listener.h>
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
@@ -970,6 +981,447 @@ TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
         EXPECT_EQ(responses[i].body().template as<std::string>(), "User ID: " + std::to_string(300 + i) + " (via HTTP/2)");
     }
     client->disconnect();
+}
+
+// ---------------------------------------------------------------------------
+// Automatic reconnection (Huly QB-103): the run backs off through the policy,
+// is bounded, ends on a connection that comes up, and a request pushed from a
+// failure callback queues behind the attempt the run schedules. Until 3.2 the
+// reconnection was immediate, unbounded, started from inside the failing
+// handler, and every drop failed the re-queued work a second and a third time
+// (the disconnected and dispose passes over what the first pass's callbacks
+// had just pushed back) -- the cases below pin each of those.
+// ---------------------------------------------------------------------------
+
+namespace reconnect {
+
+// A second, independent server that advertises ONLY http/1.1 over ALPN: every h2 attempt against
+// it comes up at the TCP+TLS level and fails at the handshake, fast and the same way on every host
+// -- unlike a refused port, which Winsock takes ~2 s to report.
+std::unique_ptr<ServerThread>
+make_http1_only_server() {
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+    return std::make_unique<ServerThread>([cert, key](H2Server &srv) -> bool {
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"http/1.1"})); // no "h2"
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
+            return false;
+        }
+        srv.start();
+        return true;
+    });
+}
+
+// The fixture's server shape, on a port the test chose (the "server comes back" case).
+std::unique_ptr<ServerThread>
+make_h2_server_on(std::uint16_t port) {
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+    return std::make_unique<ServerThread>([cert, key, port](H2Server &srv) -> bool {
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+        if (srv.transport().listen_v4(port, "127.0.0.1") != 0) {
+            return false;
+        }
+        srv.start();
+        return true;
+    });
+}
+
+std::uint16_t
+port_of(ServerThread &srv) {
+    return srv.server().transport().local_endpoint().port();
+}
+
+std::shared_ptr<qb::http2::Client>
+make_client_for(std::uint16_t port) {
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+    return client;
+}
+
+qb::http::Request
+get_test() {
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/test");
+    return request;
+}
+
+struct Failure {
+    std::chrono::steady_clock::time_point at;
+    qb::http::status                      status;
+    std::string                           body;
+};
+
+long long
+ms_between(const Failure &earlier, const Failure &later) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(later.at - earlier.at).count();
+}
+
+} // namespace reconnect
+
+// The whole run, observed from outside: a request against a server that will never speak h2, a
+// retry callback that pushes it back on every failure, a policy of four attempts at 40/80/160 ms.
+// The failures must come 6 deep (the explicit auto-connect, the four attempts, the verdict), the
+// waits must be at least the policy's, on_retry must be told before each wait with the number of
+// failed attempts, and a push from a failure callback must never connect on its own.
+TEST_F(Http2ClientTest, AutoReconnectBacksOffThroughThePolicyUntilTheRunIsExhausted) {
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+
+    std::vector<std::pair<int, qb::duration>> retries;
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}
+                                      .with_initial_delay(40ms)
+                                      .with_multiplier(2.0)
+                                      .with_max_delay(1s)
+                                      .with_jitter(false)
+                                      .with_max_attempts(4)
+                                      .with_on_retry([&](int attempt, qb::duration delay) {
+                                          retries.emplace_back(attempt, delay);
+                                          // Told as the wait starts: the run is waiting, nothing is connecting.
+                                          EXPECT_TRUE(client->is_reconnecting());
+                                          EXPECT_FALSE(client->is_connecting());
+                                          EXPECT_EQ(client->reconnect_attempts(), attempt + 1);
+                                      }));
+
+    std::vector<reconnect::Failure>         failures;
+    bool                                    exhausted = false;
+    std::function<void(qb::http::Response)> on_response;
+    on_response = [&](qb::http::Response r) {
+        failures.push_back({std::chrono::steady_clock::now(), r.status(), r.body().template as<std::string>()});
+        if (failures.back().body.find("exhausted") != std::string::npos) {
+            exhausted = true;
+            return;
+        }
+        // The retry pattern: push it back from the failure callback. It must QUEUE behind the
+        // attempt the run schedules, never start a connection of its own.
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+        EXPECT_FALSE(client->is_connecting()) << "a push from a failure callback must not connect on its own";
+    };
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return exhausted; }, 30s));
+
+    ASSERT_EQ(failures.size(), 6u) << "the explicit auto-connect, four attempts, the verdict";
+    for (std::size_t i = 0; i + 1 < failures.size(); ++i) {
+        EXPECT_EQ(failures[i].status, qb::http::status::SERVICE_UNAVAILABLE) << "failure " << i;
+        EXPECT_NE(failures[i].body.find("ALPN"), std::string::npos) << "failure " << i << " said: " << failures[i].body;
+    }
+    EXPECT_EQ(failures.back().status, qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(failures.back().body, "Reconnection attempts exhausted (4)");
+
+    ASSERT_EQ(retries.size(), 3u) << "three waits: before attempts 2, 3 and 4 (attempt 1 is immediate)";
+    EXPECT_EQ(retries[0].first, 1);
+    EXPECT_EQ(retries[0].second, 40ms);
+    EXPECT_EQ(retries[1].first, 2);
+    EXPECT_EQ(retries[1].second, 80ms);
+    EXPECT_EQ(retries[2].first, 3);
+    EXPECT_EQ(retries[2].second, 160ms);
+
+    // failures[1..4] are the four attempts; the gap before each of attempts 2..4 is its wait, at
+    // least. The upper bound only says "waited, not stalled": the handshake itself costs a few ms.
+    EXPECT_GE(reconnect::ms_between(failures[1], failures[2]), 40);
+    EXPECT_GE(reconnect::ms_between(failures[2], failures[3]), 80);
+    EXPECT_GE(reconnect::ms_between(failures[3], failures[4]), 160);
+    EXPECT_LT(reconnect::ms_between(failures[1], failures[4]), 5000);
+
+    EXPECT_EQ(client->reconnect_attempts(), 4) << "the exhausted run keeps its count until the next connect()";
+    EXPECT_FALSE(client->is_reconnecting());
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+
+    // The next push is a fresh intent: it auto-connects at once and starts a run of its own; this
+    // callback does not push back, so that run never begins (no work waits) and the count resets.
+    bool again = false;
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
+        EXPECT_EQ(r.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        again = true;
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return again; }));
+    EXPECT_EQ(client->reconnect_attempts(), 0);
+    EXPECT_FALSE(client->is_reconnecting());
+    EXPECT_EQ(retries.size(), 3u) << "no wait was scheduled: nothing was waiting";
+}
+
+// `max_attempts` of zero: the run is exhausted before its first attempt. The work the failure
+// callback pushed back fails with the verdict at once, and no attempt is ever scheduled.
+TEST_F(Http2ClientTest, ZeroMaxAttemptsNeverReconnects) {
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+
+    int on_retry_calls = 0;
+    client->enable_auto_reconnect(
+        qb::http2::RetryPolicy{}.with_max_attempts(0).with_jitter(false).with_on_retry([&](int, qb::duration) { ++on_retry_calls; }));
+
+    std::vector<std::string> verdicts;
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
+        verdicts.push_back(r.body().template as<std::string>());
+        ASSERT_TRUE(client->push_request(reconnect::get_test(),
+                                         [&](qb::http::Response second) { verdicts.push_back(second.body().template as<std::string>()); }));
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return verdicts.size() == 2u; }));
+    EXPECT_NE(verdicts[0].find("ALPN"), std::string::npos);
+    EXPECT_EQ(verdicts[1], "Reconnection attempts exhausted (0)");
+    EXPECT_EQ(on_retry_calls, 0);
+    EXPECT_EQ(client->reconnect_attempts(), 0);
+    EXPECT_FALSE(client->is_reconnecting());
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// The run ends the way it is meant to: the server comes back while the run waits, the next
+// attempt connects, the request that waited is served, the count resets. The "server that is
+// down" is a listener that accepts TCP and never speaks TLS -- the attempt comes up at the TCP
+// level and dies on the connect deadline, the one failure shape a refused port cannot give the
+// same way on Winsock and on POSIX -- and the server takes over its port during the wait.
+TEST_F(Http2ClientTest, ReconnectionSucceedsWhenTheServerComesBackDuringTheWait) {
+    qb::io::tcp::listener silent;
+    ASSERT_EQ(silent.listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = silent.local_endpoint().port();
+    ASSERT_NE(port, 0);
+
+    auto client = reconnect::make_client_for(port);
+    client->set_connect_timeout(300ms); // the silent listener is left on this, not on a refusal
+
+    std::vector<std::pair<int, qb::duration>> retries;
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(800ms).with_jitter(false).with_on_retry(
+        [&](int attempt, qb::duration delay) { retries.emplace_back(attempt, delay); }));
+
+    std::vector<reconnect::Failure>         failures;
+    std::optional<qb::http::Response>       served;
+    std::function<void(qb::http::Response)> on_response;
+    on_response = [&](qb::http::Response r) {
+        if (r.status() == qb::http::status::OK) {
+            served = std::move(r);
+            return;
+        }
+        failures.push_back({std::chrono::steady_clock::now(), r.status(), r.body().template as<std::string>()});
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+    };
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+
+    // The explicit auto-connect and attempt 1 both die on the deadline; the first wait (800 ms,
+    // before attempt 2) is when the server takes the port over.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return !retries.empty(); }, 20s));
+    ASSERT_EQ(retries[0].first, 1);
+    ASSERT_EQ(retries[0].second, 800ms);
+    EXPECT_EQ(failures.size(), 2u);
+    EXPECT_TRUE(client->is_reconnecting());
+    EXPECT_EQ(client->reconnect_attempts(), 2);
+
+    silent.close();
+    auto server = reconnect::make_h2_server_on(port);
+    ASSERT_TRUE(server->ready()) << "the h2 server could not take the port the silent listener just released";
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return served.has_value(); }, 20s));
+    EXPECT_EQ(served->body().template as<std::string>(), "HTTP/2 GET Success");
+    EXPECT_EQ(failures.size(), 2u) << "the request that waited was served, not failed again";
+    EXPECT_EQ(retries.size(), 1u) << "one wait, before the attempt that connected";
+    EXPECT_EQ(client->reconnect_attempts(), 0) << "a connection that came up ends the run";
+    EXPECT_FALSE(client->is_reconnecting());
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+}
+
+// An explicit disconnect ends the run: the scheduled attempt is cancelled, the count resets, and
+// nothing connects afterwards on its own.
+TEST_F(Http2ClientTest, ExplicitDisconnectCancelsTheScheduledAttempt) {
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+
+    int retries = 0;
+    client->enable_auto_reconnect(
+        qb::http2::RetryPolicy{}.with_initial_delay(150ms).with_jitter(false).with_on_retry([&](int, qb::duration) { ++retries; }));
+
+    std::vector<std::string>                verdicts;
+    std::function<void(qb::http::Response)> on_response;
+    on_response = [&](qb::http::Response r) {
+        verdicts.push_back(r.body().template as<std::string>());
+        if (verdicts.size() < 3) { // keep the run alive through attempt 1; stop pushing after that
+            ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+        }
+    };
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+
+    // After attempt 1 failed, attempt 2 is scheduled 150 ms out and a request waits for it.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return retries == 1; }));
+    ASSERT_TRUE(client->is_reconnecting());
+    ASSERT_EQ(client->reconnect_attempts(), 2);
+    ASSERT_EQ(verdicts.size(), 2u);
+
+    client->disconnect();
+    EXPECT_FALSE(client->is_reconnecting());
+    EXPECT_EQ(client->reconnect_attempts(), 0);
+    // The waiting request got the disconnect's verdict, once; its callback (verdicts.size() == 3)
+    // pushed nothing back, so no run follows.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return verdicts.size() == 3u; }));
+    EXPECT_EQ(verdicts[2], "Connection closed");
+
+    // Well past the cancelled wait: no attempt fired, nothing connected, nothing counted.
+    const auto until = std::chrono::steady_clock::now() + 400ms;
+    while (std::chrono::steady_clock::now() < until) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(retries, 1);
+    EXPECT_EQ(verdicts.size(), 3u);
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_reconnecting());
+    EXPECT_EQ(client->reconnect_attempts(), 0);
+}
+
+// A disconnect() while the connect is in flight: the connect callback gets its verdict (it used
+// to get nothing, and a coroutine awaiting connect() hung), and the late completion of the
+// connector is dropped rather than bringing the client up behind the caller's back.
+TEST_F(Http2ClientTest, DisconnectWhileConnectingFailsTheConnectCallbackAndDropsTheLateCompletion) {
+    auto client = make_test_client();
+
+    std::optional<bool> outcome;
+    std::string         message;
+    client->connect([&](bool ok, const std::string &err) {
+        outcome = ok;
+        message = err;
+    });
+    ASSERT_TRUE(client->is_connecting());
+    client->disconnect();
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return outcome.has_value(); }));
+    EXPECT_FALSE(*outcome);
+    EXPECT_EQ(message, "Connection closed");
+    EXPECT_FALSE(client->is_connecting());
+
+    // The connector completes on its own time against a live server: the completion must be
+    // dropped. Pump well past a loopback TLS handshake and the client must still be down.
+    const auto until = std::chrono::steady_clock::now() + 500ms;
+    while (std::chrono::steady_clock::now() < until) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_FALSE(client->is_connecting());
+
+    // And the client is reusable: an explicit connect() after that comes up.
+    outcome.reset();
+    client->connect([&](bool ok, const std::string &err) {
+        outcome = ok;
+        message = err;
+    });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return outcome.has_value(); }));
+    EXPECT_TRUE(*outcome) << message;
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+}
+
+// A request in flight when the client is disconnected is failed ONCE, with the disconnect's
+// verdict; what its callback pushes back is served by the reconnection (the server is up), not
+// failed again by the transport's own disconnected pass. Until 3.2 that second failure -- and a
+// third, from the dispose pass -- is what a retry callback saw.
+TEST_F(Http2ClientTest, WorkPushedBackFromTheDisconnectVerdictIsServedByTheReconnection) {
+    auto client = make_test_client();
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_jitter(false));
+
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+
+    std::vector<std::string>          verdicts;
+    std::optional<qb::http::Response> served;
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
+        verdicts.push_back(r.body().template as<std::string>());
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response again) {
+            if (again.status() == qb::http::status::OK) {
+                served = std::move(again);
+            } else {
+                verdicts.push_back(again.body().template as<std::string>());
+            }
+        }));
+    }));
+    ASSERT_EQ(client->get_active_request_count(), 1u) << "sent on the live connection, awaiting its response";
+    client->disconnect(); // fails the in-flight request now; its callback pushes one back
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return served.has_value() || verdicts.size() > 1; }));
+    ASSERT_EQ(verdicts.size(), 1u) << "the pushed-back request was failed again with: " << (verdicts.size() > 1 ? verdicts[1] : "");
+    EXPECT_EQ(verdicts[0], "Connection closed");
+    ASSERT_TRUE(served.has_value());
+    EXPECT_EQ(served->body().template as<std::string>(), "HTTP/2 GET Success");
+    EXPECT_EQ(client->reconnect_attempts(), 0);
+    EXPECT_FALSE(client->is_reconnecting());
+    client->disconnect();
+}
+
+// Auto-reconnect off: a push from a failure callback connects on its own, at once, as it always
+// did -- the run never exists, on_retry is never told, and the client settles idle rather than
+// hanging with a queued request nobody connects for.
+TEST_F(Http2ClientTest, WithAutoReconnectOffAPushFromAFailureCallbackConnectsOnItsOwn) {
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+
+    int on_retry_calls = 0;
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_on_retry([&](int, qb::duration) { ++on_retry_calls; }));
+    client->disable_auto_reconnect(); // keeps the policy, disarms the run
+
+    std::vector<std::string> verdicts;
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
+        verdicts.push_back(r.body().template as<std::string>());
+        ASSERT_TRUE(client->push_request(reconnect::get_test(),
+                                         [&](qb::http::Response second) { verdicts.push_back(second.body().template as<std::string>()); }));
+        EXPECT_TRUE(client->is_connecting()) << "with the run disarmed, the push connects on its own";
+        EXPECT_FALSE(client->is_reconnecting());
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return verdicts.size() == 2u; }));
+    EXPECT_NE(verdicts[0].find("ALPN"), std::string::npos);
+    EXPECT_NE(verdicts[1].find("ALPN"), std::string::npos);
+    EXPECT_EQ(on_retry_calls, 0);
+    EXPECT_EQ(client->reconnect_attempts(), 0);
+
+    const auto until = std::chrono::steady_clock::now() + 300ms;
+    while (std::chrono::steady_clock::now() < until) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(verdicts.size(), 2u) << "no third verdict: the transport's own disconnected pass has nothing left to fail";
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_reconnecting());
+}
+
+// The jitter is real when it is on: the same policy, the same attempt, spread across a run. Pinned
+// on the client rather than on the policy alone because the client is what hands the generator in.
+TEST_F(Http2ClientTest, JitterSpreadsTheWaitsOfARun) {
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+
+    std::vector<long long> waits_ms;
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}
+                                      .with_initial_delay(40ms)
+                                      .with_multiplier(1.0)
+                                      .with_max_delay(40ms)
+                                      .with_jitter(true)
+                                      .with_max_attempts(9)
+                                      .with_on_retry([&](int, qb::duration delay) {
+                                          waits_ms.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count());
+                                      }));
+
+    bool                                    exhausted = false;
+    std::function<void(qb::http::Response)> on_response;
+    on_response = [&](qb::http::Response r) {
+        if (r.body().template as<std::string>().find("exhausted") != std::string::npos) {
+            exhausted = true;
+            return;
+        }
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+    };
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return exhausted; }, 30s));
+
+    ASSERT_EQ(waits_ms.size(), 8u) << "eight waits for nine attempts";
+    for (const auto w : waits_ms) {
+        EXPECT_GE(w, 30);
+        EXPECT_LE(w, 50);
+    }
+    const bool all_equal = std::all_of(waits_ms.begin(), waits_ms.end(), [&](long long w) { return w == waits_ms.front(); });
+    EXPECT_FALSE(all_equal) << "eight draws of a uniform +-10 ms that all agree: the jitter is not applied";
 }
 
 } // namespace

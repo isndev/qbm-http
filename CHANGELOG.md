@@ -7,8 +7,63 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-Nothing yet. Entries land here as they are merged, and move under a version heading when that
-version is tagged.
+### Added
+
+- **`qb::http::RetryPolicy` (`retry_policy.h`) and the HTTP/2 client's reconnection run (Huly
+  QB-103).** The same shape as `qb::redis::RetryPolicy` -- `max_attempts` (-1 = unlimited),
+  `initial_delay` 100 ms, `max_delay` 30 s, `multiplier` 2, `jitter` +-25 %, `on_retry(attempt,
+  next_delay)`, the `with_*` builders -- plus one pure function, `next_delay(attempt, rng)`, the wait
+  after `attempt` failed attempts (the redis arithmetic, in integer milliseconds), so the policy is
+  unit-tested on its own. `qb::http2::Client` gains `enable_auto_reconnect(RetryPolicy)` /
+  `disable_auto_reconnect()` (the redis names; `set_auto_reconnect(bool)` stays and keeps the
+  policy), `is_reconnecting()` and `reconnect_attempts()`. A run is the sequence of attempts between
+  a connection loss and the next connection that comes up: attempt 1 immediate, then the policy's
+  waits; once exhausted the waiting requests fail with a 503 `Reconnection attempts exhausted (N)`
+  and the client stays down until the next `connect()`, explicit or the auto-connect of a later
+  push. The `connect_timeout` field of the redis policy is not carried: `set_connect_timeout()`
+  applies to every attempt. Tests: `unit/retry-policy/retry-policy.cpp` (the arithmetic, its caps,
+  its jitter bounds, its pathological inputs) and eight system cases at the end of
+  `system/http2/http2-client.cpp` (the run observed end to end against a server that only speaks
+  http/1.1: 40/80/160 ms waits measured, the verdict, the count; `max_attempts` 0; the server coming
+  back during a wait; a disconnect cancelling the scheduled attempt; jitter spreading a run).
+
+### Fixed
+
+- **The HTTP/2 client's automatic reconnection was immediate and unbounded, and started from
+  inside the handler that observed the failure (Huly QB-103).** `attempt_reconnection()` called
+  `connect()` on the spot -- the `client.cpp:703` comment said "you might want exponential
+  backoff" -- so a client with work pending against a server in incident reconnected as fast as
+  the failure came back, for as long as its callbacks re-queued. Every attempt now fires from the
+  client's own one-shot timer (the connect and request deadlines' mechanism), on the next pass at
+  the earliest, so the transport that dropped is disposed before the next one is opened.
+- **A request pushed from a failure callback connected on its own, bypassing any reconnection
+  policy.** `push_request()` auto-connects when nothing is connecting, and a failure handler had
+  already cleared `_is_connecting` when it ran the callbacks, so the retry pattern -- push it back
+  on failure -- was itself the immediate reconnection. During a failure pass such a push queues
+  behind the attempt the run decides on; with auto-reconnect off it connects at once, as before.
+- **Every connection loss failed the re-queued work two or three times.** The `disconnected`
+  handler ran a second failure pass over what the first pass's callbacks had just pushed back, the
+  `dispose` handler (raised by the same `dispose()`, right after) ran a third with
+  `"Client disposed"` and reset the state of a reconnection the disconnected pass had already
+  started; the h2 connection-error and non-graceful GOAWAY paths failed once more through
+  `disconnect()`'s own pass. One pass now, with the message that says why, from a single
+  `close_connection()`; the transport's `disconnected` keeps the re-queued work and decides on the
+  reconnection; `dispose` does nothing the disconnected handler has not done.
+- **`disconnect()` while a connect was in flight left the connect callback unanswered (a coroutine
+  awaiting `connect()` hung) and let the late completion bring the client back up.** The connector
+  carries the epoch it was started with; a completion the client gave up on -- its own connect
+  deadline fired first, or `disconnect()` -- is dropped and its socket closes. The callbacks get
+  `"Connection closed"` at the disconnect.
+- **A transport whose TCP+TLS leg came up but whose handshake failed (no h2 over ALPN, no
+  protocol) was left open, its watcher registered.** The next attempt's `start()` then found an
+  active watcher on a dead fd. It is closed at the failure, and the `disconnected` it raises finds
+  the state settled and the pending work preserved.
+- **Each attempt of a run leaked its protocol instances.** `start_connection()` switches to a fresh
+  handshake protocol and a success to a fresh h2 one; the base keeps every instance until told
+  otherwise, so an unlimited run against a dead server grew by two objects an attempt. The
+  scheduled attempt clears them before it connects -- from the timer, never from inside a
+  protocol's handler.
+- The `[Unreleased]` compare link named `v3.0.0`; the module has shipped `v3.1.0` since.
 
 ## [3.0.0] - 2026-08-20
 
@@ -234,6 +289,6 @@ Aligns qbm-http with the qb 2.0 framework and hardens the HTTP/2, HTTP/3, WebSoc
   pending-request queue.
 - Reject control characters in quoted header-attribute values.
 
-[Unreleased]: https://github.com/isndev/qbm-http/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/isndev/qbm-http/compare/v3.1.0...HEAD
 [3.0.0]: https://github.com/isndev/qbm-http/compare/v2.6.0...v3.0.0
 [2.6.0]: https://github.com/isndev/qbm-http/releases/tag/v2.6.0

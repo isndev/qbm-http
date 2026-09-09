@@ -165,6 +165,9 @@ qhttp_test(unit http2-protocol-coverage unit/http2/http2-protocol-coverage.cpp E
 qhttp_test(unit http2-protocol-roundtrip unit/http2/http2-protocol-roundtrip.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-server-coverage-deep unit/http2/http2-server-coverage-deep.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-client-coverage-deep unit/http2/http2-client-coverage-deep.cpp EXTRA_LABELS http2)
+# The reconnection backoff policy the h2 client follows (Huly QB-103): pure data plus one pure
+# function, pinned here so the system suite only has to prove the client OBEYS it.
+qhttp_test(unit retry-policy            unit/retry-policy/retry-policy.cpp     EXTRA_LABELS http2 client)
 # ws units (crypto-link ssl: ws.h #errors without qb::io::crypto; pure-logic, no socket)
 qhttp_test(unit ws-close-frame-negative   unit/ws/ws-close-frame-negative.cpp   REQUIRES ssl EXTRA_LABELS ws)
 qhttp_test(unit ws-frame-encode-validation unit/ws/ws-frame-encode-validation.cpp REQUIRES ssl EXTRA_LABELS ws)

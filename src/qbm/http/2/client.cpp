@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <charconv> // For std::from_chars - faster than std::stoi, no exceptions
 #include <limits>
+#include <random>
 #include <sstream>
 
 #include "../origin.h"
@@ -108,6 +109,11 @@ Client::connect(ConnectionCallback callback) {
     }
     _is_connecting       = true;
     _handshake_completed = false;
+    // An explicit connect() is a fresh intent: whatever reconnection run was going, it is over.
+    if (!_reconnect_firing) {
+        _reconnect_attempts  = 0;
+        _reconnect_scheduled = false;
+    }
 
     LOG_HTTP_INFO_PA(_client_id, "Starting connection to " << _host << ":" << _port);
 
@@ -119,18 +125,59 @@ void
 Client::disconnect() {
     LOG_HTTP_INFO_PA(_client_id, "Disconnecting client");
 
-    _is_connected                        = false;
-    _is_connecting                       = false;
-    _handshake_completed                 = false;
-    _received_graceful_goaway            = false;
-    _preserve_pending_on_next_disconnect = false;
-    _h2_protocol                         = nullptr;
+    // An explicit disconnect ends the reconnection run, and gives up on a connector in flight:
+    // its completion, if it ever comes, is dropped by the epoch check.
+    _reconnect_attempts  = 0;
+    _reconnect_scheduled = false;
+    if (_connector_pending) {
+        _connector_pending = false;
+        ++_connect_epoch;
+    }
+    close_connection("Connection closed");
+}
 
-    // Fail all active requests
-    fail_all_requests("Connection closed");
+void
+Client::close_connection(const std::string &error_message) {
+    const bool was_connecting = _is_connecting;
+    _is_connected             = false;
+    _is_connecting            = false;
+    _handshake_completed      = false;
+    _received_graceful_goaway = false;
+    _h2_protocol              = nullptr;
+
+    // A connect() still waiting for its verdict gets this one: the completion it waited for is
+    // dropped (an explicit disconnect) or will never come (the transport is being closed).
+    if (was_connecting) {
+        auto callbacks = std::move(_connection_callbacks);
+        _connection_callbacks.clear();
+        for (auto &callback : callbacks) {
+            if (callback) {
+                callback(false, error_message);
+            }
+        }
+    }
+
+    // Fail the outstanding work now, with the message that says why. What the callbacks re-queue
+    // is kept for the `disconnected` event the transport close below raises, which decides on the
+    // reconnection -- so the work is failed once, and the next attempt starts only after the
+    // transport that dropped has been disposed.
+    run_failure_pass(error_message);
+    _preserve_pending_on_next_disconnect = true;
 
     // Close transport
     BaseTcpClient::disconnect();
+}
+
+void
+Client::run_failure_pass(const std::string &error_message) {
+    const bool queue_pushes = _auto_reconnect && !_in_failure_pass;
+    if (queue_pushes) {
+        _in_failure_pass = true;
+    }
+    fail_all_requests(error_message);
+    if (queue_pushes) {
+        _in_failure_pass = false;
+    }
 }
 
 void
@@ -206,8 +253,9 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
     // If connected, process immediately
     if (is_connected()) {
         process_pending_requests();
-    } else if (!_is_connecting) {
-        // Auto-connect if not already connecting
+    } else if (!_is_connecting && !_reconnect_scheduled && !_in_failure_pass) {
+        // Auto-connect if not already connecting. Behind a scheduled reconnection, or from a
+        // failure callback, the request queues for the attempt the run decides on (QB-103).
         connect(nullptr);
     }
 
@@ -313,8 +361,8 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     // If connected, process immediately
     if (is_connected()) {
         process_pending_requests();
-    } else if (!_is_connecting) {
-        // Auto-connect if not already connecting
+    } else if (!_is_connecting && !_reconnect_scheduled && !_in_failure_pass) {
+        // Auto-connect if not already connecting (same rule as push_request, QB-103).
         connect(nullptr);
     }
 
@@ -324,6 +372,9 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
 void
 Client::start_connection() {
     _connect_started_at = std::chrono::steady_clock::now();
+    _connector_pending  = true;
+    _transport_started  = false;
+    const auto epoch    = ++_connect_epoch;
     arm_request_timeout();
 
     // Switch to handshake protocol first
@@ -334,17 +385,25 @@ Client::start_connection() {
     auto                                       weak_self = weak_from_this();
     qb::io::async::tcp::connect<qb::io::transport::stcp::transport_io_type>(
         std::move(socket), _base_uri,
-        [weak_self](qb::io::transport::stcp::transport_io_type &&transport_socket) {
+        [weak_self, epoch](qb::io::transport::stcp::transport_io_type &&transport_socket) {
             auto self = weak_self.lock();
             if (!self) {
                 return;
             }
+            if (self->_connect_epoch != epoch) {
+                // The client gave up on this attempt (its own deadline, or disconnect()) and may
+                // have moved on: the socket closes with `transport_socket`, nothing else changes.
+                LOG_HTTP_DEBUG_PA(self->_client_id, "Dropping the completion of a connection attempt the client gave up on");
+                return;
+            }
+            self->_connector_pending = false;
             if (!transport_socket.is_open() || !transport_socket.ssl_handle()) {
                 self->handle_connection_failure("TCP/SSL connection failed");
                 return;
             }
             LOG_HTTP_DEBUG_PA(self->_client_id, "TCP/SSL connection established, starting handshake");
-            self->transport() = std::move(transport_socket);
+            self->transport()        = std::move(transport_socket);
+            self->_transport_started = true;
             self->start(); // Start handshake protocol
         },
         _connect_timeout, _verify_peer);
@@ -396,6 +455,8 @@ Client::handle_connection_success() {
     _handshake_completed                 = true;
     _received_graceful_goaway            = false;
     _preserve_pending_on_next_disconnect = false;
+    _reconnect_attempts                  = 0; // a connection that came up ends the run
+    _reconnect_scheduled                 = false;
     this->setTimeout(qb::duration::zero());
 
     auto callbacks = std::move(_connection_callbacks);
@@ -414,6 +475,20 @@ void
 Client::handle_connection_failure(const std::string &error_message) {
     LOG_HTTP_ERROR_PA(_client_id, "Connection failed: " << error_message);
 
+    // The connector, if still in flight (the client's own deadline fired first), is given up on:
+    // its late completion is dropped by the epoch check instead of running this twice.
+    if (_connector_pending) {
+        _connector_pending = false;
+        ++_connect_epoch;
+    }
+
+    // A transport that was started -- the TCP+TLS leg came up and the failure is the handshake's
+    // (no h2 over ALPN, no protocol) -- is closed here rather than left open with its watcher
+    // registered: the `disconnected` it raises then finds the state already settled and the
+    // pending work preserved, and the decision below is idempotent under it.
+    const bool close_transport = _transport_started;
+    _transport_started         = false;
+
     _is_connected                        = false;
     _is_connecting                       = false;
     _handshake_completed                 = false;
@@ -429,12 +504,17 @@ Client::handle_connection_failure(const std::string &error_message) {
         }
     }
 
-    // Fail all pending requests
-    fail_all_requests("Connection failed: " + error_message);
+    // Fail all pending requests, as a failure pass: a retry callback's push queues.
+    run_failure_pass("Connection failed: " + error_message);
 
     // Reconnect only if failure callbacks queued fresh work.
     if (_auto_reconnect && has_pending_or_active_work()) {
         attempt_reconnection();
+    }
+
+    if (close_transport) {
+        _preserve_pending_on_next_disconnect = true;
+        BaseTcpClient::disconnect();
     }
 }
 
@@ -663,6 +743,11 @@ Client::arm_request_timeout() {
     if (_is_connecting && !_handshake_completed) {
         update_delay(_connect_started_at, _connect_timeout);
     }
+    if (_reconnect_scheduled) {
+        // A zero delay (the immediate first attempt) still goes through the timer: `update_delay`
+        // floors the wait at 1 us, which is the next pass of the loop.
+        update_delay(_reconnect_started_at, std::max(_reconnect_delay, qb::duration(std::chrono::microseconds(1))));
+    }
 
     if (_request_timeout > qb::duration::zero()) {
         for (const auto &context : _pending_requests) {
@@ -693,15 +778,64 @@ Client::connect_deadline_expired(std::chrono::steady_clock::time_point now) cons
 
 void
 Client::attempt_reconnection() {
-    if (_is_connecting || _is_connected) {
+    if (_is_connecting || _is_connected || _reconnect_scheduled) {
         return;
     }
 
-    LOG_HTTP_INFO_PA(_client_id, "Attempting automatic reconnection");
+    // The run is bounded: past `max_attempts` the pending work is failed with a message that
+    // says why, and nothing is scheduled until the next connect() -- explicit, or the auto-connect
+    // of a request pushed afterwards, which starts a fresh run (Huly QB-103).
+    if (_reconnect_policy.max_attempts >= 0 && _reconnect_attempts >= _reconnect_policy.max_attempts) {
+        LOG_HTTP_WARN_PA(_client_id, "Reconnection attempts exhausted (" << _reconnect_attempts << " of " << _reconnect_policy.max_attempts
+                                                                         << "); giving up until the next connect()");
+        fail_all_requests("Reconnection attempts exhausted (" + std::to_string(_reconnect_attempts) + ")");
+        return;
+    }
 
-    // Add a small delay before reconnecting
-    // In a real implementation, you might want exponential backoff
+    // The same generator shape as qb::redis::connect_with_retry: the client is bound to one loop
+    // thread, and a per-thread generator costs no client any state.
+    static thread_local std::mt19937 rng{std::random_device{}()};
+
+    const int          failed = _reconnect_attempts++;
+    const qb::duration delay  = _reconnect_policy.next_delay(failed, &rng);
+    LOG_HTTP_INFO_PA(_client_id, "Reconnection attempt " << _reconnect_attempts << " scheduled in "
+                                                         << std::chrono::duration_cast<std::chrono::milliseconds>(delay).count() << " ms");
+    // Even the immediate attempt fires from the timer, on the next pass: never from inside the
+    // handler that observed the failure, so the transport that dropped is disposed first.
+    _reconnect_scheduled  = true;
+    _reconnect_started_at = std::chrono::steady_clock::now();
+    _reconnect_delay      = delay;
+    arm_request_timeout();
+    if (failed > 0 && _reconnect_policy.on_retry) {
+        _reconnect_policy.on_retry(failed, delay);
+    }
+}
+
+bool
+Client::reconnect_due(std::chrono::steady_clock::time_point now) const noexcept {
+    return _reconnect_scheduled && now - _reconnect_started_at >= _reconnect_delay;
+}
+
+void
+Client::fire_scheduled_reconnection() {
+    _reconnect_scheduled = false;
+    if (_is_connecting || _is_connected) {
+        return;
+    }
+    if (!has_pending_or_active_work()) {
+        // Every request that waited for this attempt has since been answered (a timeout, a
+        // disconnect): nothing to reconnect for. The next push starts a fresh run.
+        LOG_HTTP_INFO_PA(_client_id, "Reconnection attempt " << _reconnect_attempts << " skipped: nothing pending");
+        return;
+    }
+    LOG_HTTP_INFO_PA(_client_id, "Reconnection attempt " << _reconnect_attempts << " starting");
+    // Each attempt switches to a fresh handshake protocol and, on success, to a fresh h2 one; the
+    // instances of the attempts before it are dead weight the base keeps until told otherwise.
+    // Safe here and only here: this runs from the timer, never from inside a protocol's handler.
+    this->clear_protocols();
+    _reconnect_firing = true;
     connect(nullptr);
+    _reconnect_firing = false;
 }
 
 qb::http::Response
@@ -767,8 +901,7 @@ Client::on(const qb::protocol::http2::Http2GoAwayEvent &event) {
         return;
     }
 
-    fail_all_requests(error_msg);
-    disconnect();
+    close_connection(error_msg); // the `disconnected` it raises decides on the reconnection
 }
 
 void
@@ -786,13 +919,10 @@ Client::on(const qb::protocol::http2::Http2ConnectionErrorEvent &event) {
     LOG_HTTP_ERROR_PA(_client_id, "HTTP/2 connection error: " << event.message);
 
     std::string error_msg = "Connection error: " + event.message;
-    fail_all_requests(error_msg);
-
-    disconnect();
-
-    if (_auto_reconnect && has_pending_or_active_work()) {
-        attempt_reconnection();
-    }
+    // One failure pass, now, with this message; the `disconnected` the close raises keeps what the
+    // callbacks re-queued and decides on the reconnection -- after this transport is disposed,
+    // never from inside the protocol handler that raised the error.
+    close_connection(error_msg);
 }
 
 void
@@ -807,6 +937,11 @@ Client::on(qb::io::async::event::timeout const &) {
         return;
     }
 
+    if (reconnect_due(now)) {
+        fire_scheduled_reconnection();
+        return; // start_connection() re-armed the timer, or nothing is scheduled any more
+    }
+
     arm_request_timeout();
 }
 
@@ -819,6 +954,19 @@ Client::on(qb::io::async::event::disconnected const &event) {
         error_msg += " (reason: " + std::to_string(event.reason) + ")";
     }
 
+    if (_connector_pending) {
+        // The transport that dropped is the PREVIOUS one: a newer attempt is already in flight
+        // (a connect() made from a callback while the old transport was closing) and the pending
+        // work is waiting for it. Only what rode the old transport is dead.
+        LOG_HTTP_DEBUG_PA(_client_id, "Disconnect of a superseded transport; a connection attempt is in flight");
+        _transport_started                   = false;
+        _preserve_pending_on_next_disconnect = false;
+        if (!_active_requests.empty()) {
+            fail_all_requests(error_msg);
+        }
+        return;
+    }
+
     if (_is_connecting && !_connection_callbacks.empty()) {
         auto callbacks = std::move(_connection_callbacks);
         _connection_callbacks.clear();
@@ -829,18 +977,20 @@ Client::on(qb::io::async::event::disconnected const &event) {
         }
     }
 
-    _is_connected        = false;
-    _is_connecting       = false;
-    _handshake_completed = false;
-    _h2_protocol         = nullptr;
+    _is_connected             = false;
+    _is_connecting            = false;
+    _handshake_completed      = false;
+    _received_graceful_goaway = false;
+    _transport_started        = false;
+    _h2_protocol              = nullptr;
 
     if (_preserve_pending_on_next_disconnect) {
         _preserve_pending_on_next_disconnect = false;
         if (!_active_requests.empty()) {
-            fail_all_requests(error_msg);
+            run_failure_pass(error_msg);
         }
     } else {
-        fail_all_requests(error_msg);
+        run_failure_pass(error_msg);
     }
 
     if (_auto_reconnect && has_pending_or_active_work()) {
@@ -850,16 +1000,10 @@ Client::on(qb::io::async::event::disconnected const &event) {
 
 void
 Client::on(qb::io::async::event::dispose const &) {
+    // Raised right after `disconnected`, by the same dispose(): everything it used to redo here
+    // (a second failure pass over the work the disconnected callbacks had just re-queued, a state
+    // reset that clobbered a reconnection already started) is that handler's, once.
     LOG_HTTP_DEBUG_PA(_client_id, "Client disposal event");
-
-    fail_all_requests("Client disposed");
-
-    _is_connected                        = false;
-    _is_connecting                       = false;
-    _handshake_completed                 = false;
-    _received_graceful_goaway            = false;
-    _preserve_pending_on_next_disconnect = false;
-    _h2_protocol                         = nullptr;
 }
 
 // Factory functions
