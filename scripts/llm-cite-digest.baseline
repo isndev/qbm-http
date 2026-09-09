@@ -185,7 +185,7 @@ llm/qbm-http.llm.api.md	security_headers.h:283-283	28e523aa0686	class SecurityHe
 llm/qbm-http.llm.api.md	security_headers.h:408-408	22b70b4e395c	security_headers_middleware(const SecurityHeadersOptions &options = S...
 llm/qbm-http.llm.api.md	security_headers.h:53-53	1c8e83f82a6e	class SecurityHeadersOptions {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:163-163	b5d9130b44cc	class Client
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:444-469	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:448-473	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:93-93	99ed1922a069	using RetryPolicy = qb::http::RetryPolicy;
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:52-52	ae8950d5071e	is_hop_by_hop(const std::string &header_name) {
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:77-77	f77072de4b7f	class ServerHttp2Protocol : public Http2Protocol<IO_Handler, ServerHt...
@@ -234,4 +234,4 @@ llm/qbm-http.llm.api.md	types.h:731-731	028e26dbdc36	enum DisconnectedReason : i
 llm/qbm-http.llm.api.md	types.h:748-748	6c7c92a87174	struct hash<qb::http::method> {
 llm/qbm-http.llm.api.md	utility.h:258-260	a316e8ede202	template <typename String>
 llm/qbm-http.llm.api.md	utility.h:34-34	8ee074414546	namespace utility {
-llm/qbm-http.llm.md	src/qbm/http/2/client.h:444-469	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
+llm/qbm-http.llm.md	src/qbm/http/2/client.h:448-473	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {

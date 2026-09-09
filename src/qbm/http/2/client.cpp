@@ -107,8 +107,9 @@ Client::connect(ConnectionCallback callback) {
     if (callback) {
         _connection_callbacks.push_back(std::move(callback));
     }
-    _is_connecting       = true;
-    _handshake_completed = false;
+    _is_connecting          = true;
+    _handshake_completed    = false;
+    _intentional_disconnect = false;
     // An explicit connect() is a fresh intent: whatever reconnection run was going, it is over.
     if (!_reconnect_firing) {
         _reconnect_attempts  = 0;
@@ -125,10 +126,12 @@ void
 Client::disconnect() {
     LOG_HTTP_INFO_PA(_client_id, "Disconnecting client");
 
-    // An explicit disconnect ends the reconnection run, and gives up on a connector in flight:
-    // its completion, if it ever comes, is dropped by the epoch check.
-    _reconnect_attempts  = 0;
-    _reconnect_scheduled = false;
+    // An explicit disconnect ends the reconnection run and starts none (the rule the HTTP/1.1
+    // client's `_intentional_disconnect` applies), and gives up on a connector in flight: its
+    // completion, if it ever comes, is dropped by the epoch check.
+    _reconnect_attempts     = 0;
+    _reconnect_scheduled    = false;
+    _intentional_disconnect = true;
     if (_connector_pending) {
         _connector_pending = false;
         ++_connect_epoch;
@@ -160,8 +163,14 @@ Client::close_connection(const std::string &error_message) {
     // Fail the outstanding work now, with the message that says why. What the callbacks re-queue
     // is kept for the `disconnected` event the transport close below raises, which decides on the
     // reconnection -- so the work is failed once, and the next attempt starts only after the
-    // transport that dropped has been disposed.
-    run_failure_pass(error_message);
+    // transport that dropped has been disposed. After an EXPLICIT disconnect no run follows, so
+    // a push made from one of these callbacks connects on its own, as it would on the HTTP/1.1
+    // client: it is not a failure pass then.
+    if (_intentional_disconnect) {
+        fail_all_requests(error_message);
+    } else {
+        run_failure_pass(error_message);
+    }
     _preserve_pending_on_next_disconnect = true;
 
     // Close transport
@@ -993,6 +1002,12 @@ Client::on(qb::io::async::event::disconnected const &event) {
         run_failure_pass(error_msg);
     }
 
+    if (_intentional_disconnect) {
+        // The user asked out: no run. What a callback pushed back is waiting for the next
+        // connect() -- explicit, or a push's own -- exactly as on the HTTP/1.1 client.
+        _intentional_disconnect = false;
+        return;
+    }
     if (_auto_reconnect && has_pending_or_active_work()) {
         attempt_reconnection();
     }

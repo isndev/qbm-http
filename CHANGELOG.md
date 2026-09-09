@@ -20,12 +20,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   a connection loss and the next connection that comes up: attempt 1 immediate, then the policy's
   waits; once exhausted the waiting requests fail with a 503 `Reconnection attempts exhausted (N)`
   and the client stays down until the next `connect()`, explicit or the auto-connect of a later
-  push. The `connect_timeout` field of the redis policy is not carried: `set_connect_timeout()`
-  applies to every attempt. Tests: `unit/retry-policy/retry-policy.cpp` (the arithmetic, its caps,
-  its jitter bounds, its pathological inputs) and eight system cases at the end of
+  push. An explicit `disconnect()` starts no run (the HTTP/1.1 client's `_intentional_disconnect`
+  rule): its verdict is `"Connection closed"` and a push after it connects on its own. The
+  `connect_timeout` field of the redis policy is not carried: `set_connect_timeout()` applies to
+  every attempt. Tests: `unit/retry-policy/retry-policy.cpp` (the arithmetic, its caps,
+  its jitter bounds, its pathological inputs) and nine system cases at the end of
   `system/http2/http2-client.cpp` (the run observed end to end against a server that only speaks
   http/1.1: 40/80/160 ms waits measured, the verdict, the count; `max_attempts` 0; the server coming
-  back during a wait; a disconnect cancelling the scheduled attempt; jitter spreading a run).
+  back during a wait; a disconnect cancelling the scheduled attempt; jitter spreading a run; a
+  peer drop with a request in flight served by the run; an explicit disconnect failing it once and
+  starting none).
 
 ### Fixed
 

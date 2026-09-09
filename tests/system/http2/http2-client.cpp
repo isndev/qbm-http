@@ -172,6 +172,10 @@ public:
             ctx->complete();
         });
 
+        // 8b. A stream the server never completes: what the peer-drop reconnection case holds in
+        //     flight while the server thread is stopped under it. Never called by anything else.
+        router().get("/api/hang", [](auto) {});
+
         // 8. Response carrying trailers.
         router().get("/api/trailers", [](auto ctx) {
             ctx->response().status() = qb::http::status::OK;
@@ -1313,13 +1317,16 @@ TEST_F(Http2ClientTest, DisconnectWhileConnectingFailsTheConnectCallbackAndDrops
     client->disconnect();
 }
 
-// A request in flight when the client is disconnected is failed ONCE, with the disconnect's
-// verdict; what its callback pushes back is served by the reconnection (the server is up), not
-// failed again by the transport's own disconnected pass. Until 3.2 that second failure -- and a
-// third, from the dispose pass -- is what a retry callback saw.
-TEST_F(Http2ClientTest, WorkPushedBackFromTheDisconnectVerdictIsServedByTheReconnection) {
-    auto client = make_test_client();
-    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_jitter(false));
+// An EXPLICIT disconnect() with a request in flight: the request is failed ONCE, with the
+// disconnect's verdict, and no reconnection run follows -- the user asked out, the rule the
+// HTTP/1.1 client's `_intentional_disconnect` applies. What the verdict's callback pushes back
+// connects on its own (a push's auto-connect, as on http1) and is served; it is not failed a
+// second time by the transport's own disconnected pass, nor a third by the dispose pass, which is
+// what a retry callback saw until 3.2.
+TEST_F(Http2ClientTest, ExplicitDisconnectFailsTheInFlightRequestOnceAndStartsNoRun) {
+    auto client  = make_test_client();
+    int  retries = 0;
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_jitter(false).with_on_retry([&](int, qb::duration) { ++retries; }));
 
     bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
@@ -1336,6 +1343,10 @@ TEST_F(Http2ClientTest, WorkPushedBackFromTheDisconnectVerdictIsServedByTheRecon
                 verdicts.push_back(again.body().template as<std::string>());
             }
         }));
+        // Not a failure pass: the push connected on its own, and no run is counting it.
+        EXPECT_TRUE(client->is_connecting());
+        EXPECT_FALSE(client->is_reconnecting());
+        EXPECT_EQ(client->reconnect_attempts(), 0);
     }));
     ASSERT_EQ(client->get_active_request_count(), 1u) << "sent on the live connection, awaiting its response";
     client->disconnect(); // fails the in-flight request now; its callback pushes one back
@@ -1345,7 +1356,74 @@ TEST_F(Http2ClientTest, WorkPushedBackFromTheDisconnectVerdictIsServedByTheRecon
     EXPECT_EQ(verdicts[0], "Connection closed");
     ASSERT_TRUE(served.has_value());
     EXPECT_EQ(served->body().template as<std::string>(), "HTTP/2 GET Success");
+    EXPECT_EQ(retries, 0) << "an explicit disconnect starts no reconnection run";
     EXPECT_EQ(client->reconnect_attempts(), 0);
+    EXPECT_FALSE(client->is_reconnecting());
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+}
+
+// A PEER drop (not a disconnect() of ours) with a request in flight: the request fails once with
+// "Connection lost", what its callback pushes back queues behind the run's immediate attempt (it
+// does not connect on its own), and the run serves it once the server is back -- each failed
+// attempt fails the waiting work, as the HTTP/1.1 client does, and the retry callback pushes it
+// back. The drop is the server's: its thread is stopped while `/api/hang` holds the stream open,
+// and a new server takes the port back during the run's first wait.
+TEST_F(Http2ClientTest, WorkPushedBackFromAPeerDropIsServedByTheReconnectionRun) {
+    qb::io::tcp::listener holder; // keeps a port of ours until the first server takes it
+    ASSERT_EQ(holder.listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = holder.local_endpoint().port();
+    holder.close();
+    auto first = reconnect::make_h2_server_on(port);
+    ASSERT_TRUE(first->ready()) << "could not bind the port the holder just released";
+
+    auto client = reconnect::make_client_for(port);
+    client->set_connect_timeout(3s);
+    std::vector<std::pair<int, qb::duration>> retries;
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(500ms).with_jitter(false).with_on_retry(
+        [&](int attempt, qb::duration delay) { retries.emplace_back(attempt, delay); }));
+
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+
+    std::vector<std::string>                verdicts;
+    std::optional<qb::http::Response>       served;
+    std::function<void(qb::http::Response)> on_response;
+    on_response = [&](qb::http::Response r) {
+        if (r.status() == qb::http::status::OK) {
+            served = std::move(r);
+            return;
+        }
+        verdicts.push_back(r.body().template as<std::string>());
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+        EXPECT_FALSE(client->is_connecting()) << "a push from a failure callback queues behind the run";
+    };
+    qb::http::Request hang;
+    hang.method() = qb::http::Method::GET;
+    hang.uri()    = qb::io::uri("/api/hang"); // the server never completes it: in flight until the peer drops
+    ASSERT_TRUE(client->push_request(hang, on_response));
+    ASSERT_EQ(client->get_active_request_count(), 1u);
+    first.reset(); // the peer drops us; the port is free again
+
+    // The drop fails the request once ("Connection lost"); the run's immediate attempt finds nothing
+    // listening and fails the pushed-back request once more ("Connection failed: ..."), whose callback
+    // pushes again; attempt 2 waits 500 ms: the server comes back inside that wait.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return !retries.empty() || served.has_value(); }, 20s));
+    ASSERT_EQ(retries.size(), 1u);
+    EXPECT_EQ(retries[0].first, 1);
+    EXPECT_EQ(retries[0].second, 500ms);
+    ASSERT_EQ(verdicts.size(), 2u) << "the drop, then the refused attempt";
+    EXPECT_NE(verdicts[0].find("Connection lost"), std::string::npos) << verdicts[0];
+    EXPECT_NE(verdicts[1].find("Connection failed"), std::string::npos) << verdicts[1];
+    EXPECT_TRUE(client->is_reconnecting());
+    auto second = reconnect::make_h2_server_on(port);
+    ASSERT_TRUE(second->ready()) << "the second server could not take the port back";
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return served.has_value(); }, 20s));
+    EXPECT_EQ(verdicts.size(), 2u) << "no further failure: attempt 2 served the request";
+    EXPECT_EQ(served->body().template as<std::string>(), "HTTP/2 GET Success");
+    EXPECT_EQ(client->reconnect_attempts(), 0) << "the connection that came up ended the run";
     EXPECT_FALSE(client->is_reconnecting());
     client->disconnect();
 }

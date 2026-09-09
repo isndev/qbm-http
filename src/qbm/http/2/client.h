@@ -214,11 +214,12 @@ private:
     // `connect()` made BY the run, which keeps its count; `_in_failure_pass` marks a failure
     // handler failing the outstanding work, during which a request pushed from a callback queues
     // and the handler decides once, through the policy, instead of the push connecting on its own.
-    RetryPolicy                           _reconnect_policy{};
-    int                                   _reconnect_attempts  = 0;
-    bool                                  _reconnect_scheduled = false;
-    bool                                  _reconnect_firing    = false;
-    bool                                  _in_failure_pass     = false;
+    RetryPolicy _reconnect_policy{};
+    int         _reconnect_attempts     = 0;
+    bool        _reconnect_scheduled    = false;
+    bool        _reconnect_firing       = false;
+    bool        _in_failure_pass        = false;
+    bool        _intentional_disconnect = false; ///< disconnect() was asked: the disconnected that follows starts no run (as http1)
     std::chrono::steady_clock::time_point _reconnect_started_at{};
     qb::duration                          _reconnect_delay{};
 
@@ -430,9 +431,12 @@ public:
      * fail with a 503 whose body says so and the client stays disconnected until the next
      * `connect()` -- explicit, or the auto-connect of a request pushed afterwards -- which starts a
      * fresh run. A connection that comes up ends the run and resets its count; so do an explicit
-     * `connect()` and an explicit `disconnect()`. `on_retry(attempt, next_delay)` is called before
-     * each wait with the number of attempts failed so far. The connect timeout of every attempt is
-     * `set_connect_timeout()`'s -- the one redis field this policy does not carry.
+     * `connect()` and an explicit `disconnect()` -- which also starts none: the user asked out, so
+     * the outstanding work fails with "Connection closed" and, as in the HTTP/1.1 client, only a
+     * request pushed afterwards (from that verdict's callback included) connects again, on its own.
+     * `on_retry(attempt, next_delay)` is called before each wait with the number of attempts
+     * failed so far. The connect timeout of every attempt is `set_connect_timeout()`'s -- the one
+     * redis field this policy does not carry.
      *
      * Every attempt fires from the client's own timer, after the transport that dropped has been
      * disposed, never from inside the handler that observed the failure; a request pushed from a
