@@ -625,6 +625,8 @@ Client::finish_graceful_goaway_if_drained() {
     _is_connecting            = false;
     _handshake_completed      = false;
     _h2_protocol              = nullptr;
+    _transport_closing        = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
+    _transport_started        = false;
 
     if (!_pending_requests.empty() && _auto_reconnect) {
         _preserve_pending_on_next_disconnect = true;
