@@ -141,6 +141,10 @@ in lockstep with the qb framework; see the qb CHANGELOG for what makes that rele
   supply what such definitions actually need, which is a *position*.
 
 ### Changed
+- **`listen()` arms the accept watcher, so a separate `start()` is no longer required** (recorded
+  2026-09-20, from `src/qbm/http/1.1/http.h` and `src/qbm/http/2/http2.h`): an extra `start()` stays
+  harmless, and `listen_no_start()` is the opt-out for a server that must finish wiring before it
+  accepts.
 
 - **Logging call sites use qb's prefixed `QB_LOG_*` macros** (1 sites). qb 3.0.0 renamed
   `LOG_DEBUG` / `LOG_VERB` / `LOG_INFO` / `LOG_WARN` / `LOG_CRIT` to `QB_LOG_*` because the
