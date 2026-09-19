@@ -33,7 +33,7 @@ body:
     attributes:
       label: qbm-http version
       description: A tag, a commit SHA, or the qb version it was built against.
-      placeholder: "v3.0.0, or a commit SHA"
+      placeholder: "a release tag or a commit SHA"
     validations:
       required: true
 
