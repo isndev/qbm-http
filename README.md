@@ -222,6 +222,32 @@ public:
 
 Clients can use the callback API (`qb::http::ws::WebSocket<T>`, `qb::http::ws::client`) or the coroutine API (`qb::http::ws::coro_client`, `co_await connect/receive/close_async`). See [WebSocket](./readme/20-websocket.md) and [WebSocket coroutines](./readme/21-websocket-coroutines.md).
 
+## Quickstart
+
+One `CMakeLists.txt`, no submodule: qb and the module are fetched at the first configure, at the
+same ref (they ship in lockstep; `main` is the released line, pin a `vX.Y.Z` tag in production).
+This is the shape the [`qb-sample-project`](https://github.com/isndev/qb-sample-project) template
+builds in CI.
+
+```cmake
+cmake_minimum_required(VERSION 3.24)
+project(hello_http CXX)
+include(FetchContent)
+set(QB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(qb        GIT_REPOSITORY https://github.com/isndev/qb.git        GIT_TAG main GIT_SHALLOW TRUE)
+FetchContent_Declare(qbm-http  GIT_REPOSITORY https://github.com/isndev/qbm-http.git GIT_TAG main GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(qb qbm-http)      # qb first: the module registers itself against it
+add_executable(hello_http main.cpp)
+target_link_libraries(hello_http PRIVATE qbm::http)
+```
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ./build/hello_http
+```
+
+`main.cpp` is the server of the first section above, with `#include <qbm/http/http.h>`. The actor engine's measurements are in
+[qb's README](https://github.com/isndev/qb#measured); this module publishes no throughput figure yet.
+
 ## What this module is
 
 `qbm-http` builds REST APIs, static-content servers, request clients, and WebSocket endpoints as qb actors. It is **not header-only**: the CMake build registers it as a compiled library (`qb_register_module` with a `SOURCES` list — `request.cpp`, `response.cpp`, `body.cpp`, the HTTP/1.1 protocol and client, the validation engine, and SSL-gated `auth/`, `ws/`, and HTTP/2 sources). You still consume it through a single umbrella header, `<qbm/http/http.h>`.
@@ -251,6 +277,7 @@ These gates are real `#ifdef` boundaries in the headers, so feature availability
 | WebSocket / WSS | `<qbm/http/ws.h>` · `qb::http::ws` | `QB_HAS_SSL` (both `ws://` and `wss://`) | OpenSSL (handshake crypto + TLS) |
 | JWT & authentication | `<qbm/http/auth.h>` · `qb::http::auth` | `QB_HAS_SSL` | OpenSSL |
 | HTTP/3 server & client | `qb::http3`, `qb::http::dual_stack_server` | `QBM_HTTP_HAS_HTTP3` | OpenSSL + QUIC + `libnghttp3` |
+| HTTP/2 client auto-reconnect | `qb::http::RetryPolicy` · `qb::http2::Client::enable_auto_reconnect` / `is_reconnecting` / `reconnect_attempts` | `QB_HAS_SSL` (HTTP/2) | OpenSSL |
 
 The entire WebSocket surface requires `QB_HAS_SSL`, including plain `ws://` — `src/qbm/http/ws/ws.h` opens with `#error "websocket protocol requires OpenSSL crypto library"` because the RFC 6455 handshake (`qb::http::ws::generateKey`, the `base64(sha1(key + GUID))` accept, and CSPRNG frame masking) builds on qb-io's `crypto::sha1` / `crypto::base64`. The umbrella `<qbm/http/http.h>` pulls in `src/qbm/http/ws/ws.h` and `src/qbm/http/2/http2.h` only under `#ifdef QB_HAS_SSL`, so reach for `qb::http::ws` and `qb::http2` in SSL-enabled builds.
 
@@ -307,6 +334,7 @@ A module **cannot be configured standalone**: it calls `qb_register_module()` an
 - **`run_sync` inside an actor stops the core.** It is correct in a `main()`, a test fixture or a CLI, where the thread it blocks is yours. Inside a handler it freezes every actor on that `VirtualCore`, silently — the I/O layer keeps running, so a "the socket still responds" check passes and the only symptom is latency.
 - **An unwrapped `co_await` on this module's awaiters is not interruptible.** They register no cancellation hook, so `kill()` neither wakes nor unwinds a coroutine parked on one. Wrap it — `ctx.cancellable(...)`, `with_deadline(...)` — when it runs inside an actor.
 - **Feature gates are build-time.** `qb::http2`, `qb::http::ws` (WSS), and `qb::http::auth` only exist when `QB_HAS_SSL` was on; `qb::http3` only when `QBM_HTTP_HAS_HTTP3` was set. Guard optional code paths with the same macros if your project ships in both configurations.
+- **A reconnection run ends.** `enable_auto_reconnect(RetryPolicy{...})` retries a dropped HTTP/2 connection with the policy's backoff; once the run is exhausted the requests waiting on it fail with a 503 `Reconnection attempts exhausted (N)` rather than hang, and `is_reconnecting()` says whether a run is in progress.
 - **`DELETE` is `DEL`.** Use `qb::http::Method::DEL` and `router().del(...)`.
 - **Not header-only.** Don't try to consume the headers without linking `qbm::http`; the message types, protocol, validation, and SSL-gated features live in compiled translation units.
 - **Configure qb first.** The module's `CMakeLists` returns early unless `QB_FOUND` is true, so `add_subdirectory(qb)` precedes `qb_load_modules`.
