@@ -30,3 +30,12 @@
 *.exe
 *.out
 *.app
+
+# Python bytecode. The guard scripts under scripts/ are imported by the superproject's guards, and a
+# __pycache__/ written beside them was committed once (three .pyc, 2026-08-20, shipped in three
+# tags): ignored, so that a `git add -A` cannot pick one up again.
+__pycache__/
+*.pyc
+
+# Runtime logs. A test that initialises qb's logger writes qb.<n>.log in its working directory.
+*.log
