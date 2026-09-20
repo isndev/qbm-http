@@ -76,6 +76,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   protocol's handler.
 - The `[Unreleased]` compare link named `v3.0.0`; the module has shipped `v3.1.0` since.
 
+## [3.1.0] - 2026-08-30
+
+Lockstep release with the qb 3.1.0 train; no change in this repository (the version says
+compatible, this section says unchanged).
+
+## [3.0.1] - 2026-08-29
+
+Lockstep patch with the qb 3.0.1 train (cut for qb-examples, Huly QB-4). In this repository only
+tooling: a nightly CI run against qb's `develop` of the day, and `scripts/gen-llms-txt.py` strips
+HTML comments by scanning rather than by regex.
+
 ## [3.0.0] - 2026-08-20
 
 Tracks changes not yet part of a tagged release. Since 2026-08-11 that is **both** branches:
@@ -305,5 +316,7 @@ Aligns qbm-http with the qb 2.0 framework and hardens the HTTP/2, HTTP/3, WebSoc
 - Reject control characters in quoted header-attribute values.
 
 [Unreleased]: https://github.com/isndev/qbm-http/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/isndev/qbm-http/compare/v3.0.1...v3.1.0
+[3.0.1]: https://github.com/isndev/qbm-http/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/isndev/qbm-http/compare/v2.6.0...v3.0.0
 [2.6.0]: https://github.com/isndev/qbm-http/releases/tag/v2.6.0
