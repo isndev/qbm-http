@@ -1,4 +1,4 @@
-<!-- Verified-against: qbm-http @ qb 3.1.0 (C++20 default, C++23 supported) -->
+<!-- Verified-against: qbm-http @ qb 3.2.0 (C++20 default, C++23 supported) -->
 # Contributing to qbm-http
 
 qbm-http is a module of the qb actor framework. General contribution guidelines — branch and pull-request

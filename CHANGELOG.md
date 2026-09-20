@@ -7,6 +7,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
+Nothing yet. Entries land here as they are merged, and move under a version heading when that version is tagged.
+
+## [3.2.0] - 2026-09-21
+
 ### Added
 
 - **`qb::http::RetryPolicy` (`retry_policy.h`) and the HTTP/2 client's reconnection run (Huly
@@ -355,7 +359,8 @@ Aligns qbm-http with the qb 2.0 framework and hardens the HTTP/2, HTTP/3, WebSoc
   pending-request queue.
 - Reject control characters in quoted header-attribute values.
 
-[Unreleased]: https://github.com/isndev/qbm-http/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/isndev/qbm-http/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/isndev/qbm-http/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/isndev/qbm-http/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/isndev/qbm-http/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/isndev/qbm-http/compare/v2.6.0...v3.0.0
