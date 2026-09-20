@@ -285,6 +285,14 @@ public:
         return _active_requests.size();
     }
 
+    /// @return Number of streams the HTTP/3 connection still keeps state for: the control and QPACK
+    ///         streams for the life of the connection, a request stream until it closes. Zero when
+    ///         not connected. It does not grow with the number of requests made.
+    [[nodiscard]] std::size_t
+    get_stream_state_count() const noexcept {
+        return _h3 ? _h3->stream_state_count() : 0;
+    }
+
     /// @return The configured maximum response body size, in bytes.
     [[nodiscard]] std::size_t
     max_http3_body_size() const noexcept {

@@ -250,7 +250,7 @@ Incoming trailers are surfaced through the ordinary header APIs on `Request` / `
 HTTP/2 and HTTP/3 use **different transports** — TCP/TLS for HTTP/1.1 and HTTP/2, UDP/QUIC for HTTP/3 — so they cannot share a socket. `qb::http::make_dual_stack_server()` runs both servers behind a single route facade, registering each route on *both* routers. It returns a `std::unique_ptr<qb::http::dual_stack_server<...>>`.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:2008-2018 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:2163-2173 (adapted)
 auto server = qb::http::make_dual_stack_server();
 
 server->router().get("/shared", [](auto ctx) {
@@ -280,7 +280,7 @@ Important behaviors to design around:
 
 A `qb::http3::Server` owns a QUIC endpoint. Each QUIC connection owns one nghttp3 connection adapter; each request stream maps to a lightweight session/context pair routed through the normal `on(...)` / router / context machinery.
 
-`graceful_shutdown()` submits the HTTP/3 shutdown notice (GOAWAY) through nghttp3 for active connections, drains pending protocol output, and closes connections that have no active contexts — while keeping the UDP endpoint able to accept new clients until you call `close()`.
+`graceful_shutdown()` submits the HTTP/3 shutdown notice (GOAWAY) through nghttp3 for active connections and closes at once the connections that have no request stream open. A connection with requests in flight closes when its last request stream has **closed** — after the handler has answered *and* the peer has acknowledged the response — so a response on its way is delivered rather than cut by the `CONNECTION_CLOSE` (since 3.2; before, the close could overtake a response the QUIC send queue was still holding). The call therefore returns with such connections still open, and keep pumping the loop until they are gone. The UDP endpoint stays able to accept new clients until you call `close()`.
 
 ```cpp
 server->graceful_shutdown();   // drain in-flight, stop accepting new streams per-connection

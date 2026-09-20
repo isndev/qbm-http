@@ -580,6 +580,9 @@ private:
         /// Set once a body buffer has been handed to nghttp3; @c tx_body must
         /// never be reassigned afterwards (see @c read_data_cb).
         bool body_submitted = false;
+        /// Set when this side refused the stream (a body over the owner's limit): it has been
+        /// reset, what still arrives on it is dropped, and the message is never handed to the owner.
+        bool refused = false;
     };
 
     Owner                                                          &_owner;
@@ -595,6 +598,56 @@ private:
     // copy of this shared_ptr so it can detect that destruction and bail out instead of
     // dereferencing freed members (_conn, _owner, _streams).
     std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
+    // nghttp3 must not be told to free a stream while one of its own calls is on the stack:
+    // nghttp3_conn_writev_stream hands out vectors that point INTO a stream's buffers, and
+    // nghttp3_conn_read_stream2 runs owner callbacks that send. A close_stream() that arrives then
+    // (drain() forwards bytes to the transport, which dispatches whatever events it has queued) is
+    // parked here and replayed by the outermost engine call, once the stack is nghttp3-free.
+    int                                                  _engine_depth = 0;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> _parked_closes;
+
+    // RAII over one engine call. Holds its own copy of the alive flag: the owner can destroy this
+    // connection from inside the call, and the scope must then touch nothing.
+    struct engine_scope {
+        connection           &conn;
+        std::shared_ptr<bool> alive;
+        explicit engine_scope(connection &c)
+            : conn(c)
+            , alive(c._alive) {
+            ++conn._engine_depth;
+        }
+        engine_scope(engine_scope const &)            = delete;
+        engine_scope &operator=(engine_scope const &) = delete;
+        ~engine_scope() {
+            if (!*alive)
+                return;
+            if (--conn._engine_depth == 0)
+                conn.replay_parked_closes();
+        }
+    };
+
+    void
+    do_close_stream(std::uint64_t stream_id, std::uint64_t app_error_code) {
+        const auto alive = _alive;
+        const auto rv    = nghttp3_conn_close_stream(_conn, static_cast<int64_t>(stream_id), app_error_code);
+        if (!*alive)
+            return; // the owner tore this connection down from stream_close_cb
+        if (rv != 0) {
+            // nghttp3 did not know the stream (or refused the close): stream_close_cb did not run,
+            // and nothing in nghttp3 points into the state kept here.
+            _streams.erase(stream_id);
+        }
+    }
+
+    void
+    replay_parked_closes() {
+        const auto alive = _alive;
+        while (*alive && !_parked_closes.empty()) {
+            const auto [stream_id, app_error_code] = _parked_closes.front();
+            _parked_closes.erase(_parked_closes.begin());
+            do_close_stream(stream_id, app_error_code);
+        }
+    }
 
     static nghttp3_tstamp
     now_ts() noexcept {
@@ -693,14 +746,29 @@ private:
     static int
     recv_data_cb(nghttp3_conn *, int64_t stream_id, const uint8_t *data, size_t datalen, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-            auto      *me           = self(conn_user_data);
-            auto      &st           = me->state_for(static_cast<std::uint64_t>(stream_id));
+            auto *me = self(conn_user_data);
+            auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (st.refused) {
+                return 0; // reset already: the rest of what the peer had in flight is dropped
+            }
             const auto current_size = me->_role == role::server ? st.request.body().size() : st.response.body().size();
             if constexpr (requires(Owner &owner) { owner.max_http3_body_size(); }) {
                 const auto limit = me->_owner.max_http3_body_size();
                 if (limit != 0 && current_size + datalen > limit) {
+                    // Refuse the STREAM, not the connection. This callback used to fail, which
+                    // fails nghttp3_conn_read_stream2, and read_stream() answers that by closing the
+                    // connection: every other exchange multiplexed on it went down with the
+                    // oversized one. And since nothing holds a CONNECTION_CLOSE back while the pacer
+                    // can hold the RESET_STREAM, the peer sometimes learned of the close first and
+                    // reported a lost connection (503) where the contract names a stream reset (502).
+                    st.refused = true;
+                    if (me->_role == role::server) {
+                        st.request.body().clear();
+                    } else {
+                        st.response.body().clear();
+                    }
                     me->_owner.reset_http3_stream(me->_connection_id, static_cast<std::uint64_t>(stream_id), NGHTTP3_H3_REQUEST_CANCELLED);
-                    return NGHTTP3_ERR_CALLBACK_FAILURE;
+                    return 0;
                 }
             }
             if (me->_role == role::server) {
@@ -790,6 +858,9 @@ private:
             auto      *me = self(conn_user_data);
             auto      &st = me->state_for(static_cast<std::uint64_t>(stream_id));
             const auto id = static_cast<std::uint64_t>(stream_id);
+            if (st.refused) {
+                return 0; // a refused message is never handed to the owner
+            }
             if (!me->content_length_matches(st)) {
                 me->_owner.close_http3_connection(me->_connection_id, NGHTTP3_H3_MESSAGE_ERROR, "HTTP/3 content-length mismatch");
                 return NGHTTP3_ERR_CALLBACK_FAILURE;
@@ -1102,7 +1173,8 @@ public:
         // read-depth guards in Client::dispatch(stream_data) and server::after_dispatch_events),
         // so *alive should remain true here — these checks are the defense-in-depth backstop
         // against any teardown path that slips through, so we never touch freed _conn/this.
-        const auto alive = _alive;
+        const auto         alive = _alive;
+        const engine_scope scope(*this);
         auto rv = nghttp3_conn_read_stream2(_conn, static_cast<int64_t>(stream_id), reinterpret_cast<const uint8_t *>(data.data()), data.size(),
                                             fin ? 1 : 0, now_ts());
         if (!*alive)
@@ -1128,6 +1200,43 @@ public:
         if (bytes != 0) {
             (void) nghttp3_conn_add_ack_offset(_conn, static_cast<int64_t>(stream_id), bytes);
         }
+    }
+
+    /**
+     * @brief Tell the HTTP/3 engine that the QUIC stream has closed.
+     *
+     * nghttp3 has no view of the transport: it frees a stream, and fires its @c stream_close
+     * callback, only when it is told. Without this call the state kept beside each stream — the
+     * request, the response and the body copy nghttp3 reads from — lives as long as the
+     * connection, and ::is_drained can never report a served connection drained.
+     *
+     * Safe to call from a transport event delivered while an engine call is on the stack: the
+     * close is then parked and replayed when that call unwinds.
+     *
+     * @param stream_id      QUIC stream that closed.
+     * @param app_error_code Application error code the stream closed with (0 when it finished).
+     */
+    void
+    close_stream(std::uint64_t stream_id, std::uint64_t app_error_code) {
+        if (!_conn) {
+            return;
+        }
+        if (_engine_depth > 0) {
+            _parked_closes.emplace_back(stream_id, app_error_code);
+            return;
+        }
+        do_close_stream(stream_id, app_error_code);
+    }
+
+    /**
+     * @brief Number of streams this connection still keeps state for.
+     *
+     * The control and QPACK streams stay for the life of the connection; a request stream's entry
+     * goes when the stream closes.
+     */
+    [[nodiscard]] std::size_t
+    stream_state_count() const noexcept {
+        return _streams.size();
     }
 
     /**
@@ -1279,6 +1388,10 @@ public:
     drain() {
         nghttp3_vec                vec[16];
         std::vector<std::uint64_t> drained_streams;
+        // An engine call: a stream close the transport delivers while the loop below is forwarding
+        // bytes is parked, and replayed by this scope's destructor — after the body has returned,
+        // when nothing here reads a vector nghttp3 handed out any more.
+        const engine_scope scope(*this);
         // Reentrancy guard: every owner callback below may synchronously destroy this
         // connection (the owner erases it on a transport close). Hold a copy of the alive flag
         // on the stack so we can detect that and stop touching freed members. Declared BEFORE

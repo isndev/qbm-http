@@ -1386,7 +1386,7 @@ TEST_F(Http3LoopbackTest, ServerRejectsRequestBodyOverLimit) {
 
     ASSERT_TRUE(done.load());
     // HTTP/3 enforces the server's max-body limit at the QUIC/nghttp3 transport
-    // layer: recv_data_cb (3/protocol/connection.h:690-695) detects the overflow
+    // layer: recv_data_cb (3/protocol/connection.h) detects the overflow
     // while the body is still streaming in — before the request reaches the
     // router — and the only RFC 9114-conformant action there is to RESET the
     // request stream (NGHTTP3_H3_REQUEST_CANCELLED). There is no buffered request
@@ -1394,9 +1394,11 @@ TEST_F(Http3LoopbackTest, ServerRejectsRequestBodyOverLimit) {
     // body and can return PAYLOAD_TOO_LARGE). The client observes the peer stream
     // reset as a stream-closed-before-completion failure and surfaces its default
     // BAD_GATEWAY (502) — see Client::on_http3_stream_closed -> fail_request
-    // (3/client.cpp:517-520, default status BAD_GATEWAY). So the pinned contract
+    // (3/client.cpp, default status BAD_GATEWAY). So the pinned contract
     // for an over-limit body in HTTP/3 is a client-side 502 via stream reset, NOT
-    // a 413 response.
+    // a 413 response. Until 3.2 the server ALSO closed the connection, and this
+    // assertion read 503 whenever the CONNECTION_CLOSE overtook the RESET_STREAM
+    // (see BodyOverLimitRefusesTheStreamNotTheConnection).
     EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
     EXPECT_EQ(client->get_active_request_count(), 0u);
     EXPECT_TRUE(server->is_open());
@@ -1411,6 +1413,59 @@ TEST_F(Http3LoopbackTest, ServerRejectsRequestBodyOverLimit) {
 
     client->disconnect();
     second->disconnect();
+    server->close();
+}
+
+// What the limit refuses is a STREAM. The connection carries the client's other exchanges, and an
+// oversized upload used to take all of them down: the callback that saw the overflow failed, which
+// made the HTTP/3 engine's read fail, and the read's answer to that is CONNECTION_CLOSE. Here the
+// refused request is settled (502, a stream reset), and the SAME connection -- never reconnected,
+// its peak of one connection on the server proves it -- serves the next request.
+TEST_F(Http3LoopbackTest, BodyOverLimitRefusesTheStreamNotTheConnection) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->set_max_body_size(8);
+    server->router().post("/limited", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "accepted";
+        ctx->complete();
+    });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+
+    auto post = [&](std::size_t size) {
+        qb::http::Request request{qb::http::method::POST, qb::io::uri("/limited")};
+        request.body() = std::string(size, 'x');
+        std::atomic<bool>  done{false};
+        qb::http::Response response;
+        EXPECT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
+            response = std::move(res);
+            done     = true;
+        }));
+        pump([&] { return done.load(); });
+        EXPECT_TRUE(done.load());
+        return response;
+    };
+
+    EXPECT_EQ(post(64).status(), qb::http::status::BAD_GATEWAY);
+
+    // Let a CONNECTION_CLOSE arrive if one was sent: it is what this test exists to refuse.
+    const auto settle = std::chrono::steady_clock::now() + 150ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_TRUE(client->is_connected()) << "the refused upload closed the whole connection";
+
+    const auto accepted = post(4);
+    EXPECT_EQ(accepted.status(), qb::http::status::OK);
+    EXPECT_EQ(accepted.body().as<std::string>(), "accepted");
+    EXPECT_EQ(server->stats().active_connections, 1u);
+
+    client->disconnect();
     server->close();
 }
 
@@ -1770,6 +1825,106 @@ TEST_F(Http3LoopbackTest, GracefulShutdownWaitsForActiveAsyncContext) {
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().as<std::string>(), "delayed-ok");
     EXPECT_FALSE(client->is_connected());
+
+    client->disconnect();
+    server->close();
+}
+
+// The deterministic form of what the test above can only lose to a timing: a response the transport
+// CANNOT put on the wire in one burst. 256 KiB is some twenty initial congestion windows, so after
+// the first flight the tail waits in the QUIC send queue for ACKs. A graceful shutdown that closes
+// the connection once the response has been HANDED to the transport sends CONNECTION_CLOSE -- which
+// no window and no pacer holds back -- ahead of that tail, and the client is told the connection
+// closed under its request. The shutdown must hold until the request stream has CLOSED, that is
+// until the peer has acknowledged the last byte.
+TEST_F(Http3LoopbackTest, GracefulShutdownDeliversResponseWiderThanTheCongestionWindow) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/delayed", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+
+    std::atomic<bool>  done{false};
+    qb::http::Response response;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/delayed")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        done     = true;
+    }));
+
+    pump([&] { return held_context != nullptr; });
+    ASSERT_NE(held_context, nullptr);
+    ASSERT_TRUE(client->is_connected());
+
+    server->graceful_shutdown();
+
+    const std::string wide(256 * 1024, 'w');
+    held_context->response().status() = qb::http::status::OK;
+    held_context->response().body()   = wide;
+    held_context->complete();
+    held_context.reset();
+
+    pump([&] { return done.load() && !client->is_connected(); });
+    ASSERT_TRUE(done.load());
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().as<std::string>().size(), wide.size());
+    EXPECT_FALSE(client->is_connected());
+
+    client->disconnect();
+    server->close();
+}
+
+// A connection keeps state beside every stream -- the request, the response, the body copy the
+// HTTP/3 engine reads from -- and that state goes when the engine is told the stream closed. It was
+// never told: a connection kept every exchange it had ever carried, on both sides, until it died.
+// Forty requests over ONE connection, each settled before the next, must leave what three leave.
+TEST_F(Http3LoopbackTest, StreamStateFollowsRequestsInFlightNotRequestsServed) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/blob", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = std::string(4096, 'b');
+        ctx->complete();
+    });
+    server->router().compile();
+
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+
+    auto exchange = [&](int count) {
+        for (int i = 0; i < count; ++i) {
+            std::atomic<bool> done{false};
+            qb::http::status  got = qb::http::status::INTERNAL_SERVER_ERROR;
+            ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/blob")}, [&](qb::http::Response res) {
+                got  = res.status();
+                done = true;
+            }));
+            pump([&] { return done.load(); });
+            ASSERT_TRUE(done.load());
+            ASSERT_EQ(got, qb::http::status::OK);
+        }
+        // The stream closes once the last byte is acknowledged: a few more turns.
+        const auto settle = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+    };
+
+    exchange(3);
+    const auto server_after_three = server->http3_stream_state_count();
+    const auto client_after_three = client->get_stream_state_count();
+    ASSERT_GT(server_after_three, 0u) << "the counter reads nothing: the control and QPACK streams are always there";
+    ASSERT_GT(client_after_three, 0u);
+
+    exchange(37);
+    EXPECT_EQ(server->http3_stream_state_count(), server_after_three);
+    EXPECT_EQ(client->get_stream_state_count(), client_after_three);
 
     client->disconnect();
     server->close();

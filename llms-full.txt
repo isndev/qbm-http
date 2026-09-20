@@ -1060,17 +1060,17 @@ Fluent setters (each returns `RetryPolicy&`): `with_max_attempts(int)`, `with_in
 - `[[nodiscard]] request_id push_request_with_id(Request, ResponseCallback)` (`request_id=std::uint64_t`; 0 on immediate failure); `bool cancel_request(request_id id, const std::string& reason="HTTP/3 request cancelled")` (resets active stream with H3 error 0x010c = `NGHTTP3_H3_REQUEST_CANCELLED`; false if id unknown).
 - `bool push_requests(std::vector<Request>, BatchResponseCallback)` / `[[nodiscard]] async::awaiter<std::vector<Response>> push_requests(std::vector<Request>)` (index-aligned; empty input → `callback({})`).
 - `void set_max_concurrent_streams(std::size_t) noexcept` (default 100); `void set_max_body_size(std::size_t) noexcept` (default 64 MiB, exceed resets stream); `void set_connect_timeout(qb::duration) noexcept` (default 30s, ≤0 disables); `void set_request_timeout(qb::duration) noexcept` (default 60s, ≤0 disables); `void set_auto_reconnect(bool) noexcept` (default true); `void set_verify_peer(bool) noexcept` (default true).
-- `std::tuple<uint64_t,uint64_t,uint64_t> get_stats() const noexcept`; `get_active_request_count()`; `max_http3_body_size()`; `get_base_uri()`.
+- `std::tuple<uint64_t,uint64_t,uint64_t> get_stats() const noexcept`; `get_active_request_count()`; `get_stream_state_count()` (streams the connection keeps state for; does not grow with the requests made); `max_http3_body_size()`; `get_base_uri()`.
 - `struct ConnectResult { bool ok{false}; std::string error_message; explicit operator bool() const noexcept; }`; aliases `ResponseCallback/BatchResponseCallback/ConnectionCallback/request_id`.
 - `std::shared_ptr<Client> qb::http3::make_client(const std::string&);` / `make_client(const qb::io::uri&);`
 Usage: `auto c = qb::http3::make_client("https://h"); auto resp = co_await c->push_request(req);`
 
 ### Server — `src/qbm/http/3/http3.h`
-- `class DefaultSession : public qb::http3::use<DefaultSession>::session<Server<DefaultSession>>` (`http3.h:720`).
-- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` (`http3.h:733`); `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http3.h:746`); alias `template<...> using server = Server<Session>`.
-- `internal::server::listen(const qb::io::uri&, const std::filesystem::path& cert, const std::filesystem::path& key) -> bool` (ALPN `{"h3"}`; also a `std::string`-uri overload) (`http3.h:477`); `[[nodiscard]] Router& router() noexcept` (`http3.h:445`); `void set_max_body_size(std::size_t) noexcept` (`http3.h:458`); `void graceful_shutdown()` (`http3.h:501`).
+- `class DefaultSession : public qb::http3::use<DefaultSession>::session<Server<DefaultSession>>` (`http3.h:743`).
+- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` (`http3.h:756`); `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http3.h:769`); alias `template<...> using server = Server<Session>`.
+- `internal::server::listen(const qb::io::uri&, const std::filesystem::path& cert, const std::filesystem::path& key) -> bool` (ALPN `{"h3"}`; also a `std::string`-uri overload) (`http3.h:501`); `[[nodiscard]] Router& router() noexcept` (`http3.h:452`); `void set_max_body_size(std::size_t) noexcept` (`http3.h:465`); `void graceful_shutdown()` (`http3.h:526`) — GOAWAY, then each connection closes once its last request stream has CLOSED (response acknowledged by the peer), not when the handler answered: returns with connections in flight still open; `[[nodiscard]] std::size_t http3_stream_state_count() const noexcept` — streams the HTTP/3 connections keep state for (follows requests in flight, not requests served).
 - `internal::session`: per-stream server session; `operator<<(Response&)` (HEAD-aware) (`http3.h:221`).
-- `template<typename Derived> struct use { ... session/server ... }` (`http3.h:704`).
+- `template<typename Derived> struct use { ... session/server ... }` (`http3.h:727`).
 
 ### Dual-stack (HTTP/2 + HTTP/3) — `src/qbm/http/3/dual_stack.h` · **namespace `qb::http`** (not `qb::http3`)
 - `template<typename Http2Session=qb::http2::DefaultSession, typename Http3Session=qb::http3::DefaultSession> class qb::http::dual_stack_server` (`dual_stack.h:47`) — runs HTTP/2 (TCP+TLS) and HTTP/3 (QUIC) side by side; `router()` returns a `router_facade` registering each route on **both** tables.

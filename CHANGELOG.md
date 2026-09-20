@@ -34,6 +34,46 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **An HTTP/3 server's `graceful_shutdown()` cut the response it was waiting for.** A connection
+  that was shutting down closed as soon as its last handler had answered, that is once the
+  response had been HANDED to the QUIC transport. Handed is not sent: the transport's send queue
+  holds whatever the congestion window or the pacer will not let out yet, and `CONNECTION_CLOSE`,
+  which neither holds back, overtook it. Any response wider than one flight was truncated, every
+  time -- a 256 KiB body arrived as a 503 `QUIC connection close received` -- and so was a
+  response of a few bytes whenever the pacer deferred its second packet, which a real round trip
+  does as a rule and a loopback does on a loaded host (seen once on the arm64 CI guest, as a
+  failure of `GracefulShutdownWaitsForActiveAsyncContext`; never in 400 quiet repetitions). The
+  connection now closes when its last request stream has CLOSED, which the transport reports once
+  the peer has acknowledged the final byte. `graceful_shutdown()` therefore returns with such a
+  connection still open and the close follows the acknowledgement; a peer that has gone away is
+  ended by the transport's idle timeout, as before. Test:
+  `GracefulShutdownDeliversResponseWiderThanTheCongestionWindow`, which fails against the previous
+  code on every run and on every platform.
+- **An HTTP/3 connection kept every exchange it had ever carried, client and server.** The
+  protocol connection keeps state beside each stream -- the request, the response and the copy of
+  the body the HTTP/3 engine reads from -- and releases it when the engine reports the stream
+  closed. nghttp3 has no view of the transport and reports that only when it is TOLD the QUIC
+  stream closed; nothing told it, so the release callback was dead code and the state lived as long
+  as the connection: forty requests of 4 KiB over one connection left 43 entries on each side where
+  3 requests leave 6. A long-lived connection grew by the size of everything it served. The QUIC
+  stream-closed event now reaches the engine (`connection::close_stream()`; a close delivered
+  while an engine call is on the stack is parked and replayed when it unwinds, because the engine's
+  write vectors point into the stream being freed). `Server::http3_stream_state_count()` and
+  `Client::get_stream_state_count()` expose the figure, which follows the requests in flight, not
+  the requests served. Test: `StreamStateFollowsRequestsInFlightNotRequestsServed` (43 against 6 on
+  both sides without the fix).
+- **A body over the HTTP/3 limit closed the whole connection, not the stream.** `set_max_body_size`
+  is documented as resetting the stream, and the stream was reset -- then the callback that saw
+  the overflow failed, which fails the HTTP/3 engine's read, and the read's answer to that is
+  `CONNECTION_CLOSE`: every other exchange multiplexed on the connection went down with the
+  oversized one, on the server (a request body) and on the client (a response body). The peer did
+  not even see the same error twice: the pacer can hold a `RESET_STREAM` back, nothing holds a
+  `CONNECTION_CLOSE`, so it reported now the stream reset (502) and now a lost connection (503) --
+  61 times in 300 for `ServerRejectsRequestBodyOverLimit` on a loaded arm64 guest, never on a quiet
+  host. The stream alone is refused now: reset in both directions, what still arrives on it dropped,
+  the message never handed to the router or to the response callback; the connection and its other
+  streams are untouched. Test: `BodyOverLimitRefusesTheStreamNotTheConnection` (the same
+  connection serves the next request; without the fix it is gone and the follow-up answers 503).
 - **The HTTP/2 client's automatic reconnection was immediate and unbounded, and started from
   inside the handler that observed the failure (Huly QB-103).** `attempt_reconnection()` called
   `connect()` on the spot -- the `client.cpp:703` comment said "you might want exponential

@@ -633,6 +633,13 @@ Client::dispatch(qb::io::async::quic::event::stream_data_acked const &ev) {
 void
 Client::dispatch(qb::io::async::quic::event::stream_closed const &ev) {
     on_http3_stream_closed(ev.id, ev.error_code);
+    // nghttp3 frees a stream only when told, and the request, the response and the body copy kept
+    // beside it go with it: until 3.2 nobody told it, and a long-lived connection kept every
+    // exchange it had ever made. The engine reports the close back through
+    // on_http3_stream_closed(), which by then finds the request already settled.
+    if (_h3) {
+        _h3->close_stream(ev.id, ev.error_code);
+    }
 }
 
 qb::http::async::awaiter<ConnectResult>

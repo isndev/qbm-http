@@ -302,24 +302,24 @@ private:
         return false;
     }
 
-    [[nodiscard]] bool
-    has_active_contexts(std::uint64_t connection_id) const noexcept {
-        for (auto const &[key, session] : _sessions) {
-            if (key.connection_id == connection_id && session && session->has_active_context()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
+    // A connection that is shutting down closes once no request stream is OPEN — not once the last
+    // response has been handed to the transport. "Handed" is not "sent": the QUIC send queue holds
+    // whatever the congestion window or the pacer would not let out, and CONNECTION_CLOSE, which
+    // neither holds back, overtakes it. Closing as soon as no handler context was left truncated every response
+    // wider than one flight, and on a real round trip any response at all (the pacer alone defers
+    // the second packet). A session lives until its QUIC stream closes, which the transport reports
+    // once the peer has acknowledged the last byte: that is the event to wait for.
     void
     maybe_finish_graceful_shutdown(std::uint64_t connection_id) {
-        if (_shutdown_connections.find(connection_id) == _shutdown_connections.end()) {
+        auto it = _shutdown_connections.find(connection_id);
+        if (it == _shutdown_connections.end()) {
             return;
         }
-        if (has_active_contexts(connection_id)) {
+        if (has_sessions(connection_id)) {
             return;
         }
+        // Once: several streams can close in one batch of transport events.
+        _shutdown_connections.erase(it);
         close_http3_connection(connection_id, 0, "HTTP/3 graceful shutdown");
     }
 
@@ -415,6 +415,13 @@ protected:
             it->second->cancel_context("HTTP/3 stream closed");
             _sessions.erase(it);
         }
+        // nghttp3 frees a stream only when told, and the per-stream state of the HTTP/3 connection
+        // (request, response, body copy) goes with it; until 3.2 nobody told it, and a long-lived
+        // connection kept every request it had ever served.
+        if (auto *conn = connection(ev.connection_id)) {
+            conn->close_stream(ev.id, ev.error_code);
+        }
+        maybe_finish_graceful_shutdown(ev.connection_id);
     }
 
     void
@@ -467,6 +474,23 @@ public:
     }
 
     /**
+     * @brief Number of streams the HTTP/3 connections still keep state for, all connections together.
+     *
+     * Each connection keeps its control and QPACK streams for its whole life and a request stream
+     * until that stream closes: the figure follows the requests IN FLIGHT, not the requests served.
+     */
+    [[nodiscard]] std::size_t
+    http3_stream_state_count() const noexcept {
+        std::size_t total = 0;
+        for (auto const &[_, conn] : _connections) {
+            if (conn) {
+                total += conn->stream_state_count();
+            }
+        }
+        return total;
+    }
+
+    /**
      * @brief Start listening for HTTP/3 (QUIC) connections.
      * @param uri       Bind URI (scheme/host/port).
      * @param cert_file Path to the TLS certificate (PEM).
@@ -493,9 +517,10 @@ public:
     /**
      * @brief Begin HTTP/3 graceful shutdown of all connections.
      *
-     * Submits a shutdown notice on each connection and closes immediately those
-     * already drained or with no active request contexts; the remainder are
-     * closed later as their contexts complete.
+     * Submits a shutdown notice (GOAWAY) on each connection and closes at once those
+     * with no request stream open; the others close when their last request stream
+     * does — after the handler has answered AND the peer has acknowledged the
+     * response, so a response in flight is delivered, not cut by the close.
      */
     void
     graceful_shutdown() {
@@ -512,9 +537,7 @@ public:
             (void) conn->submit_shutdown_notice();
             (void) conn->shutdown();
             _shutdown_connections.insert(connection_id);
-            if (conn->is_drained() || !has_active_contexts(connection_id)) {
-                close_http3_connection(connection_id, 0, "HTTP/3 graceful shutdown");
-            }
+            maybe_finish_graceful_shutdown(connection_id);
         }
     }
 
