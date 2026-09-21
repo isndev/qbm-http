@@ -250,7 +250,7 @@ Incoming trailers are surfaced through the ordinary header APIs on `Request` / `
 HTTP/2 and HTTP/3 use **different transports** — TCP/TLS for HTTP/1.1 and HTTP/2, UDP/QUIC for HTTP/3 — so they cannot share a socket. `qb::http::make_dual_stack_server()` runs both servers behind a single route facade, registering each route on *both* routers. It returns a `std::unique_ptr<qb::http::dual_stack_server<...>>`.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:2163-2173 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:2192-2202 (adapted)
 auto server = qb::http::make_dual_stack_server();
 
 server->router().get("/shared", [](auto ctx) {
@@ -296,7 +296,7 @@ HTTP/3 enforces the same safety posture as HTTP/1.1 and HTTP/2, plus QUIC-specif
 
 - **ALPN** must negotiate `h3`; otherwise the client fails the connection and the server closes it with `0x010c`.
 - **Body limits** are configurable with `set_max_body_size`; over-cap streams reset with `NGHTTP3_H3_REQUEST_CANCELLED` instead of buffering.
-- **Header and message validation** is strict: pseudo-headers must precede regular headers; a request requires `:method`/`:scheme`/`:authority`/`:path`, a response a valid `:status`; duplicate or forbidden pseudo-headers and `content-length` mismatches close the connection with `NGHTTP3_H3_MESSAGE_ERROR`.
+- **Header and message validation** is strict, in two tiers. What this module checks beyond nghttp3 -- more than `MAX_HEADERS_COUNT` fields, a field value over `MAX_HEADER_VALUE_LENGTH`, a request method it does not know, a `trailer` field inside the trailer section -- refuses that **stream** with `NGHTTP3_H3_MESSAGE_ERROR` (RFC 9114 §4.1.2): a stream reset the client side settles as a `502`, the router never sees the message, and the other exchanges multiplexed on the connection keep flowing. What nghttp3's own validator rejects first -- pseudo-headers out of order, missing, duplicated or unknown (a request needs `:method`/`:scheme`/`:authority`/`:path`, a response a numeric `:status`), an uppercase or otherwise invalid field name, a field name over 256 bytes (its QPACK decoder's cap, below this module's `MAX_HEADER_NAME_LENGTH`), a connection-specific field, a `content-length` that is not a number or that the body does not match, a pseudo-header among the trailers -- comes back from `nghttp3_conn_read_stream2` as a negative read, by the library's contract a **connection** error after which only `nghttp3_conn_del` is legal: the connection closes, with the H3 error code nghttp3 infers (`H3_MESSAGE_ERROR`) as the QUIC application error code.
 - **Hop-by-hop headers** are rejected in HTTP/3 header blocks.
 - **Pending-request cap** bounds the client's queued + active requests; over-cap requests fail fast with `503`.
 - **Timeouts, cancellation, stream reset, connection close, and graceful shutdown** all complete outstanding callbacks — no request hangs silently.

@@ -7,7 +7,34 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-Nothing yet. Entries land here as they are merged, and move under a version heading when that version is tagged.
+### Fixed
+
+- **A malformed HTTP/3 message closed the whole connection, not its stream, for what this module
+  checks itself (Huly QB-234).** More than `MAX_HEADERS_COUNT` fields, a field value over its
+  length limit, a request method the module does not know, a `trailer` field inside the trailer
+  section: each of the four validation sites of the protocol connection failed its nghttp3
+  callback, which fails the engine's read, and the read's answer to that is `CONNECTION_CLOSE` --
+  every other exchange multiplexed on the connection went down with the malformed one, on the
+  server (a request) and on the client (a response); behind a gateway that multiplexes several
+  users onto one upstream connection, one user's malformed request failed the others'. RFC 9114
+  section 4.1.2 makes a malformed message a STREAM error, and the stream alone is refused now: reset
+  with `H3_MESSAGE_ERROR`, what still arrives on it dropped, the message never handed to the router
+  or to the response callback, the connection and its other streams untouched, the peer seeing the
+  reset (a client's 502) -- the shape the body-over-limit site took in 3.2.0. **The other tier is
+  the library's.** nghttp3's own validator runs before any callback (pseudo-header order, presence
+  and uniqueness, field-name syntax and a 256-byte name cap in its QPACK decoder, the
+  connection-specific fields, content-length arithmetic, `:status`), and what it rejects comes back from `nghttp3_conn_read_stream2` as a negative read:
+  by its contract a connection error after which only `nghttp3_conn_del` is legal, so those
+  malformations still close the connection -- as they do in every nghttp3-based server, ngtcp2's
+  reference server included -- and the docs now say which checks belong to which tier. That close
+  carried the raw library code (105, 107) as the QUIC application error code; it carries the H3
+  code nghttp3 infers from it (`H3_MESSAGE_ERROR`, `H3_FRAME_ERROR`, the QPACK codes) now, on the
+  read and on the write path. Tests: four direct-connection cases feeding the frames a malformed peer
+  sends (`*RefusesTheStreamNotTheConnection`; the header-count limit in both polarities), each
+  failing against the previous code, one pinning the library tier's error code
+  (`AMalformationNghttp3RejectsClosesTheConnectionWithMessageError`), and the loopback
+  `ClientRejectsResponseContentLengthMismatch` proving the client's connection serves the next
+  request after a refused response.
 
 ## [3.2.0] - 2026-09-21
 

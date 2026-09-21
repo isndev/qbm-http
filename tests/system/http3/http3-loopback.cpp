@@ -1598,6 +1598,11 @@ TEST_F(Http3LoopbackTest, ClientRejectsOutgoingRequestContentLengthWithOWSBefore
     server->close();
 }
 
+// The server refuses to SEND a response whose body does not match its content-length (the
+// outgoing validation of submit_response) and resets the stream with H3_MESSAGE_ERROR, so the
+// client settles the exchange as a 502 -- a stream reset, never a connection close (Huly QB-234;
+// RFC 9114 section 4.1.2). The connection carries the client's other exchanges: the SAME one --
+// never reconnected, the server's peak of one connection proves it -- serves the next request.
 TEST_F(Http3LoopbackTest, ClientRejectsResponseContentLengthMismatch) {
     const auto port   = next_port();
     auto       server = qb::http3::make_server();
@@ -1605,6 +1610,11 @@ TEST_F(Http3LoopbackTest, ClientRejectsResponseContentLengthMismatch) {
         ctx->response().status() = qb::http::status::OK;
         ctx->response().set_header("content-length", "1");
         ctx->response().body() = "abc";
+        ctx->complete();
+    });
+    server->router().get("/good-length", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "accepted";
         ctx->complete();
     });
     server->router().compile();
@@ -1625,6 +1635,25 @@ TEST_F(Http3LoopbackTest, ClientRejectsResponseContentLengthMismatch) {
 
     ASSERT_TRUE(done.load());
     EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY); // 502 (was EXPECT_NE OK)
+
+    // Let a CONNECTION_CLOSE arrive if one was sent: it is what this test exists to refuse.
+    const auto settle = std::chrono::steady_clock::now() + 150ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_TRUE(client->is_connected()) << "the refused response closed the whole connection";
+
+    std::atomic<bool>  next_done{false};
+    qb::http::Response next;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/good-length")}, [&](qb::http::Response res) {
+        next      = std::move(res);
+        next_done = true;
+    }));
+    pump([&] { return next_done.load(); });
+    ASSERT_TRUE(next_done.load());
+    EXPECT_EQ(next.status(), qb::http::status::OK);
+    EXPECT_EQ(next.body().as<std::string>(), "accepted");
+    EXPECT_EQ(server->stats().active_connections, 1u) << "the follow-up went over a new connection";
 
     client->disconnect();
     server->close();

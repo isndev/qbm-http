@@ -46,6 +46,7 @@
 #include <vector>
 
 #include <qb/system/container/unordered_map.h>
+#include <nghttp3/nghttp3.h>
 
 namespace {
 
@@ -184,6 +185,73 @@ pump(ClientOwnerT &client_owner, ClientConnT &client_conn, ServerOwnerT &server_
         if (a == 0 && b == 0)
             return;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Raw HTTP/3 frames, built WITHOUT the adapter's outgoing validation: what a malformed peer sends
+// (Huly QB-234). The field block is QPACK-encoded by nghttp3's own encoder over the static table
+// alone (a zero-capacity dynamic table), so it needs no encoder stream and decodes before any
+// SETTINGS. A frame is its type, its length and its payload, each length a QUIC varint.
+// ---------------------------------------------------------------------------
+std::string
+h3_varint(std::uint64_t v) {
+    std::string out;
+    if (v < 64) {
+        out.push_back(static_cast<char>(v));
+    } else if (v < 16384) {
+        out.push_back(static_cast<char>(0x40 | (v >> 8)));
+        out.push_back(static_cast<char>(v & 0xff));
+    } else {
+        out.push_back(static_cast<char>(0x80 | (v >> 24)));
+        out.push_back(static_cast<char>((v >> 16) & 0xff));
+        out.push_back(static_cast<char>((v >> 8) & 0xff));
+        out.push_back(static_cast<char>(v & 0xff));
+    }
+    return out;
+}
+
+std::string
+h3_frame(std::uint64_t type, std::string const &payload) {
+    return h3_varint(type) + h3_varint(payload.size()) + payload;
+}
+
+// A HEADERS frame (type 0x1) carrying `fields` in the given order, encoded for `stream_id`.
+std::string
+h3_headers_frame(std::uint64_t stream_id, std::vector<std::pair<std::string, std::string>> const &fields) {
+    std::vector<nghttp3_nv> nva;
+    nva.reserve(fields.size());
+    for (auto const &[name, value] : fields) {
+        nva.push_back(nghttp3_nv{
+            reinterpret_cast<uint8_t *>(const_cast<char *>(name.data())), reinterpret_cast<uint8_t *>(const_cast<char *>(value.data())),
+            name.size(), value.size(), NGHTTP3_NV_FLAG_NONE
+        });
+    }
+    nghttp3_qpack_encoder *encoder = nullptr;
+    EXPECT_EQ(nghttp3_qpack_encoder_new(&encoder, 0, nghttp3_mem_default()), 0);
+    nghttp3_buf pbuf, rbuf, ebuf;
+    nghttp3_buf_init(&pbuf);
+    nghttp3_buf_init(&rbuf);
+    nghttp3_buf_init(&ebuf);
+    EXPECT_EQ(nghttp3_qpack_encoder_encode(encoder, &pbuf, &rbuf, &ebuf, static_cast<int64_t>(stream_id), nva.data(), nva.size()), 0);
+    EXPECT_EQ(nghttp3_buf_len(&ebuf), 0u) << "a static-table-only block writes nothing to the encoder stream";
+    std::string block(reinterpret_cast<char const *>(pbuf.pos), nghttp3_buf_len(&pbuf));
+    block.append(reinterpret_cast<char const *>(rbuf.pos), nghttp3_buf_len(&rbuf));
+    nghttp3_buf_free(&pbuf, nghttp3_mem_default());
+    nghttp3_buf_free(&rbuf, nghttp3_mem_default());
+    nghttp3_buf_free(&ebuf, nghttp3_mem_default());
+    nghttp3_qpack_encoder_del(encoder);
+    return h3_frame(0x1, block);
+}
+
+std::string
+h3_data_frame(std::string const &body) {
+    return h3_frame(0x0, body);
+}
+
+// A well-formed request field block: the four pseudo-headers, in order.
+std::vector<std::pair<std::string, std::string>>
+request_fields(std::string path = "/") {
+    return {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", std::move(path)}};
 }
 
 // A connected client+server pair with their control/qpack streams bound.
@@ -477,6 +545,212 @@ TEST(Http3ConnectionDirect, ServerResetsRequestWhoseBodyExceedsCap) {
     const bool reset_request_stream =
         std::any_of(server_owner.resets.begin(), server_owner.resets.end(), [](auto const &r) { return r.first == 0u; });
     EXPECT_TRUE(reset_request_stream) << "recv_data_cb must reset the over-cap request stream";
+}
+
+// =============================================================================
+// MALFORMED MESSAGES: THE STREAM IS REFUSED FOR WHAT THIS ADAPTER CHECKS, THE CONNECTION CLOSED
+// FOR WHAT nghttp3 CHECKS FIRST (Huly QB-234)
+// =============================================================================
+//
+// RFC 9114 section 4.1.2 makes a malformed request or response a STREAM error, H3_MESSAGE_ERROR.
+// Two validators see every message. nghttp3's own runs first, inside nghttp3_conn_read_stream2
+// (pseudo-header order, presence and uniqueness; field-name syntax; the connection-specific
+// fields; content-length arithmetic; `:status`), and what it rejects comes back as a negative
+// read -- by the library's contract a CONNECTION error, after which only nghttp3_conn_del is
+// legal. The adapter's validator runs in the callbacks nghttp3 fires for what it accepted: the
+// field count, the field-value length limit, the request method, the trailer section's own rules.
+// Those used to fail their callback, which fails the read the same way, so every exchange
+// multiplexed on the connection went down with the malformed one. They refuse the STREAM now.
+//
+// The frames below are what a peer that skipped validation would send (the adapter itself refuses
+// to SEND every one of them: SubmitRequestRejects* above). Each refusal case asserts four things
+// -- the message never reaches the owner, the owner recorded no connection close, the stream was
+// reset with H3_MESSAGE_ERROR, the next request on the SAME connection is served -- and fails
+// against the previous code, where the close is recorded. The last case pins the other tier: a
+// malformation nghttp3 rejects closes the connection with the H3 error code nghttp3 infers
+// (H3_MESSAGE_ERROR), where the raw library code used to go on the wire.
+
+namespace {
+
+// The refusal's four assertions on the server side, then the follow-up request on stream 4.
+void
+expect_server_refused_stream_and_serves_next(Pair &pair, std::size_t states_before) {
+    EXPECT_TRUE(pair.server_owner.requests.empty()) << "a malformed request must never reach the owner";
+    EXPECT_FALSE(pair.server_owner.close.has_value())
+        << "the connection must survive a malformed stream; closed with " << (pair.server_owner.close ? pair.server_owner.close->second : "");
+    ASSERT_EQ(pair.server_owner.resets.size(), 1u) << "exactly one stream reset";
+    EXPECT_EQ(pair.server_owner.resets.front().first, 0u);
+    EXPECT_EQ(pair.server_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    // The transport reports the reset stream closed: its state goes with it.
+    pair.server.close_stream(0, NGHTTP3_H3_MESSAGE_ERROR);
+    EXPECT_EQ(pair.server.stream_state_count(), states_before);
+    // The next request on the SAME connection is decoded and served.
+    qb::http::Request next{qb::http::method::GET, qb::io::uri("https://example.test/next")};
+    ASSERT_TRUE(pair.client.submit_request(4, next));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "the connection no longer serves";
+    EXPECT_EQ(pair.server_owner.requests.front().uri().path(), "/next");
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+} // namespace
+
+/**
+ * @test A request over MAX_HEADERS_COUNT fields refuses the stream only; one at the limit is served
+ * @brief nghttp3 has no field-count limit, so recv_header_cb's count is the only one: 101 fields
+ *        (pseudo-headers included) are refused at the 101st -- the stream reset, the connection kept
+ *        -- and a request of exactly 100 fields on the same connection is decoded whole. The limit, in
+ *        both polarities.
+ */
+TEST(Http3ConnectionDirect, TooManyRequestHeaderFieldsRefuseTheStreamNotTheConnection) {
+    Pair       pair;
+    const auto states = pair.server.stream_state_count();
+    auto       fields = request_fields();
+    for (std::size_t i = fields.size(); i < qb::http::protocol_limits::MAX_HEADERS_COUNT + 1; ++i) {
+        fields.emplace_back("x-" + std::to_string(i), "v");
+    }
+    ASSERT_EQ(fields.size(), qb::http::protocol_limits::MAX_HEADERS_COUNT + 1);
+    pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+    expect_server_refused_stream_and_serves_next(pair, states);
+
+    // The positive control: exactly the limit, on the same connection, is served whole.
+    auto at_limit = request_fields("/at-limit");
+    for (std::size_t i = at_limit.size(); i < qb::http::protocol_limits::MAX_HEADERS_COUNT; ++i) {
+        at_limit.emplace_back("x-" + std::to_string(i), "v");
+    }
+    ASSERT_EQ(at_limit.size(), qb::http::protocol_limits::MAX_HEADERS_COUNT);
+    pair.server.read_stream(8, h3_headers_frame(8, at_limit), true);
+    ASSERT_EQ(pair.server_owner.requests.size(), 2u);
+    EXPECT_EQ(pair.server_owner.requests.back().uri().path(), "/at-limit");
+    EXPECT_EQ(pair.server_owner.resets.size(), 1u) << "a request at the limit is not refused";
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+/**
+ * @test A field value over MAX_HEADER_VALUE_LENGTH refuses the stream only
+ * @brief nghttp3 bounds the whole field section (the advertised 64 KiB) and checks the value's bytes,
+ *        never one value's length below its own 64 KiB cap: is_valid_incoming_header_field's limit is
+ *        the only one. (A NAME over this module's limit never gets here: nghttp3's QPACK decoder caps
+ *        a name at 256 bytes and answers with a connection error first.) The field that follows the
+ *        over-long value arrives on a refused stream and is dropped.
+ */
+TEST(Http3ConnectionDirect, AnOverLongRequestFieldValueRefusesTheStreamNotTheConnection) {
+    Pair       pair;
+    const auto states = pair.server.stream_state_count();
+    auto       fields = request_fields();
+    fields.emplace_back("x-big", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'));
+    fields.emplace_back("x-after", "2");
+    pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+    expect_server_refused_stream_and_serves_next(pair, states);
+}
+
+/**
+ * @test A request method this module does not know refuses the stream only
+ * @brief nghttp3 accepts any token as `:method`; materialize_headers maps it to qb::http::Method and an
+ *        unknown token is UNINITIALIZED -- the block fails in end_headers_cb, the stream is reset, the
+ *        connection kept.
+ */
+TEST(Http3ConnectionDirect, AnUnknownRequestMethodRefusesTheStreamNotTheConnection) {
+    Pair       pair;
+    const auto states     = pair.server.stream_state_count();
+    auto       fields     = request_fields();
+    fields.front().second = "FETCH";
+    pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+    expect_server_refused_stream_and_serves_next(pair, states);
+}
+
+/**
+ * @test A `trailer` field inside the trailer section refuses the stream only
+ * @brief A second HEADERS frame after the body is the trailer section. nghttp3 drops a `content-length`
+ *        there and rejects a pseudo-header, but has no rule for `trailer` itself; is_forbidden_h3_trailer
+ *        does, so materialize_trailers fails in end_trailers_cb: the stream is reset, the connection kept.
+ */
+TEST(Http3ConnectionDirect, ATrailerFieldInsideTheTrailerSectionRefusesTheStreamNotTheConnection) {
+    Pair       pair;
+    const auto states     = pair.server.stream_state_count();
+    auto       fields     = request_fields();
+    fields.front().second = "POST";
+    pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+    pair.server.read_stream(0, h3_data_frame("abc"), false);
+    pair.server.read_stream(0, h3_headers_frame(0, {{"trailer", "x-t"}}), true);
+    expect_server_refused_stream_and_serves_next(pair, states);
+}
+
+/**
+ * @test An over-long response field refuses the stream on the CLIENT side, and the client keeps its connection
+ * @brief The client submits a request; a response block with a value over MAX_HEADER_VALUE_LENGTH fails
+ *        recv_header_cb in the client role. The response never reaches the owner, the client resets its
+ *        stream with H3_MESSAGE_ERROR instead of closing the connection, and a second request on the same
+ *        connection is answered normally.
+ */
+TEST(Http3ConnectionDirect, AnOverLongResponseFieldRefusesTheStreamNotTheConnection) {
+    Pair       pair;
+    const auto states = pair.client.stream_state_count();
+
+    qb::http::Request first{qb::http::method::GET, qb::io::uri("https://example.test/first")};
+    ASSERT_TRUE(pair.client.submit_request(0, first));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+
+    pair.client.read_stream(
+        0, h3_headers_frame(0, {{":status", "200"}, {"x-big", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v')}}),
+        true);
+    EXPECT_TRUE(pair.client_owner.responses.empty()) << "a malformed response must never reach the owner";
+    EXPECT_FALSE(pair.client_owner.close.has_value()) << "the client's connection must survive a malformed response";
+    ASSERT_EQ(pair.client_owner.resets.size(), 1u);
+    EXPECT_EQ(pair.client_owner.resets.front().first, 0u);
+    EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    pair.client.close_stream(0, NGHTTP3_H3_MESSAGE_ERROR);
+    EXPECT_EQ(pair.client.stream_state_count(), states);
+
+    // A second exchange on the SAME client connection, answered by the real server side.
+    qb::http::Request second{qb::http::method::GET, qb::io::uri("https://example.test/second")};
+    ASSERT_TRUE(pair.client.submit_request(4, second));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 2u);
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = "second";
+    ASSERT_TRUE(pair.server.submit_response(4, response));
+    pair.settle();
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u) << "the client's connection no longer serves";
+    EXPECT_EQ(pair.client_owner.responses.front().status(), qb::http::status::OK);
+    EXPECT_EQ(pair.client_owner.responses.front().body().template as<std::string>(), "second");
+    EXPECT_FALSE(pair.client_owner.close.has_value());
+}
+
+/**
+ * @test A malformation nghttp3 itself rejects closes the connection with H3_MESSAGE_ERROR on the wire
+ * @brief The other tier. A body shorter than its content-length (nghttp3_http_on_remote_end_stream) and a
+ *        regular field ahead of the pseudo-headers (nghttp3_http_on_header) never reach this adapter's
+ *        callbacks: nghttp3_conn_read_stream2 returns NGHTTP3_ERR_MALFORMED_HTTP_MESSAGING / _HEADER,
+ *        by contract a connection error. The close the owner receives carries the H3 error code nghttp3
+ *        infers, H3_MESSAGE_ERROR -- the raw library codes (107, 105) used to be sent as the application
+ *        error code -- and the request was never delivered. (A field name over 256 bytes is a third
+ *        case of this tier, refused by nghttp3's QPACK decoder before any HTTP rule.)
+ */
+TEST(Http3ConnectionDirect, AMalformationNghttp3RejectsClosesTheConnectionWithMessageError) {
+    {
+        Pair pair;
+        auto fields           = request_fields();
+        fields.front().second = "POST";
+        fields.emplace_back("content-length", "5");
+        pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+        EXPECT_FALSE(pair.server.read_stream(0, h3_data_frame("abc"), true)) << "the read reports the connection error";
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        ASSERT_TRUE(pair.server_owner.close.has_value()) << "nghttp3's own rejection is a connection error by contract";
+        EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "the inferred H3 code, not 107";
+        EXPECT_EQ(pair.server_owner.close->second, "HTTP/3 protocol read error");
+    }
+    {
+        Pair pair;
+        auto fields = request_fields();
+        fields.insert(fields.begin(), {"x-first", "1"}); // a regular field ahead of the pseudo-headers
+        EXPECT_FALSE(pair.server.read_stream(0, h3_headers_frame(0, fields), true));
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        ASSERT_TRUE(pair.server_owner.close.has_value());
+        EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "the inferred H3 code, not 105";
+    }
 }
 
 // =============================================================================

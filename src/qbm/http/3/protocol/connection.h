@@ -580,8 +580,9 @@ private:
         /// Set once a body buffer has been handed to nghttp3; @c tx_body must
         /// never be reassigned afterwards (see @c read_data_cb).
         bool body_submitted = false;
-        /// Set when this side refused the stream (a body over the owner's limit): it has been
-        /// reset, what still arrives on it is dropped, and the message is never handed to the owner.
+        /// Set when this side refused the stream (a body over the owner's limit, a malformed
+        /// message): it has been reset, what still arrives on it is dropped, and the message is
+        /// never handed to the owner.
         bool refused = false;
     };
 
@@ -662,6 +663,39 @@ private:
             ptr = std::make_unique<stream_state>();
         }
         return *ptr;
+    }
+
+    /**
+     * @brief Refuse ONE stream for a malformed message: reset it with `H3_MESSAGE_ERROR`, drop
+     *        what the peer still has in flight on it, never hand the message to the owner.
+     * @details RFC 9114 section 4.1.2 makes a malformed request or response a STREAM error. Two
+     *          validators see every message. nghttp3's own runs first, inside
+     *          `nghttp3_conn_read_stream2` -- pseudo-header order, presence and uniqueness,
+     *          field-name syntax, the connection-specific fields, content-length arithmetic,
+     *          `:status` -- and what it rejects comes back as a negative read: by the library's
+     *          contract a CONNECTION error, after which only `nghttp3_conn_del` is legal, so
+     *          `read_stream()` closes with the H3 code nghttp3 infers. This adapter's validator runs
+     *          in the callbacks nghttp3 fires for what it accepted -- the field count, the
+     *          field-value length limit (a name is capped at 256 bytes by nghttp3's QPACK decoder
+     *          first), the request method, the trailer section's own rules -- and
+     *          every one of those sites used to fail its callback, which fails the read exactly the
+     *          same way: every exchange multiplexed on the connection went down with the malformed
+     *          one, and behind a gateway that multiplexes several users onto one upstream
+     *          connection, one user's malformed request failed the others' (Huly QB-234; the
+     *          body-over-limit site moved first, QB-233). They refuse the stream: the peer sees a
+     *          reset (a client's 502) and the connection keeps serving. The body held so far is
+     *          released here; the rest of the state goes with the stream when the transport
+     *          reports it closed.
+     */
+    void
+    refuse_stream(std::uint64_t stream_id, stream_state &st) {
+        st.refused = true;
+        if (_role == role::server) {
+            st.request.body().clear();
+        } else {
+            st.response.body().clear();
+        }
+        _owner.reset_http3_stream(_connection_id, stream_id, NGHTTP3_H3_MESSAGE_ERROR);
     }
 
     [[nodiscard]] static connection *
@@ -803,12 +837,17 @@ private:
     recv_header_cb(nghttp3_conn *, int64_t stream_id, int32_t, nghttp3_rcbuf *name, nghttp3_rcbuf *value, uint8_t, void *conn_user_data,
                    void *) {
         return guard_callback([&]() -> int {
-            auto &st           = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-            auto  header_name  = detail::rcbuf_to_string(name);
-            auto  header_value = detail::rcbuf_to_string(value);
+            auto *me = self(conn_user_data);
+            auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (st.refused) {
+                return 0; // the rest of a refused message is dropped
+            }
+            auto header_name  = detail::rcbuf_to_string(name);
+            auto header_value = detail::rcbuf_to_string(value);
             if (++st.incoming_header_fields > qb::http::protocol_limits::MAX_HEADERS_COUNT
                 || !detail::is_valid_incoming_header_field(header_name, header_value)) {
-                return NGHTTP3_ERR_CALLBACK_FAILURE;
+                me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // too many fields, or a malformed one: this stream
+                return 0;
             }
             st.incoming_headers.add(std::move(header_name), std::move(header_value));
             return 0;
@@ -820,9 +859,12 @@ private:
         return guard_callback([&]() -> int {
             auto *me = self(conn_user_data);
             auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (st.refused) {
+                return 0;
+            }
             if (!me->materialize_headers(static_cast<std::uint64_t>(stream_id), st)) {
-                me->_owner.close_http3_connection(me->_connection_id, NGHTTP3_H3_MESSAGE_ERROR, "Malformed HTTP/3 headers");
-                return NGHTTP3_ERR_CALLBACK_FAILURE;
+                me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed headers: this stream, not the connection
+                return 0;
             }
             st.main_headers_seen = true;
             return 0;
@@ -844,9 +886,12 @@ private:
         return guard_callback([&]() -> int {
             auto *me = self(conn_user_data);
             auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (st.refused) {
+                return 0;
+            }
             if (!me->materialize_trailers(st)) {
-                me->_owner.close_http3_connection(me->_connection_id, NGHTTP3_H3_MESSAGE_ERROR, "Malformed HTTP/3 trailers");
-                return NGHTTP3_ERR_CALLBACK_FAILURE;
+                me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed trailers: this stream, not the connection
+                return 0;
             }
             return 0;
         });
@@ -862,8 +907,8 @@ private:
                 return 0; // a refused message is never handed to the owner
             }
             if (!me->content_length_matches(st)) {
-                me->_owner.close_http3_connection(me->_connection_id, NGHTTP3_H3_MESSAGE_ERROR, "HTTP/3 content-length mismatch");
-                return NGHTTP3_ERR_CALLBACK_FAILURE;
+                me->refuse_stream(id, st); // the body does not match content-length: this stream, not the connection
+                return 0;
             }
             if (me->_role == role::server) {
                 st.request.stream_id = id;
@@ -1180,7 +1225,13 @@ public:
         if (!*alive)
             return false; // connection destroyed mid-read; _conn and *this are gone
         if (rv < 0) {
-            _owner.close_http3_connection(_connection_id, static_cast<std::uint64_t>(-rv), "HTTP/3 protocol read error");
+            // The library's contract: a negative read is a CONNECTION error and nothing but
+            // nghttp3_conn_del may follow. What goes on the wire is the H3 error code nghttp3
+            // infers from it -- H3_MESSAGE_ERROR for a malformation its own validator found,
+            // H3_FRAME_ERROR, the QPACK codes... -- where the raw library code (105, 107) used to
+            // be sent as the application error code (Huly QB-234).
+            _owner.close_http3_connection(_connection_id, nghttp3_err_infer_quic_app_error_code(static_cast<int>(rv)),
+                                          "HTTP/3 protocol read error");
             return false;
         }
         _owner.extend_http3_stream_credit(_connection_id, stream_id, static_cast<std::uint64_t>(rv));
@@ -1422,7 +1473,8 @@ public:
             int        fin       = 0;
             const auto nvec      = nghttp3_conn_writev_stream(_conn, &stream_id, &fin, vec, 16);
             if (nvec < 0) {
-                _owner.close_http3_connection(_connection_id, static_cast<std::uint64_t>(-nvec), "HTTP/3 protocol write error");
+                _owner.close_http3_connection(_connection_id, nghttp3_err_infer_quic_app_error_code(static_cast<int>(nvec)),
+                                              "HTTP/3 protocol write error"); // the inferred H3 code, as read_stream()
                 return;
             }
             if (stream_id == -1) {
