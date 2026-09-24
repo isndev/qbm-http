@@ -1,4 +1,4 @@
-<!-- Verified-against: qbm-http @ qb 3.2.0 (C++20 default, C++23 supported) -->
+<!-- Verified-against: qbm-http @ qb 3.2.1 (C++20 default, C++23 supported) -->
 # Security policy
 
 qbm-http is a module of the qb actor framework. Vulnerability reporting and disclosure follow the
