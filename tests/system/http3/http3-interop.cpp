@@ -78,7 +78,14 @@ bool
 curl_command_has_http3(std::string const &curl_cmd) {
     const auto        tmp = std::filesystem::temp_directory_path() / "qb-curl-h3-probe.txt";
     const std::string cmd = curl_cmd + " --version > \"" + tmp.string() + "\" 2>&1";
-    std::system(cmd.c_str()); // rc is unreliable across shells; inspect the output instead
+    // The exit status does not decide -- shells disagree on what they return for a command that
+    // ran, so the output is inspected instead. -1 is the one status that does decide: the shell
+    // itself could not be started and there is no output to read. Reading it is also what glibc
+    // asks for: under _FORTIFY_SOURCE (on by default in Ubuntu's gcc) system() is
+    // warn_unused_result, and the discarded call failed the -Werror build of the x64 runners.
+    if (std::system(cmd.c_str()) == -1) {
+        return false;
+    }
     std::string content;
     {
         std::ifstream in(tmp);
