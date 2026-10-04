@@ -319,11 +319,10 @@ struct Http2ClientStream : public Http2StreamBase {
  */
 struct Http2ServerStream : public Http2StreamBase {
     // Application-specific members for server side
-    qb::http::Request assembled_request;           ///< Request being assembled
-    bool              request_dispatched  = false; ///< Request has been dispatched
-    bool              response_sent       = false; ///< Tracks if initial HEADERS frame for response was sent
-    bool        server_will_send_trailers = false; ///< Server intends to send trailers - REVIEW if needed, might be covered by is_trailers
-    std::string method;                            ///< HTTP method from request
+    qb::http::Request assembled_request;          ///< Request being assembled
+    bool              request_dispatched = false; ///< Request has been dispatched
+    bool              response_sent      = false; ///< Tracks if initial HEADERS frame for response was sent
+    std::string       method;                     ///< HTTP method from request
 
     // Response sending state for the current response_to_send
     size_t                         send_buffer_offset = 0;        ///< Current offset in response_to_send.body().raw()

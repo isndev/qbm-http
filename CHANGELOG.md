@@ -7,7 +7,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-Nothing yet. Entries land here as they are merged, and move under a version heading when that version is tagged.
+### Removed
+
+- **`Http2ServerStream::server_will_send_trailers` (Huly QB-102)** -- a member declared "REVIEW if needed" and
+  read nowhere. `ServerHttp2Protocol::send_push_promise` stays: it is a documented, tested public API (push is
+  disabled by default, and our client advertises `SETTINGS_ENABLE_PUSH = 0`).
+
+### Documentation
+
+- **`content_encoding()` says what it does (Huly QB-100).** The API sheet said "no q-value weighting" and
+  `headers.h` said q-values were not parsed: q=0 or a malformed q refuses a coding, and among the acceptable
+  codings the FIRST in the header's order wins, not the highest q -- `CompressionMiddleware` ranks by q itself.
 
 ## [3.2.1] - 2026-09-24
 

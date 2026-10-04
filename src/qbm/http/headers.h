@@ -121,8 +121,8 @@ inline constexpr std::string_view default_user_agent = "qb/" QB_VERSION;
  * @brief Selects a suitable `Content-Encoding` for a response based on the client's `Accept-Encoding` header.
  *
  * Compares the client's accepted encodings with the server's supported compression algorithms
- * (if `QB_HAS_COMPRESSION` is defined) and selects the best match. The selection logic typically respects
- * the client's preference order but does not currently parse q-values for complex weighting.
+ * (if `QB_HAS_COMPRESSION` is defined). q=0 or a malformed q excludes a coding; among the acceptable
+ * ones the FIRST in the header's order wins, not the highest q (`CompressionMiddleware` ranks by q).
  *
  * @param accept_encoding_header The `Accept-Encoding` header value received from the client.
  * @return The name of the selected encoding (e.g., `"gzip"`, `"deflate"`), or an empty string

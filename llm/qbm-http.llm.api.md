@@ -71,7 +71,7 @@ Parses Content-Type into MIME type + charset; defaults to `application/octet-str
 
 ### Header free functions
 - `parse_header_attributes(const char*, size_t)` (+ string/string_view overloads) — `headers.h:67` — parse `name=value; n2="q v"` params. Throws `std::runtime_error` on malformed/oversized/unterminated input. Bounds: `ATTRIBUTE_NAME_MAX=1024`, `ATTRIBUTE_VALUE_MAX=8192` (`headers.h:37`).
-- `std::string accept_encoding();` / `std::string content_encoding(std::string_view accept_encoding_header);` — `headers.h:97` — build `Accept-Encoding` from server capability; pick a `Content-Encoding` (no q-value weighting). Empty when compression disabled.
+- `std::string accept_encoding();` / `std::string content_encoding(std::string_view accept_encoding_header);` — `headers.h:97` — build `Accept-Encoding` from server capability; pick a `Content-Encoding`: q=0 or a malformed q refuses a coding, and the first acceptable coding in the header's order wins -- not the highest q (`CompressionMiddleware::select_best_encoding` ranks by q). Empty when compression disabled.
 
 ### `qb::http::Body` — `body.h:57`
 `class Body { template<typename...A> Body(A&&...); template<typename...A> Body& operator<<(A&&...); template<typename T> Body& operator=(...); template<typename T> T as() const; template<typename T> [[nodiscard]] std::optional<T> try_as() const noexcept; Body& add_chunk(const Chunk&); Body& add_final_chunk(); pipe<char>& raw(); std::size_t size() const; bool empty() const; void clear() noexcept; }`

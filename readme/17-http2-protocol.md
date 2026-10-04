@@ -213,7 +213,7 @@ Connection and stream lifetimes are governed by four `qb::duration` constants in
 <!-- src: qbm/http/src/qbm/http/2/http2.h:60-70 -->
 
 These are real `qb::duration` values (`std::chrono::seconds`) — the protocol layer takes `qb::duration` throughout (`cleanup_idle_streams`, `StreamManager::CleanupCriteria`).
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1356-1357; qbm/http/src/qbm/http/2/protocol/stream.h:462-468 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1356-1357; qbm/http/src/qbm/http/2/protocol/stream.h:461-467 -->
 
 The cleanup mechanism has two parts, both run from the session's `pending_write` handler:
 
@@ -337,7 +337,7 @@ You rarely touch these directly, but they are the public types behind the conven
 | `qb::protocol::http2::ErrorCode` | `src/qbm/http/2/protocol/frames.h` | RFC error codes (`NO_ERROR`, `PROTOCOL_ERROR`, `REFUSED_STREAM`, `CANCEL`, `ENHANCE_YOUR_CALM`, …). |
 | Events: `Http2StreamErrorEvent`, `Http2GoAwayEvent`, `Http2ConnectionErrorEvent`, `Http2PushPromiseEvent` | `src/qbm/http/2/protocol/stream.h` | Surfaced to the session/client via `on(...)` handlers. |
 
-<!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:46-55,64,117,281,320,371,391,411,431,455; qbm/http/src/qbm/http/2/protocol/frames.h:65-81 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:46-55,64,117,281,320,370,390,410,430,454; qbm/http/src/qbm/http/2/protocol/frames.h:65-81 -->
 
 The protocol enforces RFC 9113 validation you get for free: header names must be lowercase tokens with no NUL/CR/LF; requests require non-empty `:method`/`:scheme`/`:path` and `:authority` pseudo-headers ahead of regular headers; trailers may not carry pseudo-headers or hop-by-hop headers. A request body over `qb::http::protocol_limits::MAX_BODY_SIZE` is reset with `RST_STREAM(ENHANCE_YOUR_CALM)`, and an assembled header block over `qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE` (1 MB) closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`.
 <!-- src: qbm/http/src/qbm/http/2/protocol/server.h:46-58,140-147,338-341,497-499,1539,1659; qbm/http/src/qbm/http/2/protocol/base.h:85,88 -->
