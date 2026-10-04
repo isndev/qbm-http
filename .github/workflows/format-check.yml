@@ -1,0 +1,117 @@
+# clang-format over the WHOLE tree of this repository (Huly QB-10).
+#
+# Until 2026-10-04 only isndev/qb had a format-check lane. The three qbm modules and qb-examples had
+# none -- the superproject's local gate (`dev/agent/check-format.sh`, a `verify.sh` leg) and its
+# pre-push hook covered them, which is why qb-examples had been able to accumulate 74 non-conformant
+# files unremarked before that gate existed, and why a pull request opened against this repository
+# directly was checked by nothing. This lane asks the question qb's own format-check.yml asks, with
+# the same three things held identical so the two can never disagree:
+#
+#   * the pinned formatter -- LLVM_VERSION below, the pin of isndev/qb's format-check.yml and of
+#     check-format.sh (which refuses to run when the two disagree);
+#   * the file set -- the same extension list, and the same exclusion regex, byte for byte: it drops
+#     UPSTREAM-DERIVED trees (`src/qbm/<mod>/vendor/` holds qbm-http's vendored llhttp, whose header
+#     promises the parser is upstream's; formatting it would falsify that and destroy the ability to
+#     diff against upstream) -- the other alternatives are a measured no-op here, kept so the regex
+#     stays one string everywhere;
+#   * the style -- this repository's `.clang-format`, byte-identical to the five others (asserted by
+#     check-format.sh).
+#
+# WHOLE TREE, WITH A FLOOR. Every file in scope is checked, and the run refuses to pass over fewer
+# files than SCOPE_FLOOR (this repository's line in the superproject's
+# `dev/agent/format-backlog.baseline`): a moved directory or a broken glob would otherwise read as a
+# clean census of nothing. A missing formatter fails every file rather than skipping.
+#
+# The installer is isndev/qb's own (`scripts/ci-install-linux-dependencies.sh --profile
+# format-check`, apt.llvm.org with lock-timeout retries), read from the branch of the same name --
+# the pairing tests.yml resolves the same way -- through a sparse checkout of `scripts/` only.
+name: format-check
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: format-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LLVM_VERSION: "22"
+      SCOPE_FLOOR: "220"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # github.base_ref for a PR, github.ref_name otherwise -- never github.head_ref, which a fork
+      # controls. Proven to exist rather than discovered at checkout time.
+      - name: Resolve which isndev/qb provides the installer
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_REF}" ]; then ref="${BASE_REF}"; else ref="${REF_NAME}"; fi
+          if ! git ls-remote --exit-code --heads --tags https://github.com/isndev/qb "${ref}" >/dev/null; then
+            echo "::error::isndev/qb has no branch or tag '${ref}' (qb and this repository carry the same two branch names, main and develop)"
+            exit 1
+          fi
+          echo "QB_REF=${ref}" >> "${GITHUB_ENV}"
+
+      - name: Check out the installer of isndev/qb
+        uses: actions/checkout@v6
+        with:
+          repository: isndev/qb
+          ref: ${{ env.QB_REF }}
+          path: .qb-tools
+          sparse-checkout: scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Install LLVM tools
+        run: |
+          ./.qb-tools/scripts/ci-install-linux-dependencies.sh --profile format-check
+          "clang-format-${LLVM_VERSION}" --version
+
+      - name: Collect the C++ files in scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files -- \
+              '*.h' '*.hh' '*.hpp' '*.hxx' \
+              '*.c' '*.cc' '*.cpp' '*.cxx' \
+              '*.ipp' '*.tpp' |
+            grep -Ev '^(build|modules|not-qb|src/qb/ev|src/qb/vendor|src/qbm/[a-z0-9_]+/vendor)/' > "${RUNNER_TEMP}/format-scope.txt" || true
+          n="$(grep -c . "${RUNNER_TEMP}/format-scope.txt" || true)"
+          echo "files in scope: ${n} (floor ${SCOPE_FLOOR})"
+          if [ "${n}" -lt "${SCOPE_FLOOR}" ]; then
+            echo "::error::only ${n} C++ files in the format-check scope, under the floor of ${SCOPE_FLOOR} -- a broken glob or a moved tree would otherwise pass as a clean census of nothing"
+            exit 1
+          fi
+
+      - name: Check formatting (whole tree)
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > "${RUNNER_TEMP}/format-offenders.txt"
+          xargs -P "$(nproc)" -I{} sh -c \
+            '"clang-format-$0" --dry-run --Werror "$1" >/dev/null 2>&1 || printf "%s\n" "$1"' \
+            "${LLVM_VERSION}" {} < "${RUNNER_TEMP}/format-scope.txt" > "${RUNNER_TEMP}/format-offenders.txt"
+          bad="$(grep -c . "${RUNNER_TEMP}/format-offenders.txt" || true)"
+          if [ "${bad}" -ne 0 ]; then
+            echo "::error::${bad} file(s) are not clang-format-${LLVM_VERSION} clean:"
+            sort "${RUNNER_TEMP}/format-offenders.txt" | while IFS= read -r f; do
+              echo "  ${f}"
+              "clang-format-${LLVM_VERSION}" --dry-run --Werror "${f}" 2>&1 | head -20 || true
+            done
+            exit 1
+          fi
+          echo "all $(grep -c . "${RUNNER_TEMP}/format-scope.txt") files in scope are clang-format-${LLVM_VERSION} clean"
