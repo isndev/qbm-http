@@ -400,17 +400,15 @@ Client::start_connection() {
     arm_request_timeout();
 
     // This object is the io of every connection it makes (the HTTP/1.1 client builds a new
-    // connection object each time; the pgsql client resets in prepare_reconnect()): what the
-    // previous transport left unflushed in `out()` -- a request pushed and disconnected in the
-    // same tick, the tail of a frame -- or unparsed in `in()` would otherwise be the first bytes
-    // of the next connection, ahead of the h2 preface, and a protocol error at the server's end
-    // (measured: the server closed the second connection with reason -1). Likewise the handshake
-    // and h2 protocol instances of the previous connections, dead weight the base keeps until
-    // told. Safe here: a connect() while a transport closes waits for its disconnected, so this
-    // never runs inside a protocol's handler nor with a watcher still armed.
-    this->in().reset();
-    this->out().reset();
-    this->clear_protocols();
+    // connection object each time): what the previous transport left unflushed in `out()` -- a
+    // request pushed and disconnected in the same tick, the tail of a frame -- or unparsed in
+    // `in()` would otherwise be the first bytes of the next connection, ahead of the h2 preface,
+    // and a protocol error at the server's end (measured: the server closed the second connection
+    // with reason -1). Likewise the handshake and h2 protocol instances of the previous
+    // connections: qb-io's reset_for_reconnect() clears both (Huly QB-202). Safe here: a connect()
+    // while a transport closes waits for its disconnected, so this never runs inside a protocol's
+    // handler nor with a watcher still armed.
+    this->reset_for_reconnect();
 
     // Switch to handshake protocol first
     this->template switch_protocol<HandshakeProtocol>(*this);
