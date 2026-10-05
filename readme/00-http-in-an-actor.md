@@ -75,7 +75,7 @@ Three lines carry more than they look like they do:
   method bound *without* starting, so a missing `start()` left the socket bound, the actor active, and nothing ever
   accepted — a silent failure that cost a debugging session every time it was met. Calling `start()` yourself
   afterwards is still harmless if you have code that does.
-  <!-- src: qbm/http/src/qbm/http/1.1/http.h:601-607 (bind then start), :618-636 (the bind-only opt-out) -->
+  <!-- src: qbm/http/src/qbm/http/1.1/http.h:604-610 (bind then start), :621-639 (the bind-only opt-out) -->
 - **`addActor<…>(0)` picks the core.** The accept watcher, every session it creates, the router, and every coroutine a
   handler spawns all live on that one `VirtualCore` thread. That is the whole concurrency model of the module, and the
   next section is what follows from it.
@@ -289,7 +289,7 @@ default is `qb::duration::zero()`, which means *no timeout at all*:
 auto reply = co_await qb::http::GET(qb::http::Request{{"http://upstream/health"}},
                                     std::chrono::seconds(2));
 ```
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1034-1038 (REQUEST: qb::duration timeout = zero), :1041-1044 (GET) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1037-1041 (REQUEST: qb::duration timeout = zero), :1044-1047 (GET) -->
 
 Pass one. A route handler that `co_await`s an upstream with the default zero holds its `Context` — and the connection
 behind it — open for as long as the upstream is willing to be slow.

@@ -986,12 +986,12 @@ Usage: `auto c = qb::http1::make_client("https://h"); co_await c->connect(); aut
 `namespace constants`: `DEFAULT_SESSION_TIMEOUT = std::chrono::seconds(60)` (qb::duration), `DEFAULT_MAX_CONCURRENT_STREAMS = 50`, `STREAM_IDLE_TIMEOUT = std::chrono::seconds(30)`, `STREAM_INCOMPLETE_TIMEOUT = std::chrono::seconds(10)`, `CLEANUP_INTERVAL = std::chrono::seconds(5)` (all `qb::duration`).
 
 ### Server
-- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:577`).
-- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` — `Router& router()` (`http2.h:601`).
-- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:641`).
-- `internal::server::listen(qb::io::uri, std::filesystem::path cert, std::filesystem::path key) -> bool` — ALPN `{h2, http/1.1}`; binds **and** starts accepting, like the qb-io acceptor it derives from (`http2.h:520`). `listen_no_start(...)` is the bind-only opt-out (`http2.h:537`).
+- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:583`).
+- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` — `Router& router()` (`http2.h:607`).
+- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:647`).
+- `internal::server::listen(qb::io::uri, std::filesystem::path cert, std::filesystem::path key) -> bool` — ALPN `{h2, http/1.1}`; binds **and** starts accepting, like the qb-io acceptor it derives from (`http2.h:526`). `listen_no_start(...)` is the bind-only opt-out (`http2.h:543`).
 - `internal::session`: `[[nodiscard]] bool reset_stream(uint32_t stream_id, ErrorCode=CANCEL, const std::string& reason={})`; `auto& operator<<(qb::http::Response&)` (validates stream_id>0 + status 100..599); `Router& router()`.
-- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:553-563`).
+- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:559-569`).
 Usage: `auto s = qb::http2::make_server(); s->router().get("/", h); s->router().compile(); s->listen(uri,"cert.pem","key.pem");`
 
 ### `qb::http2::Client` (alias `client`) — `src/qbm/http/2/client.h:163`

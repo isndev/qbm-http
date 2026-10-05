@@ -277,7 +277,7 @@ private:
      * server resources indefinitely.
      */
     void
-    on([[maybe_unused]] qb::io::async::event::timeout const &) {
+    on([[maybe_unused]] qb::io::async::event::timeout const &) { // handler-access: with_timeout (a friend) calls it
         LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 session timed out.");
 
         // disconnect session on timeout
@@ -531,6 +531,9 @@ class server
     , public io_handler<Derived, Session> {
     friend qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>;
     friend io_handler<Derived, Session>;
+    // The acceptor finds on(disconnected) through qb::has_own_on, which sees a private handler
+    // only through this friend -- befriending the acceptor is not enough (Huly QB-252).
+    friend struct has_method_on<server, void, qb::io::async::event::disconnected>;
     using acceptor_type = qb::io::async::tcp::acceptor<server<Derived, Session, Transport>, Transport>;
 
     /**

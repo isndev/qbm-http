@@ -7,6 +7,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
+### Fixed
+
+- **A server's listening socket going down now reaches the server, and stops the watcher (Huly QB-252).** The
+  acceptor routes `event::disconnected` to the HTTP/1.1 and HTTP/2 servers through `qb::has_own_on`, which could
+  not see their private handlers, so it threw "Acceptor has been disconnected" instead; the event loop contained
+  the exception, and the throw had left `dispose()` before it stopped the watcher -- the listening socket stayed
+  armed on a disposed acceptor, a client then waiting in the backlog made every loop pass dispatch it, and the
+  derived server never heard that it had stopped accepting. Both servers now befriend the detector; the HTTP/2
+  server forwards `qb::http::event::disconnected` to the derived server and logs, as the HTTP/1.1 one does (its
+  handler used to be empty).
+
 ### Removed
 
 - **`Http2ServerStream::server_will_send_trailers` (Huly QB-102)** -- a member declared "REVIEW if needed" and

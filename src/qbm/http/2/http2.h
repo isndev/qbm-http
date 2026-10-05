@@ -459,6 +459,9 @@ class server
     , public io_handler<Derived, Session> {
     friend qb::io::async::tcp::acceptor<server<Derived, Session>, qb::io::transport::saccept>;
     friend io_handler<Derived, Session>;
+    // The acceptor finds on(disconnected) through qb::has_own_on, which sees a private handler
+    // only through this friend -- befriending the acceptor is not enough (Huly QB-252).
+    friend struct has_method_on<server, void, qb::io::async::event::disconnected>;
     using acceptor_type = qb::io::async::tcp::acceptor<server<Derived, Session>, qb::io::transport::saccept>;
 
     /**
@@ -473,14 +476,17 @@ class server
     /**
      * @brief Handle acceptor disconnection
      * @param event Disconnection event
+     *
+     * The listening socket is gone: no further connection will be accepted. Forwarded to the
+     * derived server as `qb::http::event::disconnected` when it handles one -- as the HTTP/1.1
+     * server does -- and always logged.
      */
     void
     on(qb::io::async::event::disconnected &&event) {
-        (void) event;
-        // Acceptor disconnected
-        // if constexpr(has_method_on<Derived, void, qb::http::event::disconnected>::value) {
-        //     this->on({event.reason});
-        // }
+        if constexpr (qb::has_on<Derived, qb::http::event::disconnected>) {
+            static_cast<Derived &>(*this).on(qb::http::event::disconnected{event.reason});
+        }
+        LOG_HTTP_WARN("HTTP/2 server disconnected. Reason: " << event.reason);
     }
 
 public:
