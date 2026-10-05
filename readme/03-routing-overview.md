@@ -55,7 +55,7 @@ A path pattern is split into `/`-delimited segments. Each segment is one of thre
 
 Capture names must be unique within a single pattern. A `:` or `*` with no name, an empty segment, a misplaced wildcard, or two conflicting captures at the same tree level all throw `std::invalid_argument` — raised from `add_route`, which surfaces during `compile()`.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:293-392 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:294-392 -->
 
 ### Match precedence and path handling
 

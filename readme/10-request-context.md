@@ -321,7 +321,7 @@ When a route is not matched, or a task returns `ERROR`, the same machinery runs 
 
 These read-only queries exist mainly for instrumentation, coroutine adapters, and tests — the normal request path never needs them: `is_completed()`, `state()`, `get_processing_phase()`, `last_task_result()`, and `completion_count()` (how many times `complete()` has been called). `defer_finalization_scope()` returns an RAII guard that holds back finalization until it leaves scope; it is the mechanism behind synchronous post-`next()` mutation in functional middleware, and you should not need it directly.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1221-1296, 385 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1222-1296, 385 -->
 
 ## Pitfalls
 

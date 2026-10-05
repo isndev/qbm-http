@@ -334,7 +334,7 @@ namespace qb::http2 {
 
 The coroutine form connects lazily — `push_request` establishes the connection on first use, so you can `co_await` without calling `connect()` first:
 
-<!-- src: qbm/http/tests/system/http2/http2-client-coro.cpp:211-216 -->
+<!-- src: qbm/http/tests/system/http2/http2-client-coro.cpp:212-216 -->
 ```cpp
 auto response = qb::http::run_sync([]() -> qb::io::async::task<qb::http::Response> {
     auto client = qb::http2::make_client("https://api.example.com");

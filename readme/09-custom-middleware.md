@@ -171,7 +171,7 @@ router.use([this](std::shared_ptr<qb::http::Context<Session>> ctx)
 
 The coroutine signature is `task<void>(ctx)` — there is **no `next` parameter**. The framework drives chaining itself when the coroutine finishes:
 
-<!-- src: qbm/http/src/qbm/http/routing/coro_task.h:113-185 -->
+<!-- src: qbm/http/src/qbm/http/routing/coro_task.h:114-185 -->
 
 - On **normal return** (`co_return` without having called `complete()`/`cancel()`), the wrapper completes the context with `AsyncTaskResult::CONTINUE`. To short-circuit, set the response and call `ctx->complete(AsyncTaskResult::COMPLETE)` before `co_return`.
 - If your body **already called** `ctx->complete(...)` or `ctx->cancel()`, the wrapper does **not** override it — the outcome you chose wins. (The wrapper compares `completion_count()` before and after to detect this.)

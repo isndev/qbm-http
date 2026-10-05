@@ -29,6 +29,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **`content_encoding()` says what it does (Huly QB-100).** The API sheet said "no q-value weighting" and
   `headers.h` said q-values were not parsed: q=0 or a malformed q refuses a coding, and among the acceptable
   codings the FIRST in the header's order wins, not the highest q -- `CompressionMiddleware` ranks by q itself.
+- **Six `readme/` citations re-derived (Huly QB-254).** Each range started on the blank line above the block it
+  meant (`03-routing-overview`, `09-custom-middleware`, `10-request-context`, `11-authentication` twice,
+  `14-async-http-client`); found by the strengthened `scripts/cite-check.py`, which now reads a range's first line,
+  the `src:` form's blank targets, bare basenames, slash-joined lists and citations embedded in prose tokens.
 
 ## [3.2.1] - 2026-09-24
 

@@ -142,7 +142,7 @@ void           set_options(const Options &) noexcept;
 | `roles` | `user.roles` (JSON array) | always |
 | `metadata` | `user.metadata` (JSON object) | when non-empty |
 
-<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:99-135 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:100-135 -->
 
 ### Verifying a token
 
@@ -228,7 +228,7 @@ Four factories cover the common shapes — all `<Session>`-templated:
 | `role_auth_middleware<S>(roles, require_all = false, name)` | Pure role gate; assumes an upstream middleware already populated the user. |
 | `optional_auth_middleware<S>(options, name)` | Auth optional — proceeds when no credentials are sent, but still rejects an *invalid* token. |
 
-<!-- src: qbm/http/src/qbm/http/middleware/auth.h:371-462 -->
+<!-- src: qbm/http/src/qbm/http/middleware/auth.h:372-462 -->
 
 ```cpp
 #include <qbm/http/http.h>
