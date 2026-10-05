@@ -10,7 +10,7 @@
 
 `qb::http::Server<>` is a mixin, not a runtime. It brings an acceptor and a session table; the `qb::Actor` it is mixed into brings the thread, the mailbox and the lifecycle. An HTTP/1.1 server is therefore an actor that mixes in `qb::http::Server<>`, defines routes on `router()`, compiles the router, then calls `listen` + `start`.
 
-<!-- src: examples/06-modules/http/02-routing.cpp:32-65 -->
+<!-- src: examples/06-modules/http/02-routing.cpp:33-66 -->
 
 ```cpp
 #include <qb/main.h>
@@ -96,7 +96,7 @@ Return `qb::io::async::task<void>` from the *same* verb method and the router de
 router().get("/delay/:ms", [](auto ctx) -> qb::io::async::task<void> {
     const auto ms = ctx->template path_param_or<int>("ms", 100);
     co_await qb::io::async::sleep(std::chrono::milliseconds(ms));
-    ctx->json(qb::json{{"slept_ms", ms}});   // implicit complete() on co_return
+    ctx->json(qb::json{{"slept_ms", ms}});   // json() completes the response
     co_return;
 });
 ```
@@ -141,7 +141,7 @@ void on(RefreshCatalog const &) {
 
 The one-shot free functions (`GET`, `POST`, `REQUEST`, …) also have a callback form that heap-allocates a self-deleting session and delivers a `qb::http::async::Reply` (the original request plus the response), taking a `qb::duration` timeout:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:893-907 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:895-911 (REQUEST, GET), 689-692 (Reply), 866-880 (the self-deleting session) -->
 
 ```cpp
 qb::http::Request req{{"http://localhost:8080/users/42"}};
@@ -159,7 +159,7 @@ Both spellings share the same names: `GET`/`POST`/`REQUEST` have callback overlo
 
 **Outside an actor** — a `main()`, a test, a CLI, a setup step before `qb::Main::start()` — the thread is yours to block, and `qb::http::run_sync` is the right answer:
 
-<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:196-200 -->
+<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:204-209 -->
 
 ```cpp
 #include <qbm/http/http.h>
@@ -264,7 +264,7 @@ These gates are real `#ifdef` boundaries in the headers, so feature availability
 
 ### Feature and build matrix
 
-<!-- src: qbm/http/CMakeLists.txt:26-103, qbm/http/src/qbm/http/http.h:43-53 -->
+<!-- src: qbm/http/CMakeLists.txt:55-106, :176-178, qbm/http/src/qbm/http/http.h:43-53 -->
 
 | Capability | Header / namespace | Compile gate | Required dependency |
 |---|---|---|---|

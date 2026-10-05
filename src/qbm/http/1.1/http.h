@@ -888,7 +888,7 @@ _execute_async_request_internal(Request request, _Func &&func, qb::duration time
  * @tparam _Func Callable type for the response callback. Signature: void(qb::http::async::Reply&&)
  * @param request The HTTP request object.
  * @param func The callback function to handle the response.
- * @param timeout Optional timeout in seconds for the request.
+ * @param timeout Connect and inactivity timeout (a `qb::duration`); zero, the default, disables it.
  */
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply &&>, void>
@@ -1028,7 +1028,7 @@ _co_invoke(AsyncOp op, Request request, qb::duration timeout) {
  * The HTTP method must be pre-set on @p request.
  *
  * @param request  Fully-formed request (uri, method, headers, body).
- * @param timeout  Socket timeout in seconds; 0 means "no timeout".
+ * @param timeout  Connect and inactivity timeout (a `qb::duration`); zero means "no timeout".
  * @return An awaitable that yields `async::Reply` (original request + response).
  */
 [[nodiscard]] inline async::awaiter<async::Reply>

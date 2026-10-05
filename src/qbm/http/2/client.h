@@ -368,7 +368,7 @@ public:
 
     /**
      * @brief Set connection timeout
-     * @param timeout_seconds Timeout in seconds
+     * @param timeout Connect timeout (a `qb::duration`)
      */
     void
     set_connect_timeout(qb::duration timeout) {
@@ -391,7 +391,7 @@ public:
 
     /**
      * @brief Set request timeout
-     * @param timeout_seconds Timeout in seconds
+     * @param timeout Per-request timeout (a `qb::duration`)
      */
     void
     set_request_timeout(qb::duration timeout) {

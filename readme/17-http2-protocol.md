@@ -316,7 +316,7 @@ auto res = qb::http::run_sync(client->push_request(std::move(req)));
 ```
 
 The coroutine `connect()` overload has **no default-argument callback overload**: a fire-and-forget caller must write `connect(nullptr)` so the call stays unambiguous. Call `set_verify_peer(false)` (before connecting) only for trusted self-signed endpoints; certificate verification is on by default because h2 is TLS-only.
-<!-- src: qbm/http/src/qbm/http/2/client.h:267-272,294,334-335,357-358,367-371 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:272-275,299,103-110,345,384-386,215 -->
 
 ### Server push
 
