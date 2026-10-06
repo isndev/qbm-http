@@ -468,14 +468,19 @@ Body::compress(std::string const &encoding) {
     std::size_t               i_processed{}, o_processed{};
     bool                      done{};
 
-    while (!done && i_processed != body.size()) {
-        std::size_t alloc = (body.size() + 32);
-        out.allocate_back(alloc);
-        std::size_t i_tmp;
-        o_processed += compressor->compress(reinterpret_cast<uint8_t const *>(body.begin()) + i_processed, body.size() - i_processed,
-                                            reinterpret_cast<uint8_t *>(out.begin()) + o_processed, out.size() - o_processed,
-                                            qb::compression::is_last, i_tmp, done);
+    // Until the codec says the stream is DONE, not until it has taken the input: a codec may consume every byte and
+    // still hold output -- deflate's stored blocks and the gzip header outgrow `size + 32` on incompressible data, and
+    // a block codec buffers whole blocks. Stopping at "input consumed" shipped a truncated stream.
+    while (!done) {
+        out.allocate_back(body.size() + 32);
+        std::size_t       i_tmp    = 0;
+        const std::size_t produced = compressor->compress(reinterpret_cast<uint8_t const *>(body.begin()) + i_processed,
+                                                          body.size() - i_processed, reinterpret_cast<uint8_t *>(out.begin()) + o_processed,
+                                                          out.size() - o_processed, qb::compression::is_last, i_tmp, done);
+        o_processed += produced;
         i_processed += i_tmp;
+        if (!done && !produced && !i_tmp)
+            throw std::runtime_error("Body::compress: the " + encoding + " codec stopped making progress before the end of its stream");
     }
     out.free_back(out.size() - o_processed);
     _data = std::move(out);
@@ -546,19 +551,24 @@ Body::uncompress(const std::string &encoding) {
     std::size_t               i_processed{}, o_processed{};
     bool                      done{};
 
-    while (!done && i_processed != body.size()) {
-        std::size_t alloc = (body.size() * 2);
-        out.allocate_back(alloc);
-        std::size_t i_tmp;
-        o_processed += decompressor->decompress(reinterpret_cast<uint8_t const *>(body.begin()) + i_processed, body.size() - i_processed,
-                                                reinterpret_cast<uint8_t *>(out.begin()) + o_processed, out.size() - o_processed,
-                                                qb::compression::is_last, i_tmp, done);
+    // Until the codec says the stream is DONE: a decoder may consume every input byte and still hold output, and a body
+    // whose input runs out first is TRUNCATED -- an error, never the prefix decoded so far. The output grows
+    // geometrically: a highly compressible body expands far past a fixed step.
+    while (!done) {
+        out.allocate_back((std::max) (body.size() * 2, o_processed));
+        std::size_t       i_tmp    = 0;
+        const std::size_t produced = decompressor->decompress(reinterpret_cast<uint8_t const *>(body.begin()) + i_processed,
+                                                              body.size() - i_processed, reinterpret_cast<uint8_t *>(out.begin()) + o_processed,
+                                                              out.size() - o_processed, qb::compression::is_last, i_tmp, done);
+        o_processed += produced;
         i_processed += i_tmp;
         if (o_processed > qb::http::protocol_limits::MAX_BODY_SIZE) {
             throw std::length_error("Body::uncompress: decompressed size exceeds qb::http::protocol_limits::MAX_BODY_SIZE "
                                     "("
                                     + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE) + " bytes); possible zip-bomb.");
         }
+        if (!done && !produced && !i_tmp)
+            throw std::runtime_error("Body::uncompress: the " + encoding + " stream ends before its end marker (truncated or corrupt body)");
     }
     out.free_back(out.size() - o_processed);
     _data = std::move(out);

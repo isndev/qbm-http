@@ -159,7 +159,7 @@ Prefer `try_as<T>()` when parsing client-supplied bodies: a malformed payload yi
 
 ### `as<std::string_view>()` and `as<std::string>()`
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:693-709 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:703-719 -->
 ```cpp
 std::string_view sv  = body.as<std::string_view>();   // zero-copy view of the pipe
 std::string      str = body.as<std::string>();         // owning copy
@@ -169,7 +169,7 @@ std::string      str = body.as<std::string>();         // owning copy
 
 ### `as<qb::json>()`
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:717-721 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:727-731 -->
 ```cpp
 qb::json doc = body.as<qb::json>();   // qb::json::parse over the pipe view
 ```
@@ -199,7 +199,7 @@ if (auto doc = req.body().try_as<qb::json>()) {
 
 Parses `application/x-www-form-urlencoded` bytes into a [`Form`](#the-form-container). Keys and values are URI-decoded (so `%40` becomes `@`); a `+` in form data decodes to a space, consistent with the encoding used on assignment. A pair with no `=` is stored with an empty value; empty keys are dropped. The parser does not throw on odd input — it does its best and returns what it found.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:836-875 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:846-885 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -215,7 +215,7 @@ form.get_first("flag").value_or("");    // ""          (key present, empty value
 
 Parses `multipart/form-data` into a [`Multipart`](#the-multipart-container). This overload extracts the boundary from the **first line of the body itself** (it expects the body to begin with `--<boundary>\r\n`), not from the `Content-Type` header. It throws `std::runtime_error` if no boundary is found, the boundary is empty, or the underlying state machine reports an error.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:736-772 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:746-782 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -348,7 +348,7 @@ namespace qb::http {
 
 A default-constructed `Multipart` generates a random boundary (OpenSSL-backed secure random when `QB_HAS_SSL` is set, a UUID fallback otherwise — so multipart works in plain-HTTP builds too). Build parts, then assign to a body:
 
-<!-- src: qbm/http/tests/unit/message/body-codec.cpp:15-23 -->
+<!-- src: qbm/http/tests/unit/message/body-codec.cpp:16-24 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -414,12 +414,13 @@ std::size_t uncompress(const std::string &encoding);   // returns decompressed s
 #endif
 ```
 
-Both replace the body in place and return the new byte count. The `encoding` argument is a `Content-Encoding`-style token list; `"gzip"` and `"deflate"` are the built-in codecs. Behavior:
+Both replace the body in place and return the new byte count. The `encoding` argument is a `Content-Encoding`-style token list; `"gzip"` and `"deflate"` are the built-in codecs, and `"zstd"` / `"br"` join them in a build of qb with `QB_WITH_ZSTD` / `QB_WITH_BROTLI` (3.3, Huly QB-79). Behavior:
 
 - `compress` with an empty body or empty encoding is a no-op (returns the current size). `identity` / `chunked` tokens select no compressor; an unknown token throws `std::runtime_error`.
 - `uncompress` throws `std::runtime_error` for an unsupported encoding or when more than one compression algorithm is stacked. It also caps decompressed output at `qb::http::protocol_limits::MAX_BODY_SIZE` and throws `std::length_error` if exceeded — an explicit zip-bomb guard.
+- Both run until the codec reports the stream DONE, not until the input is consumed. Since 3.3 (Huly QB-464) a body whose compressed stream ends before its end marker -- cut in transit, or truncated by the sender -- makes `uncompress` throw `std::runtime_error` instead of returning the prefix it decoded, and `compress` no longer ships a stream cut short when the codec's output outgrows the input (a large incompressible body under gzip or deflate lost its last blocks).
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:456-568 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:456-578 -->
 ```cpp
 #include <qbm/http/http.h>
 

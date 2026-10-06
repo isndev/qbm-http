@@ -149,6 +149,29 @@ TEST(BodyUncompressMalformed, EveryMalformedCompressedBodyTerminates) {
 }
 
 /**
+ * @test A body cut short is an ERROR, never the prefix it decoded. Every truncation point of a valid gzip stream
+ *       fails `uncompress`; it used to return the bytes decoded so far with no word that the rest was missing, so a
+ *       truncated request or response body reached the application as a shorter, valid-looking one.
+ */
+TEST(BodyUncompressMalformed, EveryTruncatedStreamIsAnErrorNotAPrefix) {
+    const std::string plain(64u * 1024u, 'A');
+    const std::string valid    = gzip(plain);
+    int               accepted = 0;
+    for (std::size_t n = 1; n < valid.size() && accepted < 3; ++n) {
+        qb::http::Body body;
+        body.raw().put(valid.data(), n);
+        try {
+            body.uncompress("gzip");
+            ++accepted;
+            ADD_FAILURE() << "a gzip stream cut at " << n << " of " << valid.size() << " bytes was accepted as " << body.size() << " bytes";
+        } catch (const std::exception &) {
+            // the expected outcome: the stream ends before its end marker
+        }
+    }
+    EXPECT_EQ(accepted, 0);
+}
+
+/**
  * @test A genuine round-trip still works, so the corpus above is not passing on a no-op.
  */
 TEST(BodyUncompressMalformed, ValidGzipStillRoundTrips) {

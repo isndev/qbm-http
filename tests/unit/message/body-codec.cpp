@@ -1,3 +1,4 @@
+#include <random>
 #include <gtest/gtest.h>
 #include <qb/json.h>
 #include <qbm/http/http.h> // Should include body.h, multipart.h, etc.
@@ -364,6 +365,29 @@ TEST_F(BodyTest, MultipartConversionPreservesPartDataAcrossMultipleParserCallbac
 }
 
 #ifdef QB_HAS_COMPRESSION
+// Every registered codec, on the two bodies the compress / uncompress loops can get wrong: one larger than the
+// compressor's slack and incompressible (deflate's stored blocks and the gzip header outgrow `size + 32`; zstd and
+// brotli outgrow it too), and one so compressible that it expands far past the uncompress loop's step. Each loop
+// must run until the codec says the stream is DONE, not until it has consumed its input.
+TEST_F(BodyTest, LargeBodiesRoundTripThroughEveryRegisteredCodec) {
+    std::string  incompressible(1u << 20, '\0');
+    std::mt19937 rng(42);
+    for (auto &c : incompressible)
+        c = static_cast<char>(rng());
+    const std::string compressible(8u << 20, 'a');
+
+    for (const auto &factory : qb::compression::builtin::get_compress_factories()) {
+        const std::string        algorithm = factory->algorithm();
+        const std::string *const bodies[]  = {&incompressible, &compressible};
+        for (const std::string *original : bodies) {
+            body = *original;
+            body.compress(algorithm);
+            EXPECT_EQ(body.uncompress(algorithm), original->size()) << algorithm << ", " << original->size() << " bytes";
+            EXPECT_TRUE(body.as<std::string>() == *original) << algorithm << ", " << original->size() << " bytes: the round trip lost data";
+        }
+    }
+}
+
 TEST_F(BodyTest, CompressionAndDecompression) {
     std::string original_data = "This is some data to compress. Repeat: This is some data to compress.";
     body                      = original_data;

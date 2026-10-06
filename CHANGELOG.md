@@ -9,6 +9,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A large incompressible body survives compression, and a truncated one is refused (Huly QB-464).**
+  `Body::compress` and `Body::uncompress` stopped as soon as their INPUT was consumed, not when the codec said the
+  stream was done. A codec may take every byte and still hold output -- deflate's stored blocks and the gzip header
+  outgrow the `size + 32` window on incompressible data -- so a 1 MiB random body came back 1 048 438 bytes long
+  under gzip (1 048 446 under deflate), and `uncompress` accepted the truncated stream as a shorter, valid-looking
+  body. The HTTP/1.1 client compresses the request it sends under a `Content-Encoding`, so it sent such a body cut
+  short, and every `uncompress` -- the client's on a response, the `CompressionMiddleware`'s on a request -- took a cut
+  stream for the whole body. The middleware's own responses were spared: it keeps a result only when it is SMALLER
+  than the body, which a stream cut at the `size + 32` window never is. Both loops now run until `done`; `uncompress`
+  grows its output geometrically and throws `std::runtime_error` when the stream ends before its end marker. Pinned by
+  `tests/unit/message/body-codec.cpp` (1 MiB random and 8 MiB compressible, through every registered codec) and
+  `tests/unit/message/body-uncompress-malformed.cpp` (every truncation point of a gzip stream is an error). The zstd
+  and brotli codecs (qb, Huly QB-79) failed the same way on the old loops: the random body came back 1 048 575 bytes
+  long under zstd, the 8 MiB one 28 bytes long under brotli.
+
 - **A server's listening socket going down now reaches the server, and stops the watcher (Huly QB-252).** The
   acceptor routes `event::disconnected` to the HTTP/1.1 and HTTP/2 servers through `qb::has_own_on`, which could
   not see their private handlers, so it threw "Acceptor has been disconnected" instead; the event loop contained
