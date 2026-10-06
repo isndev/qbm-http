@@ -296,7 +296,7 @@ Client-side certificate verification is **secure by default** across every clien
 - Disable verification (`verify_peer=false` / `set_verify_peer(false)`) **only** for endpoints you trust and control, typically self-signed development servers. It turns off both chain and hostname checks and exposes the connection to interception.
 - For private PKI, prefer adding your CA to the trust store over disabling verification. At the qb-io level you can load CAs into a client `SSL_CTX` with `qb::io::ssl::load_ca_certificates(ctx, path)` or `load_ca_directory(ctx, dir)`, set SNI/ALPN on the socket (`set_sni_hostname`, `set_alpn_protocols`), and present a client certificate (`configure_client_certificate`) for mTLS.
 
-<!-- src: qb/src/qb/io/tcp/ssl/socket.h:104,114,164,822,834 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.h:104,114,164,836,848 -->
 
 ## Pitfalls
 
