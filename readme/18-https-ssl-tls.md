@@ -33,7 +33,7 @@ Gate your own SSL-dependent code on `QB_HAS_SSL`, never on `QBM_HTTP_HAS_SSL` �
 
 A TLS server needs a certificate chain and the matching private key, both PEM-encoded. `qb::io::ssl::Context::server(cert, key)` loads them from files by path (a `std::filesystem::path` — the same type `listen(uri, cert, key)` forwards), delegating to `Context::identity`, which also checks that the key matches the certificate. Each path is resolved through `qb::io::sys::resolve_resource()` before OpenSSL opens it: an absolute path is used unchanged, while a relative path is looked up against the current working directory first, then against the running executable's own directory. A server shipped next to its `cert.pem` / `key.pem` therefore loads them regardless of the cwd it was launched from — the same resolution applies to `Context::trust`, to the legacy raw `create_server_context`, and to the CA, client-certificate, and DH-parameter helpers below.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.cpp:282-290,365-377,341-354; qb/src/qb/io/tcp/ssl/socket.cpp:186-204; qb/src/qb/io/system/file.h:377-387 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.cpp:364-372,447-459,423-436; qb/src/qb/io/tcp/ssl/socket.cpp:186-204; qb/src/qb/io/system/file.h:377-387 -->
 
 - **Production** — obtain a certificate from a trusted CA (Let's Encrypt, your internal PKI, a commercial CA). Deploy the leaf certificate (concatenated with any intermediates) and the private key as PEM files.
 - **Development** — a self-signed certificate is fine for local testing. Browsers and verifying clients reject it unless you add it to a trust store or disable verification (see [Peer verification](#peer-verification-and-trust)).
@@ -60,7 +60,7 @@ qbm-http never touches OpenSSL directly for the common path. Two qb-io transport
 
 Both expose `static constexpr bool is_secure()` returning `true`, which is how the server `listen` method (below) decides whether to build a TLS context at all. The context type lives in `qb::io::ssl` and is `Context` — RAII, value-semantic, reference-counted, secure-by-default:
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:128,139,147,157,164 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:157,168,176,186,193 -->
 ```cpp
 namespace qb::io::ssl {
 class Context {
@@ -86,7 +86,7 @@ The older raw-pointer factories `qb::io::ssl::create_server_context(method, cert
 
 The caller owns the returned raw `SSL_CTX`. Handing one to `listener::init(SSL_CTX*)` **transfers** that single reference into the listener's `qb::io::ssl::Context` (through `Context::adopt`, which takes no extra reference), so you must not `SSL_CTX_free` it afterwards. It is not a `unique_ptr`: the listener member is a value-semantic, reference-counted `Context` shared with every accepted connection, and the `SSL_CTX` is freed exactly once, when the last copy of the context and the last `SSL` minted from it are gone.
 
-<!-- src: qb/src/qb/io/tcp/ssl/listener.h:45,98-108,119; qb/src/qb/io/tcp/ssl/listener.cpp:37-42; qb/src/qb/io/tcp/ssl/context.h:149-157 -->
+<!-- src: qb/src/qb/io/tcp/ssl/listener.h:45,98-108,119; qb/src/qb/io/tcp/ssl/listener.cpp:37-42; qb/src/qb/io/tcp/ssl/context.h:178-186 -->
 
 ## Serving HTTPS over HTTP/1.1
 
@@ -149,7 +149,7 @@ if constexpr (tpt::is_secure()) {
 
 Two details matter if you replicate this by hand. ALPN is **folded into the `Context`** by the chained `.alpn({"http/1.1"})` — there is no separate `set_supported_alpn_protocols` call on this path. And the failure check is `context().ok()`, not a null handle: a `Context` that failed to load its cert or key is falsy and carries the reason in `context().error()`. The whole block is inside `if constexpr (tpt::is_secure())`, so the same `listen` compiles unchanged for a plaintext transport, where it just binds the socket.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:147,180-181,201,203 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:176,209-210,251,253 -->
 
 The SSL-off build takes the `#else` arm, which discards `cert_file`/`key_file` and only listens.
 
@@ -159,7 +159,7 @@ The SSL-off build takes the `#else` arm, which discards `cert_file`/`key_file` a
 
 The convenience `listen` covers the common case. When you need cipher policy, a minimum TLS version, mTLS, or a custom ALPN set, build a `qb::io::ssl::Context` yourself, install it with `transport().init(...)`, then call the plain `transport().listen(uri)`. The setters are fluent and chainable, each returns `Context&`, and each becomes a no-op once the context has recorded an error — so one `ok()` check at the end covers the whole chain:
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:62,72,128,147,174-177,180-181,183,201,203; qb/src/qb/io/tcp/ssl/listener.h:119 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:63,73,157,176,203-206,209-210,212,251,253; qb/src/qb/io/tcp/ssl/listener.h:119 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/tcp/ssl/context.h>
@@ -184,11 +184,11 @@ server->start();
 
 `Context` also covers curves, DH parameters, server session caching and timeout, and typed callbacks for keylog, custom verification, and SNI routing (`on_sni` returns the `Context` to switch to). `native()` borrows the raw `SSL_CTX` for anything it does not wrap.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:184-187,192,194,196,210 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:213-216,230,232,234,260 -->
 
 **The raw `SSL_CTX` path still exists as an escape hatch.** `qb::io::ssl::create_server_context` plus the free helpers (`set_cipher_list`, `set_ciphersuites_tls13`, `set_tls_protocol_versions`, `configure_mtls_server_context`) all take an `SSL_CTX*`, and `listener::init(SSL_CTX*)` adopts it — but its own documentation says to prefer the `Context` overload, and ALPN on that path needs the separate `set_supported_alpn_protocols` member because `adopt()` treats a bare context as client-role. Reach for it only for an OpenSSL feature `Context` does not expose. The listener mirrors the free helpers as members once a context is installed — `set_cipher_list`, `set_ciphersuites_tls13`, `configure_mtls`, `set_supported_alpn_protocols` — and adds OCSP stapling, SNI host selection, and session caching; see `qb/src/qb/io/tcp/ssl/socket.h` and `qb/src/qb/io/tcp/ssl/listener.h`.
 
-<!-- src: qb/src/qb/io/tcp/ssl/socket.h:95,123,132,142,154; qb/src/qb/io/tcp/ssl/listener.h:104-106,108,207,214,230,305; qb/src/qb/io/tcp/ssl/context.h:153-155 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.h:95,123,132,142,154; qb/src/qb/io/tcp/ssl/listener.h:104-106,108,207,214,230,310; qb/src/qb/io/tcp/ssl/context.h:182-184 -->
 
 The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the connection upgrades over TLS exactly as plaintext WebSocket upgrades over TCP. See [WebSocket](./20-websocket.md).
 
@@ -287,7 +287,7 @@ client->connect([client](bool connected, const std::string &/*err*/) {
 
 ALPN is a TLS extension where the client advertises the application protocols it supports and the server picks one during the handshake. qbm-http wires it for you: an HTTP/1.1 secure server advertises `{"http/1.1"}`, an HTTP/2 server advertises `{"h2", "http/1.1"}` and switches the session based on what was selected, the HTTP/2 client advertises `{"h2"}` only, and HTTP/3 negotiates `"h3"` over QUIC (a separate transport — see [HTTP/3 protocol](./19-http3-protocol.md)). You override the server's advertised set only when you build the context by hand: chain `.alpn({...})` on the `qb::io::ssl::Context` you pass to `transport().init(...)`, which is what both `listen` overloads do. `transport().set_supported_alpn_protocols({...})` is the raw-`SSL_CTX` counterpart, needed only on the `init(SSL_CTX*)` escape hatch.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:180-181; qb/src/qb/io/tcp/ssl/listener.h:305; qbm/http/src/qbm/http/1.1/http.h:629; qbm/http/src/qbm/http/2/http2.h:544 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:209-210; qb/src/qb/io/tcp/ssl/listener.h:310; qbm/http/src/qbm/http/1.1/http.h:629; qbm/http/src/qbm/http/2/http2.h:544 -->
 
 ## Peer verification and trust
 
@@ -296,7 +296,7 @@ Client-side certificate verification is **secure by default** across every clien
 - Disable verification (`verify_peer=false` / `set_verify_peer(false)`) **only** for endpoints you trust and control, typically self-signed development servers. It turns off both chain and hostname checks and exposes the connection to interception.
 - For private PKI, prefer adding your CA to the trust store over disabling verification. At the qb-io level you can load CAs into a client `SSL_CTX` with `qb::io::ssl::load_ca_certificates(ctx, path)` or `load_ca_directory(ctx, dir)`, set SNI/ALPN on the socket (`set_sni_hostname`, `set_alpn_protocols`), and present a client certificate (`configure_client_certificate`) for mTLS.
 
-<!-- src: qb/src/qb/io/tcp/ssl/socket.h:104,114,164,836,848 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.h:104,114,164,843,855 -->
 
 ## Pitfalls
 
