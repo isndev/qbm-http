@@ -7,6 +7,23 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
+### Changed
+
+- **The compression middleware offers zstd and brotli, and never chooses a codec the build cannot produce (Huly
+  QB-93).** `CompressionOptions`'s default list is the codecs of `{zstd, br, gzip, deflate}` this build registers --
+  `{gzip, deflate}` unless qb was built with the opt-in `QB_WITH_ZSTD` / `QB_WITH_BROTLI` (qb, Huly QB-79), and empty
+  without compression; `max_compression()` holds `{br, gzip, deflate, zstd}` and `fast_compression()`
+  `{zstd, deflate, gzip, br}` the same way. A browser rates every codec it lists at 1, so this order is what it gets.
+  It is measured (qb's `compress-codecs` bench, a provider per stream, MSVC and g++-14): zstd compresses JSON and HTML
+  1.6 to 4 times as fast as gzip at 4 KiB and 6.8 to 14 times as fast from 64 KiB, within 8 % of its ratio, and the
+  middleware compresses on the loop that serves the connection; brotli's output is 0 to 17 % smaller than gzip's, as
+  fast or faster from 64 KiB and up to 1.7 times slower at 4 KiB. Negotiation now passes over a name the build does
+  not register: listed ahead of an accepted codec, it was chosen, refused by `Body::compress`, and the response went
+  out uncompressed. The HTTP/1.1 client already advertised every registered codec (`accept_encoding()`). Pinned by
+  `tests/unit/middleware/middleware-compression.cpp` -- the three lists in every build (both codecs, neither, no
+  compression), a browser's `Accept-Encoding` answered with the first codec of the default order and decoded, an
+  unregistered name passed over -- which catches five defects planted one at a time.
+
 ### Fixed
 
 - **A large incompressible body survives compression, and a truncated one is refused (Huly QB-464).**

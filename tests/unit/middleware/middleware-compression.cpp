@@ -25,8 +25,10 @@
  */
 #include <gtest/gtest.h>
 
+#include <initializer_list>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../../shared/middleware_test_fixture.h"
 
@@ -76,6 +78,28 @@ protected:
         _router->route(_session, std::move(req));
     }
 };
+
+// The names of `order` this build can produce, read from the build's own macros -- not from qb's registry, which is
+// what the middleware reads (Huly QB-93).
+std::vector<std::string>
+in_this_build(std::initializer_list<const char *> order) {
+    std::vector<std::string> names;
+    for (const std::string name : order) {
+        bool built = false;
+#if defined(QB_HAS_COMPRESSION)
+        built = name == "gzip" || name == "deflate";
+#if defined(QB_HAS_ZSTD)
+        built = built || name == "zstd";
+#endif
+#if defined(QB_HAS_BROTLI)
+        built = built || name == "br";
+#endif
+#endif
+        if (built)
+            names.push_back(name);
+    }
+    return names;
+}
 
 #ifdef QB_HAS_COMPRESSION
 
@@ -347,12 +371,12 @@ TEST_F(CompressionMiddlewareTest, WildcardAcceptUsesFirstServerPreference) {
     EXPECT_EQ(dec.as<std::string>(), original);
 }
 
-TEST_F(CompressionMiddlewareTest, NotAppliedIfNoCommonEncoding_BrotliNotSupported) {
+TEST_F(CompressionMiddlewareTest, NotAppliedIfNoCommonEncoding) {
     qb::http::CompressionOptions opts;
     opts.compress_responses(true).min_size_to_compress(10).preferred_encodings({"gzip", "deflate"});
     auto comp_mw = qb::http::compression_middleware<MockMiddlewareSession>(opts);
 
-    // qb-io ships gzip+deflate only; the client asking exclusively for brotli
+    // The server offers gzip and deflate only; the client asking exclusively for brotli
     // leaves no common encoding -> body served uncompressed, no Content-Encoding.
     const std::string original = "This response body will not be compressed; only br requested.";
     auto              req      = create_request(qb::http::method::GET, "/br");
@@ -411,6 +435,46 @@ TEST_F(CompressionMiddlewareTest, RejectsMalformedQValue) {
     EXPECT_EQ(_session->_response.body().as<std::string>(), original);
 }
 
+// A browser lists every codec at q=1, so the server's order decides: the default middleware answers with the first
+// codec of {zstd, br, gzip} this build registers, and the body decodes (Huly QB-93).
+TEST_F(CompressionMiddlewareTest, ABrowserGetsTheFirstCodecOfTheDefaultOrder) {
+    auto comp_mw = qb::http::compression_middleware<MockMiddlewareSession>();
+
+    std::string original;
+    for (int i = 0; original.size() < 8192; ++i)
+        original += "{\"id\":" + std::to_string(i) + ",\"name\":\"item-" + std::to_string(i * 7919 % 1000) + "\"},";
+    auto req = create_request(qb::http::method::GET, "/browser");
+    req.set_header("Accept-Encoding", "gzip, deflate, br, zstd");
+    run_get(comp_mw, "/browser", original, std::move(req), "application/json");
+
+    const std::string expected = in_this_build({"zstd", "br", "gzip"}).front();
+    ASSERT_EQ(_session->_response.header("Content-Encoding"), expected);
+    qb::http::Body dec;
+    dec = _session->_response.body().as<std::string>();
+    dec.uncompress(expected);
+    EXPECT_EQ(dec.as<std::string>(), original);
+}
+
+// A preference list may name a codec this build does not register (a list written for a build with brotli, say):
+// it is passed over for the next one the client accepts, not chosen and then refused by Body::compress, which sent
+// the body uncompressed (Huly QB-93).
+TEST_F(CompressionMiddlewareTest, ACodecTheBuildDoesNotRegisterIsPassedOver) {
+    qb::http::CompressionOptions opts;
+    opts.min_size_to_compress(10).preferred_encodings({"x-not-a-codec", "gzip"});
+    auto comp_mw = qb::http::compression_middleware<MockMiddlewareSession>(opts);
+
+    const std::string original(4096, 'H');
+    auto              req = create_request(qb::http::method::GET, "/unregistered");
+    req.set_header("Accept-Encoding", "x-not-a-codec, gzip");
+    run_get(comp_mw, "/unregistered", original, std::move(req));
+
+    ASSERT_EQ(_session->_response.header("Content-Encoding"), "gzip");
+    qb::http::Body dec;
+    dec = _session->_response.body().as<std::string>();
+    dec.uncompress("gzip");
+    EXPECT_EQ(dec.as<std::string>(), original);
+}
+
 #endif // QB_HAS_COMPRESSION
 
 // --- Always-on (no zlib link required) -------------------------------------
@@ -424,10 +488,14 @@ TEST_F(CompressionMiddlewareTest, FactoryFunctions) {
     auto max_mw = qb::http::max_compression_middleware<MockMiddlewareSession>();
     EXPECT_EQ(max_mw->name(), "MaxCompressionMiddleware");
     EXPECT_EQ(max_mw->get_options().get_min_size_to_compress(), 256u);
+    // Smallest output first, each codec only when this build registers it (Huly QB-93).
+    EXPECT_EQ(max_mw->get_options().get_preferred_encodings(), in_this_build({"br", "gzip", "deflate", "zstd"}));
 
     auto fast_mw = qb::http::fast_compression_middleware<MockMiddlewareSession>();
     EXPECT_EQ(fast_mw->name(), "FastCompressionMiddleware");
     EXPECT_EQ(fast_mw->get_options().get_min_size_to_compress(), 2048u);
+    // Cheapest encoder first (Huly QB-93).
+    EXPECT_EQ(fast_mw->get_options().get_preferred_encodings(), in_this_build({"zstd", "deflate", "gzip", "br"}));
 }
 
 TEST_F(CompressionMiddlewareTest, OptionsDefaultsAndPreferenceOrder) {
@@ -435,10 +503,9 @@ TEST_F(CompressionMiddlewareTest, OptionsDefaultsAndPreferenceOrder) {
     EXPECT_TRUE(opts.should_compress_responses());
     EXPECT_TRUE(opts.should_decompress_requests());
     EXPECT_EQ(opts.get_min_size_to_compress(), 1024u);
-    // Default server preference list is gzip-first, deflate-second.
-    ASSERT_EQ(opts.get_preferred_encodings().size(), 2u);
-    EXPECT_EQ(opts.get_preferred_encodings()[0], "gzip");
-    EXPECT_EQ(opts.get_preferred_encodings()[1], "deflate");
+    // zstd, br, gzip, deflate -- each only when this build registers it, so {gzip, deflate} in a build of qb without
+    // the opt-in codecs and nothing in a build without compression (Huly QB-93).
+    EXPECT_EQ(opts.get_preferred_encodings(), in_this_build({"zstd", "br", "gzip", "deflate"}));
 }
 
 } // namespace

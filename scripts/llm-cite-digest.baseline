@@ -22,9 +22,9 @@ llm/qbm-http.llm.api.md	body.h:460-473	504f0d4dfa48	template <>
 llm/qbm-http.llm.api.md	body.h:57-57	7f9976a908fe	class Body {
 llm/qbm-http.llm.api.md	chunk.h:106-106	8b2020e847e8	pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
 llm/qbm-http.llm.api.md	chunk.h:32-32	50cb5b8d9d2c	class Chunk {
-llm/qbm-http.llm.api.md	compression.h:162-162	e1fb666ef806	class CompressionMiddleware final : public IMiddleware<SessionType> {
+llm/qbm-http.llm.api.md	compression.h:161-161	e1fb666ef806	class CompressionMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	compression.h:40-40	d3a697e2ad5b	class CompressionOptions {
-llm/qbm-http.llm.api.md	compression.h:536-536	0c5e06cc94a3	compression_middleware(CompressionOptions options = CompressionOption...
+llm/qbm-http.llm.api.md	compression.h:541-541	0c5e06cc94a3	compression_middleware(CompressionOptions options = CompressionOption...
 llm/qbm-http.llm.api.md	conditional.h:147-147	36cc9178c5f7	conditional_middleware(typename ConditionalMiddleware<SessionType>::P...
 llm/qbm-http.llm.api.md	conditional.h:42-42	c19422f76c02	class ConditionalMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	context.h:1106-1106	6154b20691c3	complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE) {

@@ -203,7 +203,7 @@ Configuration is `qb::http::CompressionOptions` (no time fields):
 | Compress responses | `compress_responses(bool)` | `true` |
 | Decompress requests | `decompress_requests(bool)` | `true` |
 | Minimum body to compress | `min_size_to_compress(size_t)` | `1024` bytes |
-| Preferred encodings | `preferred_encodings(std::vector<std::string>)` | `{"gzip","deflate"}` |
+| Preferred encodings | `preferred_encodings(std::vector<std::string>)` | `{"zstd","br","gzip","deflate"}`, holding only the codecs the build registers |
 
 The `CompressionOptions` builder and the `compression_middleware<S>(...)` factory compile in every build — they are *not* behind the `#ifdef`. Only the codec calls inside the middleware are gated, so attaching it in a build without `QB_HAS_COMPRESSION` is harmless: it simply passes bodies through untouched. You therefore do not need to guard the construction.
 
@@ -220,7 +220,9 @@ router.use(qb::http::compression_middleware<MySession>(opts));
 ```
 <!-- src: qbm/http/src/qbm/http/middleware/compression.h:40 -->
 
-**Presets:** `CompressionOptions::max_compression()` (compress from 256 bytes) and `CompressionOptions::fast_compression()` (compress from 2048 bytes); the matching factories are `max_compression_middleware<S>()` and `fast_compression_middleware<S>()`. `compression_middleware<S>(opts)` takes explicit options.
+The response gets the encoding the client rates highest (`q`); this list breaks a tie — and a browser rates every codec it lists at 1, so the list decides what browsers get — and a name the build does not register is passed over, never chosen. zstd and brotli are there only when qb was built with `QB_WITH_ZSTD` / `QB_WITH_BROTLI` (3.3, Huly QB-93); without them the list is `{"gzip","deflate"}`. The default order is measured (qb's `compress-codecs` bench, the `Codec` cases): zstd compresses JSON and HTML 1.6 to 4 times as fast as gzip at 4 KiB and 6.8 to 14 times as fast from 64 KiB, within 8 % of its ratio, and the middleware compresses on the loop that serves the connection; brotli's output is 0 to 17 % smaller than gzip's, as fast or faster from 64 KiB and up to 1.7 times slower at 4 KiB (on Windows and Linux).
+
+**Presets:** `CompressionOptions::max_compression()` (compress from 256 bytes; smallest output first: `{"br","gzip","deflate","zstd"}`) and `CompressionOptions::fast_compression()` (compress from 2048 bytes; cheapest encoder first: `{"zstd","deflate","gzip","br"}`), each holding only the codecs the build registers; the matching factories are `max_compression_middleware<S>()` and `fast_compression_middleware<S>()`. `compression_middleware<S>(opts)` takes explicit options.
 
 ## Timing
 

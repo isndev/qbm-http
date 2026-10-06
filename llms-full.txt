@@ -790,12 +790,12 @@ Usage: `router.use(qb::http::rate_limit_secure_middleware<S>());`
 
 ## Compression — `src/qbm/http/middleware/compression.h` · response/request compression gated on `QB_HAS_COMPRESSION`
 ### `qb::http::CompressionOptions` — `compression.h:40`
-`CompressionOptions() noexcept; compress_responses(bool) noexcept; decompress_requests(bool) noexcept; min_size_to_compress(size_t) noexcept; preferred_encodings(std::vector<std::string>);` (each returns `CompressionOptions&`). Presets: `static CompressionOptions max_compression()` (min 256, `{gzip,deflate}`), `static CompressionOptions fast_compression()` (min 2048, `{deflate,gzip}`). Getters `should_compress_responses()/should_decompress_requests()/get_min_size_to_compress()/get_preferred_encodings()`.
+`CompressionOptions() noexcept; compress_responses(bool) noexcept; decompress_requests(bool) noexcept; min_size_to_compress(size_t) noexcept; preferred_encodings(std::vector<std::string>);` (each returns `CompressionOptions&`). The default list is `{zstd,br,gzip,deflate}` and the presets are `static CompressionOptions max_compression()` (min 256, `{br,gzip,deflate,zstd}`) and `static CompressionOptions fast_compression()` (min 2048, `{zstd,deflate,gzip,br}`), each list holding only the codecs this build registers (`{gzip,deflate}` without qb's opt-in `QB_WITH_ZSTD` / `QB_WITH_BROTLI`); negotiation takes the client's highest q-value, breaks a tie by this order and passes over a name the build does not register (3.3, Huly QB-93). Getters `should_compress_responses()/should_decompress_requests()/get_min_size_to_compress()/get_preferred_encodings()`.
 
-### `qb::http::CompressionMiddleware<S>` — `compression.h:162`
+### `qb::http::CompressionMiddleware<S>` — `compression.h:161`
 `CompressionMiddleware(name); CompressionMiddleware(CompressionOptions, name); void update_options(CompressionOptions) noexcept;`
 Decompresses request bodies by `Content-Encoding`; compresses responses at `HookPoint::PRE_RESPONSE_SEND` based on `Accept-Encoding`.
-Factories (`compression.h:536`): `compression_middleware<S>(options=CompressionOptions(), name)`, `max_compression_middleware<S>(name)`, `fast_compression_middleware<S>(name)`.
+Factories (`compression.h:541`): `compression_middleware<S>(options=CompressionOptions(), name)`, `max_compression_middleware<S>(name)`, `fast_compression_middleware<S>(name)`.
 Usage: `router.use(qb::http::compression_middleware<S>());`
 
 ## Timing — `src/qbm/http/middleware/timing.h`

@@ -52,13 +52,10 @@ public:
      * - Response compression: enabled
      * - Request decompression: enabled
      * - Minimum size to compress: 1024 bytes
-     * - Preferred encodings: {"gzip", "deflate"}
+     * - Preferred encodings: those of {"zstd", "br", "gzip", "deflate"} this build registers, in that order --
+     *   {"gzip", "deflate"} unless qb was built with `QB_WITH_ZSTD` / `QB_WITH_BROTLI` (3.3, Huly QB-93)
      */
-    CompressionOptions() noexcept
-        : _compress_responses(true)
-        , _decompress_requests(true)
-        , _min_size_to_compress(1024)
-        , _preferred_encodings({"gzip", "deflate"}) {}
+    CompressionOptions() noexcept;
 
     /**
      * @brief Enables or disables compression of HTTP response bodies.
@@ -97,7 +94,8 @@ public:
     /**
      * @brief Sets the list of preferred compression encodings that the server supports and prefers, in order of preference.
      * Example: `{"gzip", "deflate"}`.
-     * This list is used to negotiate with the client's `Accept-Encoding` header.
+     * This list is used to negotiate with the client's `Accept-Encoding` header: the client's highest q-value wins,
+     * this order breaks a tie, and a name this build does not register is passed over (3.3, Huly QB-93).
      * @param encodings A vector of strings representing encoding names (e.g., "gzip").
      * @return Reference to this `CompressionOptions` instance for chaining.
      */
@@ -110,15 +108,16 @@ public:
 
     /**
      * @brief Provides a pre-configured `CompressionOptions` instance optimized for higher compression ratios.
-     * This typically means compressing smaller bodies and potentially including more computationally intensive algorithms
-     * if available (e.g., Brotli, if the underlying compression library supports it and it's added here).
+     * Compresses from 256 bytes and prefers the smallest output: brotli, then gzip and deflate, then zstd (whose
+     * factory level trades ratio for speed) -- each only when this build registers it.
      * @return A `CompressionOptions` instance with settings for maximum compression.
      */
     [[nodiscard]] static CompressionOptions max_compression() noexcept;
 
     /**
      * @brief Provides a pre-configured `CompressionOptions` instance optimized for faster compression speed.
-     * This typically means compressing only larger bodies and preferring algorithms known for speed.
+     * Compresses from 2048 bytes and prefers the cheapest encoder: zstd, then deflate and gzip, then brotli (slower
+     * than zlib on small bodies) -- each only when this build registers it.
      * @return A `CompressionOptions` instance with settings for fast compression.
      */
     [[nodiscard]] static CompressionOptions fast_compression() noexcept;
@@ -445,6 +444,12 @@ private:
         std::string best_encoding;
         int         best_q = 0;
         for (const auto &preferred_server_encoding : options.get_preferred_encodings()) {
+#if defined(QB_HAS_COMPRESSION)
+            // A codec this build does not register cannot be produced: choosing it made Body::compress throw and the
+            // response go out uncompressed, though another accepted codec was at hand (Huly QB-93).
+            if (!qb::compression::builtin::algorithm::supported(preferred_server_encoding))
+                continue;
+#endif
             int explicit_q = -1;
             int wildcard_q = -1;
 
