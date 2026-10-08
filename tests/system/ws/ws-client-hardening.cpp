@@ -377,6 +377,7 @@ public:
         : client(server) {}
 
     void on(Protocol::request &&request);
+    void on(qb::io::async::event::disconnected &&);
     void
     on(WS_Protocol::message &&) {}
     void
@@ -389,9 +390,12 @@ public:
 
 class ExtensionResponseServer : public qb::io::use<ExtensionResponseServer>::tcp::server<ExtensionResponseSession> {
 public:
-    bool               select_unoffered_extension = false;
-    std::atomic<int>  *requests                   = nullptr;
-    std::atomic<bool> *client_offered_extension   = nullptr;
+    bool               select_unoffered_extension        = false;
+    bool               send_message_after_upgrade        = false;
+    bool               send_second_message_after_upgrade = false;
+    std::atomic<int>  *requests                          = nullptr;
+    std::atomic<int>  *closed                            = nullptr;
+    std::atomic<bool> *client_offered_extension          = nullptr;
 
     void
     on(IOSession &) {}
@@ -412,9 +416,25 @@ ExtensionResponseSession::on(Protocol::request &&request) {
         response.headers()["Sec-WebSocket-Extensions"].emplace_back(std::string("permessage-deflate"));
     }
     *this << response;
+    if (probe.send_message_after_upgrade) {
+        qb::http::ws::MessageText message;
+        message << "switch";
+        *this << message;
+        if (probe.send_second_message_after_upgrade) {
+            qb::http::ws::MessageText second;
+            second << "retired";
+            *this << second;
+        }
+    }
     if (probe.requests) {
         probe.requests->fetch_add(1);
     }
+}
+
+void
+ExtensionResponseSession::on(qb::io::async::event::disconnected &&) {
+    if (auto *closed = this->server().closed)
+        closed->fetch_add(1, std::memory_order_release);
 }
 
 void
@@ -454,6 +474,213 @@ TEST(WebSocketClientHardening, ClientRejectsServerExtensionNotOffered) {
     run_extension_response_case(true);
 }
 
+TEST(WebSocketClientHardening, ConnectedCallbackMayDestroyClient) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) { s.send_message_after_upgrade = true; });
+    int                                                     callbacks = 0;
+    int                                                     messages  = 0;
+    auto                                                    client    = std::make_unique<qb::http::ws::client>();
+    client->on_connected([&](auto &) {
+        ++callbacks;
+        client.reset();
+    });
+    client->on_message([&](auto &) { ++messages; });
+    client->connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    ASSERT_TRUE(pump_until([&] { return callbacks == 1; }));
+    EXPECT_FALSE(client);
+    EXPECT_EQ(messages, 0);
+}
+
+TEST(WebSocketClientHardening, HandshakeErrorCallbackMayDestroyClient) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) { s.select_unoffered_extension = true; });
+    int                                                     callbacks = 0;
+    auto                                                    client    = std::make_unique<qb::http::ws::client>();
+    client->on_error([&](auto &) {
+        ++callbacks;
+        client.reset();
+    });
+    client->connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    ASSERT_TRUE(pump_until([&] { return callbacks == 1; }));
+    EXPECT_FALSE(client);
+}
+
+TEST(WebSocketClientHardening, HandshakeErrorCallbackCanReconnect) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> rejected(0,
+                                                                     [](ExtensionResponseServer &s) { s.select_unoffered_extension = true; });
+    qb::http::test::WsServerThread<ExtensionResponseServer> accepting(0);
+    const qb::io::uri                                       first("ws://localhost:" + std::to_string(bound_port(rejected)) + "/path");
+    const qb::io::uri                                       second("ws://localhost:" + std::to_string(bound_port(accepting)) + "/path");
+    int                                                     errors    = 0;
+    int                                                     connected = 0;
+    qb::http::ws::client                                    client;
+    client.on_error([&](auto &) {
+        if (++errors == 1)
+            client.connect(second, 2s);
+    });
+    client.on_connected([&](auto &) { ++connected; });
+    client.connect(first, 1s);
+    ASSERT_TRUE(pump_until([&] { return connected == 1 || errors > 1; }, 4000ms));
+    EXPECT_EQ(errors, 1);
+    EXPECT_EQ(connected, 1);
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, RequestHookDisconnectStopsUpgradeSend) {
+    qb::io::async::init();
+    std::atomic<int>                                        requests{0};
+    std::atomic<int>                                        closed{0};
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [&](ExtensionResponseServer &s) {
+        s.requests = &requests;
+        s.closed   = &closed;
+    });
+    int                                                     errors = 0;
+    {
+        qb::http::ws::client client;
+        client.on_sending_http_request([&](auto &) { client.disconnect(); });
+        client.on_error([&](auto &) { ++errors; });
+        client.connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+        ASSERT_TRUE(pump_until([&] { return errors == 1; }));
+        EXPECT_EQ(client.out().size(), 0u);
+    }
+    ASSERT_TRUE(pump_until([&] { return closed.load(std::memory_order_acquire) == 1; }));
+    EXPECT_EQ(requests.load(), 0);
+}
+
+TEST(WebSocketClientHardening, RequestHookMayDestroyClient) {
+    qb::io::async::init();
+    std::atomic<int>                                        requests{0};
+    std::atomic<int>                                        closed{0};
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [&](ExtensionResponseServer &s) {
+        s.requests = &requests;
+        s.closed   = &closed;
+    });
+    int                                                     hooks  = 0;
+    auto                                                    client = std::make_unique<qb::http::ws::client>();
+    client->on_sending_http_request([&](auto &) {
+        ++hooks;
+        client.reset();
+    });
+    client->connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    ASSERT_TRUE(pump_until([&] { return hooks == 1; }));
+    EXPECT_FALSE(client);
+    ASSERT_TRUE(pump_until([&] { return closed.load(std::memory_order_acquire) == 1; }));
+    EXPECT_EQ(requests.load(), 0);
+}
+
+TEST(WebSocketClientHardening, RequestHookDisconnectErrorMayDestroyClient) {
+    qb::io::async::init();
+    std::atomic<int>                                        requests{0};
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [&](ExtensionResponseServer &s) { s.requests = &requests; });
+    int                                                     errors = 0;
+    auto                                                    client = std::make_unique<qb::http::ws::client>();
+    client->on_error([&](auto &) {
+        ++errors;
+        client.reset();
+    });
+    client->on_sending_http_request([&](auto &) { client->disconnect(); });
+    client->connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    ASSERT_TRUE(pump_until([&] { return errors == 1; }));
+    EXPECT_FALSE(client);
+    EXPECT_EQ(requests.load(), 0);
+}
+
+TEST(WebSocketClientHardening, ReconnectDropsFramePipelinedWithFirstUpgrade) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade        = true;
+        s.send_second_message_after_upgrade = true;
+    });
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0);
+    const qb::io::uri                                       first("ws://localhost:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://localhost:" + std::to_string(bound_port(second_server)) + "/path");
+    int                                                     connected = 0;
+    int                                                     messages  = 0;
+    qb::http::ws::client                                    client;
+    client.on_connected([&](auto &) {
+        if (++connected == 1)
+            client.connect(second, 2s);
+    });
+    client.on_message([&](auto &) { ++messages; });
+    client.connect(first, 1s);
+    ASSERT_TRUE(pump_until([&] { return connected == 2; }, 4000ms));
+    EXPECT_EQ(messages, 0);
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, RequestHookReconnectSkipsRetiredUpgrade) {
+    qb::io::async::init();
+    std::atomic<int>                                        first_requests{0};
+    std::atomic<int>                                        second_requests{0};
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(0, [&](ExtensionResponseServer &s) { s.requests = &first_requests; });
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0,
+                                                                          [&](ExtensionResponseServer &s) { s.requests = &second_requests; });
+    const qb::io::uri                                       first("ws://localhost:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://localhost:" + std::to_string(bound_port(second_server)) + "/path");
+    int                                                     hooks     = 0;
+    int                                                     connected = 0;
+    qb::http::ws::client                                    client;
+    client.on_sending_http_request([&](auto &) {
+        if (++hooks == 1)
+            client.connect(second, 2s);
+    });
+    client.on_connected([&](auto &) { ++connected; });
+    client.connect(first, 1s);
+    ASSERT_TRUE(pump_until([&] { return connected == 1; }, 4000ms));
+    EXPECT_EQ(hooks, 2);
+    EXPECT_EQ(first_requests.load(), 0);
+    EXPECT_EQ(second_requests.load(), 1);
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, ReconnectDropsRetiredOutputBytes) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(0);
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0);
+    const qb::io::uri                                       first("ws://localhost:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://localhost:" + std::to_string(bound_port(second_server)) + "/path");
+    int                                                     connected = 0;
+    qb::http::ws::client                                    client;
+    client.on_connected([&](auto &) { ++connected; });
+    client.connect(first, 1s);
+    ASSERT_TRUE(pump_until([&] { return connected == 1; }));
+    client.disconnect();
+    client.out() << "STALE";
+    client.connect(second, 2s);
+    ASSERT_TRUE(pump_until([&] { return connected == 2; }, 4000ms));
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, EstablishedMessageCallbackCanReconnect) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade        = true;
+        s.send_second_message_after_upgrade = true;
+    });
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0);
+    const qb::io::uri                                       first("ws://localhost:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://localhost:" + std::to_string(bound_port(second_server)) + "/path");
+    int                                                     connected = 0;
+    int                                                     messages  = 0;
+    std::string                                             order;
+    qb::http::ws::client                                    client;
+    client.on_connected([&](auto &) {
+        ++connected;
+        order.push_back('C');
+    });
+    client.on_message([&](auto &) {
+        order.push_back('M');
+        if (++messages == 1)
+            client.connect(second, 2s);
+    });
+    client.connect(first, 1s);
+    ASSERT_TRUE(pump_until([&] { return connected == 2; }, 4000ms));
+    EXPECT_EQ(messages, 1);
+    EXPECT_EQ(order, "CMC");
+    client.disconnect();
+}
+
 // TCP establishment is only the first phase of connect(timeout). Hold the
 // upgrade response indefinitely after receiving a valid request, and require
 // the client's requested deadline to finish the operation exactly once.
@@ -472,9 +699,10 @@ public:
 
 class WithheldUpgradeServer : public qb::io::use<WithheldUpgradeServer>::tcp::server<WithheldUpgradeSession> {
 public:
-    std::atomic<int>                           *requests        = nullptr;
-    std::atomic<int>                           *closed          = nullptr;
-    std::atomic<std::chrono::nanoseconds::rep> *request_time_ns = nullptr;
+    bool                                        disconnect_on_request = false;
+    std::atomic<int>                           *requests              = nullptr;
+    std::atomic<int>                           *closed                = nullptr;
+    std::atomic<std::chrono::nanoseconds::rep> *request_time_ns       = nullptr;
 
     void
     on(IOSession &) {}
@@ -491,6 +719,8 @@ WithheldUpgradeSession::on(Protocol::request &&) {
     if (auto *requests = probe.requests) {
         requests->fetch_add(1, std::memory_order_release);
     }
+    if (probe.disconnect_on_request)
+        this->disconnect();
 }
 
 void
@@ -524,6 +754,20 @@ TEST(WebSocketClientHardening, DestroyedClientsIgnorePendingConnectorCallbacks) 
     // delivered them. Neither expired client may send an Upgrade request.
     ASSERT_TRUE(pump_until([&] { return closed.load(std::memory_order_acquire) == 2; }, 2500ms));
     EXPECT_EQ(requests.load(std::memory_order_acquire), 0);
+}
+
+TEST(WebSocketClientHardening, RemoteCloseBeforeUpgradeFailsPendingConnect) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<WithheldUpgradeServer> server(0, [](WithheldUpgradeServer &s) { s.disconnect_on_request = true; });
+    int                                                   errors    = 0;
+    int                                                   connected = 0;
+    qb::http::ws::client                                  client;
+    client.on_error([&](auto &) { ++errors; });
+    client.on_connected([&](auto &) { ++connected; });
+    client.connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return errors > 0 || connected > 0; }));
+    EXPECT_EQ(errors, 1);
+    EXPECT_EQ(connected, 0);
 }
 
 TEST(WebSocketClientHardening, ClientDeadlineIncludesUpgradeResponse) {
@@ -922,21 +1166,43 @@ TEST(WebSocketClientHardening, ClientEchoesPeerCloseFrameExactlyOnce) {
     const int                                            port = bound_port(server);
 
     std::size_t closes_seen = 0;
+    std::string order;
 
     qb::http::ws::client client;
+    client.on_connected([&](auto &) { order.push_back('C'); });
     client.on_closed([&](auto &) {
         ++closes_seen;
+        order.push_back('L');
         // Echo the peer's Close exactly once.
         client.close(qb::http::ws::CloseStatus::GoingAway, "client-echo");
     });
+    client.on_disconnected([&](auto &) { order.push_back('D'); });
     client.connect(qb::io::uri("ws://localhost:" + std::to_string(port) + "/path"), 1000ms);
 
-    ASSERT_TRUE(pump_until([&] { return result.client_closed.load(); }));
+    ASSERT_TRUE(pump_until([&] { return result.client_closed.load() && order.find('D') != std::string::npos; }));
 
     // The client observed the peer Close exactly once and echoed it back with
     // the same code — no tolerance, no always-passing `<= 1`.
     EXPECT_EQ(closes_seen, 1u);
+    EXPECT_EQ(order, "CLD");
     EXPECT_EQ(result.client_close_code.load(), static_cast<std::uint16_t>(qb::http::ws::CloseStatus::GoingAway));
+}
+
+TEST(WebSocketClientHardening, ExplicitDisconnectFromConnectedStillNotifiesOnce) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<CloseEchoProbeServer> server(0);
+    int                                                  connected    = 0;
+    int                                                  disconnected = 0;
+    qb::http::ws::client                                 client;
+    client.on_connected([&](auto &) {
+        ++connected;
+        client.disconnect();
+    });
+    client.on_disconnected([&](auto &) { ++disconnected; });
+    client.connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    ASSERT_TRUE(pump_until([&] { return disconnected == 1; }));
+    EXPECT_EQ(connected, 1);
+    EXPECT_EQ(disconnected, 1);
 }
 
 } // namespace
