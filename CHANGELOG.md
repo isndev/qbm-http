@@ -9,6 +9,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/3 request and response bodies advance past the initial QUIC receive window (Huly QB-503).**
+  The receiver now returns flow-control credit for every DATA payload handled by nghttp3, including
+  bytes discarded when a stream is refused. nghttp3's separate consumed-byte count continues to
+  cover framing. Direct adapter tests check exact credit in both directions, and a QUIC/TLS loopback
+  crosses multiple small stream and connection windows.
 - **WebSocket client connection hardening (Huly QB-513, QB-609, QB-517).** A client destroyed
   during an in-flight transport connect no longer leaves a callback that can access it. A
   nonzero connect timeout now covers the transport and the HTTP Upgrade as one deadline, with

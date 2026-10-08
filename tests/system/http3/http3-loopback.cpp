@@ -3000,6 +3000,58 @@ TEST_F(Http3LoopbackTest, PushRequestAwaiterErrorsWhenClientExpiresBeforeAwait) 
     EXPECT_FALSE(response.body().empty());
 }
 
+/**
+ * @test A request and response cross several deliberately small QUIC receive windows
+ * @brief DATA credit must be returned by each HTTP/3 receiver. Without it the sender
+ *        stops at the first 16 KiB stream window and neither side completes its body.
+ */
+TEST_F(Http3LoopbackTest, BodiesCrossSeveralSmallReceiveWindows) {
+    constexpr std::size_t request_size  = 160 * 1024;
+    constexpr std::size_t response_size = 192 * 1024;
+    const auto            port          = next_port();
+
+    qb::io::quic::settings flow;
+    flow.stream_recv_window          = 16 * 1024;
+    flow.connection_recv_window      = 64 * 1024;
+    flow.max_stream_data_bidi_local  = 16 * 1024;
+    flow.max_stream_data_bidi_remote = 16 * 1024;
+    flow.max_stream_data_uni         = 16 * 1024;
+
+    auto server = qb::http3::make_server();
+    server->set_settings(flow);
+    std::size_t received_request_size = 0;
+    server->router().post("/credit", [&](auto ctx) {
+        received_request_size  = ctx->request().body().size();
+        ctx->response().body() = std::string(response_size, 'R');
+        ctx->complete();
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_settings(flow);
+    client->set_verify_peer(false);
+    qb::http::Request request{qb::http::method::POST, qb::io::uri("/credit")};
+    request.body() = std::string(request_size, 'Q');
+    std::atomic<bool>  done{false};
+    qb::http::Response response;
+    ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response result) {
+        response = std::move(result);
+        done     = true;
+    }));
+
+    ASSERT_TRUE(pump([&] { return done.load(); }, 10s));
+    EXPECT_EQ(received_request_size, request_size);
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().size(), response_size);
+    EXPECT_EQ(response.body().as<std::string>(), std::string(response_size, 'R'));
+    EXPECT_TRUE(client->is_connected());
+    EXPECT_TRUE(server->is_open());
+
+    client->disconnect();
+    server->close();
+}
+
 #endif // QBM_HTTP_HAS_HTTP3
 
 // ---------------------------------------------------------------------------

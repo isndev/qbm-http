@@ -783,6 +783,9 @@ private:
             auto *me = self(conn_user_data);
             auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
             if (st.refused) {
+                // nghttp3 consumed these DATA bytes even though this stream is being
+                // discarded. They are absent from read_stream2's returned byte count.
+                me->_owner.extend_http3_stream_credit(me->_connection_id, static_cast<std::uint64_t>(stream_id), datalen);
                 return 0; // reset already: the rest of what the peer had in flight is dropped
             }
             const auto current_size = me->_role == role::server ? st.request.body().size() : st.response.body().size();
@@ -801,6 +804,9 @@ private:
                     } else {
                         st.response.body().clear();
                     }
+                    // The rejected payload still consumed connection-level QUIC flow
+                    // control. Return its credit before resetting the stream.
+                    me->_owner.extend_http3_stream_credit(me->_connection_id, static_cast<std::uint64_t>(stream_id), datalen);
                     me->_owner.reset_http3_stream(me->_connection_id, static_cast<std::uint64_t>(stream_id), NGHTTP3_H3_REQUEST_CANCELLED);
                     return 0;
                 }
@@ -810,6 +816,9 @@ private:
             } else if (st.request.method() != qb::http::method::HEAD) {
                 st.response.body().raw().put(reinterpret_cast<const char *>(data), datalen);
             }
+            // nghttp3_conn_read_stream2 reports framing bytes, not DATA payloads.
+            // This includes an ignored HEAD body: its bytes still consumed QUIC credit.
+            me->_owner.extend_http3_stream_credit(me->_connection_id, static_cast<std::uint64_t>(stream_id), datalen);
             return 0;
         });
     }

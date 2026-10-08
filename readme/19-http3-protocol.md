@@ -99,6 +99,8 @@ These terms recur throughout the API. They map directly to the protocol adapter 
 
 All HTTP/3 work is **event-loop affine**: the client and server have no internal locking and run entirely on the qb-io thread that drives them (`qb::io::async::run(...)`). Push/connect/cancel calls and the response callbacks all run on that one I/O thread.
 
+The HTTP/3 adapter returns QUIC receive credit as it processes body DATA, so requests and responses can grow beyond the initial per-stream window. It accounts for DATA separately from HTTP/3 framing and returns connection credit for bytes discarded by a refused stream. The inherited `set_settings(qb::io::quic::settings)` lets a client or server choose receive windows before `connect()` or `listen()`; the defaults are 1 MiB per stream and 16 MiB per connection.
+
 ## Server
 
 An HTTP/3 server is constructed with `qb::http3::make_server()`. It exposes the same `Router` as every other server in the module, so routes, middleware, controllers, and contexts behave identically — the transport is the only thing that differs.

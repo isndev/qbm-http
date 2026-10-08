@@ -163,12 +163,15 @@ using ClientConnection = connection<ClientOwner>;
 // frames moved so the caller can pump until the conversation is quiescent.
 template <typename FromOwner, typename ToConn>
 std::size_t
-deliver(FromOwner &from_owner, ToConn &to_conn) {
+deliver(FromOwner &from_owner, ToConn &to_conn, qb::unordered_map<std::uint64_t, std::uint64_t> *wire_bytes = nullptr) {
     std::size_t moved = 0;
     auto        queue = std::move(from_owner.outbound);
     from_owner.outbound.clear();
     for (auto &f : queue) {
         ++moved;
+        if (wire_bytes) {
+            (*wire_bytes)[f.stream_id] += f.data.size();
+        }
         to_conn.read_stream(f.stream_id, f.data, f.fin);
     }
     return moved;
@@ -178,10 +181,12 @@ deliver(FromOwner &from_owner, ToConn &to_conn) {
 // can never spin forever). Templated so a derived owner/connection (e.g. a body-capped server) pumps too.
 template <typename ClientOwnerT, typename ClientConnT, typename ServerOwnerT, typename ServerConnT>
 void
-pump(ClientOwnerT &client_owner, ClientConnT &client_conn, ServerOwnerT &server_owner, ServerConnT &server_conn) {
+pump(ClientOwnerT &client_owner, ClientConnT &client_conn, ServerOwnerT &server_owner, ServerConnT &server_conn,
+     qb::unordered_map<std::uint64_t, std::uint64_t> *client_wire_bytes = nullptr,
+     qb::unordered_map<std::uint64_t, std::uint64_t> *server_wire_bytes = nullptr) {
     for (int i = 0; i < 64; ++i) {
-        const auto a = deliver(client_owner, server_conn);
-        const auto b = deliver(server_owner, client_conn);
+        const auto a = deliver(client_owner, server_conn, client_wire_bytes);
+        const auto b = deliver(server_owner, client_conn, server_wire_bytes);
         if (a == 0 && b == 0)
             return;
     }
@@ -354,6 +359,40 @@ TEST(Http3ConnectionDirect, ClientRequestBodyReachesServerAndContentLengthMatche
     EXPECT_EQ(got.body().template as<std::string>(), "payload-bytes");
     // The connection had no protocol error (no close was forced).
     EXPECT_FALSE(pair.server_owner.close.has_value()) << "a matching content-length must not close the connection";
+}
+
+/**
+ * @test Every accepted HTTP/3 DATA byte restores QUIC stream and connection credit
+ * @brief nghttp3_conn_read_stream2 returns framing bytes but excludes DATA payloads. The direct
+ *        owner records every received wire byte and every requested credit extension, so this
+ *        test checks exact accounting in both request and response directions without a socket.
+ */
+TEST(Http3ConnectionDirect, AcceptedBodyRestoresAllStreamCreditInBothDirections) {
+    Pair                                            pair;
+    qb::unordered_map<std::uint64_t, std::uint64_t> request_wire;
+    qb::unordered_map<std::uint64_t, std::uint64_t> response_wire;
+
+    qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/upload")};
+    request.body() = std::string(8192, 'Q');
+    request.set_header("content-length", "8192");
+    ASSERT_TRUE(pair.client.submit_request(0, request));
+    pump(pair.client_owner, pair.client, pair.server_owner, pair.server, &request_wire, &response_wire);
+
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().body().size(), 8192u);
+    ASSERT_GT(request_wire[0], 8192u);
+    EXPECT_EQ(pair.server_owner.credit[0], request_wire[0]);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(12288, 'R');
+    ASSERT_TRUE(pair.server.submit_response(0, response));
+    pump(pair.client_owner, pair.client, pair.server_owner, pair.server, &request_wire, &response_wire);
+
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u);
+    EXPECT_EQ(pair.client_owner.responses.front().body().size(), 12288u);
+    ASSERT_GT(response_wire[0], 12288u);
+    EXPECT_EQ(pair.client_owner.credit[0], response_wire[0]);
 }
 
 // =============================================================================
@@ -539,9 +578,11 @@ TEST(Http3ConnectionDirect, ServerResetsRequestWhoseBodyExceedsCap) {
     request.set_header("content-length", "64");
 
     ASSERT_TRUE(client.submit_request(0, request));
-    pump(client_owner, client, server_owner, server);
+    qb::unordered_map<std::uint64_t, std::uint64_t> request_wire;
+    pump(client_owner, client, server_owner, server, &request_wire);
 
     EXPECT_TRUE(server_owner.requests.empty()) << "an over-cap request must not be delivered";
+    EXPECT_EQ(server_owner.credit[0], request_wire[0]) << "discarded DATA still consumes QUIC connection credit";
     const bool reset_request_stream =
         std::any_of(server_owner.resets.begin(), server_owner.resets.end(), [](auto const &r) { return r.first == 0u; });
     EXPECT_TRUE(reset_request_stream) << "recv_data_cb must reset the over-cap request stream";
@@ -810,6 +851,38 @@ TEST(Http3ConnectionDirect, AddAckOffsetZeroIsNoopNonZeroAccepted) {
     pair.client.add_ack_offset(0, 0);
     pair.client.add_ack_offset(0, 1);
     SUCCEED(); // reaching here without an nghttp3 abort/throw is the assertion
+}
+
+/**
+ * @test DATA arriving after a body limit reset restores connection credit once
+ * @brief After a reset, nghttp3 may account later DATA in read_stream2 without
+ *        another receive callback. The owner must receive exactly the wire byte
+ *        count through that return value and the earlier callback credit together.
+ */
+TEST(Http3ConnectionDirect, RefusedStreamCreditsSubsequentDataOnce) {
+    struct CappedServerOwner : ServerOwner {
+        std::uint64_t
+        max_http3_body_size() const noexcept {
+            return 16;
+        }
+    };
+    using CappedServerConnection = connection<CappedServerOwner>;
+
+    CappedServerOwner      owner;
+    CappedServerConnection server{owner, 1, CappedServerConnection::role::server};
+    ASSERT_TRUE(server.bind_local_streams());
+
+    const auto headers = h3_headers_frame(0, {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/upload"}});
+    const auto first   = h3_data_frame(std::string(64, 'B'));
+    const auto second  = h3_data_frame(std::string(32, 'C'));
+    ASSERT_TRUE(server.read_stream(0, headers, false));
+    ASSERT_TRUE(server.read_stream(0, first, false));
+    ASSERT_TRUE(server.read_stream(0, second, false));
+
+    ASSERT_EQ(owner.resets.size(), 1u);
+    EXPECT_EQ(owner.resets.front().first, 0u);
+    EXPECT_TRUE(owner.requests.empty());
+    EXPECT_EQ(owner.credit[0], headers.size() + first.size() + second.size());
 }
 
 #endif // QBM_HTTP_HAS_HTTP3
