@@ -123,6 +123,7 @@ public:
 
     void
     await_suspend(std::coroutine_handle<> h) {
+        qb::io::async::track_suspension(h, "http");
         _handle        = h;
         auto alive     = _alive;
         auto completed = _completed;
