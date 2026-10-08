@@ -90,12 +90,12 @@ These are the levers that matter, grounded in how the types are built rather tha
 
 - **Zero-copy reads via `string_view`.** Header lookups and many body conversions hand back `std::string_view` over the parse buffer rather than copying. Reading request data in a synchronous handler is allocation-free; the cost shows up only when you copy out. See [lifetime](#string_view-and-lifetime).
 
-- **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/src/qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). Appends and assigns avoid reallocation where possible, and `body.raw()` gives you the pipe directly for custom (de)serialization. Use move assignment to hand large payloads in without copying:
+- **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/src/qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). `body.raw()` gives you the pipe directly for custom (de)serialization. Assigning a `std::string` copies its bytes into the pipe even with an rvalue; the rvalue overload then clears the source string:
 
   ```cpp
-  // src: qbm/http/src/qbm/http/body.h:203-204 (move operator=)
+  // src: qbm/http/src/qbm/http/body.cpp:588-591 (std::string rvalue assignment)
   std::string payload = build_large_json();
-  ctx->response().body() = std::move(payload);   // moves, does not copy
+  ctx->response().body() = std::move(payload);   // copies bytes into the pipe, then clears payload
   ```
 
   Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/src/qbm/http/body.h:104-158`). `Form` is deliberately not appendable — assign it wholesale (`body = form`), not `body << form`.

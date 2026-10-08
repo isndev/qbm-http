@@ -137,7 +137,7 @@ int main() {
 }
 ```
 
-Each supported one-shot request creates a heap-allocated session for one request/response and deletes it on completion or disposal — never stack-allocate or manually delete it. The transport selector compares URI schemes case-insensitively; the mixed-case loopback checks use explicit ports because qb-io's default-port lookup for portless mixed-case URLs is a separate open issue (QB-919). An unsupported scheme is rejected locally with `BAD_REQUEST` (400); HTTPS when SSL is unavailable is rejected locally with `SERVICE_UNAVAILABLE` (503), without creating a session or opening a socket. Those local rejections can invoke a callback before the helper returns; the coroutine overload schedules its continuation normally. Other failures yield 503 when the connection cannot be opened, `GATEWAY_TIMEOUT` (504) on timeout, and `BAD_GATEWAY` (502) when the peer disconnects unexpectedly. The callback fires exactly once for each verdict.
+Each supported one-shot request creates a heap-allocated session for one request/response and deletes it on completion or disposal — never stack-allocate or manually delete it. The transport selector compares URI schemes case-insensitively; qb-io also resolves default ports for portless mixed-case HTTP(S) URLs. An unsupported scheme is rejected locally with `BAD_REQUEST` (400); HTTPS when SSL is unavailable is rejected locally with `SERVICE_UNAVAILABLE` (503), without creating a session or opening a socket. Those local rejections can invoke a callback before the helper returns; the coroutine overload schedules its continuation normally. Other failures yield 503 when the connection cannot be opened, `GATEWAY_TIMEOUT` (504) on timeout, and `BAD_GATEWAY` (502) when the peer disconnects unexpectedly. The callback fires exactly once for each verdict.
 
 For `REQUEST`, set `request.method()` yourself; the verb-named functions set it for you.
 
@@ -377,7 +377,7 @@ For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol spec
 
 HTTP/3 runs over QUIC. The entire `qb::http3` slice is compile-time gated behind `QBM_HTTP_HAS_HTTP3` — including its header — so guard any HTTP/3 code with that macro. Only ALPN `h3` is accepted, the base URI must be `https`, and (as with HTTP/2) requests must be same-origin.
 
-<!-- src: qbm/http/src/qbm/http/3/client.h:106-155,211 -->
+<!-- src: qbm/http/src/qbm/http/3/client.h:107-156,212 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 namespace qb::http3 {

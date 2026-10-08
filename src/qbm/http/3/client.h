@@ -32,6 +32,7 @@
 #include <qb/io/async.h>
 #include <qb/io/async/quic/endpoint.h>
 #include <qb/system/container/unordered_map.h>
+#include <qb/utility/branch_hints.h>
 #include <qb/uuid.h>
 
 #include "../coro.h"
@@ -273,10 +274,9 @@ public:
         _auto_reconnect = value;
     }
     /// Enable/disable TLS peer-certificate verification.
-    void
-    set_verify_peer(bool value) noexcept {
-        _verify_peer = value;
-    }
+    /// Kept out of line: AppleClang 21 at -O3 misaddressed this field when
+    /// inlined into a large consumer translation unit (QB-939).
+    QB_NOINLINE void set_verify_peer(bool value) noexcept;
 
     /// @return Tuple of (total, successful, failed) request counters.
     [[nodiscard]] std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>

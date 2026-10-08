@@ -577,12 +577,12 @@ Body::uncompress(const std::string &encoding) {
 #endif
 
 /**
- * @brief Assign a string to the body by moving
- * @param str String to move into the body
+ * @brief Assign a string to the body from an rvalue
+ * @param str String to read and clear
  * @return Reference to this body
  *
- * Move assignment operator for std::string.
- * This specialization is optimized to clear the source string after moving.
+ * Copies bytes into the pipe, then clears the source string.
+ * This does not transfer the string's allocation into the pipe.
  */
 template <>
 Body &Body::operator= <std::string>(std::string &&str) noexcept {

@@ -67,6 +67,11 @@ Client::initialize_from_uri(qb::io::uri const &uri) {
     _host     = std::string(uri.host());
 }
 
+void
+Client::set_verify_peer(bool value) noexcept {
+    _verify_peer = value;
+}
+
 bool
 Client::connect(ConnectionCallback callback) {
     auto owner = weak_from_this().lock();

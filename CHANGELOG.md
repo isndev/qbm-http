@@ -60,6 +60,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/3 `set_verify_peer(false)` takes effect in optimized AppleClang consumers (Huly QB-939).** In an
+  AppleClang 21 Release build of a large client translation unit, the inlined setter wrote eight bytes before
+  `_verify_peer`. The client still verified a self-signed certificate and failed the QUIC handshake with TLS
+  alert 48. The setter now lives in the module binary, preserving its API and object layout while writing the
+  intended field.
 - **JSON response serialization errors reach the router instead of terminating the process (Huly QB-489).**
   The rvalue `Body` JSON assignment was `noexcept` despite strict UTF-8 validation in the serializer. It now
   propagates the error like const JSON assignment, and both paths clear partial output before throwing. A
@@ -68,8 +73,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **One-shot HTTP clients choose TLS for mixed-case HTTPS at an explicit port (Huly QB-505).** The shared
   case-insensitive scheme comparison selects the secure transport. Other schemes fail locally with 400; HTTPS on
   a build without SSL fails locally with 503. Neither rejection opens a connection. Loopback tests cover TLS and
-  plaintext servers, including the SSL-disabled build. Portless mixed-case URLs still depend on qb-io's separate
-  default-port lookup (QB-919).
+  plaintext servers, including the SSL-disabled build. The paired qb-io default-port lookup (QB-919) now also
+  handles portless mixed-case URLs.
 
 - **A large incompressible body survives compression, and a truncated one is refused (Huly QB-464).**
   `Body::compress` and `Body::uncompress` stopped as soon as their INPUT was consumed, not when the codec said the
