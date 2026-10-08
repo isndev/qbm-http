@@ -141,7 +141,7 @@ void on(RefreshCatalog const &) {
 
 The one-shot free functions (`GET`, `POST`, `REQUEST`, …) also have a callback form that heap-allocates a self-deleting session and delivers a `qb::http::async::Reply` (the original request plus the response), taking a `qb::duration` timeout:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:898-914 (REQUEST, GET), 689-692 (Reply), 866-880 (the self-deleting session) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:911-927 (REQUEST, GET), 690-693 (Reply), 829-837 (the self-deleting session) -->
 
 ```cpp
 qb::http::Request req{{"http://localhost:8080/users/42"}};

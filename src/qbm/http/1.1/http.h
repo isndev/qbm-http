@@ -39,6 +39,7 @@
 #include <string_view>
 #include "../coro.h"
 #include "../logger.h"
+#include "../origin.h"
 #include "../routing.h"
 #include "./protocol/client.h"
 #include "./protocol/server.h"
@@ -870,9 +871,21 @@ _execute_async_request_internal(Request request, _Func &&func, qb::duration time
     if (!request.has_header("host")) {
         request.set_header("host", host_header_value(request.uri()));
     }
+    const auto scheme   = request.uri().scheme();
+    const bool is_https = origin::scheme_eq(scheme, "https");
+    if (!is_https && !origin::scheme_eq(scheme, "http")) {
+        std::forward<_Func>(func)(async::Reply{std::move(request), Response{qb::http::status::BAD_REQUEST}});
+        return;
+    }
+#if !QB_HAS_SSL
+    if (is_https) {
+        std::forward<_Func>(func)(async::Reply{std::move(request), Response{qb::http::status::SERVICE_UNAVAILABLE}});
+        return;
+    }
+#endif
     LOG_HTTP_DEBUG("Executing HTTP/1.1 " << method_name_for_log << " request: " << request.method() << " " << request.uri().source());
 #if QB_HAS_SSL
-    if (request.uri().scheme() == "https") {
+    if (is_https) {
         (new async::HTTPS<_Func>(std::forward<_Func>(func), request))->connect(timeout, verify_peer);
     } else {
         (new async::HTTP<_Func>(std::forward<_Func>(func), request))->connect(timeout, verify_peer);

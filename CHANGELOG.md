@@ -26,6 +26,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **JSON response serialization errors reach the router instead of terminating the process (Huly QB-489).**
+  The rvalue `Body` JSON assignment was `noexcept` despite strict UTF-8 validation in the serializer. It now
+  propagates the error like const JSON assignment, and both paths clear partial output before throwing. A
+  `Context::json` handler can therefore finish through the router's 500 path. Unit tests pin invalid and valid
+  UTF-8, the rvalue termination boundary, partial-body cleanup, and the routed error response.
+- **One-shot HTTP clients choose TLS for mixed-case HTTPS at an explicit port (Huly QB-505).** The shared
+  case-insensitive scheme comparison selects the secure transport. Other schemes fail locally with 400; HTTPS on
+  a build without SSL fails locally with 503. Neither rejection opens a connection. Loopback tests cover TLS and
+  plaintext servers, including the SSL-disabled build. Portless mixed-case URLs still depend on qb-io's separate
+  default-port lookup (QB-919).
+
 - **A large incompressible body survives compression, and a truncated one is refused (Huly QB-464).**
   `Body::compress` and `Body::uncompress` stopped as soon as their INPUT was consumed, not when the codec said the
   stream was done. A codec may take every byte and still hold output -- deflate's stored blocks and the gzip header

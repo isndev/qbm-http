@@ -51,10 +51,10 @@ If you need true incremental, time-spaced delivery (server-sent events, a long-l
 
 The HTTP/1.1 server session (`internal::session` in `qbm/http/src/qbm/http/1.1/http.h`) owns the persistence decision per connection.
 
-**Keep-alive.** Two inputs decide whether a connection survives a response: the per-message `keep_alive` flag the parser computes from the request (llhttp's `http_should_keep_alive`, factoring HTTP version and the `Connection` header), and an application-level override you set with `session::keep_alive(bool)` (`qbm/http/src/qbm/http/1.1/http.h:449-451`). The effective decision is `request.keep_alive || session_override`. After the response is fully transmitted (`event::eos`), the session either closes — `disconnect(DisconnectedReason::ResponseTransmitted)` — or stays open for the next request:
+**Keep-alive.** Two inputs decide whether a connection survives a response: the per-message `keep_alive` flag the parser computes from the request (llhttp's `http_should_keep_alive`, factoring HTTP version and the `Connection` header), and an application-level override you set with `session::keep_alive(bool)` (`qbm/http/src/qbm/http/1.1/http.h:450-452`). The effective decision is `request.keep_alive || session_override`. After the response is fully transmitted (`event::eos`), the session either closes — `disconnect(DisconnectedReason::ResponseTransmitted)` — or stays open for the next request:
 
 ```cpp
-// src: qbm/http/src/qbm/http/1.1/http.h:342-346
+// src: qbm/http/src/qbm/http/1.1/http.h:343-347
 if (!_active_should_keep_alive) {
     this->disconnect(DisconnectedReason::ResponseTransmitted);
     return;
@@ -62,13 +62,13 @@ if (!_active_should_keep_alive) {
 start_next_request_if_possible();
 ```
 
-The session also normalizes the outgoing `Connection` header for you: it adds `Connection: close` when the connection will not persist, and `Connection: keep-alive` for an HTTP/1.0 response that will (`qbm/http/src/qbm/http/1.1/http.h:169-175`). A response that itself carries `Connection: close` forces the connection shut regardless of the keep-alive inputs.
+The session also normalizes the outgoing `Connection` header for you: it adds `Connection: close` when the connection will not persist, and `Connection: keep-alive` for an HTTP/1.0 response that will (`qbm/http/src/qbm/http/1.1/http.h:170-176`). A response that itself carries `Connection: close` forces the connection shut regardless of the keep-alive inputs.
 
-**Pipelining.** While a response is in flight, further requests on the same connection queue rather than interleave. The queue is bounded by `session::max_pipelined_requests(std::size_t)` (default 128). Exceeding the cap disconnects the connection with `DisconnectedReason::ByProtocolError` (`qbm/http/src/qbm/http/1.1/http.h:137,255-262`). Each queued request is routed in order once the active context finishes (`start_next_request_if_possible`), so handlers for one connection never run concurrently — they are serialized on the session's I/O thread.
+**Pipelining.** While a response is in flight, further requests on the same connection queue rather than interleave. The queue is bounded by `session::max_pipelined_requests(std::size_t)` (default 128). Exceeding the cap disconnects the connection with `DisconnectedReason::ByProtocolError` (`qbm/http/src/qbm/http/1.1/http.h:138,256-263`). Each queued request is routed in order once the active context finishes (`start_next_request_if_possible`), so handlers for one connection never run concurrently — they are serialized on the session's I/O thread.
 
-**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/src/qbm/http/1.1/http.h:426`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/)).
+**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/src/qbm/http/1.1/http.h:427`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/)).
 
-**HEAD requests.** The session strips the response body for a `HEAD` request while preserving `Content-Length`, so a `HEAD` reply reports the size the corresponding `GET` would return without sending the bytes (`qbm/http/src/qbm/http/1.1/http.h:162-167`).
+**HEAD requests.** The session strips the response body for a `HEAD` request while preserving `Content-Length`, so a `HEAD` reply reports the size the corresponding `GET` would return without sending the bytes (`qbm/http/src/qbm/http/1.1/http.h:163-168`).
 
 ## Protocol upgrade: HTTP to WebSocket
 
@@ -106,7 +106,7 @@ These are the levers that matter, grounded in how the types are built rather tha
 
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
-- **Compression is opt-in and automatic where enabled.** With `QB_HAS_COMPRESSION`, the one-shot client sets `Accept-Encoding` and decompresses responses; setting `Content-Encoding` on a request body compresses it (`qbm/http/src/qbm/http/1.1/http.h:762-766,786-796`). On the server, set `Content-Encoding` on the response, or use the compression middleware ([Standard middleware](./08-standard-middleware.md)).
+- **Compression is opt-in and automatic where enabled.** With `QB_HAS_COMPRESSION`, the one-shot client sets `Accept-Encoding` and decompresses responses; setting `Content-Encoding` on a request body compresses it (`qbm/http/src/qbm/http/1.1/http.h:763-767,787-797`). On the server, set `Content-Encoding` on the response, or use the compression middleware ([Standard middleware](./08-standard-middleware.md)).
 
 ### Never block the event loop
 
