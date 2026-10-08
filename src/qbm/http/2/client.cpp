@@ -359,11 +359,14 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
                 batch.all_completed = true;
                 LOG_HTTP_DEBUG_PA(_client_id, "Batch " << batch_id << " completed");
 
-                // Call batch callback
-                batch.callback(std::move(batch.responses));
-
-                // Remove batch context
+                // A completion callback can disconnect (which swaps and frees the entire
+                // registry) or enqueue another batch (which can rehash it). Retire this
+                // entry before invoking user code, while its context stays owned here.
+                auto finished = std::move(batch_it->second);
                 _active_batches.erase(batch_it);
+                auto done      = std::move(finished->callback);
+                auto responses = std::move(finished->responses);
+                done(std::move(responses));
             }
         };
 
@@ -444,12 +447,16 @@ Client::start_connection() {
 
 void
 Client::process_pending_requests() {
+    auto owner = weak_from_this().lock();
     if (!is_connected() || !_h2_protocol || _received_graceful_goaway) {
         return;
     }
 
     // Process pending requests up to concurrent limit
-    while (!_pending_requests.empty() && _active_requests.size() < _max_concurrent_streams) {
+    // A failed send calls user code below. It can disconnect and queue fresh work,
+    // so every iteration must recheck the connection whose protocol we use.
+    while (is_connected() && _h2_protocol && !_received_graceful_goaway && !_pending_requests.empty()
+           && _active_requests.size() < _max_concurrent_streams) {
         auto context = std::move(_pending_requests.front());
         _pending_requests.pop_front();
 

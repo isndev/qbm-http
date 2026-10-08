@@ -17,6 +17,24 @@
 
 namespace qb::http3 {
 
+namespace {
+// Endpoint dispatch continues after a derived callback returns. If user code
+// releases the last external owner, defer the last reference until the next
+// listener turn, after the endpoint's outer event handler has unwound.
+struct EventLifetime {
+    std::shared_ptr<Client> owner;
+
+    explicit EventLifetime(Client &client)
+        : owner(client.weak_from_this().lock()) {}
+
+    ~EventLifetime() {
+        if (owner && owner.use_count() == 1) {
+            qb::io::async::listener::current.defer([hold = std::move(owner)] {});
+        }
+    }
+};
+} // namespace
+
 Client::Client(std::string const &base_uri)
     : _client_id(qb::generate_random_uuid()) {
     initialize_from_uri(qb::io::uri(base_uri));
@@ -28,8 +46,16 @@ Client::Client(qb::io::uri const &uri)
 }
 
 Client::~Client() {
-    fail_all_requests("HTTP/3 client destroyed");
-    disconnect();
+    try {
+        (void) fail_all_requests("HTTP/3 client destroyed");
+    } catch (...) {
+        // A destructor cannot propagate an application callback's exception.
+    }
+    try {
+        disconnect();
+    } catch (...) {
+        // Complete object destruction even if closing reports an exception.
+    }
 }
 
 void
@@ -43,6 +69,15 @@ Client::initialize_from_uri(qb::io::uri const &uri) {
 
 bool
 Client::connect(ConnectionCallback callback) {
+    auto owner = weak_from_this().lock();
+    if (_deferred_close && (_read_depth > 0 || _deferred_close->empty())) {
+        // The old connection is still on nghttp3's stack. A new handshake must
+        // wait until its teardown has completed after the outer read.
+        if (callback) {
+            callback(false, "HTTP/3 connection is closing");
+        }
+        return false;
+    }
     if (_is_connected) {
         if (callback) {
             callback(true, {});
@@ -58,6 +93,7 @@ Client::connect(ConnectionCallback callback) {
     if (callback) {
         _connection_callbacks.push_back(std::move(callback));
     }
+    ++_connect_epoch;
     _is_connecting   = true;
     _h3_ready        = false;
     _remote_shutdown = false;
@@ -66,6 +102,7 @@ Client::connect(ConnectionCallback callback) {
     tls.server_name = _host;
     tls.verify_peer = _verify_peer;
     if (!qb::io::async::quic::endpoint::connect(_base_uri, std::move(tls), {"h3"})) {
+        close_failed_transport("Unable to start QUIC connection");
         handle_connection_failure("Unable to start QUIC connection");
         return false;
     }
@@ -75,13 +112,58 @@ Client::connect(ConnectionCallback callback) {
 
 void
 Client::disconnect() {
-    fail_all_requests("HTTP/3 client disconnect");
+    if (_deferred_close && _deferred_close->empty()) {
+        return; // an explicit close is already notifying its old requests
+    }
+    if (_read_depth > 0 || _submit_depth > 0) {
+        // A pending callback may call disconnect from nghttp3_conn_read_stream2.
+        // Keep _h3 alive until that native reader returns. An empty deferred
+        // reason marks explicit intent and takes precedence over a transport
+        // close, so the outer dispatch will not start an automatic reconnect.
+        ++_connect_epoch;
+        _is_connected    = false;
+        _is_connecting   = false;
+        _h3_ready        = false;
+        _remote_shutdown = true;
+        _deferred_close.emplace();
+        return;
+    }
+    // Mark the old connection unavailable before invoking failure callbacks.
+    // They may call connect(), push_request(), or disconnect() again.
+    auto owner = weak_from_this().lock();
+    ++_connect_epoch;
     _is_connected    = false;
     _is_connecting   = false;
     _h3_ready        = false;
-    _remote_shutdown = false;
+    _remote_shutdown = true;
+    _deferred_close.emplace();
+    auto callbacks = std::move(_connection_callbacks);
+    _connection_callbacks.clear();
+    std::exception_ptr callback_error;
+    const auto         capture = [&](auto &&notify) {
+        try {
+            notify();
+        } catch (...) {
+            if (!callback_error) {
+                callback_error = std::current_exception();
+            }
+        }
+    };
+    for (auto &callback : callbacks) {
+        if (callback) {
+            capture([&] { callback(false, "HTTP/3 client disconnect"); });
+        }
+    }
+    if (auto error = fail_all_requests("HTTP/3 client disconnect"); error && !callback_error) {
+        callback_error = error;
+    }
     _h3.reset();
-    qb::io::async::quic::endpoint::close(0, "HTTP/3 client disconnect");
+    capture([&] { qb::io::async::quic::endpoint::close(0, "HTTP/3 client disconnect"); });
+    _deferred_close.reset();
+    _remote_shutdown = false;
+    if (callback_error) {
+        std::rethrow_exception(callback_error);
+    }
 }
 
 void
@@ -137,9 +219,10 @@ Client::push_request_with_id(qb::http::Request request, ResponseCallback callbac
         callback(std::move(*error));
         return 0;
     }
-    if (_remote_shutdown && is_connected()) {
+    if (_remote_shutdown) {
         ++_failed_requests;
-        callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
+        const auto *reason = _deferred_close && _deferred_close->empty() ? "HTTP/3 client disconnect" : "HTTP/3 server is shutting down";
+        callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, reason));
         return 0;
     }
     if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
@@ -200,11 +283,12 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     if (!callback) {
         return false;
     }
-    if (_remote_shutdown && is_connected()) {
+    if (_remote_shutdown) {
         std::vector<qb::http::Response> responses;
         responses.reserve(requests.size());
+        const auto *reason = _deferred_close && _deferred_close->empty() ? "HTTP/3 client disconnect" : "HTTP/3 server is shutting down";
         for (std::size_t i = 0; i < requests.size(); ++i) {
-            responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
+            responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, reason));
         }
         _total_requests += requests.size();
         _failed_requests += requests.size();
@@ -274,10 +358,11 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
 
 void
 Client::process_pending_requests() {
+    auto owner = weak_from_this().lock();
     if (!_h3 || !is_connected() || _remote_shutdown) {
         return;
     }
-    while (!_pending_requests.empty() && _active_requests.size() < _max_concurrent_streams) {
+    while (_h3 && is_connected() && !_remote_shutdown && !_pending_requests.empty() && _active_requests.size() < _max_concurrent_streams) {
         // A prior iteration's submit_request / reset_stream drains output; a >TX-cap send can
         // have reentrantly scheduled a connection teardown (deferred until the read unwinds —
         // see dispatch(stream_data)). Stop enqueuing onto a connection that is going away: the
@@ -290,10 +375,60 @@ Client::process_pending_requests() {
         auto ctx = std::move(_pending_requests.front());
         _pending_requests.pop_front();
 
-        auto stream          = open_bidirectional_stream(0);
-        ctx->stream_id       = stream.id();
-        const auto stream_id = ctx->stream_id;
-        if (!_h3->submit_request(stream_id, ctx->request)) {
+        auto stream              = open_bidirectional_stream(0);
+        ctx->stream_id           = stream.id();
+        const auto stream_id     = ctx->stream_id;
+        const auto attempt_epoch = _connect_epoch;
+        bool       submitted     = false;
+        {
+            struct SubmitGuard {
+                int &depth;
+                explicit SubmitGuard(int &value) noexcept
+                    : depth(value) {
+                    ++depth;
+                }
+                ~SubmitGuard() noexcept {
+                    --depth;
+                }
+            } guard(_submit_depth);
+            submitted = _h3->submit_request(stream_id, ctx->request);
+        }
+        std::exception_ptr transition_error;
+        bool               closed_during_submit = false;
+        if (_deferred_close && _read_depth == 0 && _submit_depth == 0) {
+            closed_during_submit     = true;
+            const std::string reason = std::move(*_deferred_close);
+            _deferred_close.reset();
+            try {
+                if (reason.empty()) {
+                    disconnect();
+                } else {
+                    close_failed_transport("HTTP/3 connection closed");
+                    handle_connection_failure(reason);
+                    if (_auto_reconnect && has_pending_or_active_work()) {
+                        connect(nullptr);
+                    }
+                }
+            } catch (...) {
+                transition_error = std::current_exception();
+            }
+        }
+        if (closed_during_submit || attempt_epoch != _connect_epoch || !_h3 || !is_connected()) {
+            ++_failed_requests;
+            try {
+                ctx->callback(
+                    create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 connection closed during request submission"));
+            } catch (...) {
+                if (!transition_error) {
+                    transition_error = std::current_exception();
+                }
+            }
+            if (transition_error) {
+                std::rethrow_exception(transition_error);
+            }
+            return;
+        }
+        if (!submitted) {
             // Request never made it onto the wire; abandon the just-opened
             // stream the same way the client cancels any request (RFC 9114 §4.1).
             reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
@@ -307,6 +442,7 @@ Client::process_pending_requests() {
 
 void
 Client::handle_connection_success(std::string const &alpn) {
+    ++_connect_epoch;
     _is_connected    = true;
     _is_connecting   = false;
     _h3_ready        = true;
@@ -315,17 +451,28 @@ Client::handle_connection_success(std::string const &alpn) {
     _h3->bind_local_streams();
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
+    std::exception_ptr callback_error;
     for (auto &cb : callbacks) {
         if (cb) {
-            cb(true, {});
+            try {
+                cb(true, {});
+            } catch (...) {
+                if (!callback_error) {
+                    callback_error = std::current_exception();
+                }
+            }
         }
     }
     process_pending_requests();
     LOG_HTTP_INFO_PA(_client_id, "HTTP/3 connected with ALPN " << alpn);
+    if (callback_error) {
+        std::rethrow_exception(callback_error);
+    }
 }
 
 void
 Client::handle_connection_failure(std::string const &error) {
+    ++_connect_epoch;
     _is_connected    = false;
     _is_connecting   = false;
     _h3_ready        = false;
@@ -333,15 +480,42 @@ Client::handle_connection_failure(std::string const &error) {
     _h3.reset();
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
+    // Retire old requests before connection callbacks can enqueue a new attempt.
+    // fail_all_requests swaps its registries first, so work started by any of
+    // its callbacks belongs to the next connection.
+    auto callback_error = fail_all_requests(error);
     for (auto &cb : callbacks) {
         if (cb) {
-            cb(false, error);
+            try {
+                cb(false, error);
+            } catch (...) {
+                if (!callback_error) {
+                    callback_error = std::current_exception();
+                }
+            }
         }
     }
-    fail_all_requests(error);
+    if (callback_error) {
+        std::rethrow_exception(callback_error);
+    }
 }
 
 void
+Client::close_failed_transport(std::string_view reason) {
+    struct CloseGuard {
+        bool &flag;
+        explicit CloseGuard(bool &value) noexcept
+            : flag(value) {
+            flag = true;
+        }
+        ~CloseGuard() noexcept {
+            flag = false;
+        }
+    } guard(_closing_failed_attempt);
+    qb::io::async::quic::endpoint::close(0, reason);
+}
+
+std::exception_ptr
 Client::fail_all_requests(std::string const &error) {
     qb::unordered_map<std::uint64_t, std::unique_ptr<RequestContext>>      active;
     std::deque<std::unique_ptr<RequestContext>>                            pending;
@@ -349,6 +523,16 @@ Client::fail_all_requests(std::string const &error) {
     active.swap(_active_requests);
     pending.swap(_pending_requests);
     batches.swap(_active_batches);
+    std::exception_ptr callback_error;
+    const auto         capture = [&](auto &&notify) {
+        try {
+            notify();
+        } catch (...) {
+            if (!callback_error) {
+                callback_error = std::current_exception();
+            }
+        }
+    };
 
     for (auto &[id, ctx] : active) {
         (void) id;
@@ -356,7 +540,7 @@ Client::fail_all_requests(std::string const &error) {
             continue;
         }
         ++_failed_requests;
-        ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error));
+        capture([&] { ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
     }
     while (!pending.empty()) {
         auto ctx = std::move(pending.front());
@@ -365,7 +549,7 @@ Client::fail_all_requests(std::string const &error) {
             continue;
         }
         ++_failed_requests;
-        ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error));
+        capture([&] { ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
     }
     for (auto &[id, batch] : batches) {
         (void) id;
@@ -375,8 +559,9 @@ Client::fail_all_requests(std::string const &error) {
                 batch->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error);
             }
         }
-        batch->callback(std::move(batch->responses));
+        capture([&] { batch->callback(std::move(batch->responses)); });
     }
+    return callback_error;
 }
 
 void
@@ -414,15 +599,16 @@ Client::arm_connect_timeout() {
     if (_connect_timeout <= qb::duration::zero()) {
         return;
     }
-    auto weak_self = weak_from_this();
+    auto       weak_self = weak_from_this();
+    const auto epoch     = _connect_epoch;
     qb::io::async::callback(
-        [weak_self]() {
+        [weak_self, epoch]() {
             auto self = weak_self.lock();
-            if (!self || !self->_is_connecting || self->is_connected()) {
+            if (!self || self->_connect_epoch != epoch || !self->_is_connecting || self->is_connected()) {
                 return;
             }
+            self->close_failed_transport("HTTP/3 connection timeout");
             self->handle_connection_failure("HTTP/3 connection timeout");
-            static_cast<qb::io::async::quic::endpoint &>(*self).close(0, "HTTP/3 connection timeout");
         },
         _connect_timeout);
 }
@@ -559,7 +745,9 @@ Client::on_http3_response(std::uint64_t stream_id, qb::http::Response response) 
 
 void
 Client::dispatch(qb::io::async::quic::event::connected const &ev) {
+    EventLifetime lifetime{*this};
     if (ev.negotiated_alpn != "h3") {
+        close_failed_transport("HTTP/3 ALPN negotiation failed");
         handle_connection_failure("HTTP/3 ALPN negotiation failed: " + ev.negotiated_alpn);
         return;
     }
@@ -568,6 +756,10 @@ Client::dispatch(qb::io::async::quic::event::connected const &ev) {
 
 void
 Client::dispatch(qb::io::async::quic::event::connection_closed const &ev) {
+    EventLifetime lifetime{*this};
+    if (_closing_failed_attempt || (_deferred_close && _deferred_close->empty())) {
+        return; // the explicit close already owns notification and teardown
+    }
     std::string reason = ev.reason_phrase.empty() ? "HTTP/3 connection closed" : ev.reason_phrase;
     if (ev.error_code != 0) {
         reason += " (" + std::to_string(ev.error_code) + ")";
@@ -576,12 +768,15 @@ Client::dispatch(qb::io::async::quic::event::connection_closed const &ev) {
     // nghttp3_conn_read_stream2. Tearing _h3 down now would call nghttp3_conn_del mid-read
     // (UAF) and reconnect on a live-but-doomed stack. Defer: dispatch(stream_data) runs the
     // teardown + reconnect once the outermost read unwinds. First reason wins.
-    if (_read_depth > 0) {
+    if (_read_depth > 0 || _submit_depth > 0) {
         if (!_deferred_close) {
             _deferred_close = std::move(reason);
         }
         return;
     }
+    // endpoint has marked its state closed, but its socket and watchers are
+    // still attached. Retire them before failure callbacks may start a retry.
+    close_failed_transport("HTTP/3 connection closed");
     handle_connection_failure(reason);
     if (_auto_reconnect && has_pending_or_active_work()) {
         connect(nullptr);
@@ -593,6 +788,7 @@ Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
     if (!_h3) {
         return;
     }
+    EventLifetime lifetime{*this};
     // Guard the read: a response callback reached from nghttp3_conn_read_stream2 can
     // reentrantly fail the connection (see _read_depth in client.h). While the read is on
     // the stack the teardown is deferred; run it here, after the outermost read unwinds and
@@ -613,9 +809,14 @@ Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
         DepthGuard guard(_read_depth);
         _h3->read_stream(ev.id, ev.payload, ev.fin);
     }
-    if (_read_depth == 0 && _deferred_close) {
+    if (_read_depth == 0 && _submit_depth == 0 && _deferred_close) {
         const std::string reason = std::move(*_deferred_close);
         _deferred_close.reset();
+        if (reason.empty()) {
+            disconnect(); // explicit intent: fail once and close after nghttp3 unwinds
+            return;
+        }
+        close_failed_transport("HTTP/3 connection closed");
         handle_connection_failure(reason);
         if (_auto_reconnect && has_pending_or_active_work()) {
             connect(nullptr);
@@ -626,12 +827,14 @@ Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
 void
 Client::dispatch(qb::io::async::quic::event::stream_data_acked const &ev) {
     if (_h3) {
+        EventLifetime lifetime{*this};
         _h3->add_ack_offset(ev.id, ev.bytes);
     }
 }
 
 void
 Client::dispatch(qb::io::async::quic::event::stream_closed const &ev) {
+    EventLifetime lifetime{*this};
     on_http3_stream_closed(ev.id, ev.error_code);
     // nghttp3 frees a stream only when told, and the request, the response and the body copy kept
     // beside it go with it: until 3.2 nobody told it, and a long-lived connection kept every

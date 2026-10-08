@@ -241,6 +241,7 @@ qhttp_bench(http1-parser     benchmark/http1/http1-parser.bench.cpp      EXTRA_L
 qhttp_bench(http1-serialize  benchmark/http1/http1-serialize.bench.cpp   EXTRA_LABELS http1)
 qhttp_bench(hpack            benchmark/http2/hpack.bench.cpp             EXTRA_LABELS http2)
 qhttp_bench(frame-codec      benchmark/http2/frame-codec.bench.cpp       EXTRA_LABELS http2)
+qhttp_bench(http2-client-loopback benchmark/http2/client-loopback.bench.cpp REQUIRES ssl EXTRA_LABELS http2 ssl)
 qhttp_bench(cors             benchmark/middleware/cors.bench.cpp         EXTRA_LABELS middleware)
 qhttp_bench(body-codec       benchmark/message/body-codec.bench.cpp      EXTRA_LABELS message)
 qhttp_bench(uri-parse        benchmark/uri/uri-parse.bench.cpp           EXTRA_LABELS uri)
@@ -249,4 +250,5 @@ qhttp_bench(auth-verify      benchmark/middleware/auth-verify.bench.cpp  REQUIRE
 qhttp_bench(compression      benchmark/middleware/compression.bench.cpp  REQUIRES compression EXTRA_LABELS middleware)
 if(QBM_HTTP_HAS_HTTP3)
     qhttp_bench(http3-field-block benchmark/http3/field-block.bench.cpp  EXTRA_LABELS http3)
+    qhttp_bench(http3-client-loopback benchmark/http3/client-loopback.bench.cpp REQUIRES quic ssl EXTRA_LABELS http3 quic ssl)
 endif()

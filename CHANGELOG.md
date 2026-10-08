@@ -9,6 +9,40 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **HTTP/2 batch completion callbacks may disconnect or enqueue another batch (Huly QB-496).** The completed
+  batch now leaves the registry before invoking user code, so a disconnect cannot free its iterator during
+  callback return. Ordered responses and callback cardinality are preserved.
+- **HTTP/2 pending sends tolerate a failure callback that disconnects or replaces the client (Huly QB-926).**
+  The client retains itself while draining the queue and checks the connection and protocol again before each
+  send, so a callback cannot make the next request use a retired connection.
+- **HTTP/3 callbacks can close or release their client during event delivery (Huly QB-501, QB-924, QB-927).**
+  A `disconnect()` reached inside an nghttp3 read marks the client down immediately and waits until that read
+  returns to destroy the protocol, close QUIC and fail remaining active work. GOAWAY's pending-request callbacks
+  continue to run during the read. Reentrant connect attempts fail, new requests receive `503`, and that explicit
+  close does not start an automatic reconnect. A callback that releases the last external `shared_ptr` leaves the
+  client alive until the endpoint has finished dispatching the event.
+- **HTTP/3 retries start with a retired transport and request cohort (Huly QB-929).** Connect-start failures,
+  timeouts and remote closes close the old QUIC transport before failure callbacks can initiate another attempt;
+  those callbacks see the old requests failed before they queue new work. On retry, the qb-io endpoint refreshes
+  its internally owned native backend.
+- **An HTTP/3 connect timer belongs to one attempt (Huly QB-500).** A cancelled attempt reports failure to its
+  connection callbacks once. Its timer cannot time out a later attempt on the same client, even if that later
+  attempt is still connecting when the old deadline passes.
+- **HTTP/3 pending sends stop after a reentrant teardown (Huly QB-931).** The queue drain retains the client and
+  rechecks connection, protocol and shutdown state before each submission, including after a failed submit and
+  its callback.
+- **HTTP/3 can serve sequential requests past the initial QUIC stream limit (Huly QB-934).** For a
+  client-initiated request stream delivered through ngtcp2's `stream_open` callback, qb returns its
+  bidirectional slot on close; ngtcp2 handles implicit openings itself. A loopback client completed 130
+  sequential requests on one connection with the default limit of 100.
+- **A synchronous QUIC close during HTTP/3 submission settles the in-between request (Huly QB-932).** The
+  client defers teardown until native submission returns, then gives a `503` to the request already removed
+  from the pending queue before it could enter the active registry. That notification still runs if an old
+  request's failure callback throws during teardown; the saved exception propagates afterward.
+- **HTTP/3 connect and disconnect transitions finish notification after a callback throws (Huly QB-933).**
+  A throwing connection or request callback no longer strands the close or silently skips the other callbacks
+  in that transition; explicit disconnect completes transport cleanup before propagating the saved exception.
+
 - **The compression middleware offers zstd and brotli, and never chooses a codec the build cannot produce (Huly
   QB-93).** `CompressionOptions`'s default list is the codecs of `{zstd, br, gzip, deflate}` this build registers --
   `{gzip, deflate}` unless qb was built with the opt-in `QB_WITH_ZSTD` / `QB_WITH_BROTLI` (qb, Huly QB-79), and empty

@@ -22,6 +22,7 @@
 
 #include <chrono>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -112,13 +113,15 @@ public:
     using h3_connection = qb::protocol::http3::connection<Client>;
 
 private:
-    qb::io::uri _base_uri;
-    qb::uuid    _client_id;
-    std::string _host;
-    bool        _is_connected    = false;
-    bool        _is_connecting   = false;
-    bool        _h3_ready        = false;
-    bool        _remote_shutdown = false;
+    qb::io::uri   _base_uri;
+    qb::uuid      _client_id;
+    std::string   _host;
+    bool          _is_connected           = false;
+    bool          _is_connecting          = false;
+    bool          _h3_ready               = false;
+    bool          _remote_shutdown        = false;
+    bool          _closing_failed_attempt = false;
+    std::uint64_t _connect_epoch          = 0;
 
     // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
     // dispatch(stream_data)) runs response callbacks that can synchronously fail the
@@ -127,7 +130,9 @@ private:
     // nghttp3_conn_del while the outer read is still on the stack (use-after-free), and fire
     // user callbacks reentrantly. While _read_depth > 0 the teardown is DEFERRED into
     // _deferred_close and executed once the outermost read returns.
-    int                        _read_depth = 0;
+    int _read_depth   = 0;
+    int _submit_depth = 0;
+    // Empty value means explicit disconnect; a nonempty value is a transport failure.
     std::optional<std::string> _deferred_close;
 
     std::unique_ptr<h3_connection>                                         _h3;
@@ -352,8 +357,10 @@ private:
     void handle_connection_success(std::string const &alpn);
     /// Mark the connection down, notify callbacks, and fail all requests.
     void handle_connection_failure(std::string const &error);
+    /// Close an unsuccessful QUIC attempt without delivering its own close event twice.
+    void close_failed_transport(std::string_view reason);
     /// Fail every pending/active request and batch with @p error.
-    void fail_all_requests(std::string const &error);
+    [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error);
     /// Fail the active request on @p stream_id with @p status and @p error.
     void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     /// Fail the pending request with @p request_id with @p status and @p error.
