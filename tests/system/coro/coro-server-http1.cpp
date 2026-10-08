@@ -270,7 +270,7 @@ TEST_F(CoroServerTest, CoroMiddlewareManualContinueDoesNotDoubleAdvanceChain) {
 }
 
 // ===========================================================================
-// http_awaiter completion-callback safety (coro.h:129-141).
+// http_awaiter completion-callback safety (coro.h:130-142).
 //
 // The generic HTTP awaiter must tolerate a completion callback that fires more
 // than once (at-most-once is a contract callers can violate) and one that fires
@@ -280,7 +280,7 @@ TEST_F(CoroServerTest, CoroMiddlewareManualContinueDoesNotDoubleAdvanceChain) {
 
 // A completion callback invoked TWICE must resolve the await exactly once with
 // the FIRST value; the second invocation is swallowed by the compare-exchange
-// guard (coro.h:133-136). We invoke it twice synchronously inside the operation,
+// guard (coro.h:134-137). We invoke it twice synchronously inside the operation,
 // while the awaiter is still alive, so the second call hits the double-complete
 // branch (not the destroyed-awaiter branch).
 TEST(CoroAwaiterMechanics, DoubleCompletionResolvesOnceWithFirstValue) {
@@ -297,7 +297,7 @@ TEST(CoroAwaiterMechanics, DoubleCompletionResolvesOnceWithFirstValue) {
 }
 
 // A completion callback captured OUT of the operation and invoked AFTER the
-// awaiter is gone must be a silent no-op (coro.h:130-132): the shared `_alive`
+// awaiter is gone must be a silent no-op (coro.h:131-133): the shared `_alive`
 // flag is false, so the callback returns before touching freed state. The await
 // still resolves through the in-band completion; the late call simply must not
 // crash (proven by running clean under ASan).

@@ -7,7 +7,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
 - **HTTP/3 active cancellation retains the client through its callback (Huly QB-960).** A
   cancellation callback may release the last external `shared_ptr`; the client stays alive until
@@ -28,6 +28,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   close before the 101 reports a failed connect, and clients reject a 101 response that selects
   an extension they did not offer. The qb-io integer and typed `disconnect(reason)` overloads
   remain available through the WebSocket client.
+- **A coroutine parked on a client request says so in qb's `CoroutineScheduler::dump()` (Huly QB-71).** `http_awaiter`
+  -- every coroutine form of the client -- begins its `await_suspend` with `qb::io::async::track_suspension(h,
+  "http")`: with suspension tracking on, the dump shows the coroutine waiting on `"http"`, for how long. An awaiter
+  without the call would leave the coroutine with the record of its previous wait, ageing. Off -- the default -- the
+  call is one predictable branch. Pinned by `TheDumpSaysACoroutineWaitsOnARequest` in
+  `tests/system/coro/coro-client-http1.cpp`; qb's `scripts/check-awaiter-tracking.py`, run over this module from the
+  superproject, refuses an awaiter without it.
 
 ### Changed
 
@@ -81,6 +88,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
   unregistered name passed over -- which catches five defects planted one at a time.
 
 ### Fixed
+
+- **WebSocket client connection hardening (Huly QB-513, QB-609, QB-517).** A client destroyed
+  during an in-flight transport connect no longer leaves a callback that can access it. A
+  nonzero connect timeout now covers the transport and the HTTP Upgrade as one deadline, with
+  one failure completion when the server withholds its response. A retry started from that
+  failure callback waits for the retired transport to finish closing and drops its buffered bytes.
+  Parsed handshake errors, established notifications and disconnect callbacks run after parser
+  dispatch, so they may release the client;
+  a request hook that cancels or replaces an attempt cannot send its retired Upgrade. A peer
+  close before the 101 reports a failed connect, and clients reject a 101 response that selects
+  an extension they did not offer. The qb-io integer and typed `disconnect(reason)` overloads
+  remain available through the WebSocket client.
 
 - **HTTP/3 `set_verify_peer(false)` takes effect in optimized AppleClang consumers (Huly QB-939).** In an
   AppleClang 21 Release build of a large client translation unit, the inlined setter wrote eight bytes before
