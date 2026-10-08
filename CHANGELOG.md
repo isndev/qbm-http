@@ -18,7 +18,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   dispatch, so they may release the client;
   a request hook that cancels or replaces an attempt cannot send its retired Upgrade. A peer
   close before the 101 reports a failed connect, and clients reject a 101 response that selects
-  an extension they did not offer.
+  an extension they did not offer. The qb-io integer and typed `disconnect(reason)` overloads
+  remain available through the WebSocket client.
 
 ### Changed
 

@@ -66,7 +66,7 @@ struct IncomingFrame {
 
 ## The coroutine client
 
-`connect(uri, timeout)` performs both the TCP/TLS connection and the HTTP `Upgrade` handshake. The timeout is one deadline across both phases, as a `qb::duration` (default `qb::duration::zero()`, meaning no client-side deadline). A server that withholds its upgrade response makes the awaiter resume once with `ConnectResult::ok == false` when that deadline expires. `ConnectResult::ok` is `true` only when both phases succeed; on failure the result stays intentionally small — bind a `sending_http_request` callback or inspect the transport log before `connect()` if you need wire-level detail. <!-- src: src/qbm/http/ws/ws.h:1415-1512, src/qbm/http/ws/coro.h:382-403 -->
+`connect(uri, timeout)` performs both the TCP/TLS connection and the HTTP `Upgrade` handshake. The timeout is one deadline across both phases, as a `qb::duration` (default `qb::duration::zero()`, meaning no client-side deadline). A server that withholds its upgrade response makes the awaiter resume once with `ConnectResult::ok == false` when that deadline expires. `ConnectResult::ok` is `true` only when both phases succeed; on failure the result stays intentionally small — bind a `sending_http_request` callback or inspect the transport log before `connect()` if you need wire-level detail. <!-- src: src/qbm/http/ws/ws.h:1421-1518, src/qbm/http/ws/coro.h:382-403 -->
 
 ```cpp
 // <!-- src: qbm/http/tests/system/ws/ws-coro-client.cpp:381-403 -->

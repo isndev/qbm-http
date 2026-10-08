@@ -621,7 +621,7 @@ Usage: `auto s = qb::http::make_dual_stack_server(); s->router().get("/", h); s-
 Drives TCP connect + HTTP upgrade + protocol switch; forwards `ping/pong/message/closed/disconnected/error/connected` events to parent `T::on(...)` if present.
 - `void set_ping_interval(qb::duration interval=qb::duration::zero())` — auto-ping keepalive after a verified upgrade; **zero/negative disables**.
 - `void connect(const qb::io::uri& remote, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` — connect to `ws://`/`wss://`, install protocol, send upgrade. A positive timeout is one deadline across transport and Upgrade; zero disables it. An active transport is retired before reconnect, and its input/output buffers are cleared before the next handshake. A retry from a failure callback starts after the old transport's disconnect dispatch. The client rejects an unoffered `Sec-WebSocket-Extensions` response before `connected`.
-- `void disconnect()` — cancels an unfinished connection and its deadline, then closes the transport. An in-flight connector callback is inert after cancellation or client destruction; stack and `unique_ptr` clients are supported.
+- `void disconnect(int reason=1)` / `void disconnect(qb::io::async::event::disconnect_reason reason)` — cancel an unfinished connection and its deadline, then close the transport while forwarding the reason to qb-io's `disconnected` event. The zero-argument call remains valid through the default. An in-flight connector callback is inert after cancellation or client destruction; stack and `unique_ptr` clients are supported.
 - `connected`, parsed-handshake/protocol `error`, and `disconnected` user callbacks are delivered after parser/I/O dispatch and may release the client. A transport connect failure or explicit pending `disconnect()` may report `error` synchronously. A pre-101 transport close reports `error` once. The `sending_http_request` hook remains synchronous; after it returns, a cancelled, replaced, or destroyed attempt sends no Upgrade request. Frames pipelined with the 101 are delivered after `connected`, in wire order.
 - `void close(CloseStatus=Normal, std::string_view reason="closed normally")` — queue a Close frame (no TCP teardown); throws `std::invalid_argument` on reserved code; call `disconnect()` after for immediate teardown.
 - `void set_subprotocols(std::vector<std::string>)` / `void add_subprotocol(std::string)` — offer list; each must be a valid RFC 7230 token (else `std::invalid_argument`); before connect.
@@ -652,7 +652,7 @@ Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([]{..
   - `void set_pending_cap(std::size_t) noexcept` (default 1024).
 Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect(qb::io::uri{"ws://h/p"}); auto f = co_await ws.receive();`
 
-### WS pipe serialization — `src/qbm/http/ws/ws.h:1988`
+### WS pipe serialization — `src/qbm/http/ws/ws.h:1994`
 `template<> pipe<char>& pipe<char>::put<Message>(const Message&);` (and `MessagePing/MessagePong/MessageText/MessageBinary/MessageClose/WebSocketRequest`) — frame onto the outbound pipe (masks when `msg.masked`); invoked indirectly via `operator<<`.
 
 ---

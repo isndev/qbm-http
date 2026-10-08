@@ -57,6 +57,16 @@ using namespace std::chrono_literals;
 
 namespace {
 
+static_assert(requires(qb::http::ws::client &client) {
+    client.disconnect();
+    client.disconnect(73);
+    client.disconnect(qb::io::async::event::disconnect_reason::protocol_error);
+});
+static_assert(requires(qb::http::ws::client_secure &client) {
+    client.disconnect(73);
+    client.disconnect(qb::io::async::event::disconnect_reason::protocol_error);
+});
+
 // ---------------------------------------------------------------------------
 // Ephemeral port: bind :0 on the socket that actually serves.
 // ---------------------------------------------------------------------------
@@ -768,6 +778,47 @@ TEST(WebSocketClientHardening, RemoteCloseBeforeUpgradeFailsPendingConnect) {
     ASSERT_TRUE(pump_until([&] { return errors > 0 || connected > 0; }));
     EXPECT_EQ(errors, 1);
     EXPECT_EQ(connected, 0);
+}
+
+TEST(WebSocketClientHardening, PendingDisconnectForwardsTypedReason) {
+    qb::io::async::init();
+    std::atomic<int>                                      requests{0};
+    qb::http::test::WsServerThread<WithheldUpgradeServer> server(0, [&](WithheldUpgradeServer &s) { s.requests = &requests; });
+    int                                                   errors       = 0;
+    int                                                   disconnected = 0;
+    int                                                   reason       = 0;
+    qb::http::ws::client                                  client;
+    client.on_error([&](auto &) { ++errors; });
+    client.on_disconnected([&](auto &event) {
+        ++disconnected;
+        reason = event.reason;
+    });
+    client.connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return requests.load(std::memory_order_acquire) == 1; }));
+    client.disconnect(qb::io::async::event::disconnect_reason::protocol_error);
+    ASSERT_TRUE(pump_until([&] { return disconnected == 1; }));
+    EXPECT_EQ(errors, 1);
+    EXPECT_EQ(reason, static_cast<int>(qb::io::async::event::disconnect_reason::protocol_error));
+}
+
+TEST(WebSocketClientHardening, EstablishedDisconnectForwardsIntegerReason) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0);
+    int                                                     connected    = 0;
+    int                                                     disconnected = 0;
+    int                                                     reason       = 0;
+    qb::http::ws::client                                    client;
+    client.on_connected([&](auto &) { ++connected; });
+    client.on_disconnected([&](auto &event) {
+        ++disconnected;
+        reason = event.reason;
+    });
+    client.connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    ASSERT_TRUE(pump_until([&] { return connected == 1; }));
+    client.disconnect(73);
+    ASSERT_TRUE(pump_until([&] { return disconnected == 1; }));
+    EXPECT_EQ(connected, 1);
+    EXPECT_EQ(reason, 73);
 }
 
 TEST(WebSocketClientHardening, ClientDeadlineIncludesUpgradeResponse) {

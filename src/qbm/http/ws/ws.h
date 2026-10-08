@@ -1150,11 +1150,11 @@ private:
     }
 
     void
-    start_transport_close() {
+    start_transport_close(int reason = 1) {
         if (this->transport().is_open() && !_disconnect_pending) {
             _disconnect_pending  = true;
             _disconnect_notified = false;
-            tcp_client::disconnect();
+            tcp_client::disconnect(reason);
         }
     }
 
@@ -1304,14 +1304,15 @@ public:
 
     /// Cancel an in-progress handshake as well as the transport. A connector
     /// already in flight is allowed to finish, but its weak callback is inert.
+    /// The reason is forwarded to qb-io's disconnection event.
     void
-    disconnect() {
+    disconnect(int reason = 1) {
         ++_connection_epoch;
         const bool pending = _connect_pending;
         cancel_connect_attempt();
         _ws_connected = false;
         this->setTimeout(qb::duration::zero());
-        start_transport_close();
+        start_transport_close(reason);
         // An earlier disconnect dispatch may already have queued cleanup for
         // the previous epoch. Replace it when there is no new attempt to do so.
         if (_disconnect_pending && _disconnect_notified)
@@ -1321,6 +1322,11 @@ public:
                 derived().on(error{});
             }
         }
+    }
+
+    void
+    disconnect(::qb::io::async::event::disconnect_reason reason) {
+        disconnect(static_cast<int>(reason));
     }
 
     /**
