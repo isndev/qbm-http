@@ -551,7 +551,7 @@ TEST(Http3ConnectionDirect, SubmitResponseRejectsAnnouncedButInvalidTrailer) {
  * @test A request body exceeding the owner's cap is reset in recv_data_cb and never delivered
  * @brief When the Owner exposes max_http3_body_size() (detected via `requires`), recv_data_cb tracks the
  *        accumulating body and, once it would exceed the limit, calls reset_http3_stream with
- *        NGHTTP3_H3_REQUEST_CANCELLED and fails the callback. The over-limit request is therefore reset
+ *        NGHTTP3_H3_REQUEST_CANCELLED and returns 0. The connection survives; that stream is reset
  *        (the owner records the reset) and never materialized into on_http3_request. This is the body-cap
  *        arm of recv_data_cb, only compiled in when the owner advertises a cap.
  */
