@@ -20,7 +20,7 @@ This page covers the HTTP/1.1 upgrade path only. WebSocket over HTTP/2 extended 
 
 ## Concepts
 
-The WebSocket subsystem is split across a few namespaces. You normally only touch `qb::http::ws`; the protocol templates re-export the rest. <!-- src: src/qbm/http/ws/ws.h:1048-1065 -->
+The WebSocket subsystem is split across a few namespaces. You normally only touch `qb::http::ws`; the protocol templates re-export the rest. <!-- src: src/qbm/http/ws/ws.h:1050-1067 -->
 
 | Symbol | Namespace | Role |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ The WebSocket subsystem is split across a few namespaces. You normally only touc
 
 A few mechanics worth knowing before you wire anything up:
 
-- **The handshake is an HTTP exchange.** The client sends `GET` with `Sec-WebSocket-Key`; the server replies `101 Switching Protocols` with `Sec-WebSocket-Accept = base64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`. The client verifies that accept value in constant time. <!-- src: src/qbm/http/ws/ws.h:798,801-808,875-884,1003-1028 -->
+- **The handshake is an HTTP exchange.** The client sends `GET` with `Sec-WebSocket-Key`; the server replies `101 Switching Protocols` with `Sec-WebSocket-Accept = base64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`. The client verifies that accept value in constant time. <!-- src: src/qbm/http/ws/ws.h:800,803-810,877-886,1005-1030 -->
 
 ```mermaid
 sequenceDiagram
@@ -49,9 +49,9 @@ sequenceDiagram
     Cl->>Sv: masked text / binary / ping frames
     Sv-->>Cl: on(MessageText) · auto-pong to ping
 ```
-- **Masking is directional and mandatory.** Every client-to-server frame (control frames included) must be masked; every server-to-client frame must not be. The framer enforces both directions: a server that receives an unmasked frame, or a client that receives a masked one, fails the connection with `ProtocolError`. On the send side `WebSocket::operator<<` forces `masked = true` on outbound frames regardless of what you set. <!-- src: src/qbm/http/ws/ws.h:654-666, src/qbm/http/ws/ws.h:1491-1494 -->
-- **Reassembly is bounded by default.** A message reassembled from continuation fragments is capped at `qb::http::protocol_limits::MAX_BODY_SIZE`; a peer streaming unbounded fragments is cut off with `CloseStatus::MessageTooBig`. Call `set_max_payload_size(0)` only deliberately to lift the cap. <!-- src: src/qbm/http/ws/ws.h:437, src/qbm/http/ws/ws.h:555-559, src/qbm/http/ws/ws.h:610-613 -->
-- **Ping keepalive is a `qb::duration`.** `set_ping_interval(qb::duration)` arms a timer on the client; on each tick it sends a `MessagePing`, and the framer auto-replies to inbound pings with a same-payload `MessagePong`. A zero interval disables it. <!-- src: src/qbm/http/ws/ws.h:1198-1200, src/qbm/http/ws/ws.h:522-528, src/qbm/http/ws/ws.h:1471-1476 -->
+- **Masking is directional and mandatory.** Every client-to-server frame (control frames included) must be masked; every server-to-client frame must not be. The framer enforces both directions: a server that receives an unmasked frame, or a client that receives a masked one, fails the connection with `ProtocolError`. On the send side `WebSocket::operator<<` forces `masked = true` on outbound frames regardless of what you set. <!-- src: src/qbm/http/ws/ws.h:656-668, src/qbm/http/ws/ws.h:1599-1602 -->
+- **Reassembly is bounded by default.** A message reassembled from continuation fragments is capped at `qb::http::protocol_limits::MAX_BODY_SIZE`; a peer streaming unbounded fragments is cut off with `CloseStatus::MessageTooBig`. Call `set_max_payload_size(0)` only deliberately to lift the cap. <!-- src: src/qbm/http/ws/ws.h:439, src/qbm/http/ws/ws.h:557-561, src/qbm/http/ws/ws.h:612-615 -->
+- **Ping keepalive is a `qb::duration`.** `set_ping_interval(qb::duration)` arms the ping timer after the upgrade succeeds; on each tick it sends a `MessagePing`, and the framer auto-replies to inbound pings with a same-payload `MessagePong`. A zero interval disables it. <!-- src: src/qbm/http/ws/ws.h:1258-1261, src/qbm/http/ws/ws.h:524-530, src/qbm/http/ws/ws.h:1577-1584 -->
 
 ## Server: upgrade an existing HTTP session
 
@@ -107,14 +107,14 @@ public:
 
 `switch_protocol` has two server overloads:
 
-- **`switch_protocol<ws_protocol>(*this, request)`** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the one-call form shown above. <!-- src: src/qbm/http/ws/ws.h:957-964 -->
-- **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: src/qbm/http/ws/ws.h:973-982; examples/06-modules/ws/01-chat-server.cpp:610-630 -->
+- **`switch_protocol<ws_protocol>(*this, request)`** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the one-call form shown above. <!-- src: src/qbm/http/ws/ws.h:959-966 -->
+- **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: src/qbm/http/ws/ws.h:975-984; examples/06-modules/ws/01-chat-server.cpp:610-630 -->
 
 `switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/src/qb/io/async/io.h:859-870 -->
 
 ### What the handshake validator enforces
 
-`populate_handshake_response` rejects anything that is not a strict RFC 6455 §4.2.1 upgrade. The request must be: HTTP `GET`; `Upgrade: websocket` (case-insensitive); `Connection` containing the `Upgrade` token; `Sec-WebSocket-Version: 13`; and a `Sec-WebSocket-Key` that is exactly 24 base64 characters decoding to 16 bytes with a clean base64 round-trip. Otherwise the response is `400 Bad Request` and the protocol goes `not_ok`. <!-- src: src/qbm/http/ws/ws.h:900-930 -->
+`populate_handshake_response` rejects anything that is not a strict RFC 6455 §4.2.1 upgrade. The request must be: HTTP `GET`; `Upgrade: websocket` (case-insensitive); `Connection` containing the `Upgrade` token; `Sec-WebSocket-Version: 13`; and a `Sec-WebSocket-Key` that is exactly 24 base64 characters decoding to 16 bytes with a clean base64 round-trip. Otherwise the response is `400 Bad Request` and the protocol goes `not_ok`. <!-- src: src/qbm/http/ws/ws.h:902-932 -->
 
 ### Broadcasting from a server
 
@@ -152,7 +152,7 @@ void on(TransferToWebSocketEvent &event) {
 
 ## Sending frames
 
-Each outbound frame is a value type derived from `qb::http::ws::Message`. Stream the payload in with `operator<<`, then send the whole value with `session << frame`. The framer attaches the correct opcode, length encoding, and (on the client) masking. <!-- src: src/qbm/http/ws/ws.h:96,146,161,177,193 -->
+Each outbound frame is a value type derived from `qb::http::ws::Message`. Stream the payload in with `operator<<`, then send the whole value with `session << frame`. The framer attaches the correct opcode, length encoding, and (on the client) masking. <!-- src: src/qbm/http/ws/ws.h:98,146,161,177,193 -->
 
 ```cpp
 qb::http::ws::MessageText text;
@@ -169,20 +169,20 @@ qb::http::ws::MessagePing  ping;   // empty keepalive ping
 
 ### Closing
 
-`MessageClose` carries a 2-byte status code plus an optional UTF-8 reason, capped at 125 bytes total (2 status + 123 reason). Construction is fail-fast: a reserved code (`1004` / `1005` / `1006` / `1015`) or one outside `[1000, 4999]` throws `std::invalid_argument`, and an over-long reason is truncated on a UTF-8 boundary. <!-- src: src/qbm/http/ws/ws.cpp:210-234, src/qbm/http/ws/ws.h:283-298 -->
+`MessageClose` carries a 2-byte status code plus an optional UTF-8 reason, capped at 125 bytes total (2 status + 123 reason). Construction is fail-fast: a reserved code (`1004` / `1005` / `1006` / `1015`) or one outside `[1000, 4999]` throws `std::invalid_argument`, and an over-long reason is truncated on a UTF-8 boundary. <!-- src: src/qbm/http/ws/ws.cpp:210-234, src/qbm/http/ws/ws.h:285-300 -->
 
 ```cpp
 qb::http::ws::MessageClose bye(qb::http::ws::CloseStatus::Normal, "done");
 *this << bye;
 ```
 
-RFC 6455 §5.5.1 is a two-way handshake: after you send a Close you should wait for the peer's Close echo before tearing the TCP stream down. The framer's behavior on an inbound Close depends on whether your session defines an `on(close)` handler. If it does **not**, the framer auto-echoes the peer's Close before going `not_ok`. If it **does** (as the server example above does, with an empty `void on(ws_protocol::close &&) {}`), the framer hands the Close to your handler and goes `not_ok` **without** echoing — re-sending the Close (or calling `disconnect()`) is then your handler's responsibility. Call `disconnect()` only when you want an immediate teardown. <!-- src: src/qbm/http/ws/ws.h:491-521 -->
+RFC 6455 §5.5.1 is a two-way handshake: after you send a Close you should wait for the peer's Close echo before tearing the TCP stream down. The framer's behavior on an inbound Close depends on whether your session defines an `on(close)` handler. If it does **not**, the framer auto-echoes the peer's Close before going `not_ok`. If it **does** (as the server example above does, with an empty `void on(ws_protocol::close &&) {}`), the framer hands the Close to your handler and goes `not_ok` **without** echoing — re-sending the Close (or calling `disconnect()`) is then your handler's responsibility. Call `disconnect()` only when you want an immediate teardown. <!-- src: src/qbm/http/ws/ws.h:493-523 -->
 
 ## Client: the CRTP form
 
-Subclass `WebSocket<Self>` (or `WebSocketSecure<Self>` for WSS) when the client holds state. You receive lifecycle and frame events as `on(...)` overloads; only the handlers you actually define are wired up. <!-- src: src/qbm/http/ws/ws.h:1165-1572 -->
+Subclass `WebSocket<Self>` (or `WebSocketSecure<Self>` for WSS) when the client holds state. You receive lifecycle and frame events as `on(...)` overloads; only the handlers you actually define are wired up. <!-- src: src/qbm/http/ws/ws.h:1202-1680 -->
 
-<!-- src: src/qbm/http/ws/ws.h:1152-1164 (illustrative of the public WebSocket<T> event API) -->
+<!-- src: src/qbm/http/ws/ws.h:1189-1201 (illustrative of the public WebSocket<T> event API) -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
@@ -211,11 +211,11 @@ Client ws;
 ws.connect(qb::io::uri("ws://localhost:9000/chat"));  // takes a uri, not a string; "wss://" for TLS
 ```
 
-The `connect(...)` signature is `connect(const qb::io::uri &remote, qb::duration timeout = qb::duration::zero(), bool verify_peer = true)`. It establishes the TCP (or TLS) connection, sends the upgrade `GET`, and verifies the `101` before firing `connected`. A nonzero `timeout` bounds the connect; `verify_peer` controls TLS certificate verification on the secure transport. <!-- src: src/qbm/http/ws/ws.h:1277 -->
+The `connect(...)` signature is `connect(const qb::io::uri &remote, qb::duration timeout = qb::duration::zero(), bool verify_peer = true)`. It establishes the TCP (or TLS) connection, sends the upgrade `GET`, and verifies the `101` before firing `connected`. A positive `timeout` is one deadline across both phases; zero disables it. The ping timer starts only after a verified upgrade. `verify_peer` controls TLS certificate verification on the secure transport. A retry requested from a failure callback starts after the old transport's disconnect dispatch. A client may be stack-owned or held in a `unique_ptr`; its pending connector callback becomes inert when it is destroyed. <!-- src: src/qbm/http/ws/ws.h:1338-1414, src/qbm/http/ws/ws.h:1103-1119, src/qbm/http/ws/ws.h:1226-1228 -->
 
 ## Client: the callback form
 
-For compact, stateless clients, use `qb::http::ws::client` (or `client_secure` for WSS) and register lambdas. Each `on_*` returns `*this` so the calls chain. <!-- src: src/qbm/http/ws/ws.h:1709-1710 -->
+For compact, stateless clients, use `qb::http::ws::client` (or `client_secure` for WSS) and register lambdas. Each `on_*` returns `*this` so the calls chain. <!-- src: src/qbm/http/ws/ws.h:1817-1818 -->
 
 <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:222-258 -->
 ```cpp
@@ -240,7 +240,7 @@ Both client forms expose the same connection controls: `set_ping_interval(qb::du
 
 ## Subprotocol negotiation
 
-Advertise an ordered list of subprotocols before `connect()`. The client serializes them into `Sec-WebSocket-Protocol`; the server must echo exactly one (case-sensitive) of them or omit the header. After `connected` fires, `negotiated_subprotocol()` returns the chosen token, or empty if the server picked none. <!-- src: src/qbm/http/ws/ws.h:1229-1232, src/qbm/http/ws/ws.h:1263-1264, src/qbm/http/ws/ws.h:1306, src/qbm/http/ws/ws.h:1341-1367 -->
+Advertise an ordered list of subprotocols before `connect()`. The client serializes them into `Sec-WebSocket-Protocol`; the server must echo exactly one (case-sensitive) of them or omit the header. After `connected` fires, `negotiated_subprotocol()` returns the chosen token, or empty if the server picked none. <!-- src: src/qbm/http/ws/ws.h:1290-1293, src/qbm/http/ws/ws.h:1324-1325, src/qbm/http/ws/ws.h:1398, src/qbm/http/ws/ws.h:1443-1463 -->
 
 ```cpp
 qb::http::ws::client ws;
@@ -251,7 +251,9 @@ ws.on_connected([&](auto &) {
 ws.connect(qb::io::uri("ws://localhost:9000/"));
 ```
 
-Offers must be valid RFC 7230 tokens — `set_subprotocols` / `add_subprotocol` throw `std::invalid_argument` otherwise — and the negotiation check is strict: a server that returns multiple tokens, an unoffered token, or any token when the client offered none triggers `on(error)` and a disconnect. <!-- src: src/qbm/http/ws/ws.h:1237-1244, src/qbm/http/ws/ws.h:1251-1256, src/qbm/http/ws/ws.h:1341-1367 -->
+Offers must be valid RFC 7230 tokens — `set_subprotocols` / `add_subprotocol` throw `std::invalid_argument` otherwise — and the negotiation check is strict: a server that returns multiple tokens, an unoffered token, or any token when the client offered none triggers `on(error)` and a disconnect. <!-- src: src/qbm/http/ws/ws.h:1298-1305, src/qbm/http/ws/ws.h:1312-1317, src/qbm/http/ws/ws.h:1443-1463 -->
+
+The client does not offer WebSocket extensions. If a server selects one in `Sec-WebSocket-Extensions`, the client rejects the response before reporting `connected`. <!-- src: src/qbm/http/ws/ws.h:1425-1433 -->
 
 ## Secure WebSocket (WSS)
 
@@ -262,16 +264,16 @@ qb::http::ws::client_secure ws;            // = Client<qb::io::transport::stcp>
 ws.connect("wss://localhost:9443/ws");      // verify_peer defaults to true
 ```
 
-Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:275-378, src/qbm/http/ws/ws.h:1083,1510 -->
+Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:275-378, src/qbm/http/ws/ws.h:1085,1617-1618 -->
 
 ## Pitfalls
 
 - **The subsystem is SSL-gated, not just WSS.** Plaintext `ws://` still needs `QB_HAS_SSL`; `src/qbm/http/ws/ws.h` `#error`s without OpenSSL because the handshake hash and masking CSPRNG come from `qb::crypto`. Build with `QB_WITH_SSL=ON`. <!-- src: src/qbm/http/ws/ws.h:22-25 -->
-- **Do not pre-mask or pre-unmask by hand.** `WebSocket::operator<<` forces `masked = true` on every outbound frame; setting `masked` yourself has no effect on the client send path. The receive path validates masking per direction and fails the connection on a violation. <!-- src: src/qbm/http/ws/ws.h:1491-1494, src/qbm/http/ws/ws.h:654-666 -->
-- **`MessageClose` throws on reserved/out-of-range codes.** `is_sendable_close_code` forbids the full reserved set — `1004` (reserved), `1005` ("no status received"), `1006` ("abnormal closure"), and `1015` ("TLS handshake failure") — none of which may appear on the wire, plus anything outside `[1000, 4999]`. Passing any of those to `MessageClose` throws `std::invalid_argument`. Receiving a 1-byte Close payload, or a reserved code on the wire, is itself a `ProtocolError`. <!-- src: src/qbm/http/ws/ws.h:253-266 (is_sendable_close_code), src/qbm/http/ws/ws.cpp:210-234, src/qbm/http/ws/ws.h:492-502 -->
-- **`set_max_payload_size(0)` removes the memory guard.** The default cap (`MAX_BODY_SIZE`) is what stops a peer from exhausting memory with unbounded continuation fragments. Lift it only when you have an independent bound. <!-- src: src/qbm/http/ws/ws.h:437, src/qbm/http/ws/ws.h:555-559 -->
+- **Do not pre-mask or pre-unmask by hand.** `WebSocket::operator<<` forces `masked = true` on every outbound frame; setting `masked` yourself has no effect on the client send path. The receive path validates masking per direction and fails the connection on a violation. <!-- src: src/qbm/http/ws/ws.h:1599-1602, src/qbm/http/ws/ws.h:656-668 -->
+- **`MessageClose` throws on reserved/out-of-range codes.** `is_sendable_close_code` forbids the full reserved set — `1004` (reserved), `1005` ("no status received"), `1006` ("abnormal closure"), and `1015` ("TLS handshake failure") — none of which may appear on the wire, plus anything outside `[1000, 4999]`. Passing any of those to `MessageClose` throws `std::invalid_argument`. Receiving a 1-byte Close payload, or a reserved code on the wire, is itself a `ProtocolError`. <!-- src: src/qbm/http/ws/ws.h:255-268 (is_sendable_close_code), src/qbm/http/ws/ws.cpp:210-234, src/qbm/http/ws/ws.h:494-504 -->
+- **`set_max_payload_size(0)` removes the memory guard.** The default cap (`MAX_BODY_SIZE`) is what stops a peer from exhausting memory with unbounded continuation fragments. Lift it only when you have an independent bound. <!-- src: src/qbm/http/ws/ws.h:439, src/qbm/http/ws/ws.h:557-561 -->
 - **Transfer ownership cleanly.** When you move a session's transport to another actor for the upgrade, call `ctx->suppress_response()` so the routing context destructor does not send a moved-from HTTP response over the transferred socket. <!-- src: qbm/http/src/qbm/http/routing/context.h:1250-1255 -->
-- **Frame events are views, not owners.** `event.data` / `event.size` point into the framer's reassembly buffer and are valid only during the `on(...)` call; copy out anything you need to keep. The owning `event.ws` (`qb::http::ws::Message`) is what you forward when echoing. <!-- src: src/qbm/http/ws/ws.h:392-396 -->
+- **Frame events are views, not owners.** `event.data` / `event.size` point into the framer's reassembly buffer and are valid only during the `on(...)` call; copy out anything you need to keep. The owning `event.ws` (`qb::http::ws::Message`) is what you forward when echoing. <!-- src: src/qbm/http/ws/ws.h:394-398 -->
 
 ## See also
 

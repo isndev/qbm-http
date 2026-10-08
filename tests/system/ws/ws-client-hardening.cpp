@@ -40,8 +40,10 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <gtest/gtest.h>
 
@@ -360,6 +362,277 @@ TEST(WebSocketClientHardening, ClientRejectsServerSubprotocolNotOffered) {
 
     EXPECT_TRUE(errored);
     EXPECT_FALSE(connected);
+}
+
+// A valid 101 is accepted, but the same response must be rejected when the
+// server selects an extension that the client never offered.
+class ExtensionResponseServer;
+
+class ExtensionResponseSession : public qb::io::use<ExtensionResponseSession>::tcp::client<ExtensionResponseServer> {
+public:
+    using Protocol    = qb::http::protocol<ExtensionResponseSession>;
+    using WS_Protocol = qb::http::ws::protocol<ExtensionResponseSession>;
+
+    explicit ExtensionResponseSession(IOServer &server)
+        : client(server) {}
+
+    void on(Protocol::request &&request);
+    void
+    on(WS_Protocol::message &&) {}
+    void
+    on(WS_Protocol::ping &&) {}
+    void
+    on(WS_Protocol::pong &&) {}
+    void
+    on(WS_Protocol::close &&) {}
+};
+
+class ExtensionResponseServer : public qb::io::use<ExtensionResponseServer>::tcp::server<ExtensionResponseSession> {
+public:
+    bool               select_unoffered_extension = false;
+    std::atomic<int>  *requests                   = nullptr;
+    std::atomic<bool> *client_offered_extension   = nullptr;
+
+    void
+    on(IOSession &) {}
+};
+
+void
+ExtensionResponseSession::on(Protocol::request &&request) {
+    auto &probe = this->server();
+    if (probe.client_offered_extension) {
+        probe.client_offered_extension->store(request.has_header("Sec-WebSocket-Extensions"));
+    }
+    qb::http::Response response;
+    if (!this->switch_protocol<WS_Protocol>(*this, request, response)) {
+        disconnect();
+        return;
+    }
+    if (probe.select_unoffered_extension) {
+        response.headers()["Sec-WebSocket-Extensions"].emplace_back(std::string("permessage-deflate"));
+    }
+    *this << response;
+    if (probe.requests) {
+        probe.requests->fetch_add(1);
+    }
+}
+
+void
+run_extension_response_case(bool select_unoffered_extension) {
+    qb::io::async::init();
+
+    std::atomic<int>                                        requests{0};
+    std::atomic<bool>                                       client_offered_extension{false};
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [&](ExtensionResponseServer &s) {
+        s.select_unoffered_extension = select_unoffered_extension;
+        s.requests                   = &requests;
+        s.client_offered_extension   = &client_offered_extension;
+    });
+    const int                                               port = bound_port(server);
+
+    int                  connected = 0;
+    int                  errors    = 0;
+    qb::http::ws::client client;
+    client.on_connected([&](auto &) { ++connected; });
+    client.on_error([&](auto &) { ++errors; });
+    client.connect(qb::io::uri("ws://localhost:" + std::to_string(port) + "/path"), 1000ms);
+
+    ASSERT_TRUE(pump_until([&] { return connected + errors > 0; }));
+    EXPECT_EQ(requests.load(), 1);
+    EXPECT_FALSE(client_offered_extension.load());
+    EXPECT_EQ(connected + errors, 1);
+    EXPECT_EQ(connected, select_unoffered_extension ? 0 : 1);
+    EXPECT_EQ(errors, select_unoffered_extension ? 1 : 0);
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, ClientAcceptsValidResponseWithoutExtension) {
+    run_extension_response_case(false);
+}
+
+TEST(WebSocketClientHardening, ClientRejectsServerExtensionNotOffered) {
+    run_extension_response_case(true);
+}
+
+// TCP establishment is only the first phase of connect(timeout). Hold the
+// upgrade response indefinitely after receiving a valid request, and require
+// the client's requested deadline to finish the operation exactly once.
+class WithheldUpgradeServer;
+
+class WithheldUpgradeSession : public qb::io::use<WithheldUpgradeSession>::tcp::client<WithheldUpgradeServer> {
+public:
+    using Protocol = qb::http::protocol<WithheldUpgradeSession>;
+
+    explicit WithheldUpgradeSession(IOServer &server)
+        : client(server) {}
+
+    void on(Protocol::request &&);
+    void on(qb::io::async::event::disconnected &&);
+};
+
+class WithheldUpgradeServer : public qb::io::use<WithheldUpgradeServer>::tcp::server<WithheldUpgradeSession> {
+public:
+    std::atomic<int>                           *requests        = nullptr;
+    std::atomic<int>                           *closed          = nullptr;
+    std::atomic<std::chrono::nanoseconds::rep> *request_time_ns = nullptr;
+
+    void
+    on(IOSession &) {}
+};
+
+void
+WithheldUpgradeSession::on(Protocol::request &&) {
+    auto &probe = this->server();
+    if (probe.request_time_ns) {
+        probe.request_time_ns->store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+            std::memory_order_relaxed);
+    }
+    if (auto *requests = probe.requests) {
+        requests->fetch_add(1, std::memory_order_release);
+    }
+}
+
+void
+WithheldUpgradeSession::on(qb::io::async::event::disconnected &&) {
+    if (auto *closed = this->server().closed)
+        closed->fetch_add(1, std::memory_order_release);
+}
+
+TEST(WebSocketClientHardening, DestroyedClientsIgnorePendingConnectorCallbacks) {
+    qb::io::async::init();
+
+    std::atomic<int>                                      requests{0};
+    std::atomic<int>                                      closed{0};
+    qb::http::test::WsServerThread<WithheldUpgradeServer> server(0, [&](WithheldUpgradeServer &s) {
+        s.requests = &requests;
+        s.closed   = &closed;
+    });
+    const int                                             port = bound_port(server);
+    const qb::io::uri                                     remote("ws://localhost:" + std::to_string(port) + "/path");
+
+    {
+        qb::http::ws::client client;
+        client.connect(remote, 1s);
+    }
+    {
+        auto client = std::make_unique<qb::http::ws::client>();
+        client->connect(remote, 1s);
+    }
+
+    // The server sees both transports close only after the connector has
+    // delivered them. Neither expired client may send an Upgrade request.
+    ASSERT_TRUE(pump_until([&] { return closed.load(std::memory_order_acquire) == 2; }, 2500ms));
+    EXPECT_EQ(requests.load(std::memory_order_acquire), 0);
+}
+
+TEST(WebSocketClientHardening, ClientDeadlineIncludesUpgradeResponse) {
+    qb::io::async::init();
+
+    constexpr auto                             requested_timeout = 3s;
+    std::atomic<int>                           requests{0};
+    std::atomic<std::chrono::nanoseconds::rep> request_time_ns{0};
+    int                                        connected = 0;
+    int                                        errors    = 0;
+    qb::http::ws::client                       client;
+    client.on_connected([&](auto &) { ++connected; });
+    client.on_error([&](auto &) { ++errors; });
+
+    {
+        qb::http::test::WsServerThread<WithheldUpgradeServer> server(0, [&](WithheldUpgradeServer &s) {
+            s.requests        = &requests;
+            s.request_time_ns = &request_time_ns;
+        });
+        const int                                             port    = bound_port(server);
+        const auto                                            started = std::chrono::steady_clock::now();
+        const auto started_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(started.time_since_epoch()).count();
+        client.connect(qb::io::uri("ws://localhost:" + std::to_string(port) + "/path"), requested_timeout);
+
+        // The server records receipt on its own loop. This distinguishes a
+        // missing upgrade timeout from an overloaded TCP connect that expired
+        // before the request was even delivered.
+        const bool request_seen = pump_until([&] { return requests.load(std::memory_order_acquire) == 1; }, 2000ms);
+        if (request_seen) {
+            const auto request_delay_ns = request_time_ns.load(std::memory_order_relaxed) - started_ns;
+            EXPECT_GE(request_delay_ns, 0);
+            EXPECT_LT(request_delay_ns, std::chrono::duration_cast<std::chrono::nanoseconds>(requested_timeout).count());
+            EXPECT_EQ(connected + errors, 0);
+        }
+
+        const bool completed = pump_until([&] { return connected + errors > 0; }, 5000ms);
+        EXPECT_TRUE(completed);
+        if (completed) {
+            EXPECT_LE(std::chrono::steady_clock::now() - started, requested_timeout + 1500ms);
+        }
+
+        // Allow a second callback scheduled on the deadline to surface before
+        // tearing down the peer. The time bound only drains work; callback
+        // counts below are the oracle.
+        const auto deadline_drain = started + requested_timeout + 500ms;
+        while (std::chrono::steady_clock::now() < deadline_drain) {
+            qb::io::async::run(EVRUN_NOWAIT);
+            std::this_thread::yield();
+        }
+    }
+
+    // Server teardown closes the held transport. Deliver that notification,
+    // then drain any callback queued by local disconnect before counting.
+    qb::io::async::run(EVRUN_NOWAIT);
+    client.disconnect();
+    const auto teardown_drain = std::chrono::steady_clock::now() + 250ms;
+    while (std::chrono::steady_clock::now() < teardown_drain) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(requests.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(connected + errors, 1);
+    EXPECT_EQ(connected, 0);
+    EXPECT_EQ(errors, 1);
+}
+
+TEST(WebSocketClientHardening, CoroutineClientDeadlineIncludesUpgradeResponse) {
+    qb::io::async::init();
+
+    std::atomic<int>                                      requests{0};
+    qb::http::test::WsServerThread<WithheldUpgradeServer> server(0, [&](WithheldUpgradeServer &s) { s.requests = &requests; });
+    const qb::io::uri                                     remote("ws://localhost:" + std::to_string(bound_port(server)) + "/path");
+
+    auto scenario = [remote]() -> qb::io::async::task<bool> {
+        qb::http::ws::coro_client<> client;
+        const auto                  connected = co_await client.connect(remote, 1s);
+        co_return connected.ok;
+    };
+
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_FALSE(qb::http::ws::run_sync(scenario()));
+    EXPECT_EQ(requests.load(std::memory_order_acquire), 1);
+    EXPECT_LE(std::chrono::steady_clock::now() - started, 2500ms);
+}
+
+TEST(WebSocketClientHardening, TimeoutCallbackCanStartAnotherAttempt) {
+    qb::io::async::init();
+
+    std::atomic<int>                                        withheld_requests{0};
+    qb::http::test::WsServerThread<WithheldUpgradeServer>   withheld(0, [&](WithheldUpgradeServer &s) { s.requests = &withheld_requests; });
+    qb::http::test::WsServerThread<ExtensionResponseServer> accepting(0);
+    const qb::io::uri                                       first("ws://localhost:" + std::to_string(bound_port(withheld)) + "/path");
+    const qb::io::uri                                       second("ws://localhost:" + std::to_string(bound_port(accepting)) + "/path");
+
+    int                  errors    = 0;
+    int                  connected = 0;
+    qb::http::ws::client client;
+    client.on_error([&](auto &) {
+        if (++errors == 1)
+            client.connect(second, 2s);
+    });
+    client.on_connected([&](auto &) { ++connected; });
+    client.connect(first, 1s);
+
+    ASSERT_TRUE(pump_until([&] { return connected == 1 || errors > 1; }, 4500ms));
+    EXPECT_EQ(withheld_requests.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(errors, 1);
+    EXPECT_EQ(connected, 1);
+    client.disconnect();
 }
 
 // ===========================================================================

@@ -7,6 +7,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
+### Fixed
+
+- **WebSocket client connection hardening (Huly QB-513, QB-609, QB-517).** A client destroyed
+  during an in-flight transport connect no longer leaves a callback that can access it. A
+  nonzero connect timeout now covers the transport and the HTTP Upgrade as one deadline, with
+  one failure completion when the server withholds its response. A retry started from that
+  failure callback waits for the retired transport to finish closing. Clients also reject a 101
+  response that selects an extension they did not offer.
+
 ### Changed
 
 - **HTTP/2 batch completion callbacks may disconnect or enqueue another batch (Huly QB-496).** The completed

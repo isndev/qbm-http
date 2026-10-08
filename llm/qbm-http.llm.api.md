@@ -619,8 +619,9 @@ Usage: `auto s = qb::http::make_dual_stack_server(); s->router().get("/", h); s-
 ### CRTP client — `src/qbm/http/ws/ws.h`
 `template<typename T, typename Transport=qb::io::transport::tcp> class WebSocket : public qb::io::async::tcp::client<WebSocket<T,Transport>,Transport>, public qb::io::use<WebSocket<T,Transport>>::timeout`
 Drives TCP connect + HTTP upgrade + protocol switch; forwards `ping/pong/message/closed/disconnected/error/connected` events to parent `T::on(...)` if present.
-- `void set_ping_interval(qb::duration interval=qb::duration::zero())` — auto-ping keepalive; **zero/negative disables**.
-- `void connect(const qb::io::uri& remote, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` — connect to `ws://`/`wss://`, install protocol, send upgrade.
+- `void set_ping_interval(qb::duration interval=qb::duration::zero())` — auto-ping keepalive after a verified upgrade; **zero/negative disables**.
+- `void connect(const qb::io::uri& remote, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` — connect to `ws://`/`wss://`, install protocol, send upgrade. A positive timeout is one deadline across transport and Upgrade; zero disables it. A retry from a failure callback starts after the old transport's disconnect dispatch. The client rejects an unoffered `Sec-WebSocket-Extensions` response before `connected`.
+- `void disconnect()` — cancels an unfinished connection and its deadline, then closes the transport. An in-flight connector callback is inert after cancellation or client destruction; stack and `unique_ptr` clients are supported.
 - `void close(CloseStatus=Normal, std::string_view reason="closed normally")` — queue a Close frame (no TCP teardown); throws `std::invalid_argument` on reserved code; call `disconnect()` after for immediate teardown.
 - `void set_subprotocols(std::vector<std::string>)` / `void add_subprotocol(std::string)` — offer list; each must be a valid RFC 7230 token (else `std::invalid_argument`); before connect.
 - `std::string_view negotiated_subprotocol() const noexcept` — selected subprotocol (valid after `connected`).
@@ -650,7 +651,7 @@ Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([]{..
   - `void set_pending_cap(std::size_t) noexcept` (default 1024).
 Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect(qb::io::uri{"ws://h/p"}); auto f = co_await ws.receive();`
 
-### WS pipe serialization — `src/qbm/http/ws/ws.h:1717`
+### WS pipe serialization — `src/qbm/http/ws/ws.h:1825`
 `template<> pipe<char>& pipe<char>::put<Message>(const Message&);` (and `MessagePing/MessagePong/MessageText/MessageBinary/MessageClose/WebSocketRequest`) — frame onto the outbound pipe (masks when `msg.masked`); invoked indirectly via `operator<<`.
 
 ---
