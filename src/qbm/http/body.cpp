@@ -675,7 +675,12 @@ Body &Body::operator= <Multipart>(Multipart const &mp) {
 template <>
 Body &Body::operator= <qb::json>(qb::json const &json) {
     _data.clear();
-    _data << json;
+    try {
+        _data << json;
+    } catch (...) {
+        _data.clear(); // never expose the prefix written before serialization failed
+        throw;
+    }
     return *this;
 }
 
@@ -687,10 +692,8 @@ Body &Body::operator= <qb::json>(qb::json const &json) {
  * Copy assignment operator for qb::json.
  */
 template <>
-Body &Body::operator= <qb::json>(qb::json &&json) noexcept {
-    _data.clear();
-    _data << json;
-    return *this;
+Body &Body::operator= <qb::json>(qb::json &&json) {
+    return operator= <qb::json>(static_cast<const qb::json &>(json));
 }
 
 /**

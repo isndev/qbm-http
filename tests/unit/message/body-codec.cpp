@@ -1,4 +1,7 @@
 #include <random>
+#include <cstdlib>
+#include <type_traits>
+#include <utility>
 #include <gtest/gtest.h>
 #include <qb/json.h>
 #include <qbm/http/http.h> // Should include body.h, multipart.h, etc.
@@ -9,6 +12,12 @@
 #endif
 
 using namespace qb::http;
+
+static_assert(!std::is_nothrow_assignable_v<Body &, qb::json &&>);
+static_assert(!std::is_nothrow_assignable_v<Body &, const qb::json &>);
+static_assert(std::is_nothrow_assignable_v<Body &, std::string &&>);
+static_assert(std::is_nothrow_assignable_v<Body &, std::vector<char> &&>);
+static_assert(std::is_nothrow_assignable_v<Body &, Form &&>);
 
 // Helper function to create a simple multipart body
 Multipart
@@ -239,6 +248,42 @@ TEST_F(BodyTest, JsonAssignmentAndConversion) {
     body                = std::move(j_val_move);
     j_parsed            = body.as<qb::json>();
     EXPECT_EQ(qb::json({{"moved", true}}).dump(), j_parsed.dump());
+}
+
+TEST_F(BodyTest, InvalidUtf8ConstJsonThrowsWithoutLeavingPartialBody) {
+    const qb::json invalid = {{"a", "valid"}, {"z", std::string(1, static_cast<char>(0xff))}};
+    body                   = "previous body";
+
+    EXPECT_THROW(body = invalid, qb::json::type_error);
+    EXPECT_TRUE(body.empty()) << "a failed JSON assignment must not expose a partial document";
+}
+
+TEST_F(BodyTest, InvalidUtf8RvalueJsonPropagatesInsteadOfTerminating) {
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(
+        {
+            Body     body_in_child;
+            qb::json invalid;
+            invalid["a"] = "valid";
+            invalid["z"] = std::string(1, static_cast<char>(0xff));
+            try {
+                body_in_child = std::move(invalid);
+            } catch (const qb::json::type_error &) {
+                std::_Exit(body_in_child.empty() ? 0 : 2);
+            }
+            std::_Exit(3);
+        },
+        ::testing::ExitedWithCode(0), "");
+}
+
+TEST_F(BodyTest, ValidUtf8JsonWorksForConstAndRvalueAssignment) {
+    const qb::json valid = {{"accent", "\xc3\xa9"}};
+    body                 = valid;
+    EXPECT_EQ(body.as<qb::json>(), valid);
+
+    qb::json movable = valid;
+    body             = std::move(movable);
+    EXPECT_EQ(body.as<qb::json>(), valid);
 }
 
 // Regression: assigning a json body serializes through qb::allocator::pipe::put<json>,

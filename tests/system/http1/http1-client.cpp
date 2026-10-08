@@ -1053,3 +1053,35 @@ TEST(Http1ClientTest, ResponseDecompressFailureSurfacesBadRequest) {
     drain_client_callbacks();
 }
 #endif
+
+TEST(Http1ClientTest, OneShotHttpSchemesUsePlainTransportAcrossCaseVariants) {
+    LoopbackHttp1Server server;
+    const auto          lower     = qb::http::run_sync(qb::http::GET(qb::http::Request{{server.url("/ping")}}, std::chrono::seconds(1)));
+    const std::string   mixed_url = "hTtP" + server.url("/ping").substr(4);
+    const auto          mixed     = qb::http::run_sync(qb::http::GET(qb::http::Request{{mixed_url}}, std::chrono::seconds(1)));
+
+    EXPECT_EQ(lower.response.status(), qb::http::status::OK);
+    EXPECT_EQ(mixed.response.status(), qb::http::status::OK);
+    EXPECT_EQ(server.request_count(), 2);
+    EXPECT_EQ(server.connection_count(), 2);
+}
+
+TEST(Http1ClientTest, OneShotUnsupportedSchemeIsRejectedBeforeConnecting) {
+    LoopbackHttp1Server server;
+    const std::string   ftp_url = "ftp" + server.url("/ping").substr(4);
+    auto                reply   = qb::http::run_sync(qb::http::GET(qb::http::Request{{ftp_url}}, std::chrono::seconds(1)));
+    EXPECT_EQ(reply.response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(server.connection_count(), 0);
+    EXPECT_EQ(server.request_count(), 0);
+}
+
+#if !QB_HAS_SSL
+TEST(Http1ClientTest, OneShotHttpsWithoutSslIsRejectedBeforeConnecting) {
+    LoopbackHttp1Server server;
+    const std::string   https_url = "HTTPS" + server.url("/ping").substr(4);
+    auto                reply     = qb::http::run_sync(qb::http::GET(qb::http::Request{{https_url}}, std::chrono::seconds(1)));
+    EXPECT_EQ(reply.response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(server.connection_count(), 0);
+    EXPECT_EQ(server.request_count(), 0);
+}
+#endif

@@ -455,7 +455,7 @@ client->set_connect_timeout(std::chrono::seconds(10));               // default 
 client->set_verify_peer(false);                                      // BEFORE connect
 ```
 
-`qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot failures synthesize a response: 503 (cannot connect), 504 (timeout), 502 (peer disconnect). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it is the bridge for `main()`/tests, **not** for use inside a coroutine that is already being driven. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`.
+`qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot helpers compare URI schemes case-insensitively for transport selection: unsupported schemes fail locally with 400, and HTTPS without SSL support fails locally with 503; neither opens a socket. Mixed-case HTTP(S) with no explicit port still depends on qb-io's separate default-port lookup (QB-919). A local rejection may invoke the callback before the helper returns; the coroutine awaiter schedules its continuation. Other failures synthesize 503 (cannot connect), 504 (timeout), or 502 (peer disconnect). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it is the bridge for `main()`/tests, **not** for use inside a coroutine that is already being driven. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`.
 
 ---
 
@@ -477,6 +477,7 @@ client->set_verify_peer(false);                                      // BEFORE c
 - Request cookies need an explicit `req.parse_cookie_header()`; response cookie edits via the pointer/jar need `update_cookie_header(name)`.
 - Terminal context helpers (`json`, `text`, `redirect`, `no_content`, the 4xx/5xx ones) call `complete()` internally — set custom headers/body first. Only `ctx->status(code)` is chainable.
 - `Body::as<T>()`/`try_as<T>()` and the assignment set are closed; non-supported `T` is a compile error. `as<T>()` throws on a malformed payload — reach for `try_as<T>() -> std::optional<T>` (`noexcept`) on request bodies.
+- Assigning a C++-constructed `qb::json` with invalid UTF-8 to `Body` throws for const and rvalue JSON alike and clears partial output; a routed `Context::json` handler becomes a 500 instead of terminating the process.
 - HTTP/2 / HTTP/3 are TLS-only with ALPN; no plaintext h2c. HTTP/2 client `connect(nullptr)` for fire-and-forget.
 - `verify_peer` defaults to `true`; disable only for trusted/self-signed endpoints, and set it before connecting on persistent clients.
 - Validation `validate()` mutates the request; type-gated rules pass silently for the wrong kind (assert `type` first).
@@ -576,6 +577,7 @@ Parses Content-Type into MIME type + charset; defaults to `application/octet-str
 
 ### `qb::http::Body` — `body.h:57`
 `class Body { template<typename...A> Body(A&&...); template<typename...A> Body& operator<<(A&&...); template<typename T> Body& operator=(...); template<typename T> T as() const; template<typename T> [[nodiscard]] std::optional<T> try_as() const noexcept; Body& add_chunk(const Chunk&); Body& add_final_chunk(); pipe<char>& raw(); std::size_t size() const; bool empty() const; void clear() noexcept; }`
+`Body::operator=(qb::json&&)` and the const JSON assignment can throw on invalid UTF-8 (`body.h:439-443`); both clear partial output before propagation (`body.cpp:675-697`).
 Backed by `qb::allocator::pipe<char>`. Append/assign constrained by `is_body_appendable` (string-like, Chunk/Multipart/Form/`qb::json`, arithmetic). The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460-473`. Conversions defined in `body.cpp`.
 **Prefer `try_as<T>()` for client-supplied bodies** (`body.h:404`): it returns `std::optional<T>` and is `noexcept`, so a malformed JSON/multipart payload yields `std::nullopt` (→ reply 400) instead of an exception you must catch at the call site. `as<T>()` throws on malformed input; the string conversions never fail.
 Usage: `req.body() = "payload"; if (auto j = resp.body().try_as<qb::json>()) { /* use *j */ }`

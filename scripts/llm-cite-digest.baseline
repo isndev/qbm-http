@@ -12,12 +12,14 @@
 # excerpt rather than as an opaque hash.  Fields: doc <TAB> cited-spec <TAB>
 # digest <TAB> excerpt.  Keyed WITHOUT the doc's own line number, so
 # re-flowing a paragraph does not re-key the file.
+llm/qbm-http.llm.api.md	body.cpp:675-697	0a49f9fa4b9b	template <>
 llm/qbm-http.llm.api.md	body.h:253-253	cc499af9d486	static std::unique_ptr<qb::compression::compress_provider> get_compre...
 llm/qbm-http.llm.api.md	body.h:272-272	ee0ec258f912	std::size_t compress(std::string const &encoding);
 llm/qbm-http.llm.api.md	body.h:289-289	c60e797b9e48	static std::unique_ptr<qb::compression::decompress_provider> get_deco...
 llm/qbm-http.llm.api.md	body.h:311-311	34b3eec579d1	std::size_t uncompress(const std::string &encoding);
 llm/qbm-http.llm.api.md	body.h:387-387	bcf110ac1c69	static_assert(dependent_false<T>::value, "Body::as<T>() is not implem...
 llm/qbm-http.llm.api.md	body.h:404-404	11e30b5c8399	try_as() const noexcept {
+llm/qbm-http.llm.api.md	body.h:439-443	b2f952bd08c2	template <>
 llm/qbm-http.llm.api.md	body.h:460-473	504f0d4dfa48	template <>
 llm/qbm-http.llm.api.md	body.h:57-57	7f9976a908fe	class Body {
 llm/qbm-http.llm.api.md	chunk.h:106-106	8b2020e847e8	pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);

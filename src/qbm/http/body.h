@@ -197,11 +197,11 @@ public:
      * @return Reference to this body
      *
      * Moves the content of the provided data into the body.
-     * This version is more efficient for temporary values as it
-     * avoids unnecessary copying when possible.
+     * This version avoids unnecessary copying when possible. JSON serialization
+     * can throw; its rvalue specialization propagates the error.
      */
     template <typename T>
-    Body &operator=(T &&) noexcept;
+    Body &operator=(T &&) noexcept(!std::is_same_v<std::remove_cvref_t<T>, qb::json>);
 
     /**
      * @brief Assign a C string to the body
@@ -440,7 +440,7 @@ template <>
 Body &Body::operator= <qb::json>(qb::json const &json);
 
 template <>
-Body &Body::operator= <qb::json>(qb::json &&json) noexcept;
+Body &Body::operator= <qb::json>(qb::json &&json);
 
 template <>
 Body &Body::operator= <Multipart>(Multipart const &mp);
