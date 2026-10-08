@@ -36,6 +36,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 
 #include <benchmark/benchmark.h>
 
@@ -219,11 +220,48 @@ BM_Body_JsonRoundTrip(benchmark::State &state) {
     state.SetItemsProcessed(state.iterations());
 }
 
+// ---------------------------------------------------------------------------
+// JSON rvalue assignment: serialize into a fresh body without parsing it back.
+// ---------------------------------------------------------------------------
+void
+BM_Body_JsonRvalueAssign(benchmark::State &state) {
+    const qb::json    seed          = make_wide_json();
+    const std::string expected_wire = seed.dump();
+
+    {
+        qb::json probe_input = seed;
+        Body     probe;
+        probe = std::move(probe_input);
+        if (probe.as<std::string>() != expected_wire) {
+            state.SkipWithError("json rvalue assignment changed serialized content");
+            return;
+        }
+    }
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        {
+            qb::json input = seed;
+            Body     body;
+            state.ResumeTiming();
+
+            body = std::move(input);
+            benchmark::DoNotOptimize(body);
+            state.PauseTiming();
+        }
+        state.ResumeTiming();
+    }
+
+    state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(expected_wire.size()));
+    state.SetItemsProcessed(state.iterations());
+}
+
 } // namespace
 
 BENCHMARK(BM_Body_FormEncode)->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Body_FormDecode)->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Body_MultipartParse)->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Body_JsonRoundTrip)->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Body_JsonRvalueAssign)->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();
