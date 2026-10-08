@@ -9,6 +9,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/3 active cancellation retains the client through its callback (Huly QB-960).** A
+  cancellation callback may release the last external `shared_ptr`; the client stays alive until
+  the active stream has been reset and the pending queue has resumed.
 - **HTTP/3 request and response bodies advance past the initial QUIC receive window (Huly QB-503).**
   The receiver now returns flow-control credit for every DATA payload handled by nghttp3, including
   bytes discarded when a stream is refused. nghttp3's separate consumed-byte count continues to

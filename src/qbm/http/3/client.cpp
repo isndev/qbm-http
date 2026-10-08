@@ -270,8 +270,8 @@ Client::cancel_request(request_id id, std::string const &reason) {
         return false;
     }
     const auto stream_id = active->first;
+    auto       owner     = weak_from_this().lock(); // Keep alive through callback and RFC 9114 §4.1 stream reset.
     fail_request(stream_id, reason, qb::http::status::CLIENT_CLOSED_REQUEST);
-    // Client-initiated cancellation of an active request stream (RFC 9114 §4.1).
     reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
     process_pending_requests();
     return true;

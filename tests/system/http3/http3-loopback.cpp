@@ -3102,3 +3102,31 @@ TEST_F(Http3LoopbackTest, BatchOfFullyRejectedRequestsStillInvokesTheCallback) {
     ASSERT_EQ(got.size(), 1u);
     EXPECT_EQ(got[0].status(), qb::http::status::BAD_REQUEST);
 }
+
+TEST_F(Http3LoopbackTest, CancelActiveRequestKeepsClientAliveThroughCallback) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/stall", [](auto) {});
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    std::weak_ptr<qb::http3::Client> weak_client       = client;
+    int                              calls             = 0;
+    bool                             alive_in_callback = false;
+    const auto id = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response response) {
+        ++calls;
+        EXPECT_EQ(response.status(), qb::http::status::CLIENT_CLOSED_REQUEST);
+        client.reset();
+        alive_in_callback = !weak_client.expired();
+    });
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1u; }));
+
+    EXPECT_TRUE(client->cancel_request(id));
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(alive_in_callback) << "cancel_request must finish its stream teardown before the last owner is released";
+    EXPECT_TRUE(weak_client.expired());
+    server->close();
+}
