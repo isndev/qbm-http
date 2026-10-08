@@ -332,6 +332,33 @@ TEST_F(CoroClientTest, TimeoutYieldsGatewayTimeout) {
     EXPECT_EQ(reply.response.status(), qb::http::status::GATEWAY_TIMEOUT);
 }
 
+// What a coroutine waits on, in its scheduler's dump (Huly QB-71): the module's awaiter labels itself with
+// qb::io::async::track_suspension, so a coroutine parked on a request says "http" -- not the record of its earlier
+// sleep, which an unlabelled awaiter would leave. The never-completing route holds the request until its timeout.
+TEST_F(CoroClientTest, TheDumpSaysACoroutineWaitsOnARequest) {
+    auto &sched = qb::io::async::coro_scheduler();
+    ASSERT_TRUE(sched.set_suspension_tracking(true));
+    bool        done = false;
+    std::string on_request;
+    auto        client = [&]() -> qb::io::async::task<void> {
+        co_await qb::io::async::sleep(1ms);
+        (void) co_await qb::http::GET(qb::http::Request{{url("/blackhole")}}, 300ms);
+        done = true;
+    };
+    sched.spawn("http-client", client());
+    const bool seen     = ServerThread::pump_until([&] {
+        for (auto const &p : sched.dump())
+            if (p.name == "http-client" && p.kind)
+                on_request = p.kind;
+        return on_request == "http" || done;
+    });
+    const bool finished = ServerThread::pump_until([&] { return done; });
+    sched.set_suspension_tracking(false);
+
+    EXPECT_TRUE(seen && finished) << "the request never parked or never ended";
+    EXPECT_EQ(on_request, "http");
+}
+
 // ---------------------------------------------------------------------------
 // Interop with the untouched callback-style API
 // ---------------------------------------------------------------------------

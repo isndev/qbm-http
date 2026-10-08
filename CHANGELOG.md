@@ -7,6 +7,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
+### Added
+
+- **A coroutine parked on a client request says so in qb's `CoroutineScheduler::dump()` (Huly QB-71).** `http_awaiter`
+  -- every coroutine form of the client -- begins its `await_suspend` with `qb::io::async::track_suspension(h,
+  "http")`: with suspension tracking on, the dump shows the coroutine waiting on `"http"`, for how long. An awaiter
+  without the call would leave the coroutine with the record of its previous wait, ageing. Off -- the default -- the
+  call is one predictable branch. Pinned by `TheDumpSaysACoroutineWaitsOnARequest` in
+  `tests/system/coro/coro-client-http1.cpp`; qb's `scripts/check-awaiter-tracking.py`, run over this module from the
+  superproject, refuses an awaiter without it.
+
 ### Changed
 
 - **The compression middleware offers zstd and brotli, and never chooses a codec the build cannot produce (Huly

@@ -273,13 +273,13 @@ WebSocket coroutine API — returns an `http_awaiter`. It registers no `on_cance
 `cancel()` neither wakes nor unwinds a coroutine parked on one.
 [C++20 coroutines](https://github.com/isndev/qb/blob/main/readme/3_qb_io/coroutines.md#every-awaitable-and-what-cancellation-does-to-it)
 owns the full inventory of what is and is not cancellation-aware; this module's entry is that one line.
-<!-- src: qbm/http/src/qbm/http/coro.h:119-142 (await_ready false; await_suspend stores the handle and launches the operation — no token, no hook) -->
+<!-- src: qbm/http/src/qbm/http/coro.h:119-143 (await_ready false; await_suspend stores the handle and launches the operation — no token, no hook) -->
 
 It is a callback bridge with two guards: a `shared_ptr<bool>` alive sentinel cleared in the destructor, so a completion
 arriving after the awaiter is gone is a no-op, and a `shared_ptr<std::atomic<bool>>` that makes the completion
 at-most-once even if the underlying operation calls back twice. It is also **immovable** — copy and move are all
 deleted — so you construct it as a prvalue from a factory and `co_await` it immediately.
-<!-- src: qbm/http/src/qbm/http/coro.h:109-117 (copy and move deleted; destructor clears the alive flag), :129-136 (the completion checks alive, then compare-exchanges completed) -->
+<!-- src: qbm/http/src/qbm/http/coro.h:109-117 (copy and move deleted; destructor clears the alive flag), :130-137 (the completion checks alive, then compare-exchanges completed) -->
 
 **What bounds it instead is its own timeout argument.** Every client entry point takes a `qb::duration` — and the
 default is `qb::duration::zero()`, which means *no timeout at all*:

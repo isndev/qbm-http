@@ -179,7 +179,7 @@ qb::io::async::task<void> fetch() {
 
 To drive a single call from synchronous code, wrap it in `run_sync`:
 
-<!-- src: qbm/http/src/qbm/http/coro.h:198-201 -->
+<!-- src: qbm/http/src/qbm/http/coro.h:199-202 -->
 ```cpp
 #include <qbm/http/http.h>
 
