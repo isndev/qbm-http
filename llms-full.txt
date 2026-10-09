@@ -828,8 +828,8 @@ Usage: `router.use(qb::http::timing_middleware<S>([](auto ms){ LOG(ms.count()); 
 
 ### `qb::http::StaticFilesMiddleware<S>` — `static_files.h:281`
 `explicit StaticFilesMiddleware(StaticFilesOptions options, std::string name="StaticFilesMiddleware");`
-Serves GET/HEAD; path-traversal hardened (canonicalised, symlink-escape rejected); supports ETag/If-None-Match, Last-Modified/If-Modified-Since, `Range`/`206`/`416`, optional directory listing. **Ctor anchors a relative `root_directory` via `qb::io::sys::resolve_resource` (cwd then exe dir), then requires it to exist and canonicalise.** Throws `std::invalid_argument` if root empty, `std::runtime_error` if root (after resolution) missing/not a directory or not canonicalisable.
-Factory (`static_files.h:757`): `static_files_middleware<S>(options, name="StaticFilesMiddleware")`.
+Serves GET/HEAD; path-traversal hardened (canonicalised, symlink-escape rejected), including configured directory index files; supports ETag/If-None-Match, Last-Modified/If-Modified-Since (`If-None-Match` takes precedence when present), `Range`/`206`/`416`, optional directory listing. **Ctor anchors a relative `root_directory` via `qb::io::sys::resolve_resource` (cwd then exe dir), then requires it to exist and canonicalise.** Throws `std::invalid_argument` if root empty, `std::runtime_error` if root (after resolution) missing/not a directory or not canonicalisable.
+Factory (`static_files.h:807`): `static_files_middleware<S>(options, name="StaticFilesMiddleware")`.
 Usage: `router.use(qb::http::static_files_middleware<S>(qb::http::StaticFilesOptions{"public"}.with_path_prefix_to_strip("/static")));  // "public" found relative to cwd or the executable's dir`
 
 ## Security headers — `src/qbm/http/middleware/security_headers.h`

@@ -89,6 +89,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Static file index paths stay inside the configured root (Huly QB-538).** Directory index selection now checks
+  the canonical target and applies the symlink policy before serving the file; its MIME type follows the configured
+  index name.
+- **Static file validators follow HTTP precedence (Huly QB-540).** A present `If-None-Match` now takes precedence
+  over `If-Modified-Since`, including when the entity tag differs or the header value is empty.
 - **Request validation keeps error policies and verdicts consistent (Huly QB-544, QB-546).** A body schema now
   receives the request validator's Full, Preview, or None policy and byte budget in either configuration order.
   A parameter rule that returns `false` without adding an error now emits one named for that rule, so both direct
