@@ -96,6 +96,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   over `If-Modified-Since`, including when the entity tag differs or the header value is empty.
 - **Request validation keeps error policies and verdicts consistent (Huly QB-544, QB-546).** A body schema now
   receives the request validator's Full, Preview, or None policy and byte budget in either configuration order.
+  Nested `additionalProperties` errors keep their already-shaped value when their field path is prefixed, so a
+  compound Preview is captured once.
   A parameter rule that returns `false` without adding an error now emits one named for that rule, so both direct
   parameter validation and routed requests reject it; explicit rule errors retain their detail.
 - **Validation previews keep complete UTF-8 characters (Huly QB-545).** Truncating a valid multibyte value at

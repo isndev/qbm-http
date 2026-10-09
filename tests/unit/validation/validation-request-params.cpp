@@ -287,6 +287,36 @@ TEST_F(RequestParamsTest, BodyAndQueryErrorsUseConfiguredPolicyInEitherOrder) {
     }
 }
 
+TEST_F(RequestParamsTest, NestedAdditionalPropertyErrorKeepsSinglePreview) {
+    const qb::json schema = {{"type", "object"}, {"additionalProperties", {{"type", "string"}}}};
+    const qb::json body   = {{"dynamic", {{"secret", std::string(48, 'A')}}}};
+
+    for (const bool policy_first : {false, true}) {
+        RequestValidator validator;
+        if (policy_first)
+            validator.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+        validator.for_body(schema);
+        if (!policy_first)
+            validator.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+
+        qb::http::Request req;
+        req.uri()  = qb::io::uri("/submit");
+        req.body() = body.dump();
+
+        Result out;
+        EXPECT_FALSE(validator.validate(req, out));
+        ASSERT_EQ(out.errors().size(), 1u);
+        const auto &error = out.errors().front();
+        EXPECT_EQ(error.field_path, "dynamic");
+        EXPECT_EQ(error.rule_violated, "type");
+        EXPECT_EQ(error.message, "Invalid type. Expected string.");
+        ASSERT_TRUE(error.offending_value.has_value());
+        EXPECT_EQ(error.offending_value->at("_truncated"), true);
+        EXPECT_EQ(error.offending_value->at("original_kind"), "object");
+        EXPECT_EQ(error.offending_value->at("preview"), body.at("dynamic").dump().substr(0, 16));
+    }
+}
+
 TEST_F(RequestParamsTest, SilentCustomRuleRejectsRepeatedQueryValue) {
     RequestValidator validator;
     validator.for_query_param("token",
