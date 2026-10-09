@@ -395,7 +395,7 @@ TEST(WsFramingEdge, UnmaskedClientFrameIsRejected) {
 }
 
 // NEW: a Close frame carrying an out-of-range status code must be rejected
-// with 1002 (ws.h:500 "Invalid close status code").
+// with 1002 (ws.h:503 "Invalid close status code").
 TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
     EphemeralWsServer<EchoServer> server;
 
@@ -422,7 +422,7 @@ TEST(WsFramingEdge, OutOfRangeCloseCodeIsRejected) {
 }
 
 // A Close frame whose payload is exactly ONE byte is malformed: a close code is
-// two bytes, so a lone byte can never be a valid status (ws.h:492 → 1002).
+// two bytes, so a lone byte can never be a valid status (ws.h:495-497 → 1002).
 TEST(WsFramingEdge, OneByteCloseFramePayloadIsRejected) {
     EphemeralWsServer<EchoServer> server;
     // Close (0x88) with a single payload byte.
@@ -430,7 +430,7 @@ TEST(WsFramingEdge, OneByteCloseFramePayloadIsRejected) {
 }
 
 // A Close frame with a VALID status code but a reason that is not valid UTF-8
-// must be failed with 1007 DataNotConsistent (ws.h:504). This is distinct from
+// must be failed with 1007 DataNotConsistent (ws.h:506-508). This is distinct from
 // the out-of-range-code path (1002) already covered above.
 TEST(WsFramingEdge, CloseFrameWithInvalidUtf8ReasonIsRejectedWith1007) {
     EphemeralWsServer<EchoServer> server;
@@ -447,7 +447,7 @@ TEST(WsFramingEdge, CloseFrameWithInvalidUtf8ReasonIsRejectedWith1007) {
 
 // A control (Ping) frame announcing a length indicator of 126 exceeds the 125
 // byte control-frame payload cap and is rejected from the indicator alone
-// (ws.h:674 → 1002): 126 is read as a length value > 125 before the ext16 path
+// (ws.h:673-679 → 1002): 126 is read as a length value > 125 before the ext16 path
 // is taken. make_client_frame only emits the 7-bit form, so build it by hand.
 TEST(WsFramingEdge, ControlFrameAnnouncingOversizeLengthIsRejected) {
     EphemeralWsServer<EchoServer> server;
@@ -658,7 +658,7 @@ TEST(WsFramingEdge, ValidMultiByteUtf8TextIsAcceptedAndEchoed) {
 }
 
 // A multi-byte code point split ACROSS a fragment boundary must reassemble and
-// validate as one scalar (ws.h:572 final-fragment UTF-8 check on the joined
+// validate as one scalar (ws.h:575-576 final-fragment UTF-8 check on the joined
 // buffer). The euro sign (E2 82 AC) is split 1+2 between two frames.
 TEST(WsFramingEdge, MultiByteUtf8SplitAcrossFragmentsReassemblesAndValidates) {
     EphemeralWsServer<EchoServer> server;

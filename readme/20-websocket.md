@@ -152,7 +152,7 @@ void on(TransferToWebSocketEvent &event) {
 
 ## Sending frames
 
-Each outbound frame is a value type derived from `qb::http::ws::Message`. Stream the payload in with `operator<<`, then send the whole value with `session << frame`. The framer attaches the correct opcode, length encoding, and (on the client) masking. <!-- src: src/qbm/http/ws/ws.h:99,147,162,178,194 -->
+Each outbound frame is a value type derived from `qb::http::ws::Message`. Stream the payload in with `operator<<`, then send the whole value with `session << frame`. The framer attaches the correct opcode, length encoding, and (on the client) masking. <!-- src: src/qbm/http/ws/ws.h:99,149,164,180,196 -->
 
 ```cpp
 qb::http::ws::MessageText text;
@@ -180,7 +180,7 @@ RFC 6455 §5.5.1 is a two-way handshake: after you send a Close you should wait 
 
 ## Client: the CRTP form
 
-Subclass `WebSocket<Self>` (or `WebSocketSecure<Self>` for WSS) when the client holds state. You receive lifecycle and frame events as `on(...)` overloads; only the handlers you actually define are wired up. <!-- src: src/qbm/http/ws/ws.h:1275-1849 -->
+Subclass `WebSocket<Self>` (or `WebSocketSecure<Self>` for WSS) when the client holds state. You receive lifecycle and frame events as `on(...)` overloads; only the handlers you actually define are wired up. <!-- src: src/qbm/http/ws/ws.h:1085-1777,1786-1787 -->
 
 <!-- src: src/qbm/http/ws/ws.h:1262-1274 (illustrative of the public WebSocket<T> event API) -->
 ```cpp

@@ -377,7 +377,7 @@ For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol spec
 
 HTTP/3 runs over QUIC. The entire `qb::http3` slice is compile-time gated behind `QBM_HTTP_HAS_HTTP3` — including its header — so guard any HTTP/3 code with that macro. Only ALPN `h3` is accepted, the base URI must be `https`, and (as with HTTP/2) requests must be same-origin.
 
-<!-- src: qbm/http/src/qbm/http/3/client.h:107-156,212 -->
+<!-- src: qbm/http/src/qbm/http/3/client.h:110-114,184-191,210-243,245-279,389 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 namespace qb::http3 {
