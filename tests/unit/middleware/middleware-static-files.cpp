@@ -479,9 +479,9 @@ TEST_F(StaticFilesMiddlewareTest, LastModifiedAndIfModifiedSince) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(StaticFilesMiddlewareTest, MatchingETagWinsWhenBothValidatorsPresent) {
+TEST_F(StaticFilesMiddlewareTest, IfNoneMatchPrecedesIfModifiedSince) {
     // With a matching If-None-Match AND an If-Modified-Since, the ETag validator
-    // is evaluated first and short-circuits to 304 (RFC 7232 §6 precedence).
+    // is evaluated first and short-circuits to 304 (RFC 9110 §13.1.3 precedence).
     qb::http::StaticFilesOptions options(_test_root_dir);
     options.with_etags(true).with_last_modified(true);
     auto sf_mw = make_mw(options);
@@ -499,6 +499,42 @@ TEST_F(StaticFilesMiddlewareTest, MatchingETagWinsWhenBothValidatorsPresent) {
                                                    {{"If-None-Match", etag}, {"If-Modified-Since", "Sat, 01 Jan 2000 00:00:00 GMT"}}));
     EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
     EXPECT_TRUE(_session->_response.body().empty());
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::HEAD, "/file1.txt",
+                                                   {{"If-None-Match", etag}, {"If-Modified-Since", "Sat, 01 Jan 2000 00:00:00 GMT"}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
+    EXPECT_TRUE(_session->_response.body().empty());
+
+    // A different entity tag takes precedence over a date that would otherwise
+    // produce 304. Check the representation for GET and metadata-only HEAD.
+    const std::string future_date    = "Fri, 01 Jan 2100 00:00:00 GMT";
+    const std::string different_etag = "\"different-representation\"";
+    configure_router_and_run(
+        sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", different_etag}, {"If-Modified-Since", future_date}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+    EXPECT_EQ(std::string(_session->_response.header("ETag")), etag);
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    configure_router_and_run(
+        sf_mw, create_request(qb::http::method::HEAD, "/file1.txt", {{"If-None-Match", different_etag}, {"If-Modified-Since", future_date}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.body().empty());
+    EXPECT_EQ(std::string(_session->_response.header("Content-Length")), std::to_string(std::string("Contents of file1.txt").size()));
+
+    // Presence, rather than a non-empty value, controls precedence.
+    configure_router_and_run(sf_mw,
+                             create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", ""}, {"If-Modified-Since", future_date}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+
+    qb::http::StaticFilesOptions no_etag_options(_test_root_dir);
+    no_etag_options.with_etags(false);
+    configure_router_and_run(make_mw(no_etag_options), create_request(qb::http::method::GET, "/file1.txt",
+                                                                      {{"If-None-Match", different_etag}, {"If-Modified-Since", future_date}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+    EXPECT_TRUE(_session->_response.header("ETag").empty());
 }
 
 // --- Range requests --------------------------------------------------------
@@ -895,6 +931,37 @@ TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToOutsideRootIsForbidden) {
     EXPECT_TRUE(_session->_response.status() == qb::http::status::FORBIDDEN || _session->_response.status() == qb::http::status::NOT_FOUND)
         << "Status code was: " << _session->_response.status();
     EXPECT_FALSE(_session->_final_handler_called);
+
+    // Directory index selection must apply the same containment rule as a
+    // direct request for the link.
+    std::error_code ec;
+    const auto      dir = _test_root_dir / "outside_index_dir";
+    std::filesystem::create_directory(dir, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    std::filesystem::create_symlink(_outside_file_path, dir / "index.html", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/outside_index_dir/index.html"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/outside_index_dir/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_NE(_session->_response.body().as<std::string>(), "Contents of file outside root");
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // The root path is anchored at construction, but its directory contents
+    // can be replaced later; index selection must still inspect the final path.
+    const auto mutable_root = _test_root_dir / "mutable_root";
+    create_test_file(mutable_root / "index.html", "Original index");
+    qb::http::StaticFilesOptions mutable_options(mutable_root);
+    auto                         mutable_mw = make_mw(mutable_options);
+    std::filesystem::rename(mutable_root, _test_root_dir / "mutable_root_old", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    std::filesystem::create_directory(mutable_root, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    std::filesystem::create_symlink(_outside_file_path, mutable_root / "index.html", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    configure_router_and_run(mutable_mw, create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_NE(_session->_response.body().as<std::string>(), "Contents of file outside root");
 }
 
 TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToInsideRootIsOk) {
@@ -905,7 +972,19 @@ TEST_F(StaticFilesMiddlewareTest, SecuritySymlinkToInsideRootIsOk) {
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/symlink_to_inside.txt"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "Body: " << _session->_response.body().as<std::string>();
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+    EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/plain; charset=utf-8");
     EXPECT_FALSE(_session->_final_handler_called);
+
+    std::error_code ec;
+    const auto      dir = _test_root_dir / "inside_index_dir";
+    std::filesystem::create_directory(dir, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    std::filesystem::create_symlink(_test_root_dir / "file1.txt", dir / "index.html", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/inside_index_dir/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+    EXPECT_EQ(std::string(_session->_response.header("Content-Type")), "text/html; charset=utf-8");
 }
 
 TEST_F(StaticFilesMiddlewareTest, RejectSymlinksOptionBlocksInsideLinks) {
@@ -917,6 +996,36 @@ TEST_F(StaticFilesMiddlewareTest, RejectSymlinksOptionBlocksInsideLinks) {
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/symlink_to_inside.txt"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_FALSE(_session->_final_handler_called);
+
+    std::error_code ec;
+    const auto      dir = _test_root_dir / "rejected_index_dir";
+    std::filesystem::create_directory(dir, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    std::filesystem::create_symlink(_test_root_dir / "file1.txt", dir / "index.html", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/rejected_index_dir/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, ConfiguredIndexPathCannotEscapeRoot) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_index_file_name("../outside_root.txt");
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_NE(_session->_response.body().as<std::string>(), kOutsideRootSecret);
+
+    // A sibling file shares the root's string prefix; component comparison
+    // must still reject it.
+    options.with_index_file_name("../" + _outside_file_path.filename().string());
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_NE(_session->_response.body().as<std::string>(), "Contents of file outside root");
+
+    options.with_index_file_name(_outside_file_path.string());
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
+    EXPECT_NE(_session->_response.body().as<std::string>(), "Contents of file outside root");
 }
 
 // --- DoS guard: max_file_size ----------------------------------------------
@@ -968,6 +1077,7 @@ TEST_F(StaticFilesMiddlewareTest, ConstructorRejectsNonexistentRootDirectory) {
 
 TEST_F(StaticFilesMiddlewareTest, WithRootDirectoryAndIndexFileNameSettersServeNamedIndex) {
     create_test_file(_test_root_dir / "main.page", "Custom Index Page");
+    create_test_file(_test_root_dir / "100%index.html", "Literal Percent Index");
 
     // Build options against a throw-away path, then re-root via with_root_directory
     // and pick a non-default index file name via with_index_file_name.
@@ -977,6 +1087,11 @@ TEST_F(StaticFilesMiddlewareTest, WithRootDirectoryAndIndexFileNameSettersServeN
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Custom Index Page");
+
+    options.with_index_file_name("100%index.html");
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Literal Percent Index");
 }
 
 // --- cancel() is a no-op on the synchronous middleware ---------------------

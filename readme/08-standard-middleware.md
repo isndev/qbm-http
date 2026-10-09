@@ -273,6 +273,8 @@ Configuration is `qb::http::StaticFilesOptions`, constructed with the root direc
 
 The freshness lifetime is **not** a duration type: `with_cache_control` takes a literal `Cache-Control` header *string* (`"public, max-age=3600"`), so the `max-age` token is whatever you write into that string. Directory listing defaults to off for safety, and the middleware normalizes paths to reject directory traversal.
 
+For GET and HEAD, a present `If-None-Match` takes precedence over `If-Modified-Since`; a differing ETag serves the representation even when the supplied date is newer. A directory's configured index file is checked against the canonical root and the `reject_symlinks` option before serving it. Its `Content-Type` follows the configured index filename, including when that filename is a symlink to a file with another extension.
+
 `root_directory` is a `std::filesystem::path`, and a **relative** root is resolved through `qb::io::sys::resolve_resource` when the middleware is constructed: it is looked up against the current working directory first (historical behaviour), then against the executable's own directory, before being canonicalised. A binary shipped next to its asset directory therefore serves them from **any** working directory — no `cd`, no environment setup. An **absolute** root is used unchanged. The root must exist and be a directory at construction time, or the constructor throws.
 
 ```cpp
@@ -289,7 +291,7 @@ opts.with_serve_index_file(true)
 
 router.use(qb::http::static_files_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:757 -->
+<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:807 -->
 
 `static_files_middleware<S>(StaticFilesOptions)` is the only factory; there is no default-constructed form because the root directory is required.
 
