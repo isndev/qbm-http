@@ -9,6 +9,25 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **HTTP/3 active cancellation retains the client through its callback (Huly QB-960).** A
+  cancellation callback may release the last external `shared_ptr`; the client stays alive until
+  the active stream has been reset and the pending queue has resumed.
+- **HTTP/3 request and response bodies advance past the initial QUIC receive window (Huly QB-503).**
+  The receiver now returns flow-control credit for every DATA payload handled by nghttp3, including
+  bytes discarded when a stream is refused. nghttp3's separate consumed-byte count continues to
+  cover framing. Direct adapter tests check exact credit in both directions, and a QUIC/TLS loopback
+  crosses multiple small stream and connection windows.
+- **WebSocket client connection hardening (Huly QB-513, QB-609, QB-517).** A client destroyed
+  during an in-flight transport connect no longer leaves a callback that can access it. A
+  nonzero connect timeout now covers the transport and the HTTP Upgrade as one deadline, with
+  one failure completion when the server withholds its response. A retry started from that
+  failure callback waits for the retired transport to finish closing and drops its buffered bytes.
+  Parsed handshake errors, established notifications and disconnect callbacks run after parser
+  dispatch, so they may release the client;
+  a request hook that cancels or replaces an attempt cannot send its retired Upgrade. A peer
+  close before the 101 reports a failed connect, and clients reject a 101 response that selects
+  an extension they did not offer. The qb-io integer and typed `disconnect(reason)` overloads
+  remain available through the WebSocket client.
 - **A coroutine parked on a client request says so in qb's `CoroutineScheduler::dump()` (Huly QB-71).** `http_awaiter`
   -- every coroutine form of the client -- begins its `await_suspend` with `qb::io::async::track_suspension(h,
   "http")`: with suspension tracking on, the dump shows the coroutine waiting on `"http"`, for how long. An awaiter
@@ -18,6 +37,40 @@ All notable changes to the qbm-http module are documented here. The format is ba
   superproject, refuses an awaiter without it.
 
 ### Changed
+
+- **HTTP/2 batch completion callbacks may disconnect or enqueue another batch (Huly QB-496).** The completed
+  batch now leaves the registry before invoking user code, so a disconnect cannot free its iterator during
+  callback return. Ordered responses and callback cardinality are preserved.
+- **HTTP/2 pending sends tolerate a failure callback that disconnects or replaces the client (Huly QB-926).**
+  The client retains itself while draining the queue and checks the connection and protocol again before each
+  send, so a callback cannot make the next request use a retired connection.
+- **HTTP/3 callbacks can close or release their client during event delivery (Huly QB-501, QB-924, QB-927).**
+  A `disconnect()` reached inside an nghttp3 read marks the client down immediately and waits until that read
+  returns to destroy the protocol, close QUIC and fail remaining active work. GOAWAY's pending-request callbacks
+  continue to run during the read. Reentrant connect attempts fail, new requests receive `503`, and that explicit
+  close does not start an automatic reconnect. A callback that releases the last external `shared_ptr` leaves the
+  client alive until the endpoint has finished dispatching the event.
+- **HTTP/3 retries start with a retired transport and request cohort (Huly QB-929).** Connect-start failures,
+  timeouts and remote closes close the old QUIC transport before failure callbacks can initiate another attempt;
+  those callbacks see the old requests failed before they queue new work. On retry, the qb-io endpoint refreshes
+  its internally owned native backend.
+- **An HTTP/3 connect timer belongs to one attempt (Huly QB-500).** A cancelled attempt reports failure to its
+  connection callbacks once. Its timer cannot time out a later attempt on the same client, even if that later
+  attempt is still connecting when the old deadline passes.
+- **HTTP/3 pending sends stop after a reentrant teardown (Huly QB-931).** The queue drain retains the client and
+  rechecks connection, protocol and shutdown state before each submission, including after a failed submit and
+  its callback.
+- **HTTP/3 can serve sequential requests past the initial QUIC stream limit (Huly QB-934).** For a
+  client-initiated request stream delivered through ngtcp2's `stream_open` callback, qb returns its
+  bidirectional slot on close; ngtcp2 handles implicit openings itself. A loopback client completed 130
+  sequential requests on one connection with the default limit of 100.
+- **A synchronous QUIC close during HTTP/3 submission settles the in-between request (Huly QB-932).** The
+  client defers teardown until native submission returns, then gives a `503` to the request already removed
+  from the pending queue before it could enter the active registry. That notification still runs if an old
+  request's failure callback throws during teardown; the saved exception propagates afterward.
+- **HTTP/3 connect and disconnect transitions finish notification after a callback throws (Huly QB-933).**
+  A throwing connection or request callback no longer strands the close or silently skips the other callbacks
+  in that transition; explicit disconnect completes transport cleanup before propagating the saved exception.
 
 - **The compression middleware offers zstd and brotli, and never chooses a codec the build cannot produce (Huly
   QB-93).** `CompressionOptions`'s default list is the codecs of `{zstd, br, gzip, deflate}` this build registers --
@@ -35,6 +88,55 @@ All notable changes to the qbm-http module are documented here. The format is ba
   unregistered name passed over -- which catches five defects planted one at a time.
 
 ### Fixed
+
+- **Static file index paths stay inside the configured root (Huly QB-538).** Directory index selection now checks
+  the canonical target and applies the symlink policy before serving the file; its MIME type follows the configured
+  index name.
+- **Static file validators follow HTTP precedence (Huly QB-540).** A present `If-None-Match` now takes precedence
+  over `If-Modified-Since`, including when the entity tag differs or the header value is empty.
+- **Request validation keeps error policies and verdicts consistent (Huly QB-544, QB-546).** A body schema now
+  receives the request validator's Full, Preview, or None policy and byte budget in either configuration order.
+  Nested `additionalProperties` errors keep their already-shaped value when their field path is prefixed, so a
+  compound Preview is captured once.
+  A parameter rule that returns `false` without adding an error now emits one named for that rule, so both direct
+  parameter validation and routed requests reject it; explicit rule errors retain their detail.
+- **Validation previews keep complete UTF-8 characters (Huly QB-545).** Truncating a valid multibyte value at
+  the preview byte limit no longer turns a JSON validation response into a 500.
+- **Sanitized Content-Type refreshes its typed view (Huly QB-547).** A changed raw header is reflected in
+  `Request::content_type()` before downstream validation and handlers read it.
+
+- **Out-of-range native unsigned token times are rejected by `auth::Manager` (Huly QB-983).** In the explicitly
+  signature-unchecked verification mode, an unsigned `nbf` above `INT64_MAX` could become negative when converted to
+  `int64_t` and pass the time check. The manager now checks the unsigned range before converting it; in-range signed,
+  unsigned, and string claims keep their existing behavior.
+
+- **WebSocket client connection hardening (Huly QB-513, QB-609, QB-517).** A client destroyed
+  during an in-flight transport connect no longer leaves a callback that can access it. A
+  nonzero connect timeout now covers the transport and the HTTP Upgrade as one deadline, with
+  one failure completion when the server withholds its response. A retry started from that
+  failure callback waits for the retired transport to finish closing and drops its buffered bytes.
+  Parsed handshake errors, established notifications and disconnect callbacks run after parser
+  dispatch, so they may release the client;
+  a request hook that cancels or replaces an attempt cannot send its retired Upgrade. A peer
+  close before the 101 reports a failed connect, and clients reject a 101 response that selects
+  an extension they did not offer. The qb-io integer and typed `disconnect(reason)` overloads
+  remain available through the WebSocket client.
+
+- **HTTP/3 `set_verify_peer(false)` takes effect in optimized AppleClang consumers (Huly QB-939).** In an
+  AppleClang 21 Release build of a large client translation unit, the inlined setter wrote eight bytes before
+  `_verify_peer`. The client still verified a self-signed certificate and failed the QUIC handshake with TLS
+  alert 48. The setter now lives in the module binary, preserving its API and object layout while writing the
+  intended field.
+- **JSON response serialization errors reach the router instead of terminating the process (Huly QB-489).**
+  The rvalue `Body` JSON assignment was `noexcept` despite strict UTF-8 validation in the serializer. It now
+  propagates the error like const JSON assignment, and both paths clear partial output before throwing. A
+  `Context::json` handler can therefore finish through the router's 500 path. Unit tests pin invalid and valid
+  UTF-8, the rvalue termination boundary, partial-body cleanup, and the routed error response.
+- **One-shot HTTP clients choose TLS for mixed-case HTTPS at an explicit port (Huly QB-505).** The shared
+  case-insensitive scheme comparison selects the secure transport. Other schemes fail locally with 400; HTTPS on
+  a build without SSL fails locally with 503. Neither rejection opens a connection. Loopback tests cover TLS and
+  plaintext servers, including the SSL-disabled build. The paired qb-io default-port lookup (QB-919) now also
+  handles portless mixed-case URLs.
 
 - **A large incompressible body survives compression, and a truncated one is refused (Huly QB-464).**
   `Body::compress` and `Body::uncompress` stopped as soon as their INPUT was consumed, not when the codec said the

@@ -108,7 +108,7 @@ qb::http::Body body{"chunk-", 1, "-of-", 3};   // "chunk-1-of-3"
 
 ### Assignment replaces the whole body
 
-`operator=` clears the existing bytes, then writes the new value. Specializations exist for each owning or serializable type; the move overloads additionally clear the source.
+`operator=` replaces the existing bytes. The string, vector and form move overloads also clear their sources; JSON rvalue assignment reads the DOM without consuming it. If JSON serialization rejects invalid UTF-8, const and rvalue assignment both throw and clear the partially written body.
 
 | Assigned type | Behavior | `noexcept`? |
 | --- | --- | --- |
@@ -119,7 +119,7 @@ qb::http::Body body{"chunk-", 1, "-of-", 3};   // "chunk-1-of-3"
 | `const char *` | copy, `nullptr` yields empty body | no |
 | `std::vector<char> const &` | copy bytes | no |
 | `std::vector<char> &&` | copy bytes, then `vec.clear()` | yes |
-| `qb::json` (copy or move) | serialize via `<<` (compact `dump()`) | move overload `noexcept` |
+| `qb::json` (const or rvalue) | serialize via `<<` (compact `dump()`); leave body empty on failure | no for both |
 | `Form` (copy) | serialize as `application/x-www-form-urlencoded` | no |
 | `Form &&` | serialize, then `form.clear()` | yes |
 | `Multipart const &` | serialize the full multipart wire form | no |
@@ -159,7 +159,7 @@ Prefer `try_as<T>()` when parsing client-supplied bodies: a malformed payload yi
 
 ### `as<std::string_view>()` and `as<std::string>()`
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:703-719 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:706-722 -->
 ```cpp
 std::string_view sv  = body.as<std::string_view>();   // zero-copy view of the pipe
 std::string      str = body.as<std::string>();         // owning copy
@@ -169,7 +169,7 @@ std::string      str = body.as<std::string>();         // owning copy
 
 ### `as<qb::json>()`
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:727-731 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:730-734 -->
 ```cpp
 qb::json doc = body.as<qb::json>();   // qb::json::parse over the pipe view
 ```
@@ -199,7 +199,7 @@ if (auto doc = req.body().try_as<qb::json>()) {
 
 Parses `application/x-www-form-urlencoded` bytes into a [`Form`](#the-form-container). Keys and values are URI-decoded (so `%40` becomes `@`); a `+` in form data decodes to a space, consistent with the encoding used on assignment. A pair with no `=` is stored with an empty value; empty keys are dropped. The parser does not throw on odd input — it does its best and returns what it found.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:846-885 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:849-888 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -215,7 +215,7 @@ form.get_first("flag").value_or("");    // ""          (key present, empty value
 
 Parses `multipart/form-data` into a [`Multipart`](#the-multipart-container). This overload extracts the boundary from the **first line of the body itself** (it expects the body to begin with `--<boundary>\r\n`), not from the `Content-Type` header. It throws `std::runtime_error` if no boundary is found, the boundary is empty, or the underlying state machine reports an error.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:746-782 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:749-785 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -348,7 +348,7 @@ namespace qb::http {
 
 A default-constructed `Multipart` generates a random boundary (OpenSSL-backed secure random when `QB_HAS_SSL` is set, a UUID fallback otherwise — so multipart works in plain-HTTP builds too). Build parts, then assign to a body:
 
-<!-- src: qbm/http/tests/unit/message/body-codec.cpp:16-24 -->
+<!-- src: qbm/http/tests/unit/message/body-codec.cpp:25-33 -->
 ```cpp
 #include <qbm/http/http.h>
 

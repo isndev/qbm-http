@@ -251,4 +251,86 @@ TEST_F(RequestParamsTest, NonePolicyDropsOffendingValueOnError) {
     EXPECT_EQ(out.error_value_policy(), Result::ErrorValuePolicy::None);
 }
 
+TEST_F(RequestParamsTest, BodyAndQueryErrorsUseConfiguredPolicyInEitherOrder) {
+    const std::string rejected(32, 'x');
+    const qb::json    schema = {{"type", "object"}, {"properties", {{"secret", {{"type", "string"}, {"maxLength", 2}}}}}};
+
+    for (const bool policy_first : {false, true}) {
+        for (const auto policy : {Result::ErrorValuePolicy::Full, Result::ErrorValuePolicy::Preview, Result::ErrorValuePolicy::None}) {
+            RequestValidator validator;
+            if (policy_first)
+                validator.set_error_value_policy(policy, 16);
+            validator.for_body(schema);
+            validator.for_query_param("token", ParameterRuleSet("token").add_rule(std::make_shared<MaxLengthRule>(2)));
+            if (!policy_first)
+                validator.set_error_value_policy(policy, 16);
+
+            qb::http::Request req;
+            req.uri()  = qb::io::uri("/submit?token=" + rejected);
+            req.body() = qb::json{{"secret", rejected}}.dump();
+
+            Result out;
+            EXPECT_FALSE(validator.validate(req, out));
+            ASSERT_EQ(out.errors().size(), 2u);
+            EXPECT_EQ(out.errors()[0].field_path, "secret");
+            EXPECT_EQ(out.errors()[1].field_path, "query.token");
+            for (const auto &error : out.errors()) {
+                if (policy == Result::ErrorValuePolicy::None) {
+                    EXPECT_FALSE(error.offending_value.has_value());
+                } else {
+                    ASSERT_TRUE(error.offending_value.has_value());
+                    const auto expected = policy == Result::ErrorValuePolicy::Preview ? rejected.substr(0, 16) : rejected;
+                    EXPECT_EQ(*error.offending_value, qb::json(expected));
+                }
+            }
+        }
+    }
+}
+
+TEST_F(RequestParamsTest, NestedAdditionalPropertyErrorKeepsSinglePreview) {
+    const qb::json schema = {{"type", "object"}, {"additionalProperties", {{"type", "string"}}}};
+    const qb::json body   = {{"dynamic", {{"secret", std::string(48, 'A')}}}};
+
+    for (const bool policy_first : {false, true}) {
+        RequestValidator validator;
+        if (policy_first)
+            validator.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+        validator.for_body(schema);
+        if (!policy_first)
+            validator.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+
+        qb::http::Request req;
+        req.uri()  = qb::io::uri("/submit");
+        req.body() = body.dump();
+
+        Result out;
+        EXPECT_FALSE(validator.validate(req, out));
+        ASSERT_EQ(out.errors().size(), 1u);
+        const auto &error = out.errors().front();
+        EXPECT_EQ(error.field_path, "dynamic");
+        EXPECT_EQ(error.rule_violated, "type");
+        EXPECT_EQ(error.message, "Invalid type. Expected string.");
+        ASSERT_TRUE(error.offending_value.has_value());
+        EXPECT_EQ(error.offending_value->at("_truncated"), true);
+        EXPECT_EQ(error.offending_value->at("original_kind"), "object");
+        EXPECT_EQ(error.offending_value->at("preview"), body.at("dynamic").dump().substr(0, 16));
+    }
+}
+
+TEST_F(RequestParamsTest, SilentCustomRuleRejectsRepeatedQueryValue) {
+    RequestValidator validator;
+    validator.for_query_param("token",
+                              ParameterRuleSet("token").add_rule(std::make_shared<CustomRule>(
+                                  [](const qb::json &value, const std::string &, Result &) { return value != "deny"; }, "tokenDenied")));
+
+    qb::http::Request req;
+    req.uri() = qb::io::uri("/submit?token=allow&token=deny&token=allow");
+    Result out;
+    EXPECT_FALSE(validator.validate(req, out));
+    ASSERT_EQ(out.errors().size(), 1u);
+    EXPECT_EQ(out.errors()[0].field_path, "query.token");
+    EXPECT_EQ(out.errors()[0].rule_violated, "tokenDenied");
+    EXPECT_EQ(out.errors()[0].offending_value, qb::json("deny"));
+}
+
 } // namespace

@@ -465,6 +465,76 @@ TEST_F(Http2ClientTest, BatchRequestsPreserveOrder) {
     client->disconnect();
 }
 
+TEST_F(Http2ClientTest, CompletedBatchCanDisconnectInsideItsCallback) {
+    auto                           client = make_test_client(); // owner survives the callback
+    std::vector<qb::http::Request> requests;
+    requests.emplace_back(qb::http::method::GET, qb::io::uri("/api/users/301"));
+    requests.emplace_back(qb::http::method::GET, qb::io::uri("/api/users/302"));
+
+    int                             calls = 0;
+    std::vector<qb::http::Response> responses;
+    ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> result) {
+        ++calls;
+        responses = std::move(result);
+        client->disconnect();
+    }));
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return calls == 1; }));
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(responses.size(), 2u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::OK);
+    EXPECT_EQ(responses[1].status(), qb::http::status::OK);
+    EXPECT_EQ(responses[0].body().as<std::string>(), "User ID: 301 (via HTTP/2)");
+    EXPECT_EQ(responses[1].body().as<std::string>(), "User ID: 302 (via HTTP/2)");
+    EXPECT_FALSE(client->is_connected());
+}
+
+TEST_F(Http2ClientTest, CompletedBatchCallbackCanQueueAnotherBatch) {
+    auto                            client      = make_test_client();
+    int                             first_calls = 0, second_calls = 0;
+    std::vector<qb::http::Response> first_responses, second_responses;
+    std::vector<qb::http::Request>  first;
+    first.emplace_back(qb::http::method::GET, qb::io::uri("/api/users/401"));
+
+    ASSERT_TRUE(client->push_requests(std::move(first), [&](std::vector<qb::http::Response> result) {
+        ++first_calls;
+        first_responses = std::move(result);
+        std::vector<qb::http::Request> next;
+        next.emplace_back(qb::http::method::GET, qb::io::uri("/api/users/402"));
+        EXPECT_TRUE(client->push_requests(std::move(next), [&](std::vector<qb::http::Response> followup) {
+            ++second_calls;
+            second_responses = std::move(followup);
+        }));
+    }));
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return second_calls == 1; }));
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(second_calls, 1);
+    ASSERT_EQ(first_responses.size(), 1u);
+    ASSERT_EQ(second_responses.size(), 1u);
+    EXPECT_EQ(first_responses[0].body().as<std::string>(), "User ID: 401 (via HTTP/2)");
+    EXPECT_EQ(second_responses[0].body().as<std::string>(), "User ID: 402 (via HTTP/2)");
+    client->disconnect();
+}
+
+TEST_F(Http2ClientTest, ResponseCallbackMayReleaseLastClientOwner) {
+    auto                             client                 = make_test_client();
+    std::weak_ptr<qb::http2::Client> weak_client            = client;
+    int                              calls                  = 0;
+    bool                             alive_after_owner_drop = false;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/users/403")}, [&](qb::http::Response response) {
+        ++calls;
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        client.reset();
+        alive_after_owner_drop = !weak_client.expired();
+    }));
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return calls == 1; }));
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(alive_after_owner_drop) << "the response stack must keep the client alive through callback return";
+    EXPECT_TRUE(weak_client.expired()) << "the event stack must release its temporary owner afterward";
+}
+
 // ---------------------------------------------------------------------------
 // Stream reset mapping (server RST_STREAM -> client BAD_GATEWAY)
 // ---------------------------------------------------------------------------
@@ -985,6 +1055,68 @@ TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
         EXPECT_EQ(responses[i].body().template as<std::string>(), "User ID: " + std::to_string(300 + i) + " (via HTTP/2)");
     }
     client->disconnect();
+}
+
+TEST_F(Http2ClientTest, FailedSendCallbackMayDisconnectAndQueueAnotherRequest) {
+    auto client = make_test_client();
+    client->set_max_concurrent_streams(60); // above the server's advertised 50
+    int warmup_calls = 0;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/users/400")}, [&](qb::http::Response response) {
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        ++warmup_calls;
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return warmup_calls == 1; }));
+    int                failed_send_calls = 0, followup_calls = 0;
+    qb::http::Response followup_response;
+
+    for (int i = 0; i < 51; ++i) {
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/hang")}, [&](qb::http::Response response) {
+            if (response.body().as<std::string>() != "Failed to send HTTP/2 request") {
+                return;
+            }
+            ++failed_send_calls;
+            client->disconnect();
+            EXPECT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/users/404")}, [&](qb::http::Response next) {
+                ++followup_calls;
+                followup_response = std::move(next);
+            }));
+        }));
+    }
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed_send_calls == 1 && followup_calls == 1; }))
+        << "failed_send_calls=" << failed_send_calls << " followup_calls=" << followup_calls;
+    EXPECT_EQ(failed_send_calls, 1);
+    EXPECT_EQ(followup_calls, 1);
+    EXPECT_EQ(followup_response.status(), qb::http::status::OK);
+    EXPECT_EQ(followup_response.body().as<std::string>(), "User ID: 404 (via HTTP/2)");
+    client->disconnect();
+}
+
+TEST_F(Http2ClientTest, FailedSendCallbackMayReleaseLastClientOwner) {
+    auto client = make_test_client();
+    client->set_max_concurrent_streams(60);
+    std::weak_ptr<qb::http2::Client> weak_client  = client;
+    int                              warmup_calls = 0;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/users/400")}, [&](qb::http::Response response) {
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        ++warmup_calls;
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return warmup_calls == 1; }));
+
+    int  failed_send_calls     = 0;
+    bool alive_inside_callback = false;
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/hang")}, [](qb::http::Response) {}));
+    }
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/hang")}, [&](qb::http::Response response) {
+        EXPECT_EQ(response.body().as<std::string>(), "Failed to send HTTP/2 request");
+        ++failed_send_calls;
+        client.reset();
+        alive_inside_callback = !weak_client.expired();
+    }));
+    EXPECT_EQ(failed_send_calls, 1);
+    EXPECT_TRUE(alive_inside_callback);
+    EXPECT_TRUE(weak_client.expired());
 }
 
 // ---------------------------------------------------------------------------

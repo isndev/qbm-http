@@ -577,12 +577,12 @@ Body::uncompress(const std::string &encoding) {
 #endif
 
 /**
- * @brief Assign a string to the body by moving
- * @param str String to move into the body
+ * @brief Assign a string to the body from an rvalue
+ * @param str String to read and clear
  * @return Reference to this body
  *
- * Move assignment operator for std::string.
- * This specialization is optimized to clear the source string after moving.
+ * Copies bytes into the pipe, then clears the source string.
+ * This does not transfer the string's allocation into the pipe.
  */
 template <>
 Body &Body::operator= <std::string>(std::string &&str) noexcept {
@@ -675,7 +675,12 @@ Body &Body::operator= <Multipart>(Multipart const &mp) {
 template <>
 Body &Body::operator= <qb::json>(qb::json const &json) {
     _data.clear();
-    _data << json;
+    try {
+        _data << json;
+    } catch (...) {
+        _data.clear(); // never expose the prefix written before serialization failed
+        throw;
+    }
     return *this;
 }
 
@@ -687,10 +692,8 @@ Body &Body::operator= <qb::json>(qb::json const &json) {
  * Copy assignment operator for qb::json.
  */
 template <>
-Body &Body::operator= <qb::json>(qb::json &&json) noexcept {
-    _data.clear();
-    _data << json;
-    return *this;
+Body &Body::operator= <qb::json>(qb::json &&json) {
+    return operator= <qb::json>(static_cast<const qb::json &>(json));
 }
 
 /**

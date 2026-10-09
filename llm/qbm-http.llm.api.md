@@ -75,6 +75,7 @@ Parses Content-Type into MIME type + charset; defaults to `application/octet-str
 
 ### `qb::http::Body` — `body.h:57`
 `class Body { template<typename...A> Body(A&&...); template<typename...A> Body& operator<<(A&&...); template<typename T> Body& operator=(...); template<typename T> T as() const; template<typename T> [[nodiscard]] std::optional<T> try_as() const noexcept; Body& add_chunk(const Chunk&); Body& add_final_chunk(); pipe<char>& raw(); std::size_t size() const; bool empty() const; void clear() noexcept; }`
+`Body::operator=(qb::json&&)` and the const JSON assignment can throw on invalid UTF-8 (`body.h:439-443`); both clear partial output before propagation (`body.cpp:675-697`).
 Backed by `qb::allocator::pipe<char>`. Append/assign constrained by `is_body_appendable` (string-like, Chunk/Multipart/Form/`qb::json`, arithmetic). The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460-473`. Conversions defined in `body.cpp`.
 **Prefer `try_as<T>()` for client-supplied bodies** (`body.h:404`): it returns `std::optional<T>` and is `noexcept`, so a malformed JSON/multipart payload yields `std::nullopt` (→ reply 400) instead of an exception you must catch at the call site. `as<T>()` throws on malformed input; the string conversions never fail.
 Usage: `req.body() = "payload"; if (auto j = resp.body().try_as<qb::json>()) { /* use *j */ }`
@@ -311,8 +312,8 @@ Usage: `router.use(qb::http::timing_middleware<S>([](auto ms){ LOG(ms.count()); 
 
 ### `qb::http::StaticFilesMiddleware<S>` — `static_files.h:281`
 `explicit StaticFilesMiddleware(StaticFilesOptions options, std::string name="StaticFilesMiddleware");`
-Serves GET/HEAD; path-traversal hardened (canonicalised, symlink-escape rejected); supports ETag/If-None-Match, Last-Modified/If-Modified-Since, `Range`/`206`/`416`, optional directory listing. **Ctor anchors a relative `root_directory` via `qb::io::sys::resolve_resource` (cwd then exe dir), then requires it to exist and canonicalise.** Throws `std::invalid_argument` if root empty, `std::runtime_error` if root (after resolution) missing/not a directory or not canonicalisable.
-Factory (`static_files.h:757`): `static_files_middleware<S>(options, name="StaticFilesMiddleware")`.
+Serves GET/HEAD; path-traversal hardened (canonicalised, symlink-escape rejected), including configured directory index files; supports ETag/If-None-Match, Last-Modified/If-Modified-Since (`If-None-Match` takes precedence when present), `Range`/`206`/`416`, optional directory listing. **Ctor anchors a relative `root_directory` via `qb::io::sys::resolve_resource` (cwd then exe dir), then requires it to exist and canonicalise.** Throws `std::invalid_argument` if root empty, `std::runtime_error` if root (after resolution) missing/not a directory or not canonicalisable.
+Factory (`static_files.h:807`): `static_files_middleware<S>(options, name="StaticFilesMiddleware")`.
 Usage: `router.use(qb::http::static_files_middleware<S>(qb::http::StaticFilesOptions{"public"}.with_path_prefix_to_strip("/static")));  // "public" found relative to cwd or the executable's dir`
 
 ## Security headers — `src/qbm/http/middleware/security_headers.h`
@@ -405,6 +406,7 @@ Usage: `qb::http::auth::Manager m{o}; auto tok = m.generate_token(user); auto u 
 ### `qb::http::validation::Result` — `src/qbm/http/validation/error.h:59`
 `class Result { enum class ErrorValuePolicy{Full,Preview,None}; Result& set_error_value_policy(ErrorValuePolicy, std::size_t preview_bytes=256) noexcept; bool success() const; const std::vector<Error>& errors() const; void add_error(path,rule,msg,value=std::nullopt); void add_error(Error); void clear(); void merge(const Result&); Result make_child() const; }`
 `success() == errors().empty()`; `preview_bytes` clamped to `[16, 64*1024]`.
+`Preview` keeps the longest complete UTF-8 prefix within the byte budget for strings and serialized compound values.
 
 ### Rules — `src/qbm/http/validation/rule.h`
 - `enum class DataType{STRING,INTEGER,NUMBER,BOOLEAN,OBJECT,ARRAY,NUL,ANY}` (`rule.h:31`).
@@ -419,6 +421,7 @@ Usage: `qb::http::validation::SchemaValidator v{schema}; qb::http::validation::R
 ### Parameters — `src/qbm/http/validation/parameter_validator.h`
 - `struct ParameterRuleSet { std::string name; DataType expected_type=STRING; bool required=false; std::optional<std::string> default_value; std::vector<std::shared_ptr<IRule>> rules; std::function<qb::json(const std::string&,bool&)> custom_parser; }` + fluent `set_type/set_required/set_default/add_rule/set_custom_parser` (`parameter_validator.h:35`).
 - `class ParameterValidator { explicit ParameterValidator(bool strict_mode=false); void add_param(ParameterRuleSet); bool validate(const qb::icase_unordered_map<std::string>& params, Result&, const std::string& source_name) const; qb::json validate_single(name, const std::optional<std::string>& value, const ParameterRuleSet&, Result&, source_name) const; const qb::icase_unordered_map<ParameterRuleSet>& get_param_definitions() const; void set_strict_mode(bool); bool is_strict_mode() const; }` (`parameter_validator.h:115`).
+  A rule returning `false` without adding an error produces a generic error named by `rule_name()`; an explicit rule error is not duplicated.
 
 ### Sanitizers — `src/qbm/http/validation/sanitizer.h`
 - `using SanitizerFunction=std::function<std::string(const std::string&)>` (`sanitizer.h:26`).
@@ -428,6 +431,7 @@ Usage: `qb::http::validation::SchemaValidator v{schema}; qb::http::validation::R
 ### `qb::http::validation::RequestValidator` — `src/qbm/http/validation/request_validator.h:34`
 `class RequestValidator { RequestValidator& for_body(const qb::json& schema); for_query_param(name, ParameterRuleSet); for_header(name, ParameterRuleSet); for_path_param(name, ParameterRuleSet) /*strict*/; add_body_sanitizer(field_path, SanitizerFunction); add_query_param_sanitizer(name, SanitizerFunction); add_header_sanitizer(name, SanitizerFunction); bool validate(qb::http::Request&, Result&, const qb::http::PathParameters* =nullptr); RequestValidator& set_error_value_policy(Result::ErrorValuePolicy, preview_bytes=256) noexcept; }`
 Composes body-schema + query/header/path validators + sanitizers. `validate()` mutates the request (sanitizers run first), merges errors, returns true if fully valid. `for_body` may throw if schema not an object.
+The configured error-value policy reaches the body schema in either setter/`for_body` order. A header sanitizer that changes `Content-Type` refreshes the typed `request.content_type()` cache before validation continues.
 Usage: `auto rv = std::make_shared<qb::http::validation::RequestValidator>(); rv->for_body(schema);`
 
 ---
@@ -500,6 +504,8 @@ Usage: `auto s = qb::http2::make_server(); s->router().get("/", h); s->router().
 - `void disconnect(); bool is_connected()/is_connecting() const noexcept` (connected = TCP + h2 handshake).
 - `bool push_request(Request, ResponseCallback)` / `[[nodiscard]] async::awaiter<Response> push_request(Request)` (lazy connect). Past the pending cap both **reject with `503 Service Unavailable`** (DoS guard, matches http1/http3).
 - `bool push_requests(std::vector<Request>, BatchResponseCallback)` / `[[nodiscard]] async::awaiter<std::vector<Response>> push_requests(std::vector<Request>)` (separate streams, request order).
+- A completed batch leaves the client's batch registry before its callback runs; that callback may call `disconnect()` or enqueue another batch (`src/qbm/http/2/client.cpp:358-370`).
+- While sending queued requests, the client retains itself and rechecks its connection and h2 protocol before each send. A failed-send callback may disconnect or enqueue new work without sending the next request on a retired connection (`src/qbm/http/2/client.cpp:448-485`).
 - `void set_connect_timeout(qb::duration)` (default 30s); `set_request_timeout(qb::duration)` (default 60s); `void set_max_concurrent_streams(size_t)` (default 100); `void set_max_pending_requests(size_t) noexcept` (default 1024; bound on outstanding pending+active requests, 503 over-limit); `set_auto_reconnect(bool)` (default true; keeps the policy); `void set_verify_peer(bool) noexcept` (default true) + `bool verify_peer() const noexcept`.
 - Reconnection run (`src/qbm/http/2/client.h:457-482`): `void enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept` / `void disable_auto_reconnect() noexcept` (the redis names; a scheduled attempt still fires); `[[nodiscard]] bool is_reconnecting() const noexcept` (an attempt scheduled or in flight); `[[nodiscard]] int reconnect_attempts() const noexcept` (attempts in the current run: reset by a connection that comes up, an explicit `connect()`, an explicit `disconnect()` — which starts no run, as on http1: a push after it connects on its own). `qb::http2::RetryPolicy` is `qb::http::RetryPolicy` (`src/qbm/http/2/client.h:93`). Attempt 1 immediate, then the policy's waits; exhausted -> the waiting requests get `503` with body `Reconnection attempts exhausted (N)` and the client stays down until the next `connect()` (explicit, or a later push's auto-connect). Every attempt fires from the client's timer, never from inside the failing handler; a push made from a failure callback queues behind the scheduled attempt.
 - `std::tuple<uint64_t,uint64_t,uint64_t> get_stats() const noexcept`; `get_active_request_count()`; `get_base_uri()`.
@@ -550,15 +556,22 @@ Fluent setters (each returns `RetryPolicy&`): `with_max_attempts(int)`, `with_in
 
 # Namespace `qb::http3` — HTTP/3 / QUIC (`3/`) · **needs `QBM_HTTP_HAS_HTTP3`**
 
-### `qb::http3::Client` (alias `client`) — `src/qbm/http/3/client.h:108`
+### `qb::http3::Client` (alias `client`) — `src/qbm/http/3/client.h:110`
 `class Client : public std::enable_shared_from_this<Client>, public qb::io::async::quic::endpoint` — persistent same-origin client; **heap-owned via `shared_ptr`**.
 - `explicit Client(const std::string& base_uri); explicit Client(const qb::io::uri&);` — throws `std::invalid_argument` unless scheme is https.
 - `bool connect(ConnectionCallback)` (ALPN `{"h3"}`) / `[[nodiscard]] async::awaiter<ConnectResult> connect();`
 - `void disconnect(); [[nodiscard]] bool is_connected() const noexcept` (QUIC + h3 ready).
+- From a callback inside a native HTTP/3 read, `disconnect()` marks the client logically down at once. Protocol teardown, QUIC close and failure of still-active requests wait until the read returns; GOAWAY may continue invoking other pending-request callbacks meanwhile. A reentrant `connect(callback)` fails without starting a handshake, new requests get an immediate `503`, and explicit disconnect does not auto-reconnect (`src/qbm/http/3/client.cpp:76-85,119-171,227-235,291-302,728-736,792-830`).
+- During ordinary `disconnect()`, the client publishes the closed state before failure callbacks run and rejects their reentrant connect or request attempts until close finishes (`src/qbm/http/3/client.cpp:119-171`). Event callbacks retain the client through endpoint dispatch even if user code releases its last external `shared_ptr` (`src/qbm/http/3/client.cpp:20-36,752-766,792-796,833-851`).
+- Failure to start the QUIC connection, a connect timeout or a remote close retires the old transport before failure callbacks can start another attempt. Old requests are failed before connection callbacks can queue new work; the qb-io endpoint refreshes its internally owned native backend on retry (`src/qbm/http/3/client.cpp:93-115,479-521,602-619,762-789`; `qb/src/qb/io/async/quic/endpoint.h:84-119,425-454`).
+- The connect timer captures its attempt's epoch and does nothing after a later attempt begins. Explicit `disconnect()` of an in-progress attempt reports failure to that attempt's connection callbacks once; their cancelled timer cannot fail the next attempt (`src/qbm/http/3/client.cpp:101-114,119-171,449-506,602-619`).
+- The pending-request drain retains the client and rechecks connection, protocol and shutdown state before each submission, including after a failed submit invokes user code (`src/qbm/http/3/client.cpp:365-446`).
+- If the transport closes synchronously during request submission, the request already removed from the pending queue receives a synthesized `503` instead of being installed in the active registry of the closed connection, even if an old failure callback throws; its saved exception propagates afterward. Connect success/failure notify their other callbacks before propagating a callback exception; explicit disconnect also completes transport cleanup (`src/qbm/http/3/client.cpp:119-171,365-446,449-506,524-574`).
 - `bool push_request(Request, ResponseCallback)` (auto-connects; false if callback null) / `[[nodiscard]] async::awaiter<Response> push_request(Request)`.
-- `[[nodiscard]] request_id push_request_with_id(Request, ResponseCallback)` (`request_id=std::uint64_t`; 0 on immediate failure); `bool cancel_request(request_id id, const std::string& reason="HTTP/3 request cancelled")` (resets active stream with H3 error 0x010c = `NGHTTP3_H3_REQUEST_CANCELLED`; false if id unknown).
+- `[[nodiscard]] request_id push_request_with_id(Request, ResponseCallback)` (`request_id=std::uint64_t`; 0 on immediate failure); `bool cancel_request(request_id id, const std::string& reason="HTTP/3 request cancelled")` (resets active stream with H3 error 0x010c = `NGHTTP3_H3_REQUEST_CANCELLED`; false if id unknown). Active cancellation retains the client through its callback and stream reset even if the callback releases the last external owner (`src/qbm/http/3/client.cpp:267-278`).
 - `bool push_requests(std::vector<Request>, BatchResponseCallback)` / `[[nodiscard]] async::awaiter<std::vector<Response>> push_requests(std::vector<Request>)` (index-aligned; empty input → `callback({})`).
 - `void set_max_concurrent_streams(std::size_t) noexcept` (default 100); `void set_max_body_size(std::size_t) noexcept` (default 64 MiB, exceed resets stream); `void set_connect_timeout(qb::duration) noexcept` (default 30s, ≤0 disables); `void set_request_timeout(qb::duration) noexcept` (default 60s, ≤0 disables); `void set_auto_reconnect(bool) noexcept` (default true); `void set_verify_peer(bool) noexcept` (default true).
+- The QUIC peer's `max_streams_bidi` is a concurrent stream quota, not a lifetime request count. Qb returns a slot on close for a client-initiated request stream delivered through `stream_open_cb`; ngtcp2 renews implicitly opened streams itself. Sequential requests can reuse one HTTP/3 connection beyond the initial quota (`qb/src/qb/io/quic.cpp:1015,1456-1483`; `qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343`).
 - `std::tuple<uint64_t,uint64_t,uint64_t> get_stats() const noexcept`; `get_active_request_count()`; `get_stream_state_count()` (streams the connection keeps state for; does not grow with the requests made); `max_http3_body_size()`; `get_base_uri()`.
 - `struct ConnectResult { bool ok{false}; std::string error_message; explicit operator bool() const noexcept; }`; aliases `ResponseCallback/BatchResponseCallback/ConnectionCallback/request_id`.
 - `std::shared_ptr<Client> qb::http3::make_client(const std::string&);` / `make_client(const qb::io::uri&);`
@@ -609,8 +622,10 @@ Usage: `auto s = qb::http::make_dual_stack_server(); s->router().get("/", h); s-
 ### CRTP client — `src/qbm/http/ws/ws.h`
 `template<typename T, typename Transport=qb::io::transport::tcp> class WebSocket : public qb::io::async::tcp::client<WebSocket<T,Transport>,Transport>, public qb::io::use<WebSocket<T,Transport>>::timeout`
 Drives TCP connect + HTTP upgrade + protocol switch; forwards `ping/pong/message/closed/disconnected/error/connected` events to parent `T::on(...)` if present.
-- `void set_ping_interval(qb::duration interval=qb::duration::zero())` — auto-ping keepalive; **zero/negative disables**.
-- `void connect(const qb::io::uri& remote, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` — connect to `ws://`/`wss://`, install protocol, send upgrade.
+- `void set_ping_interval(qb::duration interval=qb::duration::zero())` — auto-ping keepalive after a verified upgrade; **zero/negative disables**.
+- `void connect(const qb::io::uri& remote, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` — connect to `ws://`/`wss://`, install protocol, send upgrade. A positive timeout is one deadline across transport and Upgrade; zero disables it. An active transport is retired before reconnect, and its input/output buffers are cleared before the next handshake. A retry from a failure callback starts after the old transport's disconnect dispatch. The client rejects an unoffered `Sec-WebSocket-Extensions` response before `connected`.
+- `void disconnect(int reason=1)` / `void disconnect(qb::io::async::event::disconnect_reason reason)` — cancel an unfinished connection and its deadline, then close the transport while forwarding the reason to qb-io's `disconnected` event. The zero-argument call remains valid through the default. An in-flight connector callback is inert after cancellation or client destruction; stack and `unique_ptr` clients are supported.
+- `connected`, parsed-handshake/protocol `error`, and `disconnected` user callbacks are delivered after parser/I/O dispatch and may release the client. A transport connect failure or explicit pending `disconnect()` may report `error` synchronously. A pre-101 transport close reports `error` once. The `sending_http_request` hook remains synchronous; after it returns, a cancelled, replaced, or destroyed attempt sends no Upgrade request. Frames pipelined with the 101 are delivered after `connected`, in wire order.
 - `void close(CloseStatus=Normal, std::string_view reason="closed normally")` — queue a Close frame (no TCP teardown); throws `std::invalid_argument` on reserved code; call `disconnect()` after for immediate teardown.
 - `void set_subprotocols(std::vector<std::string>)` / `void add_subprotocol(std::string)` — offer list; each must be a valid RFC 7230 token (else `std::invalid_argument`); before connect.
 - `std::string_view negotiated_subprotocol() const noexcept` — selected subprotocol (valid after `connected`).
@@ -640,7 +655,7 @@ Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([]{..
   - `void set_pending_cap(std::size_t) noexcept` (default 1024).
 Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect(qb::io::uri{"ws://h/p"}); auto f = co_await ws.receive();`
 
-### WS pipe serialization — `src/qbm/http/ws/ws.h:1717`
+### WS pipe serialization — `src/qbm/http/ws/ws.h:1994`
 `template<> pipe<char>& pipe<char>::put<Message>(const Message&);` (and `MessagePing/MessagePong/MessageText/MessageBinary/MessageClose/WebSocketRequest`) — frame onto the outbound pipe (masks when `msg.masked`); invoked indirectly via `operator<<`.
 
 ---

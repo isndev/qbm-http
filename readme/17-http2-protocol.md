@@ -16,7 +16,7 @@ HTTP/2 is a binary, multiplexed protocol: many concurrent request/response excha
 ### ALPN selects the protocol
 
 There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,544; qbm/http/src/qbm/http/2/client.cpp:417,437,891-910 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,544; qbm/http/src/qbm/http/2/client.cpp:420,440,898-917 -->
 
 ### Streams and multiplexing
 
@@ -85,7 +85,7 @@ A sender must not emit DATA that would exceed *either* window. The protocol laye
 
 - **`RST_STREAM`** abruptly terminates a single stream with an error code, moving it straight to `CLOSED`. The server sends it for refused, malformed, oversized, or idle streams; your handler can trigger one through `session::reset_stream(...)`.
 - **`GOAWAY`** announces connection shutdown and the last peer-initiated stream the sender will process, enabling a graceful drain. On a `NO_ERROR` GOAWAY the server keeps the connection until all in-range client-initiated streams close; a non-`NO_ERROR` GOAWAY deactivates immediately. The client fails any streams beyond `last_stream_id` and finishes its drain once active requests complete.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-779,795-894,884-893; qbm/http/src/qbm/http/2/http2.h:166; qbm/http/src/qbm/http/2/client.cpp:608-628,630-658,925-938 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-779,795-894,884-893; qbm/http/src/qbm/http/2/http2.h:166; qbm/http/src/qbm/http/2/client.cpp:615-635,637-665,932-945 -->
 
 ## Running an HTTP/2 server
 
@@ -276,6 +276,12 @@ client->push_request(std::move(req), [](qb::http::Response res) {
 
 `push_request` triggers an implicit connect when needed, so you do not have to call `connect()` first; queued requests flush once the handshake completes. To run several requests as one batch with a single callback that fires when all responses are in (order preserved), use `push_requests(std::vector<Request>, BatchResponseCallback)` — each request travels on its own stream concurrently.
 <!-- src: qbm/http/src/qbm/http/2/client.h:330,353; qbm/http/tests/system/http2/http2-client-coro.cpp:264-285 -->
+
+The completed batch is retired before its callback runs. The callback may disconnect the client or enqueue another batch; it still receives the completed responses exactly once.
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:358-370; qbm/http/tests/system/http2/http2-client.cpp:468-519 -->
+
+If sending a queued request fails, its callback runs before the client tries the next pending request. That callback may disconnect or queue different work. The client retains itself during this drain and checks that the connection and HTTP/2 protocol are still live at each iteration; it does not send the next item through the retired protocol.
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:448-485 -->
 
 ### Bounding outstanding work
 

@@ -20,7 +20,7 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 
 The one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the original request with the server response so you can correlate the two — useful for tracing or request IDs.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:690-693 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:691-694 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
@@ -99,9 +99,9 @@ To send a *compressed* request body, compress it yourself and set `Content-Encod
 
 ## One-shot callback client (HTTP/1.1)
 
-The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`; it runs on the I/O thread when the response arrives or the request fails.
+The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`. Network responses and failures invoke it on the I/O thread; a locally rejected scheme or missing SSL capability invokes it on the calling thread before the helper returns.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:907-912 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:785-800,870-885,920-925 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -137,7 +137,7 @@ int main() {
 }
 ```
 
-Each one-shot session is heap-allocated with `new`, performs exactly one request/response, and `delete`s itself on completion or disposal — never stack-allocate or manually delete it. On failure the callback still fires exactly once, with a synthesized error response: `SERVICE_UNAVAILABLE` (503) when the connection cannot be opened, `GATEWAY_TIMEOUT` (504) on timeout, and `BAD_GATEWAY` (502) when the peer disconnects unexpectedly.
+Each supported one-shot request creates a heap-allocated session for one request/response and deletes it on completion or disposal — never stack-allocate or manually delete it. The transport selector compares URI schemes case-insensitively; qb-io also resolves default ports for portless mixed-case HTTP(S) URLs. An unsupported scheme is rejected locally with `BAD_REQUEST` (400); HTTPS when SSL is unavailable is rejected locally with `SERVICE_UNAVAILABLE` (503), without creating a session or opening a socket. Those local rejections can invoke a callback before the helper returns; the coroutine overload schedules its continuation normally. Other failures yield 503 when the connection cannot be opened, `GATEWAY_TIMEOUT` (504) on timeout, and `BAD_GATEWAY` (502) when the peer disconnects unexpectedly. The callback fires exactly once for each verdict.
 
 For `REQUEST`, set `request.method()` yourself; the verb-named functions set it for you.
 
@@ -145,7 +145,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1041-1046 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1056-1061 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -198,7 +198,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1041-1046 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1056-1061 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
@@ -377,7 +377,7 @@ For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol spec
 
 HTTP/3 runs over QUIC. The entire `qb::http3` slice is compile-time gated behind `QBM_HTTP_HAS_HTTP3` — including its header — so guard any HTTP/3 code with that macro. Only ALPN `h3` is accepted, the base URI must be `https`, and (as with HTTP/2) requests must be same-origin.
 
-<!-- src: qbm/http/src/qbm/http/3/client.h:105-150,206 -->
+<!-- src: qbm/http/src/qbm/http/3/client.h:107-156,212 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 namespace qb::http3 {
@@ -410,7 +410,7 @@ namespace qb::http3 {
 
 The callback form, run-to-completion driven by the event loop:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:178-197 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:181-200 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 auto client = qb::http3::make_client("https://127.0.0.1:31943");
@@ -427,7 +427,7 @@ client->disconnect();
 
 And the coroutine form with lazy connect:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:282-293 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:285-296 -->
 ```cpp
 auto client = qb::http3::make_client("https://127.0.0.1:31992");
 client->set_verify_peer(false);  // self-signed local endpoint; default is true

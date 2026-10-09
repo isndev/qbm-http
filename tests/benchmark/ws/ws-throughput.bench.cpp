@@ -17,6 +17,8 @@
  *     the unmasking XOR, the reassembly-buffer append, and the auto-Pong on a Ping.
  *   - ECHO: encode a masked client frame, decode it server-side, re-encode the
  *     server's reply — one full message round-trip per iteration.
+ *   - CLIENT FORWARD: deliver a prebuilt message event through the established
+ *     CRTP client callback, without a socket or parser setup in the timed loop.
  *
  * The frame shapes (text/binary sizes 16B..64KiB, plus a Ping control frame) and
  * the masked client→server framing mirror the dropped `ws-stress` throughput
@@ -52,6 +54,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -404,6 +407,46 @@ BM_WS_EchoRoundTrip(benchmark::State &state) {
     state.SetItemsProcessed(state.iterations());
 }
 
+// Exercise the client-side CRTP forwarder itself. A connected WebSocket's
+// message event is already parsed; construction, event storage, and the
+// correctness probe stay outside the measured loop.
+struct WsForwardClient : qb::http::ws::WebSocket<WsForwardClient> {
+    using base         = qb::http::ws::WebSocket<WsForwardClient>;
+    using message      = typename base::message;
+    using disconnected = typename base::disconnected;
+
+    std::size_t forwarded_bytes = 0;
+
+    void
+    on(message &&event) {
+        forwarded_bytes += event.size;
+    }
+    void
+    on(disconnected &&) {}
+};
+
+void
+BM_WS_ClientMessageForward(benchmark::State &state) {
+    qb::io::async::init();
+    WsForwardClient           client;
+    qb::http::ws::MessageText payload;
+    payload << "forward";
+    auto event = WsForwardClient::message{payload.size(), payload.data().cbegin(), payload};
+
+    static_cast<WsForwardClient::base &>(client).on(std::move(event));
+    if (client.forwarded_bytes != payload.size()) {
+        state.SkipWithError("client message forwarding did not reach the callback");
+        return;
+    }
+    client.forwarded_bytes = 0;
+
+    for (auto _ : state) {
+        static_cast<WsForwardClient::base &>(client).on(std::move(event));
+        benchmark::DoNotOptimize(client.forwarded_bytes);
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+
 } // namespace
 
 BENCHMARK(BM_WS_EncodeMaskedText)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
@@ -415,5 +458,7 @@ BENCHMARK(BM_WS_DecodeMaskedText)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 10
 BENCHMARK(BM_WS_DecodePingAutoPong)->Arg(0)->Arg(32)->Arg(125)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK(BM_WS_EchoRoundTrip)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
+
+BENCHMARK(BM_WS_ClientMessageForward)->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();

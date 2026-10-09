@@ -62,7 +62,7 @@ if (!result.success()) {
 `ErrorValuePolicy` has three values:
 
 - `Full` (default) — deep-copy the offending value verbatim.
-- `Preview` — serialize and truncate to `preview_bytes` (clamped to the range 16 B – 64 KiB). Cheap scalars pass through untouched; strings are cut to the budget; compound values become a `{"_truncated": true, "preview": ..., "original_kind": ...}` marker.
+- `Preview` — serialize and truncate to `preview_bytes` (clamped to the range 16 B – 64 KiB). Cheap scalars pass through untouched; strings are cut at the last complete UTF-8 code point within the byte budget; compound values become a `{"_truncated": true, "preview": ..., "original_kind": ...}` marker whose preview uses the same boundary. A valid UTF-8 input therefore stays JSON-serializable even when the budget falls inside a multibyte character.
 - `None` — omit the value; `field_path` is the only locator that remains.
 
 Use `Preview` or `None` in production where error bodies and logs forward to systems with payload budgets, or where the offending value may contain data you do not want echoed back.
@@ -70,6 +70,8 @@ Use `Preview` or `None` in production where error bodies and logs forward to sys
 Two structural helpers matter when composing validators: `Result::make_child()` returns an empty `Result` that *inherits this result's policy* (used for sub-validations), and `Result::merge(other)` appends another result's already-shaped errors. The whole pipeline is built on these two.
 
 > **Policy is set at the top, not on the leaf.** The `offending_value` shaping runs only on the `add_error(field, rule, message, value)` overload. The `add_error(Error)` overload and `merge()` copy the payload verbatim — deliberately, so a caller can opt out for a synthetic error. Both `SchemaValidator::validate` and `RequestValidator::validate` call `set_error_value_policy` on the supplied `Result` *at entry*, so any policy you set on a `Result` before calling them is overwritten. Configure the policy on the validator (`RequestValidator::set_error_value_policy`, `SchemaValidator::set_error_value_policy`) rather than on the `Result` you pass in.
+
+`RequestValidator` also applies its configured policy to its body `SchemaValidator`, whether you call `set_error_value_policy` before or after `for_body`. Configure the validator before sharing it across request threads; `validate()` does not change this configuration.
 
 ## Rules
 
@@ -122,6 +124,8 @@ auto even_only = std::make_shared<CustomRule>(
     },
     "evenOnly");
 ```
+
+If a parameter rule returns `false` without adding an error, `ParameterValidator` records one using the rule's `rule_name()` and a generic message. An error supplied by the rule is kept as-is, without a duplicate generic error.
 
 > **Most primitive rules are type-gated and pass silently for the wrong kind.** Numeric rules pass for non-numbers, item/array rules pass for non-arrays, property-count rules pass for non-objects, and `PatternRule` passes for non-strings. Absence of an error therefore does **not** mean the constraint was checked — it may mean the value was the wrong kind. Always pair a constraint with a `type` keyword (in a schema) or `set_type(...)` (in a parameter rule set) so the kind is asserted first.
 
@@ -321,7 +325,7 @@ flowchart TD
     R -- no --> E400["400 Bad Request<br/>JSON { message, errors[] }"]
 ```
 
-> **`validate()` mutates the request.** Sanitizers rewrite query and header values *in place*, and a sanitized body is re-serialized via `dump()` back into `request.body()`. Do not assume the request is unchanged after `validate()` returns — even after a *failed* validation. The handler downstream sees the sanitized request.
+> **`validate()` mutates the request.** Sanitizers rewrite query and header values *in place*, and a sanitized body is re-serialized via `dump()` back into `request.body()`. A sanitizer that changes `Content-Type` also refreshes `request.content_type()` to match the raw header. Do not assume the request is unchanged after `validate()` returns — even after a *failed* validation. The handler downstream sees the sanitized request.
 
 A few more pipeline facts to design around:
 

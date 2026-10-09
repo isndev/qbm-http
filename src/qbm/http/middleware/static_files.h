@@ -343,6 +343,7 @@ public:
             send_error_response(ctx, qb::http::status::FORBIDDEN, "Forbidden");
             return;
         }
+        std::optional<std::filesystem::path> index_mime_path;
 
         // F44 defence-in-depth: `target_file_abs` is already the real,
         // canonicalised path, so `is_symlink(target_file_abs)` would
@@ -417,17 +418,59 @@ public:
         if (is_dir) {
             // Explicitly a directory, try to serve index or list
             if (_options.serve_index_file && !_options.index_file_name.empty()) {
-                std::filesystem::path index_file_path = target_file_abs / _options.index_file_name;
+                const std::filesystem::path index_name{_options.index_file_name};
+                const std::filesystem::path index_file_path = target_file_abs / index_name;
+                std::error_code             index_canonical_ec;
+                const auto                  canonical_index = std::filesystem::weakly_canonical(index_file_path, index_canonical_ec);
 
-                bool index_exists = std::filesystem::exists(index_file_path, ec_idx_exists);
+                // The configured index name is a filesystem path, not a URI: keep
+                // literal '%' bytes, but require the resulting file to remain below
+                // the canonical static root. Compare components so a sibling with
+                // the same string prefix cannot pass the check.
+                bool index_in_root = !index_canonical_ec && !index_name.has_root_path();
+                if (index_in_root) {
+                    auto root_part  = _options.root_directory.begin();
+                    auto index_part = canonical_index.begin();
+                    for (; root_part != _options.root_directory.end(); ++root_part, ++index_part) {
+                        if (index_part == canonical_index.end() || *root_part != *index_part) {
+                            index_in_root = false;
+                            break;
+                        }
+                    }
+                }
+                if (!index_in_root) {
+                    send_error_response(ctx, qb::http::status::FORBIDDEN, "Forbidden");
+                    return;
+                }
+
+                // Canonicalisation removes symlink components. Check the original
+                // appended path before using its canonical target when links are
+                // disallowed, including links in a nested configured index name.
+                if (_options.reject_symlinks) {
+                    std::filesystem::path walker = target_file_abs;
+                    for (const auto &part : index_name) {
+                        if (part.empty() || part == std::filesystem::path("."))
+                            continue;
+                        walker /= part;
+                        std::error_code symlink_ec;
+                        const auto      entry = std::filesystem::symlink_status(walker, symlink_ec);
+                        if (!symlink_ec && std::filesystem::is_symlink(entry)) {
+                            send_error_response(ctx, qb::http::status::FORBIDDEN, "Symlinks are not served");
+                            return;
+                        }
+                    }
+                }
+
+                bool index_exists = std::filesystem::exists(canonical_index, ec_idx_exists);
 
                 bool index_is_reg = false;
                 if (!ec_idx_exists && index_exists) {
-                    index_is_reg = std::filesystem::is_regular_file(index_file_path, ec_idx_is_reg);
+                    index_is_reg = std::filesystem::is_regular_file(canonical_index, ec_idx_is_reg);
                 }
 
                 if (!ec_idx_exists && index_exists && !ec_idx_is_reg && index_is_reg) {
-                    target_file_abs = index_file_path; // Now target the index file
+                    target_file_abs = canonical_index; // Now target the checked index file
+                    index_mime_path = index_file_path; // MIME follows the configured index name, even when it is a link
                     is_dir          = false;           // Treat as if we're serving a file now
                     is_regular      = true;            // The index file is regular
                 }
@@ -473,6 +516,11 @@ public:
         std::filesystem::file_time_type last_modified_time;
 
         if (_options.enable_etags || _options.enable_last_modified) {
+            // One map lookup distinguishes an absent validator from a present
+            // empty one; either present value takes precedence over the date.
+            const auto     &request_headers   = ctx->request().headers();
+            const auto      if_none_match_it  = request_headers.find("If-None-Match");
+            const bool      has_if_none_match = if_none_match_it != request_headers.cend();
             std::error_code file_stat_ec;
             auto            file_size_for_cond = std::filesystem::file_size(target_file_abs, file_stat_ec);
             if (file_stat_ec) {
@@ -494,9 +542,8 @@ public:
                 etag_value = "\"" + std::to_string(file_size_for_cond) + "-" + std::to_string(last_modified_epoch_sec) + "\"";
                 ctx->response().set_header("ETag", etag_value);
 
-                std::string_view if_none_match_sv = ctx->request().header("If-None-Match");
-                if (!if_none_match_sv.empty()) {
-                    if (internal::if_none_match_contains(if_none_match_sv, etag_value)) {
+                if (has_if_none_match && !if_none_match_it->second.empty()) {
+                    if (internal::if_none_match_contains(if_none_match_it->second.front(), etag_value)) {
                         send_not_modified_response(ctx);
                         return;
                     }
@@ -511,18 +558,21 @@ public:
                 // Uses your existing date formatter
                 ctx->response().set_header("Last-Modified", last_modified_str);
 
-                std::string_view if_modified_since_sv = ctx->request().header("If-Modified-Since");
-                if (!if_modified_since_sv.empty()) {
-                    auto if_modified_since_tp_opt = qb::http::date::parse_http_date(if_modified_since_sv);
-                    if (if_modified_since_tp_opt) {
-                        // Precision of last_modified_time from filesystem might be higher than HTTP date.
-                        // Truncate last_modified_time (as system_clock::time_point) to seconds for comparison.
-                        auto last_modified_sec_precision     = std::chrono::time_point_cast<std::chrono::seconds>(last_modified_sys_tp);
-                        auto if_modified_since_sec_precision = std::chrono::time_point_cast<std::chrono::seconds>(*if_modified_since_tp_opt);
+                if (!has_if_none_match) {
+                    std::string_view if_modified_since_sv = ctx->request().header("If-Modified-Since");
+                    if (!if_modified_since_sv.empty()) {
+                        auto if_modified_since_tp_opt = qb::http::date::parse_http_date(if_modified_since_sv);
+                        if (if_modified_since_tp_opt) {
+                            // Precision of last_modified_time from filesystem might be higher than HTTP date.
+                            // Truncate last_modified_time (as system_clock::time_point) to seconds for comparison.
+                            auto last_modified_sec_precision = std::chrono::time_point_cast<std::chrono::seconds>(last_modified_sys_tp);
+                            auto if_modified_since_sec_precision =
+                                std::chrono::time_point_cast<std::chrono::seconds>(*if_modified_since_tp_opt);
 
-                        if (last_modified_sec_precision <= if_modified_since_sec_precision) {
-                            send_not_modified_response(ctx);
-                            return;
+                            if (last_modified_sec_precision <= if_modified_since_sec_precision) {
+                                send_not_modified_response(ctx);
+                                return;
+                            }
                         }
                     }
                 }
@@ -633,7 +683,7 @@ public:
             ctx->response().status() = qb::http::status::OK;
         }
 
-        std::string mime_type = internal::get_mime_type_for_file(target_file_abs, _options);
+        std::string mime_type = internal::get_mime_type_for_file(index_mime_path ? *index_mime_path : target_file_abs, _options);
 
         if (!is_range_request) {
             // For full requests or if range processing was skipped/failed to become a range request

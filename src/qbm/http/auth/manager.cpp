@@ -67,15 +67,15 @@ decode_unverified_payload(const std::string &token) {
 
 static std::optional<int64_t>
 parse_time_claim_as_int64(const json &claim) noexcept {
-    if (claim.is_number_integer()) {
-        return claim.get<int64_t>();
-    }
     if (claim.is_number_unsigned()) {
         const auto as_uint = claim.get<uint64_t>();
         if (as_uint > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
             return std::nullopt;
         }
         return static_cast<int64_t>(as_uint);
+    }
+    if (claim.is_number_integer()) {
+        return claim.get<int64_t>();
     }
     if (claim.is_string()) {
         const auto &s        = claim.get_ref<const std::string &>();

@@ -75,7 +75,7 @@ Three lines carry more than they look like they do:
   method bound *without* starting, so a missing `start()` left the socket bound, the actor active, and nothing ever
   accepted — a silent failure that cost a debugging session every time it was met. Calling `start()` yourself
   afterwards is still harmless if you have code that does.
-  <!-- src: qbm/http/src/qbm/http/1.1/http.h:604-610 (bind then start), :621-639 (the bind-only opt-out) -->
+  <!-- src: qbm/http/src/qbm/http/1.1/http.h:605-611 (bind then start), :622-640 (the bind-only opt-out) -->
 - **`addActor<…>(0)` picks the core.** The accept watcher, every session it creates, the router, and every coroutine a
   handler spawns all live on that one `VirtualCore` thread. That is the whole concurrency model of the module, and the
   next section is what follows from it.
@@ -115,7 +115,7 @@ Read off it the four facts that matter:
 1. **A request occupies the session until it completes.** A second request arriving on the same connection while one is
    in flight is queued, not routed — up to 128 of them, after which the session is dropped with
    `DisconnectedReason::ByProtocolError`. HTTP/1.1 pipelining is *serialised*, not parallel.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:254-264 (queue behind the active response), :137 (_max_pipelined_requests default 128) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:255-265 (queue behind the active response), :138 (_max_pipelined_requests default 128) -->
 2. **The `Context` is a `shared_ptr` and it is the handle you keep.** The router builds it and hands it to your
    handler; the session holds one reference, your handler holds another. It outlives any suspension you make inside a
    handler, which is why the coroutine form below does not need the copy-everything-out discipline that the other two
@@ -124,11 +124,11 @@ Read off it the four facts that matter:
    synchronously from the protocol's `noexcept onMessage`, so an exception escaping your handler chain would cross a
    `noexcept` boundary and call `std::terminate`. It is contained: the session disconnects and the server keeps
    serving.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:210-230 (start_request contains the throw and disconnects) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:211-231 (start_request contains the throw and disconnects) -->
 4. **The response is written when the loop says so.** `complete()` serialises into the session's output pipe; the write
    watcher drains it over one or more turns, and `event::eos` fires when the last byte is gone. Only then does the
    `POST_RESPONSE_SEND` hook run, the context reset, and the keep-alive decision get taken.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:322-347 (eos: hook, then keep-alive or disconnect) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:323-348 (eos: hook, then keep-alive or disconnect) -->
 
 Which is the whole reason the next section exists: **while your handler is on the stack, none of that happens.** No
 other request on this connection is routed, no other session on this core is read, and no other actor on this core is
@@ -258,13 +258,13 @@ It is set in exactly the places the session knows the response can no longer be 
 | The session is handed to another handler — a WebSocket upgrade, an ownership transfer | `session::on(extracted)` calls `_context->cancel()` unless `suppress_response()` was called |
 | Your own code | `ctx->cancel()` |
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:394-397 (disconnected: cancel only when ByUser and incomplete), :358-361 (extracted: cancel then reset) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:395-398 (disconnected: cancel only when ByUser and incomplete), :359-362 (extracted: cancel then reset) -->
 
 Note what is **not** in that table: a peer that simply closes the socket, and a session inactivity timeout. The timeout
 handler disconnects with `DisconnectedReason::ByTimeout`, which does not take the `ByUser` branch. A long-running
 handler learns that the client went away when its `complete()` finds nothing to write to, not before — so
 `is_cancelled()` is a useful check but not a reliable liveness signal.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:279-299 (timeout disconnects with ByTimeout) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:280-300 (timeout disconnects with ByTimeout) -->
 
 ### `http_awaiter` — the client's awaiter is not cancellation-aware
 
@@ -289,7 +289,7 @@ default is `qb::duration::zero()`, which means *no timeout at all*:
 auto reply = co_await qb::http::GET(qb::http::Request{{"http://upstream/health"}},
                                     std::chrono::seconds(2));
 ```
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1037-1041 (REQUEST: qb::duration timeout = zero), :1044-1047 (GET) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1050-1054 (REQUEST: qb::duration timeout = zero), :1057-1060 (GET) -->
 
 Pass one. A route handler that `co_await`s an upstream with the default zero holds its `Context` — and the connection
 behind it — open for as long as the upstream is willing to be slow.

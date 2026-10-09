@@ -92,7 +92,7 @@ The caller owns the returned raw `SSL_CTX`. Handing one to `listener::init(SSL_C
 
 The secure HTTP/1.1 server is `qb::http::ssl::Server<Session>`, defaulting to `qb::http::ssl::DefaultSecureSession`. Use the `qb::http::ssl::make_server()` factory and the server's `listen(uri, cert, key)` overload — that one call builds a `qb::io::ssl::Context` from the cert and key with ALPN `{"http/1.1"}` folded in, installs it on the `saccept` transport, and starts listening.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:604-610 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:605-611 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
@@ -132,7 +132,7 @@ int main(int argc, char *argv[]) {
 
 `listen` returns `false` if the certificate or key fails to load, so check the result. Under the hood it does exactly this for a secure transport:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:627-634 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:628-635 -->
 ```cpp
 using tpt = std::decay_t<decltype(this->transport())>;
 if constexpr (tpt::is_secure()) {
@@ -153,7 +153,7 @@ Two details matter if you replicate this by hand. ALPN is **folded into the `Con
 
 The SSL-off build takes the `#else` arm, which discards `cert_file`/`key_file` and only listens.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:623,635-639 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:624,636-640 -->
 
 ### Tuning the context before listening
 
@@ -223,9 +223,9 @@ The protocol the session ends up speaking is decided after the handshake by insp
 
 ### One-shot and coroutine clients
 
-The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically. A `https://` URI routes through the secure `async::HTTPS` session (`stcp` transport); `http://` routes through plaintext. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
+The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically, ignoring ASCII case. A mixed-case HTTPS URI routes through the secure `async::HTTPS` session (`stcp` transport); HTTP routes through plaintext. Qb-io supplies the default port when a mixed-case URI omits one. Unsupported schemes are rejected before connecting, and a build without SSL support rejects HTTPS with 503 instead of using TCP. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:904-931,875-878,846-847 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:917-944,888-891,847-848 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -240,7 +240,7 @@ qb::http::GET(
 
 Every one-shot verb and the generic `REQUEST` take an optional trailing `bool verify_peer = true`. Leaving it at the default performs full certificate-chain and hostname verification; passing `false` disables both and **must only be used for trusted or self-signed endpoints you control**:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:898,911 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:924 -->
 ```cpp
 // Dev only: accept a self-signed server certificate.
 qb::http::GET(std::move(req), on_reply,
@@ -287,7 +287,7 @@ client->connect([client](bool connected, const std::string &/*err*/) {
 
 ALPN is a TLS extension where the client advertises the application protocols it supports and the server picks one during the handshake. qbm-http wires it for you: an HTTP/1.1 secure server advertises `{"http/1.1"}`, an HTTP/2 server advertises `{"h2", "http/1.1"}` and switches the session based on what was selected, the HTTP/2 client advertises `{"h2"}` only, and HTTP/3 negotiates `"h3"` over QUIC (a separate transport — see [HTTP/3 protocol](./19-http3-protocol.md)). You override the server's advertised set only when you build the context by hand: chain `.alpn({...})` on the `qb::io::ssl::Context` you pass to `transport().init(...)`, which is what both `listen` overloads do. `transport().set_supported_alpn_protocols({...})` is the raw-`SSL_CTX` counterpart, needed only on the `init(SSL_CTX*)` escape hatch.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:209-210; qb/src/qb/io/tcp/ssl/listener.h:310; qbm/http/src/qbm/http/1.1/http.h:629; qbm/http/src/qbm/http/2/http2.h:544 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:209-210; qb/src/qb/io/tcp/ssl/listener.h:310; qbm/http/src/qbm/http/1.1/http.h:630; qbm/http/src/qbm/http/2/http2.h:544 -->
 
 ## Peer verification and trust
 

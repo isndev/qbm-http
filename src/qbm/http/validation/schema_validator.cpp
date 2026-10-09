@@ -13,6 +13,7 @@
  */
 #include "./schema_validator.h"
 #include <algorithm>
+#include <utility>
 #include <qb/system/container/unordered_set.h> // Already included in rule.cpp, but good for clarity if directly used here
 #include "./rule.h"                            // For access to concrete rule classes like TypeRule, MinLengthRule, etc.
 
@@ -493,7 +494,11 @@ SchemaValidator::validate_additional_properties_keyword(const qb::json &value, c
                             new_path += err.field_path;
                         }
                     }
-                    result.add_error(new_path, err.rule_violated, err.message, err.offending_value);
+                    // The nested Result has already applied the value policy.
+                    // Re-path its Error without previewing the shaped value again.
+                    Error repathed      = err;
+                    repathed.field_path = std::move(new_path);
+                    result.add_error(std::move(repathed));
                 }
                 is_valid = false;
             }

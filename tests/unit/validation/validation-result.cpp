@@ -125,6 +125,45 @@ TEST_F(ValidationResultTest, ErrorValuePolicyPreviewKeepsShortStrings) {
     EXPECT_EQ(r.errors().front().offending_value->get<std::string>(), "short");
 }
 
+TEST_F(ValidationResultTest, PreviewStopsAtUtf8BoundaryWithinByteBudget) {
+    const std::string emoji{"\xF0\x9F\x98\x80", 4};
+    const std::string two_bytes{"\xC3\xA9", 2};
+    const std::string three_bytes{"\xE2\x82\xAC", 3};
+
+    for (const auto &character : {emoji, two_bytes, three_bytes}) {
+        for (std::size_t remaining = 1; remaining < character.size(); ++remaining) {
+            const std::string prefix(16 - remaining, 'a');
+            Result            r;
+            r.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+            r.add_error("field", "rule", "message", qb::json(prefix + character + "tail"));
+            ASSERT_EQ(r.errors().size(), 1u);
+            ASSERT_TRUE(r.errors()[0].offending_value.has_value());
+            EXPECT_EQ(r.errors()[0].offending_value->get<std::string>(), prefix);
+            EXPECT_NO_THROW((void) r.errors()[0].offending_value->dump());
+        }
+    }
+
+    Result complete;
+    complete.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+    complete.add_error("field", "rule", "message", qb::json(std::string(12, 'a') + emoji + "tail"));
+    EXPECT_EQ(*complete.errors()[0].offending_value, qb::json(std::string(12, 'a') + emoji));
+}
+
+TEST_F(ValidationResultTest, CompoundPreviewKeepsValidUtf8) {
+    Result r;
+    r.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+    const std::string emoji{"\xF0\x9F\x98\x80", 4};
+    r.add_error("body", "rule", "message", qb::json{{"a", std::string(9, 'a') + emoji + "tail"}});
+    ASSERT_EQ(r.errors().size(), 1u);
+    ASSERT_TRUE(r.errors()[0].offending_value.has_value());
+    const qb::json &preview = *r.errors()[0].offending_value;
+    ASSERT_TRUE(preview.is_object());
+    EXPECT_EQ(preview["_truncated"], true);
+    EXPECT_EQ(preview["preview"].get<std::string>(), "{\"a\":\"aaaaaaaaa");
+    EXPECT_EQ(preview["original_kind"], "object");
+    EXPECT_NO_THROW((void) preview.dump());
+}
+
 // None: offending_value is dropped entirely.
 TEST_F(ValidationResultTest, ErrorValuePolicyNoneDropsValue) {
     Result r;

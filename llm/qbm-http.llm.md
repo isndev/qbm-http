@@ -305,6 +305,8 @@ router().use(qb::http::validation_middleware<qb::http::DefaultSession>(rv));  //
 ```
 
 - `validate()` **mutates the request** (sanitizers rewrite query/header values in place; a sanitized body is re-serialized). Capture raw input before validating if you need it.
+- A changed `Content-Type` sanitizer result refreshes `request.content_type()`; error-value policy reaches both body schema and parameters regardless of whether it is set before or after `for_body`.
+- A parameter `CustomRule` returning `false` without adding an error still rejects the request with a generic error named for that rule. `Preview` trims to a complete UTF-8 prefix within its byte limit.
 - Most primitive rules are type-gated and pass silently for the wrong kind — always assert `type` first.
 - `SchemaValidator` caches compiled rules lazily and is not thread-safe to first-touch; warm it on the owning thread or use one per core.
 
@@ -326,6 +328,8 @@ qb::io::async::run();
 
 - Routing/middleware/controllers/validation are identical to HTTP/1.1 — the same `Router`.
 - Client is `qb::http2::Client` via `qb::http2::make_client("https://...")` (returns `std::shared_ptr`; non-copyable/non-movable — always keep the shared_ptr). `push_request(req, cb)`, `push_requests(vec, batch_cb)`, or coroutine overloads. Callback `connect` has no zero-arg overload — use `connect(nullptr)` for fire-and-forget.
+- An HTTP/2 batch callback may disconnect or enqueue another batch: the completed batch leaves the registry before user code runs. _(src/qbm/http/2/client.cpp:358-370)_
+- A failed pending send calls user code. The queue drain retains the client and rechecks the connection and h2 protocol before its next iteration, so a callback may disconnect or enqueue work without sending on the old connection. _(src/qbm/http/2/client.cpp:448-485)_
 - There is no plaintext h2c. Never write a response with `stream_id == 0` (it is the HTTP/1.1 sentinel). Server caps concurrency at 50 streams; client at 100. Server push is off by default and not a router feature.
 - Reconnection is a RUN with a backoff, not a loop: `client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(100ms).with_max_attempts(5))` (`qb::http::RetryPolicy`, the redis shape; `set_auto_reconnect(bool)` keeps the policy). A loss fails the outstanding work with a 503 and what the failure callbacks push back is what the run reconnects for — attempt 1 at once, then the policy's waits, `on_retry(attempt, next_delay)` before each; exhausted, the waiting requests get `503 Reconnection attempts exhausted (N)` and nothing reconnects until the next `connect()` or push. A push made from a failure callback queues behind the scheduled attempt: never `connect()` from one to "retry faster". `is_reconnecting()` / `reconnect_attempts()` are the observable state. _(src/qbm/http/2/client.h:457-482)_
 
@@ -344,6 +348,16 @@ For mTLS/cipher policy, build the `SSL_CTX` yourself with `qb::io::ssl::create_s
 - **Cert/key (and CA/DH) paths are self-locating.** The HTTP/1.1 `listen(uri, cert, key)` here takes defaulted `std::filesystem::path cert={}, key={}`; the http2/http3/dual-stack `listen` overloads take `std::filesystem::path` cert/key too but WITHOUT defaults (both are required). `create_server_context` (and the CA/mTLS helpers) resolve a **relative** path via `qb::io::sys::resolve_resource` (`<qb/io/system/file.h>`): cwd first, then the executable's own directory — so certs shipped next to the binary load from any working directory; absolute paths are used unchanged. String literals convert implicitly, so `"cert.pem"` keeps working.
 
 ## HTTP/3 (needs `QBM_HTTP_HAS_HTTP3`)
+
+An HTTP/3 GOAWAY callback may call `client->disconnect()`: inside the native read, the client becomes logically disconnected at once while protocol and QUIC teardown wait until that read returns. GOAWAY may still invoke other pending-request callbacks during the read; the remaining active requests fail after it. A reentrant `connect(callback)` fails without starting a handshake, new requests get an immediate `503`, and explicit disconnect starts no automatic reconnect. Ordinary disconnect also marks the client down before failure callbacks and rejects their reentrant connect or request attempts until close finishes. _(src/qbm/http/3/client.cpp:76-85,119-171,227-235,291-302,728-736,792-830)_
+
+An HTTP/3 event callback can release the last external `shared_ptr`: the client is retained until endpoint dispatch unwinds. Explicit cancellation of an active request also retains the client through its callback and stream reset. The pending-request drain likewise retains the client and checks the connection, protocol and shutdown state before each submission, including after failed submit invokes user code. Failure to start QUIC, a connect timeout or a remote close retires the old transport and requests before connection callbacks can queue a new attempt; qb-io refreshes its internally owned native backend on retry. _(src/qbm/http/3/client.cpp:20-36,93-115,267-278,365-446,479-521,602-619,752-789,792-830,833-851; qb/src/qb/io/async/quic/endpoint.h:84-119,425-454)_
+
+The connection timeout belongs to one attempt: `disconnect()` of an in-progress attempt reports failure to its connection callbacks once, and that attempt's timer cannot fail a later attempt still connecting on the same client. _(src/qbm/http/3/client.cpp:101-114,119-171,449-506,602-619)_
+
+`max_streams_bidi` limits HTTP/3 requests in flight, not requests over the connection's lifetime. Qb returns a bidirectional slot on close for client-initiated streams delivered through `stream_open_cb`; ngtcp2 handles implicit openings itself. The loopback test completes 130 sequential requests on one connection with the default QUIC limit of 100. _(qb/src/qb/io/quic.cpp:1015,1456-1483; qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343)_
+
+If QUIC closes synchronously during request submission, the request already removed from the queue receives a `503` and is not entered into the active registry of the closed connection, even if an old failure callback throws during teardown; its saved exception propagates afterward. Connect success/failure notify their other callbacks before propagating a user callback exception; explicit disconnect also completes transport cleanup. _(src/qbm/http/3/client.cpp:119-171,365-446,449-506,524-574)_
 
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
@@ -417,7 +431,7 @@ cb.on_connected([](auto&){}).on_message([](auto& e){}).on_error([](auto&){});
 cb.connect(qb::io::uri("ws://localhost:9000/"));
 ```
 
-WebSocket notes: the masking direction is enforced (client→server masked, server→client not — `operator<<` forces `masked=true` on outbound, do not pre-mask). Reassembly is capped at `protocol_limits::MAX_BODY_SIZE`; `set_max_payload_size(0)` removes the guard. `MessageClose` throws on reserved (`1004/1005/1006/1015`) or out-of-`[1000,4999]` codes. When handing an upgrade off to another actor, call `ctx->suppress_response()` so the routing context destructor does not send a moved-from HTTP response. Coroutine API: `qb::http::ws::coro_client`/`coro_session` with `co_await connect/receive/close_async`.
+WebSocket notes: a positive `connect` timeout is one deadline across transport and HTTP Upgrade; the ping timer starts only after the 101 is validated. An unoffered server `Sec-WebSocket-Extensions` header fails the handshake, and destroying a stack or `unique_ptr` client during transport connect is safe. `connected`, parsed-handshake/protocol `error`, and `disconnected` callbacks run after parser dispatch and may release the client; a transport connect failure or explicit pending `disconnect()` may report `error` synchronously. A request hook that cancels or replaces the attempt sends no Upgrade. A reconnect retires the old transport and clears its input/output buffers. The masking direction is enforced (client→server masked, server→client not — `operator<<` forces `masked=true` on outbound, do not pre-mask). Reassembly is capped at `protocol_limits::MAX_BODY_SIZE`; `set_max_payload_size(0)` removes the guard. `MessageClose` throws on reserved (`1004/1005/1006/1015`) or out-of-`[1000,4999]` codes. When handing an upgrade off to another actor, call `ctx->suppress_response()` so the routing context destructor does not send a moved-from HTTP response. Coroutine API: `qb::http::ws::coro_client`/`coro_session` with `co_await connect/receive/close_async`.
 
 ## Clients (one-shot + persistent)
 
@@ -440,7 +454,7 @@ client->set_connect_timeout(std::chrono::seconds(10));               // default 
 client->set_verify_peer(false);                                      // BEFORE connect
 ```
 
-`qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot failures synthesize a response: 503 (cannot connect), 504 (timeout), 502 (peer disconnect). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it is the bridge for `main()`/tests, **not** for use inside a coroutine that is already being driven. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`. A coroutine parked on a client request shows as `"http"` in qb's `CoroutineScheduler::dump()` when its thread tracks suspensions (3.3).
+`qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot helpers compare URI schemes case-insensitively for transport selection: unsupported schemes fail locally with 400, and HTTPS without SSL support fails locally with 503; neither opens a socket. Qb-io also resolves default ports for portless mixed-case HTTP(S) URLs (QB-919). A local rejection may invoke the callback before the helper returns; the coroutine awaiter schedules its continuation. Other failures synthesize 503 (cannot connect), 504 (timeout), or 502 (peer disconnect). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it is the bridge for `main()`/tests, **not** for use inside a coroutine that is already being driven. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`. A coroutine parked on a client request shows as `"http"` in qb's `CoroutineScheduler::dump()` when its thread tracks suspensions (3.3).
 
 ---
 
@@ -462,6 +476,7 @@ client->set_verify_peer(false);                                      // BEFORE c
 - Request cookies need an explicit `req.parse_cookie_header()`; response cookie edits via the pointer/jar need `update_cookie_header(name)`.
 - Terminal context helpers (`json`, `text`, `redirect`, `no_content`, the 4xx/5xx ones) call `complete()` internally — set custom headers/body first. Only `ctx->status(code)` is chainable.
 - `Body::as<T>()`/`try_as<T>()` and the assignment set are closed; non-supported `T` is a compile error. `as<T>()` throws on a malformed payload — reach for `try_as<T>() -> std::optional<T>` (`noexcept`) on request bodies.
+- Assigning a C++-constructed `qb::json` with invalid UTF-8 to `Body` throws for const and rvalue JSON alike and clears partial output; a routed `Context::json` handler becomes a 500 instead of terminating the process.
 - HTTP/2 / HTTP/3 are TLS-only with ALPN; no plaintext h2c. HTTP/2 client `connect(nullptr)` for fire-and-forget.
 - `verify_peer` defaults to `true`; disable only for trusted/self-signed endpoints, and set it before connecting on persistent clients.
 - Validation `validate()` mutates the request; type-gated rules pass silently for the wrong kind (assert `type` first).

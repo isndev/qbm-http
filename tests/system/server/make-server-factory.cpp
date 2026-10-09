@@ -197,6 +197,17 @@ TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
     EXPECT_EQ(1, g_https_server_requests.load());
 }
 
+TEST_F(HttpsMakeServerTest, MixedCaseHttpsOneShotUsesTlsTransport) {
+    std::string origin = base_url();
+    origin.replace(0, 5, "HtTpS");
+    qb::http::Request request{{origin + "/ping_ssl"}};
+    auto              response = qb::http::run_sync(qb::http::GET(request, std::chrono::seconds(2), /*verify_peer=*/false)).response;
+
+    EXPECT_EQ(qb::http::status::OK, response.status());
+    EXPECT_EQ("pong_https_default", response.body().as<std::string>());
+    EXPECT_EQ(1, g_https_server_requests.load());
+}
+
 // ===========================================================================
 // HTTP/2 factory (REQUIRES ssl)
 // ===========================================================================

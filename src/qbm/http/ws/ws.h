@@ -26,12 +26,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <qb/io/async/tcp/connector.h>
 #include <qb/io/crypto.h>
+#include <qb/system/time.h>
 #include "../http.h"
 #include "../logger.h"
 
@@ -1083,6 +1086,9 @@ template <typename T, typename Transport = ::qb::io::transport::tcp>
 class WebSocket
     : public ::qb::io::async::tcp::client<WebSocket<T, Transport>, Transport>
     , public ::qb::io::use<WebSocket<T, Transport>>::timeout {
+    using tcp_client     = ::qb::io::async::tcp::client<WebSocket<T, Transport>, Transport>;
+    using deadline_timer = ::qb::io::async::ScopedTimeout<std::function<void()>>;
+
     const std::string _ws_key;        /**< WebSocket handshake key */
     qb::duration      _ping_interval; /**< Interval for sending ping frames (0 = disabled). */
     ::qb::io::uri     _remote;        /**< Remote server URI */
@@ -1095,8 +1101,101 @@ class WebSocket
     /// server did not advertise any). Populated in `on(http_response)`.
     std::string _negotiated_subprotocol;
     bool        _close_sent{false};
+    // A connector may finish after its client has gone away. Its callback holds
+    // only a weak reference to this attempt, so stack and unique_ptr clients are
+    // safe without requiring shared ownership of the WebSocket object.
+    std::shared_ptr<int>               _connect_lifetime;
+    std::shared_ptr<deadline_timer>    _connect_deadline;
+    std::shared_ptr<int>               _object_lifetime{std::make_shared<int>(0)};
+    std::function<void()>              _launch_after_disconnect;
+    std::vector<std::function<void()>> _early_events;
+    std::uint64_t                      _connection_epoch{0};
+    std::uint64_t                      _session_epoch{0};
+    bool                               _connect_pending{false};
+    bool                               _ws_connected{false};
+    // A failed/closed transport is disposed on the next loop dispatch. A
+    // reconnect requested from its callback must start after that dispatch.
+    bool _disconnect_pending{false};
+    bool _disconnect_notified{false};
+    bool _error_queued{false};
+    bool _connected_callback_pending{false};
 
 private:
+    void
+    cancel_connect_attempt() noexcept {
+        _connect_pending = false;
+        _connect_lifetime.reset();
+        _connect_deadline.reset();
+        _launch_after_disconnect = {};
+    }
+
+    void
+    queue_error() {
+        if (_error_queued)
+            return;
+        _error_queued    = true;
+        const auto weak  = std::weak_ptr<int>(_object_lifetime);
+        const auto epoch = _connection_epoch;
+        ::qb::io::async::defer([this, weak, epoch] {
+            if (weak.expired())
+                return;
+            if (epoch != _connection_epoch || !_error_queued)
+                return;
+            _error_queued = false;
+            if constexpr (qb::has_on<T, error>) {
+                // The callback may delete this client. No member access follows.
+                derived().on(error{});
+            }
+        });
+    }
+
+    void
+    start_transport_close(int reason = 1) {
+        if (this->transport().is_open() && !_disconnect_pending) {
+            _disconnect_pending  = true;
+            _disconnect_notified = false;
+            tcp_client::disconnect(reason);
+        }
+    }
+
+    void
+    schedule_transport_cleanup() {
+        const auto weak   = std::weak_ptr<int>(_object_lifetime);
+        const auto epoch  = _connection_epoch;
+        const auto old_fd = this->transport().native_handle();
+        // A queued error callback may start another attempt before this runs.
+        // Only that attempt's launcher may then close the retired socket.
+        ::qb::io::async::defer([this, weak, epoch, old_fd] {
+            if (weak.expired())
+                return;
+            if (epoch != _connection_epoch)
+                return;
+            if (_disconnect_pending && _disconnect_notified && this->transport().native_handle() == old_fd) {
+                this->transport().close();
+                _disconnect_pending  = false;
+                _disconnect_notified = false;
+            }
+        });
+    }
+
+    void
+    fail_connect_attempt(bool from_parser = false) {
+        if (!_connect_pending)
+            return;
+        cancel_connect_attempt();
+        start_transport_close();
+        if (_disconnect_pending && _disconnect_notified)
+            schedule_transport_cleanup();
+        if (from_parser) {
+            queue_error();
+            return;
+        }
+        // The user callback may destroy this client; make it the last action.
+        if constexpr (qb::has_on<T, error>) {
+            derived().on(error{});
+        }
+    }
+
     T &
     derived() noexcept {
         return *static_cast<T *>(this);
@@ -1104,6 +1203,17 @@ private:
     const T &
     derived() const noexcept {
         return *static_cast<const T *>(this);
+    }
+
+    template <typename Event>
+    void
+    queue_early_event(Event &&event) {
+        using event_type = std::decay_t<Event>;
+        Message frame    = event.ws;
+        _early_events.emplace_back([this, frame = std::move(frame)]() mutable {
+            auto copy = event_type{frame.size(), frame.data().cbegin(), frame};
+            derived().on(std::move(copy));
+        });
     }
 
     /// Trim ASCII whitespace from both ends of @p sv (RFC 7230 OWS).
@@ -1186,6 +1296,39 @@ public:
         : _ws_key(http::ws::generateKey())
         , _ping_interval{} {}
 
+    ~WebSocket() {
+        _object_lifetime.reset();
+        _launch_after_disconnect = {};
+        cancel_connect_attempt();
+    }
+
+    /// Cancel an in-progress handshake as well as the transport. A connector
+    /// already in flight is allowed to finish, but its weak callback is inert.
+    /// The reason is forwarded to qb-io's disconnection event.
+    void
+    disconnect(int reason = 1) {
+        ++_connection_epoch;
+        const bool pending = _connect_pending;
+        cancel_connect_attempt();
+        _ws_connected = false;
+        this->setTimeout(qb::duration::zero());
+        start_transport_close(reason);
+        // An earlier disconnect dispatch may already have queued cleanup for
+        // the previous epoch. Replace it when there is no new attempt to do so.
+        if (_disconnect_pending && _disconnect_notified)
+            schedule_transport_cleanup();
+        if (pending) {
+            if constexpr (qb::has_on<T, error>) {
+                derived().on(error{});
+            }
+        }
+    }
+
+    void
+    disconnect(::qb::io::async::event::disconnect_reason reason) {
+        disconnect(static_cast<int>(reason));
+    }
+
     /**
      * @brief Sets the ping interval for keepalive.
      * @param interval Ping interval as a `qb::duration` (zero disables pings).
@@ -1197,7 +1340,8 @@ public:
     void
     set_ping_interval(qb::duration interval = qb::duration::zero()) {
         _ping_interval = interval;
-        this->setTimeout(interval);
+        if (_ws_connected)
+            this->setTimeout(interval);
     }
 
     /**
@@ -1267,7 +1411,7 @@ public:
     /**
      * @brief Connects to a WebSocket server
      * @param remote URI of the remote WebSocket endpoint
-     * @param timeout Connection timeout in milliseconds (0 for no timeout)
+     * @param timeout Deadline for the complete transport and HTTP upgrade (0 for no deadline)
      *
      * Initiates a connection to the specified WebSocket server.
      * The connection process includes establishing a TCP connection and
@@ -1275,45 +1419,102 @@ public:
      */
     void
     connect(::qb::io::uri const &remote, qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
-        this->clear_protocols();
+        const auto started = qb::mono_now();
+        cancel_connect_attempt();
+        ++_connection_epoch;
+        ++_session_epoch;
+        _error_queued               = false;
+        _connected_callback_pending = false;
+        _early_events.clear();
+        start_transport_close();
         this->setTimeout(qb::duration::zero());
         _remote = remote;
         _negotiated_subprotocol.clear();
-        _close_sent = false;
-        ::qb::io::async::tcp::connect<typename Transport::transport_io_type>(
-            remote,
-            [this](auto &&transport) {
-                if (!transport.is_open()) {
-                    if constexpr (qb::has_on<T, error>) {
-                        derived().on(error{});
-                    }
-                } else {
-                    this->transport() = std::move(transport);
-                    this->template switch_protocol<http_protocol>(*this);
-                    this->start();
-
-                    http::WebSocketRequest request(_ws_key);
-                    request.headers()["host"].emplace_back(make_host_header_value(_remote));
-                    request.uri() = _remote;
-
-                    if (!_offered_subprotocols.empty()) {
-                        std::string joined;
-                        for (std::size_t i = 0; i < _offered_subprotocols.size(); ++i) {
-                            if (i)
-                                joined.append(", ");
-                            joined.append(_offered_subprotocols[i]);
-                        }
-                        request.headers()["Sec-WebSocket-Protocol"].emplace_back(std::move(joined));
-                    }
-
-                    if constexpr (qb::has_on<T, sending_http_request>) {
-                        derived().on(sending_http_request{request});
-                    }
-
-                    *this << request;
+        _close_sent                = false;
+        _ws_connected              = false;
+        _connect_pending           = true;
+        _connect_lifetime          = std::make_shared<int>(0);
+        std::weak_ptr<int> attempt = _connect_lifetime;
+        if (timeout > qb::duration::zero()) {
+            // This timer spans both phases. Keep a local timer reference while
+            // it fires, because a completion callback can destroy the client.
+            std::function<void()> deadline = [this, attempt] {
+                if (auto live = attempt.lock(); live && live == _connect_lifetime && _connect_pending) {
+                    auto keep_timer = _connect_deadline;
+                    fail_connect_attempt();
                 }
-            },
-            timeout, verify_peer);
+            };
+            const auto elapsed = qb::mono_now() - started;
+            if (elapsed >= timeout) {
+                fail_connect_attempt();
+                return;
+            }
+            _connect_deadline = std::make_shared<deadline_timer>(std::move(deadline), timeout - elapsed);
+        }
+        // A live old transport is retired first. The launch is held until its
+        // disconnected dispatch has returned, so no active HTTP/WS parser or
+        // watcher can observe the buffer and protocol reset below.
+        auto launch = [this, attempt, remote, timeout, verify_peer, started] {
+            auto live = attempt.lock();
+            if (!live || live != _connect_lifetime || !_connect_pending)
+                return;
+            if (_disconnect_pending) {
+                this->transport().close();
+                _disconnect_pending  = false;
+                _disconnect_notified = false;
+            }
+            this->reset_for_reconnect();
+            ::qb::io::async::tcp::connect<typename Transport::transport_io_type>(
+                remote,
+                [this, attempt](auto &&transport) {
+                    auto live = attempt.lock();
+                    if (!live || live != _connect_lifetime || !_connect_pending)
+                        return;
+                    if (!transport.is_open()) {
+                        fail_connect_attempt();
+                    } else {
+                        this->transport() = std::move(transport);
+                        this->template switch_protocol<http_protocol>(*this);
+                        this->start();
+
+                        http::WebSocketRequest request(_ws_key);
+                        request.headers()["host"].emplace_back(make_host_header_value(_remote));
+                        request.uri() = _remote;
+
+                        if (!_offered_subprotocols.empty()) {
+                            std::string joined;
+                            for (std::size_t i = 0; i < _offered_subprotocols.size(); ++i) {
+                                if (i)
+                                    joined.append(", ");
+                                joined.append(_offered_subprotocols[i]);
+                            }
+                            request.headers()["Sec-WebSocket-Protocol"].emplace_back(std::move(joined));
+                        }
+
+                        if constexpr (qb::has_on<T, sending_http_request>) {
+                            const auto object = std::weak_ptr<int>(_object_lifetime);
+                            derived().on(sending_http_request{request});
+                            // The hook may destroy, cancel, or replace this
+                            // attempt. Check before reading any member or send.
+                            if (object.expired())
+                                return;
+                            if (attempt.lock() != _connect_lifetime || !_connect_pending)
+                                return;
+                        }
+
+                        *this << request;
+                    }
+                },
+                timeout > qb::duration::zero() ? std::max(qb::duration::zero(), timeout - (qb::mono_now() - started)) : timeout, verify_peer);
+        };
+        if (_disconnect_pending) {
+            if (_disconnect_notified)
+                ::qb::io::async::defer(std::move(launch));
+            else
+                _launch_after_disconnect = std::move(launch);
+        } else {
+            launch();
+        }
     }
 
     /**
@@ -1326,11 +1527,16 @@ public:
      */
     void
     on(typename http_protocol::response &&event) {
+        if (!_connect_pending)
+            return;
+        // No extension is offered by this client. RFC 6455 forbids accepting
+        // one selected unilaterally by the server.
+        if (event.has_header("Sec-WebSocket-Extensions")) {
+            fail_connect_attempt(true);
+            return;
+        }
         if (!this->template switch_protocol<ws_protocol>(*this, event, _ws_key)) {
-            if constexpr (qb::has_on<T, error>) {
-                derived().on(error{});
-            }
-            this->disconnect();
+            fail_connect_attempt(true);
             return;
         }
 
@@ -1347,30 +1553,50 @@ public:
             // RFC 6455 §4.2.2: server must return exactly one subprotocol and it
             // must be one the client actually offered.
             if (has_multiple_tokens || _offered_subprotocols.empty()) {
-                if constexpr (qb::has_on<T, error>) {
-                    derived().on(error{});
-                }
-                this->disconnect();
+                fail_connect_attempt(true);
                 return;
             }
 
             const bool was_offered = std::any_of(_offered_subprotocols.begin(), _offered_subprotocols.end(),
                                                  [&](const std::string &offered) { return offered == selected_token; });
             if (!was_offered) {
-                if constexpr (qb::has_on<T, error>) {
-                    derived().on(error{});
-                }
-                this->disconnect();
+                fail_connect_attempt(true);
                 return;
             }
 
             _negotiated_subprotocol.assign(selected_token);
         }
 
-        if constexpr (qb::has_on<T, connected>) {
-            derived().on(connected{});
-        }
+        cancel_connect_attempt();
+        _ws_connected = true;
         this->setTimeout(_ping_interval);
+        if constexpr (qb::has_on<T, connected>) {
+            _connected_callback_pending = true;
+            const auto weak             = std::weak_ptr<int>(_object_lifetime);
+            const auto epoch            = _connection_epoch;
+            ::qb::io::async::defer([this, weak, epoch] {
+                if (weak.expired())
+                    return;
+                if (epoch != _connection_epoch)
+                    return;
+                auto early                  = std::move(_early_events);
+                _connected_callback_pending = false;
+                // Run after the HTTP parser and qb-io dispatch have returned.
+                // The user may delete this client in the callback.
+                derived().on(connected{});
+                if (weak.expired())
+                    return;
+                if (epoch != _connection_epoch)
+                    return;
+                for (auto &deliver : early) {
+                    deliver();
+                    if (weak.expired())
+                        return;
+                    if (epoch != _connection_epoch)
+                        return;
+                }
+            });
+        }
     }
 
     /**
@@ -1382,6 +1608,10 @@ public:
     void
     on(ping &&event) {
         if constexpr (qb::has_on<T, ping>) {
+            if (unlikely(_connected_callback_pending)) {
+                queue_early_event(event);
+                return;
+            }
             derived().on(std::forward<ping>(event));
         }
     }
@@ -1395,6 +1625,10 @@ public:
     void
     on(pong &&event) {
         if constexpr (qb::has_on<T, pong>) {
+            if (unlikely(_connected_callback_pending)) {
+                queue_early_event(event);
+                return;
+            }
             derived().on(std::forward<pong>(event));
         }
     }
@@ -1415,9 +1649,8 @@ public:
      */
     void
     on(error &&event) {
-        if constexpr (qb::has_on<T, error>) {
-            derived().on(std::forward<error>(event));
-        }
+        (void) event;
+        queue_error();
     }
 
     /**
@@ -1428,6 +1661,10 @@ public:
      */
     void
     on(message &&event) {
+        if (unlikely(_connected_callback_pending)) {
+            queue_early_event(event);
+            return;
+        }
         derived().on(std::forward<message>(event));
     }
 
@@ -1445,6 +1682,10 @@ public:
             *this << echo;
         }
         if constexpr (qb::has_on<T, closed>) {
+            if (unlikely(_connected_callback_pending)) {
+                queue_early_event(event);
+                return;
+            }
             derived().on(std::forward<closed>(event));
         }
     }
@@ -1457,8 +1698,42 @@ public:
      */
     void
     on(disconnected &&event) {
+        // A completion callback may already have requested a new attempt.
+        // This notification belongs to the retired transport, not to it.
+        const bool replacing         = _disconnect_pending && _connect_pending;
+        const bool connected_pending = _connected_callback_pending;
+        _disconnect_pending          = true;
+        _disconnect_notified         = true;
+        _ws_connected                = false;
+        if (!connected_pending)
+            _early_events.clear();
+        this->setTimeout(qb::duration::zero());
         _close_sent = false;
-        derived().on(std::forward<disconnected>(event));
+        if (replacing) {
+            if (_launch_after_disconnect) {
+                auto launch              = std::move(_launch_after_disconnect);
+                _launch_after_disconnect = {};
+                ::qb::io::async::defer(std::move(launch));
+            }
+            return;
+        }
+        const bool pending = _connect_pending;
+        cancel_connect_attempt();
+        const auto weak    = std::weak_ptr<int>(_object_lifetime);
+        const auto session = _session_epoch;
+        // dispose() stops the watcher only after this hook returns. Close its
+        // socket at the listener tail, ahead of the user disconnect callback.
+        schedule_transport_cleanup();
+        if (pending)
+            queue_error();
+        ::qb::io::async::defer([this, weak, session, event = std::move(event)]() mutable {
+            if (weak.expired())
+                return;
+            if (session != _session_epoch)
+                return;
+            // qb-io's dispose() still uses this object after on(disconnected).
+            derived().on(std::move(event));
+        });
     }
 
     /**
@@ -1470,6 +1745,8 @@ public:
      */
     void
     on(timeout const &) {
+        if (!_ws_connected)
+            return;
         MessagePing msg;
         *this << msg;
         this->setTimeout(_ping_interval);
