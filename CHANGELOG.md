@@ -89,6 +89,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Request validation keeps error policies and verdicts consistent (Huly QB-544, QB-546).** A body schema now
+  receives the request validator's Full, Preview, or None policy and byte budget in either configuration order.
+  A parameter rule that returns `false` without adding an error now emits one named for that rule, so both direct
+  parameter validation and routed requests reject it; explicit rule errors retain their detail.
+- **Validation previews keep complete UTF-8 characters (Huly QB-545).** Truncating a valid multibyte value at
+  the preview byte limit no longer turns a JSON validation response into a 500.
+- **Sanitized Content-Type refreshes its typed view (Huly QB-547).** A changed raw header is reflected in
+  `Request::content_type()` before downstream validation and handlers read it.
+
 - **Out-of-range native unsigned token times are rejected by `auth::Manager` (Huly QB-983).** In the explicitly
   signature-unchecked verification mode, an unsigned `nbf` above `INT64_MAX` could become negative when converted to
   `int64_t` and pass the time check. The manager now checks the unsigned range before converting it; in-range signed,

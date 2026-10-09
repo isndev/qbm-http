@@ -143,6 +143,34 @@ TEST_F(ValidationRequestTest, HeaderSanitizerSuccess) {
     EXPECT_EQ(it->second.front(), "raw-sanitized");
 }
 
+TEST_F(ValidationRequestTest, ContentTypeSanitizerRefreshesTypedHeader) {
+    RequestValidator validator;
+    validator.add_header_sanitizer("content-type", [](const std::string &value) -> std::string {
+        if (value == "application/json; charset=utf-8")
+            return "text/plain; charset=iso-8859-1";
+        return value;
+    });
+
+    qb::http::Request first;
+    first.set_header("Content-Type", "application/json; charset=utf-8");
+    EXPECT_EQ(first.content_type().type(), "application/json");
+    EXPECT_EQ(first.content_type().charset(), "utf-8");
+
+    Result first_result;
+    EXPECT_TRUE(validator.validate(first, first_result));
+    EXPECT_EQ(first.header("Content-Type"), "text/plain; charset=iso-8859-1");
+    EXPECT_EQ(first.content_type().type(), "text/plain");
+    EXPECT_EQ(first.content_type().charset(), "iso-8859-1");
+
+    qb::http::Request second;
+    second.set_header("cOnTeNt-TyPe", "text/plain; charset=iso-8859-1");
+    Result second_result;
+    EXPECT_TRUE(validator.validate(second, second_result));
+    EXPECT_EQ(second.header("CONTENT-TYPE"), "text/plain; charset=iso-8859-1");
+    EXPECT_EQ(second.content_type().type(), "text/plain");
+    EXPECT_EQ(second.content_type().charset(), "iso-8859-1");
+}
+
 TEST_F(ValidationRequestTest, HeaderSanitizerExceptionIsCaptured) {
     RequestValidator validator;
     validator.add_header_sanitizer("X-Test", [](const std::string &) -> std::string { throw std::runtime_error("header sanitizer crash"); });

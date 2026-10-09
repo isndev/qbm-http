@@ -288,3 +288,42 @@ TEST_F(ValidationParameterTest, PropagatesErrorValuePolicyToChildResults) {
     EXPECT_EQ(out.errors().front().rule_violated, "minLength");
     EXPECT_FALSE(out.errors().front().offending_value.has_value());
 }
+
+TEST_F(ValidationParameterTest, SilentCustomRuleFailureProducesOneError) {
+    ParameterValidator validator;
+    validator.add_param(ParameterRuleSet("token").add_rule(
+        std::make_shared<CustomRule>([](const qb::json &, const std::string &, Result &) { return false; }, "tokenDenied")));
+
+    qb::icase_unordered_map<std::string> params;
+    params["token"] = "secret";
+    Result out;
+    EXPECT_FALSE(validator.validate(params, out, "header"));
+    ASSERT_EQ(out.errors().size(), 1u);
+    EXPECT_EQ(out.errors()[0].field_path, "header.token");
+    EXPECT_EQ(out.errors()[0].rule_violated, "tokenDenied");
+    EXPECT_EQ(out.errors()[0].offending_value, qb::json("secret"));
+}
+
+TEST_F(ValidationParameterTest, CustomRuleKeepsExplicitErrorAndAcceptsSuccess) {
+    ParameterValidator validator;
+    validator.add_param(ParameterRuleSet("token").add_rule(std::make_shared<CustomRule>(
+        [](const qb::json &value, const std::string &path, Result &result) {
+            if (value == "allow")
+                return true;
+            result.add_error(path, "specificDenial", "Token denied.", value);
+            return false;
+        },
+        "tokenDenied")));
+
+    qb::icase_unordered_map<std::string> params;
+    params["token"] = "allow";
+    Result accepted;
+    EXPECT_TRUE(validator.validate(params, accepted, "header"));
+    EXPECT_TRUE(accepted.success());
+
+    params["token"] = "deny";
+    Result rejected;
+    EXPECT_FALSE(validator.validate(params, rejected, "header"));
+    ASSERT_EQ(rejected.errors().size(), 1u);
+    EXPECT_EQ(rejected.errors()[0].rule_violated, "specificDenial");
+}

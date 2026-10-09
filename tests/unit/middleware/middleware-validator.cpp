@@ -266,6 +266,22 @@ TEST_F(ValidationMiddlewareTest, InvalidHeaderFails) {
     EXPECT_TRUE(has_error("header.content-length", "minimum"));
 }
 
+TEST_F(ValidationMiddlewareTest, Utf8PreviewErrorReturnsJsonBadRequest) {
+    _request_validator->set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+    _request_validator->for_header("X-Token", ParameterRuleSet("X-Token").add_rule(std::make_shared<MaxLengthRule>(2)));
+
+    auto req = val_request("/test_validation_get", qb::http::method::GET);
+    req.set_header("X-Token", std::string(15, 'a') + std::string("\xF0\x9F\x98\x80", 4) + "tail");
+    configure_and_run(std::move(req));
+
+    EXPECT_FALSE(_session->_final_handler_called);
+    ASSERT_EQ(_session->_response.status(), qb::http::status::BAD_REQUEST);
+    const auto env = error_envelope();
+    ASSERT_EQ(env["errors"].size(), 1u);
+    EXPECT_EQ(env["errors"][0]["field"], "header.x-token");
+    EXPECT_EQ(env["errors"][0]["value"], std::string(15, 'a'));
+}
+
 TEST_F(ValidationMiddlewareTest, MultipleValidationFailures) {
     _request_validator->for_query_param("page", ParameterRuleSet("page").set_type(DataType::INTEGER).set_required());
     _request_validator->for_header("X-Client-Version", ParameterRuleSet("X-Client-Version").add_rule(std::make_shared<MinLengthRule>(3)));

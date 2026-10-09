@@ -14,6 +14,22 @@
 #include "./request_validator.h"
 
 namespace qb::http::validation {
+namespace {
+
+SchemaValidator::ErrorValuePolicy
+to_schema_policy(Result::ErrorValuePolicy policy) noexcept {
+    switch (policy) {
+        case Result::ErrorValuePolicy::Preview:
+            return SchemaValidator::ErrorValuePolicy::Preview;
+        case Result::ErrorValuePolicy::None:
+            return SchemaValidator::ErrorValuePolicy::None;
+        case Result::ErrorValuePolicy::Full:
+        default:
+            return SchemaValidator::ErrorValuePolicy::Full;
+    }
+}
+
+} // namespace
 
 RequestValidator &
 RequestValidator::set_error_value_policy(Result::ErrorValuePolicy policy, std::size_t preview_bytes) noexcept {
@@ -26,12 +42,15 @@ RequestValidator::set_error_value_policy(Result::ErrorValuePolicy policy, std::s
     if (preview_bytes > kMaxPreview)
         preview_bytes = kMaxPreview;
     _error_value_preview_bytes = preview_bytes;
+    if (_body_schema_validator)
+        _body_schema_validator->set_error_value_policy(to_schema_policy(policy), preview_bytes);
     return *this;
 }
 
 RequestValidator &
 RequestValidator::for_body(const qb::json &schema_definition) {
     _body_schema_validator.emplace(schema_definition);
+    _body_schema_validator->set_error_value_policy(to_schema_policy(_error_value_policy), _error_value_preview_bytes);
     return *this;
 }
 
@@ -135,16 +154,24 @@ RequestValidator::validate(qb::http::Request &request, Result &result, const qb:
     if (!_header_sanitizers.empty()) {
         auto  &headers_map            = request.headers(); // mutable reference
         Result header_sanitize_result = result.make_child();
+        bool   content_type_changed   = false;
         for (auto &header_pair : headers_map) {
             const auto &header_name   = header_pair.first;
             auto        it_sanitizers = _header_sanitizers.find(header_name);
             if (it_sanitizers != _header_sanitizers.end()) {
+                const bool is_content_type = header_name == "content-type"; // icase map stores lower-case keys
                 for (std::string &value_str : header_pair.second) {
                     // mutable reference
                     bool sanitizer_failed = false;
                     for (const auto &sanitizer_func : it_sanitizers->second) {
                         try {
-                            value_str = sanitizer_func(value_str);
+                            if (is_content_type) {
+                                std::string sanitized = sanitizer_func(value_str);
+                                content_type_changed |= sanitized != value_str;
+                                value_str = std::move(sanitized);
+                            } else {
+                                value_str = sanitizer_func(value_str);
+                            }
                         } catch (const std::exception &e) {
                             header_sanitize_result.add_error("header." + header_name, "sanitizeException.header",
                                                              "Header sanitizer threw exception: " + std::string(e.what()), value_str);
@@ -165,6 +192,8 @@ RequestValidator::validate(qb::http::Request &request, Result &result, const qb:
                 }
             }
         }
+        if (content_type_changed)
+            request.refresh_content_type();
         result.merge(header_sanitize_result);
     }
 

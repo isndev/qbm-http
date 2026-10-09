@@ -305,6 +305,8 @@ router().use(qb::http::validation_middleware<qb::http::DefaultSession>(rv));  //
 ```
 
 - `validate()` **mutates the request** (sanitizers rewrite query/header values in place; a sanitized body is re-serialized). Capture raw input before validating if you need it.
+- A changed `Content-Type` sanitizer result refreshes `request.content_type()`; error-value policy reaches both body schema and parameters regardless of whether it is set before or after `for_body`.
+- A parameter `CustomRule` returning `false` without adding an error still rejects the request with a generic error named for that rule. `Preview` trims to a complete UTF-8 prefix within its byte limit.
 - Most primitive rules are type-gated and pass silently for the wrong kind — always assert `type` first.
 - `SchemaValidator` caches compiled rules lazily and is not thread-safe to first-touch; warm it on the owning thread or use one per core.
 

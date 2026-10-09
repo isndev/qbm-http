@@ -12,8 +12,22 @@
  * @ingroup Http
  */
 #include "error.h"
+#include <string_view>
 
 namespace qb::http::validation {
+namespace {
+
+// The byte at the first excluded position is a continuation byte only when
+// the budget splits a UTF-8 code point. Keep the longest complete prefix.
+std::size_t
+utf8_prefix_length(std::string_view value, std::size_t byte_budget) noexcept {
+    std::size_t end = byte_budget;
+    while (end > 0 && (static_cast<unsigned char>(value[end]) & 0xc0u) == 0x80u)
+        --end;
+    return end;
+}
+
+} // namespace
 
 Result &
 Result::set_error_value_policy(ErrorValuePolicy policy, std::size_t preview_bytes) noexcept {
@@ -65,12 +79,12 @@ Result::apply_policy(std::optional<qb::json> value) const {
         const auto &s = v.get_ref<const std::string &>();
         if (s.size() <= _preview_bytes)
             return value;
-        return qb::json(s.substr(0, _preview_bytes));
+        return qb::json(s.substr(0, utf8_prefix_length(s, _preview_bytes)));
     }
     std::string dumped = v.dump();
     if (dumped.size() <= _preview_bytes)
         return value;
-    dumped.resize(_preview_bytes);
+    dumped.resize(utf8_prefix_length(dumped, _preview_bytes));
     return qb::json{{"_truncated", true}, {"preview", std::move(dumped)}, {"original_kind", v.type_name()}};
 }
 

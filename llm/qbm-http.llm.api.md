@@ -406,6 +406,7 @@ Usage: `qb::http::auth::Manager m{o}; auto tok = m.generate_token(user); auto u 
 ### `qb::http::validation::Result` — `src/qbm/http/validation/error.h:59`
 `class Result { enum class ErrorValuePolicy{Full,Preview,None}; Result& set_error_value_policy(ErrorValuePolicy, std::size_t preview_bytes=256) noexcept; bool success() const; const std::vector<Error>& errors() const; void add_error(path,rule,msg,value=std::nullopt); void add_error(Error); void clear(); void merge(const Result&); Result make_child() const; }`
 `success() == errors().empty()`; `preview_bytes` clamped to `[16, 64*1024]`.
+`Preview` keeps the longest complete UTF-8 prefix within the byte budget for strings and serialized compound values.
 
 ### Rules — `src/qbm/http/validation/rule.h`
 - `enum class DataType{STRING,INTEGER,NUMBER,BOOLEAN,OBJECT,ARRAY,NUL,ANY}` (`rule.h:31`).
@@ -420,6 +421,7 @@ Usage: `qb::http::validation::SchemaValidator v{schema}; qb::http::validation::R
 ### Parameters — `src/qbm/http/validation/parameter_validator.h`
 - `struct ParameterRuleSet { std::string name; DataType expected_type=STRING; bool required=false; std::optional<std::string> default_value; std::vector<std::shared_ptr<IRule>> rules; std::function<qb::json(const std::string&,bool&)> custom_parser; }` + fluent `set_type/set_required/set_default/add_rule/set_custom_parser` (`parameter_validator.h:35`).
 - `class ParameterValidator { explicit ParameterValidator(bool strict_mode=false); void add_param(ParameterRuleSet); bool validate(const qb::icase_unordered_map<std::string>& params, Result&, const std::string& source_name) const; qb::json validate_single(name, const std::optional<std::string>& value, const ParameterRuleSet&, Result&, source_name) const; const qb::icase_unordered_map<ParameterRuleSet>& get_param_definitions() const; void set_strict_mode(bool); bool is_strict_mode() const; }` (`parameter_validator.h:115`).
+  A rule returning `false` without adding an error produces a generic error named by `rule_name()`; an explicit rule error is not duplicated.
 
 ### Sanitizers — `src/qbm/http/validation/sanitizer.h`
 - `using SanitizerFunction=std::function<std::string(const std::string&)>` (`sanitizer.h:26`).
@@ -429,6 +431,7 @@ Usage: `qb::http::validation::SchemaValidator v{schema}; qb::http::validation::R
 ### `qb::http::validation::RequestValidator` — `src/qbm/http/validation/request_validator.h:34`
 `class RequestValidator { RequestValidator& for_body(const qb::json& schema); for_query_param(name, ParameterRuleSet); for_header(name, ParameterRuleSet); for_path_param(name, ParameterRuleSet) /*strict*/; add_body_sanitizer(field_path, SanitizerFunction); add_query_param_sanitizer(name, SanitizerFunction); add_header_sanitizer(name, SanitizerFunction); bool validate(qb::http::Request&, Result&, const qb::http::PathParameters* =nullptr); RequestValidator& set_error_value_policy(Result::ErrorValuePolicy, preview_bytes=256) noexcept; }`
 Composes body-schema + query/header/path validators + sanitizers. `validate()` mutates the request (sanitizers run first), merges errors, returns true if fully valid. `for_body` may throw if schema not an object.
+The configured error-value policy reaches the body schema in either setter/`for_body` order. A header sanitizer that changes `Content-Type` refreshes the typed `request.content_type()` cache before validation continues.
 Usage: `auto rv = std::make_shared<qb::http::validation::RequestValidator>(); rv->for_body(schema);`
 
 ---

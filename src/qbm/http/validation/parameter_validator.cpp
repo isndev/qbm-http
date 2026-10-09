@@ -175,8 +175,11 @@ ParameterValidator::validate_single(const std::string &param_name, const std::op
     bool all_rules_passed = true;
     for (const auto &rule : rules.rules) {
         try {
+            const std::size_t errors_before = result.errors().size();
             if (!rule->validate(parsed_value, field_path, result)) {
                 all_rules_passed = false;
+                if (result.errors().size() == errors_before)
+                    result.add_error(field_path, rule->rule_name(), "Parameter failed validation rule.", parsed_value);
                 // Unlike schema keywords, for parameters, we typically stop at the first rule failure for a single parameter.
                 // However, the current loop continues, which might be desired if multiple errors for one param are needed.
                 // For now, let it collect all. If first-fail is desired, add 'break;' here.

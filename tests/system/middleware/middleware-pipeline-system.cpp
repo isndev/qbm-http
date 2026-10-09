@@ -906,4 +906,30 @@ TEST_F(MiddlewarePipelineTest, ValidationMiddlewareRejectsInvalidBody) {
     EXPECT_TRUE(email_pattern_error_found) << "email pattern error not found in: " << error_response.dump(2);
 }
 
+TEST_F(MiddlewarePipelineTest, ValidationMiddlewareSanitizesContentTypeForHandler) {
+    auto server = start_pipeline_server(_port, [](PipelineServer &srv) {
+        auto validator = std::make_shared<qb::http::validation::RequestValidator>();
+        validator->add_header_sanitizer("content-type", [](const std::string &value) -> std::string {
+            if (value == "application/json; charset=utf-8")
+                return "text/plain; charset=iso-8859-1";
+            return value;
+        });
+        srv.router().use(qb::http::validation_middleware<PipelineSession>(validator));
+        srv.router().post("/sanitized_content_type", [](std::shared_ptr<PipelineCtx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = ctx->request().header("Content-Type") + "|" + ctx->request().content_type().type() + "|"
+                                       + ctx->request().content_type().charset();
+            ctx->complete();
+        });
+    });
+    ASSERT_TRUE(server->ready());
+
+    qb::http::Request request{qb::http::method::POST, {base_url() + "/sanitized_content_type"}};
+    request.body() = "{}";
+    request.set_header("Content-Type", "application/json; charset=utf-8");
+    auto response = qb::http::run_sync(qb::http::POST(request)).response;
+    EXPECT_EQ(qb::http::status::OK, response.status());
+    EXPECT_EQ("text/plain; charset=iso-8859-1|text/plain|iso-8859-1", response.body().as<std::string>());
+}
+
 } // namespace
