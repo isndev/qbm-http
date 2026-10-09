@@ -89,6 +89,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Out-of-range native unsigned token times are rejected by `auth::Manager` (Huly QB-983).** In the explicitly
+  signature-unchecked verification mode, an unsigned `nbf` above `INT64_MAX` could become negative when converted to
+  `int64_t` and pass the time check. The manager now checks the unsigned range before converting it; in-range signed,
+  unsigned, and string claims keep their existing behavior.
+
 - **WebSocket client connection hardening (Huly QB-513, QB-609, QB-517).** A client destroyed
   during an in-flight transport connect no longer leaves a callback that can access it. A
   nonzero connect timeout now covers the transport and the HTTP Upgrade as one deadline, with

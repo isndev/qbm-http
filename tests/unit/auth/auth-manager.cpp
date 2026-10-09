@@ -30,6 +30,7 @@
  */
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -698,17 +699,9 @@ TEST(AuthManagerUnverified, NonNumericNbfIsRejected) {
     EXPECT_FALSE(mgr.verify_token(token).has_value());
 }
 
-// A NATIVE integer `exp` drives the is_number_integer() arm of
-// parse_time_claim_as_int64 — distinct from the stringified exp qb::jwt::create
+// A native integer `exp` is distinct from the stringified exp qb::jwt::create
 // emits (is_string arm) and the float exp covered elsewhere (rejected). A future
-// integer exp parses cleanly and the token is accepted, pinning the integer-claim
-// path the other exp tests never reach.
-//
-// NOTE: the sibling `is_number_unsigned() && > INT64_MAX` block in
-// parse_time_claim_as_int64 is dead code — nlohmann's is_number_integer() already
-// returns true for unsigned values, so an unsigned claim is consumed by the arm
-// above before the unsigned branch is ever reached. There is therefore no input
-// that exercises it, and no test is written for it.
+// integer exp parses cleanly and the token is accepted.
 TEST(AuthManagerUnverified, NativeIntegerExpClaimIsAccepted) {
     Options opts = hmac_options();
     opts.require_signature_verification(false);
@@ -722,6 +715,41 @@ TEST(AuthManagerUnverified, NativeIntegerExpClaimIsAccepted) {
     auto out = mgr.verify_token(token);
     ASSERT_TRUE(out.has_value());
     EXPECT_EQ(out->id, "u");
+}
+
+TEST(AuthManagerUnverified, NativeUnsignedTimeClaimsOutsideInt64AreRejected) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    Manager mgr(opts);
+
+    // The raw helper preserves the JSON unsigned type. The claim-map helper
+    // would turn these numbers into strings before Manager sees them.
+    for (const auto value :
+         {static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1, std::numeric_limits<std::uint64_t>::max()}) {
+        for (const auto *claim : {"exp", "nbf"}) {
+            qb::json payload;
+            payload["sub"]   = "u";
+            payload[claim]   = value;
+            const auto token = forge_token_raw_payload(payload);
+            EXPECT_FALSE(mgr.verify_token(token).has_value()) << claim << "=" << value;
+        }
+    }
+}
+
+TEST(AuthManagerUnverified, NativeTimeClaimsWithinInt64AreAccepted) {
+    Options opts = hmac_options();
+    opts.require_signature_verification(false);
+    Manager mgr(opts);
+
+    qb::json payload;
+    payload["sub"] = "u";
+    payload["exp"] = now_epoch() + 3600;
+    payload["nbf"] = now_epoch() - 60;
+    EXPECT_TRUE(mgr.verify_token(forge_token_raw_payload(payload)).has_value());
+
+    payload["exp"] = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    payload["nbf"] = std::int64_t{-1};
+    EXPECT_TRUE(mgr.verify_token(forge_token_raw_payload(payload)).has_value());
 }
 
 // ---------------------------------------------------------------------------
