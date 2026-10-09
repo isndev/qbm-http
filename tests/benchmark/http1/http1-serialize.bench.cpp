@@ -123,7 +123,7 @@ serialize_loop(benchmark::State &state, const Message &message) {
         benchmark::DoNotOptimize(out.begin());
         benchmark::DoNotOptimize(out.size());
 
-        // reset() is three integer assignments (pipe.h:308-311) — no free. Resetting inline costs
+        // reset() is three integer assignments (pipe.h:314-317) — no free. Resetting inline costs
         // far less than the PauseTiming/ResumeTiming pair it used to be wrapped in (each ~hundreds
         // of ns), which only added wall-time + noise. Matches route-match / ws-throughput.
         out.reset();
