@@ -310,7 +310,8 @@ TEST_F(ValidationParameterTest, CustomRuleKeepsExplicitErrorAndAcceptsSuccess) {
         [](const qb::json &value, const std::string &path, Result &result) {
             if (value == "allow")
                 return true;
-            result.add_error(path, "specificDenial", "Token denied.", value);
+            // nlohmann >= 3.12 cannot copy-initialise std::optional<json> from a json lvalue: pass the optional.
+            result.add_error(path, "specificDenial", "Token denied.", std::optional<qb::json>(value));
             return false;
         },
         "tokenDenied")));
