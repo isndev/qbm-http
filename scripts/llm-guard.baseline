@@ -24,5 +24,5 @@ llm/qbm-http.llm.api.md	symbol:qb_load_modules	qb's own CMake function, defined 
 llm/qbm-http.llm.md	symbol:qb_load_modules	as above — qb/cmake/qbFunctions.cmake.
 llm/qbm-http.llm.md	symbol:create_server_context	qb-io's TLS helper `qb::io::ssl::create_server_context`, declared in qb/src/qb/io/tcp/ssl/socket.h. qbm-http builds an SSL_CTX with it and hands it to the transport.
 llm/qbm-http.llm.md	symbol:set_supported_alpn_protocols	qb-io's ALPN setter on the SSL listener transport, declared in qb/src/qb/io/tcp/ssl/listener.h.
-llm/qbm-http.llm.md	symbol:TLS_server_method	OpenSSL, not qb and not qbm-http. Reached through qb-io's ssl API and used by qb itself at qb/src/qb/io/tcp/ssl/context.cpp:366. No repo in this family declares it.
+llm/qbm-http.llm.md	symbol:TLS_server_method	OpenSSL, not qb and not qbm-http. Reached through qb-io's ssl API and used by qb itself at qb/src/qb/io/tcp/ssl/context.cpp:375. No repo in this family declares it.
 llm/qbm-http.llm.md	symbol:target_link_libraries	a CMake built-in command, declared by no C++ project. It appears in a build-integration snippet.

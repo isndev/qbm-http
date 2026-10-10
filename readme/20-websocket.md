@@ -105,12 +105,12 @@ public:
 };
 ```
 
-`switch_protocol` has two server overloads. It constructs the selected protocol and returns its pointer on success. <!-- src: qb/src/qb/io/async/io.h:905-916 -->
+`switch_protocol` has two server overloads. It constructs the selected protocol and returns its pointer on success. <!-- src: qb/src/qb/io/async/io.h:917-928 -->
 
 - **One-call form** — validates the handshake, builds the `101` response, **and queues it on the session** before installing the framer. This is the form shown above. <!-- src: src/qbm/http/ws/ws.h:960-967 -->
 - **`switch_protocol<ws_protocol>(*this, request, response)`** — fills a `response` you own but does **not** send it, so you can add headers (or transfer the socket to another actor) before flushing it yourself with `session << response`. Use this when an HTTP router handled the request and you want to hand the upgrade off. <!-- src: src/qbm/http/ws/ws.h:976-985; examples/06-modules/ws/01-chat-server.cpp:610-630 -->
 
-`switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/src/qb/io/async/io.h:905-916 -->
+`switch_protocol<_Protocol>(...)` returns a `_Protocol*` (here a `ws_protocol*`), not a `bool`: it yields the installed protocol pointer on success and `nullptr` — marking the protocol `not_ok` — when the request is not a valid RFC 6455 upgrade. Test it as a pointer (`if (!this->switch_protocol<ws_protocol>(...))`). On failure, either `disconnect()` or queue a `400` HTTP response and `close_after_deliver()` so the client sees the error before the socket closes. <!-- src: qb/src/qb/io/async/io.h:917-928 -->
 
 ### What the handshake validator enforces
 
