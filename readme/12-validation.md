@@ -94,18 +94,20 @@ The concrete rules below map one-to-one onto JSON-Schema keywords. You rarely in
 | Rule (constructor) | `rule_name()` | Applies to |
 | --- | --- | --- |
 | `TypeRule(DataType)` | `"type"` | any — checks the JSON kind |
-| `MinLengthRule(size_t)` / `MaxLengthRule(size_t)` | `"minLength"` / `"maxLength"` | strings (char count) and arrays (element count) |
+| `MinLengthRule(size_t)` / `MaxLengthRule(size_t)` | `"minLength"` / `"maxLength"` | strings (Unicode code-point count); arrays retain the module's historical element-count extension |
 | `PatternRule(std::string regex)` | `"pattern"` | strings — full `std::regex_match` |
-| `MinimumRule(double, bool exclusive=false)` | `"minimum"` / `"exclusiveMinimum"` | numbers |
-| `MaximumRule(double, bool exclusive=false)` | `"maximum"` / `"exclusiveMaximum"` | numbers |
-| `EnumRule(qb::json allowed_values)` | `"enum"` | any — membership in a set |
+| `MinimumRule(double, bool exclusive=false)` | `"minimum"` / `"exclusiveMinimum"` | numbers; also accepts integral or `qb::json` bounds without rounding |
+| `MaximumRule(double, bool exclusive=false)` | `"maximum"` / `"exclusiveMaximum"` | numbers; also accepts integral or `qb::json` bounds without rounding |
+| `EnumRule(qb::json allowed_values)` | `"enum"` | any — exact JSON value membership, including mixed numeric kinds |
 | `MinItemsRule(size_t)` / `MaxItemsRule(size_t)` | `"minItems"` / `"maxItems"` | arrays |
-| `UniqueItemsRule()` | `"uniqueItems"` | arrays |
+| `UniqueItemsRule()` | `"uniqueItems"` | arrays — recursive JSON equality, including numerically equal integer/floating values |
 | `MinPropertiesRule(size_t)` / `MaxPropertiesRule(size_t)` | `"minProperties"` / `"maxProperties"` | objects |
 | `PropertyNamesRule(const qb::json& name_schema_definition)` | `"propertyNames"` | objects — validates keys against a sub-schema |
 | `CustomRule(CustomValidateFn, std::string name)` | your name | any — arbitrary lambda |
 
 `DataType` is the kind enum used by both rules and parameter coercion: `STRING`, `INTEGER`, `NUMBER`, `BOOLEAN`, `OBJECT`, `ARRAY`, `NUL`, `ANY`.
+
+Length counts Unicode code points, not UTF-8 bytes or grapheme clusters: `"é"` is one, while `"e"` followed by a combining accent is two. Directly constructed `qb::json` strings with malformed UTF-8 fail length validation without placing their invalid bytes in the error value. Parsed JSON input is already checked by the parser. Counting a long multibyte string visits its encoded bytes; short ASCII strings use a fast path. Numeric bounds and equality keep distinctions among signed integers, unsigned integers, and floating values representable by `qb::json`; an integer beyond 2⁵³ no longer rounds through `double` during validation. A programmatically constructed NaN/infinite schema bound produces a validation error when evaluated.
 
 `CustomRule` expresses logic no built-in rule covers:
 
@@ -129,7 +131,7 @@ If a parameter rule returns `false` without adding an error, `ParameterValidator
 
 > **Most primitive rules are type-gated and pass silently for the wrong kind.** Numeric rules pass for non-numbers, item/array rules pass for non-arrays, property-count rules pass for non-objects, and `PatternRule` passes for non-strings. Absence of an error therefore does **not** mean the constraint was checked — it may mean the value was the wrong kind. Always pair a constraint with a `type` keyword (in a schema) or `set_type(...)` (in a parameter rule set) so the kind is asserted first.
 
-> **Some constructors throw at build time, not at `validate()` time.** `PatternRule` throws `std::invalid_argument` if the pattern exceeds 1024 characters or fails to compile as an ECMAScript regex. `EnumRule` throws `std::invalid_argument` if its argument is not a JSON array. `SchemaValidator`'s constructor (and therefore `RequestValidator::for_body`) throws `std::invalid_argument` if the schema is not a JSON object. Wrap construction in `try/catch` when the schema or pattern comes from untrusted input.
+> **Some constructors throw at build time, not at `validate()` time.** `PatternRule` throws `std::invalid_argument` if the pattern exceeds 1024 characters or fails to compile as an ECMAScript regex. `EnumRule` throws if its argument is not a JSON array; `MinimumRule(qb::json)` and `MaximumRule(qb::json)` throw if their bounds are not numbers. `SchemaValidator`'s constructor (and therefore `RequestValidator::for_body`) throws if the schema is not a JSON object. Wrap construction in `try/catch` when the schema or pattern comes from untrusted input.
 
 > **`PatternRule` is a ReDoS surface.** It uses `std::regex_match` (full match, not search) and has no execution timeout. To bound cost it rejects inputs longer than 2 KiB (`MAX_REGEX_INPUT_LENGTH`) and caps pattern length at 1024 characters, but a pathological pattern can still be super-linear. Prefer linear-time patterns. The 2 KiB input cap is deliberately small: libstdc++'s `std::regex` executor recurses one stack frame per matched character, so a longer input against even a benign `.*` pattern overflows the stack (measured to crash above ~4 KiB on Linux) — the cap keeps matching below that limit. Validate larger payloads by other means.
 
@@ -141,7 +143,7 @@ If a parameter rule returns `false` without adding an error, `ParameterValidator
 
 - **Type:** `type` (a single string or an array of allowed type names).
 - **Strings:** `minLength`, `maxLength`, `pattern`.
-- **Numbers:** `minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`.
+- **Numbers:** `minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`. Numeric exclusive bounds work independently, as in JSON Schema 2020-12. The older boolean `exclusiveMinimum`/`exclusiveMaximum` alongside `minimum`/`maximum` remains supported for existing schemas.
 - **Any value:** `enum`.
 - **Arrays:** `items` (one schema for all, or an array of schemas for tuple positions), `additionalItems`, `minItems`, `maxItems`, `uniqueItems`.
 - **Objects:** `properties`, `required`, `additionalProperties` (bool or schema), `minProperties`, `maxProperties`, `propertyNames`.

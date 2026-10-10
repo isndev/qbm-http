@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <concepts>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -170,8 +171,8 @@ public:
 /** @brief Validates that a number is greater than (or equal to if not exclusive) a minimum value. */
 class MinimumRule : public IRule {
 private:
-    double _minimum;
-    bool   _exclusive;
+    qb::json _minimum;
+    bool     _exclusive;
 
 public:
     /**
@@ -179,9 +180,13 @@ public:
      * @param min_val The minimum value to compare against.
      * @param exclusive If true, the value must be strictly greater than @p min_val.
      */
-    MinimumRule(double min_val, bool exclusive = false)
-        : _minimum(min_val)
-        , _exclusive(exclusive) {}
+    MinimumRule(double min_val, bool exclusive = false);
+    MinimumRule(qb::json min_val, bool exclusive = false);
+
+    template <std::integral Integer>
+    requires(!std::same_as<Integer, bool>)
+    MinimumRule(Integer min_val, bool exclusive = false)
+        : MinimumRule(qb::json(min_val), exclusive) {}
 
     bool validate(const qb::json &value, const std::string &field_path, Result &result) const override;
 
@@ -194,8 +199,8 @@ public:
 /** @brief Validates that a number is less than (or equal to if not exclusive) a maximum value. */
 class MaximumRule : public IRule {
 private:
-    double _maximum;
-    bool   _exclusive;
+    qb::json _maximum;
+    bool     _exclusive;
 
 public:
     /**
@@ -203,9 +208,13 @@ public:
      * @param max_val The maximum value to compare against.
      * @param exclusive If true, the value must be strictly less than @p max_val.
      */
-    MaximumRule(double max_val, bool exclusive = false)
-        : _maximum(max_val)
-        , _exclusive(exclusive) {}
+    MaximumRule(double max_val, bool exclusive = false);
+    MaximumRule(qb::json max_val, bool exclusive = false);
+
+    template <std::integral Integer>
+    requires(!std::same_as<Integer, bool>)
+    MaximumRule(Integer max_val, bool exclusive = false)
+        : MaximumRule(qb::json(max_val), exclusive) {}
 
     bool validate(const qb::json &value, const std::string &field_path, Result &result) const override;
 

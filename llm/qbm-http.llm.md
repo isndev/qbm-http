@@ -307,6 +307,7 @@ router().use(qb::http::validation_middleware<qb::http::DefaultSession>(rv));  //
 - `validate()` **mutates the request** (sanitizers rewrite query/header values in place; a sanitized body is re-serialized). Capture raw input before validating if you need it.
 - A changed `Content-Type` sanitizer result refreshes `request.content_type()`; error-value policy reaches both body schema and parameters regardless of whether it is set before or after `for_body`.
 - A parameter `CustomRule` returning `false` without adding an error still rejects the request with a generic error named for that rule. `Preview` trims to a complete UTF-8 prefix within its byte limit.
+- String length rules count Unicode code points, not UTF-8 bytes; malformed programmatic strings fail without echoing their invalid bytes. JSON numeric limits and `enum`/`uniqueItems` preserve exact 64-bit integer distinctions, including inside arrays and objects. Numeric `exclusiveMinimum`/`exclusiveMaximum` are independent bounds; the prior boolean form beside `minimum`/`maximum` remains an extension for existing schemas.
 - Most primitive rules are type-gated and pass silently for the wrong kind — always assert `type` first.
 - `SchemaValidator` caches compiled rules lazily and is not thread-safe to first-touch; warm it on the owning thread or use one per core.
 

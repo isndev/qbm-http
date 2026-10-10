@@ -104,13 +104,19 @@ SchemaValidator::build_rules_for_schema_node(const qb::json &schema_node) {
         rules.push_back(std::make_shared<PatternRule>(schema_node["pattern"].get<std::string>()));
     }
     if (schema_node.contains("minimum") && schema_node["minimum"].is_number()) {
-        bool exclusive = schema_node.value("exclusiveMinimum", false);
-        rules.push_back(std::make_shared<MinimumRule>(schema_node["minimum"].get<double>(), exclusive));
+        const bool legacy_exclusive = schema_node.contains("exclusiveMinimum") && schema_node["exclusiveMinimum"].is_boolean()
+                                      && schema_node["exclusiveMinimum"].get<bool>();
+        rules.push_back(std::make_shared<MinimumRule>(schema_node["minimum"], legacy_exclusive));
     }
     if (schema_node.contains("maximum") && schema_node["maximum"].is_number()) {
-        bool exclusive = schema_node.value("exclusiveMaximum", false);
-        rules.push_back(std::make_shared<MaximumRule>(schema_node["maximum"].get<double>(), exclusive));
+        const bool legacy_exclusive = schema_node.contains("exclusiveMaximum") && schema_node["exclusiveMaximum"].is_boolean()
+                                      && schema_node["exclusiveMaximum"].get<bool>();
+        rules.push_back(std::make_shared<MaximumRule>(schema_node["maximum"], legacy_exclusive));
     }
+    if (schema_node.contains("exclusiveMinimum") && schema_node["exclusiveMinimum"].is_number())
+        rules.push_back(std::make_shared<MinimumRule>(schema_node["exclusiveMinimum"], true));
+    if (schema_node.contains("exclusiveMaximum") && schema_node["exclusiveMaximum"].is_number())
+        rules.push_back(std::make_shared<MaximumRule>(schema_node["exclusiveMaximum"], true));
     if (schema_node.contains("enum") && schema_node["enum"].is_array()) {
         rules.push_back(std::make_shared<EnumRule>(schema_node["enum"]));
     }

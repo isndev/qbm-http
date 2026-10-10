@@ -89,6 +89,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **JSON Schema validation preserves Unicode and numeric meaning (Huly QB-549, QB-550, QB-551).**
+  `minLength`/`maxLength` count Unicode code points rather than UTF-8 bytes, rejecting malformed
+  programmatic strings without echoing them in an error. Numeric bounds compare signed, unsigned,
+  and floating values without rounding 64-bit integers through `double`; numeric exclusive bounds
+  work on their own while the earlier boolean form remains supported. `uniqueItems` and `enum`
+  use recursive JSON equality, so mixed numeric representations compare by value even inside objects.
+  Long multibyte strings now require a linear Unicode scan where the former byte-count check
+  was constant-time; the short-ASCII path remains fast.
 - **Static file index paths stay inside the configured root (Huly QB-538).** Directory index selection now checks
   the canonical target and applies the symlink policy before serving the file; its MIME type follows the configured
   index name.

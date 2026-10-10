@@ -13,12 +13,296 @@
  */
 #include "./rule.h"
 #include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <qb/system/container/unordered_set.h>
 #include "./schema_validator.h"
 
 namespace qb::http::validation {
+namespace {
+
+std::optional<std::size_t>
+utf8_code_point_count(std::string_view text) noexcept {
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < text.size();) {
+        const auto first = static_cast<unsigned char>(text[i]);
+        if (first < 0x80u) {
+            // ASCII blocks count one code point per byte. memcpy permits
+            // unaligned loads on every supported architecture without aliasing UB.
+            constexpr std::uint64_t kHighBits = 0x8080808080808080ull;
+            while (text.size() - i >= 4 * sizeof(std::uint64_t)) {
+                std::uint64_t words[4];
+                std::memcpy(words, text.data() + i, sizeof(words));
+                if (((words[0] | words[1] | words[2] | words[3]) & kHighBits) != 0)
+                    break;
+                i += sizeof(words);
+                count += sizeof(words);
+            }
+            while (text.size() - i >= sizeof(std::uint64_t)) {
+                std::uint64_t bytes;
+                std::memcpy(&bytes, text.data() + i, sizeof(bytes));
+                if ((bytes & kHighBits) != 0)
+                    break;
+                i += sizeof(bytes);
+                count += sizeof(bytes);
+            }
+            while (i < text.size() && static_cast<unsigned char>(text[i]) < 0x80u) {
+                ++i;
+                ++count;
+            }
+            continue;
+        }
+
+        if constexpr (std::endian::native == std::endian::little) {
+            if (first >= 0xc2u && first <= 0xdfu) {
+                // A word holds four two-byte scalars: C2-DF at even offsets,
+                // 80-BF at odd offsets. Test every lead's low bits too, so
+                // overlong C0/C1 cannot slip in at a later block boundary.
+                const auto four_pairs_valid = [](std::uint64_t pairs) noexcept {
+                    constexpr std::uint64_t kLeadMask    = 0x00e000e000e000e0ull;
+                    constexpr std::uint64_t kLeadPattern = 0x00c000c000c000c0ull;
+                    constexpr std::uint64_t kTailMask    = 0xc000c000c000c000ull;
+                    constexpr std::uint64_t kTailPattern = 0x8000800080008000ull;
+                    constexpr std::uint64_t kLeadLowBits = 0x001e001e001e001eull;
+                    const auto              low_bits     = pairs & kLeadLowBits;
+                    return (pairs & kLeadMask) == kLeadPattern && (pairs & kTailMask) == kTailPattern && (low_bits & 0x000000000000001eull) != 0
+                           && (low_bits & 0x00000000001e0000ull) != 0 && (low_bits & 0x0000001e00000000ull) != 0
+                           && (low_bits & 0x001e000000000000ull) != 0;
+                };
+                const auto start = i;
+                while (text.size() - i >= 4 * sizeof(std::uint64_t)) {
+                    std::uint64_t blocks[4];
+                    std::memcpy(blocks, text.data() + i, sizeof(blocks));
+                    if (!four_pairs_valid(blocks[0]) || !four_pairs_valid(blocks[1]) || !four_pairs_valid(blocks[2])
+                        || !four_pairs_valid(blocks[3]))
+                        break;
+                    i += sizeof(blocks);
+                    count += 16;
+                }
+                while (text.size() - i >= sizeof(std::uint64_t)) {
+                    std::uint64_t pairs;
+                    std::memcpy(&pairs, text.data() + i, sizeof(pairs));
+                    if (!four_pairs_valid(pairs))
+                        break;
+                    i += sizeof(pairs);
+                    count += 4;
+                }
+                if (i != start)
+                    continue;
+            }
+        }
+
+        std::size_t width = 0;
+        if (first >= 0xc2u && first <= 0xdfu)
+            width = 2;
+        else if (first >= 0xe0u && first <= 0xefu)
+            width = 3;
+        else if (first >= 0xf0u && first <= 0xf4u)
+            width = 4;
+        else
+            return std::nullopt;
+        if (width > text.size() - i)
+            return std::nullopt;
+
+        const auto second = static_cast<unsigned char>(text[i + 1]);
+        if ((second & 0xc0u) != 0x80u || (first == 0xe0u && second < 0xa0u) || (first == 0xedu && second > 0x9fu)
+            || (first == 0xf0u && second < 0x90u) || (first == 0xf4u && second > 0x8fu))
+            return std::nullopt;
+        for (std::size_t j = 2; j < width; ++j)
+            if ((static_cast<unsigned char>(text[i + j]) & 0xc0u) != 0x80u)
+                return std::nullopt;
+        i += width;
+        ++count;
+    }
+    return count;
+}
+
+template <typename T>
+int
+compare_same_kind(T lhs, T rhs) noexcept {
+    return static_cast<int>(lhs > rhs) - static_cast<int>(lhs < rhs);
+}
+
+std::optional<int>
+compare_signed_to_double(std::int64_t lhs, double rhs) noexcept {
+    if (std::isnan(rhs))
+        return std::nullopt;
+    constexpr double kTwoTo63 = 0x1p63;
+    if (rhs < -kTwoTo63)
+        return 1;
+    if (rhs >= kTwoTo63)
+        return -1;
+    const double whole    = std::trunc(rhs);
+    const auto   integral = static_cast<std::int64_t>(whole);
+    if (lhs != integral)
+        return compare_same_kind(lhs, integral);
+    return compare_same_kind(whole, rhs);
+}
+
+std::optional<int>
+compare_unsigned_to_double(std::uint64_t lhs, double rhs) noexcept {
+    if (std::isnan(rhs))
+        return std::nullopt;
+    constexpr double kTwoTo64 = 0x1p64;
+    if (rhs < 0.0)
+        return 1;
+    if (rhs >= kTwoTo64)
+        return -1;
+    const double whole    = std::trunc(rhs);
+    const auto   integral = static_cast<std::uint64_t>(whole);
+    if (lhs != integral)
+        return compare_same_kind(lhs, integral);
+    return compare_same_kind(whole, rhs);
+}
+
+std::optional<int>
+compare_numbers(const qb::json &lhs, const qb::json &rhs) noexcept {
+    if (lhs.is_number_unsigned()) {
+        const auto value = lhs.get<qb::json::number_unsigned_t>();
+        if (rhs.is_number_unsigned())
+            return compare_same_kind(value, rhs.get<qb::json::number_unsigned_t>());
+        if (rhs.is_number_integer()) {
+            const auto other = rhs.get<qb::json::number_integer_t>();
+            return other < 0 ? 1 : compare_same_kind(value, static_cast<std::uint64_t>(other));
+        }
+        return compare_unsigned_to_double(value, rhs.get<qb::json::number_float_t>());
+    }
+    if (lhs.is_number_integer()) {
+        const auto value = lhs.get<qb::json::number_integer_t>();
+        if (rhs.is_number_unsigned()) {
+            if (value < 0)
+                return -1;
+            return compare_same_kind(static_cast<std::uint64_t>(value), rhs.get<qb::json::number_unsigned_t>());
+        }
+        if (rhs.is_number_integer())
+            return compare_same_kind(value, rhs.get<qb::json::number_integer_t>());
+        return compare_signed_to_double(value, rhs.get<qb::json::number_float_t>());
+    }
+    const auto value = lhs.get<qb::json::number_float_t>();
+    if (rhs.is_number_unsigned()) {
+        const auto order = compare_unsigned_to_double(rhs.get<qb::json::number_unsigned_t>(), value);
+        return order ? std::optional<int>(-*order) : std::nullopt;
+    }
+    if (rhs.is_number_integer()) {
+        const auto order = compare_signed_to_double(rhs.get<qb::json::number_integer_t>(), value);
+        return order ? std::optional<int>(-*order) : std::nullopt;
+    }
+    const auto other = rhs.get<qb::json::number_float_t>();
+    if (std::isnan(value) || std::isnan(other))
+        return std::nullopt;
+    return compare_same_kind(value, other);
+}
+
+bool
+equal_json_values(const qb::json &lhs, const qb::json &rhs) {
+    if (lhs.is_number() && rhs.is_number()) {
+        const auto order = compare_numbers(lhs, rhs);
+        if (order)
+            return *order == 0;
+        // NaN is outside JSON, but programmatic qb::json values must still
+        // give the hash table a reflexive equality relation.
+        return lhs.is_number_float() && rhs.is_number_float() && std::isnan(lhs.get<double>()) && std::isnan(rhs.get<double>());
+    }
+    if (lhs.type() != rhs.type())
+        return false;
+    if (lhs.is_array()) {
+        if (lhs.size() != rhs.size())
+            return false;
+        for (std::size_t i = 0; i < lhs.size(); ++i)
+            if (!equal_json_values(lhs[i], rhs[i]))
+                return false;
+        return true;
+    }
+    if (lhs.is_object()) {
+        if (lhs.size() != rhs.size())
+            return false;
+        auto left  = lhs.begin();
+        auto right = rhs.begin();
+        for (; left != lhs.end(); ++left, ++right)
+            if (left.key() != right.key() || !equal_json_values(left.value(), right.value()))
+                return false;
+        return true;
+    }
+    return lhs == rhs;
+}
+
+std::size_t
+combine_hash(std::size_t seed, std::size_t value) noexcept {
+    return seed ^ (value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u));
+}
+
+std::size_t
+hash_number(const qb::json &value) noexcept {
+    constexpr std::size_t kNumberTag = 0x4e554d42u;
+    if (value.is_number_unsigned())
+        return combine_hash(kNumberTag, std::hash<std::uint64_t>{}(value.get<qb::json::number_unsigned_t>()));
+    if (value.is_number_integer()) {
+        const auto signed_value = value.get<qb::json::number_integer_t>();
+        if (signed_value >= 0)
+            return combine_hash(kNumberTag, std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(signed_value)));
+        return combine_hash(kNumberTag, std::hash<std::int64_t>{}(signed_value));
+    }
+    const auto number = value.get<qb::json::number_float_t>();
+    if (std::isnan(number))
+        return combine_hash(kNumberTag ^ 0x464c4f41u, 0x4e414e00u);
+    if (number == 0.0)
+        return combine_hash(kNumberTag, std::hash<std::uint64_t>{}(0));
+    if (std::isfinite(number) && std::trunc(number) == number) {
+        if (number >= 0.0 && number < 0x1p64)
+            return combine_hash(kNumberTag, std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(number)));
+        if (number < 0.0 && number >= -0x1p63)
+            return combine_hash(kNumberTag, std::hash<std::int64_t>{}(static_cast<std::int64_t>(number)));
+    }
+    return combine_hash(kNumberTag ^ 0x464c4f41u, std::hash<double>{}(number));
+}
+
+std::size_t
+hash_json_value(const qb::json &value) {
+    if (value.is_number())
+        return hash_number(value);
+    std::size_t seed = static_cast<std::size_t>(value.type());
+    if (value.is_array()) {
+        seed = combine_hash(seed, value.size());
+        for (const auto &item : value)
+            seed = combine_hash(seed, hash_json_value(item));
+    } else if (value.is_object()) {
+        seed = combine_hash(seed, value.size());
+        for (auto const &[key, item] : value.items()) {
+            seed = combine_hash(seed, std::hash<std::string>{}(key));
+            seed = combine_hash(seed, hash_json_value(item));
+        }
+    } else if (value.is_string()) {
+        seed = combine_hash(seed, std::hash<std::string>{}(value.get_ref<const std::string &>()));
+    } else if (value.is_boolean()) {
+        seed = combine_hash(seed, std::hash<bool>{}(value.get<bool>()));
+    } else {
+        seed = combine_hash(seed, std::hash<qb::json>{}(value));
+    }
+    return seed;
+}
+
+struct JsonPointerHash {
+    std::size_t
+    operator()(const qb::json *value) const {
+        return hash_json_value(*value);
+    }
+};
+
+struct JsonPointerEqual {
+    bool
+    operator()(const qb::json *lhs, const qb::json *rhs) const {
+        return equal_json_values(*lhs, *rhs);
+    }
+};
+
+} // namespace
 
 std::string
 TypeRule::data_type_to_string(DataType dt) noexcept {
@@ -98,7 +382,12 @@ RequiredRule::validate(const qb::json &value, const std::string &field_path, Res
 bool
 MinLengthRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
     if (value.is_string()) {
-        if (value.get<std::string>().length() < _min_length) {
+        const auto length = utf8_code_point_count(value.get_ref<const std::string &>());
+        if (!length) {
+            result.add_error(field_path, rule_name(), "String is not valid UTF-8.", std::nullopt);
+            return false;
+        }
+        if (*length < _min_length) {
             result.add_error(field_path, rule_name(), "String too short. Minimum length is " + std::to_string(_min_length) + ".",
                              std::make_optional(value));
             return false;
@@ -118,7 +407,12 @@ MinLengthRule::validate(const qb::json &value, const std::string &field_path, Re
 bool
 MaxLengthRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
     if (value.is_string()) {
-        if (value.get<std::string>().length() > _max_length) {
+        const auto length = utf8_code_point_count(value.get_ref<const std::string &>());
+        if (!length) {
+            result.add_error(field_path, rule_name(), "String is not valid UTF-8.", std::nullopt);
+            return false;
+        }
+        if (*length > _max_length) {
             result.add_error(field_path, rule_name(), "String too long. Maximum length is " + std::to_string(_max_length) + ".",
                              std::make_optional(value));
             return false;
@@ -203,20 +497,33 @@ PatternRule::validate(const qb::json &value, const std::string &field_path, Resu
     return true;
 }
 
+MinimumRule::MinimumRule(double min_val, bool exclusive)
+    : MinimumRule(qb::json(min_val), exclusive) {}
+
+MinimumRule::MinimumRule(qb::json min_val, bool exclusive)
+    : _minimum(std::move(min_val))
+    , _exclusive(exclusive) {
+    if (!_minimum.is_number())
+        throw std::invalid_argument("MinimumRule requires a numeric bound.");
+}
+
 bool
 MinimumRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
+    if (_minimum.is_number_float() && !std::isfinite(_minimum.get<double>())) {
+        result.add_error(field_path, rule_name(), "Numeric bound must be finite.", std::nullopt);
+        return false;
+    }
     if (!value.is_number())
         return true; // Rule only applies to numbers.
-    double num_val = value.get<double>();
+    const auto order = compare_numbers(value, _minimum);
     if (_exclusive) {
-        if (num_val <= _minimum) {
-            result.add_error(field_path, rule_name(), "Value must be greater than " + std::to_string(_minimum) + ".",
-                             std::make_optional(value));
+        if (!order || *order <= 0) {
+            result.add_error(field_path, rule_name(), "Value must be greater than " + _minimum.dump() + ".", std::make_optional(value));
             return false;
         }
     } else {
-        if (num_val < _minimum) {
-            result.add_error(field_path, rule_name(), "Value must be greater than or equal to " + std::to_string(_minimum) + ".",
+        if (!order || *order < 0) {
+            result.add_error(field_path, rule_name(), "Value must be greater than or equal to " + _minimum.dump() + ".",
                              std::make_optional(value));
             return false;
         }
@@ -224,19 +531,33 @@ MinimumRule::validate(const qb::json &value, const std::string &field_path, Resu
     return true;
 }
 
+MaximumRule::MaximumRule(double max_val, bool exclusive)
+    : MaximumRule(qb::json(max_val), exclusive) {}
+
+MaximumRule::MaximumRule(qb::json max_val, bool exclusive)
+    : _maximum(std::move(max_val))
+    , _exclusive(exclusive) {
+    if (!_maximum.is_number())
+        throw std::invalid_argument("MaximumRule requires a numeric bound.");
+}
+
 bool
 MaximumRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
+    if (_maximum.is_number_float() && !std::isfinite(_maximum.get<double>())) {
+        result.add_error(field_path, rule_name(), "Numeric bound must be finite.", std::nullopt);
+        return false;
+    }
     if (!value.is_number())
         return true; // Rule only applies to numbers.
-    double num_val = value.get<double>();
+    const auto order = compare_numbers(value, _maximum);
     if (_exclusive) {
-        if (num_val >= _maximum) {
-            result.add_error(field_path, rule_name(), "Value must be less than " + std::to_string(_maximum) + ".", std::make_optional(value));
+        if (!order || *order >= 0) {
+            result.add_error(field_path, rule_name(), "Value must be less than " + _maximum.dump() + ".", std::make_optional(value));
             return false;
         }
     } else {
-        if (num_val > _maximum) {
-            result.add_error(field_path, rule_name(), "Value must be less than or equal to " + std::to_string(_maximum) + ".",
+        if (!order || *order > 0) {
+            result.add_error(field_path, rule_name(), "Value must be less than or equal to " + _maximum.dump() + ".",
                              std::make_optional(value));
             return false;
         }
@@ -256,7 +577,7 @@ bool
 EnumRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
     bool found = false;
     for (const auto &allowed_val : _allowed_values) {
-        if (value == allowed_val) {
+        if (equal_json_values(value, allowed_val)) {
             found = true;
             break;
         }
@@ -273,9 +594,9 @@ UniqueItemsRule::validate(const qb::json &value, const std::string &field_path, 
     if (!value.is_array())
         return true; // Rule only applies to arrays.
 
-    qb::unordered_set<qb::json> seen_items;
+    qb::unordered_flat_set<const qb::json *, JsonPointerHash, JsonPointerEqual> seen_items;
     for (const auto &item : value) {
-        if (!seen_items.insert(item).second) {
+        if (!seen_items.insert(&item).second) {
             // .second is false if item was already present
             result.add_error(field_path, rule_name(), "Array items must be unique.", std::make_optional(value));
             // Report error on the whole array value

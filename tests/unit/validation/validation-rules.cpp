@@ -12,9 +12,13 @@
  * @ingroup Http
  */
 #include <gtest/gtest.h>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <qb/json.h>
 
@@ -172,6 +176,122 @@ TEST_F(ValidationRulesTest, MaxLengthRuleValidation) {
     EXPECT_TRUE(result.success());
 }
 
+TEST_F(ValidationRulesTest, StringLengthCountsUnicodeCodePoints) {
+    const qb::json one_code_point  = std::string("\xC3\xA9");  // U+00E9, two UTF-8 bytes
+    const qb::json two_code_points = std::string("e\xCC\x81"); // e + U+0301, three UTF-8 bytes
+
+    MaxLengthRule max_one(1);
+    result.clear();
+    EXPECT_TRUE(max_one.validate(one_code_point, "name", result));
+    EXPECT_TRUE(result.success());
+
+    MinLengthRule min_two(2);
+    result.clear();
+    EXPECT_FALSE(min_two.validate(one_code_point, "name", result));
+    EXPECT_FALSE(result.success());
+
+    result.clear();
+    EXPECT_TRUE(min_two.validate(two_code_points, "name", result));
+    EXPECT_TRUE(result.success());
+    result.clear();
+    EXPECT_FALSE(max_one.validate(two_code_points, "name", result));
+    EXPECT_FALSE(result.success());
+}
+
+TEST_F(ValidationRulesTest, StringLengthRejectsMalformedUtf8WithoutCopyingItIntoError) {
+    MaxLengthRule max_one(1);
+    for (const std::string &malformed :
+         {std::string("\x80"), std::string("\xC0\xAF"), std::string("\xED\xA0\x80"), std::string("\xF4\x90\x80\x80"),
+          std::string("\xF0\x9F\x98"), std::string("\xC3\xA9\xC0\xAF\xC3\xA9\xC3\xA9")}) {
+        result.clear();
+        EXPECT_FALSE(max_one.validate(qb::json(malformed), "name", result));
+        ASSERT_EQ(result.errors().size(), 1u);
+        EXPECT_EQ(result.errors()[0].rule_violated, "maxLength");
+        EXPECT_FALSE(result.errors()[0].offending_value.has_value());
+    }
+
+    result.clear();
+    EXPECT_TRUE(max_one.validate(qb::json(std::string("\xF0\x9F\x98\x80")), "name", result)); // U+1F600
+    EXPECT_TRUE(result.success());
+}
+
+TEST_F(ValidationRulesTest, UnicodeFastPathsPreserveBoundariesAndRejectBrokenPairs) {
+    MaxLengthRule max_four(4);
+    std::string   four_pairs;
+    for (int i = 0; i < 4; ++i)
+        four_pairs += "\xC3\xA9";
+    result.clear();
+    EXPECT_TRUE(max_four.validate(qb::json(four_pairs), "name", result));
+    EXPECT_TRUE(result.success());
+
+    for (std::size_t pair = 1; pair < 4; ++pair) {
+        for (char invalid_lead : {'\xC0', '\xC1'}) {
+            SCOPED_TRACE(pair);
+            std::string malformed = four_pairs;
+            malformed[pair * 2]   = invalid_lead;
+            result.clear();
+            EXPECT_FALSE(max_four.validate(qb::json(malformed), "name", result));
+        }
+        std::string malformed_tail   = four_pairs;
+        malformed_tail[pair * 2 + 1] = 'x';
+        result.clear();
+        EXPECT_FALSE(max_four.validate(qb::json(malformed_tail), "name", result));
+    }
+
+    result.clear();
+    EXPECT_FALSE(max_four.validate(qb::json(four_pairs + "\xF0\x9F"), "name", result));
+    result.clear();
+    EXPECT_FALSE(max_four.validate(qb::json(four_pairs + four_pairs + "\xC0\xAF"), "name", result));
+
+    const std::string sixteen_pairs = four_pairs + four_pairs + four_pairs + four_pairs;
+    MaxLengthRule     max_sixteen(16);
+    result.clear();
+    EXPECT_TRUE(max_sixteen.validate(qb::json(sixteen_pairs), "name", result));
+    for (std::size_t pair : {4u, 7u, 8u, 15u}) {
+        SCOPED_TRACE(pair);
+        std::string malformed = sixteen_pairs;
+        malformed[pair * 2]   = '\xC1';
+        result.clear();
+        EXPECT_FALSE(max_sixteen.validate(qb::json(malformed), "name", result));
+    }
+
+    for (std::size_t ascii_size : {7u, 8u, 9u, 31u, 32u, 33u}) {
+        SCOPED_TRACE(ascii_size);
+        MaxLengthRule max_length(ascii_size + 1);
+        result.clear();
+        EXPECT_TRUE(max_length.validate(qb::json(std::string(ascii_size, 'a') + "\xC3\xA9"), "name", result));
+        EXPECT_TRUE(result.success());
+    }
+}
+
+TEST_F(ValidationRulesTest, UnicodeFastPathsAgreeWithJsonUtf8SerializerAtEveryByte) {
+    MaxLengthRule max_length(32);
+    for (const std::size_t pairs : {4u, 16u}) {
+        std::string base;
+        for (std::size_t i = 0; i < pairs; ++i)
+            base += "\xC3\xA9";
+        for (std::size_t position = 0; position < base.size(); ++position) {
+            for (unsigned byte = 0; byte <= 255; ++byte) {
+                SCOPED_TRACE(pairs);
+                SCOPED_TRACE(position);
+                SCOPED_TRACE(byte);
+                std::string mutated = base;
+                mutated[position]   = static_cast<char>(byte);
+                const qb::json value(mutated);
+                bool           valid_utf8 = true;
+                try {
+                    (void) value.dump();
+                } catch (const qb::json::type_error &) {
+                    valid_utf8 = false;
+                }
+                result.clear();
+                EXPECT_EQ(max_length.validate(value, "name", result), valid_utf8);
+                EXPECT_EQ(result.success(), valid_utf8);
+            }
+        }
+    }
+}
+
 // --- PatternRule -------------------------------------------------------------
 
 TEST_F(ValidationRulesTest, PatternRuleValidation) {
@@ -275,6 +395,71 @@ TEST_F(ValidationRulesTest, MaximumRuleValidation) {
     EXPECT_TRUE(result.success());
 }
 
+TEST_F(ValidationRulesTest, NumericBoundsKeepIntegerPrecision) {
+    constexpr std::uint64_t kTwoTo53 = std::uint64_t{1} << 53;
+
+    MinimumRule exclusive_min(static_cast<double>(kTwoTo53), true);
+    result.clear();
+    EXPECT_TRUE(exclusive_min.validate(qb::json(kTwoTo53 + 1), "amount", result));
+    EXPECT_TRUE(result.success());
+
+    MinimumRule negative_exclusive_min(-static_cast<double>(kTwoTo53), true);
+    result.clear();
+    EXPECT_TRUE(negative_exclusive_min.validate(qb::json(-static_cast<std::int64_t>(kTwoTo53) + 1), "amount", result));
+    EXPECT_TRUE(result.success());
+}
+
+TEST_F(ValidationRulesTest, NumericBoundsHandleMixedKindsAnd64BitEdges) {
+    constexpr auto kMaxUnsigned = (std::numeric_limits<std::uint64_t>::max)();
+    constexpr auto kMinSigned   = (std::numeric_limits<std::int64_t>::min)();
+
+    MinimumRule unsigned_min(kMaxUnsigned);
+    result.clear();
+    EXPECT_TRUE(unsigned_min.validate(qb::json(kMaxUnsigned), "number", result));
+    result.clear();
+    EXPECT_FALSE(unsigned_min.validate(qb::json(kMaxUnsigned - 1), "number", result));
+    result.clear();
+    EXPECT_FALSE(unsigned_min.validate(qb::json(-1), "number", result));
+
+    MaximumRule unsigned_max(kMaxUnsigned);
+    result.clear();
+    EXPECT_FALSE(unsigned_max.validate(qb::json(0x1p64), "number", result));
+    result.clear();
+    EXPECT_TRUE(unsigned_max.validate(qb::json(kMaxUnsigned), "number", result));
+
+    MinimumRule signed_min(kMinSigned);
+    result.clear();
+    EXPECT_TRUE(signed_min.validate(qb::json(-0x1p63), "number", result));
+    result.clear();
+    EXPECT_FALSE(signed_min.validate(qb::json(std::nextafter(-0x1p63, -(std::numeric_limits<double>::infinity)())), "number", result));
+
+    MinimumRule positive_fraction(0.5, true);
+    result.clear();
+    EXPECT_FALSE(positive_fraction.validate(qb::json(0), "number", result));
+    result.clear();
+    EXPECT_TRUE(positive_fraction.validate(qb::json(1), "number", result));
+    MaximumRule negative_fraction(-0.5, true);
+    result.clear();
+    EXPECT_FALSE(negative_fraction.validate(qb::json(0), "number", result));
+    result.clear();
+    EXPECT_TRUE(negative_fraction.validate(qb::json(-1), "number", result));
+
+    MinimumRule signed_boundary(qb::json(-1));
+    result.clear();
+    EXPECT_TRUE(signed_boundary.validate(qb::json(std::uint64_t{0}), "number", result));
+    MaximumRule unsigned_boundary(qb::json(std::uint64_t{0}));
+    result.clear();
+    EXPECT_TRUE(unsigned_boundary.validate(qb::json(-1), "number", result));
+
+    const auto nan = (std::numeric_limits<double>::quiet_NaN)();
+    result.clear();
+    EXPECT_FALSE(signed_boundary.validate(qb::json(nan), "number", result));
+    EXPECT_FALSE(result.success());
+
+    EXPECT_THROW(MinimumRule(qb::json("5")), std::invalid_argument);
+    EXPECT_THROW(MaximumRule(qb::json("5")), std::invalid_argument);
+}
+
 // --- EnumRule ----------------------------------------------------------------
 
 TEST_F(ValidationRulesTest, EnumRuleValidation) {
@@ -297,6 +482,19 @@ TEST_F(ValidationRulesTest, EnumRuleValidation) {
     EXPECT_EQ(result.errors()[0].rule_violated, "enum");
 
     ASSERT_THROW(EnumRule(qb::json(qb::json::value_t::object)), std::invalid_argument);
+}
+
+TEST_F(ValidationRulesTest, EnumRuleUsesExactJsonNumberEquality) {
+    constexpr std::uint64_t kTwoTo53 = std::uint64_t{1} << 53;
+    EnumRule                rule(qb::json::array({static_cast<double>(kTwoTo53)}));
+
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json(kTwoTo53), "choice", result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json(kTwoTo53 + 1), "choice", result));
+    EXPECT_FALSE(result.success());
 }
 
 // --- UniqueItemsRule ---------------------------------------------------------
@@ -325,6 +523,57 @@ TEST_F(ValidationRulesTest, UniqueItemsRuleValidation) {
     result.clear();
     EXPECT_TRUE(rule.validate(qb::json(123), "test", result));
     EXPECT_TRUE(result.success());
+}
+
+TEST_F(ValidationRulesTest, UniqueItemsUsesJsonNumericEquality) {
+    UniqueItemsRule rule;
+
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json::array({1, 1.0}), "items", result));
+    EXPECT_FALSE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json::array({qb::json::object({{"n", 1}}), qb::json::object({{"n", 1.0}})}), "items", result));
+    EXPECT_FALSE(result.success());
+
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json::array({1, true}), "items", result));
+    EXPECT_TRUE(result.success());
+}
+
+TEST_F(ValidationRulesTest, UniqueItemsKeepsDistinctLargeNumbersAndIgnoresObjectInsertionOrder) {
+    constexpr std::uint64_t kTwoTo53     = std::uint64_t{1} << 53;
+    constexpr auto          kMaxUnsigned = (std::numeric_limits<std::uint64_t>::max)();
+    constexpr auto          kMinSigned   = (std::numeric_limits<std::int64_t>::min)();
+    UniqueItemsRule         rule;
+
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json::array({kTwoTo53 + 1, static_cast<double>(kTwoTo53)}), "items", result));
+    EXPECT_TRUE(result.success());
+
+    result.clear();
+    EXPECT_TRUE(rule.validate(qb::json::array({kMaxUnsigned, -1, 0x1p64}), "items", result));
+    EXPECT_TRUE(result.success());
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json::array({kMinSigned, -0x1p63}), "items", result));
+    EXPECT_FALSE(result.success());
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json::array({0, -0.0}), "items", result));
+    EXPECT_FALSE(result.success());
+    result.clear();
+    const auto nan = (std::numeric_limits<double>::quiet_NaN)();
+    EXPECT_FALSE(rule.validate(qb::json::array({nan, nan}), "items", result));
+    EXPECT_FALSE(result.success());
+
+    qb::json first  = qb::json::object();
+    first["a"]      = 1;
+    first["b"]      = qb::json::array({2.0});
+    qb::json second = qb::json::object();
+    second["b"]     = qb::json::array({2});
+    second["a"]     = 1.0;
+    result.clear();
+    EXPECT_FALSE(rule.validate(qb::json::array({first, second}), "items", result));
+    EXPECT_FALSE(result.success());
 }
 
 // --- MinItemsRule ------------------------------------------------------------

@@ -237,6 +237,7 @@ function(qhttp_bench NAME RELPATH)
 endfunction()
 
 qhttp_bench(route-match      benchmark/routing/route-match.bench.cpp     EXTRA_LABELS routing)
+qhttp_bench(validation-rules benchmark/validation/validation-rules.bench.cpp EXTRA_LABELS validation)
 qhttp_bench(http1-parser     benchmark/http1/http1-parser.bench.cpp      EXTRA_LABELS http1)
 qhttp_bench(http1-serialize  benchmark/http1/http1-serialize.bench.cpp   EXTRA_LABELS http1)
 qhttp_bench(hpack            benchmark/http2/hpack.bench.cpp             EXTRA_LABELS http2)

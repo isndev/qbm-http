@@ -13,6 +13,8 @@
  * @ingroup Http
  */
 #include <gtest/gtest.h>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -904,4 +906,87 @@ TEST_F(ValidationSchemaTest, AdditionalPropertiesSchemaValidatesDynamicValues) {
     ASSERT_FALSE(result.success());
     ASSERT_GE(result.errors().size(), 1u);
     EXPECT_NE(result.errors()[0].field_path.find("tag"), std::string::npos);
+}
+
+TEST_F(ValidationSchemaTest, UnicodeStringLengthUsesCodePoints) {
+    SchemaValidator max_one({{"type", "string"}, {"maxLength", 1}});
+    result.clear();
+    EXPECT_TRUE(max_one.validate(qb::json(std::string("\xC3\xA9")), result));
+    EXPECT_TRUE(result.success());
+
+    SchemaValidator min_two({{"type", "string"}, {"minLength", 2}});
+    result.clear();
+    EXPECT_FALSE(min_two.validate(qb::json(std::string("\xC3\xA9")), result));
+    EXPECT_FALSE(result.success());
+}
+
+TEST_F(ValidationSchemaTest, IntegerBoundsRetainPrecisionBeyondTwoTo53) {
+    constexpr std::uint64_t kTwoTo53 = std::uint64_t{1} << 53;
+    SchemaValidator         minimum({{"type", "integer"}, {"minimum", kTwoTo53 + 1}});
+    result.clear();
+    EXPECT_FALSE(minimum.validate(qb::json(kTwoTo53), result));
+    EXPECT_FALSE(result.success());
+    result.clear();
+    EXPECT_TRUE(minimum.validate(qb::json(kTwoTo53 + 1), result));
+    EXPECT_TRUE(result.success());
+
+    SchemaValidator exclusive_minimum({{"type", "integer"}, {"exclusiveMinimum", kTwoTo53}});
+    result.clear();
+    EXPECT_FALSE(exclusive_minimum.validate(qb::json(kTwoTo53), result));
+    EXPECT_FALSE(result.success());
+    result.clear();
+    EXPECT_TRUE(exclusive_minimum.validate(qb::json(kTwoTo53 + 1), result));
+    EXPECT_TRUE(result.success());
+}
+
+TEST_F(ValidationSchemaTest, NumericExclusiveBoundsAndLegacyBooleanForm) {
+    constexpr std::uint64_t kTwoTo53 = std::uint64_t{1} << 53;
+
+    SchemaValidator exclusive_maximum({{"exclusiveMaximum", kTwoTo53 + 1}});
+    result.clear();
+    EXPECT_TRUE(exclusive_maximum.validate(qb::json(kTwoTo53), result));
+    EXPECT_TRUE(result.success());
+    result.clear();
+    EXPECT_FALSE(exclusive_maximum.validate(qb::json(kTwoTo53 + 1), result));
+    EXPECT_FALSE(result.success());
+
+    SchemaValidator legacy_exclusive({{"minimum", 5}, {"exclusiveMinimum", true}});
+    result.clear();
+    EXPECT_FALSE(legacy_exclusive.validate(qb::json(5), result));
+    EXPECT_FALSE(result.success());
+    result.clear();
+    EXPECT_TRUE(legacy_exclusive.validate(qb::json(6), result));
+    EXPECT_TRUE(result.success());
+
+    SchemaValidator legacy_inclusive({{"minimum", 5}, {"exclusiveMinimum", false}});
+    result.clear();
+    EXPECT_TRUE(legacy_inclusive.validate(qb::json(5), result));
+    EXPECT_TRUE(result.success());
+}
+
+TEST_F(ValidationSchemaTest, NonFiniteProgrammaticBoundReturnsValidationError) {
+    SchemaValidator validator({{"minimum", (std::numeric_limits<double>::infinity)()}});
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json(5), result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].rule_violated, "minimum");
+    EXPECT_FALSE(result.errors()[0].offending_value.has_value());
+
+    SchemaValidator invalid_maximum({{"maximum", -(std::numeric_limits<double>::infinity)()}});
+    result.clear();
+    EXPECT_FALSE(invalid_maximum.validate(qb::json("not a number"), result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].rule_violated, "maximum");
+    EXPECT_FALSE(result.errors()[0].offending_value.has_value());
+}
+
+TEST_F(ValidationSchemaTest, UniqueItemsRejectsEqualNumbersAcrossJsonKinds) {
+    SchemaValidator validator({{"type", "array"}, {"uniqueItems", true}});
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::array({1, 1.0}), result));
+    EXPECT_FALSE(result.success());
+
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json::array({qb::json::object({{"n", 1}}), qb::json::object({{"n", 1.0}})}), result));
+    EXPECT_FALSE(result.success());
 }
