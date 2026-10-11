@@ -53,7 +53,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -76,6 +78,24 @@ make_payload(std::size_t size) {
         payload[i] = static_cast<char>('a' + (i % 26u));
     }
     return payload;
+}
+
+// Literal RFC 6455 headers for this benchmark's registered payload sizes.
+// This oracle is independent of the serializer and keeps the existing payload.
+std::string_view
+expected_unmasked_binary_prefix(std::size_t size) {
+    switch (size) {
+        case 16:
+            return {"\x82\x10", 2};
+        case 256:
+            return {"\x82\x7e\x01\x00", 4};
+        case 4 * 1024:
+            return {"\x82\x7e\x10\x00", 4};
+        case 64 * 1024:
+            return {"\x82\x7f\x00\x00\x00\x00\x00\x01\x00\x00", 10};
+        default:
+            throw std::logic_error("unregistered unmasked binary oracle size");
+    }
 }
 
 // Build one masked client->server WebSocket frame, mirroring
@@ -248,17 +268,18 @@ BM_WS_EncodeUnmaskedBinary(benchmark::State &state) {
     const auto size    = static_cast<std::size_t>(state.range(0));
     const auto payload = make_payload(size);
 
-    // Correctness gate (out of the timed loop): an unmasked binary frame must
-    // carry at least a 2+ byte header on top of the payload, i.e. strictly more
-    // than the payload — so a broken serializer can't quietly post a number.
+    // Correctness gate (out of the timed loop): compare every header and
+    // payload byte. The 256-byte case must be exactly 260 wire bytes.
     {
         qb::allocator::pipe<char>   probe_out;
         qb::http::ws::MessageBinary probe;
         probe.masked = false;
         probe << payload;
         probe_out << probe;
-        if (probe_out.size() <= payload.size()) {
-            state.SkipWithError("unmasked frame must be larger than its payload");
+        std::string expected(expected_unmasked_binary_prefix(size));
+        expected += payload;
+        if (probe_out.view() != expected) {
+            state.SkipWithError("unmasked binary frame differs from exact header and payload");
             return;
         }
     }

@@ -1173,7 +1173,7 @@ Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([]{..
   - `void set_pending_cap(std::size_t) noexcept` (default 1024).
 Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect(qb::io::uri{"ws://h/p"}); auto f = co_await ws.receive();`
 
-### WS pipe serialization — `src/qbm/http/ws/ws.h:1994`
+### WS pipe serialization — `src/qbm/http/ws/ws.h:1995`
 `template<> pipe<char>& pipe<char>::put<Message>(const Message&);` (and `MessagePing/MessagePong/MessageText/MessageBinary/MessageClose/WebSocketRequest`) — frame onto the outbound pipe (masks when `msg.masked`); invoked indirectly via `operator<<`.
 
 ---

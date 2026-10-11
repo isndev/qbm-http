@@ -35,6 +35,7 @@
 #include <qb/io/async/tcp/connector.h>
 #include <qb/io/crypto.h>
 #include <qb/system/time.h>
+#include <qb/utility/branch_hints.h>
 #include "../http.h"
 #include "../logger.h"
 
@@ -1206,7 +1207,7 @@ private:
     }
 
     template <typename Event>
-    void
+    QB_NOINLINE QB_COLD void
     queue_early_event(Event &&event) {
         using event_type = std::decay_t<Event>;
         Message frame    = event.ws;

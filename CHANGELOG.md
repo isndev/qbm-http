@@ -38,6 +38,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **Early WebSocket frame queuing stays outside established dispatch (Huly QB-513).**
+  A cold helper builds the owning queue entry; established-message forwarding keeps a
+  smaller compiled path while retaining payload ownership and delivery order.
+
 - **HTTP/2 batch completion callbacks may disconnect or enqueue another batch (Huly QB-496).** The completed
   batch now leaves the registry before invoking user code, so a disconnect cannot free its iterator during
   callback return. Ordered responses and callback cardinality are preserved.
