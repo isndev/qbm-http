@@ -38,6 +38,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -48,12 +49,78 @@
 #include <gtest/gtest.h>
 
 #include <qb/io/async.h>
+#include <qb/io/stream.h>
+#include <qb/io/tcp/socket.h>
 
 #include "../../shared/loopback_server.h" // shared system-tier fixtures
 #include "../../shared/ws_loopback.h"     // WsServerThread
 #include <qbm/http/ws.h>
 
 using namespace std::chrono_literals;
+
+namespace ws_connect_lifetime_test {
+
+// Keep the real connector and its deferred-failure dispatch, but remove kernel
+// refusal timing and the closed-port TOCTOU from these lifetime witnesses.
+class RefusingSocket : public qb::io::tcp::socket {
+public:
+    inline static unsigned connect_calls = 0;
+
+    int
+    n_connect(qb::io::endpoint const &) noexcept {
+        ++connect_calls;
+        qb::io::socket::set_last_errno(ECONNREFUSED);
+        return -1;
+    }
+
+    int
+    n_connect(qb::io::uri const &) noexcept {
+        ++connect_calls;
+        qb::io::socket::set_last_errno(ECONNREFUSED);
+        return -1;
+    }
+};
+
+struct RefusingTransport : qb::io::stream<RefusingSocket> {
+    static constexpr bool
+    is_secure() noexcept {
+        return false;
+    }
+};
+
+using RefusingClient = qb::http::ws::Client<RefusingTransport>;
+
+struct OwnerState {
+    bool entered   = false;
+    int  destroyed = 0;
+    int  resumed   = 0;
+    bool connected = false;
+};
+
+class OwnedCoroClient : public qb::http::ws::coro_client<RefusingTransport> {
+    OwnerState &_state;
+
+public:
+    explicit OwnedCoroClient(OwnerState &state)
+        : _state(state) {}
+
+    ~OwnedCoroClient() {
+        ++_state.destroyed;
+    }
+};
+
+qb::io::async::task<void>
+connect_in_owned_frame(qb::io::uri remote, OwnerState &state) {
+    // The task's pooled frame is not ASan-poisoned when freed. A heap-owned
+    // client gives the late connector's raw-this access a real ASan witness.
+    auto client       = std::make_unique<OwnedCoroClient>(state);
+    state.entered     = true;
+    const auto result = co_await client->connect(remote);
+    ++state.resumed;
+    state.connected = result.ok;
+}
+
+} // namespace ws_connect_lifetime_test
 
 namespace {
 
@@ -764,6 +831,91 @@ TEST(WebSocketClientHardening, DestroyedClientsIgnorePendingConnectorCallbacks) 
     // delivered them. Neither expired client may send an Upgrade request.
     ASSERT_TRUE(pump_until([&] { return closed.load(std::memory_order_acquire) == 2; }, 2500ms));
     EXPECT_EQ(requests.load(std::memory_order_acquire), 0);
+}
+
+TEST(WebSocketClientHardening, DestroyedClientIgnoresDeferredConnectorFailure) {
+    qb::io::async::init();
+    using ws_connect_lifetime_test::RefusingClient;
+    const qb::io::uri remote("ws://127.0.0.1:1/path");
+    int               expired_errors = 0;
+    auto              client         = std::make_unique<RefusingClient>();
+    client->on_error([&](auto &) { ++expired_errors; });
+    ws_connect_lifetime_test::RefusingSocket::connect_calls = 0;
+    client->connect(remote);
+    ASSERT_GT(ws_connect_lifetime_test::RefusingSocket::connect_calls, 0u);
+    ASSERT_TRUE(qb::io::async::listener::current.has_deferred());
+    EXPECT_EQ(expired_errors, 0) << "the connector failure must not run inline";
+    client.reset();
+
+    bool drained = false;
+    qb::io::async::defer([&] { drained = true; });
+    qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(drained) << "barrier follows the already queued connector failure";
+    // A failure also queues the WebSocket error at the tail. Two passes
+    // cover both snapshot drains, whether libev ran the defer wake or not.
+    qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_EQ(expired_errors, 0);
+
+    // Positive control: the same connector still reports one failure to an
+    // owner that remains alive. No timer or network completion is involved.
+    int            live_errors = 0;
+    RefusingClient live;
+    live.on_error([&](auto &) { ++live_errors; });
+    ws_connect_lifetime_test::RefusingSocket::connect_calls = 0;
+    live.connect(remote);
+    ASSERT_GT(ws_connect_lifetime_test::RefusingSocket::connect_calls, 0u);
+    EXPECT_EQ(live_errors, 0);
+    drained = false;
+    qb::io::async::defer([&] { drained = true; });
+    qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(drained);
+    qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_EQ(live_errors, 1);
+}
+
+TEST(WebSocketClientHardening, DestroyedCoroutineOwnerIgnoresDeferredConnectorFailure) {
+    qb::io::async::init();
+    using ws_connect_lifetime_test::connect_in_owned_frame;
+    using ws_connect_lifetime_test::OwnerState;
+    const qb::io::uri remote("ws://127.0.0.1:1/path");
+    OwnerState        expired;
+    {
+        ws_connect_lifetime_test::RefusingSocket::connect_calls = 0;
+        auto owner                                              = connect_in_owned_frame(remote, expired);
+        owner.handle().resume();
+        ASSERT_GT(ws_connect_lifetime_test::RefusingSocket::connect_calls, 0u);
+        ASSERT_TRUE(expired.entered);
+        ASSERT_FALSE(owner.handle().done()) << "owner must be parked on connect";
+        ASSERT_TRUE(qb::io::async::listener::current.has_deferred());
+        EXPECT_EQ(expired.resumed, 0);
+        EXPECT_EQ(expired.destroyed, 0);
+    }
+    ASSERT_EQ(expired.destroyed, 1) << "destroying the frame must also destroy its client";
+    bool drained = false;
+    qb::io::async::defer([&] { drained = true; });
+    qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(drained);
+    qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_EQ(expired.resumed, 0);
+    EXPECT_EQ(expired.destroyed, 1);
+
+    OwnerState live;
+    ws_connect_lifetime_test::RefusingSocket::connect_calls = 0;
+    auto owner                                              = connect_in_owned_frame(remote, live);
+    owner.handle().resume();
+    ASSERT_GT(ws_connect_lifetime_test::RefusingSocket::connect_calls, 0u);
+    ASSERT_TRUE(live.entered);
+    ASSERT_FALSE(owner.handle().done());
+    drained = false;
+    qb::io::async::defer([&] { drained = true; });
+    qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(drained);
+    qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(owner.handle().done()) << "live owner must resume through the real awaiter/scheduler";
+    EXPECT_NO_THROW(owner.await_resume());
+    EXPECT_EQ(live.resumed, 1);
+    EXPECT_FALSE(live.connected);
+    EXPECT_EQ(live.destroyed, 1);
 }
 
 TEST(WebSocketClientHardening, RemoteCloseBeforeUpgradeFailsPendingConnect) {
