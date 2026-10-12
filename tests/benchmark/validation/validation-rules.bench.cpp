@@ -59,7 +59,7 @@ BM_Validation_Utf8Length(benchmark::State &state) {
     value.reserve(size * 2);
     for (std::size_t i = 0; i < size; ++i)
         value += "\xC3\xA9";
-    run_schema(state, {{"type", "string"}, {"minLength", 1}, {"maxLength", size * 2}}, value, true);
+    run_schema(state, {{"type", "string"}, {"minLength", size}, {"maxLength", size}}, value, true);
 }
 
 void

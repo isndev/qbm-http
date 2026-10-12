@@ -145,6 +145,8 @@ private:
 
     static std::vector<std::shared_ptr<IRule>> build_rules_for_schema_node(const qb::json &schema_node);
 
+    static std::shared_ptr<IRule> make_length_range_rule(std::size_t min_length, std::size_t max_length);
+
     /// Cache of pre-compiled rule lists keyed by schema-node pointer.
     /// `_schema_definition` is stored by value and never mutated after
     /// construction, which keeps those pointers stable for the full lifetime

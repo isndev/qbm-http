@@ -290,6 +290,28 @@ TEST_F(ValidationRulesTest, UnicodeFastPathsAgreeWithJsonUtf8SerializerAtEveryBy
             }
         }
     }
+
+    // Exhaust the four reduced lead lanes, including adjacent zero lanes and
+    // a zero followed by the smallest valid lane (the word subtraction borrow).
+    // Bit zero distinguishes C0/C1 and covers every C2..DF lead as well.
+    std::string four_pairs("\xC3\x80\xC3\x80\xC3\x80\xC3\x80");
+    for (unsigned lane_bits = 0; lane_bits < (1u << 16); ++lane_bits) {
+        for (unsigned odd = 0; odd < 2; ++odd) {
+            for (unsigned lane = 0; lane < 4; ++lane)
+                four_pairs[lane * 2] = static_cast<char>(0xC0u | (((lane_bits >> (lane * 4)) & 0xFu) << 1) | odd);
+            const qb::json value(four_pairs);
+            bool           valid_utf8 = true;
+            try {
+                (void) value.dump();
+            } catch (const qb::json::type_error &) {
+                valid_utf8 = false;
+            }
+            result.clear();
+            const bool accepted = max_length.validate(value, "name", result);
+            ASSERT_EQ(accepted, valid_utf8) << "lanes=" << lane_bits << ", odd=" << odd;
+            ASSERT_EQ(result.success(), valid_utf8) << "lanes=" << lane_bits << ", odd=" << odd;
+        }
+    }
 }
 
 // --- PatternRule -------------------------------------------------------------

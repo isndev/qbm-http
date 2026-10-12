@@ -38,6 +38,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **Paired schema length bounds share one Unicode scan (Huly QB-549).**
+  Cached `minLength` and `maxLength` evaluation uses one validated code-point count,
+  retaining ordered keyword errors, offending-value policies and array behavior.
+  Standalone length rules and parameter validation keep their existing evaluation.
+  Two-byte UTF-8 blocks check all overlong leads together; exact unsigned numeric
+  comparisons read the guarded integer storage without generic conversions.
+
 - **Early WebSocket frame queuing stays outside established dispatch (Huly QB-513).**
   A cold helper builds the owning queue entry; established-message forwarding keeps a
   smaller compiled path while retaining payload ownership and delivery order.

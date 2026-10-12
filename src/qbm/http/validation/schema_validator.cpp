@@ -88,17 +88,26 @@ std::vector<std::shared_ptr<IRule>>
 SchemaValidator::build_rules_for_schema_node(const qb::json &schema_node) {
     std::vector<std::shared_ptr<IRule>> rules;
 
+    std::optional<size_t> min_length;
+    std::optional<size_t> max_length;
     if (schema_node.contains("minLength") && schema_node["minLength"].is_number_integer()) {
         long long val = schema_node["minLength"].get<long long>();
         if (val >= 0) {
-            rules.push_back(std::make_shared<MinLengthRule>(static_cast<size_t>(val)));
+            min_length = static_cast<size_t>(val);
         }
     }
     if (schema_node.contains("maxLength") && schema_node["maxLength"].is_number_integer()) {
         long long val = schema_node["maxLength"].get<long long>();
         if (val >= 0) {
-            rules.push_back(std::make_shared<MaxLengthRule>(static_cast<size_t>(val)));
+            max_length = static_cast<size_t>(val);
         }
+    }
+    if (min_length && max_length) {
+        rules.push_back(make_length_range_rule(*min_length, *max_length));
+    } else if (min_length) {
+        rules.push_back(std::make_shared<MinLengthRule>(*min_length));
+    } else if (max_length) {
+        rules.push_back(std::make_shared<MaxLengthRule>(*max_length));
     }
     if (schema_node.contains("pattern") && schema_node["pattern"].is_string()) {
         rules.push_back(std::make_shared<PatternRule>(schema_node["pattern"].get<std::string>()));

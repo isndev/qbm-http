@@ -65,23 +65,24 @@ utf8_code_point_count(std::string_view text) noexcept {
                 // A word holds four two-byte scalars: C2-DF at even offsets,
                 // 80-BF at odd offsets. Test every lead's low bits too, so
                 // overlong C0/C1 cannot slip in at a later block boundary.
-                const auto four_pairs_valid = [](std::uint64_t pairs) noexcept {
-                    constexpr std::uint64_t kLeadMask    = 0x00e000e000e000e0ull;
-                    constexpr std::uint64_t kLeadPattern = 0x00c000c000c000c0ull;
-                    constexpr std::uint64_t kTailMask    = 0xc000c000c000c000ull;
-                    constexpr std::uint64_t kTailPattern = 0x8000800080008000ull;
-                    constexpr std::uint64_t kLeadLowBits = 0x001e001e001e001eull;
-                    const auto              low_bits     = pairs & kLeadLowBits;
-                    return (pairs & kLeadMask) == kLeadPattern && (pairs & kTailMask) == kTailPattern && (low_bits & 0x000000000000001eull) != 0
-                           && (low_bits & 0x00000000001e0000ull) != 0 && (low_bits & 0x0000001e00000000ull) != 0
-                           && (low_bits & 0x001e000000000000ull) != 0;
+                const auto invalid_pair_bits = [](std::uint64_t pairs) noexcept {
+                    constexpr std::uint64_t kPairMask     = 0xc0e0c0e0c0e0c0e0ull;
+                    constexpr std::uint64_t kPairPattern  = 0x80c080c080c080c0ull;
+                    constexpr std::uint64_t kLeadLowBits  = 0x001e001e001e001eull;
+                    constexpr std::uint64_t kLaneOnes     = 0x0001000100010001ull;
+                    constexpr std::uint64_t kLaneHighBits = 0x8000800080008000ull;
+                    const auto              low_bits      = pairs & kLeadLowBits;
+                    // Each lane is zero (C0/C1) or even >= 2. Subtracting one,
+                    // including a borrow from a zero lane, never flags a valid lane.
+                    return ((pairs ^ kPairPattern) & kPairMask) | ((low_bits - kLaneOnes) & kLaneHighBits);
                 };
                 const auto start = i;
                 while (text.size() - i >= 4 * sizeof(std::uint64_t)) {
                     std::uint64_t blocks[4];
                     std::memcpy(blocks, text.data() + i, sizeof(blocks));
-                    if (!four_pairs_valid(blocks[0]) || !four_pairs_valid(blocks[1]) || !four_pairs_valid(blocks[2])
-                        || !four_pairs_valid(blocks[3]))
+                    if ((invalid_pair_bits(blocks[0]) | invalid_pair_bits(blocks[1]) | invalid_pair_bits(blocks[2])
+                         | invalid_pair_bits(blocks[3]))
+                        != 0)
                         break;
                     i += sizeof(blocks);
                     count += 16;
@@ -89,7 +90,7 @@ utf8_code_point_count(std::string_view text) noexcept {
                 while (text.size() - i >= sizeof(std::uint64_t)) {
                     std::uint64_t pairs;
                     std::memcpy(&pairs, text.data() + i, sizeof(pairs));
-                    if (!four_pairs_valid(pairs))
+                    if (invalid_pair_bits(pairs) != 0)
                         break;
                     i += sizeof(pairs);
                     count += 4;
@@ -123,6 +124,58 @@ utf8_code_point_count(std::string_view text) noexcept {
     }
     return count;
 }
+
+// Cached schema pairs share the count, while keeping both keyword diagnostics.
+class LengthRangeRule final : public IRule {
+    std::size_t _min_length;
+    std::size_t _max_length;
+
+public:
+    LengthRangeRule(std::size_t min_length, std::size_t max_length)
+        : _min_length(min_length)
+        , _max_length(max_length) {}
+
+    bool
+    validate(const qb::json &value, const std::string &field_path, Result &result) const override {
+        const bool  is_string = value.is_string();
+        std::size_t length;
+        if (is_string) {
+            const auto count = utf8_code_point_count(value.get_ref<const std::string &>());
+            if (!count) [[unlikely]] {
+                result.add_error(field_path, "minLength", "String is not valid UTF-8.", std::nullopt);
+                result.add_error(field_path, "maxLength", "String is not valid UTF-8.", std::nullopt);
+                return false;
+            }
+            length = *count;
+        } else if (value.is_array()) {
+            length = value.size();
+        } else {
+            return true;
+        }
+
+        bool valid = true;
+        if (length < _min_length) [[unlikely]] {
+            result.add_error(field_path, "minLength",
+                             (is_string ? "String too short. Minimum length is " : "Array too short. Minimum items is ")
+                                 + std::to_string(_min_length) + ".",
+                             std::make_optional(value));
+            valid = false;
+        }
+        if (length > _max_length) [[unlikely]] {
+            result.add_error(field_path, "maxLength",
+                             (is_string ? "String too long. Maximum length is " : "Array too long. Maximum items is ")
+                                 + std::to_string(_max_length) + ".",
+                             std::make_optional(value));
+            valid = false;
+        }
+        return valid;
+    }
+
+    std::string
+    rule_name() const override {
+        return "lengthRange";
+    }
+};
 
 template <typename T>
 int
@@ -165,9 +218,9 @@ compare_unsigned_to_double(std::uint64_t lhs, double rhs) noexcept {
 std::optional<int>
 compare_numbers(const qb::json &lhs, const qb::json &rhs) noexcept {
     if (lhs.is_number_unsigned()) {
-        const auto value = lhs.get<qb::json::number_unsigned_t>();
+        const auto value = *lhs.get_ptr<const qb::json::number_unsigned_t *>();
         if (rhs.is_number_unsigned())
-            return compare_same_kind(value, rhs.get<qb::json::number_unsigned_t>());
+            return compare_same_kind(value, *rhs.get_ptr<const qb::json::number_unsigned_t *>());
         if (rhs.is_number_integer()) {
             const auto other = rhs.get<qb::json::number_integer_t>();
             return other < 0 ? 1 : compare_same_kind(value, static_cast<std::uint64_t>(other));
@@ -303,6 +356,11 @@ struct JsonPointerEqual {
 };
 
 } // namespace
+
+std::shared_ptr<IRule>
+SchemaValidator::make_length_range_rule(std::size_t min_length, std::size_t max_length) {
+    return std::make_shared<LengthRangeRule>(min_length, max_length);
+}
 
 std::string
 TypeRule::data_type_to_string(DataType dt) noexcept {

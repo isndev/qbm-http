@@ -36,7 +36,7 @@ protected:
 };
 
 // Renders a validation error list to JSON for readable assertion failure messages.
-// Kept local to this TU: SchemaValidatorOneOf is its only consumer.
+// Kept local to this TU for schema assertions.
 static qb::json
 validation_errors_to_json(const std::vector<qb::http::validation::Error> &errors) {
     qb::json errors_array = qb::json::array();
@@ -918,6 +918,143 @@ TEST_F(ValidationSchemaTest, UnicodeStringLengthUsesCodePoints) {
     result.clear();
     EXPECT_FALSE(min_two.validate(qb::json(std::string("\xC3\xA9")), result));
     EXPECT_FALSE(result.success());
+
+    SchemaValidator exactly_one({{"type", "string"}, {"minLength", 1}, {"maxLength", 1}});
+    for (const char *text : {"a", "\xC3\xA9", "\xE2\x82\xAC", "\xF0\x9F\x98\x80"}) {
+        result.clear();
+        EXPECT_TRUE(exactly_one.validate(qb::json(text), result));
+        EXPECT_TRUE(result.success());
+    }
+}
+
+TEST_F(ValidationSchemaTest, PairedLengthBoundsMatchOrderedStandaloneRules) {
+    struct Bounds {
+        std::size_t minimum;
+        std::size_t maximum;
+    };
+    const Bounds                bounds[] = {{0, 0}, {1, 1}, {2, 4}, {40, 8}};
+    const std::vector<qb::json> values   = {
+        "",
+        "a",
+        "abc",
+        std::string(32, 'x'),
+        std::string("\xC3\xA9"),
+        std::string("\xE2\x82\xAC"),
+        std::string("\xF0\x9F\x98\x80"),
+        std::string("a\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80"),
+        std::string("a\0b", 3),
+        std::string("\xC0\x80"),
+        std::string(64, 'x') + "\xF0\x9F",
+        qb::json::array(),
+        qb::json::array({1, 2}),
+        qb::json(std::vector<int>(32, 7)),
+        nullptr,
+        true,
+        42,
+        2.5,
+        qb::json::object({{"key", "value"}})
+    };
+
+    for (const auto &bound : bounds) {
+        SchemaValidator paired({{"type", "object"}, {"properties", {{"value", {{"minLength", bound.minimum}, {"maxLength", bound.maximum}}}}}});
+        qb::json        data = {{"value", nullptr}};
+        for (const auto policy :
+             {SchemaValidator::ErrorValuePolicy::Full, SchemaValidator::ErrorValuePolicy::Preview, SchemaValidator::ErrorValuePolicy::None}) {
+            paired.set_error_value_policy(policy, 16);
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                SCOPED_TRACE(::testing::Message() << "min=" << bound.minimum << " max=" << bound.maximum
+                                                  << " policy=" << static_cast<int>(policy) << " value=" << i);
+                // Mutate the same value between calls to exercise the warmed schema cache.
+                data["value"] = values[i];
+                result.clear();
+                const bool paired_passed = paired.validate(data, result);
+
+                Result standalone;
+                standalone.set_error_value_policy(result.error_value_policy(), result.offending_value_preview_bytes());
+                const bool minimum_passed = MinLengthRule(bound.minimum).validate(data["value"], "value", standalone);
+                const bool maximum_passed = MaxLengthRule(bound.maximum).validate(data["value"], "value", standalone);
+                EXPECT_EQ(paired_passed, minimum_passed && maximum_passed);
+                EXPECT_EQ(result.success(), standalone.success());
+                EXPECT_EQ(validation_errors_to_json(result.errors()), validation_errors_to_json(standalone.errors()));
+            }
+        }
+    }
+}
+
+TEST_F(ValidationSchemaTest, PairedLengthBoundsRetainBothMalformedUtf8Errors) {
+    SchemaValidator validator({{"type", "string"}, {"minLength", 40}, {"maxLength", 8}});
+    const qb::json  malformed = std::string(64, 'x') + "\xF0\x9F";
+    for (const auto policy :
+         {SchemaValidator::ErrorValuePolicy::Full, SchemaValidator::ErrorValuePolicy::Preview, SchemaValidator::ErrorValuePolicy::None}) {
+        validator.set_error_value_policy(policy, 16);
+        result.clear();
+        EXPECT_FALSE(validator.validate(malformed, result));
+        ASSERT_EQ(result.errors().size(), 2u);
+        EXPECT_EQ(result.errors()[0].rule_violated, "minLength");
+        EXPECT_EQ(result.errors()[1].rule_violated, "maxLength");
+        for (const auto &error : result.errors()) {
+            EXPECT_EQ(error.field_path, "");
+            EXPECT_EQ(error.message, "String is not valid UTF-8.");
+            EXPECT_FALSE(error.offending_value.has_value());
+        }
+    }
+}
+
+TEST_F(ValidationSchemaTest, LengthBoundsKeepSingleAndIgnoredKeywordBehavior) {
+    struct SchemaCase {
+        qb::json    schema;
+        const char *error_rule;
+    };
+    const auto       too_large = (std::numeric_limits<qb::json::number_unsigned_t>::max)();
+    const SchemaCase cases[]   = {
+        {{{"minLength", 2}}, "minLength"},
+        {{{"maxLength", 0}}, "maxLength"},
+        {{{"minLength", -1}, {"maxLength", 0}}, "maxLength"},
+        {{{"minLength", 2}, {"maxLength", -1}}, "minLength"},
+        {{{"minLength", 2.0}, {"maxLength", 0}}, "maxLength"},
+        {{{"minLength", 2}, {"maxLength", "0"}}, "minLength"},
+        {{{"minLength", too_large}, {"maxLength", 0}}, "maxLength"},
+        {{{"minLength", 2}, {"maxLength", too_large}}, "minLength"},
+        {{{"minLength", nullptr}, {"maxLength", -1}}, nullptr},
+        {qb::json::object(), nullptr}
+    };
+    for (const auto &item : cases) {
+        SchemaValidator validator(item.schema);
+        result.clear();
+        EXPECT_EQ(validator.validate(qb::json(std::string("\xC3\xA9")), result), item.error_rule == nullptr);
+        if (item.error_rule) {
+            ASSERT_EQ(result.errors().size(), 1u);
+            EXPECT_EQ(result.errors()[0].rule_violated, item.error_rule);
+        } else {
+            EXPECT_TRUE(result.success());
+        }
+    }
+}
+
+TEST_F(ValidationSchemaTest, PairedLengthBoundsRespectTypeAndLaterSchemaChecks) {
+    SchemaValidator string_only({{"type", "string"}, {"minLength", 3}, {"maxLength", 1}});
+    result.clear();
+    EXPECT_FALSE(string_only.validate(qb::json::array({"x", 1}), result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].rule_violated, "type");
+
+    SchemaValidator array_checks(
+        {{"type", "array"},
+         {"minLength", 3},
+         {"maxLength", 1},
+         {"items", {{"type", "integer"}}},
+         {"allOf", qb::json::array({{{"minItems", 3}}})}});
+    result.clear();
+    EXPECT_FALSE(array_checks.validate(qb::json::array({"x", 1}), result));
+    ASSERT_EQ(result.errors().size(), 5u);
+    EXPECT_EQ(result.errors()[0].rule_violated, "minLength");
+    EXPECT_EQ(result.errors()[0].message, "Array too short. Minimum items is 3.");
+    EXPECT_EQ(result.errors()[1].rule_violated, "maxLength");
+    EXPECT_EQ(result.errors()[1].message, "Array too long. Maximum items is 1.");
+    EXPECT_EQ(result.errors()[2].rule_violated, "type");
+    EXPECT_EQ(result.errors()[2].field_path, "[0]");
+    EXPECT_EQ(result.errors()[3].rule_violated, "minItems");
+    EXPECT_EQ(result.errors()[4].rule_violated, "allOf");
 }
 
 TEST_F(ValidationSchemaTest, IntegerBoundsRetainPrecisionBeyondTwoTo53) {
