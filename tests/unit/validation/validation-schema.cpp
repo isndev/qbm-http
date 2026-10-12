@@ -1074,6 +1074,24 @@ TEST_F(ValidationSchemaTest, IntegerBoundsRetainPrecisionBeyondTwoTo53) {
     result.clear();
     EXPECT_TRUE(exclusive_minimum.validate(qb::json(kTwoTo53 + 1), result));
     EXPECT_TRUE(result.success());
+
+    SchemaValidator contradictory({{"minimum", kTwoTo53 + 1}, {"maximum", kTwoTo53 - 1}});
+    for (auto policy :
+         {SchemaValidator::ErrorValuePolicy::Full, SchemaValidator::ErrorValuePolicy::Preview, SchemaValidator::ErrorValuePolicy::None}) {
+        contradictory.set_error_value_policy(policy, 16);
+        result.clear();
+        EXPECT_FALSE(contradictory.validate(qb::json(kTwoTo53), result));
+        ASSERT_EQ(result.errors().size(), 2u);
+        EXPECT_EQ(result.errors()[0].rule_violated, "minimum");
+        EXPECT_EQ(result.errors()[0].message, "Value must be greater than or equal to 9007199254740993.");
+        EXPECT_EQ(result.errors()[1].rule_violated, "maximum");
+        EXPECT_EQ(result.errors()[1].message, "Value must be less than or equal to 9007199254740991.");
+        for (const auto &error : result.errors()) {
+            ASSERT_EQ(error.offending_value.has_value(), policy != SchemaValidator::ErrorValuePolicy::None);
+            if (error.offending_value)
+                EXPECT_EQ(error.offending_value->get<std::uint64_t>(), kTwoTo53);
+        }
+    }
 }
 
 TEST_F(ValidationSchemaTest, NumericExclusiveBoundsAndLegacyBooleanForm) {
@@ -1099,6 +1117,74 @@ TEST_F(ValidationSchemaTest, NumericExclusiveBoundsAndLegacyBooleanForm) {
     result.clear();
     EXPECT_TRUE(legacy_inclusive.validate(qb::json(5), result));
     EXPECT_TRUE(result.success());
+
+    // Private cached specializations must match the standalone public rules,
+    // including mixed JSON kinds, arbitrary programmatic data and every policy.
+    const auto                  infinity = (std::numeric_limits<double>::infinity)();
+    const auto                  nan      = (std::numeric_limits<double>::quiet_NaN)();
+    const std::vector<qb::json> bounds   = {qb::json(kTwoTo53 + 1), qb::json((std::numeric_limits<std::int64_t>::min)()),
+                                            qb::json(0.5),          qb::json(-0.0),
+                                            qb::json(nan),          qb::json(infinity),
+                                            qb::json(-infinity)};
+    const std::vector<qb::json> values   = {
+        qb::json(kTwoTo53),
+        qb::json(kTwoTo53 + 1),
+        qb::json((std::numeric_limits<std::uint64_t>::max)()),
+        qb::json(-1),
+        qb::json((std::numeric_limits<std::int64_t>::min)()),
+        qb::json(0.0),
+        qb::json(0.5),
+        qb::json(-0x1p63),
+        qb::json(0x1p64),
+        qb::json(nan),
+        qb::json(infinity),
+        qb::json(-infinity),
+        qb::json(std::string("\xFF", 1)),
+        qb::json::array({1, "x"}),
+        qb::json::object({{"n", 1}})
+    };
+    for (const auto &bound : bounds) {
+        SCOPED_TRACE(bound.dump());
+        for (bool minimum : {false, true}) {
+            for (bool exclusive : {false, true}) {
+                const char *keyword = minimum ? (exclusive ? "exclusiveMinimum" : "minimum") : (exclusive ? "exclusiveMaximum" : "maximum");
+                SCOPED_TRACE(keyword);
+                SchemaValidator cached({{keyword, bound}});
+                MinimumRule     standalone_minimum(bound, exclusive);
+                MaximumRule     standalone_maximum(bound, exclusive);
+                const IRule    &standalone =
+                    minimum ? static_cast<const IRule &>(standalone_minimum) : static_cast<const IRule &>(standalone_maximum);
+                for (auto policy :
+                     {SchemaValidator::ErrorValuePolicy::Full, SchemaValidator::ErrorValuePolicy::Preview,
+                      SchemaValidator::ErrorValuePolicy::None}) {
+                    cached.set_error_value_policy(policy, 16);
+                    Result leaf;
+                    leaf.set_error_value_policy(policy == SchemaValidator::ErrorValuePolicy::None      ? Result::ErrorValuePolicy::None
+                                                : policy == SchemaValidator::ErrorValuePolicy::Preview ? Result::ErrorValuePolicy::Preview
+                                                                                                       : Result::ErrorValuePolicy::Full,
+                                                16);
+                    for (const auto &value : values) {
+                        result.clear();
+                        leaf.clear();
+                        EXPECT_EQ(cached.validate(value, result), standalone.validate(value, "", leaf));
+                        ASSERT_EQ(result.errors().size(), leaf.errors().size());
+                        for (std::size_t i = 0; i < leaf.errors().size(); ++i) {
+                            const auto &actual   = result.errors()[i];
+                            const auto &expected = leaf.errors()[i];
+                            EXPECT_EQ(actual.field_path, expected.field_path);
+                            EXPECT_EQ(actual.rule_violated, expected.rule_violated);
+                            EXPECT_EQ(actual.message, expected.message);
+                            ASSERT_EQ(actual.offending_value.has_value(), expected.offending_value.has_value());
+                            if (actual.offending_value) {
+                                EXPECT_EQ(actual.offending_value->type(), expected.offending_value->type());
+                                EXPECT_EQ(actual.offending_value->dump(), expected.offending_value->dump());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST_F(ValidationSchemaTest, NonFiniteProgrammaticBoundReturnsValidationError) {

@@ -18,6 +18,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <qb/json.h>
@@ -356,6 +357,7 @@ TEST_F(ValidationRulesTest, MinimumRuleValidation) {
     EXPECT_FALSE(result.success());
     ASSERT_FALSE(result.errors().empty());
     EXPECT_EQ(result.errors()[0].rule_violated, "minimum");
+    EXPECT_EQ(result.errors()[0].message, "Value must be greater than or equal to 10.0.");
 
     result.clear();
     EXPECT_FALSE(rule_excl.validate(qb::json(10.0), "test", result));
@@ -363,6 +365,7 @@ TEST_F(ValidationRulesTest, MinimumRuleValidation) {
     // Exclusive bound reports the "exclusiveMinimum" rule name (rule.h MinimumRule).
     ASSERT_FALSE(result.errors().empty());
     EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMinimum");
+    EXPECT_EQ(result.errors()[0].message, "Value must be greater than 10.0.");
     result.clear();
     EXPECT_TRUE(rule_excl.validate(qb::json(10.0001), "test", result));
     EXPECT_TRUE(result.success());
@@ -395,6 +398,7 @@ TEST_F(ValidationRulesTest, MaximumRuleValidation) {
     EXPECT_FALSE(result.success());
     ASSERT_FALSE(result.errors().empty());
     EXPECT_EQ(result.errors()[0].rule_violated, "maximum");
+    EXPECT_EQ(result.errors()[0].message, "Value must be less than or equal to 20.0.");
 
     result.clear();
     EXPECT_FALSE(rule_excl.validate(qb::json(20.0), "test", result));
@@ -402,6 +406,7 @@ TEST_F(ValidationRulesTest, MaximumRuleValidation) {
     // Exclusive bound reports the "exclusiveMaximum" rule name (rule.h MaximumRule).
     ASSERT_FALSE(result.errors().empty());
     EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMaximum");
+    EXPECT_EQ(result.errors()[0].message, "Value must be less than 20.0.");
     result.clear();
     EXPECT_TRUE(rule_excl.validate(qb::json(19.9999), "test", result));
     EXPECT_TRUE(result.success());
@@ -429,6 +434,37 @@ TEST_F(ValidationRulesTest, NumericBoundsKeepIntegerPrecision) {
     result.clear();
     EXPECT_TRUE(negative_exclusive_min.validate(qb::json(-static_cast<std::int64_t>(kTwoTo53) + 1), "amount", result));
     EXPECT_TRUE(result.success());
+
+    // Copies and moves own the exact scalar after constructor arguments and
+    // source rules have been destroyed. No cached JSON-storage pointer may escape.
+    const auto copied_bounds = [] {
+        qb::json    minimum_value(kTwoTo53 + 1);
+        qb::json    maximum_value(-static_cast<std::int64_t>(kTwoTo53) - 1);
+        MinimumRule minimum(minimum_value, true);
+        MaximumRule maximum(maximum_value, true);
+        minimum_value     = 0;
+        maximum_value     = 0;
+        auto minimum_copy = minimum;
+        auto maximum_copy = maximum;
+        return std::make_pair(std::move(minimum_copy), std::move(maximum_copy));
+    }();
+    result.clear();
+    EXPECT_FALSE(copied_bounds.first.validate(qb::json(kTwoTo53 + 1), "amount", result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].field_path, "amount");
+    EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMinimum");
+    EXPECT_EQ(result.errors()[0].message, "Value must be greater than 9007199254740993.");
+    ASSERT_TRUE(result.errors()[0].offending_value.has_value());
+    EXPECT_EQ(result.errors()[0].offending_value->get<std::uint64_t>(), kTwoTo53 + 1);
+    result.clear();
+    EXPECT_TRUE(copied_bounds.first.validate(qb::json(kTwoTo53 + 2), "amount", result));
+    result.clear();
+    EXPECT_FALSE(copied_bounds.second.validate(qb::json(-static_cast<std::int64_t>(kTwoTo53) - 1), "amount", result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].rule_violated, "exclusiveMaximum");
+    EXPECT_EQ(result.errors()[0].message, "Value must be less than -9007199254740993.");
+    result.clear();
+    EXPECT_TRUE(copied_bounds.second.validate(qb::json(-static_cast<std::int64_t>(kTwoTo53) - 2), "amount", result));
 }
 
 TEST_F(ValidationRulesTest, NumericBoundsHandleMixedKindsAnd64BitEdges) {
@@ -477,6 +513,37 @@ TEST_F(ValidationRulesTest, NumericBoundsHandleMixedKindsAnd64BitEdges) {
     result.clear();
     EXPECT_FALSE(signed_boundary.validate(qb::json(nan), "number", result));
     EXPECT_FALSE(result.success());
+    result.clear();
+    EXPECT_FALSE(unsigned_boundary.validate(qb::json(nan), "number", result));
+    result.clear();
+    EXPECT_FALSE(positive_fraction.validate(qb::json(nan), "number", result));
+
+    const auto infinity = (std::numeric_limits<double>::infinity)();
+    result.clear();
+    EXPECT_TRUE(unsigned_min.validate(qb::json(infinity), "number", result));
+    result.clear();
+    EXPECT_FALSE(unsigned_min.validate(qb::json(-infinity), "number", result));
+    result.clear();
+    EXPECT_FALSE(signed_boundary.validate(qb::json(-infinity), "number", result));
+    result.clear();
+    EXPECT_TRUE(unsigned_boundary.validate(qb::json(-infinity), "number", result));
+
+    // A non-finite bound remains an evaluation error even for nonnumeric data.
+    for (double bound : {nan, infinity, -infinity}) {
+        for (bool exclusive : {false, true}) {
+            MinimumRule invalid_min(bound, exclusive);
+            MaximumRule invalid_max(bound, exclusive);
+            for (const auto *rule : {static_cast<const IRule *>(&invalid_min), static_cast<const IRule *>(&invalid_max)}) {
+                result.clear();
+                EXPECT_FALSE(rule->validate(qb::json("not a number"), "number", result));
+                ASSERT_EQ(result.errors().size(), 1u);
+                EXPECT_EQ(result.errors()[0].field_path, "number");
+                EXPECT_EQ(result.errors()[0].rule_violated, rule->rule_name());
+                EXPECT_EQ(result.errors()[0].message, "Numeric bound must be finite.");
+                EXPECT_FALSE(result.errors()[0].offending_value.has_value());
+            }
+        }
+    }
 
     EXPECT_THROW(MinimumRule(qb::json("5")), std::invalid_argument);
     EXPECT_THROW(MaximumRule(qb::json("5")), std::invalid_argument);

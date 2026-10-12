@@ -109,6 +109,8 @@ The concrete rules below map one-to-one onto JSON-Schema keywords. You rarely in
 
 Length counts Unicode code points, not UTF-8 bytes or grapheme clusters: `"é"` is one, while `"e"` followed by a combining accent is two. Directly constructed `qb::json` strings with malformed UTF-8 fail length validation without placing their invalid bytes in the error value. Parsed JSON input is already checked by the parser. Counting a long multibyte string visits its encoded bytes; short ASCII strings use a fast path. Numeric bounds and equality keep distinctions among signed integers, unsigned integers, and floating values representable by `qb::json`; an integer beyond 2⁵³ no longer rounds through `double` during validation. A programmatically constructed NaN/infinite schema bound produces a validation error when evaluated.
 
+The schema cache selects private numeric rules with an owned typed scalar bound when compiling a schema node. Standalone numeric rules retain their JSON storage and object layout. Both paths use the same exact comparison and diagnostic logic: non-finite bounds fail before the nonnumeric-value pass-through, with no offending value, and bound diagnostics are serialized only on failure.
+
 When a schema node has both valid `minLength` and `maxLength` bounds, its cached evaluation shares one Unicode count. Both keyword diagnostics are still evaluated in order, including two errors for malformed UTF-8 or contradictory bounds. Standalone rules and parameter rule ordering retain their existing behavior.
 
 `CustomRule` expresses logic no built-in rule covers:

@@ -44,6 +44,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   Standalone length rules and parameter validation keep their existing evaluation.
   Two-byte UTF-8 blocks check all overlong leads together; exact unsigned numeric
   comparisons read the guarded integer storage without generic conversions.
+  Cached schema numeric rules specialize their scalar bound once when compiled,
+  preserving exact comparisons, diagnostics and non-finite-bound errors.
+  Standalone numeric rules retain their JSON storage and object layout.
 
 - **Early WebSocket frame queuing stays outside established dispatch (Huly QB-513).**
   A cold helper builds the owning queue entry; established-message forwarding keeps a

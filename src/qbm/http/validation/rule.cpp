@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <qb/system/container/unordered_set.h>
+#include <qb/utility/branch_hints.h>
 #include "./schema_validator.h"
 
 namespace qb::http::validation {
@@ -215,42 +216,145 @@ compare_unsigned_to_double(std::uint64_t lhs, double rhs) noexcept {
     return compare_same_kind(whole, rhs);
 }
 
+// The JSON operand is numeric at every call site. A typed bound removes its
+// repeated JSON dispatch and keeps arithmetic getters out of the comparison.
+template <typename Number>
+std::optional<int>
+compare_number_to_bound(const qb::json &value, Number bound) noexcept {
+    if (const auto *number = value.get_ptr<const qb::json::number_unsigned_t *>()) {
+        if constexpr (std::same_as<Number, qb::json::number_unsigned_t>) {
+            return compare_same_kind(*number, bound);
+        } else if constexpr (std::same_as<Number, qb::json::number_integer_t>) {
+            return bound < 0 ? 1 : compare_same_kind(*number, static_cast<std::uint64_t>(bound));
+        } else {
+            return compare_unsigned_to_double(*number, bound);
+        }
+    }
+    if (const auto *number = value.get_ptr<const qb::json::number_integer_t *>()) {
+        if constexpr (std::same_as<Number, qb::json::number_unsigned_t>) {
+            return *number < 0 ? -1 : compare_same_kind(static_cast<std::uint64_t>(*number), bound);
+        } else if constexpr (std::same_as<Number, qb::json::number_integer_t>) {
+            return compare_same_kind(*number, bound);
+        } else {
+            return compare_signed_to_double(*number, bound);
+        }
+    }
+    const auto number = *value.get_ptr<const qb::json::number_float_t *>();
+    if constexpr (std::same_as<Number, qb::json::number_unsigned_t>) {
+        const auto order = compare_unsigned_to_double(bound, number);
+        return order ? std::optional<int>(-*order) : std::nullopt;
+    } else if constexpr (std::same_as<Number, qb::json::number_integer_t>) {
+        const auto order = compare_signed_to_double(bound, number);
+        return order ? std::optional<int>(-*order) : std::nullopt;
+    } else {
+        if (std::isnan(number) || std::isnan(bound))
+            return std::nullopt;
+        return compare_same_kind(number, bound);
+    }
+}
+
 std::optional<int>
 compare_numbers(const qb::json &lhs, const qb::json &rhs) noexcept {
-    if (lhs.is_number_unsigned()) {
-        const auto value = *lhs.get_ptr<const qb::json::number_unsigned_t *>();
-        if (rhs.is_number_unsigned())
-            return compare_same_kind(value, *rhs.get_ptr<const qb::json::number_unsigned_t *>());
-        if (rhs.is_number_integer()) {
-            const auto other = rhs.get<qb::json::number_integer_t>();
-            return other < 0 ? 1 : compare_same_kind(value, static_cast<std::uint64_t>(other));
+    if (const auto *number = rhs.get_ptr<const qb::json::number_unsigned_t *>())
+        return compare_number_to_bound(lhs, *number);
+    if (const auto *number = rhs.get_ptr<const qb::json::number_integer_t *>())
+        return compare_number_to_bound(lhs, *number);
+    return compare_number_to_bound(lhs, *rhs.get_ptr<const qb::json::number_float_t *>());
+}
+
+template <bool Minimum>
+bool
+numeric_bound_satisfied(std::optional<int> order, bool exclusive) noexcept {
+    if (!order)
+        return false;
+    if constexpr (Minimum)
+        return exclusive ? *order > 0 : *order >= 0;
+    else
+        return exclusive ? *order < 0 : *order <= 0;
+}
+
+template <bool Minimum>
+const char *
+numeric_bound_name(bool exclusive) noexcept {
+    if constexpr (Minimum)
+        return exclusive ? "exclusiveMinimum" : "minimum";
+    else
+        return exclusive ? "exclusiveMaximum" : "maximum";
+}
+
+QB_NOINLINE QB_COLD bool
+report_nonfinite_bound(const std::string &rule_name, const std::string &field_path, Result &result) {
+    result.add_error(field_path, rule_name, "Numeric bound must be finite.", std::nullopt);
+    return false;
+}
+
+template <bool Minimum, typename Bound>
+QB_NOINLINE QB_COLD bool
+report_numeric_bound_failure(const Bound &bound, bool exclusive, const std::string &rule_name, const qb::json &value,
+                             const std::string &field_path, Result &result) {
+    const char *relation;
+    if constexpr (Minimum)
+        relation = exclusive ? "Value must be greater than " : "Value must be greater than or equal to ";
+    else
+        relation = exclusive ? "Value must be less than " : "Value must be less than or equal to ";
+    std::string bound_text;
+    if constexpr (std::same_as<Bound, qb::json>)
+        bound_text = bound.dump();
+    else
+        bound_text = qb::json(bound).dump();
+    result.add_error(field_path, rule_name, std::string(relation) + bound_text + ".", std::make_optional(value));
+    return false;
+}
+
+template <typename Number>
+bool
+numeric_bound_finite(Number bound) noexcept {
+    if constexpr (std::floating_point<Number>)
+        return std::isfinite(bound);
+    else
+        return true;
+}
+
+// Only the private schema cache owns these specializations. Public numeric
+// rules retain their JSON storage and layout, including inline copy/destruction.
+template <typename Number, bool Minimum>
+class NumericBoundRule final : public IRule {
+    const Number _bound;
+    const bool   _exclusive;
+    const bool   _finite;
+
+public:
+    NumericBoundRule(Number bound, bool exclusive)
+        : _bound(bound)
+        , _exclusive(exclusive)
+        , _finite(numeric_bound_finite(bound)) {}
+
+    bool
+    validate(const qb::json &value, const std::string &field_path, Result &result) const override {
+        if constexpr (std::floating_point<Number>) {
+            if (!_finite) [[unlikely]]
+                return report_nonfinite_bound(rule_name(), field_path, result);
         }
-        return compare_unsigned_to_double(value, rhs.get<qb::json::number_float_t>());
+        if (!value.is_number())
+            return true;
+        const auto order = compare_number_to_bound(value, _bound);
+        if (!numeric_bound_satisfied<Minimum>(order, _exclusive)) [[unlikely]]
+            return report_numeric_bound_failure<Minimum>(_bound, _exclusive, rule_name(), value, field_path, result);
+        return true;
     }
-    if (lhs.is_number_integer()) {
-        const auto value = lhs.get<qb::json::number_integer_t>();
-        if (rhs.is_number_unsigned()) {
-            if (value < 0)
-                return -1;
-            return compare_same_kind(static_cast<std::uint64_t>(value), rhs.get<qb::json::number_unsigned_t>());
-        }
-        if (rhs.is_number_integer())
-            return compare_same_kind(value, rhs.get<qb::json::number_integer_t>());
-        return compare_signed_to_double(value, rhs.get<qb::json::number_float_t>());
+
+    std::string
+    rule_name() const override {
+        return numeric_bound_name<Minimum>(_exclusive);
     }
-    const auto value = lhs.get<qb::json::number_float_t>();
-    if (rhs.is_number_unsigned()) {
-        const auto order = compare_unsigned_to_double(rhs.get<qb::json::number_unsigned_t>(), value);
-        return order ? std::optional<int>(-*order) : std::nullopt;
-    }
-    if (rhs.is_number_integer()) {
-        const auto order = compare_signed_to_double(rhs.get<qb::json::number_integer_t>(), value);
-        return order ? std::optional<int>(-*order) : std::nullopt;
-    }
-    const auto other = rhs.get<qb::json::number_float_t>();
-    if (std::isnan(value) || std::isnan(other))
-        return std::nullopt;
-    return compare_same_kind(value, other);
+};
+
+template <typename Number>
+std::shared_ptr<IRule>
+make_typed_numeric_bound_rule(Number bound, bool exclusive, bool minimum) {
+    if (minimum)
+        return std::make_shared<NumericBoundRule<Number, true>>(bound, exclusive);
+    return std::make_shared<NumericBoundRule<Number, false>>(bound, exclusive);
 }
 
 bool
@@ -261,7 +365,8 @@ equal_json_values(const qb::json &lhs, const qb::json &rhs) {
             return *order == 0;
         // NaN is outside JSON, but programmatic qb::json values must still
         // give the hash table a reflexive equality relation.
-        return lhs.is_number_float() && rhs.is_number_float() && std::isnan(lhs.get<double>()) && std::isnan(rhs.get<double>());
+        return lhs.is_number_float() && rhs.is_number_float() && std::isnan(*lhs.get_ptr<const qb::json::number_float_t *>())
+               && std::isnan(*rhs.get_ptr<const qb::json::number_float_t *>());
     }
     if (lhs.type() != rhs.type())
         return false;
@@ -295,14 +400,14 @@ std::size_t
 hash_number(const qb::json &value) noexcept {
     constexpr std::size_t kNumberTag = 0x4e554d42u;
     if (value.is_number_unsigned())
-        return combine_hash(kNumberTag, std::hash<std::uint64_t>{}(value.get<qb::json::number_unsigned_t>()));
+        return combine_hash(kNumberTag, std::hash<std::uint64_t>{}(*value.get_ptr<const qb::json::number_unsigned_t *>()));
     if (value.is_number_integer()) {
-        const auto signed_value = value.get<qb::json::number_integer_t>();
+        const auto signed_value = *value.get_ptr<const qb::json::number_integer_t *>();
         if (signed_value >= 0)
             return combine_hash(kNumberTag, std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(signed_value)));
         return combine_hash(kNumberTag, std::hash<std::int64_t>{}(signed_value));
     }
-    const auto number = value.get<qb::json::number_float_t>();
+    const auto number = *value.get_ptr<const qb::json::number_float_t *>();
     if (std::isnan(number))
         return combine_hash(kNumberTag ^ 0x464c4f41u, 0x4e414e00u);
     if (number == 0.0)
@@ -360,6 +465,17 @@ struct JsonPointerEqual {
 std::shared_ptr<IRule>
 SchemaValidator::make_length_range_rule(std::size_t min_length, std::size_t max_length) {
     return std::make_shared<LengthRangeRule>(min_length, max_length);
+}
+
+std::shared_ptr<IRule>
+SchemaValidator::make_numeric_bound_rule(const qb::json &bound, bool exclusive, bool minimum) {
+    if (const auto *number = bound.get_ptr<const qb::json::number_unsigned_t *>())
+        return make_typed_numeric_bound_rule(*number, exclusive, minimum);
+    if (const auto *number = bound.get_ptr<const qb::json::number_integer_t *>())
+        return make_typed_numeric_bound_rule(*number, exclusive, minimum);
+    if (const auto *number = bound.get_ptr<const qb::json::number_float_t *>())
+        return make_typed_numeric_bound_rule(*number, exclusive, minimum);
+    throw std::invalid_argument(minimum ? "MinimumRule requires a numeric bound." : "MaximumRule requires a numeric bound.");
 }
 
 std::string
@@ -567,25 +683,13 @@ MinimumRule::MinimumRule(qb::json min_val, bool exclusive)
 
 bool
 MinimumRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
-    if (_minimum.is_number_float() && !std::isfinite(_minimum.get<double>())) {
-        result.add_error(field_path, rule_name(), "Numeric bound must be finite.", std::nullopt);
-        return false;
-    }
+    if (const auto *number = _minimum.get_ptr<const qb::json::number_float_t *>(); number && !std::isfinite(*number)) [[unlikely]]
+        return report_nonfinite_bound(rule_name(), field_path, result);
     if (!value.is_number())
         return true; // Rule only applies to numbers.
     const auto order = compare_numbers(value, _minimum);
-    if (_exclusive) {
-        if (!order || *order <= 0) {
-            result.add_error(field_path, rule_name(), "Value must be greater than " + _minimum.dump() + ".", std::make_optional(value));
-            return false;
-        }
-    } else {
-        if (!order || *order < 0) {
-            result.add_error(field_path, rule_name(), "Value must be greater than or equal to " + _minimum.dump() + ".",
-                             std::make_optional(value));
-            return false;
-        }
-    }
+    if (!numeric_bound_satisfied<true>(order, _exclusive)) [[unlikely]]
+        return report_numeric_bound_failure<true>(_minimum, _exclusive, rule_name(), value, field_path, result);
     return true;
 }
 
@@ -601,25 +705,13 @@ MaximumRule::MaximumRule(qb::json max_val, bool exclusive)
 
 bool
 MaximumRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
-    if (_maximum.is_number_float() && !std::isfinite(_maximum.get<double>())) {
-        result.add_error(field_path, rule_name(), "Numeric bound must be finite.", std::nullopt);
-        return false;
-    }
+    if (const auto *number = _maximum.get_ptr<const qb::json::number_float_t *>(); number && !std::isfinite(*number)) [[unlikely]]
+        return report_nonfinite_bound(rule_name(), field_path, result);
     if (!value.is_number())
         return true; // Rule only applies to numbers.
     const auto order = compare_numbers(value, _maximum);
-    if (_exclusive) {
-        if (!order || *order >= 0) {
-            result.add_error(field_path, rule_name(), "Value must be less than " + _maximum.dump() + ".", std::make_optional(value));
-            return false;
-        }
-    } else {
-        if (!order || *order > 0) {
-            result.add_error(field_path, rule_name(), "Value must be less than or equal to " + _maximum.dump() + ".",
-                             std::make_optional(value));
-            return false;
-        }
-    }
+    if (!numeric_bound_satisfied<false>(order, _exclusive)) [[unlikely]]
+        return report_numeric_bound_failure<false>(_maximum, _exclusive, rule_name(), value, field_path, result);
     return true;
 }
 
