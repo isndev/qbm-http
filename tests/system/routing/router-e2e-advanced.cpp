@@ -16,8 +16,11 @@
  *   - URL-encoded path segments decode correctly server-side;
  *   - HEAD body-stripping on the wire (handler may set a body; the client sees none);
  *   - the `Allow` header is serialized correctly for auto-405 and OPTIONS;
- *   - async-over-loop completion: a handler that completes from a deferred
- *     `qb::io::async::callback` still produces a correct response;
+ *   - deferred completion: a handler that RETURNS before its response is
+ *     complete -- a positive-delay `qb::io::async::callback` completes it on a
+ *     later loop dispatch -- still produces a correct response, and says so in
+ *     two phase headers; the zero-delay callback, which completes the response
+ *     inline before the handler returns, is kept as the control (Huly QB-300);
  *   - several requests in flight concurrently on the same loop all complete;
  *   - a middleware-induced error routes to the custom global error chain and
  *     yields EXACTLY 503 (the pre-restructure weak `EXPECT_NE(OK)` is gone; see
@@ -87,6 +90,38 @@ url_encode(const std::string &value) {
         escaped << std::uppercase << '%' << std::setw(2) << static_cast<int>(static_cast<unsigned char>(c)) << std::nouppercase;
     }
     return escaped.str();
+}
+
+// ---------------------------------------------------------------------------
+// Complete `ctx` from `qb::io::async::callback(..., delay)` and record the phase
+// the completion ran in, as two response headers:
+//   - `X-Handler-Returned`: whether the route handler that armed the callback
+//     had returned first ("yes") or was still on the stack ("no");
+//   - `X-Dispatches-Between`: how many loop dispatches the server's listener
+//     completed between arming and completion. `total_events_processed()`
+//     counts a dispatch once it has returned, so the dispatch that delivered
+//     the request counts only after it unwound: 0 means the same dispatch.
+// A positive delay arms a timer the loop fires on a later pass; a zero (or
+// negative) one calls the lambda inline, before `callback` returns
+// (`qb/io/async/io.h`) -- the control.
+// ---------------------------------------------------------------------------
+template <typename Ctx>
+void
+complete_from_callback(std::shared_ptr<Ctx> ctx, qb::duration delay, const char *body) {
+    auto       returned = std::make_shared<bool>(false);
+    const auto armed_at = qb::io::async::listener::current.total_events_processed();
+    qb::io::async::callback(
+        [ctx, returned, armed_at, body]() {
+            const auto between       = qb::io::async::listener::current.total_events_processed() - armed_at;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = body;
+            ctx->response().set_header("X-Async", "completed");
+            ctx->response().set_header("X-Handler-Returned", *returned ? "yes" : "no");
+            ctx->response().set_header("X-Dispatches-Between", std::to_string(between));
+            ctx->complete();
+        },
+        delay);
+    *returned = true; // the route handler returns right after this call
 }
 
 // ---------------------------------------------------------------------------
@@ -202,17 +237,10 @@ public:
             ctx->complete();
         });
 
-        // ---- Async-over-loop completion via a deferred callback ----
-        router().get("/async", [](std::shared_ptr<Context> ctx) {
-            qb::io::async::callback(
-                [ctx]() {
-                    ctx->response().status() = qb::http::status::OK;
-                    ctx->response().body()   = "async-done";
-                    ctx->response().set_header("X-Async", "completed");
-                    ctx->complete();
-                },
-                qb::duration::zero());
-        });
+        // ---- Deferred completion: the handler returns, a later loop dispatch completes ----
+        router().get("/async", [](std::shared_ptr<Context> ctx) { complete_from_callback(ctx, 1ms, "async-done"); });
+        // ---- The control: a zero delay completes inline, before the handler returns ----
+        router().get("/async-inline", [](std::shared_ptr<Context> ctx) { complete_from_callback(ctx, qb::duration::zero(), "inline-done"); });
 
         // ---- Middleware-induced error -> global error chain -> 503 ----
         {
@@ -352,7 +380,7 @@ TEST_F(RouterE2ETest, OptionsSerializesExplicitAllowHeader) {
 }
 
 // ---------------------------------------------------------------------------
-// Async-over-loop completion
+// Deferred completion over the loop, and its inline control
 // ---------------------------------------------------------------------------
 
 TEST_F(RouterE2ETest, AsyncHandlerCompletesOverTheLoop) {
@@ -360,6 +388,22 @@ TEST_F(RouterE2ETest, AsyncHandlerCompletesOverTheLoop) {
     EXPECT_EQ(reply.response.status(), qb::http::status::OK);
     EXPECT_EQ(reply.response.body().template as<std::string>(), "async-done");
     EXPECT_EQ(reply.response.header("X-Async"), "completed");
+    // The phase: the handler had returned, and the loop completed at least one dispatch -- the
+    // one that delivered the request -- before the timer's completed the response.
+    EXPECT_EQ(reply.response.header("X-Handler-Returned"), "yes") << "the response was completed before the handler returned";
+    const auto &between = reply.response.header("X-Dispatches-Between");
+    ASSERT_FALSE(between.empty());
+    EXPECT_GT(std::stoull(between), 0u) << "the completion ran inside the dispatch that armed it";
+}
+
+TEST_F(RouterE2ETest, ZeroDelayCallbackCompletesInlineBeforeTheHandlerReturns) {
+    // The control of the case above: `callback(fn, 0)` calls `fn` inline, so the same headers must
+    // read the other phase -- or they would distinguish nothing.
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{url("/async-inline")}}, kClientTimeout));
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.response.body().template as<std::string>(), "inline-done");
+    EXPECT_EQ(reply.response.header("X-Handler-Returned"), "no");
+    EXPECT_EQ(reply.response.header("X-Dispatches-Between"), "0");
 }
 
 // ---------------------------------------------------------------------------

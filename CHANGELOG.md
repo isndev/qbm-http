@@ -184,6 +184,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   server forwards `qb::http::event::disconnected` to the derived server and logs, as the HTTP/1.1 one does (its
   handler used to be empty).
 
+- **The router's "deferred completion" system test defers (Huly QB-300).** `AsyncHandlerCompletesOverTheLoop`
+  (`tests/system/routing/router-e2e-advanced.cpp`) completed its response from `qb::io::async::callback(...,
+  qb::duration::zero())`, which calls the lambda inline before it returns: the response was finished inside the
+  handler, and only the immediate path was ever exercised. The route now arms a 1 ms callback and the response
+  carries its phase -- whether the handler had returned (`X-Handler-Returned`) and how many loop dispatches completed
+  between arming and completion (`X-Dispatches-Between`, from the listener's `total_events_processed()`) -- which the
+  test asserts ("yes", above zero). The zero-delay route stays as the control,
+  `ZeroDelayCallbackCompletesInlineBeforeTheHandlerReturns`, asserting the other phase ("no", 0). Test only.
+
 ### Removed
 
 - **`Http2ServerStream::server_will_send_trailers` (Huly QB-102)** -- a member declared "REVIEW if needed" and
