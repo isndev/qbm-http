@@ -1088,8 +1088,9 @@ TEST_F(ValidationSchemaTest, IntegerBoundsRetainPrecisionBeyondTwoTo53) {
         EXPECT_EQ(result.errors()[1].message, "Value must be less than or equal to 9007199254740991.");
         for (const auto &error : result.errors()) {
             ASSERT_EQ(error.offending_value.has_value(), policy != SchemaValidator::ErrorValuePolicy::None);
-            if (error.offending_value)
+            if (error.offending_value) {
                 EXPECT_EQ(error.offending_value->get<std::uint64_t>(), kTwoTo53);
+            }
         }
     }
 }
