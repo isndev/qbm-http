@@ -159,7 +159,7 @@ The server caps inbound request bodies via `set_max_body_size` (default 64 MiB);
 `push_request` connects lazily on the first request, multiplexes over the live QUIC connection thereafter, and invokes the callback on the I/O thread when the response (or an error response) is ready.
 
 The QUIC `max_streams_bidi` setting limits client-initiated streams open at once, not the total requests one connection can serve. For a request stream delivered through ngtcp2's `stream_open` callback, qb's native backend returns one bidirectional slot on close; ngtcp2 renews implicitly opened streams itself. In the loopback test, 130 sequential requests complete on one connection under the default 100-stream quota. This stream-count credit is separate from request timeouts and the client's pending-work cap.
-<!-- src: qb/src/qb/io/quic.cpp:1015,1456-1483; qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343 -->
+<!-- src: qb/src/qb/io/quic.cpp:1020,1465-1492; qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343 -->
 
 ```cpp
 // src: qbm/http/tests/system/http3/http3-loopback.cpp:198-209 (adapted)
