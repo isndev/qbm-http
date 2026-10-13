@@ -190,7 +190,7 @@ if (validator.validate(data, result)) {
 }
 ```
 
-> **A constructed `SchemaValidator` is effectively `const`-shared, but not concurrently first-touched.** Internally it caches the compiled `IRule` list for each schema node, keyed by the node's address in the by-value schema copy. That cache is a plain `std::unordered_map` populated lazily and is **not** thread-safe to first-populate. If you share one validator across cores, validate once on the owning thread first (warming the cache), or give each core its own validator. Once warmed it is safe to read concurrently because the schema is never mutated.
+> **Use one `SchemaValidator` per core.** Internally it caches the compiled `IRule` list lazily in an unsynchronised `std::unordered_map`, and every recursive validation also increments and decrements the validator's ordinary mutable `_recursion_depth` counter. Warming the cache removes neither that write nor its data race. Do not share one validator across cores without external serialization.
 
 > **Combinators short-circuit and aggregate.** `anyOf`/`oneOf`/`not` are evaluated only if earlier combinators passed. They validate sub-schemas against throwaway `Result`s, so a failure surfaces a single aggregate error (`"anyOf"`, `"oneOf"`, `"not"`) rather than the per-branch detail. Expect one error per failed combinator, not a tree.
 
@@ -378,7 +378,7 @@ router.post("/messages", [](auto ctx) {
 });
 ```
 
-The factory and constructor throw `std::invalid_argument` if the `RequestValidator` pointer is null. Construct and configure the validator once (it is reusable and, after warm-up, read-safe across cores) and share it.
+The factory and constructor throw `std::invalid_argument` if the `RequestValidator` pointer is null. Construct and configure one reusable validator per listener/core. If an application must share one across cores, serialize every call externally.
 
 ## Pitfalls
 
@@ -386,7 +386,7 @@ The factory and constructor throw `std::invalid_argument` if the `RequestValidat
 - **Schema and pattern construction can throw.** `for_body` / `SchemaValidator` throw on a non-object schema; `PatternRule` and `EnumRule` throw on a bad pattern or non-array enum. Guard with `try/catch` for untrusted definitions; these are construction-time, not `validate()`-time, throws.
 - **Set the error-value policy on the validator, not the `Result`.** Both validators reset the `Result`'s policy at entry. A policy you set on the `Result` first is discarded.
 - **`validate()` mutates the request.** Sanitized values are written back; the body is re-serialized. Code that needs the raw input must capture it before validation.
-- **Warm a shared `SchemaValidator` before concurrent use.** Its rule cache is populated lazily and is not thread-safe to first-touch. Validate once on the owning thread, or use one validator per core.
+- **Keep `SchemaValidator` core-local.** Cache warm-up does not remove writes to its recursion-depth counter. Use one validator per core or serialize all access.
 - **`strip_html_tags()` and `escape_sql_like()` are not security boundaries.** Use a real HTML sanitizer and parameterized queries for those concerns; these are convenience transforms.
 - **Path-param validation requires the routing context.** Outside the middleware, you must pass a `PathParameters*` to `validate()` or every defined path-param rule reports `"required"`.
 

@@ -59,7 +59,9 @@ using qb::http::test::now_epoch;
 // ---------------------------------------------------------------------------
 
 TEST(AuthManagerPayload, ContainsStandardAndUserClaims) {
-    Manager     mgr(hmac_options());
+    Options     opts     = hmac_options();
+    const auto  lifetime = static_cast<std::uint64_t>(opts.get_token_expiration().count());
+    Manager     mgr(opts);
     const User  user        = make_user();
     const auto  before      = now_epoch();
     std::string payload_str = mgr.generate_token_payload(user);
@@ -82,16 +84,14 @@ TEST(AuthManagerPayload, ContainsStandardAndUserClaims) {
     EXPECT_GE(iat, before);
     EXPECT_LE(iat, after);
 
-    // Default options enable expiration verification -> exp present and in the future.
-    // manager.cpp reads the wall clock TWICE (once for iat, once for exp = now()+3600),
-    // so a one-second boundary straddle between the two reads makes exp == iat+3601
-    // legitimately. Assert exp - iat is the expected 3600 +/- the 1s straddle window
-    // rather than pinning the exact value (which would flake at a second rollover).
+    // manager.cpp reads the wall clock separately for iat and exp. Bound each
+    // read by the observed before/after window instead of assuming the second
+    // read happens within one scheduler second of the first.
     ASSERT_TRUE(payload.contains("exp"));
     const auto exp = payload.at("exp").get<std::uint64_t>();
     EXPECT_GT(exp, iat);
-    EXPECT_GE(exp - iat, 3600u);
-    EXPECT_LE(exp - iat, 3601u);
+    EXPECT_GE(exp, before + lifetime);
+    EXPECT_LE(exp, after + lifetime);
 
     // Metadata is serialized as a nested object.
     ASSERT_TRUE(payload.contains("metadata"));

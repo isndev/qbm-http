@@ -88,7 +88,8 @@ void on(Protocol::request&& request) {      // HTTP upgrade arrives
 
 These are the levers that matter, grounded in how the types are built rather than benchmarks.
 
-- **Zero-copy reads via `string_view`.** Header lookups and many body conversions hand back `std::string_view` over the parse buffer rather than copying. Reading request data in a synchronous handler is allocation-free; the cost shows up only when you copy out. See [lifetime](#string_view-and-lifetime).
+- **Borrowed reads of owned data.** Parsed header names and values live in owning `std::string` storage; `header()` returns a borrowed `const std::string&`. `Body::as<std::string_view>()` borrows from the body's owning pipe without another body copy. Parsing and assigning a `string_view` to `Body` can still allocate and copy; no allocation-free parsing or measured speedup is implied. See [lifetime](#string_view-and-lifetime).
+<!-- src: qbm/http/src/qbm/http/headers.h:143-159,306-313; qbm/http/src/qbm/http/body.cpp:603-606,707-710 -->
 
 - **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/src/qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). `body.raw()` gives you the pipe directly for custom (de)serialization. Assigning a `std::string` copies its bytes into the pipe even with an rvalue; the rvalue overload then clears the source string:
 
@@ -98,6 +99,9 @@ These are the levers that matter, grounded in how the types are built rather tha
   ctx->response().body() = std::move(payload);   // copies bytes into the pipe, then clears payload
   ```
 
+  Assigning `std::string_view` also copies its bytes into the pipe. Moving an entire `Body` instead uses its move assignment for the owned pipe; that is a different operation from moving a string or a view into a `Body`.
+  <!-- src: qbm/http/src/qbm/http/body.h:65-75; qbm/http/src/qbm/http/body.cpp:588-606,892-895 -->
+
   Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/src/qbm/http/body.h:104-158`). `Form` is deliberately not appendable — assign it wholesale (`body = form`), not `body << form`.
 
 - **The router compiles once.** `router().compile()` builds an optimized radix tree for path matching. Call it once, after all routes are defined and before serving; it is not designed to be re-run on a hot path. See [Routing overview](./03-routing-overview.md).
@@ -106,7 +110,8 @@ These are the levers that matter, grounded in how the types are built rather tha
 
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
-- **Compression is opt-in and automatic where enabled.** With `QB_HAS_COMPRESSION`, the one-shot client sets `Accept-Encoding` and decompresses responses; setting `Content-Encoding` on a request body compresses it (`qbm/http/src/qbm/http/1.1/http.h:763-767,787-797`). On the server, set `Content-Encoding` on the response, or use the compression middleware ([Standard middleware](./08-standard-middleware.md)).
+- **One declared encoding, one transformation.** With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an *uncompressed* request body when `Content-Encoding` is set, and decompress encoded responses. Do not precompress an HTTP/1.1 request before passing it to those clients. The response serializer emits the body's bytes unchanged: if you compress manually, set `Content-Encoding` after `body().compress(...)`; if you leave the body plain, use the compression middleware, which negotiates `Accept-Encoding`, compresses when worthwhile, and sets the header itself. An existing `Content-Encoding` makes that middleware skip response compression. See [Asynchronous HTTP client](./14-async-http-client.md) and [Standard middleware](./08-standard-middleware.md).
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:765-799; qbm/http/src/qbm/http/1.1/client.cpp:118-131,145-159; qbm/http/src/qbm/http/response.cpp:315-335; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
 
 ### Never block the event loop
 
@@ -169,10 +174,11 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 
 ## `string_view` and lifetime
 
-`std::string_view` returned from `RequestView`/`ResponseView`, from header accessors, or from `Body::as<std::string_view>()` is **non-owning**. It points into the parse buffer or the body's pipe.
+The retired `RequestView`/`ResponseView` types are not part of this API. For a present header, `header()` returns a borrowed `const std::string&` into the owning message's header map; for an absent header, it returns a reference to a process-wide static empty string. `Body::as<std::string_view>()` returns a borrowed view into the owning body's pipe. Neither accessor transfers ownership.
+<!-- src: qbm/http/src/qbm/http/headers.h:143-159,306-313; qbm/http/src/qbm/http/body.cpp:707-710 -->
 
-- Within a single synchronous handler or middleware `process()` call, using these views is safe — the underlying buffer outlives the call.
-- The moment data must outlive the request buffer — stored in an async callback, carried in an event to another actor, cached past the response — **copy it into an owning type** (`std::string`, `std::vector<char>`). A view that outlives its buffer is a dangling read and undefined behavior.
+- While the owning message and its storage stay alive and unmodified, using those borrowed values is safe. Mutating a header map or body can invalidate a reference or view even inside one handler call.
+- If data must outlive the message or its storage — stored in an async callback, carried in an event to another actor, cached past the response — **copy it into an owning type** (`std::string`, `std::vector<char>`) or move the owning message/`Body` with the lifetime you need. A borrowed value that outlives its owner is a dangling read and undefined behavior.
 - `Chunk` carries the same rule: it borrows its bytes (`qbm/http/src/qbm/http/chunk.h:32-33,57-59`). Keep the source alive until the chunk is serialized.
 
 ## Pitfalls
@@ -183,7 +189,7 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 - **Forgetting `ctx->complete()`.** The request hangs until the inactivity timeout closes it. Terminal response helpers complete for you; raw `body =`/`status()` do not.
 - **Calling `complete()` from `cancel()`.** Contract violation — the `Context` manages its own finalization (`qbm/http/src/qbm/http/routing/async_task.h:62-76`).
 - **Omitting `suppress_response()` on upgrade or ownership transfer.** The `Context` destructor will send a stale HTTP response over a transport that has moved on (`qbm/http/src/qbm/http/routing/context.h:1250-1255`).
-- **Holding a `string_view` (or `Chunk`) past the request buffer.** Copy into an owning type before crossing an async or inter-actor boundary.
+- **Holding a borrowed body view, header reference, or `Chunk` past its owner.** Copy into an owning type, or transfer ownership of the message/`Body`, before crossing an async or inter-actor boundary.
 - **Re-compiling the router on the hot path.** `compile()` is a setup-time, single-threaded operation; the router is not safe to mutate while serving.
 
 ## See also

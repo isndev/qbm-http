@@ -43,19 +43,22 @@
  * @ingroup Http
  */
 
-#include <array>
 #include <cctype>
 #include <chrono>
 #include <iomanip>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "../../shared/loopback_server.h"
 
+#include <qb/io/async/coroutine.h>
 #include <qbm/http/http.h>
 #include <qbm/http/routing/context.h>
 #include <qbm/http/routing/middleware.h>
@@ -67,6 +70,22 @@ namespace {
 
 /// Bounded client timeout — a stuck server surfaces as 504, never a hang.
 constexpr auto kClientTimeout = 7s;
+
+qb::io::async::task<qb::http::async::Reply>
+fetch_one(std::string target) {
+    qb::http::Request request{{std::move(target)}};
+    co_return co_await qb::http::GET(std::move(request), kClientTimeout);
+}
+
+qb::io::async::task<std::vector<qb::http::async::Reply>>
+fetch_all(std::vector<std::string> targets) {
+    std::vector<qb::io::async::task<qb::http::async::Reply>> tasks;
+    tasks.reserve(targets.size());
+    for (auto &target : targets) {
+        tasks.emplace_back(fetch_one(std::move(target)));
+    }
+    co_return co_await qb::io::async::when_all(std::move(tasks));
+}
 
 class RouterE2EServer;
 
@@ -90,6 +109,44 @@ url_encode(const std::string &value) {
         escaped << std::uppercase << '%' << std::setw(2) << static_cast<int>(static_cast<unsigned char>(c)) << std::nouppercase;
     }
     return escaped.str();
+}
+
+bool
+write_all(qb::io::tcp::socket &socket, std::string_view bytes) {
+    std::size_t sent     = 0;
+    const auto  deadline = std::chrono::steady_clock::now() + kClientTimeout;
+    while (sent < bytes.size() && std::chrono::steady_clock::now() < deadline) {
+        const int n = socket.write(bytes.data() + sent, static_cast<int>(bytes.size() - sent));
+        if (n > 0) {
+            sent += static_cast<std::size_t>(n);
+        } else {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+    return sent == bytes.size();
+}
+
+std::string
+read_wire_response(qb::io::tcp::socket &socket) {
+    std::string response;
+    const auto  deadline  = std::chrono::steady_clock::now() + kClientTimeout;
+    auto        last_byte = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() < deadline) {
+        char      buffer[1024];
+        const int n = socket.read(buffer, sizeof(buffer));
+        if (n > 0) {
+            response.append(buffer, static_cast<std::size_t>(n));
+            last_byte = std::chrono::steady_clock::now();
+        } else if (n == 0) {
+            break;
+        } else {
+            if (response.find("\r\n\r\n") != std::string::npos && std::chrono::steady_clock::now() - last_byte >= 200ms) {
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+    return response;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +202,13 @@ public:
 
 class RouterE2EServer : public qb::http::use<RouterE2EServer>::server<RouterE2ESession> {
 public:
-    using Context = qb::http::Context<RouterE2ESession>;
+    using Context                                    = qb::http::Context<RouterE2ESession>;
+    static constexpr std::size_t kConcurrentRequests = 8;
 
+private:
+    std::vector<std::shared_ptr<Context>> _concurrent_requests;
+
+public:
     RouterE2EServer() {
         // ---- Custom global error chain: any routed ERROR -> 503 ----
         qb::http::RouteHandlerFn<RouterE2ESession> error_handler = [](std::shared_ptr<Context> ctx) {
@@ -209,6 +271,23 @@ public:
             ctx->response().status() = qb::http::status::CREATED;
             ctx->response().body()   = ctx->request().body().template as<std::string>();
             ctx->complete();
+        });
+
+        // Hold every request until all peers are simultaneously active. A
+        // sequential client deadlocks here and times out, so the corresponding
+        // test cannot pass without real overlap.
+        router().get("/concurrent/:value", [this](std::shared_ptr<Context> ctx) {
+            _concurrent_requests.push_back(ctx);
+            if (_concurrent_requests.size() != kConcurrentRequests) {
+                return;
+            }
+            auto ready = std::move(_concurrent_requests);
+            _concurrent_requests.clear();
+            for (auto &pending : ready) {
+                pending->response().status() = qb::http::status::OK;
+                pending->response().body()   = "concurrent:" + std::string{pending->path_param("value")};
+                pending->complete();
+            }
         });
 
         // ---- Multi-method resource: auto-405 must compute a sorted Allow ----
@@ -353,10 +432,17 @@ TEST_F(RouterE2ETest, RequestBodyRoundTripsThroughWire) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RouterE2ETest, HeadResponseHasNoBodyOnTheWire) {
-    auto reply = qb::http::run_sync(qb::http::HEAD(qb::http::Request{qb::http::method::HEAD, {url("/ping")}}, kClientTimeout));
-    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
-    // The HEAD handler set a body; the transport must strip it for HEAD.
-    EXPECT_TRUE(reply.response.body().empty());
+    qb::io::tcp::socket socket;
+    ASSERT_EQ(socket.connect_v4("127.0.0.1", _port), qb::io::SocketStatus::Done);
+    const std::string request = "HEAD /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(write_all(socket, request));
+
+    const std::string wire  = read_wire_response(socket);
+    const auto        split = wire.find("\r\n\r\n");
+    ASSERT_NE(split, std::string::npos) << wire;
+    EXPECT_NE(wire.substr(0, split).find("HTTP/1.1 200"), std::string::npos) << wire;
+    EXPECT_TRUE(wire.substr(split + 4).empty()) << "HEAD emitted body bytes on the wire";
+    socket.disconnect();
 }
 
 // ---------------------------------------------------------------------------
@@ -426,29 +512,17 @@ TEST_F(RouterE2ETest, MiddlewareInducedErrorYieldsExact503) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RouterE2ETest, ConcurrentInFlightRequestsAllComplete) {
-    // Issue several requests from a single coroutine WITHOUT awaiting each in
-    // turn: they are all spawned onto the loop and resolved together. The test
-    // pins each response to its own deterministic body, so an out-of-order or
-    // cross-talk bug would surface as a mismatched body, not just a count.
-    constexpr int               kN = 8;
-    std::array<int, kN>         statuses{};
-    std::array<std::string, kN> bodies{};
-    int                         completed = 0;
+    std::vector<std::string> targets;
+    targets.reserve(RouterE2EServer::kConcurrentRequests);
+    for (std::size_t i = 0; i < RouterE2EServer::kConcurrentRequests; ++i) {
+        targets.push_back(url("/concurrent/req" + std::to_string(i)));
+    }
 
-    auto fetch_requests = [&]() -> qb::io::async::task<void> {
-        for (int i = 0; i < kN; ++i) {
-            auto reply  = co_await qb::http::GET(qb::http::Request{{url("/param/req" + std::to_string(i))}}, kClientTimeout);
-            statuses[i] = reply.response.status();
-            bodies[i]   = reply.response.body().template as<std::string>();
-            ++completed;
-        }
-        co_return;
-    };
-    qb::io::async::run_sync(fetch_requests());
-    ASSERT_EQ(completed, kN);
-    for (int i = 0; i < kN; ++i) {
-        EXPECT_EQ(statuses[i], static_cast<int>(qb::http::status::OK)) << "i=" << i;
-        EXPECT_EQ(bodies[i], "param:req" + std::to_string(i)) << "i=" << i;
+    const auto replies = qb::io::async::run_sync(fetch_all(std::move(targets)));
+    ASSERT_EQ(replies.size(), RouterE2EServer::kConcurrentRequests);
+    for (std::size_t i = 0; i < replies.size(); ++i) {
+        EXPECT_EQ(replies[i].response.status(), qb::http::status::OK) << "i=" << i;
+        EXPECT_EQ(replies[i].response.body().template as<std::string>(), "concurrent:req" + std::to_string(i)) << "i=" << i;
     }
 }
 

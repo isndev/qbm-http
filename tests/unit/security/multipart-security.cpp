@@ -24,6 +24,9 @@
  */
 
 #include <gtest/gtest.h>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <qb/system/allocator/pipe.h>
 #include <qbm/http/body.h>
 #include <qbm/http/headers.h>
@@ -40,6 +43,26 @@ protected:
     void
     SetUp() override {}
 };
+
+[[nodiscard]] std::string
+well_formed_attributes_of_size(std::size_t target_size) {
+    constexpr std::size_t tail_prefix_size = 5u; // "tail="
+    if (target_size < tail_prefix_size) {
+        throw std::invalid_argument("attribute corpus is too small for its terminal field");
+    }
+    std::string attributes;
+    std::size_t index = 0;
+    for (;;) {
+        const std::string token = "a" + std::to_string(index++) + "=v;";
+        if (attributes.size() + token.size() + tail_prefix_size > target_size) {
+            break;
+        }
+        attributes += token;
+    }
+    attributes += "tail=";
+    attributes.append(target_size - attributes.size(), 'x');
+    return attributes;
+}
 
 TEST_F(MultipartSecurityTest, ValidBoundaryParsing) {
     // Standard boundary parsing should work
@@ -284,11 +307,21 @@ TEST_F(MultipartSecurityTest, HeaderAttributeValueOverLimitIsRejected) {
 }
 
 TEST_F(MultipartSecurityTest, HeaderAttributesTotalInputOverLimitIsRejected) {
-    // The whole-input guard (len > 64KB) trips before any per-value parsing,
-    // so a >64KB blob is rejected even split across many small attributes.
-    constexpr std::size_t over_total = 64u * 1024u + 1u;
-    const std::string     attrs(over_total, 'y');
-    EXPECT_THROW({ (void) parse_header_attributes(attrs.data(), attrs.size()); }, std::runtime_error);
+    constexpr std::size_t limit = 64u * 1024u;
+    for (const auto accepted_size : {limit - 1u, limit}) {
+        const auto attrs = well_formed_attributes_of_size(accepted_size);
+        ASSERT_EQ(attrs.size(), accepted_size);
+        EXPECT_NO_THROW({ (void) parse_header_attributes(attrs.data(), attrs.size()); });
+    }
+
+    const auto over = well_formed_attributes_of_size(limit + 1u);
+    ASSERT_EQ(over.size(), limit + 1u);
+    try {
+        (void) parse_header_attributes(over.data(), over.size());
+        FAIL() << "the 64 KiB total-input guard accepted one byte over its limit";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string_view{e.what()}.find("64KB"), std::string_view::npos) << e.what();
+    }
 }
 
 TEST_F(MultipartSecurityTest, EmptyHeaderAttributes) {

@@ -140,7 +140,7 @@ int main(int argc, char *argv[]) {
 When you need per-connection state or custom event handling, define your own session and server through the `qb::http2::use<Derived>` template. The session derives from the internal HTTP/2 session machinery; the server derives from the internal acceptor and owns the router.
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:72-83 (server pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:72-84 (server pattern)
 #include <qbm/http/http.h>
 
 class MyServer;   // forward declaration
@@ -175,7 +175,7 @@ public:
 Inside a handler you set the response and call `ctx->complete()` as usual; the session writes it on the request's stream. To abort a single stream — for example to enforce an application policy — call `reset_stream` on the session, which sends `RST_STREAM` with the error code you choose:
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:157-165 (reset pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:174-182 (reset pattern)
 router().get("/api/cancel", [](auto ctx) {
     auto session = ctx->session();
     if (session) {
@@ -257,7 +257,7 @@ The persistent client is `qb::http2::Client`, created through `qb::http2::make_c
 ### Callback API
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:242-275 (client pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:330-363 (client pattern)
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
 
@@ -266,19 +266,21 @@ qb::io::async::init();
 auto client = qb::http2::make_client("https://api.example.com");
 client->set_verify_peer(true);              // default; verifies chain + hostname
 
-qb::http::Request req;
-req.uri() = qb::io::uri("/v1/items");        // resolved against the base URI
+qb::http::Request req(qb::io::uri("/v1/items")); // URI constructor sets method to GET
 client->push_request(std::move(req), [](qb::http::Response res) {
     // delivered once, on this thread, when the stream completes
     handle(res.status(), res.body().as<std::string_view>());
 });
 ```
 
+The URI-only `Request` constructor sets `GET`; the default constructor leaves the method `UNINITIALIZED`. The HTTP/2 client resolves a relative URI against its base but does not fill in the method, which becomes the `:method` pseudo-header. For another verb, set the method explicitly before `push_request`.
+<!-- src: qbm/http/src/qbm/http/request.h:50-62,78-86; qbm/http/src/qbm/http/2/client.cpp:225-238; qbm/http/src/qbm/http/2/protocol/client.h:1520-1524 -->
+
 `push_request` triggers an implicit connect when needed, so you do not have to call `connect()` first; queued requests flush once the handshake completes. To run several requests as one batch with a single callback that fires when all responses are in (order preserved), use `push_requests(std::vector<Request>, BatchResponseCallback)` — each request travels on its own stream concurrently.
 <!-- src: qbm/http/src/qbm/http/2/client.h:330,353; qbm/http/tests/system/http2/http2-client-coro.cpp:264-285 -->
 
 The completed batch is retired before its callback runs. The callback may disconnect the client or enqueue another batch; it still receives the completed responses exactly once.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:358-370; qbm/http/tests/system/http2/http2-client.cpp:468-519 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:358-370; qbm/http/tests/system/http2/http2-client.cpp:556-607 -->
 
 If sending a queued request fails, its callback runs before the client tries the next pending request. That callback may disconnect or queue different work. The client retains itself during this drain and checks that the connection and HTTP/2 protocol are still live at each iteration; it does not send the next item through the retired protocol.
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:448-485 -->

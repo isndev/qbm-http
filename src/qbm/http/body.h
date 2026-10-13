@@ -266,8 +266,8 @@ public:
      * 3. The original data is replaced with the compressed data
      * 4. The size of the compressed data is returned
      *
-     * This method is typically called automatically when sending a response
-     * with a Content-Encoding header.
+     * HTTP/1.1 clients call this for encoded outbound requests; optional compression
+     * middleware calls it for responses. Response serialization does not call it.
      */
     std::size_t compress(std::string const &encoding);
 
@@ -303,8 +303,8 @@ public:
      * 3. The compressed data is replaced with the decompressed data
      * 4. The size of the decompressed data is returned
      *
-     * This method is typically called automatically when receiving a request
-     * or response with a Content-Encoding header.
+     * HTTP/1.1 clients call this for encoded inbound responses; optional compression
+     * middleware calls it for requests. Other paths must call it explicitly.
      *
      * @throws std::runtime_error if decompression fails or the encoding is unsupported
      */

@@ -79,7 +79,7 @@ flowchart TD
 
 Here is the contract exercised directly, taken from the test suite:
 
-<!-- src: tests/unit/http1/http1-parse-limits.cpp:122-130 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:131-139 -->
 
 ```cpp
 #include <qbm/http/http.h>
@@ -96,7 +96,7 @@ assert(parser.content_length == 0u);   // normalized — see "Body framing" belo
 
 And fragmented input — the case the framing layer is built around — reassembles correctly:
 
-<!-- src: tests/unit/http1/http1-parse-limits.cpp:185-202 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:194-211 -->
 
 ```cpp
 Parser<Request> parser;
@@ -160,7 +160,8 @@ Both are wired in by the server/client session types as `using protocol = qb::pr
 **Phase 3 — body.** With headers in hand:
 
 - **Chunked** (`Transfer-Encoding` present): `resume()` the parser and feed the post-header bytes. `HPE_CB_MESSAGE_COMPLETE` means the final chunk arrived — return the full message size. `HPE_OK` means more chunks are pending — advance `body_offset` and return 0. Anything else marks the protocol `not_ok()`.
-- **Content-Length** (the common case): the message is complete once `_io.in().size() >= body_offset + content_length`. When complete, the body is set as a `string_view` over the input buffer and the total size is returned; otherwise return 0 and keep accumulating.
+- **Content-Length** (the common case): the message is complete once `_io.in().size() >= body_offset + content_length`. When complete, a temporary `string_view` identifies the bytes in the input buffer; assigning it to `Body` **copies** them into the owning pipe before the total size is returned. Otherwise return 0 and keep accumulating.
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:792-802; qbm/http/src/qbm/http/body.cpp:603-606 -->
 
 When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that many bytes and calls `onMessage()`. If the parser ever marks itself `not_ok()`, the framework disconnects the connection.
 
@@ -185,7 +186,7 @@ void onMessage(std::size_t) noexcept final {
 }
 ```
 
-Because the message is *owned* (`std::string`-backed, not a `string_view` into the socket buffer), the handler may move it into a long-lived structure — the shared `Context`, a middleware chain, or a coroutine frame — and it stays valid after the socket read that produced it. The retired `server_view` / `client_view` variants used view semantics and could not satisfy that requirement; the qb-io input pipe may `memmove` or reallocate between reads. See [the request context](./10-request-context.md) for how ownership flows through the async pipeline.
+Because the message is *owned* (header strings and a `Body` pipe, not views into the socket buffer), the handler may move it into a long-lived structure — the shared `Context`, a middleware chain, or a coroutine frame — and it stays valid after the socket read that produced it. The retired `server_view` / `client_view` variants used view semantics and could not satisfy that requirement; the qb-io input pipe may `memmove` or reallocate between reads. See [the request context](./10-request-context.md) for how ownership flows through the async pipeline.
 
 After `_io.on(...)`, server sessions apply pipelining and keep-alive: while a response is in flight, further requests queue up to `max_pipelined_requests` (default 128); exceeding the cap disconnects with `DisconnectedReason::ByProtocolError`. When the parser-computed `keep_alive` is false (or the session overrides it), the server closes after `ResponseTransmitted`. See [Advanced topics](./16-advanced-topics.md).
 
@@ -225,7 +226,7 @@ Two framing defenses go beyond size limits, both in `on_headers_complete`:
 
 These are exercised directly against `Parser`:
 
-<!-- src: tests/unit/http1/http1-parse-limits.cpp:59-160 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:59-169 -->
 
 ```cpp
 Parser<Request> parser;
@@ -270,10 +271,12 @@ The HTTP/1.1 parser handles only the *opening* handshake of a WebSocket connecti
 
 ## Pitfalls
 
-- **Do not assume header callbacks accumulate across `http_execute` calls.** They overwrite. The framing layer's re-feed-the-whole-buffer strategy exists precisely so each header is parsed in one shot; if you build your own driver over `Parser`, you must preserve that property or split-header values will be truncated.
+- **Feed only new bytes to an incremental parser.** The header-field and header-value callbacks append fragments across `http_execute` calls. A custom driver passes each newly arrived range once, keeps parser state between reads, and never re-feeds bytes already consumed; the framing layer does the same with `header_parsed`. Replaying the whole input buffer would duplicate parsed data and restore the old quadratic work. Reset only between messages or after an error.
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:255-304,717-740 -->
 - **`reset()` before reuse, always.** A `Parser` carries the previous message's state until reset. The framing layer resets after every `onMessage()`; a hand-rolled loop must too. `reset()` is also what makes the parser usable after an error.
 - **`content_length == 0` does not mean "no `Content-Length` header."** For requests with no framing headers, and for `1xx`/`204`/`304` responses, the parser normalizes the length to 0 even when a (misleading) `Content-Length` header was present. Read the body, not the raw header, to know what arrived.
-- **The body is a view until `onMessage`.** Inside `getMessageSize()` the Content-Length body is set as a `string_view` into the I/O input pipe; it only becomes owned when `onMessage` moves the message out. Never hold a reference to `get_parsed_message()` across a `parse()` or buffer mutation.
+- **The parsed body owns its bytes before `onMessage`.** Inside `getMessageSize()`, the temporary `string_view` passed to `Body::operator=` is copied into the body's pipe. `onMessage()` moves that owning message to the handler. Do not keep a reference to `get_parsed_message()` across `parse()`, `reset()`, or message delivery.
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:797-802; qbm/http/src/qbm/http/body.cpp:603-606; qbm/http/src/qbm/http/1.1/protocol/server.h:76-93 -->
 - **These limits are compile-time.** `MAX_BODY_SIZE` is 100 MB by default; there is no per-connection runtime knob in this layer. If you need a different ceiling you change the constant and rebuild the module. The HTTP/2 and HTTP/3 layers have their own, separate `protocol_limits`.
 - **This is HTTP/1.1 only.** None of `Parser`, `protocol_limits`, or `qb::protocol::http::base` is involved in HTTP/2 (`2/protocol/`) or HTTP/3 (`3/protocol/`) framing. Do not reason about h2/h3 message limits from this page.
 

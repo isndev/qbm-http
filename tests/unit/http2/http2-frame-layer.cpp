@@ -23,9 +23,12 @@
  */
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "../../shared/http2_fake_io.h"
@@ -36,6 +39,7 @@ namespace h2 = qb::protocol::http2;
 using qb::http::test::default_request_headers;
 using qb::http::test::do_handshake;
 using qb::http::test::drive;
+using qb::http::test::emitted_payload;
 using qb::http::test::encode_hpack_headers;
 using qb::http::test::Http2FakeIO;
 using qb::http::test::parse_emitted_frames;
@@ -94,6 +98,19 @@ TEST(HTTP2FrameLayerBinary, EncodeUint16BigEndian) {
     h2::encode_uint16_be(0xFFFF, out);
     EXPECT_EQ(out[0], 0xFF);
     EXPECT_EQ(out[1], 0xFF);
+}
+
+TEST(HTTP2EmittedFrameParser, RejectsTruncatedFinalPayload) {
+    qb::allocator::pipe<char> output;
+    h2::FrameHeader           header;
+    header.type = static_cast<uint8_t>(h2::FrameType::DATA);
+    header.set_stream_id(1);
+    header.set_payload_length(4);
+    output.put(reinterpret_cast<const char *>(&header), sizeof(header));
+    const std::array<char, 2> partial_payload{'o', 'k'};
+    output.put(partial_payload.data(), partial_payload.size());
+
+    EXPECT_THROW((void) parse_emitted_frames(output), std::runtime_error);
 }
 
 TEST(HTTP2FrameLayerBinary, EncodeUint32BigEndian) {
@@ -1191,14 +1208,59 @@ TEST(HTTP2FramerDrive, ServerResponseLargeHeaderBlockSpansContinuation) {
     drive(protocol, io);
     ASSERT_TRUE(protocol.ok());
 
-    // Issue a GET; the response path emits the response headers. We can't force
-    // a >16KB header block from here deterministically, but the single-frame
-    // path through send_headers_with_continuation (first_frame + last_fragment)
-    // is exercised by every emitted response.
+    // Route a GET, then emit a response whose HPACK block cannot fit in one
+    // 16KiB frame. The value is deliberately varied so Huffman encoding cannot
+    // collapse it into a small repeated run.
     push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, encode_hpack_headers(default_request_headers("/")));
     drive(protocol, io);
-    EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(io.request_count, 1);
+    ASSERT_TRUE(protocol.ok());
+    ASSERT_EQ(io.request_count, 1);
+
+    std::string large_value;
+    large_value.reserve(48 * 1024);
+    static constexpr std::string_view alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for (std::size_t i = 0; i < 48 * 1024; ++i) {
+        large_value.push_back(alphabet[(i * 37 + i / 17) % alphabet.size()]);
+    }
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("x-large-response-header", large_value);
+    ASSERT_TRUE(protocol.send_response(1, response));
+
+    std::vector<uint8_t> header_block;
+    std::size_t          response_header_frames = 0;
+    bool                 saw_continuation       = false;
+    bool                 saw_end_headers        = false;
+    for (const auto &frame : parse_emitted_frames(io.output)) {
+        if (frame.stream_id != 1 || (frame.type != FT::HEADERS && frame.type != FT::CONTINUATION)) {
+            continue;
+        }
+        ++response_header_frames;
+        EXPECT_LE(frame.payload_length, h2::DEFAULT_SETTINGS_MAX_FRAME_SIZE);
+        if (frame.type == FT::HEADERS) {
+            EXPECT_EQ(response_header_frames, 1u);
+            EXPECT_EQ(frame.flags & FLAG_END_HEADERS, 0);
+        } else {
+            saw_continuation = true;
+        }
+        const auto payload = emitted_payload(io.output, frame);
+        header_block.insert(header_block.end(), payload.begin(), payload.end());
+        if (frame.flags & FLAG_END_HEADERS) {
+            saw_end_headers = true;
+        }
+    }
+
+    EXPECT_GT(response_header_frames, 1u);
+    EXPECT_TRUE(saw_continuation);
+    EXPECT_TRUE(saw_end_headers);
+
+    const auto decoded = qb::protocol::hpack::convenience::decode_headers(header_block);
+    ASSERT_TRUE(decoded.has_value());
+    const auto large_header =
+        std::find_if(decoded->begin(), decoded->end(), [](const auto &field) { return field.name == "x-large-response-header"; });
+    ASSERT_NE(large_header, decoded->end());
+    EXPECT_EQ(large_header->value, large_value);
 }
 
 // --- PUSH_PROMISE payload parse (base.h:1234-1264) -------------------------

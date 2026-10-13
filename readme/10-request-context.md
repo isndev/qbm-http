@@ -83,7 +83,7 @@ After `router.compile()`, the task objects in a chain (`IAsyncTask`, middleware,
 ```cpp
 router.get("/orders/:order_id/items/:item_id", [](auto ctx) {
     const std::string& order = ctx->path_param("order_id");
-    std::string item  = ctx->path_param_or<std::string>("item_id", "unknown");   // fallback if absent
+    std::string item  = ctx->template path_param_or<std::string>("item_id", "unknown"); // fallback if absent
     // ...
     ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
 });
@@ -102,7 +102,7 @@ The context also offers typed accessors over the query string and the request bo
 ```cpp
 router.get("/search", [](auto ctx) {
     auto q    = ctx->query_param("q");                       // std::optional<std::string>
-    int  page = ctx->query_param_or<int>("page", 1);          // typed, with a default
+    int  page = ctx->template query_param_or<int>("page", 1); // typed, with a default
     // ...
     ctx->complete(qb::http::AsyncTaskResult::COMPLETE);
 });
@@ -111,7 +111,7 @@ router.get("/search", [](auto ctx) {
 `bind<T>()` deserializes the request body into `T` without throwing, returning `std::optional<T>` (`std::nullopt` on any parse/convert failure). `bind<qb::json>()` parses JSON, `bind<std::string>()` returns the raw body, and any other `T` is parsed as JSON then converted via `qb::json::get<T>()` — for example a `NLOHMANN_DEFINE_TYPE` model. (`bind<std::string_view>()` is a compile error, because the view would dangle into a temporary `qb::json`.)
 
 ```cpp
-auto dto = ctx->bind<CreateTask>();        // std::optional<CreateTask>
+auto dto = ctx->template bind<CreateTask>(); // std::optional<CreateTask>
 if (!dto) { ctx->bad_request("invalid body"); return; }
 use(*dto);
 ```

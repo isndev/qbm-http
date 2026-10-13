@@ -11,9 +11,9 @@ WebSocket lives under `qb::http::ws`. It is not a separate module: an applicatio
 > **Feature gate.** The entire WebSocket subsystem requires `QB_HAS_SSL`, not only secure WS. `<qbm/http/http.h>` includes `src/qbm/http/ws/ws.h` only under `#ifdef QB_HAS_SSL`, and `src/qbm/http/ws/ws.h` itself opens with `#error "websocket protocol requires OpenSSL crypto library"` — even plaintext `ws://` cannot compile without OpenSSL, because the handshake hash (SHA-1 + base64) and the masking-key CSPRNG come from `qb::crypto`. In an SSL-less build, `qb::http::ws::*` simply does not exist. <!-- src: qbm/http/src/qbm/http/http.h:45-48, src/qbm/http/ws/ws.h:22-25 -->
 
 ```cpp
-#include <qbm/http/http.h>   // umbrella: pulls in <src/qbm/http/ws/ws.h> under QB_HAS_SSL
-// or, equivalently, the WebSocket header directly:
-// #include <src/qbm/http/ws/ws.h>
+#include <qbm/http/http.h>   // umbrella: pulls in WebSocket support under QB_HAS_SSL
+// or use the focused public header:
+// #include <qbm/http/ws.h>
 ```
 
 This page covers the HTTP/1.1 upgrade path only. WebSocket over HTTP/2 extended `CONNECT` and WebTransport over HTTP/3 are not part of this integration. For a coroutine-shaped API over the same wire protocol, see [WebSocket coroutines](./21-websocket-coroutines.md).
@@ -269,7 +269,7 @@ WSS reuses the same TLS transport as HTTPS — the only change is the transport 
 
 ```cpp
 qb::http::ws::client_secure ws;            // = Client<qb::io::transport::stcp>
-ws.connect("wss://localhost:9443/ws");      // verify_peer defaults to true
+ws.connect(qb::io::uri{"wss://localhost:9443/ws"}); // verify_peer defaults to true
 ```
 
 Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:275-378, src/qbm/http/ws/ws.h:1087,1787-1788 -->

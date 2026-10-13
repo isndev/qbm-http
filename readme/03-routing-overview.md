@@ -35,7 +35,7 @@ A `Router<Session>` holds three things:
 | --- | --- |
 | `RouterCore<Session>` (shared) | The engine: owns the radix tree, the compiled 404/405 chains, the optional user error chain, and router-level lifecycle hooks. |
 | Root `RouteGroup<Session>` (shared) | A group with an empty path prefix. Routes and middleware added directly on the `Router` attach here, which is why `router.use(...)` is effectively global middleware. |
-| `_is_compiled` flag | Tracks whether `compile()` has run. Any definition mutation resets it to `false`. |
+| `_is_compiled` flag | Tracks whether `compile()` has run. Mutations made through the `Router` facade reset it to `false`. |
 
 The *route table* is the set of top-level handler nodes registered with the core, plus everything nested under them. Each node is an `IHandlerNode<Session>`:
 
@@ -86,7 +86,9 @@ The assembled order for any endpoint is **parent middleware → this node's midd
 
 `compile()` **must** be called after all routes, groups, controllers, and middleware are defined and before serving requests. Two safety nets back this up:
 
-- Any definition mutation (`add_route`, `group`, `controller`, `use`, …) sets `_is_compiled = false`.
+- Definition mutations made through the `Router` facade (`add_route`, `group`, `controller`, `use`, …) set
+  `_is_compiled = false`. Mutating a retained `RouteGroup` or `Controller` directly does not notify the router; call
+  `compile()` explicitly after such a change.
 - `route()` auto-compiles on first use if you forgot. Relying on this is fine for tests, but compile explicitly at startup in production so a malformed pattern fails fast rather than on the first request.
 
 Calling `compile()` again recompiles from scratch — it is idempotent and safe to re-run after adding routes.

@@ -55,6 +55,8 @@ protected:
     void
     route(qb::http::method method, const std::string &path) {
         router.route(mock_session, create_request(method, path));
+        EXPECT_EQ(mock_session->response_write_count(), 1u)
+            << "Every synchronous matcher scenario must finalize exactly one response for " << path;
     }
 
     /** @brief Returns the decoded value of captured path parameter @p name, or empty. */

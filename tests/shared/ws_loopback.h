@@ -98,6 +98,7 @@ struct WsServerThread {
     std::atomic<bool>       failed{false};
     std::atomic<bool>       running{true};
     int                     port{0};
+    std::string             failure_message;
     std::mutex              mutex;
     std::condition_variable cv;
 
@@ -117,7 +118,9 @@ struct WsServerThread {
                 if (config) {
                     config(server);
                 }
-                server.transport().listen_v4(static_cast<std::uint16_t>(port));
+                if (server.transport().listen_v4(static_cast<std::uint16_t>(port)) != 0) {
+                    throw std::runtime_error("listen_v4 failed for 127.0.0.1:" + std::to_string(port));
+                }
                 // When the caller asked for an ephemeral port (port == 0), read the
                 // kernel-assigned port back from the now-bound listener and publish it
                 // under the lock BEFORE notifying, so the main thread (which reads
@@ -135,9 +138,17 @@ struct WsServerThread {
                         std::this_thread::sleep_for(1ms);
                     }
                 }
+            } catch (const std::exception &e) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    failure_message = e.what();
+                    failed.store(true, std::memory_order_release);
+                }
+                cv.notify_all();
             } catch (...) {
                 {
                     std::lock_guard<std::mutex> lock(mutex);
+                    failure_message = "unknown startup exception";
                     failed.store(true, std::memory_order_release);
                 }
                 cv.notify_all();
@@ -152,7 +163,7 @@ struct WsServerThread {
         if (!signalled) {
             ADD_FAILURE() << "WsServerThread: the server did not become ready within " << ready_budget.count() << " ms";
         } else if (failed.load(std::memory_order_acquire)) {
-            ADD_FAILURE() << "WsServerThread: the server threw during startup — nothing is listening on port " << port;
+            ADD_FAILURE() << "WsServerThread: startup failed — nothing is listening on port " << port << ": " << failure_message;
         }
     }
 

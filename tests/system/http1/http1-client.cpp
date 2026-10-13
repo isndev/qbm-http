@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <chrono>
 #include <gtest/gtest.h>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -35,6 +36,10 @@
 #include "../../shared/loopback_server.h"
 
 #include <qbm/http/http.h>
+
+#ifdef QB_HAS_COMPRESSION
+#include <zlib.h>
+#endif
 
 using namespace std::chrono_literals;
 using qb::http::test::ephemeral_port;
@@ -57,6 +62,53 @@ drain_client_callbacks() {
         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
     }
 }
+
+#ifdef QB_HAS_COMPRESSION
+// Decode the echoed wire bytes through zlib directly. This is deliberately
+// independent of Body::uncompress(), the client path whose output the test is
+// checking, so an empty or truncated stream cannot satisfy the oracle.
+[[nodiscard]] std::optional<std::string>
+gunzip_reference(std::string_view compressed) {
+    z_stream stream{};
+    if (inflateInit2(&stream, 15 + 16) != Z_OK) {
+        return std::nullopt;
+    }
+    struct InflateGuard {
+        z_stream *stream;
+        ~InflateGuard() {
+            inflateEnd(stream);
+        }
+    } guard{&stream};
+
+    stream.next_in  = reinterpret_cast<Bytef *>(const_cast<char *>(compressed.data()));
+    stream.avail_in = static_cast<uInt>(compressed.size());
+
+    std::string output(4096, '\0');
+    std::size_t produced = 0;
+    for (;;) {
+        if (produced == output.size()) {
+            output.resize(output.size() * 2);
+        }
+        stream.next_out  = reinterpret_cast<Bytef *>(output.data() + produced);
+        stream.avail_out = static_cast<uInt>(output.size() - produced);
+
+        const auto before_in  = stream.avail_in;
+        const auto before_out = stream.avail_out;
+        const int  rc         = inflate(&stream, Z_NO_FLUSH);
+        produced              = output.size() - stream.avail_out;
+        if (rc == Z_STREAM_END) {
+            if (stream.avail_in != 0) {
+                return std::nullopt;
+            }
+            output.resize(produced);
+            return output;
+        }
+        if (rc != Z_OK || (stream.avail_in == before_in && stream.avail_out == before_out)) {
+            return std::nullopt;
+        }
+    }
+}
+#endif
 
 class Http1ClientTestServer;
 
@@ -141,6 +193,7 @@ public:
             ++request_count;
             ctx->response().status() = qb::http::status::OK;
             ctx->response().body()   = ctx->request().body().template as<std::string>();
+            ctx->response().set_header("X-Received-Content-Encoding", ctx->request().header("Content-Encoding"));
             ctx->complete();
         });
 
@@ -242,6 +295,9 @@ struct LoopbackHttp1Server {
             return true;
         }) {
         // `thread`'s ctor already blocked on the readiness barrier, so the transport is bound.
+        if (!thread.ready()) {
+            throw std::runtime_error("HTTP/1.1 loopback server failed to start");
+        }
         port = thread.server().transport().local_endpoint().port();
     }
 
@@ -278,18 +334,24 @@ class raw_socket {
 
 public:
     explicit raw_socket(int port) {
-        _fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (_fd == qb::io::inet::invalid_socket) {
+        socket_type fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd == qb::io::inet::invalid_socket) {
             throw std::runtime_error("socket failed");
         }
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port   = htons(static_cast<uint16_t>(port));
-        if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
-            throw std::runtime_error("inet_pton failed");
-        }
-        if (::connect(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
-            throw std::runtime_error("connect failed");
+        try {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port   = htons(static_cast<uint16_t>(port));
+            if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+                throw std::runtime_error("inet_pton failed");
+            }
+            if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
+                throw std::runtime_error("connect failed");
+            }
+            _fd = fd;
+        } catch (...) {
+            QB_CLOSESOCKET(fd);
+            throw;
         }
     }
 
@@ -990,9 +1052,8 @@ TEST(Http1ClientTest, PushRequestsBatchAwaiterErrorsWhenClientExpiresBeforeAwait
 // A request carrying Content-Encoding: gzip has its body compressed by the client
 // transport BEFORE it hits the wire (client.cpp connection::send compress block).
 // The server echoes the raw bytes it received, so the response body is the
-// gzip-compressed form — strictly different from, and (for this payload) smaller
-// than, the original plaintext. That observable difference proves the client
-// performed the compression.
+// gzip-compressed form. A direct zlib decoder must consume the complete stream
+// and reproduce the original plaintext byte-for-byte.
 TEST(Http1ClientTest, RequestBodyIsCompressedWhenContentEncodingSet) {
     LoopbackHttp1Server server;
     auto                client = qb::http1::make_client(server.url("/"));
@@ -1004,10 +1065,13 @@ TEST(Http1ClientTest, RequestBodyIsCompressedWhenContentEncodingSet) {
 
     auto response = qb::http::run_sync(client->push_request(std::move(req)));
     EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.header("X-Received-Content-Encoding"), "gzip");
 
     const auto echoed = response.body().template as<std::string>();
-    EXPECT_NE(echoed, plaintext);               // the server saw compressed bytes
-    EXPECT_LT(echoed.size(), plaintext.size()); // gzip shrank this payload
+    ASSERT_FALSE(echoed.empty());
+    const auto decoded = gunzip_reference(echoed);
+    ASSERT_TRUE(decoded.has_value()) << "the request body was not a complete valid gzip stream";
+    EXPECT_EQ(*decoded, plaintext);
 }
 
 // A response tagged Content-Encoding: gzip is uncompressed by the client's

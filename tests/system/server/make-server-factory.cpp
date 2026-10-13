@@ -34,20 +34,26 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <gtest/gtest-spi.h>
 
 #include <qb/io/async.h>
 #include <qb/io/uri.h>
 
-#include <qbm/http/2/client.h>
-#include <qbm/http/2/http2.h>
 #include <qbm/http/http.h>
 
 #include "../../shared/loopback_server.h"
+#if QB_HAS_SSL && !defined(QBM_TEST_FACTORY_PLAINTEXT_ONLY)
+#include <qbm/http/2/client.h>
+#include <qbm/http/2/http2.h>
 #include "../../shared/ssl_test_resource.h"
+#endif
 
 using namespace std::chrono_literals;
 
@@ -57,6 +63,7 @@ namespace {
 // Plaintext HTTP/1.1 factory (UN-GATED — no SSL dependency)
 // ===========================================================================
 
+#if !defined(QBM_TEST_FACTORY_TLS_ONLY)
 using PlainServer       = qb::http::Server<>;
 using PlainServerThread = qb::http::test::ServerThread<PlainServer>;
 
@@ -80,20 +87,22 @@ protected:
         // this closes: its probe must be shut before the caller can bind, so under `ctest -j`
         // another test PROCESS can take the port in that window (measured: 2 failures in 12
         // full-suite runs). Binding :0 here leaves no window at all.
-        _server = std::make_unique<PlainServerThread>([](PlainServer &srv) -> bool {
-            srv.router().get("/ping", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
-                ++g_plain_server_requests;
-                ctx->response().status() = qb::http::status::OK;
-                ctx->response().body()   = "pong_http_default";
-                ctx->complete();
-            });
-            srv.router().compile();
-            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
-                return false;
-            }
-            srv.start();
-            return true;
-        });
+        _server = std::make_unique<PlainServerThread>([] { return qb::http::make_server(); },
+                                                      [](PlainServer &srv) -> bool {
+                                                          srv.router().get(
+                                                              "/ping", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+                                                                  ++g_plain_server_requests;
+                                                                  ctx->response().status() = qb::http::status::OK;
+                                                                  ctx->response().body()   = "pong_http_default";
+                                                                  ctx->complete();
+                                                              });
+                                                          srv.router().compile();
+                                                          if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
+                                                              return false;
+                                                          }
+                                                          srv.start();
+                                                          return true;
+                                                      });
         ASSERT_TRUE(_server->ready()) << "plaintext HTTP/1.1 loopback server failed to start";
         // The ServerThread ctor already blocked on the readiness barrier, so the transport is
         // bound and its assigned port is visible to this thread.
@@ -121,7 +130,58 @@ TEST_F(HttpMakeServerTest, PingDefaultSessionHttpServer) {
     EXPECT_EQ(1, g_plain_server_requests.load());
 }
 
-#if QB_HAS_SSL
+std::mutex      g_probe_mutex;
+std::thread::id g_probe_constructed_on;
+std::thread::id g_probe_destroyed_on;
+
+struct ThreadOwnershipProbe {
+    ThreadOwnershipProbe() {
+        std::lock_guard<std::mutex> lock(g_probe_mutex);
+        g_probe_constructed_on = std::this_thread::get_id();
+    }
+    ~ThreadOwnershipProbe() {
+        std::lock_guard<std::mutex> lock(g_probe_mutex);
+        g_probe_destroyed_on = std::this_thread::get_id();
+    }
+};
+
+void
+run_failed_server_configuration(bool throws) {
+    qb::http::test::ServerThread<ThreadOwnershipProbe> server([] { return std::make_unique<ThreadOwnershipProbe>(); },
+                                                              [throws](ThreadOwnershipProbe &) -> bool {
+                                                                  if (throws) {
+                                                                      throw std::runtime_error("controlled configure failure");
+                                                                  }
+                                                                  return false;
+                                                              });
+    EXPECT_FALSE(server.ready());
+    EXPECT_THROW((void) server.server(), std::logic_error);
+}
+
+TEST(ServerThreadFixture, FailedStartupDestroysServerOnItsWorker) {
+    const auto caller_thread = std::this_thread::get_id();
+    for (const bool throws : {false, true}) {
+        {
+            std::lock_guard<std::mutex> lock(g_probe_mutex);
+            g_probe_constructed_on = {};
+            g_probe_destroyed_on   = {};
+        }
+
+        if (throws) {
+            EXPECT_NONFATAL_FAILURE(run_failed_server_configuration(true), "configure callback failed or threw during startup");
+        } else {
+            EXPECT_NONFATAL_FAILURE(run_failed_server_configuration(false), "configure callback failed or threw during startup");
+        }
+
+        std::lock_guard<std::mutex> lock(g_probe_mutex);
+        EXPECT_NE(g_probe_constructed_on, std::thread::id{});
+        EXPECT_EQ(g_probe_destroyed_on, g_probe_constructed_on);
+        EXPECT_NE(g_probe_destroyed_on, caller_thread);
+    }
+}
+#endif
+
+#if QB_HAS_SSL && !defined(QBM_TEST_FACTORY_PLAINTEXT_ONLY)
 
 // ===========================================================================
 // HTTPS factory (REQUIRES ssl)
@@ -152,25 +212,27 @@ protected:
         // Bind :0 on the socket that ACTUALLY SERVES and read the port back (see the plaintext
         // fixture above for why): the probe-then-bind window is a cross-process race under
         // `ctest -j`, and binding :0 on the serving socket removes it entirely.
-        _server = std::make_unique<SecureServerThread>([cert, key](SecureServer &srv) -> bool {
-            auto tls = qb::io::ssl::Context::server(cert, key);
-            if (!tls.ok()) {
-                return false;
-            }
-            srv.transport().init(std::move(tls));
-            srv.router().get("/ping_ssl", [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
-                ++g_https_server_requests;
-                ctx->response().status() = qb::http::status::OK;
-                ctx->response().body()   = "pong_https_default";
-                ctx->complete();
+        _server = std::make_unique<SecureServerThread>(
+            [] { return qb::http::ssl::make_server(); },
+            [cert, key](SecureServer &srv) -> bool {
+                auto tls = qb::io::ssl::Context::server(cert, key);
+                if (!tls.ok()) {
+                    return false;
+                }
+                srv.transport().init(std::move(tls));
+                srv.router().get("/ping_ssl", [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
+                    ++g_https_server_requests;
+                    ctx->response().status() = qb::http::status::OK;
+                    ctx->response().body()   = "pong_https_default";
+                    ctx->complete();
+                });
+                srv.router().compile();
+                if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
+                    return false;
+                }
+                srv.start();
+                return true;
             });
-            srv.router().compile();
-            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
-                return false;
-            }
-            srv.start();
-            return true;
-        });
         ASSERT_TRUE(_server->ready()) << "HTTPS loopback server failed to start";
         _port = _server->server().transport().local_endpoint().port();
         ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
@@ -237,40 +299,42 @@ protected:
         // Bind :0 on the socket that ACTUALLY SERVES and read the port back (see the plaintext
         // fixture above for why): the probe-then-bind window is a cross-process race under
         // `ctest -j`, and binding :0 on the serving socket removes it entirely.
-        _server = std::make_unique<Http2FactoryServerThread>([cert, key](Http2FactoryServer &srv) -> bool {
-            auto tls = qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"});
-            if (!tls.ok()) {
-                return false;
-            }
-            srv.transport().init(std::move(tls));
-            srv.router().get("/ping_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
-                ++g_http2_server_requests;
-                ctx->response().status() = qb::http::status::OK;
-                ctx->response().body()   = "pong_http2_default";
-                ctx->complete();
-            });
-            // A response larger than the default per-stream send window forces
-            // the factory-built server through its flow-control / pending-DATA
-            // path over a real socket.
-            srv.router().get("/big_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
-                std::string body;
-                body.reserve(300 * 1024);
-                body += "BIG-START;";
-                while (body.size() < 300 * 1024) {
-                    body += static_cast<char>('a' + (body.size() % 26));
+        _server = std::make_unique<Http2FactoryServerThread>(
+            [] { return qb::http2::make_server(); },
+            [cert, key](Http2FactoryServer &srv) -> bool {
+                auto tls = qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"});
+                if (!tls.ok()) {
+                    return false;
                 }
-                body += ";BIG-END";
-                ctx->response().status() = qb::http::status::OK;
-                ctx->response().body()   = std::move(body);
-                ctx->complete();
+                srv.transport().init(std::move(tls));
+                srv.router().get("/ping_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                    ++g_http2_server_requests;
+                    ctx->response().status() = qb::http::status::OK;
+                    ctx->response().body()   = "pong_http2_default";
+                    ctx->complete();
+                });
+                // A response larger than the default per-stream send window forces
+                // the factory-built server through its flow-control / pending-DATA
+                // path over a real socket.
+                srv.router().get("/big_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                    std::string body;
+                    body.reserve(300 * 1024);
+                    body += "BIG-START;";
+                    while (body.size() < 300 * 1024) {
+                        body += static_cast<char>('a' + (body.size() % 26));
+                    }
+                    body += ";BIG-END";
+                    ctx->response().status() = qb::http::status::OK;
+                    ctx->response().body()   = std::move(body);
+                    ctx->complete();
+                });
+                srv.router().compile();
+                if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
+                    return false;
+                }
+                srv.start();
+                return true;
             });
-            srv.router().compile();
-            if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
-                return false;
-            }
-            srv.start();
-            return true;
-        });
         ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start";
         _port = _server->server().transport().local_endpoint().port();
         ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";

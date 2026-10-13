@@ -88,7 +88,7 @@ router.get("/items/:id", [](auto ctx) {
 
 - `CONTINUE` — task succeeded; advance to the next task in the chain.
 - `COMPLETE` — request fully handled; finalize and send the current response.
-- `CANCELLED` — processing was cancelled (client disconnect, timeout, explicit `ctx->cancel()`).
+- `CANCELLED` — mark the context cancelled and finalize. Passing this result directly does not choose an HTTP status; `ctx->cancel()` sets 503 before completing with it.
 - `ERROR` — divert to the error chain (or, if none, finalize as 500).
 - `FATAL_SPECIAL_HANDLER_ERROR` — a critical fault inside a special handler (404/405 chain or the error chain itself); forces a generic 500 and bypasses the error chain to prevent loops.
 
@@ -154,7 +154,7 @@ The dispatch lives in `Context::complete()`. When a task signals `ERROR` (and th
 2. **Otherwise**, it locks the router core. If an error chain *is set* (`is_error_chain_set()`) and *non-empty*, the context switches its phase to `ERROR_CHAIN`, replaces the running chain with the compiled error tasks, and starts from the top.
 3. **If no error chain is set, or the set chain is empty**, it sets `500 INTERNAL_SERVER_ERROR` and finalizes with whatever response is present.
 
-So `AsyncTaskResult::ERROR` with no configured chain is not lost — it produces a 500 using any status and body the erroring task already wrote. Setting a meaningful status before signaling `ERROR` is therefore worthwhile even without an error chain.
+So `AsyncTaskResult::ERROR` with no configured chain is not lost: it overwrites the response status with 500 and finalizes, while retaining any body the task already wrote. A custom status matters only when an installed error chain inspects it before finalizing.
 
 ```mermaid
 flowchart TD
@@ -175,7 +175,7 @@ You do not have to wrap handler bodies in `try/catch` to keep the server alive. 
 ```cpp
 // <!-- src: qbm/http/src/qbm/http/routing/context.h:240-264 (task try/catch), :1105-1106 (complete()), :1146-1172 (the ERROR case: reseat the error chain, else 500) -->
 router.get("/risky", [](auto ctx) {
-    auto data = parse_or_throw(ctx->request().body().as<std::string_view>());
+    auto data = parse_or_throw(ctx->request().body().template as<std::string_view>());
     // If parse_or_throw throws, the chain driver catches it,
     // signals ERROR, and your error chain (or a default 500) takes over.
     ctx->json(data);

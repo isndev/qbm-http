@@ -99,8 +99,10 @@ protected:
     SetUp() override {
         MiddlewareTestFixture<LoggingSession>::SetUp();
         _logger = [this](qb::http::LogLevel level, const std::string &message) {
-            if (_session)
+            if (_session) {
                 _session->_log_entries.push_back({level, message});
+                _session->_order_trace.push_back(message.rfind("Request:", 0) == 0 ? "request-log" : "response-log");
+            }
         };
     }
 
@@ -284,9 +286,8 @@ TEST_F(LoggingMiddlewareTest, RequestLoggedOnceBeforeDownstreamMiddleware) {
     EXPECT_NE(_session->_log_entries[0].second.find("Request: GET /ordered"), std::string::npos);
     EXPECT_NE(_session->_log_entries[1].second.find("Response: 200"), std::string::npos);
 
-    // The downstream tracer and handler ran in order after the logging middleware.
-    ASSERT_EQ(_session->_order_trace.size(), 2u);
-    EXPECT_EQ(_session->_order_trace[0], "downstream");
-    EXPECT_EQ(_session->_order_trace[1], "handler");
+    // Logger, downstream middleware, handler and response hook share one trace,
+    // so moving the request log after downstream cannot keep this green.
+    EXPECT_EQ(_session->_order_trace, (std::vector<std::string>{"request-log", "downstream", "handler", "response-log"}));
     EXPECT_TRUE(_session->_final_handler_called);
 }

@@ -88,14 +88,19 @@ post_req.set_content_type("application/json");
 post_req.body() = R"({"name":"test","value":123})";
 ```
 
-The clients fill in standard headers for you:
+The HTTP/1.1 one-shot and persistent clients fill in these standard headers for you:
 
 - **Host** — set automatically from `request.uri()` (bracketed IPv6, default ports omitted for `http:80` / `https:443`).
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
-- **Accept-Encoding** — added automatically when compression is compiled in (`QB_HAS_COMPRESSION`); matching `Content-Encoding` responses are decompressed transparently.
+- **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:721-727,789-799; qbm/http/src/qbm/http/1.1/client.cpp:145-159,345-363; qbm/http/src/qbm/http/headers.cpp:306-311 -->
 
-To send a *compressed* request body, compress it yourself and set `Content-Encoding` before handing the request to the client (`request.body().compress("gzip")`). See [Request and Response bodies](./02-body-deep-dive.md).
+The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:225-238,564-579; qbm/http/src/qbm/http/3/client.cpp:193-205,739-748; qbm/http/src/qbm/http/body.h:291-312 -->
+
+For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:765-772; qbm/http/src/qbm/http/1.1/client.cpp:118-131 -->
 
 ## One-shot callback client (HTTP/1.1)
 
@@ -265,7 +270,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:392-403 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:454-465 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -347,7 +352,7 @@ Two cautions unique to the HTTP/2 client:
 
 - **`connect(nullptr)` for fire-and-forget.** The callback `connect` has no default-argument overload, so the coroutine `connect()` stays unambiguous. Call `connect(nullptr)` when you do not need a connection callback.
 
-  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:264-268 -->
+  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:352-356 -->
   ```cpp
   http2_client->connect(nullptr);  // queue requests now, flush on handshake
   ```

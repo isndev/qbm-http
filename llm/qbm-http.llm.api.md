@@ -74,9 +74,9 @@ Parses Content-Type into MIME type + charset; defaults to `application/octet-str
 - `std::string accept_encoding();` / `std::string content_encoding(std::string_view accept_encoding_header);` — `headers.h:97` — build `Accept-Encoding` from server capability; pick a `Content-Encoding`: q=0 or a malformed q refuses a coding, and the first acceptable coding in the header's order wins -- not the highest q (`CompressionMiddleware::select_best_encoding` ranks by q). Empty when compression disabled.
 
 ### `qb::http::Body` — `body.h:57`
-`class Body { template<typename...A> Body(A&&...); template<typename...A> Body& operator<<(A&&...); template<typename T> Body& operator=(...); template<typename T> T as() const; template<typename T> [[nodiscard]] std::optional<T> try_as() const noexcept; Body& add_chunk(const Chunk&); Body& add_final_chunk(); pipe<char>& raw(); std::size_t size() const; bool empty() const; void clear() noexcept; }`
+`class Body { template<typename...A> requires (is_body_appendable_v<A> && ...) Body(A&&...); template<typename...A> requires (is_body_appendable_v<A> && ...) Body& operator<<(A&&...); template<typename T> Body& operator=(...); template<typename T> T as() const; template<typename T> [[nodiscard]] std::optional<T> try_as() const noexcept; Body& add_chunk(const Chunk&); Body& add_final_chunk(); pipe<char>& raw(); std::size_t size() const; bool empty() const; void clear() noexcept; }`
 `Body::operator=(qb::json&&)` and the const JSON assignment can throw on invalid UTF-8 (`body.h:439-443`); both clear partial output before propagation (`body.cpp:675-697`).
-Backed by `qb::allocator::pipe<char>`. Append/assign constrained by `is_body_appendable` (string-like, Chunk/Multipart/Form/`qb::json`, arithmetic). The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460-473`. Conversions defined in `body.cpp`.
+Backed by `qb::allocator::pipe<char>`. `is_body_appendable` gates only the variadic constructor and `operator<<`: `Body`, `Chunk`, `Multipart`, `qb::json`, `std::string`, `std::string_view`, `std::vector<char>`, arithmetic values, built-in `char[N]` arrays, and `char*`/`const char*`. `Form` is deliberately not appendable. Assignment is a separate explicit-specialization set: `std::string`, `std::vector<char>`, `qb::json`, `Multipart`, `Form`, `std::string_view`, and `const char*` (plus Body copy/move). A `nullptr` literal is not a supported assignment; use `clear()`. The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460-473`. Conversions defined in `body.cpp`.
 **Prefer `try_as<T>()` for client-supplied bodies** (`body.h:404`): it returns `std::optional<T>` and is `noexcept`, so a malformed JSON/multipart payload yields `std::nullopt` (→ reply 400) instead of an exception you must catch at the call site. `as<T>()` throws on malformed input; the string conversions never fail.
 Usage: `req.body() = "payload"; if (auto j = resp.body().try_as<qb::json>()) { /* use *j */ }`
 
@@ -343,7 +343,7 @@ Usage: `router.use(qb::http::logging_middleware<S>([](auto lvl,auto&m){ /*...*/ 
 
 ## Error handling — `src/qbm/http/middleware/error_handling.h`
 ### `qb::http::ErrorHandlingMiddleware<S>` — `error_handling.h:54`
-`using ErrorHandler=std::function<void(ContextPtr,const std::string&)>; using StatusHandler=std::function<void(ContextPtr)>; explicit ErrorHandlingMiddleware(std::string name="ErrorHandlingMiddleware") noexcept;` Fluent (return `ErrorHandlingMiddleware&`): `on_status(qb::http::status, StatusHandler); on_status_range(min_status, max_status, StatusHandler); on_any_error(ErrorHandler);` Centralises error-to-response translation; typically set as the error task chain or a global middleware.
+`using ErrorHandler=std::function<void(ContextPtr,const std::string&)>; using StatusHandler=std::function<void(ContextPtr)>; explicit ErrorHandlingMiddleware(std::string name="ErrorHandlingMiddleware") noexcept;` Fluent (return `ErrorHandlingMiddleware&`): `on_status(qb::http::status, StatusHandler); on_status_range(min_status, max_status, StatusHandler); on_any_error(ErrorHandler);` Centralises error-to-response translation. Put it in the router's error task chain: `process()` always completes the context, so mounting it as ordinary global middleware would terminate every normal request before its route handler.
 Factory (`error_handling.h:217`): `error_handling_middleware<S>(name="ErrorHandlingMiddleware")`.
 Usage: `auto eh = qb::http::error_handling_middleware<S>(); eh->on_status(qb::http::status::NOT_FOUND, [](auto ctx){ ctx->text("nope"); });`
 
@@ -637,7 +637,7 @@ Drives TCP connect + HTTP upgrade + protocol switch; forwards `ping/pong/message
 ### Callback client — `src/qbm/http/ws/ws.h`
 `template<typename Transport=qb::io::transport::tcp> class Client : public WebSocket<Client<Transport>,Transport>` — chainable setters (each returns `Client&`): `on_connected/on_message/on_ping/on_pong/on_closed/on_error/on_disconnected/on_sending_http_request`.
 Aliases: `using ClientSecure = Client<stcp>; using client = Client<tcp>; using client_secure = Client<stcp>`.
-Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([]{...}); c.connect(qb::io::uri{"ws://h/path"});`
+Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([](auto&&){...}); c.connect(qb::io::uri{"ws://h/path"});`
 
 ### Coroutine API — `src/qbm/http/ws/coro.h`
 - `struct ConnectResult { bool ok{false}; }`; `struct CloseResult { bool ok{true}; }`.

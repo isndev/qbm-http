@@ -191,6 +191,9 @@ ephemeral_udp_port(const std::string &host = "127.0.0.1") {
 template <typename ServerT>
 class ServerThread {
 public:
+    /** @brief Constructs the concrete server object on the worker thread. */
+    using FactoryFn = std::function<std::unique_ptr<ServerT>()>;
+
     /**
      * @brief Configure callback type.
      * @param server Reference to the freshly-constructed server (on the worker thread).
@@ -207,7 +210,12 @@ public:
      * @param ready_budget Maximum wall time to wait for readiness before giving up.
      */
     explicit ServerThread(ConfigureFn configure, std::chrono::milliseconds ready_budget = std::chrono::seconds(5))
-        : _configure(std::move(configure)) {
+        : ServerThread([] { return std::make_unique<ServerT>(); }, std::move(configure), ready_budget) {}
+
+    /** @brief Construct through @p factory, then configure, start, and wait for readiness. */
+    ServerThread(FactoryFn factory, ConfigureFn configure, std::chrono::milliseconds ready_budget = std::chrono::seconds(5))
+        : _factory(std::move(factory))
+        , _configure(std::move(configure)) {
         _thread = std::thread([this] { worker_main(); });
 
         std::unique_lock<std::mutex> lock(_mutex);
@@ -246,15 +254,19 @@ public:
     /**
      * @brief Access the live server object.
      *
-     * Valid for the lifetime of this ServerThread. Note the server is owned by,
+     * Valid while ready, before stop() begins. Note the server is owned by,
      * and runs on, the worker thread; touching its state from the test thread is
      * only safe for atomics or read-only inspection that the server itself does
      * not mutate concurrently.
      *
-     * @return Reference to the server (asserts in debug if not yet constructed).
+     * @return Reference to the ready server.
+     * @throws std::logic_error if startup failed or the server is no longer live.
      */
     ServerT &
     server() {
+        if (!ready() || !_server) {
+            throw std::logic_error("ServerThread::server() requires a live, ready server");
+        }
         return *_server;
     }
 
@@ -294,10 +306,16 @@ private:
 
         bool ok = false;
         try {
-            _server = std::make_unique<ServerT>();
-            ok      = _configure ? _configure(*_server) : false;
+            _server = _factory ? _factory() : nullptr;
+            ok      = _server && _configure ? _configure(*_server) : false;
         } catch (...) {
             ok = false;
+        }
+
+        if (!ok) {
+            // Destruction belongs to the worker. Finish it before publishing
+            // failure so the constructor cannot race a read of `_server`.
+            _server.reset();
         }
 
         {
@@ -322,9 +340,11 @@ private:
             }
         }
 
+        _ready.store(false, std::memory_order_release);
         _server.reset(); // Destroy the server on the thread it lived on.
     }
 
+    FactoryFn                _factory;
     ConfigureFn              _configure;
     std::unique_ptr<ServerT> _server;
     std::thread              _thread;

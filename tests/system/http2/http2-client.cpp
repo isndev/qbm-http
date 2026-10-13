@@ -45,8 +45,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -80,6 +82,21 @@ public:
 // can assert correctness from the OBSERVABLE response alone — no server-side
 // smoke counters.
 class H2Server : public qb::http2::use<H2Server>::server<H2Session> {
+    using Context = qb::http::Context<H2Session>;
+
+    struct HangProbeState {
+        std::atomic<int>    routed{0};
+        std::atomic<int>    cancelled{0};
+        mutable std::mutex  context_mutex;
+        std::weak_ptr<void> context;
+    };
+
+    std::shared_ptr<HangProbeState>      _hang_probe{std::make_shared<HangProbeState>()};
+    std::deque<std::shared_ptr<Context>> _serialized_contexts;
+    std::atomic<int>                     _serialized_admitted{0};
+    std::atomic<int>                     _serialized_active{0};
+    std::atomic<int>                     _serialized_peak{0};
+
 public:
     H2Server() {
         // 1. Basic GET.
@@ -172,9 +189,49 @@ public:
             ctx->complete();
         });
 
-        // 8b. A stream the server never completes: what the peer-drop reconnection case holds in
-        //     flight while the server thread is stopped under it. Never called by anything else.
-        router().get("/api/hang", [](auto) {});
+        // 8b. A stream the server never completes. The counters and weak owner
+        //     give the peer-disconnect test a deterministic "routed and alive"
+        //     barrier plus cancellation/ownership post-conditions.
+        const auto hang_probe = _hang_probe;
+        router().get("/api/hang", [hang_probe](auto ctx) {
+            ctx->add_lifecycle_hook([hang_probe](auto &context, qb::http::HookPoint point) {
+                if (point == qb::http::HookPoint::POST_HANDLER_EXECUTION && context.is_cancelled()) {
+                    ++hang_probe->cancelled;
+                }
+            });
+            {
+                std::lock_guard lock(hang_probe->context_mutex);
+                hang_probe->context = ctx;
+            }
+            ++hang_probe->routed;
+        });
+
+        // 8c. A held response used to observe the concurrent-stream cap. A
+        //     second client calls release-one; both routes execute on the server
+        //     loop, so no test-thread completion crosses the session boundary.
+        router().get("/api/serialized/:id", [this](auto ctx) {
+            const int active = ++_serialized_active;
+            int       peak   = _serialized_peak.load();
+            while (active > peak && !_serialized_peak.compare_exchange_weak(peak, active)) {
+            }
+            ++_serialized_admitted;
+            _serialized_contexts.push_back(std::move(ctx));
+        });
+        router().get("/api/release-one", [this](auto ctx) {
+            if (_serialized_contexts.empty()) {
+                ctx->response().status() = qb::http::status::CONFLICT;
+                ctx->complete();
+                return;
+            }
+            auto held = std::move(_serialized_contexts.front());
+            _serialized_contexts.pop_front();
+            --_serialized_active;
+            held->response().status() = qb::http::status::OK;
+            held->response().body()   = "User ID: " + held->path_param("id") + " (serialized via HTTP/2)";
+            held->complete();
+            ctx->response().status() = qb::http::status::NO_CONTENT;
+            ctx->complete();
+        });
 
         // 8. Response carrying trailers.
         router().get("/api/trailers", [](auto ctx) {
@@ -186,6 +243,37 @@ public:
         });
 
         router().compile();
+    }
+
+    [[nodiscard]] int
+    hang_routed() const noexcept {
+        return _hang_probe->routed.load();
+    }
+
+    [[nodiscard]] int
+    hang_cancelled() const noexcept {
+        return _hang_probe->cancelled.load();
+    }
+
+    [[nodiscard]] bool
+    hang_context_expired() const {
+        std::lock_guard lock(_hang_probe->context_mutex);
+        return _hang_probe->context.expired();
+    }
+
+    [[nodiscard]] int
+    serialized_admitted() const noexcept {
+        return _serialized_admitted.load();
+    }
+
+    [[nodiscard]] int
+    serialized_active() const noexcept {
+        return _serialized_active.load();
+    }
+
+    [[nodiscard]] int
+    serialized_peak() const noexcept {
+        return _serialized_peak.load();
     }
 };
 
@@ -805,37 +893,46 @@ TEST_F(Http2ClientTest, Http1FallbackPostEchoesBodyOverAlpn) {
 // Abrupt peer disconnect with an in-flight stream: the server's session
 // `on(disconnected&&)` must cancel every still-open stream context and clear
 // the context map. We force an in-flight stream by issuing a request whose
-// handler the server never completes (the reset-stream route resets without
-// completing), then drop the transport from under it.
+// handler the server never completes, wait until that Context is retained,
+// then drop the transport from under it.
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
     auto client = make_test_client();
 
-    std::atomic<bool>  response_received{false};
+    std::atomic<int>   response_count{0};
     qb::http::Response response;
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
-    request.uri()    = qb::io::uri("/api/large"); // multi-DATA-frame, gives the loop work in flight
+    request.uri()    = qb::io::uri("/api/hang");
 
     ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
-        response          = std::move(r);
-        response_received = true;
+        response = std::move(r);
+        ++response_count;
     }));
     client->connect(nullptr);
 
-    // Wait until the connection is live, then drop it. The server observes a
-    // peer disconnect and runs its context-cancel/clear path.
-    ASSERT_TRUE(ServerThread::pump_until([&] { return client->is_connected() || response_received.load(); }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == 1; }));
+    EXPECT_FALSE(_server->server().hang_context_expired());
+    EXPECT_EQ(client->get_active_request_count(), 1u);
+    EXPECT_EQ(response_count.load(), 0);
+
+    // A high-level disconnect schedules local disposal; explicitly shut down
+    // the transport to deliver peer EOF for this server-side cancellation test.
+    ASSERT_EQ(client->transport().disconnect(), 0);
     client->disconnect();
 
-    // The server-side cleanup happens on the worker thread; pump our own loop a
-    // bounded amount so any client-side teardown settles. The deterministic,
-    // observable post-condition is that the client reports disconnected with no
-    // active requests.
-    EXPECT_TRUE(ServerThread::pump_until([&] { return !client->is_connected(); }));
+    ASSERT_TRUE(ServerThread::pump_until([&] {
+        return _server->server().hang_cancelled() == 1 && _server->server().hang_context_expired() && response_count.load() == 1;
+    })) << "cancelled="
+        << _server->server().hang_cancelled() << " expired=" << _server->server().hang_context_expired()
+        << " responses=" << response_count.load() << " client_connected=" << client->is_connected();
+    EXPECT_FALSE(client->is_connected());
     EXPECT_EQ(client->get_active_request_count(), 0u);
+    EXPECT_EQ(response_count.load(), 1);
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(response.body().template as<std::string>().empty());
 }
 
 // A batch whose size exceeds the outstanding-request bound is rejected up-front:
@@ -1041,7 +1138,7 @@ TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
     for (int i = 0; i < 3; ++i) {
         qb::http::Request request;
         request.method() = qb::http::Method::GET;
-        request.uri()    = qb::io::uri("/api/users/" + std::to_string(300 + i));
+        request.uri()    = qb::io::uri("/api/serialized/" + std::to_string(300 + i));
         ASSERT_TRUE(client->push_request(request, [&, i](qb::http::Response r) {
             responses[i] = std::move(r);
             ++received;
@@ -1049,11 +1146,42 @@ TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
     }
     client->connect(nullptr);
 
-    ASSERT_TRUE(ServerThread::pump_until([&] { return received.load() == 3; }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().serialized_admitted() == 1; }));
+    EXPECT_EQ(client->get_active_request_count(), 1u);
+    EXPECT_EQ(_server->server().serialized_active(), 1);
+    EXPECT_EQ(_server->server().serialized_peak(), 1);
+
+    auto             control = make_test_client();
+    std::atomic<int> control_replies{0};
+    for (int released = 1; released <= 3; ++released) {
+        qb::http::Request release;
+        release.method() = qb::http::Method::GET;
+        release.uri()    = qb::io::uri("/api/release-one");
+        ASSERT_TRUE(control->push_request(std::move(release), [&](qb::http::Response r) {
+            EXPECT_EQ(r.status(), qb::http::status::NO_CONTENT);
+            ++control_replies;
+        }));
+        if (released == 1) {
+            control->connect(nullptr);
+        }
+
+        ASSERT_TRUE(ServerThread::pump_until([&] {
+            const int next_admission = std::min(released + 1, 3);
+            return control_replies.load() == released && received.load() == released
+                   && _server->server().serialized_admitted() == next_admission;
+        }));
+        EXPECT_LE(client->get_active_request_count(), 1u);
+        EXPECT_LE(_server->server().serialized_active(), 1);
+        EXPECT_EQ(_server->server().serialized_peak(), 1);
+    }
+
+    ASSERT_EQ(received.load(), 3);
+    EXPECT_EQ(_server->server().serialized_active(), 0);
     for (int i = 0; i < 3; ++i) {
         EXPECT_EQ(responses[i].status(), qb::http::status::OK);
-        EXPECT_EQ(responses[i].body().template as<std::string>(), "User ID: " + std::to_string(300 + i) + " (via HTTP/2)");
+        EXPECT_EQ(responses[i].body().template as<std::string>(), "User ID: " + std::to_string(300 + i) + " (serialized via HTTP/2)");
     }
+    control->disconnect();
     client->disconnect();
 }
 
