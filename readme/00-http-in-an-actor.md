@@ -260,11 +260,13 @@ It is set in exactly the places the session knows the response can no longer be 
 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:395-398 (disconnected: cancel only when ByUser and incomplete), :359-362 (extracted: cancel then reset) -->
 
-Note what is **not** in that table: an explicit local `disconnect()` and a session inactivity timeout. qb-io remaps a
-local disconnect's default/zero reason to `DisconnectedReason::BySystem` (`1`); the timeout handler uses
-`DisconnectedReason::ByTimeout`. Neither takes the HTTP/1.1 session's reason-`0` cancellation branch. A long-running
-handler therefore cannot treat `is_cancelled()` as a general liveness signal: it is set for peer EOF and extraction,
-but not for either local teardown path.
+Note what is **not** in that table: an explicit local `disconnect()` and a session inactivity timeout. qb-io's default
+local reason, `disconnect_reason::user_initiated`, has integer value `1`; an explicit `disconnect(0)` is remapped to
+that same value because zero is qb-io's internal "no disconnect pending" sentinel. The qbm-http enum independently
+assigns value `1` to `DisconnectedReason::ByTimeout`, so both a local default/zero disconnect and the timeout handler
+miss the HTTP/1.1 session's reason-`0` cancellation branch. A long-running handler therefore cannot treat
+`is_cancelled()` as a general liveness signal: it is set for peer EOF and extraction, but not for either local teardown
+path.
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:280-300 (timeout disconnects with ByTimeout) -->
 
 ### `http_awaiter` — the client's awaiter is not cancellation-aware
