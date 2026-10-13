@@ -240,8 +240,8 @@ TEST_F(CoroH2ClientTest, CoAwaitConnectThenPushRequestInsideCoroutine) {
     auto client = make_test_client();
 
     qb::http::Response captured;
-    bool               connected = false;
-    qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
+    bool               connected        = false;
+    auto               connect_and_post = [&]() -> qb::io::async::task<void> {
         auto cr   = co_await client->connect();
         connected = cr.ok;
         if (!connected)
@@ -254,8 +254,8 @@ TEST_F(CoroH2ClientTest, CoAwaitConnectThenPushRequestInsideCoroutine) {
         req.body() = "payload-42";
         captured   = co_await client->push_request(std::move(req));
         co_return;
-    }());
-
+    };
+    qb::io::async::run_sync(connect_and_post());
     ASSERT_TRUE(connected);
     EXPECT_EQ(captured.status(), qb::http::status::CREATED);
     EXPECT_EQ(captured.body().template as<std::string>(), "payload-42");

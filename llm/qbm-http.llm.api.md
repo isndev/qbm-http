@@ -168,7 +168,8 @@ Main router: a RouterCore + a root RouteGroup. **Must `compile()` before `route(
 - `void set_not_found_handler(RouteHandlerFn)` (`router.h:265`) — global middleware still prepended.
 - `void set_error_task_chain(std::vector<std::shared_ptr<IAsyncTask<S>>>)` (`router.h:272`) — global middleware **not** auto-prepended.
 - `Router& add_lifecycle_hook(typename Context<S>::LifecycleHook)` (`router.h:282`) — only way to observe `PRE_ROUTING`.
-- `void compile()` (`router.h:290`); `std::shared_ptr<Context<S>> route(std::shared_ptr<S> session, qb::http::Request)` (`router.h:302`); `std::weak_ptr<RouterCore<S>> get_router_core_weak_ptr() noexcept` (`router.h:310`); `void clear()` (`router.h:317`, requires recompile).
+- `void compile()` (`router.h:290`); `std::shared_ptr<Context<S>> route(std::shared_ptr<S> session, qb::http::Request)` (`router.h:302`); `std::weak_ptr<RouterCore<S>> get_router_core_weak_ptr() noexcept` (`router.h:310`).
+- `void clear()` (`router.h:317`, requires recompile).
 Usage: `server->router().get("/", [](auto ctx){ ctx->text("hi"); }); server->router().compile();`
 
 ### `qb::http::RouteGroup<Session>` — `src/qbm/http/routing/route_group.h:50`

@@ -105,6 +105,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: module
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
 
       # github.base_ref for a PR (the branch being merged INTO, which is main or develop by
       # this workflow's triggers), github.ref_name otherwise. Never github.head_ref: on a fork
@@ -117,7 +118,7 @@ jobs:
         env:
           INPUT_REF: ${{ inputs.qb_ref }}
           BASE_REF: ${{ github.base_ref }}
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
         run: |
           set -euo pipefail
           ref="${INPUT_REF}"

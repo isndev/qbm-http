@@ -1144,7 +1144,7 @@ TEST_F(Http3LoopbackTest, CoAwaitConnectAndPushRequestInsideCoroutine) {
 
     bool               connected = false;
     qb::http::Response captured;
-    qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
+    auto               connect_and_post = [&]() -> qb::io::async::task<void> {
         auto result = co_await client->connect();
         connected   = result.ok;
         if (!connected) {
@@ -1156,8 +1156,8 @@ TEST_F(Http3LoopbackTest, CoAwaitConnectAndPushRequestInsideCoroutine) {
         request.body() = "payload-h3-coro";
         captured       = co_await client->push_request(std::move(request));
         co_return;
-    }());
-
+    };
+    qb::io::async::run_sync(connect_and_post());
     ASSERT_TRUE(connected);
     EXPECT_EQ(captured.status(), qb::http::status::CREATED);
     EXPECT_EQ(captured.header("x-protocol"), "HTTP/3");

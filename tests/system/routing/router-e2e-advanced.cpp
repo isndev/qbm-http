@@ -435,7 +435,7 @@ TEST_F(RouterE2ETest, ConcurrentInFlightRequestsAllComplete) {
     std::array<std::string, kN> bodies{};
     int                         completed = 0;
 
-    qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
+    auto fetch_requests = [&]() -> qb::io::async::task<void> {
         for (int i = 0; i < kN; ++i) {
             auto reply  = co_await qb::http::GET(qb::http::Request{{url("/param/req" + std::to_string(i))}}, kClientTimeout);
             statuses[i] = reply.response.status();
@@ -443,8 +443,8 @@ TEST_F(RouterE2ETest, ConcurrentInFlightRequestsAllComplete) {
             ++completed;
         }
         co_return;
-    }());
-
+    };
+    qb::io::async::run_sync(fetch_requests());
     ASSERT_EQ(completed, kN);
     for (int i = 0; i < kN; ++i) {
         EXPECT_EQ(statuses[i], static_cast<int>(qb::http::status::OK)) << "i=" << i;

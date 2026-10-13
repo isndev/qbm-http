@@ -289,13 +289,13 @@ TEST_F(CoroClientTest, CoAwaitFromInsideCoroutine) {
     qb::http::Response captured;
     bool               done = false;
 
-    qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
+    auto fetch = [&]() -> qb::io::async::task<void> {
         auto reply = co_await qb::http::GET(qb::http::Request{{url("/ping")}});
         captured   = std::move(reply.response);
         done       = true;
         co_return;
-    }());
-
+    };
+    qb::io::async::run_sync(fetch());
     EXPECT_TRUE(done);
     EXPECT_EQ(captured.status(), qb::http::status::OK);
     EXPECT_EQ(captured.body().template as<std::string>(), "pong");
@@ -304,14 +304,14 @@ TEST_F(CoroClientTest, CoAwaitFromInsideCoroutine) {
 TEST_F(CoroClientTest, SequentialAwaitsShareLoop) {
     std::vector<int> statuses;
 
-    qb::io::async::run_sync([&]() -> qb::io::async::task<void> {
+    auto fetch_sequence = [&]() -> qb::io::async::task<void> {
         for (int i = 0; i < 3; ++i) {
             auto reply = co_await qb::http::GET(qb::http::Request{{url("/echo/" + std::to_string(i))}});
             statuses.push_back(reply.response.status());
         }
         co_return;
-    }());
-
+    };
+    qb::io::async::run_sync(fetch_sequence());
     ASSERT_EQ(statuses.size(), 3u);
     for (int s : statuses)
         EXPECT_EQ(s, static_cast<int>(qb::http::status::OK));
