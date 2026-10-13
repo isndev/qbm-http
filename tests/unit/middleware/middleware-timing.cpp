@@ -177,19 +177,25 @@ TEST_F(TimingMiddlewareTest, DistinctNamesYieldIndependentTiming) {
     mw1->process(ctx);
     mw2->process(ctx);
 
-    // Seed Timer1's key 30ms in the past, Timer2's key 10ms in the past: the two callbacks
-    // must report distinct, deterministic minimum durations — no live-run NEAR/NE coupling.
-    const auto now = TimingMW::Clock::now();
-    ctx->set(std::string("__TimingMiddleware_StartTime_Timer1"), now - 30ms);
-    ctx->set(std::string("__TimingMiddleware_StartTime_Timer2"), now - 10ms);
+    // Seed both keys from one timestamp, then bound each callback by timestamps
+    // sampled around the single hook dispatch. Arbitrary preemption widens both
+    // valid intervals and cannot invert an order assertion.
+    const auto seed   = TimingMW::Clock::now();
+    const auto start1 = seed - 30ms;
+    const auto start2 = seed - 10ms;
+    ctx->set(std::string("__TimingMiddleware_StartTime_Timer1"), start1);
+    ctx->set(std::string("__TimingMiddleware_StartTime_Timer2"), start2);
 
+    const auto before = TimingMW::Clock::now();
     ctx->execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND);
+    const auto after = TimingMW::Clock::now();
 
     ASSERT_TRUE(d1.has_value());
     ASSERT_TRUE(d2.has_value());
-    EXPECT_GE(d1->count(), 30);
-    EXPECT_GE(d2->count(), 10);
-    EXPECT_GT(d1->count(), d2->count());
+    EXPECT_GE(*d1, std::chrono::duration_cast<std::chrono::milliseconds>(before - start1));
+    EXPECT_LE(*d1, std::chrono::duration_cast<std::chrono::milliseconds>(after - start1));
+    EXPECT_GE(*d2, std::chrono::duration_cast<std::chrono::milliseconds>(before - start2));
+    EXPECT_LE(*d2, std::chrono::duration_cast<std::chrono::milliseconds>(after - start2));
 }
 
 // --- Same name twice: second process() overwrites the shared key -------------

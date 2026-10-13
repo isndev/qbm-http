@@ -56,6 +56,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -467,6 +468,7 @@ struct EmittedFrame {
     uint8_t       flags;
     uint32_t      stream_id;
     uint32_t      payload_length;
+    std::size_t   payload_offset = 0;
 };
 
 /**
@@ -484,11 +486,28 @@ parse_emitted_frames(const qb::allocator::pipe<char> &output) {
     while (off + h2::FRAME_HEADER_SIZE <= size) {
         h2::FrameHeader fh{};
         std::memcpy(&fh, data + off, h2::FRAME_HEADER_SIZE);
-        const uint32_t plen = fh.get_payload_length();
-        frames.push_back({fh.get_type(), fh.flags, fh.get_stream_id(), plen});
+        const uint32_t plen           = fh.get_payload_length();
+        const auto     payload_offset = off + h2::FRAME_HEADER_SIZE;
+        if (plen > size - payload_offset) {
+            throw std::runtime_error("truncated HTTP/2 frame payload in emitted output");
+        }
+        frames.push_back({fh.get_type(), fh.flags, fh.get_stream_id(), plen, payload_offset});
         off += h2::FRAME_HEADER_SIZE + plen;
     }
+    if (off != size) {
+        throw std::runtime_error("truncated HTTP/2 frame header in emitted output");
+    }
     return frames;
+}
+
+/// Copy the payload bytes described by an emitted-frame view.
+[[nodiscard]] inline std::vector<uint8_t>
+emitted_payload(const qb::allocator::pipe<char> &output, const EmittedFrame &frame) {
+    if (frame.payload_offset > output.size() || frame.payload_length > output.size() - frame.payload_offset) {
+        throw std::runtime_error("emitted HTTP/2 frame payload is outside the output pipe");
+    }
+    const auto *first = reinterpret_cast<const uint8_t *>(output.cbegin() + frame.payload_offset);
+    return {first, first + frame.payload_length};
 }
 
 /// Parse the @c FrameHeader sitting at @p offset bytes into a pipe.

@@ -57,8 +57,8 @@ using namespace std::chrono_literals;
 using qb::http::test::WsServerThread;
 
 // ---------------------------------------------------------------------------
-// Echo server: reflects every data message, answers pings with a pong carrying
-// the same payload. Used for text / binary / large-frame / ping round-trips.
+// Echo server: reflects every data message and observes pings. The protocol
+// itself answers each ping with one same-payload pong.
 // ---------------------------------------------------------------------------
 
 class EchoServer;
@@ -84,13 +84,7 @@ public:
     }
 
     void
-    on(WS_Protocol::ping &&event) {
-        qb::http::ws::MessagePong pong;
-        if (event.size) {
-            pong << std::string(event.data, event.size);
-        }
-        *this << pong;
-    }
+    on(WS_Protocol::ping &&) {}
 };
 
 class EchoServer : public qb::io::use<EchoServer>::tcp::server<EchoClient> {

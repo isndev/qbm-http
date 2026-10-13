@@ -110,30 +110,13 @@ public:
 
 inline void
 SecurityServerClient::on(typename Protocol::request &&request) {
-    bool valid = true;
-    if (request.header("Sec-WebSocket-Version") != "13") {
-        valid = false;
-    }
-    if (request.header("Sec-WebSocket-Key").empty()) {
-        valid = false;
-    }
-    if (!request.upgrade || request.header("Upgrade") != "websocket" || request.header("Connection").find("Upgrade") == std::string::npos) {
-        valid = false;
-    }
-
-    if (valid) {
+    // Every acceptance and rejection goes through the production handshake
+    // validator. In particular, missing keys and wrong versions must not be
+    // intercepted by fixture policy before switch_protocol sees them.
+    if (this->switch_protocol<WS_Protocol>(*this, request)) {
         _validated = true;
-        if (!this->switch_protocol<WS_Protocol>(*this, request)) {
-            ++server().rejections;
-            disconnect();
-        } else {
-            ++server().connections;
-        }
+        ++server().connections;
     } else {
-        qb::http::Response res;
-        res.status() = qb::http::status::BAD_REQUEST;
-        res.body()   = "Invalid WebSocket request";
-        *this << res;
         ++server().rejections;
         disconnect();
     }
@@ -237,12 +220,10 @@ TEST(WsHandshakeSecurity, NonGetMethodIsRejected) {
 // ---------------------------------------------------------------------------
 // Sec-WebSocket-Key value validation inside populate_handshake_response.
 //
-// The session's own pre-check only requires the key to be *present*; the strict
-// RFC 6455 §4.2.1 validation (24-char base64 of 16 bytes) lives in
-// ws_server::populate_handshake_response (ws.h:918-938). A key that is present
-// but malformed therefore passes the session gate, is handed to switch_protocol,
-// and the ws_server constructor rejects it → 400 + not_ok (ws.h:961-974). Each case
-// below isolates one rejection branch and asserts the 400.
+// The strict RFC 6455 §4.2.1 validation (24-char base64 of 16 bytes) lives in
+// ws_server::populate_handshake_response. Every request in this fixture is
+// handed directly to switch_protocol, so each case below isolates a production
+// rejection branch and asserts the 400.
 // ---------------------------------------------------------------------------
 
 TEST(WsHandshakeSecurity, WrongLengthKeyIsRejected) {

@@ -32,7 +32,6 @@
 
 #include <chrono>
 #include <cstdint>
-#include <thread>
 
 #include <qbm/http/2/protocol/stream.h>
 
@@ -156,20 +155,28 @@ TEST(HTTP2StreamBase, ConstructorSeedsWindowsAndThreshold) {
     EXPECT_EQ(s.error_code, h2::ErrorCode::NO_ERROR);
 }
 
-TEST(HTTP2StreamBase, AgeAndIdleTimeAdvanceWithWallClock) {
+TEST(HTTP2StreamBase, AgeAndTouchUseIndependentMonotonicTimestamps) {
     Http2StreamBase s(1, kInitWin, kInitWin);
-    // Age is monotonic and non-negative right after construction.
-    EXPECT_GE(s.get_age().count(), 0);
-    EXPECT_GE(s.get_idle_time().count(), 0);
+    const auto      synthetic_now = std::chrono::steady_clock::now();
+    const auto      created       = synthetic_now - std::chrono::milliseconds(10);
+    const auto      activity      = synthetic_now - std::chrono::milliseconds(7);
+    s.created_at                  = created;
+    s.last_activity               = activity;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    const auto age_after = s.get_age();
-    EXPECT_GE(age_after.count(), 4);
+    EXPECT_GE(s.get_age(), std::chrono::milliseconds(10));
+    EXPECT_GE(s.get_idle_time(), std::chrono::milliseconds(7));
 
-    // touch() resets the idle clock but not the creation age.
+    // Bracket touch() with direct steady-clock samples. This proves the reset
+    // without comparing a later idle sample to an earlier age sample, a bound
+    // that ordinary thread preemption can invalidate.
+    const auto before_touch = std::chrono::steady_clock::now();
     s.touch();
-    EXPECT_LE(s.get_idle_time().count(), age_after.count());
-    EXPECT_GE(s.get_age().count(), age_after.count());
+    const auto after_touch = std::chrono::steady_clock::now();
+
+    EXPECT_EQ(s.created_at, created);
+    EXPECT_GE(s.last_activity, before_touch);
+    EXPECT_LE(s.last_activity, after_touch);
+    EXPECT_GT(s.last_activity, activity);
 }
 
 // ===========================================================================

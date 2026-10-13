@@ -37,12 +37,14 @@ TEST_F(ValidationSanitizerTest, Trim) {
 TEST_F(ValidationSanitizerTest, MultipleRulesOnField) {
     Sanitizer s;
     s.add_rule("comment", PredefinedSanitizers::trim());
-    s.add_rule("comment", PredefinedSanitizers::to_lower_case());
     s.add_rule("comment", PredefinedSanitizers::escape_html());
+    s.add_rule("comment", PredefinedSanitizers::strip_html_tags());
 
     qb::json data = {{"comment", "  <Hello> World!  "}};
     s.sanitize(data);
-    EXPECT_EQ(data["comment"].get<std::string>(), "&lt;hello&gt; world!");
+    // escape_html before strip_html leaves encoded markup; reversing those two
+    // rules would remove the tag and produce only "Hello World!".
+    EXPECT_EQ(data["comment"].get<std::string>(), "&lt;Hello&gt; World!");
 }
 
 TEST_F(ValidationSanitizerTest, NestedPath) {
@@ -314,16 +316,28 @@ TEST_F(ValidationSanitizerTest, StripHtmlTagsXSSProtection) {
     EXPECT_EQ(form["content"].get<std::string>(), "Submit");
 }
 
-// Chaining order is deterministic: trim -> lower-case -> strip tags.
+// Chaining order is deterministic and observed directly, independently of
+// whether any built-in transformations happen to commute for a given input.
 TEST_F(ValidationSanitizerTest, ChainedRulesApplyInOrder) {
-    Sanitizer s;
-    s.add_rule("content", PredefinedSanitizers::trim());
-    s.add_rule("content", PredefinedSanitizers::to_lower_case());
-    s.add_rule("content", PredefinedSanitizers::strip_html_tags());
+    Sanitizer        s;
+    std::vector<int> trace;
+    s.add_rule("content", [&trace](const std::string &input) {
+        trace.push_back(1);
+        return input + "-first";
+    });
+    s.add_rule("content", [&trace](const std::string &input) {
+        trace.push_back(2);
+        return "second(" + input + ")";
+    });
+    s.add_rule("content", [&trace](const std::string &input) {
+        trace.push_back(3);
+        return input + "-third";
+    });
 
-    qb::json data = {{"content", "  <DIV>HELLO WORLD</DIV>  "}};
+    qb::json data = {{"content", "value"}};
     s.sanitize(data);
-    EXPECT_EQ(data["content"].get<std::string>(), "hello world");
+    EXPECT_EQ(trace, (std::vector<int>{1, 2, 3}));
+    EXPECT_EQ(data["content"].get<std::string>(), "second(value-first)-third");
 }
 
 // --- escape_html: ampersand / quote / apostrophe -----------------------------

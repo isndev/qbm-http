@@ -359,14 +359,13 @@ TEST_F(ValidationMiddlewareTest, BodySanitizationByMiddleware) {
 }
 
 TEST_F(ValidationMiddlewareTest, SanitizerGatesRuleSoValidationPassesAfterTransform) {
-    // The raw value ("  ab  ", trimmed length 2) would FAIL MinLengthRule(3), but a
-    // to_upper + a no-op proves the sanitizer runs BEFORE the rule: trim then pad-check.
-    // Here the trimmed+uppercased value "VALID" satisfies MinLength(3), so the rule
-    // sees the sanitized value, not the raw one — validation passes.
+    // The raw value is 9 bytes and fails MaxLengthRule(6); trim + upper-case
+    // produces the 5-byte value "VALID", which passes only when sanitization
+    // runs before validation.
     _request_validator->add_query_param_sanitizer("name", PredefinedSanitizers::trim());
     _request_validator->add_query_param_sanitizer("name", PredefinedSanitizers::to_upper_case());
     _request_validator->for_query_param("name",
-                                        ParameterRuleSet("name").set_type(DataType::STRING).add_rule(std::make_shared<MinLengthRule>(3)));
+                                        ParameterRuleSet("name").set_type(DataType::STRING).add_rule(std::make_shared<MaxLengthRule>(6)));
 
     _router     = std::make_unique<qb::http::Router<Session>>();
     auto val_mw = qb::http::validation_middleware<Session>(_request_validator);

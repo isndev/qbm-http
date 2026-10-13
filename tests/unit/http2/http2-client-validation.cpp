@@ -38,8 +38,10 @@
  * @ingroup Http
  */
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -50,6 +52,18 @@
 #include <qbm/http/origin.h>
 
 using namespace std::chrono_literals;
+
+namespace http2_client_validation_test {
+
+qb::io::async::task<void>
+await_one_request(std::shared_ptr<qb::http2::Client> client, bool &entered, bool &resumed) {
+    qb::http::Request request{qb::io::uri("https://localhost:1/armed-abandon")};
+    entered = true;
+    (void) co_await client->push_request(std::move(request));
+    resumed = true;
+}
+
+} // namespace http2_client_validation_test
 
 namespace {
 
@@ -409,10 +423,8 @@ TEST(Http2ClientLifetimeTest, PushRequestAwaiterCompletesWhenClientExpiresBefore
 }
 
 TEST(Http2ClientLifetimeTest, AbandonedRequestAwaiterDestroyedWithoutAwaitDoesNotCrash) {
-    // Destroy-while-awaiting in its most adversarial form: build the awaiter,
-    // never co_await it, and let both it and the client go out of scope. The
-    // completion handler the awaiter registered with the client must be safely
-    // dropped (no use-after-free, no leaked timer firing into freed state).
+    // Control case: a lazy awaiter that is never awaited never registers an
+    // operation with the client.
     {
         auto client = qb::http2::make_client("https://localhost:1");
         client->set_connect_timeout(10ms);
@@ -426,6 +438,47 @@ TEST(Http2ClientLifetimeTest, AbandonedRequestAwaiterDestroyedWithoutAwaitDoesNo
         qb::io::async::run(EVRUN_NOWAIT);
     }
     SUCCEED();
+}
+
+TEST(Http2ClientLifetimeTest, DestroyedSuspendedRequestFrameIgnoresLateCompletionAndCleansRequest) {
+    qb::io::async::init();
+    auto client = qb::http2::make_client("https://localhost:1");
+    client->set_auto_reconnect(false);
+    client->set_connect_timeout(5s);
+
+    bool entered = false;
+    bool resumed = false;
+    {
+        auto waiter = http2_client_validation_test::await_one_request(client, entered, resumed);
+        ASSERT_TRUE(waiter.handle());
+        waiter.handle().resume();
+
+        ASSERT_TRUE(entered);
+        ASSERT_FALSE(resumed);
+        ASSERT_FALSE(waiter.done());
+        const auto [total, successful, failed] = client->get_stats();
+        EXPECT_EQ(total, 1u);
+        EXPECT_EQ(successful, 0u);
+        EXPECT_EQ(failed, 0u);
+
+        // Destroy the actually suspended coroutine frame. The awaiter's alive
+        // sentinel must make the client callback below a no-op.
+        waiter = {};
+    }
+
+    client->disconnect();
+    for (int i = 0; i < 8; ++i) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+
+    EXPECT_FALSE(resumed);
+    EXPECT_EQ(client->get_active_request_count(), 0u);
+    const auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 1u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 1u);
+    client.reset();
+    qb::io::async::listener::current.clear();
 }
 
 } // namespace

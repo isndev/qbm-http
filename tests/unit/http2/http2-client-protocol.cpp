@@ -350,14 +350,10 @@ TEST(HTTP2ClientProtocol, AssemblesResponseFromHeadersAndData) {
 }
 
 // ===========================================================================
-// H5/H6 regression: a response handler that synchronously re-enters send_request
-// relocates the _client_streams flat map (ska rehash) WHILE
-// process_complete_response_if_ready still holds the `stream` reference. The fix
-// snapshots sid/response into locals before dispatch; without it the post-dispatch
-// `stream.state=...` / try_close_stream_context_by_id(stream.id) is a use-after-free
-// (release-only, ska map; ASan-invisible under the node-stable debug map). This
-// exercises the exact path — previously untested — and asserts the response is
-// delivered correctly and the connection stays usable afterward.
+// Reentrancy controls for process_complete_response_if_ready. Insertion during
+// dispatch proves the map can grow while user code runs; the second case erases
+// the current node through an inbound RST_STREAM, the lifetime hazard that
+// requires the completion path to snapshot every value used after dispatch.
 // ===========================================================================
 namespace {
 struct ReentrantSendClientFakeIO : Http2ClientFakeIO {
@@ -369,7 +365,8 @@ struct ReentrantSendClientFakeIO : Http2ClientFakeIO {
     void
     on(qb::http::Response &&response, uint64_t app_id, h2::ErrorCode ec) {
         Http2ClientFakeIO::on(std::move(response), app_id, ec);
-        // Open many streams during the dispatch to force the flat map to rehash/relocate.
+        // Open many streams during dispatch to exercise map growth separately
+        // from the current-node erase case below.
         if (proto && !reentered) {
             reentered = true;
             for (int i = 0; i < 256; ++i) {
@@ -379,6 +376,27 @@ struct ReentrantSendClientFakeIO : Http2ClientFakeIO {
                 (void) proto->send_request(std::move(r), 2000 + static_cast<uint64_t>(i));
             }
         }
+    }
+};
+
+struct ReentrantEraseClientFakeIO : Http2ClientFakeIO {
+    using Http2ClientFakeIO::on;
+
+    h2::ClientHttp2Protocol<ReentrantEraseClientFakeIO> *proto     = nullptr;
+    bool                                                 reentered = false;
+
+    void
+    on(qb::http::Response &&response, uint64_t app_id, h2::ErrorCode ec) {
+        Http2ClientFakeIO::on(std::move(response), app_id, ec);
+        if (!proto || reentered) {
+            return;
+        }
+        reentered = true;
+        h2::Http2FrameData<h2::RstStreamFrame> rst;
+        rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+        rst.header.set_stream_id(1);
+        rst.payload.error_code = h2::ErrorCode::CANCEL;
+        proto->on(std::move(rst));
     }
 };
 } // namespace
@@ -411,6 +429,41 @@ TEST(HTTP2ClientProtocol, ResponseHandlerReenteringSendRequestKeepsResponseAndCo
     protocol.on(make_headers_frame(3, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "204"}}));
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.response_count, 2);
+}
+
+TEST(HTTP2ClientProtocol, ResponseHandlerReentrantlyErasingCurrentStreamKeepsConnectionIntact) {
+    ReentrantEraseClientFakeIO                          io;
+    h2::ClientHttp2Protocol<ReentrantEraseClientFakeIO> protocol(io);
+    io.proto = &protocol;
+    // A one-stream peer cap makes the next request a public witness that the
+    // completed stream no longer counts after reentrant RST cleanup.
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, 1}}));
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Request first;
+    first.method() = qb::http::method::GET;
+    first.uri()    = qb::io::uri("https://example.test/erase-current");
+    ASSERT_TRUE(protocol.send_request(std::move(first), 5));
+
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "body-1"));
+
+    EXPECT_TRUE(io.reentered);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 1);
+    EXPECT_EQ(io.last_app_id, 5u);
+
+    // The by-id cleanup after user dispatch must tolerate that stream 1 is
+    // already gone. The cap rejects a second request if stream 1 remained active.
+    qb::http::Request second;
+    second.method() = qb::http::method::GET;
+    second.uri()    = qb::io::uri("https://example.test/after-erase");
+    ASSERT_TRUE(protocol.send_request(std::move(second), 6));
+    protocol.on(make_headers_frame(3, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "204"}}));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 2);
+    EXPECT_EQ(io.last_app_id, 6u);
 }
 
 // ===========================================================================

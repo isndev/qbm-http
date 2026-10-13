@@ -223,6 +223,7 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
     server.start();
 
     std::atomic<bool>  client_saw_non_ok{false};
+    std::atomic<bool>  worker_failed{false};
     std::exception_ptr worker_error;
     std::thread        t([&] {
         try {
@@ -248,10 +249,11 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
             client_saw_non_ok.store(client.saw_non_ok.load());
         } catch (...) {
             worker_error = std::current_exception();
+            worker_failed.store(true, std::memory_order_release);
         }
     });
 
-    pump_loop_until([&] { return all_done() || worker_error != std::exception_ptr(); });
+    pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
     t.join();
 
     if (worker_error) {
@@ -285,6 +287,7 @@ TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {
     server.start();
 
     std::atomic<bool>  any_status_mismatch{false};
+    std::atomic<bool>  worker_failed{false};
     std::exception_ptr worker_error;
     std::thread        t([&] {
         try {
@@ -305,10 +308,11 @@ TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {
             }
         } catch (...) {
             worker_error = std::current_exception();
+            worker_failed.store(true, std::memory_order_release);
         }
     });
 
-    pump_loop_until([&] { return all_done() || worker_error != std::exception_ptr(); });
+    pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
     t.join();
 
     if (worker_error) {
@@ -554,6 +558,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
     server.start();
 
     std::atomic<bool>  client_saw_non_ok{false};
+    std::atomic<bool>  worker_failed{false};
     std::exception_ptr worker_error;
     std::thread        t([&] {
         try {
@@ -582,10 +587,11 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
             client_saw_non_ok.store(client.saw_non_ok.load());
         } catch (...) {
             worker_error = std::current_exception();
+            worker_failed.store(true, std::memory_order_release);
         }
     });
 
-    pump_loop_until([&] { return all_done() || worker_error != std::exception_ptr(); });
+    pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
     t.join();
 
     if (worker_error) {

@@ -79,7 +79,7 @@ flowchart TD
 
 Here is the contract exercised directly, taken from the test suite:
 
-<!-- src: tests/unit/http1/http1-parse-limits.cpp:122-130 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:131-139 -->
 
 ```cpp
 #include <qbm/http/http.h>
@@ -96,7 +96,7 @@ assert(parser.content_length == 0u);   // normalized — see "Body framing" belo
 
 And fragmented input — the case the framing layer is built around — reassembles correctly:
 
-<!-- src: tests/unit/http1/http1-parse-limits.cpp:185-202 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:194-211 -->
 
 ```cpp
 Parser<Request> parser;
@@ -225,7 +225,7 @@ Two framing defenses go beyond size limits, both in `on_headers_complete`:
 
 These are exercised directly against `Parser`:
 
-<!-- src: tests/unit/http1/http1-parse-limits.cpp:59-160 -->
+<!-- src: tests/unit/http1/http1-parse-limits.cpp:59-169 -->
 
 ```cpp
 Parser<Request> parser;

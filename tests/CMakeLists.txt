@@ -33,16 +33,17 @@
 # waves dissolve each into its tiered targets and remove it here. Keeps the build green meanwhile.
 # -----------------------------------------------------------------------------
 
-# qhttp_test(<tier> <name> <relpath> [REQUIRES...] [LABELS extra...]) helper.
+# qhttp_test(<tier> <name> <relpath> [REQUIRES...] [DEFINES...] [LABELS extra...]) helper.
 # INCLUDES ${CMAKE_CURRENT_SOURCE_DIR} (the tests/ dir) so the test files' `"../<hdr>.h"` module
 # includes — authored relative to tests/ — keep resolving to qbm/http/<hdr>.h after the move into
 # the unit/system/ subtrees. (Canonicalising those to <http/...> angle includes is a later cleanup.)
 function(qhttp_test TIER NAME RELPATH)
-    cmake_parse_arguments(T "" "" "REQUIRES;EXTRA_LABELS" ${ARGN})
+    cmake_parse_arguments(T "" "" "REQUIRES;DEFINES;EXTRA_LABELS" ${ARGN})
     qb_register_module_test(
         MODULE_NAME http TIER ${TIER} TEST_NAME ${NAME}
         SOURCES ${RELPATH}
         INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}
+        DEFINES ${T_DEFINES}
         LABELS module:qbm-http tier:${TIER} ${T_EXTRA_LABELS}
         REQUIRES ${T_REQUIRES})
 endfunction()
@@ -100,7 +101,7 @@ qhttp_test(unit body-codec       unit/message/body-codec.cpp)
 qhttp_test(unit headers-utility  unit/message/headers-utility.cpp)
 qhttp_test(unit message-types    unit/message/message-types.cpp)
 qhttp_test(unit response-accessors unit/message/response-accessors.cpp)
-qhttp_test(unit body-uncompress-malformed unit/message/body-uncompress-malformed.cpp)
+qhttp_test(unit body-uncompress-malformed unit/message/body-uncompress-malformed.cpp REQUIRES compression)
 qhttp_test(unit cookie           unit/cookie/cookie.cpp)
 qhttp_test(unit multipart-security unit/security/multipart-security.cpp EXTRA_LABELS security)
 qhttp_test(unit content-length-preallocation unit/security/content-length-preallocation.cpp EXTRA_LABELS security)
@@ -182,7 +183,10 @@ qhttp_test(system http1-loopback system/http1/http1-loopback.cpp REQUIRES ssl li
 qhttp_test(system router-e2e-advanced  system/routing/router-e2e-advanced.cpp REQUIRES live EXTRA_LABELS http1 routing)
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
 qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
-qhttp_test(system make-server-factory  system/server/make-server-factory.cpp REQUIRES ssl live EXTRA_LABELS http1 http2 ssl)
+qhttp_test(system make-server-factory-http1 system/server/make-server-factory.cpp REQUIRES live
+           DEFINES QBM_TEST_FACTORY_PLAINTEXT_ONLY EXTRA_LABELS http1)
+qhttp_test(system make-server-factory-tls system/server/make-server-factory.cpp REQUIRES ssl live
+           DEFINES QBM_TEST_FACTORY_TLS_ONLY EXTRA_LABELS http1 http2 ssl)
 qhttp_test(system listen-start-parity system/server/listen-start-parity.cpp REQUIRES live EXTRA_LABELS http1 http2)
 qhttp_test(system acceptor-disconnect system/server/acceptor-disconnect.cpp REQUIRES live EXTRA_LABELS http1 http2)
 qhttp_test(system middleware-pipeline-system system/middleware/middleware-pipeline-system.cpp REQUIRES live EXTRA_LABELS middleware)

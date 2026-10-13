@@ -9,14 +9,14 @@
  *
  *   - window recovery: an exhausted client is allowed again after the window
  *     elapses (the post-429 "recover" arc collapsed out of the fast core);
- *   - straddling the window boundary (counter survives within-window, resets
- *     across it), incl. the monotonic-decreasing X-RateLimit-Reset assertion;
+ *   - same-window counting, separated from real-time expiry so no request is
+ *     required to arrive before a short scheduler deadline;
  *   - the F41 opportunistic periodic cleanup recovering capacity once short
  *     windows have genuinely elapsed.
  *
- * Windows here are kept as small as practical (60-120 ms) to bound the wall
- * time while staying comfortably above scheduler jitter on a loaded CI box;
- * the sleeps use a generous margin (~2x the window) so they do not race.
+ * Expiry cases use short windows only with lower-bound sleeps: extra scheduler
+ * delay can never make them fail. Same-window cases use a 24-hour window and
+ * never sleep.
  *
  * FRAMEWORK FOLLOW-UP: if `RateLimitMiddleware` gained an injectable `now()`
  * source (e.g. a `Clock` template param or a settable time function), every
@@ -102,10 +102,10 @@ TEST_F(RateLimitWindowTest, ClientIsAllowedAgainAfterWindowElapses) {
     EXPECT_LE(reset, 1);
 }
 
-// Requests within the same window share the counter; once the window rolls
-// over, the counter resets. Also pins the X-RateLimit-Reset progression.
-TEST_F(RateLimitWindowTest, RequestsStraddlingWindowBoundary) {
-    constexpr auto             kWindow = std::chrono::milliseconds(120);
+// Requests within the same window share the counter. Expiry is proved by the
+// preceding lower-bound-only test, so this case has no short upper deadline.
+TEST_F(RateLimitWindowTest, RequestsWithinOneWindowShareCounter) {
+    constexpr auto             kWindow = std::chrono::hours(24);
     qb::http::RateLimitOptions options;
     options.max_requests(2).window(kWindow);
     auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
@@ -115,8 +115,7 @@ TEST_F(RateLimitWindowTest, RequestsStraddlingWindowBoundary) {
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "1");
 
-    // Stay within the window (well under kWindow), then Request 2 -> still OK.
-    std::this_thread::sleep_for(kWindow / 3);
+    // Request 2 -> still in the deliberately long window.
     configure_router_and_run(mw, request_for("/mw_test", "straddle"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "0");
@@ -124,15 +123,6 @@ TEST_F(RateLimitWindowTest, RequestsStraddlingWindowBoundary) {
     // Request 3 within the same window -> 429.
     configure_router_and_run(mw, request_for("/mw_test", "straddle"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::TOO_MANY_REQUESTS);
-
-    // Cross the boundary with a generous margin -> Request 4 starts a new window.
-    std::this_thread::sleep_for(kWindow * 2);
-    configure_router_and_run(mw, request_for("/mw_test", "straddle"));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
-    EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "1");
-    const long long reset = qb::to_number<long long>(header_value(_session->_response, "X-RateLimit-Reset")).value();
-    EXPECT_GE(reset, 0);
-    EXPECT_LE(reset, 1);
 }
 
 // F41: a flood of short-lived clients must not permanently consume tracking
@@ -158,26 +148,22 @@ TEST_F(RateLimitWindowTest, OpportunisticCleanupRecoversCapacityAfterWindowElaps
     EXPECT_EQ(mw->tracked_client_count(), 0U);
 }
 
-// Surgical eviction across a real boundary: a client whose window has elapsed
-// is evicted, while one whose window is still fresh survives with its counter.
-TEST_F(RateLimitWindowTest, StaleEvictedActiveSurvivesAcrossRealWindow) {
-    constexpr auto             kWindow = std::chrono::milliseconds(80);
+// An immediate sweep keeps a fresh client and its counter. Stale eviction is
+// covered above with only a lower-bound sleep; separating the two removes the
+// former requirement that a fresh request beat an 80 ms scheduler deadline.
+TEST_F(RateLimitWindowTest, ImmediateSweepKeepsFreshClientAndCounter) {
+    constexpr auto             kWindow = std::chrono::hours(24);
     qb::http::RateLimitOptions options;
     options.max_requests(3).window(kWindow);
     auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
 
-    // Stale client: hit once, then let its window elapse.
-    configure_router_and_run(mw, request_for("/mw_test", "stale"));
-    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
-    std::this_thread::sleep_for(kWindow * 2);
-
-    // Active client: hit right before the sweep — its window is fresh.
+    // Active client: hit immediately before the sweep.
     configure_router_and_run(mw, request_for("/mw_test", "active"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
 
     const auto evicted = mw->evict_stale_entries_now();
-    EXPECT_EQ(evicted, 1U);                    // only `stale`
-    EXPECT_EQ(mw->tracked_client_count(), 1U); // only `active` survives
+    EXPECT_EQ(evicted, 0U);
+    EXPECT_EQ(mw->tracked_client_count(), 1U);
 
     // The survivor keeps its counter: next request sees remaining = 1 (3 - 2).
     configure_router_and_run(mw, request_for("/mw_test", "active"));

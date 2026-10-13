@@ -113,6 +113,32 @@ data_end_stream_seen(const qb::allocator::pipe<char> &output, uint32_t stream_id
     return false;
 }
 
+[[nodiscard]] std::string
+data_payload_bytes(const qb::allocator::pipe<char> &output, uint32_t stream_id) {
+    std::string bytes;
+    for (const auto &frame : parse_emitted_frames(output)) {
+        if (frame.type != FrameType::DATA || frame.stream_id != stream_id) {
+            continue;
+        }
+        const auto payload = emitted_payload(output, frame);
+        bytes.append(reinterpret_cast<const char *>(payload.data()), payload.size());
+    }
+    return bytes;
+}
+
+[[nodiscard]] std::optional<ErrorCode>
+last_rst_stream_error(const qb::allocator::pipe<char> &output, uint32_t stream_id) {
+    std::optional<ErrorCode> result;
+    for (const auto &frame : parse_emitted_frames(output)) {
+        if (frame.type != FrameType::RST_STREAM || frame.stream_id != stream_id || frame.payload_length != 4) {
+            continue;
+        }
+        const auto payload = emitted_payload(output, frame);
+        result             = static_cast<ErrorCode>(qb::protocol::http2::extract_uint32_be(payload.data()));
+    }
+    return result;
+}
+
 // True if any frame of the given type was emitted.
 [[nodiscard]] bool
 frame_type_seen(const qb::allocator::pipe<char> &output, FrameType type) {
@@ -134,7 +160,7 @@ first_frame_at_or_after(const qb::allocator::pipe<char> &output, FrameType type,
         return std::nullopt;
     }
     const auto fh = peek_frame_header(output, off);
-    return EmittedFrame{fh.get_type(), fh.flags, fh.get_stream_id(), fh.get_payload_length()};
+    return EmittedFrame{fh.get_type(), fh.flags, fh.get_stream_id(), fh.get_payload_length(), off + qb::protocol::http2::FRAME_HEADER_SIZE};
 }
 
 } // namespace
@@ -2534,12 +2560,11 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsLeavesFreshStreamsAlone) {
 }
 
 // ---------------------------------------------------------------------------
-// DATA carrying END_STREAM that arrives AFTER the server already sent its full
-// response (end_stream_sent) -> the stream is past end-of-response; the late
-// DATA is treated as a closed-stream reset.
+// A response may finish while the request half remains open. DATA is still
+// accepted on that half; only the declared content-length mismatch is an error.
 // ---------------------------------------------------------------------------
 
-TEST(HTTP2ServerProtocol, DataAfterResponseEndStreamIsResetClosed) {
+TEST(HTTP2ServerProtocol, DataAfterEarlyResponseWithMismatchedContentLengthResetsProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     do_handshake(protocol, io);
@@ -2557,13 +2582,43 @@ TEST(HTTP2ServerProtocol, DataAfterResponseEndStreamIsResetClosed) {
 
     const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
 
-    // Late client DATA on the now end-of-response stream -> RST_STREAM(
-    // STREAM_CLOSED); the connection survives.
+    // The receive half is still open, so these four bytes are accepted first.
+    // END_STREAM then exposes the 4 != 100 content-length mismatch.
     push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 1, {'l', 'a', 't', 'e'});
     drive(protocol, io);
 
     EXPECT_TRUE(protocol.ok());
     EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
+    const auto reset_error = last_rst_stream_error(io.output, 1);
+    ASSERT_TRUE(reset_error.has_value());
+    EXPECT_EQ(*reset_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 0);
+}
+
+TEST(HTTP2ServerProtocol, DataAfterBothStreamHalvesCloseResetsStreamClosed) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    // END_STREAM on the request closes the receive half. Sending an empty
+    // response closes the send half and lets the protocol reclaim stream 1.
+    open_get_stream_end_stream(protocol, io, 1, "/closed");
+    ASSERT_TRUE(protocol.ok());
+    qb::http::Response response;
+    response.status() = qb::http::status::NO_CONTENT;
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_TRUE(protocol.is_stream_closed(1));
+
+    const auto rst_before = count_frames(io.output, FrameType::RST_STREAM);
+    push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 1, {'x'});
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(count_frames(io.output, FrameType::RST_STREAM), rst_before + 1);
+    const auto reset_error = last_rst_stream_error(io.output, 1);
+    ASSERT_TRUE(reset_error.has_value());
+    EXPECT_EQ(*reset_error, ErrorCode::STREAM_CLOSED);
     EXPECT_EQ(io.goaway_count, 0);
 }
 
@@ -3189,37 +3244,41 @@ TEST(HTTP2ServerProtocol, NegativeWindowBlocksSendsThenWindowUpdateResumesThem) 
     open_post_stream_open(protocol, io, 1, "/resume");
     ASSERT_TRUE(protocol.ok());
 
-    qb::http::Response first;
-    first.status() = qb::http::status::OK;
-    first.body()   = std::string(600, 'a');
-    ASSERT_TRUE(protocol.send_response(1, first));
-    ASSERT_EQ(sum_data_bytes(io.output, 1), 600u);
+    std::string body;
+    body.reserve(1600);
+    for (std::size_t i = 0; i < 1600; ++i) {
+        body.push_back(static_cast<char>('a' + (i % 26)));
+    }
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = body;
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 1000u);
+    EXPECT_EQ(data_payload_bytes(io.output, 1), body.substr(0, 1000));
+    EXPECT_FALSE(data_end_stream_seen(io.output, 1));
     io.output.clear();
 
-    // Drive the window to -500.
+    // The initial send exhausted the 1000-byte window with a 600-byte suffix
+    // still pending. Shrinking the initial window by 900 drives it to -900.
     push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100}}));
     drive(protocol, io);
     ASSERT_TRUE(protocol.ok());
     io.output.clear();
 
-    // Open a second stream and queue a body on it. Its window starts at the new initial size, but
-    // the connection-level window is what we exercise here: the point is that the negative stream
-    // stays quiet until credited.
-    open_post_stream_open(protocol, io, 3, "/other");
-    ASSERT_TRUE(protocol.ok());
-    io.output.clear();
-
-    // A WINDOW_UPDATE smaller than the deficit must NOT unblock stream 1 (-500 + 200 = -300).
-    make_window_update_frame(io, 1, 200);
+    // A WINDOW_UPDATE smaller than the deficit must not unblock the suffix.
+    make_window_update_frame(io, 1, 800);
     drive(protocol, io);
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(sum_data_bytes(io.output, 1), 0u) << "still negative — nothing may be sent";
 
-    // Credit past zero: -300 + 900 = +600, which must let queued data flow again.
+    // Credit exactly enough to cross zero with 600 bytes available. The queued
+    // suffix must resume byte-for-byte and carry the only END_STREAM.
     io.output.clear();
-    make_window_update_frame(io, 0, 100000); // lift the connection window too
-    drive(protocol, io);
-    make_window_update_frame(io, 1, 900);
+    make_window_update_frame(io, 1, 700);
     drive(protocol, io);
     EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 600u);
+    EXPECT_EQ(data_payload_bytes(io.output, 1), body.substr(1000));
+    EXPECT_TRUE(data_end_stream_seen(io.output, 1));
 }

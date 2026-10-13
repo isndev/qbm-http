@@ -60,14 +60,14 @@ TEST_F(IncomingParserLimitsTest, OversizedUrlIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
     std::string               raw = "GET /" + std::string(protocol_limits::MAX_URL_LENGTH + 1, 'x') + " HTTP/1.1\r\n\r\n";
 
-    EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderNameIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
     std::string               raw = "GET / HTTP/1.1\r\n" + std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') + ": value\r\n\r\n";
 
-    EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderValueIsRejectedWhileParsing) {
@@ -89,10 +89,19 @@ TEST_F(IncomingParserLimitsTest, TooManyHeadersAreRejectedWhileParsing) {
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedContentLengthIsRejectedBeforeBodyAllocation) {
+    qb::http::Parser<Request> at_limit;
+    std::string allowed = "POST /upload HTTP/1.1\r\nContent-Length: " + std::to_string(protocol_limits::MAX_BODY_SIZE) + "\r\n\r\n";
+    EXPECT_EQ(at_limit.parse(allowed.data(), allowed.size()), HPE_PAUSED);
+    EXPECT_TRUE(at_limit.headers_completed());
+
     qb::http::Parser<Request> parser;
     std::string raw = "POST /upload HTTP/1.1\r\nContent-Length: " + std::to_string(protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\n";
 
-    EXPECT_NE(parser.parse(raw.data(), raw.size()), HPE_OK);
+    const auto result = parser.parse(raw.data(), raw.size());
+    // llhttp maps qb's on_headers_complete refusal to this callback code and
+    // replaces the custom reason with "User callback error". The paired
+    // boundary control proves the one-byte excess triggered this refusal.
+    EXPECT_EQ(result, HPE_CB_HEADERS_COMPLETE);
 }
 
 // MAX_CHUNK_SIZE parse-path: a single chunked-transfer chunk larger than the
@@ -116,7 +125,7 @@ TEST_F(IncomingParserLimitsTest, OversizedChunkIsRejectedWhileParsing) {
     std::string chunk = chunk_size_line + std::string(chunk_len, 'Z') + "\r\n0\r\n\r\n";
 
     parser.resume();
-    EXPECT_NE(parser.parse(chunk.data(), chunk.size()), HPE_OK);
+    EXPECT_EQ(parser.parse(chunk.data(), chunk.size()), HPE_USER);
 }
 
 TEST_F(IncomingParserLimitsTest, HeaderOnlyRequestNormalizesUnknownLengthToZero) {

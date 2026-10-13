@@ -140,7 +140,7 @@ int main(int argc, char *argv[]) {
 When you need per-connection state or custom event handling, define your own session and server through the `qb::http2::use<Derived>` template. The session derives from the internal HTTP/2 session machinery; the server derives from the internal acceptor and owns the router.
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:72-83 (server pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:72-84 (server pattern)
 #include <qbm/http/http.h>
 
 class MyServer;   // forward declaration
@@ -175,7 +175,7 @@ public:
 Inside a handler you set the response and call `ctx->complete()` as usual; the session writes it on the request's stream. To abort a single stream — for example to enforce an application policy — call `reset_stream` on the session, which sends `RST_STREAM` with the error code you choose:
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:157-165 (reset pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:174-182 (reset pattern)
 router().get("/api/cancel", [](auto ctx) {
     auto session = ctx->session();
     if (session) {
@@ -257,7 +257,7 @@ The persistent client is `qb::http2::Client`, created through `qb::http2::make_c
 ### Callback API
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:242-275 (client pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:330-363 (client pattern)
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
 
@@ -278,7 +278,7 @@ client->push_request(std::move(req), [](qb::http::Response res) {
 <!-- src: qbm/http/src/qbm/http/2/client.h:330,353; qbm/http/tests/system/http2/http2-client-coro.cpp:264-285 -->
 
 The completed batch is retired before its callback runs. The callback may disconnect the client or enqueue another batch; it still receives the completed responses exactly once.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:358-370; qbm/http/tests/system/http2/http2-client.cpp:468-519 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:358-370; qbm/http/tests/system/http2/http2-client.cpp:556-607 -->
 
 If sending a queued request fails, its callback runs before the client tries the next pending request. That callback may disconnect or queue different work. The client retains itself during this drain and checks that the connection and HTTP/2 protocol are still live at each iteration; it does not send the next item through the retired protocol.
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:448-485 -->

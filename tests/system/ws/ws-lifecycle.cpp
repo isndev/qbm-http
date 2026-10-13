@@ -138,11 +138,6 @@ public:
         // so this handler MUST NOT send its own Pong — a manual Pong here would
         // double every reply and make `pongs == pings` impossible.
     }
-
-    void
-    on(WS_Protocol::close &&) {
-        disconnect();
-    }
 };
 
 class EchoServer : public qb::io::use<EchoServer>::tcp::server<EchoServerClient> {
@@ -167,10 +162,13 @@ public:
     std::atomic<std::size_t> text_received{0};
     std::atomic<std::size_t> binary_received{0};
     std::atomic<std::size_t> pongs_received{0};
+    std::atomic<std::size_t> closes_received{0};
 
     std::vector<std::string> echoed_texts;
     std::string              last_binary;
     std::string              last_pong;
+    std::uint16_t            last_close_code{0};
+    std::string              last_close_reason;
 
     explicit LifecycleClient(int port)
         : _ws_key(qb::http::ws::generateKey())
@@ -240,6 +238,17 @@ public:
     on(WS_Protocol::pong &&event) {
         last_pong = std::string(event.data, event.size);
         ++pongs_received;
+    }
+
+    void
+    on(WS_Protocol::close &&event) {
+        if (event.size >= 2u) {
+            const auto *payload = reinterpret_cast<const unsigned char *>(event.data);
+            last_close_code     = static_cast<std::uint16_t>((payload[0] << 8u) | payload[1]);
+            last_close_reason.assign(event.data + 2, event.size - 2u);
+        }
+        closes_received.fetch_add(1, std::memory_order_release);
+        disconnect();
     }
 
     void
@@ -354,8 +363,8 @@ TEST(WsLifecycle, PongsEqualPings) {
     EXPECT_TRUE(pump_until([&] { return client.disconnected.load(); }));
 }
 
-// A client-initiated Close(1000) is answered by the server, which disconnects;
-// the client observes the TCP teardown. No tolerance, no early exit.
+// A client-initiated Close(1000) is echoed by the protocol's stock close path;
+// the client observes the exact frame before the TCP teardown.
 TEST(WsLifecycle, GracefulCloseExchange) {
     WsServerThread<EchoServer> server{kBindEphemeral};
     ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
@@ -369,8 +378,13 @@ TEST(WsLifecycle, GracefulCloseExchange) {
 
     client.send_close(qb::http::ws::CloseStatus::Normal, "client closing");
 
+    ASSERT_TRUE(pump_until([&] { return client.closes_received.load(std::memory_order_acquire) == 1u; }))
+        << "server did not echo the Close frame";
     ASSERT_TRUE(pump_until([&] { return client.disconnected.load(); })) << "graceful close did not result in a disconnect";
 
+    EXPECT_EQ(client.closes_received.load(), 1u);
+    EXPECT_EQ(client.last_close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::Normal));
+    EXPECT_EQ(client.last_close_reason, "client closing");
     EXPECT_TRUE(client.disconnected.load());
     EXPECT_FALSE(client.connected.load());
 }

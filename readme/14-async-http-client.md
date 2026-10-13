@@ -265,7 +265,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:392-403 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:454-465 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -347,7 +347,7 @@ Two cautions unique to the HTTP/2 client:
 
 - **`connect(nullptr)` for fire-and-forget.** The callback `connect` has no default-argument overload, so the coroutine `connect()` stays unambiguous. Call `connect(nullptr)` when you do not need a connection callback.
 
-  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:264-268 -->
+  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:352-356 -->
   ```cpp
   http2_client->connect(nullptr);  // queue requests now, flush on handshake
   ```

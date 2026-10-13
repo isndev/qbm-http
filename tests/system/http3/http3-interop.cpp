@@ -2,7 +2,7 @@
  * @file qbm/http/tests/system/http3/http3-interop.cpp
  * @brief System tier (label: interop): HTTP/3 cross-implementation interop probes.
  *
- * Unlike @c http3-loopback.cpp, these tests fork an EXTERNAL HTTP/3 tool against
+ * Unlike @c http3-loopback.cpp, these tests spawn an EXTERNAL HTTP/3 tool against
  * the qb server (a curl built with HTTP/3, an nghttp3 client, h3spec) or drive
  * the qb client against an external HTTP/3 server. They are the only genuinely
  * "needs an outside process" cases in the HTTP/3 suite, so they are isolated
@@ -25,10 +25,15 @@
  */
 #include <gtest/gtest.h>
 
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include <qbm/http/http.h>
 
 #if defined(QBM_HTTP_HAS_HTTP3)
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -36,13 +41,16 @@
 #include <iterator>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <qb/system/parse.h>
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <csignal>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -149,14 +157,91 @@ struct CommandResult {
     bool timed_out = false;
 };
 
-// Forks the external command and, while waiting for it, keeps the qb event loop
-// pumping so the in-process server can answer it. On timeout the child is
-// SIGTERM'd then SIGKILL'd, and timed_out is reported.
+// Starts the external command without blocking and, while waiting for it, keeps
+// the qb event loop pumping so the in-process server can answer it. On timeout
+// the Windows job is terminated; POSIX sends SIGTERM then SIGKILL.
 CommandResult
 run_command_while_pumping(std::string const &command, std::chrono::milliseconds timeout) {
 #ifdef _WIN32
-    (void) timeout;
-    return {std::system(command.c_str()), false};
+    // The command is assembled from filesystem::path::string() and getenv(),
+    // both native narrow strings on Windows. Decode it with the active Windows
+    // code page rather than assuming those bytes are UTF-8.
+    const int wide_size = MultiByteToWideChar(CP_ACP, 0, command.data(), static_cast<int>(command.size()), nullptr, 0);
+    if (wide_size <= 0) {
+        return {-1, false};
+    }
+    std::wstring wide_command(static_cast<std::size_t>(wide_size), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, command.data(), static_cast<int>(command.size()), wide_command.data(), wide_size) != wide_size) {
+        return {-1, false};
+    }
+
+    std::wstring         command_line = L"cmd.exe /D /S /C \"" + wide_command + L"\"";
+    std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+    mutable_command.push_back(L'\0');
+
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (!job) {
+        return {-1, false};
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        CloseHandle(job);
+        return {-1, false};
+    }
+
+    STARTUPINFOW        startup{};
+    PROCESS_INFORMATION process{};
+    startup.cb = sizeof(startup);
+    if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr,
+                        &startup, &process)) {
+        CloseHandle(job);
+        return {-1, false};
+    }
+
+    if (!AssignProcessToJobObject(job, process.hProcess)) {
+        TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, INFINITE);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        CloseHandle(job);
+        return {-1, false};
+    }
+    if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+        // KILL_ON_JOB_CLOSE is the fail-closed tree termination path.
+        CloseHandle(job);
+        WaitForSingleObject(process.hProcess, INFINITE);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return {-1, false};
+    }
+    CloseHandle(process.hThread);
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const DWORD wait_result = WaitForSingleObject(process.hProcess, 0);
+        if (wait_result == WAIT_OBJECT_0) {
+            DWORD      exit_code     = 0;
+            const bool got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code) != FALSE;
+            CloseHandle(process.hProcess);
+            CloseHandle(job);
+            return {got_exit_code ? static_cast<int>(exit_code) : -1, false};
+        }
+        if (wait_result == WAIT_FAILED) {
+            CloseHandle(job);
+            WaitForSingleObject(process.hProcess, INFINITE);
+            CloseHandle(process.hProcess);
+            return {-1, false};
+        }
+        if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    CloseHandle(job);
+    WaitForSingleObject(process.hProcess, INFINITE);
+    CloseHandle(process.hProcess);
+    return {-1, true};
 #else
     const auto pid = fork();
     if (pid < 0) {
@@ -199,6 +284,39 @@ run_command_while_pumping(std::string const &command, std::chrono::milliseconds 
 }
 
 } // namespace
+
+#ifdef _WIN32
+TEST(Http3InteropCommandRunner, PumpsLoopWhileWindowsChildRuns) {
+    qb::io::async::init();
+    std::atomic<bool> timer_fired{false};
+    qb::io::async::callback([&] { timer_fired = true; }, 10ms);
+
+    const auto result = run_command_while_pumping("ping.exe -n 2 127.0.0.1 >NUL", 3s);
+
+    EXPECT_FALSE(result.timed_out);
+    EXPECT_EQ(result.exit_code, 0);
+    EXPECT_TRUE(timer_fired.load());
+    qb::io::async::listener::current.clear();
+}
+
+TEST(Http3InteropCommandRunner, TerminatesWindowsChildAtDeadline) {
+    qb::io::async::init();
+    const auto result = run_command_while_pumping("ping.exe -n 10 127.0.0.1 >NUL", 20ms);
+
+    EXPECT_TRUE(result.timed_out);
+    EXPECT_EQ(result.exit_code, -1);
+    qb::io::async::listener::current.clear();
+}
+
+TEST(Http3InteropCommandRunner, ReportsMissingWindowsCommandWithoutTimingOut) {
+    qb::io::async::init();
+    const auto result = run_command_while_pumping("qb-http3-command-that-does-not-exist.exe", 2s);
+
+    EXPECT_FALSE(result.timed_out);
+    EXPECT_NE(result.exit_code, 0);
+    qb::io::async::listener::current.clear();
+}
+#endif
 
 TEST(Http3InteropTest, HomebrewCurlCanCallQbHttp3ServerWhenAvailable) {
     ASSERT_TRUE(certs_available()) << "HTTP/3 interop server probe requires the test TLS certificate pair";

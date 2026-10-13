@@ -32,6 +32,7 @@
  * @ingroup Http
  */
 #include <gtest/gtest.h>
+#include <qb/uuid.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -62,6 +63,7 @@ class StaticFilesMiddlewareTest : public ::testing::Test {
 protected:
     std::shared_ptr<MockMiddlewareSession>                   _session;
     std::unique_ptr<qb::http::Router<MockMiddlewareSession>> _router;
+    std::filesystem::path                                    _run_root_dir;
     std::filesystem::path                                    _test_root_dir;
     std::filesystem::path                                    _outside_file_path;
     std::filesystem::path _outside_root_file_path; ///< `<temp>/outside_root.txt`, the real escape target of the traversal tests.
@@ -87,21 +89,17 @@ protected:
         _session = std::make_shared<MockMiddlewareSession>();
 
         std::error_code ec;
-        _test_root_dir = std::filesystem::temp_directory_path(ec) / "static_files_mw_tests";
+        const auto      temp_dir = std::filesystem::temp_directory_path(ec);
         ASSERT_FALSE(ec) << "Failed to get temp directory path: " << ec.message();
-        _outside_file_path = std::filesystem::temp_directory_path(ec) / "static_files_mw_tests_OUTSIDE_FILE.txt";
-        ASSERT_FALSE(ec) << "Failed to get temp directory path for outside file: " << ec.message();
+        _run_root_dir      = temp_dir / ("static_files_mw_tests_" + uuids::to_string(qb::generate_random_uuid()));
+        _test_root_dir     = _run_root_dir / "www";
+        _outside_file_path = _run_root_dir / "outside_file.txt";
         // The escape TARGET the SecurityPathTraversal* tests actually reference:
-        // `/../outside_root.txt` from the root resolves to `<temp>/outside_root.txt`.
+        // `/../outside_root.txt` from the root resolves inside this run-owned parent.
         // It MUST exist with a known sentinel body so a regressed escape guard
         // that serves the real outside file is caught (instead of silently
         // passing because the file was missing -> 404).
-        _outside_root_file_path = std::filesystem::temp_directory_path(ec) / "outside_root.txt";
-        ASSERT_FALSE(ec) << "Failed to get temp directory path for outside-root file: " << ec.message();
-
-        std::filesystem::remove_all(_test_root_dir, ec);
-        std::filesystem::remove(_outside_file_path, ec);
-        std::filesystem::remove(_outside_root_file_path, ec);
+        _outside_root_file_path = _run_root_dir / "outside_root.txt";
 
         std::filesystem::create_directories(_test_root_dir, ec);
         ASSERT_FALSE(ec) << "Failed to create test root directory: " << _test_root_dir << " (" << ec.message() << ")";
@@ -151,9 +149,7 @@ protected:
     void
     TearDown() override {
         std::error_code ec;
-        std::filesystem::remove_all(_test_root_dir, ec);
-        std::filesystem::remove(_outside_file_path, ec);
-        std::filesystem::remove(_outside_root_file_path, ec);
+        std::filesystem::remove_all(_run_root_dir, ec);
     }
 
     /**

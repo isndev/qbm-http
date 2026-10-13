@@ -182,7 +182,7 @@ For connection reuse against a single origin, use `qb::http1::Client` (request q
 
 WebSocket is part of `qbm-http` (namespace `qb::http::ws`); there is no separate module. A server session starts as HTTP/1.1, validates the RFC 6455 `GET` upgrade, then switches the connection from HTTP parsing to WebSocket framing with `switch_protocol` — the session is the same object throughout, only its framer changes.
 
-<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:111-152 -->
+<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:111-147 -->
 
 ```cpp
 #include <qb/main.h>

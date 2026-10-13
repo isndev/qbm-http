@@ -1,33 +1,43 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include <qb/io/compression.h>
 #include <qbm/http/headers.h>
 #include <qbm/http/request.h>
 #include <qbm/http/response.h>
 #include <qbm/http/utility.h>
 
 namespace {
-// Discover the encodings this build actually supports by parsing the codec
-// names out of the server-advertised Accept-Encoding string (e.g.
-// "gzip;q=1.0, deflate;q=0.9" -> {"gzip", "deflate"}). Returns empty when the
-// build has no compression support.
+// Discover codecs from the registered factories, independently of the
+// content_encoding() selector under test.
 std::vector<std::string>
 supported_encodings() {
     std::vector<std::string> out;
-    for (const auto &token : qb::http::utility::split_string<std::string>(qb::http::accept_encoding(), ",")) {
-        std::string_view name = qb::http::utility::trim_http_whitespace(token);
-        const auto       semi = name.find(';');
-        if (semi != std::string_view::npos) {
-            name = qb::http::utility::trim_http_whitespace(name.substr(0, semi));
-        }
-        if (!name.empty()) {
-            out.emplace_back(name);
+    for (const auto &factory : qb::compression::builtin::get_compress_factories()) {
+        if (factory) {
+            out.push_back(factory->algorithm());
         }
     }
     return out;
+}
+
+template <typename Fn>
+void
+expect_runtime_error_containing(Fn &&fn, std::string_view expected) {
+    try {
+        std::forward<Fn>(fn)();
+        FAIL() << "expected std::runtime_error containing: " << expected;
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string_view{e.what()}.find(expected), std::string_view::npos) << e.what();
+    } catch (...) {
+        FAIL() << "expected std::runtime_error containing: " << expected;
+    }
 }
 } // namespace
 
@@ -49,30 +59,30 @@ TEST(HeadersUtility, ContentEncodingSelectsNothingForUnknownOrEmpty) {
     EXPECT_TRUE(qb::http::content_encoding("x-no-such-codec").empty());
     EXPECT_TRUE(qb::http::content_encoding("x-no-such-codec, y-also-none;q=1.0").empty());
     // A wildcard with no server-supported encoding still selects nothing on a
-    // no-compression build; on a compression build it picks a real codec — pin
-    // the build-independent invariant that the result is never an unsupported name.
+    // no-compression build; on a compression build it picks the first registered
+    // factory. Factory discovery cannot disappear with a selector regression.
+    const auto        sup      = supported_encodings();
     const std::string wildcard = qb::http::content_encoding("*");
-    if (!wildcard.empty()) {
-        const auto sup = supported_encodings();
-        EXPECT_NE(std::find(sup.begin(), sup.end(), wildcard), sup.end());
-    }
+    EXPECT_EQ(wildcard, sup.empty() ? std::string{} : sup.front());
 }
 
 TEST(HeadersUtility, ContentEncodingRespectsQZero) {
-    const std::string first_supported = qb::http::content_encoding("*");
-    if (first_supported.empty()) {
+    const auto supported = supported_encodings();
+    if (supported.empty()) {
         GTEST_SKIP() << "Compression support is not available in this build.";
     }
+    const std::string &first_supported = supported.front();
 
     const std::string header = first_supported + ";q=0";
     EXPECT_TRUE(qb::http::content_encoding(header).empty());
 }
 
 TEST(HeadersUtility, WildcardDoesNotReenableExplicitlyDisabledEncoding) {
-    const std::string first_supported = qb::http::content_encoding("*");
-    if (first_supported.empty()) {
+    const auto supported = supported_encodings();
+    if (supported.empty()) {
         GTEST_SKIP() << "Compression support is not available in this build.";
     }
+    const std::string &first_supported = supported.front();
 
     const std::string header   = first_supported + ";q=0, *;q=1";
     const std::string selected = qb::http::content_encoding(header);
@@ -285,10 +295,11 @@ TEST(HeadersUtility, HeaderAttributesDuplicateNameCaseInsensitiveFirstWins) {
 // rejection branch of the q-value parser; since the named codec is the only
 // candidate, the negotiated result must be empty in every case.
 TEST(HeadersUtility, ContentEncodingMalformedQValueDisablesEncoding) {
-    const std::string first = qb::http::content_encoding("*");
-    if (first.empty()) {
+    const auto supported = supported_encodings();
+    if (supported.empty()) {
         GTEST_SKIP() << "Compression support is not available in this build.";
     }
+    const std::string &first = supported.front();
 
     for (const char *bad_q : {
              "",       // empty q value
@@ -307,10 +318,11 @@ TEST(HeadersUtility, ContentEncodingMalformedQValueDisablesEncoding) {
 // q parameter is present at all. Both paths leave the codec acceptable, so it is
 // selected.
 TEST(HeadersUtility, ContentEncodingFindsQAfterOtherParameters) {
-    const std::string first = qb::http::content_encoding("*");
-    if (first.empty()) {
+    const auto supported = supported_encodings();
+    if (supported.empty()) {
         GTEST_SKIP() << "Compression support is not available in this build.";
     }
+    const std::string &first = supported.front();
 
     // q follows an unrelated parameter -> parser advances past "v=1" to read it.
     EXPECT_EQ(qb::http::content_encoding(first + ";v=1;q=0.5"), first);
@@ -322,10 +334,11 @@ TEST(HeadersUtility, ContentEncodingFindsQAfterOtherParameters) {
 // be skipped rather than treated as a match, and a following supported codec still
 // wins.
 TEST(HeadersUtility, ContentEncodingSkipsEmptyTokens) {
-    const std::string first = qb::http::content_encoding("*");
-    if (first.empty()) {
+    const auto supported = supported_encodings();
+    if (supported.empty()) {
         GTEST_SKIP() << "Compression support is not available in this build.";
     }
+    const std::string &first = supported.front();
 
     EXPECT_EQ(qb::http::content_encoding(" , " + first), first);
 }
@@ -367,19 +380,33 @@ TEST(HeadersUtility, HeaderAttributesRejectControlCharInName) {
 // (8192) bytes is rejected rather than buffered without bound.
 TEST(HeadersUtility, HeaderAttributesRejectOversizedQuotedValue) {
     std::string attrs = "x=\"";
-    attrs.append(8193, 'a'); // one past the limit, still inside the open quote
+    attrs.append(qb::http::ATTRIBUTE_VALUE_MAX + 1u, 'a');
+    attrs += '"';
 
-    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
+    expect_runtime_error_containing([&] { (void) qb::http::parse_header_attributes(attrs); }, "Quoted attribute value size exceeds");
 }
 
 // Same guard on the quoted-pair (escaped) path: the size check fires while
 // consuming the escaped character once the value is already at the limit.
 TEST(HeadersUtility, HeaderAttributesRejectOversizedEscapedQuotedValue) {
     std::string attrs = "x=\"";
-    attrs.append(8192, 'a'); // value now exactly at the limit
-    attrs += "\\b";          // escaped char pushes past it
+    attrs.append(qb::http::ATTRIBUTE_VALUE_MAX, 'a');
+    attrs += "\\b"; // escaped char pushes past it
+    attrs += '"';
 
-    EXPECT_THROW((void) qb::http::parse_header_attributes(attrs), std::runtime_error);
+    expect_runtime_error_containing([&] { (void) qb::http::parse_header_attributes(attrs); }, "Quoted attribute value size exceeds");
+}
+
+TEST(HeadersUtility, HeaderAttributesAcceptQuotedValueAtLimit) {
+    const std::string value(qb::http::ATTRIBUTE_VALUE_MAX, 'a');
+    const auto        parsed = qb::http::parse_header_attributes("x=\"" + value + "\"");
+    ASSERT_NE(parsed.find("x"), parsed.end());
+    EXPECT_EQ(parsed.at("x"), value);
+}
+
+TEST(HeadersUtility, HeaderAttributesRejectUnterminatedQuotedValueBelowLimit) {
+    expect_runtime_error_containing([] { (void) qb::http::parse_header_attributes(std::string_view{"x=\"short"}); },
+                                    "Unterminated quoted attribute value");
 }
 
 // The raw (pointer,length) overload rejects a null buffer with a non-zero length
