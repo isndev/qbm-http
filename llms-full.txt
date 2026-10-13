@@ -41,7 +41,8 @@ Six rules decide whether generated qbm-http code is correct; everything else is 
    complete from the callback, and guard on `ctx->is_cancelled()`.
 4. **Handlers and middleware are shared across concurrent requests.** Never store per-request
    state on them — put it in the `Context` via `Slot<T>`. `ctx->session()` is weak-locked and
-   may be `nullptr` after a disconnect.
+   may be `nullptr` after a disconnect. A routed context retains its compiled parameter names
+   even after the router is destroyed; standalone parameter-key views remain borrowed.
 5. **DELETE is `qb::http::method::DEL`** (`router().del(...)`); `method::DELETE` does not
    exist. `Body` and `Headers` are base classes, so it is `req.set_header(...)` and
    `req.body()`, not `req.headers().set(...)`.
@@ -232,6 +233,14 @@ Terminal response helpers (each sets body/status/content-type **and** calls `com
 
 Lifecycle hooks: `ctx->add_lifecycle_hook(fn)` or router-wide `router().add_lifecycle_hook(fn)`. `HookPoint`s: `PRE_ROUTING` (router-level only), `PRE_HANDLER_EXECUTION`, `POST_HANDLER_EXECUTION`, `PRE_RESPONSE_SEND` (best place for final headers), `POST_RESPONSE_SEND`, `REQUEST_COMPLETE`. Hook exceptions are caught and suppressed; a destructor-time hook must not call `shared_from_this()`.
 
+Hooks registered during dispatch are published after the outermost dispatch returns. The current dispatch and nested dispatches retain the old published list; the next separate phase sees additions in registration order. Active callable state is preserved, and registration affects only this context. _(src/qbm/http/routing/context.h:219-245,694-707)_
+
+Router-extracted parameter values are owned; their key views are backed by compiled storage retained through the context's existing `IAsyncTask` chain. A retained context may outlive its router or session, including `REQUEST_COMPLETE`; `session()` remains weak and may return null. A 405 or error-chain transition retains the matching compilation's names. A standalone `PathParameters` copy still borrows keys: retain the original context or copy names into owned strings. _(src/qbm/http/routing/path_parameters.h:32-57; src/qbm/http/routing/async_task.h:92-115; src/qbm/http/routing/router_core.h:84-90,419-428)_
+
+Conditional middleware records the selected pending child on the context; cancellation notifies that child once, including a nested leaf. A predicate that completes/cancels or a child that throws after synchronous completion cannot replace newer work. The unchanged `IMiddleware::cancel()` has no context argument: do not promise per-operation native cancellation inside a shared user child. _(src/qbm/http/middleware/conditional.h:87-111; src/qbm/http/routing/context.h:1268-1300; src/qbm/http/routing/middleware.h:58-61)_
+
+Context and HTTP session templates contain updated private lifecycle bookkeeping. Rebuild consumers that share the same specializations with consistent headers; public signatures do not imply that mixed template definitions have compatible layout.
+
 ## Middleware
 
 ```cpp
@@ -349,6 +358,9 @@ qb::io::async::run();
 - An HTTP/2 batch callback may disconnect or enqueue another batch: the completed batch leaves the registry before user code runs. _(src/qbm/http/2/client.cpp:358-370)_
 - A failed pending send calls user code. The queue drain retains the client and rechecks the connection and h2 protocol before its next iteration, so a callback may disconnect or enqueue work without sending on the old connection. _(src/qbm/http/2/client.cpp:448-485)_
 - There is no plaintext h2c. Never write a response with `stream_id == 0` (it is the HTTP/1.1 sentinel). Server caps concurrency at 50 streams; client at 100. Server push is off by default and not a router feature.
+
+- The stock server collects completed contexts with closed native streams on write progress and full-drain EOS. It selects batches of 32 IDs (128 bytes of stack ID scratch, no heap scratch), refinds and rechecks each ID, then detaches one owner before `POST_RESPONSE_SEND` and releases it before the next candidate. The last release runs `REQUEST_COMPLETE` and member destruction; external owners can postpone that destruction. Same-drain rescans catch silent eligibility changes from hooks or destruction, even with no hooks registered, within the removal budget fixed to the registry size at entry. No iterator or pointer to a native stream crosses user code. Selection is unordered, with no public stream-ID ordering contract. Reentry is suppressed; protocol, connection and output size are checked before each scan/candidate. Changed output size defers collection; first-POST extraction cancels the remaining contexts. EOS means framework output drain, not peer acknowledgment, and partial-write timing remains. The batching changes no public API or Session data members; no measured performance gain is claimed. _(src/qbm/http/2/http2.h:120-175,375-419)_
+- Peer resets of unfinished routed streams cancel the stock context, including `NO_ERROR`, without turning a neutral reset into `Http2StreamErrorEvent`. The optional internal notification adds no required callback to custom protocol I/O. The private `on_peer_stream_reset` hook removes registry ownership before cancellation; late completion remains inert. _(src/qbm/http/2/protocol/server.h:768-789; src/qbm/http/2/http2.h:181-188,455-464)_
 - Reconnection is a RUN with a backoff, not a loop: `client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(100ms).with_max_attempts(5))` (`qb::http::RetryPolicy`, the redis shape; `set_auto_reconnect(bool)` keeps the policy). A loss fails the outstanding work with a 503 and what the failure callbacks push back is what the run reconnects for — attempt 1 at once, then the policy's waits, `on_retry(attempt, next_delay)` before each; exhausted, the waiting requests get `503 Reconnection attempts exhausted (N)` and nothing reconnects until the next `connect()` or push. A push made from a failure callback queues behind the scheduled attempt: never `connect()` from one to "retry faster". `is_reconnecting()` / `reconnect_attempts()` are the observable state. _(src/qbm/http/2/client.h:457-482)_
 
 ## HTTPS / TLS (needs `QB_HAS_SSL`)
@@ -451,6 +463,8 @@ cb.connect(qb::io::uri("ws://localhost:9000/"));
 
 WebSocket notes: a positive `connect` timeout is one deadline across transport and HTTP Upgrade; the ping timer starts only after the 101 is validated. An unoffered server `Sec-WebSocket-Extensions` header fails the handshake, and destroying a stack or `unique_ptr` client during transport connect is safe. `connected`, parsed-handshake/protocol `error`, and `disconnected` callbacks run after parser dispatch and may release the client; a transport connect failure or explicit pending `disconnect()` may report `error` synchronously. A request hook that cancels or replaces the attempt sends no Upgrade. A reconnect retires the old transport and clears its input/output buffers. The masking direction is enforced (client→server masked, server→client not — `operator<<` forces `masked=true` on outbound, do not pre-mask). Reassembly is capped at `protocol_limits::MAX_BODY_SIZE`; `set_max_payload_size(0)` removes the guard. `MessageClose` throws on reserved (`1004/1005/1006/1015`) or out-of-`[1000,4999]` codes. When handing an upgrade off to another actor, call `ctx->suppress_response()` so the routing context destructor does not send a moved-from HTTP response. Coroutine API: `qb::http::ws::coro_client`/`coro_session` with `co_await connect/receive/close_async`.
 
+A destroyed suspended WebSocket receive/next-frame/close awaiter makes its slot inactive; a successor can reserve it, while a genuinely concurrent live waiter still throws. An older awaiter cannot clear a newer reservation. Frame buffering remains bounded; abandoning a close waiter does not retract queued bytes. Close codes and UTF-8 reasons are validated before coroutine state is published, permitting a valid later close after rejection. No full allocation/serialization rollback or new actor-cancellation behavior is promised. Use `auto`/`co_await` and consistent rebuilt headers for the new concrete WebSocket awaiter types; ordinary HTTP callback factories retain their path. _(src/qbm/http/coro.h:93-112,182-218,232-259; src/qbm/http/ws/coro.h:422-475,857-912)_
+
 ## Clients (one-shot + persistent)
 
 ```cpp
@@ -473,6 +487,8 @@ client->set_verify_peer(false);                                      // BEFORE c
 ```
 
 `qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot helpers compare URI schemes case-insensitively for transport selection: unsupported schemes fail locally with 400, and HTTPS without SSL support fails locally with 503; neither opens a socket. Qb-io also resolves default ports for portless mixed-case HTTP(S) URLs (QB-919). A local rejection may invoke the callback before the helper returns; the coroutine awaiter schedules its continuation. Other failures synthesize 503 (cannot connect), 504 (timeout), or 502 (peer disconnect). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it bridges synchronous top-level code and tests, **not** code inside an already driven coroutine. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`. A coroutine parked on a client request shows as `"http"` in qb's `CoroutineScheduler::dump()` when its thread tracks suspensions (3.3).
+
+HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/timeout retires the old request and connect-callback cohort before user notification; new callback submissions belong to the next cycle. An explicit connect accepted during retirement starts after the old callback/protocol dispatch returns, and pending work may queue behind that intent with auto-reconnect disabled. Destruction abandons pending connect observers; explicit disconnect reports cancellation once. _(src/qbm/http/1.1/client.cpp:232-236,272-307,338-349,565-630,690-749)_
 
 ---
 
@@ -712,33 +728,33 @@ Terminal node binding one method+segment to a `RouteHandlerFn` or `ICustomRoute`
 ### Tree / chain interfaces
 - `IHandlerNode<Session>` — `src/qbm/http/routing/handler_node.h:136` — base for tree nodes: `set_parent/get_parent`, `get_path_segment`, `add_middleware`, pure-virtual `compile_tasks_and_register` + `get_node_name`.
 - `detail::join_paths(parent, segment)` / `detail::normalize_path_segment(segment)` — `handler_node.h:84` — slash-normalizing path joins (`""+""` → `/`).
-- `IAsyncTask<SessionType>` — `src/qbm/http/routing/async_task.h:44` — `virtual void execute(ctx)=0; virtual void cancel()=0; virtual std::string name() const=0;`. `execute()` must eventually call `ctx->complete()`; `cancel()` must **not**.
+- `IAsyncTask<SessionType>` — `src/qbm/http/routing/async_task.h:47` — `virtual void execute(ctx)=0; virtual void cancel()=0; virtual std::string name() const=0;`. `execute()` must eventually call `ctx->complete()`; `cancel()` must **not**.
 - `ICustomRoute<SessionType>` — `src/qbm/http/routing/custom_route.h:43` — `virtual void process(ctx)=0; std::string name() const=0; void cancel()=0;`. Adapted via `CustomRouteAdapterTask`.
 - `IMiddleware<SessionType>` — `src/qbm/http/routing/middleware.h:39` — `virtual void process(ctx)=0; std::string name() const=0; void cancel()=0;`. `process()` must call `ctx->complete()` to advance.
 - `MiddlewareTask<SessionType>` — `middleware.h:75` — `explicit MiddlewareTask(std::shared_ptr<IMiddleware<S>>, name="MiddlewareTask")`. Adapts IMiddleware→IAsyncTask; on exception sets 500 + ERROR. Throws `std::invalid_argument` on null.
 - `FunctionalMiddleware<SessionType>` — `middleware.h:183` — `FunctionalMiddleware(MiddlewareHandlerFn, name)`. Adapts a `(ctx,next)` lambda; calling `next()` once completes CONTINUE; duplicate `next()` ignored.
 - `RouteLambdaTask<S>` / `CustomRouteAdapterTask<S>` — `route.h:51, :139` — wrap a lambda handler / an ICustomRoute; thrown exceptions → 500 + ERROR; throw `std::invalid_argument` on null.
 
-### `qb::http::Context<SessionType>` — `src/qbm/http/routing/context.h:68`
+### `qb::http::Context<SessionType>` — `src/qbm/http/routing/context.h:74`
 `template<typename SessionType> class Context : public std::enable_shared_from_this<Context<SessionType>>`
 Per-request state; always handled as `std::shared_ptr<Context>`.
-- Accessors (`context.h:439`): `Request& request() noexcept; Response& response() noexcept; std::shared_ptr<S> session() noexcept` (null if session expired); `PathParameters& path_parameters() noexcept; const std::string& path_param(std::string_view name) const` (static-empty on miss); typed `std::optional<T> path_param<T>(name)` / `T path_param_or<T>(name, fallback)`; typed query `template<typename T=std::string> std::optional<T> query_param(name)` (nullopt on empty/absent/parse-fail) / `T query_param_or<T>(name, fallback)`; `template<typename T> std::optional<T> bind() const` (body→T: `qb::json` / `std::string` / NLOHMANN model; nullopt on fail). Typed parsing goes through `static parse_value<T>(string_view) noexcept` (integral/floating via `std::from_chars` whole-string match, `bool` from `true/false/1/0`, string passthrough; `static_assert` otherwise).
-- `void complete(AsyncTaskResult = COMPLETE)` (`context.h:1106`) — advance/finalize the chain. CONTINUE→next; COMPLETE/CANCELLED/ERROR/FATAL drive finalization or error chain.
-- `void cancel(reason="Cancelled by application") noexcept` (`context.h:1189`) — sets 503 + completes CANCELLED.
-- `void add_lifecycle_hook(LifecycleHook); void execute_hook(HookPoint)` (`context.h:626`) — hook exceptions are caught/suppressed.
-- string-keyed store: `template<typename T> void set(key,T); template<typename T> std::optional<T> get(key) const; template<typename T> T* get_if(key) noexcept; bool has(key) const noexcept; bool remove(key) noexcept` — `set` `context.h:659`, `get` `:673`, `get_if` `:695` (const overload `:713`), `has` `:727`, `remove` `:747`. Backed by `qb::unordered_map<std::string,std::any>` — bad cast swallowed (returns nullopt/nullptr).
-- typed-slot store (`context.h:782`): `template<typename T> void set(const Slot<T>&,T); template<typename T,typename...A> T& emplace(const Slot<T>&,A&&...); template<typename T> T* get_if(const Slot<T>&) noexcept; template<typename T,typename U=T> T get_or(const Slot<T>&,U&&) const`. `get_if` is the zero-copy hot read.
-- response helpers (`context.h:930`): `void json(qb::json json_data, status=OK); void text(std::string text_data, status=OK, const std::string& content_type="text/plain; charset=utf-8"); void html(std::string html_data, status=OK); void no_content(); void redirect(const std::string& url, status=FOUND); void bad_request(...)/unauthorized(...)/forbidden(...)/not_found(...)/internal_server_error(...); Context& status(status)`. **The body sinks take their payload BY VALUE (move-sink)**; `json` sets `application/json; charset=utf-8`, `text` defaults `text/plain; charset=utf-8`, `html` `text/html; charset=utf-8`, `no_content` → 204 (clears body + CT/CL). **All except `status()` set the response and `complete(COMPLETE)`** — set headers/body first. `status()` only sets the code and is chainable.
-- `void suppress_response() noexcept` (`context.h:1251`) — finalize without firing the send callback (e.g. on WebSocket upgrade).
-- introspection (`context.h:1218`): `bool is_cancelled()/is_completed() const noexcept; State state() const noexcept; ProcessingPhase get_processing_phase() const noexcept; std::uint64_t completion_count() const noexcept; [[nodiscard]] ScopedFinalizationDeferral defer_finalization_scope() noexcept`.
+- Accessors (`context.h:505`): `Request& request() noexcept; Response& response() noexcept; std::shared_ptr<S> session() noexcept` (null if session expired); `PathParameters& path_parameters() noexcept; const std::string& path_param(std::string_view name) const` (static-empty on miss); typed `std::optional<T> path_param<T>(name)` / `T path_param_or<T>(name, fallback)`; typed query `template<typename T=std::string> std::optional<T> query_param(name)` (nullopt on empty/absent/parse-fail) / `T query_param_or<T>(name, fallback)`; `template<typename T> std::optional<T> bind() const` (body→T: `qb::json` / `std::string` / NLOHMANN model; nullopt on fail). Typed parsing goes through `static parse_value<T>(string_view) noexcept` (integral/floating via `std::from_chars` whole-string match, `bool` from `true/false/1/0`, string passthrough; `static_assert` otherwise).
+- `void complete(AsyncTaskResult = COMPLETE)` (`context.h:1184`) — advance/finalize the chain. CONTINUE→next; COMPLETE/CANCELLED/ERROR/FATAL drive finalization or error chain.
+- `void cancel(reason="Cancelled by application") noexcept` (`context.h:1268`) — notifies the in-flight task, or the conditional child selected by this context, once; sets 503 + completes CANCELLED. The no-context child cancellation interface does not promise per-operation native preemption inside a shared user middleware.
+- `void add_lifecycle_hook(LifecycleHook); void execute_hook(HookPoint)` (`context.h:694`) — hook exceptions are caught/suppressed. Registrations during dispatch become visible after the outermost dispatch returns; active/nested dispatches keep the published list and the next separate phase sees additions in order.
+- string-keyed store: `template<typename T> void set(key,T); template<typename T> std::optional<T> get(key) const; template<typename T> T* get_if(key) noexcept; bool has(key) const noexcept; bool remove(key) noexcept` — `set` `context.h:737`, `get` `:751`, `get_if` `:773` (const overload `:791`), `has` `:805`, `remove` `:825`. Backed by `qb::unordered_map<std::string,std::any>` — bad cast swallowed (returns nullopt/nullptr).
+- typed-slot store (`context.h:860`): `template<typename T> void set(const Slot<T>&,T); template<typename T,typename...A> T& emplace(const Slot<T>&,A&&...); template<typename T> T* get_if(const Slot<T>&) noexcept; template<typename T,typename U=T> T get_or(const Slot<T>&,U&&) const`. `get_if` is the zero-copy hot read.
+- response helpers (`context.h:1008`): `void json(qb::json json_data, status=OK); void text(std::string text_data, status=OK, const std::string& content_type="text/plain; charset=utf-8"); void html(std::string html_data, status=OK); void no_content(); void redirect(const std::string& url, status=FOUND); void bad_request(...)/unauthorized(...)/forbidden(...)/not_found(...)/internal_server_error(...); Context& status(status)`. **The body sinks take their payload BY VALUE (move-sink)**; `json` sets `application/json; charset=utf-8`, `text` defaults `text/plain; charset=utf-8`, `html` `text/html; charset=utf-8`, `no_content` → 204 (clears body + CT/CL). **All except `status()` set the response and `complete(COMPLETE)`** — set headers/body first. `status()` only sets the code and is chainable.
+- `void suppress_response() noexcept` (`context.h:1339`) — finalize without firing the send callback (e.g. on WebSocket upgrade).
+- introspection (`context.h:1306`): `bool is_cancelled()/is_completed() const noexcept; State state() const noexcept; ProcessingPhase get_processing_phase() const noexcept; std::uint64_t completion_count() const noexcept; [[nodiscard]] ScopedFinalizationDeferral defer_finalization_scope() noexcept`.
 Usage: `ctx->json(qb::json{{"ok",true}});`
 
-### Context-scoped types — `src/qbm/http/routing/context.h:76`
+### Context-scoped types — `src/qbm/http/routing/context.h:83`
 `enum class ProcessingPhase{INITIAL,NORMAL_CHAIN,NOT_FOUND_CHAIN,METHOD_NOT_ALLOWED_CHAIN,ERROR_CHAIN}; enum class State:uint8_t{Ready,Running,Finalised}; using LifecycleHook = std::function<void(Context<S>&,HookPoint)>; using CustomDataMap = qb::unordered_map<std::string,std::any>;`
 
 ### `qb::http::PathParameters` — `src/qbm/http/routing/path_parameters.h:32`
 `class PathParameters { void set(string_view key,string_view value); std::optional<string_view> get(string_view) const noexcept; bool has(string_view) const noexcept; ... at/find/begin/end/size/reserve }`
-Keys are `string_view`s into the long-lived route pattern; values are owned decoded copies.
+Keys are borrowed `string_view`s; values are owned decoded copies. Router-extracted keys are backed by compiled storage retained by the routed Context's shared `IAsyncTask` chain through `REQUEST_COMPLETE`, including after router/session destruction and 405/error-chain transitions. A standalone copied `PathParameters` does not acquire that owner: retain the context or copy names into owned strings. (`src/qbm/http/routing/async_task.h:92-115`; `src/qbm/http/routing/router_core.h:84-90,419-428`.)
 
 ### `qb::http::Slot<T>` — `src/qbm/http/routing/slot.h:79`
 `template<typename T> struct Slot { using value_type=T; std::string_view name; consteval explicit Slot(std::string_view); consteval explicit Slot(const char*); constexpr std::string_view key() const noexcept; }`
@@ -875,7 +891,7 @@ Usage: `router.use(qb::http::transform_middleware<S>([](auto& req){ req.set_head
 ## Conditional (branching) — `src/qbm/http/middleware/conditional.h`
 ### `qb::http::ConditionalMiddleware<S>` — `conditional.h:42`
 `using Predicate=std::function<bool(const ContextPtr&)>; using ChildMiddlewarePtr=std::shared_ptr<IMiddleware<S>>; ConditionalMiddleware(Predicate, ChildMiddlewarePtr if_mw, ChildMiddlewarePtr else_mw=nullptr, std::string name="ConditionalMiddleware");` Throws `std::invalid_argument` if `predicate` or `if_mw` is null. Runs `if_mw` when predicate true, else `else_mw` (or continues).
-Factory (`conditional.h:147`): `conditional_middleware<S>(predicate, if_middleware, else_middleware=nullptr, name)`.
+Factory (`conditional.h:154`): `conditional_middleware<S>(predicate, if_middleware, else_middleware=nullptr, name)`.
 
 ## Validation (middleware) — `src/qbm/http/middleware/validation.h`
 ### `qb::http::ValidationMiddleware<S>` — `middleware/validation.h:45`
@@ -978,7 +994,7 @@ Usage: `auto s = qb::http::make_server(); s->router().get("/", h); s->router().c
 - Callback form: `template<typename Func> REQUEST(Request, Func&&, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` (method taken from request); verb helpers `GET/POST/PUT/DEL/HEAD/OPTIONS/PATCH(Request, Func&&, timeout, verify_peer)` force the method. `Func` is invoked with `async::Reply&&`. Sets Host/User-Agent/Accept-Encoding if absent.
 - Coroutine form: `[[nodiscard]] async::awaiter<async::Reply> REQUEST(Request, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` and `GET/POST/PUT/DEL/HEAD/OPTIONS/PATCH(...)` — `co_await` yields `async::Reply`.
 - `std::string host_header_value(const qb::io::uri&)` — Host header value (brackets IPv6, omits default ports).
-- `template<typename Awaitable> auto run_sync(Awaitable&&)` — `coro.h:202` — drive any qbm-http awaitable to completion on the current I/O thread; a thin re-export of `qb::io::async::run_sync` so callers need not reach into `qb::io`. This is the **non-ws** `qb::http::run_sync`; `qb::http::ws::run_sync` (`src/qbm/http/ws/coro.h:486`) is the WebSocket-side alias of the same primitive. Use it from `main()`/tests, never from inside a coroutine already being driven.
+- `template<typename Awaitable> auto run_sync(Awaitable&&)` — `src/qbm/http/coro.h:287` — drive any qbm-http awaitable to completion on the current I/O thread; a thin re-export of `qb::io::async::run_sync` so callers need not reach into `qb::io`. This is the **non-ws** `qb::http::run_sync`; `qb::http::ws::run_sync` (`src/qbm/http/ws/coro.h:496`) is the WebSocket-side alias of the same primitive. Use it from `main()`/tests, never from inside a coroutine already being driven.
   Usage: `auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{"http://localhost:8080/"}}));`
 - **`qb::duration::zero()` means "no timeout"**, not an immediate timeout.
 Usage (coro): `auto reply = co_await qb::http::GET(qb::http::Request{qb::http::method::GET, qb::io::uri{"https://h/x"}});`
@@ -986,8 +1002,8 @@ Usage (coro): `auto reply = co_await qb::http::GET(qb::http::Request{qb::http::m
 ### Persistent client — `qb::http1::Client` (alias `client`) — `src/qbm/http/1.1/client.h`
 `class Client : public std::enable_shared_from_this<Client>` — same-origin keep-alive client; **non-copyable, must live in a `shared_ptr`**.
 - `explicit Client(const std::string& base_uri); explicit Client(const qb::io::uri&);` — throws `std::invalid_argument` on non-http(s) scheme / missing host (http-only when `QB_HAS_SSL` off).
-- `bool connect(ConnectionCallback);` and `[[nodiscard]] async::awaiter<ConnectResult> connect();` — `ConnectionCallback = void(bool connected, const std::string& error)`.
-- `void disconnect();` — fails active + pending with SERVICE_UNAVAILABLE.
+- `bool connect(ConnectionCallback);` and `[[nodiscard]] async::awaiter<ConnectResult> connect();` — `ConnectionCallback = void(bool connected, const std::string& error)`. During retirement it accepts the next intent but starts it after old callback/protocol dispatch unwinds; `is_connecting()` may be true before connected. Work may queue behind explicit intent with automatic reconnect disabled.
+- `void disconnect();` — marks down before old notifications, fails the detached active + pending cohort with SERVICE_UNAVAILABLE, and reports the old connect callbacks cancelled once. Reentrant requests/connects belong to the next cycle. Destruction abandons pending connect callbacks instead of notifying them. (`src/qbm/http/1.1/client.cpp:232-236,272-307,338-349,565-630`.)
 - `bool push_request(Request, ResponseCallback);` and `[[nodiscard]] async::awaiter<Response> push_request(Request);` — `ResponseCallback=void(Response)`; callback form returns false if callback null or pending limit reached.
 - `bool push_requests(std::vector<Request>, BatchResponseCallback);` and `[[nodiscard]] async::awaiter<std::vector<Response>> push_requests(std::vector<Request>);` — `BatchResponseCallback=void(std::vector<Response>)`, responses index-aligned.
 - `void set_connect_timeout(qb::duration) noexcept` (default 30s); `set_request_timeout(qb::duration)` (default 60s); `set_auto_reconnect(bool)`; `set_max_pending_requests(...)` (default 1024); `void set_verify_peer(bool) noexcept` (default true, before connect) + `bool verify_peer() const noexcept`.
@@ -1010,13 +1026,15 @@ Usage: `auto c = qb::http1::make_client("https://h"); co_await c->connect(); aut
 `namespace constants`: `DEFAULT_SESSION_TIMEOUT = std::chrono::seconds(60)` (qb::duration), `DEFAULT_MAX_CONCURRENT_STREAMS = 50`, `STREAM_IDLE_TIMEOUT = std::chrono::seconds(30)`, `STREAM_INCOMPLETE_TIMEOUT = std::chrono::seconds(10)`, `CLEANUP_INTERVAL = std::chrono::seconds(5)` (all `qb::duration`).
 
 ### Server
-- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:583`).
-- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` — `Router& router()` (`http2.h:607`).
-- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:647`).
-- `internal::server::listen(qb::io::uri, std::filesystem::path cert, std::filesystem::path key) -> bool` — ALPN `{h2, http/1.1}`; binds **and** starts accepting, like the qb-io acceptor it derives from (`http2.h:526`). `listen_no_start(...)` is the bind-only opt-out (`http2.h:543`).
+- `class DefaultSession : public qb::http2::use<DefaultSession>::session<Server<DefaultSession>>` (`http2.h:655`).
+- `template<typename SessionType=DefaultSession> class Server : public internal::server<Server<SessionType>,SessionType>` — `Router& router()` (`http2.h:679`).
+- `template<typename Session=DefaultSession> std::unique_ptr<Server<Session>> make_server();` (`http2.h:719`).
+- `internal::server::listen(qb::io::uri, std::filesystem::path cert, std::filesystem::path key) -> bool` — ALPN `{h2, http/1.1}`; binds **and** starts accepting, like the qb-io acceptor it derives from (`http2.h:598`). `listen_no_start(...)` is the bind-only opt-out (`http2.h:615`).
 - `internal::session`: `[[nodiscard]] bool reset_stream(uint32_t stream_id, ErrorCode=CANCEL, const std::string& reason={})`; `auto& operator<<(qb::http::Response&)` (validates stream_id>0 + status 100..599); `Router& router()`.
-- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:559-569`).
+- `template<typename Derived> struct use { ... session/io_handler/server ... }` (`http2.h:631-641`).
 Usage: `auto s = qb::http2::make_server(); s->router().get("/", h); s->router().compile(); s->listen(uri,"cert.pem","key.pem");`
+
+Stock session lifecycle: write progress and full-drain EOS collect logically completed contexts whose native stream is closed. Selection uses batches of 32 IDs (128 bytes of stack ID scratch, no heap scratch); each ID is refound and rechecked. One context leaves the registry before `POST_RESPONSE_SEND` and is released before the next candidate. The last owner triggers `REQUEST_COMPLETE` and member destruction; external owners may delay them. Same-drain rescans catch silent eligibility changes, including destruction with no hooks registered, while actual removals consume a budget fixed to the initial registry size. Selection is unordered, without a public stream-ID ordering guarantee. Reentry, active-protocol, connection and output-size guards apply before each scan/candidate; first-POST extraction cancels the remaining contexts. This changes no public API or Session data members and establishes no measured performance gain. Partial-write timing remains; EOS means framework output drain, not peer acknowledgment. Peer resets of unfinished routed streams, including `NO_ERROR`, cancel the stock context without a neutral public error event or a required new custom-I/O callback. (`src/qbm/http/2/http2.h:120-188,375-419`; `src/qbm/http/2/protocol/server.h:768-789`.)
 
 ### `qb::http2::Client` (alias `client`) — `src/qbm/http/2/client.h:163`
 `class Client : public std::enable_shared_from_this<Client>, public qb::io::async::tcp::client<Client,qb::io::transport::stcp>, public qb::io::use<Client>::timeout` — TLS+ALPN-h2 only; **non-copyable, non-movable**; via `make_client`/`shared_ptr`.
@@ -1070,7 +1088,7 @@ Fluent setters (each returns `RetryPolicy&`): `with_max_attempts(int)`, `with_in
   - `void send_rst_stream(uint32_t, ErrorCode, const std::string& msg="", bool close_context=true) noexcept`;
   - `uint32_t cleanup_idle_streams(qb::duration max_idle=std::chrono::seconds(30), qb::duration max_incomplete=std::chrono::seconds(10)) noexcept`;
   - `[[nodiscard]] bool is_stream_closed(uint32_t) const`; `static bool is_valid_header_field(const std::string& name, const std::string& value) noexcept`.
-- `template<typename IO_Handler> using client_protocol/server_protocol = ClientHttp2Protocol/ServerHttp2Protocol<IO_Handler>` (`http2.h:71-75`).
+- `template<typename IO_Handler> using client_protocol/server_protocol = ClientHttp2Protocol/ServerHttp2Protocol<IO_Handler>` (`http2.h:72-76`).
 - `bool qb::http::well_known::is_hop_by_hop(const std::string& header_name)` (`src/qbm/http/2/protocol/server.h:52`) — classifies hop-by-hop headers (forbidden in HTTP/2).
 
 ---
@@ -1163,18 +1181,20 @@ Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([](au
 - `struct IncomingFrame { enum class Kind:std::uint8_t{Message,Ping,Pong,Close,Disconnected}; Kind kind{Disconnected}; std::string payload; bool is_text{false}; std::uint16_t close_code{0}; std::string close_reason; }` — owning value safe to store past the `co_await`.
 - `template<typename Transport=qb::io::transport::tcp> class coro_client : public WebSocket<coro_client<Transport>,Transport>` — coroutine-first; non-copyable/non-movable:
   - `[[nodiscard]] auto connect(const qb::io::uri& remote, qb::duration timeout=qb::duration::zero());` and `connect(std::string_view remote_uri, qb::duration timeout=qb::duration::zero())` — yields `ConnectResult`.
-  - `[[nodiscard]] auto receive()` — yields next `IncomingFrame` in order; resolves immediately with `Disconnected` once gone; throws `std::logic_error` if another awaiter is parked (one consumer).
-  - `[[nodiscard]] auto close_async(CloseStatus=Normal, std::string_view reason="closed normally")` — yields `CloseResult`; throws `std::invalid_argument` on reserved code, `std::logic_error` if a close awaiter is pending.
+  - `[[nodiscard]] auto receive()` — yields next `IncomingFrame` in order; resolves immediately with `Disconnected` once gone; throws `std::logic_error` if another live awaiter is parked (one consumer). Destruction of a suspended awaiter makes its reservation inactive; later delivery uses a successor or the existing buffer policy.
+  - `[[nodiscard]] auto close_async(CloseStatus=Normal, std::string_view reason="closed normally")` — yields `CloseResult`; validates the Close frame before publishing coroutine state, so reserved code/invalid UTF-8 rejection leaves a later valid close available; `std::logic_error` if another live close waiter is pending. Abandoning a waiter does not retract queued frame bytes; no complete allocation/serialization rollback guarantee.
   - `void set_pending_cap(std::size_t) noexcept` (default 1024; full→drop oldest; 0 disables buffering).
   - `using coro_client_secure = coro_client<qb::io::transport::stcp>`.
 - `template<typename Awaitable> auto run_sync(Awaitable&&)` — drive a WS awaitable to completion on the current I/O thread (thin alias over `qb::io::async::run_sync`).
 - `template<typename Self, typename Server> class coro_session : public qb::io::use<Self>::tcp::template client<Server>` — CRTP base for a server-side WS session written as a coroutine (`Self` defines `task<void> run()`); keeps the session shared_ptr alive across suspensions:
   - `bool accept_upgrade(qb::http::Request&, qb::http::Response&)` — single router integration point: apply handshake hook, `switch_protocol<WS_Protocol>`, send response, spawn `run()`. Returns false (and disconnects) on refusal/invalid handshake. Must run on the transport's I/O thread.
-  - `[[nodiscard]] auto next_frame()` — yields next inbound `IncomingFrame`; after close always resolves `Disconnected`; throws `std::logic_error` if an awaiter is already parked.
+  - `[[nodiscard]] auto next_frame()` — yields next inbound `IncomingFrame`; after close always resolves `Disconnected`; throws `std::logic_error` if a live awaiter is already parked. A destroyed suspended awaiter releases its reservation as on the client.
   - `[[nodiscard]] auto close_async(CloseStatus=Normal, std::string_view reason="closed normally")` — server-side close; throws as above.
   - `using HandshakeHook = std::function<bool(Self&, qb::http::Request&, qb::http::Response&)>; void set_handshake_hook(HandshakeHook)` — pre-upgrade hook (negotiate subprotocol / add headers / return false to reject; a throwing hook is a rejection); before `accept_upgrade`.
   - `void set_pending_cap(std::size_t) noexcept` (default 1024).
 Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect(qb::io::uri{"ws://h/p"}); auto f = co_await ws.receive();`
+
+The `http_awaiter` returned by `receive()` / `next_frame()` / `close_async()` now has a lifetime-aware concrete deduced operation type. Keep `auto`/`co_await` at call sites and rebuild consumers sharing these template definitions consistently. Public ordinary HTTP `async::awaiter<T>` / `make_awaiter` keep their existing callback path; actor cancellation is unchanged. (`src/qbm/http/coro.h:182-218,232-259`; `src/qbm/http/ws/coro.h:422-475,857-912`.)
 
 ### WS pipe serialization — `src/qbm/http/ws/ws.h:1995`
 `template<> pipe<char>& pipe<char>::put<Message>(const Message&);` (and `MessagePing/MessagePong/MessageText/MessageBinary/MessageClose/WebSocketRequest`) — frame onto the outbound pipe (masks when `msg.masked`); invoked indirectly via `operator<<`.
@@ -1184,7 +1204,7 @@ Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect
 # Build / integration
 
 - `find_package` / `qb_load_modules(...)`, link target `qbm::http`, include `<qbm/http/http.h>`.
-- `http.h` pulls: `src/qbm/http/1.1/http.h` + `src/qbm/http/1.1/client.h` always; `src/qbm/http/2/http2.h` + `src/qbm/http/ws/ws.h` under `QB_HAS_SSL`; `src/qbm/http/3/http3.h` + `src/qbm/http/3/client.h` + `src/qbm/http/3/dual_stack.h` under `QBM_HTTP_HAS_HTTP3`. Both `src/qbm/http/1.1/http.h` and `src/qbm/http/1.1/client.h` include `coro.h` — which defines `async::http_awaiter` (`coro.h:94`), the `async::awaiter<T>` alias (`coro.h:160`), `async::make_awaiter` (`coro.h:175`) and `qb::http::run_sync` (`coro.h:202`) — so it always arrives with the umbrella header; you never include it directly. Middleware: include `src/qbm/http/middleware/all.h` (or individual headers / `src/qbm/http/middleware/make.h`).
+- `http.h` pulls: `src/qbm/http/1.1/http.h` + `src/qbm/http/1.1/client.h` always; `src/qbm/http/2/http2.h` + `src/qbm/http/ws/ws.h` under `QB_HAS_SSL`; `src/qbm/http/3/http3.h` + `src/qbm/http/3/client.h` + `src/qbm/http/3/dual_stack.h` under `QBM_HTTP_HAS_HTTP3`. Both `src/qbm/http/1.1/http.h` and `src/qbm/http/1.1/client.h` include `coro.h` — which defines `async::http_awaiter` (`src/qbm/http/coro.h:162`), the `async::awaiter<T>` alias (`src/qbm/http/coro.h:232`), `async::make_awaiter` (`src/qbm/http/coro.h:247`) and `qb::http::run_sync` (`src/qbm/http/coro.h:287`) — so it always arrives with the umbrella header; you never include it directly. Middleware: include `src/qbm/http/middleware/all.h` (or individual headers / `src/qbm/http/middleware/make.h`).
 - Reference qb-core / qb-io types (`qb::io::uri`, `qb::allocator::pipe<char>`, `qb::json`, `qb::duration`, `qb::wall_time`, `qb::icase_unordered_map`, `qb::unordered_map`, async client/awaiter, transports) in the qb framework Factbook — not restated here.
 
 <!-- END llm/qbm-http.llm.api.md -->

@@ -277,7 +277,7 @@ Middleware communicates with downstream middleware and the route handler through
 
 **String-keyed** access — quick, untyped:
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:659-747 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:737-825 -->
 
 ```cpp
 ctx->set("request_id", std::string("abc-123"));        // store
@@ -294,7 +294,7 @@ bool present = ctx->has("payload");                    // contains() is an alias
 
 **Typed slots** — compile-time keys, the safer choice for state that crosses module boundaries:
 
-<!-- src: qbm/http/src/qbm/http/routing/slot.h:79-95, qbm/http/src/qbm/http/routing/context.h:782-894 -->
+<!-- src: qbm/http/src/qbm/http/routing/slot.h:79-95, qbm/http/src/qbm/http/routing/context.h:860-972 -->
 
 ```cpp
 // Declare once, in a shared header.

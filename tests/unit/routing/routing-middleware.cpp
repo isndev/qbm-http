@@ -26,8 +26,10 @@
 
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
+#include <type_traits>
 #include <vector>
 
 #include "../../shared/mock_session.h"
@@ -503,3 +505,117 @@ TEST(MiddlewareAdapters, FunctionalMiddlewareCancelIsNoop) {
 }
 
 } // namespace
+
+namespace hook_growth_test {
+struct Observation {
+    std::vector<int> pre_routing;
+    std::vector<int> pre_handler;
+    bool             added                       = false;
+    int              cookie_at_next_phase        = 0;
+    bool             nested_dispatch             = false;
+    int              cookie_in_nested_dispatch   = 0;
+    int              added_in_nested_dispatch    = 0;
+    int              added_at_next_phase         = 0;
+    int              request_complete_calls      = 0;
+    int              added_during_complete_calls = 0;
+};
+} // namespace hook_growth_test
+
+// QB-511: a heap-backed callback may retain its target when std::function
+// moves, but the vector's live iteration still must survive user registration.
+TEST_F(RoutingMiddlewareTest, HookAddedFromPreRoutingIsVisibleFromTheNextPhase) {
+    using Point                = qb::http::HookPoint;
+    auto              observed = std::make_shared<hook_growth_test::Observation>();
+    const std::string marker(128, 'h');
+    router.add_lifecycle_hook([marker, observed](auto &ctx, Point point) {
+        if (point == Point::PRE_ROUTING) {
+            observed->pre_routing.push_back(0);
+            if (!observed->added) {
+                observed->added = true;
+                for (int id = 2; id != 66; ++id) {
+                    ctx.add_lifecycle_hook([id, observed](auto &completed_ctx, Point next_point) {
+                        if (next_point == Point::PRE_ROUTING)
+                            observed->pre_routing.push_back(id);
+                        if (next_point == Point::PRE_HANDLER_EXECUTION)
+                            observed->pre_handler.push_back(id);
+                        if (next_point == Point::REQUEST_COMPLETE && id == 2) {
+                            ++observed->request_complete_calls;
+                            completed_ctx.add_lifecycle_hook([observed](auto &, Point added_point) {
+                                if (added_point == Point::REQUEST_COMPLETE)
+                                    ++observed->added_during_complete_calls;
+                            });
+                        }
+                    });
+                }
+                EXPECT_EQ(marker, std::string(128, 'h'));
+                throw std::runtime_error("hook registration completed before this contained failure");
+            }
+        }
+        if (point == Point::PRE_HANDLER_EXECUTION)
+            observed->pre_handler.push_back(0);
+    });
+    router.add_lifecycle_hook([observed](auto &, Point point) {
+        if (point == Point::PRE_ROUTING)
+            observed->pre_routing.push_back(1);
+        if (point == Point::PRE_HANDLER_EXECUTION)
+            observed->pre_handler.push_back(1);
+    });
+    router.get("/hook-growth", [](auto ctx) { ctx->text("done"); });
+    router.compile();
+    auto context = router.route(session, create_request(qb::http::method::GET, "/hook-growth"));
+    ASSERT_NE(context, nullptr);
+    EXPECT_EQ(observed->pre_routing, (std::vector<int>{0, 1}));
+    std::vector<int> expected;
+    for (int id = 0; id != 66; ++id)
+        expected.push_back(id);
+    EXPECT_EQ(observed->pre_handler, expected);
+    EXPECT_EQ(session->response_write_count(), 1u);
+    context.reset();
+    EXPECT_EQ(observed->request_complete_calls, 1);
+    EXPECT_EQ(observed->added_during_complete_calls, 0);
+}
+
+// A second shape makes a mutation of the active callable itself observable.
+// The capture is trivial and fits a two-pointer budget; this is a size/trait
+// fact, not a portable assertion that every std::function implementation uses
+// inline storage. The shared observation owner is a separate registered hook.
+TEST_F(RoutingMiddlewareTest, ActiveHookCookieSurvivesRegistrationAndIsSeenAtTheNextPhase) {
+    using Point     = qb::http::HookPoint;
+    auto observed   = std::make_shared<hook_growth_test::Observation>();
+    auto small_hook = [state = observed.get(), cookie = 0](auto &context, Point point) mutable {
+        if (point == Point::PRE_ROUTING) {
+            cookie = 17;
+            for (int id = 0; id != 64; ++id)
+                context.add_lifecycle_hook([state](auto &, Point added_point) {
+                    if (added_point == Point::PRE_HANDLER_EXECUTION) {
+                        if (state->nested_dispatch)
+                            ++state->added_in_nested_dispatch;
+                        else
+                            ++state->added_at_next_phase;
+                    }
+                });
+            state->nested_dispatch = true;
+            context.execute_hook(Point::PRE_HANDLER_EXECUTION);
+            state->nested_dispatch = false;
+            cookie                 = 23; // must update the active callable which the next phase invokes
+        } else if (point == Point::PRE_HANDLER_EXECUTION) {
+            if (state->nested_dispatch)
+                state->cookie_in_nested_dispatch = cookie;
+            else
+                state->cookie_at_next_phase = cookie;
+        }
+    };
+    static_assert(std::is_trivially_copyable_v<decltype(small_hook)>);
+    static_assert(sizeof(small_hook) <= 2 * sizeof(void *));
+    router.add_lifecycle_hook(small_hook);
+    router.add_lifecycle_hook([observed](auto &, Point) { (void) observed; });
+    router.get("/hook-cookie", [](auto context) { context->text("done"); });
+    router.compile();
+    auto context = router.route(session, create_request(qb::http::method::GET, "/hook-cookie"));
+    ASSERT_NE(context, nullptr);
+    EXPECT_EQ(observed->cookie_in_nested_dispatch, 17);
+    EXPECT_EQ(observed->added_in_nested_dispatch, 0);
+    EXPECT_EQ(observed->added_at_next_phase, 64);
+    EXPECT_EQ(observed->cookie_at_next_phase, 23);
+    EXPECT_EQ(session->response_write_count(), 1u);
+}

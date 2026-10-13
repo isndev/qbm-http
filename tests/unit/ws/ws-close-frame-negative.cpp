@@ -36,6 +36,7 @@
  * @ingroup Http
  */
 
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -46,6 +47,16 @@
 #include <qbm/http/ws.h>
 
 namespace {
+
+struct CoroutineCleanup {
+    ~CoroutineCleanup() {
+        if (qb::io::async::listener::current.has_coro_scheduler()) {
+            qb::io::async::run_for(std::chrono::milliseconds(5));
+            qb::io::async::listener::current.reset_coro_scheduler();
+        }
+        qb::io::async::listener::current.clear();
+    }
+};
 
 // ---------------------------------------------------------------------------
 // 1. MessageClose constructor — reserved / out-of-range status codes.
@@ -73,6 +84,7 @@ TEST(WsCloseFrameNegative, ReservedCloseCodeIsRefused) {
 // coroutine. The client is never connected — this is pure constructor logic that
 // happens to be reached through the awaiter, so it stays in the unit tier.
 TEST(WsCloseFrameNegative, CoroClientCloseAsyncRefusesReservedCode) {
+    CoroutineCleanup cleanup;
     qb::io::async::init();
 
     auto scenario = [&]() -> qb::io::async::task<bool> {
@@ -228,6 +240,7 @@ TEST(WsCloseFrameNegative, IsUtf8AllByteClasses) {
 // ---------------------------------------------------------------------------
 
 TEST(WsCloseFrameNegative, CoroClientPendingCapZeroDropsFrame) {
+    CoroutineCleanup cleanup;
     qb::io::async::init();
 
     qb::http::ws::coro_client ws;
@@ -262,6 +275,177 @@ TEST(WsCloseFrameNegative, CoroClientPendingCapZeroDropsFrame) {
     const auto frame = qb::http::ws::run_sync(probe());
     EXPECT_EQ(frame.kind, qb::http::ws::IncomingFrame::Kind::Message);
     EXPECT_EQ(frame.payload, "kept") << "the cap-0 frame must have been dropped, not buffered";
+}
+
+// QB-514: task destruction is an actual frame destruction, not Actor::kill or
+// a sentinel toggled by the test. The public delivery handler owns the slot.
+TEST(WsCloseFrameNegative, AbandonedReceiveAllowsAReplacementReceiver) {
+    CoroutineCleanup cleanup;
+    qb::io::async::init();
+    qb::http::ws::coro_client<> ws;
+    int                         resumed = 0;
+    auto                        receive = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
+        auto frame = co_await ws.receive();
+        ++resumed;
+        co_return frame;
+    };
+    {
+        auto abandoned = receive();
+        abandoned.handle().resume();
+        ASSERT_FALSE(abandoned.handle().done());
+    }
+    auto replacement = receive();
+    replacement.handle().resume();
+    ASSERT_FALSE(replacement.handle().done()) << "an abandoned operation must not occupy the receive slot";
+    qb::http::ws::MessageText message;
+    message << "replacement";
+    ws.on(qb::http::ws::coro_client<>::message{message.size(), message.data().cbegin(), message});
+    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(replacement.handle().done());
+    EXPECT_EQ(replacement.await_resume().payload, "replacement");
+    EXPECT_EQ(resumed, 1);
+
+    // The preceding awaiter is still alive when the next consumer parks.
+    // Its destruction during scheduled resumption must not clear that slot.
+    auto preceding = receive();
+    preceding.handle().resume();
+    ASSERT_FALSE(preceding.handle().done());
+    qb::http::ws::MessageText preceding_message;
+    preceding_message << "preceding";
+    ws.on(qb::http::ws::coro_client<>::message{preceding_message.size(), preceding_message.data().cbegin(), preceding_message});
+    auto next = receive();
+    next.handle().resume();
+    ASSERT_FALSE(next.handle().done());
+    for (int turn = 0; turn != 16 && !preceding.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(preceding.handle().done());
+    EXPECT_EQ(preceding.await_resume().payload, "preceding");
+    EXPECT_FALSE(next.handle().done());
+    qb::http::ws::MessageText next_message;
+    next_message << "next";
+    ws.on(qb::http::ws::coro_client<>::message{next_message.size(), next_message.data().cbegin(), next_message});
+    for (int turn = 0; turn != 16 && !next.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(next.handle().done());
+    EXPECT_EQ(next.await_resume().payload, "next");
+    EXPECT_EQ(resumed, 3);
+}
+
+TEST(WsCloseFrameNegative, FrameArrivingAfterReceiveAbandonIsBufferedForTheNextReceiver) {
+    CoroutineCleanup cleanup;
+    qb::io::async::init();
+    qb::http::ws::coro_client<> ws;
+    int                         resumed = 0;
+    auto                        receive = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
+        auto frame = co_await ws.receive();
+        ++resumed;
+        co_return frame;
+    };
+    {
+        auto abandoned = receive();
+        abandoned.handle().resume();
+        ASSERT_FALSE(abandoned.handle().done());
+    }
+    qb::http::ws::MessageText message;
+    message << "buffered-after-abandon";
+    ws.on(qb::http::ws::coro_client<>::message{message.size(), message.data().cbegin(), message});
+    EXPECT_EQ(resumed, 0);
+    auto replacement = receive();
+    replacement.handle().resume();
+    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(replacement.handle().done()) << "a frame must not be delivered to a dead completion";
+    EXPECT_EQ(replacement.await_resume().payload, "buffered-after-abandon");
+    EXPECT_EQ(resumed, 1);
+}
+
+TEST(WsCloseFrameNegative, ARealConcurrentReceiverIsStillRejected) {
+    CoroutineCleanup cleanup;
+    qb::io::async::init();
+    qb::http::ws::coro_client<> ws;
+    auto                        receive = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
+        co_return co_await ws.receive();
+    };
+    auto first = receive();
+    first.handle().resume();
+    ASSERT_FALSE(first.handle().done());
+    auto second = receive();
+    second.handle().resume();
+    ASSERT_TRUE(second.handle().done());
+    EXPECT_THROW((void) second.await_resume(), std::logic_error);
+    qb::http::ws::MessageText message;
+    message << "first";
+    ws.on(qb::http::ws::coro_client<>::message{message.size(), message.data().cbegin(), message});
+    for (int turn = 0; turn != 16 && !first.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(first.handle().done());
+    EXPECT_EQ(first.await_resume().payload, "first");
+}
+
+// QB-515: the existing rejection-only case is a positive control. Recovery
+// after that rejection uses the same client and its real async Close slot.
+TEST(WsCloseFrameNegative, RejectedCloseAllowsAValidCloseOnTheSameClient) {
+    CoroutineCleanup cleanup;
+    qb::io::async::init();
+    using Status = qb::http::ws::CloseStatus;
+    for (bool bad_code : {true, false}) {
+        qb::http::ws::coro_client<> ws;
+        bool                        rejected  = false;
+        bool                        completed = false;
+        auto                        scenario  = [&]() -> qb::io::async::task<void> {
+            try {
+                (void) co_await ws.close_async(bad_code ? static_cast<Status>(1005u) : Status::Normal,
+                                               bad_code ? std::string_view{"invalid code"} : std::string_view{"\xED\xA0\x80", 3});
+            } catch (const std::invalid_argument &) {
+                rejected = true;
+            }
+            completed = (co_await ws.close_async(Status::Normal, "valid")).ok;
+        };
+        auto task = scenario();
+        task.handle().resume();
+        ASSERT_TRUE(rejected);
+        ASSERT_FALSE(task.handle().done()) << "the rejected close must leave no pending Close slot";
+        ASSERT_GT(ws.out().size(), 0u);
+        const auto                 queued_bytes = ws.out().size();
+        qb::http::ws::MessageClose echo(Status::Normal, "valid");
+        ws.on(qb::http::ws::coro_client<>::closed{echo.size(), echo.data().cbegin(), echo});
+        for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
+            qb::io::async::run(EVRUN_NOWAIT);
+        ASSERT_TRUE(task.handle().done());
+        EXPECT_NO_THROW(task.await_resume());
+        EXPECT_TRUE(completed);
+        EXPECT_EQ(ws.out().size(), queued_bytes) << "the peer echo must not enqueue a second Close";
+    }
+}
+
+TEST(WsCloseFrameNegative, AbandonedCloseAllowsAReplacementButRejectsAConcurrentClose) {
+    CoroutineCleanup cleanup;
+    qb::io::async::init();
+    qb::http::ws::coro_client<> ws;
+    auto                        close = [&]() -> qb::io::async::task<qb::http::ws::CloseResult> {
+        co_return co_await ws.close_async(qb::http::ws::CloseStatus::Normal, "valid");
+    };
+    {
+        auto abandoned = close();
+        abandoned.handle().resume();
+        ASSERT_FALSE(abandoned.handle().done());
+    }
+    auto replacement = close();
+    replacement.handle().resume();
+    ASSERT_FALSE(replacement.handle().done()) << "an abandoned Close must not reserve the completion slot";
+    auto concurrent = close();
+    concurrent.handle().resume();
+    ASSERT_TRUE(concurrent.handle().done());
+    EXPECT_THROW((void) concurrent.await_resume(), std::logic_error);
+    const auto                 queued_bytes = ws.out().size();
+    qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::Normal, "valid");
+    ws.on(qb::http::ws::coro_client<>::closed{peer.size(), peer.data().cbegin(), peer});
+    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(replacement.handle().done());
+    EXPECT_TRUE(replacement.await_resume().ok);
+    EXPECT_EQ(ws.out().size(), queued_bytes);
 }
 
 } // namespace

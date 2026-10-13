@@ -22,7 +22,8 @@ Six rules decide whether generated qbm-http code is correct; everything else is 
    complete from the callback, and guard on `ctx->is_cancelled()`.
 4. **Handlers and middleware are shared across concurrent requests.** Never store per-request
    state on them — put it in the `Context` via `Slot<T>`. `ctx->session()` is weak-locked and
-   may be `nullptr` after a disconnect.
+   may be `nullptr` after a disconnect. A routed context retains its compiled parameter names
+   even after the router is destroyed; standalone parameter-key views remain borrowed.
 5. **DELETE is `qb::http::method::DEL`** (`router().del(...)`); `method::DELETE` does not
    exist. `Body` and `Headers` are base classes, so it is `req.set_header(...)` and
    `req.body()`, not `req.headers().set(...)`.

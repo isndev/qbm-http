@@ -13,8 +13,11 @@
  */
 #pragma once
 
-#include <memory> // For std::shared_ptr
-#include <string> // For std::string
+#include <list>    // For stable compiled route-name storage
+#include <memory>  // For std::shared_ptr
+#include <string>  // For std::string
+#include <utility> // For std::move
+#include <vector>  // For compiled task lists
 
 namespace qb {
 namespace http {
@@ -81,5 +84,37 @@ public:
      */
     [[nodiscard]] virtual std::string name() const = 0;
 };
+
+namespace detail {
+
+// Names are appended only while the tree generation is being compiled.
+// Existing compiled chains keep that generation alive after a clear/recompile.
+struct RouteNameArena {
+    std::list<std::string> segments;
+};
+
+template <typename SessionType, typename KeepAlive>
+struct CompiledTaskChain {
+    using TaskList = std::vector<std::shared_ptr<IAsyncTask<SessionType>>>;
+
+    // Tasks are destroyed before their backing names or preceding chain.
+    KeepAlive keep_alive;
+    TaskList  tasks;
+
+    CompiledTaskChain(KeepAlive owner, TaskList task_list)
+        : keep_alive(std::move(owner))
+        , tasks(std::move(task_list)) {}
+};
+
+template <typename SessionType, typename KeepAlive, typename Tasks>
+[[nodiscard]] std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>
+make_owned_task_chain(KeepAlive keep_alive, Tasks &&tasks) {
+    using Owner       = CompiledTaskChain<SessionType, KeepAlive>;
+    auto        owner = std::make_shared<Owner>(std::move(keep_alive), std::forward<Tasks>(tasks));
+    const auto *list  = &owner->tasks;
+    return {std::move(owner), list};
+}
+
+} // namespace detail
 } // namespace http
 } // namespace qb

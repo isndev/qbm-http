@@ -55,13 +55,13 @@ A path pattern is split into `/`-delimited segments. Each segment is one of thre
 
 Capture names must be unique within a single pattern. A `:` or `*` with no name, an empty segment, a misplaced wildcard, or two conflicting captures at the same tree level all throw `std::invalid_argument` — raised from `add_route`, which surfaces during `compile()`.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:294-392 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:339-428 -->
 
 ### Match precedence and path handling
 
 When more than one branch could match a segment, the radix tree applies a fixed priority: **static > parameter > wildcard**. A wildcard is the lowest priority and is terminal-only. So for a request to `/users/active`, a registered `/users/active` wins over `/users/:status`, which wins over `/users/*rest`.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:434-436,504-540 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:438-440,507-543 -->
 
 Path segmentation handles slashes for you:
 
@@ -69,7 +69,7 @@ Path segmentation handles slashes for you:
 - **Consecutive slashes** produce no empty segments — `/foo//bar` segments to `{"foo", "bar"}`.
 - The root `/` segments to the empty list, so a handler registered at `/` attaches to the tree root.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:279-313 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:282-316 -->
 
 ### The `compile()` step
 
@@ -82,7 +82,7 @@ Path segmentation handles slashes for you:
 
 The assembled order for any endpoint is **parent middleware → this node's middleware → route handler**. Inherited tasks always run before a node's own, and a node's own before the final handler.
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:177-211; qbm/http/src/qbm/http/routing/route.h:309-334; qbm/http/src/qbm/http/routing/handler_node.h:262-274 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:189-223; qbm/http/src/qbm/http/routing/route.h:309-334; qbm/http/src/qbm/http/routing/handler_node.h:262-274 -->
 
 `compile()` **must** be called after all routes, groups, controllers, and middleware are defined and before serving requests. Two safety nets back this up:
 
@@ -110,9 +110,12 @@ Calling `compile()` again recompiles from scratch — it is idempotent and safe 
 
 Path parameters are URI-decoded exactly once, at match time, and only when a parameterized route matches — static routes never allocate decoded strings. In path components `+` stays literal (only query/form decoding maps `+` to a space).
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:309-421 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:350-466 -->
 
 The `Context` returned by `route()` manages its own asynchronous lifecycle. When the chain finishes, the context invokes the router's finalization callback, which (if the session is still alive) fires `PRE_RESPONSE_SEND` and writes the response back over the session. See [Request context](./10-request-context.md) for the full lifecycle.
+
+The selected compiled chain also keeps its route-parameter names alive. A retained context can finish or run its destructor hooks after the router and session are gone; session access remains weak. Parameter names stay tied to the matching compilation through a 405 or error-chain transition. A copied standalone `PathParameters` remains a borrowed-key container, so retain the context or copy those names when keeping them separately.
+<!-- src: qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:84-90,419-428; qbm/http/src/qbm/http/routing/path_parameters.h:32-57 -->
 
 ### Compiled chains are shared and immutable
 
@@ -121,7 +124,7 @@ After `compile()`, the task objects (`IAsyncTask`, middleware, route handlers) a
 - A task implementation **must not** store per-request state on itself. All per-request bookkeeping (the current-task cursor, cancellation, custom data) lives on the `Context`.
 - The routing layer is single-threaded per listener: `execute()` and `cancel()` always run on the same I/O thread, and coroutine handlers resume on that thread via `qb::io::async::coro_scheduler()`. Tasks need no internal locking.
 
-<!-- src: qbm/http/src/qbm/http/routing/async_task.h:37-41,66-72 -->
+<!-- src: qbm/http/src/qbm/http/routing/async_task.h:40-44,69-75 -->
 
 ## Steps and examples
 
@@ -152,7 +155,7 @@ server->listen(qb::io::uri("http://0.0.0.0:8080"));         // begin accepting c
 
 Every handler **must** eventually call a terminal: `ctx->complete(AsyncTaskResult)` (default `AsyncTaskResult::COMPLETE`) or one of the terminal response helpers (`json`, `text`, `html`, `redirect`, `no_content`, `bad_request`, …) — each of those ends in `complete(AsyncTaskResult::COMPLETE)` for you. Forget it and the request hangs. The `Context::status(code)` setter is the exception: it sets the status, returns `Context&`, and does **not** terminate, so you can chain it ahead of a terminal call.
 
-<!-- src: qbm/http/src/qbm/http/routing/async_task.h:62-76; qbm/http/src/qbm/http/routing/context.h:913-1106 -->
+<!-- src: qbm/http/src/qbm/http/routing/async_task.h:65-79; qbm/http/src/qbm/http/routing/context.h:983-1184 -->
 
 ### Read captured parameters
 
@@ -176,7 +179,7 @@ server->router().get("/files/:bucket/*path", [](auto ctx) {
 
 Values arrive URI-decoded: a request to `/notes/My%20Note` matched by `/notes/:title` yields `title == "My Note"`. The parameter keys are `string_view`s into the route pattern held by the router, so the router must outlive the context — which it does by construction.
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:385-395; qbm/http/src/qbm/http/routing/path_parameters.h:36-39,77-83 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:397-407; qbm/http/src/qbm/http/routing/path_parameters.h:36-39,77-83 -->
 
 ### Customize the not-found and error behavior
 
@@ -199,7 +202,7 @@ router.compile();
 
 Global middleware **is** prepended to the default and custom 404 and 405 chains, but it is **not** auto-prepended to the user error chain set via `set_error_task_chain` — include any cross-cutting behavior (logging, CORS) explicitly in that chain. See [Error handling](./13-error-handling.md).
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:112-142,232-250,256-268 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:124-154,244-262,268-280 -->
 
 ### Conceptual radix tree
 

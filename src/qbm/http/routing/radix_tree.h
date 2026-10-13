@@ -17,7 +17,6 @@
 #include <algorithm>                           // For std::find_if, std::copy, std::back_inserter
 #include <array>                               // For std::array (method-indexed handler slots)
 #include <cassert>                             // For assert (debug mode checks)
-#include <list>                                // For std::list (task chains, _path_segment_storage)
 #include <memory>                              // For std::shared_ptr, std::make_shared, std::unique_ptr (used by Node)
 #include <optional>                            // For std::optional (match result)
 #include <stdexcept>                           // For std::runtime_error, std::invalid_argument
@@ -37,6 +36,9 @@
 // template <typename SessionType> class RouteGroup;
 
 namespace qb::http {
+template <typename SessionType>
+class RouterCore;
+
 /**
  * @brief (Internal) Holds information about a successfully matched route from the `RadixTree`.
  * @tparam SessionType The session type used by the `Context` and `IAsyncTask`.
@@ -111,6 +113,8 @@ struct PathAllowedMethodsInfo {
  */
 template <typename SessionType>
 class RadixTree {
+    friend class RouterCore<SessionType>;
+
 public:
     /** @brief Type alias for a list of tasks (middleware + handler) associated with a route. */
     using TaskList = std::vector<std::shared_ptr<IAsyncTask<SessionType>>>;
@@ -259,14 +263,13 @@ private:
                   dst.end());
     }
 
-    std::unique_ptr<Node> _root; ///< The root node of the Radix Tree.
-
     /**
      * @brief Internal storage for path segments to ensure `std::string_view` stability.
      * When a path is added, its segments (if they are new unique strings) are copied here,
      * and the `Node::segment_match` and `Node::param_name` `string_view`s point into this storage.
      */
-    std::list<std::string> _path_segment_storage;
+    std::shared_ptr<detail::RouteNameArena> _name_arena{std::make_shared<detail::RouteNameArena>()};
+    std::unique_ptr<Node>                   _root; ///< The root node of the Radix Tree.
 
     /**
      * @brief (Private) Splits a URL path string_view into its constituent segments.
@@ -363,8 +366,8 @@ public:
                     throw std::invalid_argument("Wildcard segment '" + std::string(segment_sv)
                                                 + "' must be the last segment in the path pattern: " + path_pattern_str);
                 }
-                _path_segment_storage.emplace_back(segment_sv.substr(1));
-                std::string_view wildcard_name_sv = _path_segment_storage.back();
+                _name_arena->segments.emplace_back(segment_sv.substr(1));
+                std::string_view wildcard_name_sv = _name_arena->segments.back();
                 if (!seen_capture_names.emplace(std::string(wildcard_name_sv)).second) {
                     throw std::invalid_argument("Duplicate capture name '" + std::string(wildcard_name_sv)
                                                 + "' in path pattern: " + path_pattern_str);
@@ -385,8 +388,8 @@ public:
                     throw std::invalid_argument("Parameter segment must have a name (e.g., :id), got: '" + std::string(segment_sv)
                                                 + "' in path: " + path_pattern_str);
                 }
-                _path_segment_storage.emplace_back(segment_sv.substr(1));
-                std::string_view p_name_sv = _path_segment_storage.back();
+                _name_arena->segments.emplace_back(segment_sv.substr(1));
+                std::string_view p_name_sv = _name_arena->segments.back();
                 if (!seen_capture_names.emplace(std::string(p_name_sv)).second) {
                     throw std::invalid_argument("Duplicate capture name '" + std::string(p_name_sv) + "' in path pattern: " + path_pattern_str);
                 }
@@ -401,8 +404,8 @@ public:
                 current_node = current_node->param_child.get();
             } else {
                 // Static segment
-                _path_segment_storage.emplace_back(segment_sv);
-                std::string_view static_segment_sv = _path_segment_storage.back();
+                _name_arena->segments.emplace_back(segment_sv);
+                std::string_view static_segment_sv = _name_arena->segments.back();
 
                 auto it = current_node->static_children.find(static_segment_sv);
                 if (it == current_node->static_children.end()) {
@@ -421,7 +424,8 @@ public:
             throw std::invalid_argument("Cannot register a handler for an uninitialised / out-of-range HTTP method on path: "
                                         + path_pattern_str);
         }
-        current_node->handlers[slot] = std::make_shared<const TaskList>(std::move(task_chain_vec));
+        current_node->handlers[slot] =
+            detail::make_owned_task_chain<SessionType>(std::shared_ptr<const detail::RouteNameArena>(_name_arena), std::move(task_chain_vec));
     }
 
     /**
@@ -435,10 +439,9 @@ public:
      * 1. Static segments are preferred over parameterized segments.
      * 2. Parameterized segments are preferred over wildcard segments (though a wildcard can only be terminal).
      *
-     * The caller owns the backing storage for `path_sv`; the returned
-     * `MatchedRouteInfo` may contain `std::string_view`s that reference
-     * slices of it, so it must remain valid for the lifetime of the match
-     * result (typically: the current request processing chain).
+     * Parameter values in the result are owned strings. Parameter-name views
+     * refer to the compiled name arena retained by the returned task chain;
+     * clearing or destroying this tree cannot invalidate that result's names.
      *
      * @param path_sv The request URI path (e.g., "/users/123/profile").
      * @param method The HTTP method of the request.
@@ -633,8 +636,8 @@ public:
      */
     void
     clear() noexcept {
-        _root = std::make_unique<Node>(NodeType::ROOT); // Reset to a new root node
-        _path_segment_storage.clear();                  // Clear stored path segments as well
+        _root       = std::make_unique<Node>(NodeType::ROOT);     // Reset to a new root node
+        _name_arena = std::make_shared<detail::RouteNameArena>(); // Old compiled chains retain their generation.
     }
 
     /**

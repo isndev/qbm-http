@@ -2700,7 +2700,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (server.h:1079-1083).
+// with INTERNAL_ERROR (server.h:1169-1174).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -2728,7 +2728,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (server.h:1063-1065).
+// (server.h:1151-1156).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -2748,7 +2748,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (server.h:1042-1045).
+// (server.h:1132-1135).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -2768,7 +2768,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (server.h:1038-1040).
+// A non-numeric content-length response header is rejected (server.h:1126-1131).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -2791,7 +2791,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:851-855).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:932-937).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -2810,7 +2810,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (server.h:860-875).
+// on(WindowUpdateFrame) for stream 0 (server.h:939-957).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -2843,8 +2843,8 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
 // ---------------------------------------------------------------------------
 // GOAWAY receipt with a server-pushed (even) stream present.
 // Injecting a client GOAWAY whose last_stream_id is below the pushed stream's
-// parent forces the pushed-stream-orphan cleanup arm (server.h:760-792) and the
-// client-stream implicit-close arm (server.h:793-813).
+// parent forces the pushed-stream-orphan cleanup arm (server.h:840-843,859-873) and the
+// client-stream implicit-close arm (server.h:875-893).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, GoAwayReceiptClosesPushedAndHigherClientStreams) {
@@ -2881,7 +2881,7 @@ TEST(HTTP2ServerProtocol, GoAwayReceiptClosesPushedAndHigherClientStreams) {
 // GOAWAY whose last_stream_id is below a pushed stream's PARENT forces the
 // pushed-stream orphan-close arm: parent (3) > last_stream_id (1) sets
 // close_pushed_stream, so pushed stream 4 is closed + erased and a stream-error
-// event fires for it (server.h:760-792).
+// event fires for it (server.h:840-843,859-873).
 TEST(HTTP2ServerProtocol, GoAwayReceiptClosesOrphanedPushedStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -2912,7 +2912,7 @@ TEST(HTTP2ServerProtocol, GoAwayReceiptClosesOrphanedPushedStream) {
 }
 
 // GOAWAY(error) implicitly closing a higher client stream that is still OPEN
-// (server.h:793-813 error branch) dispatches a stream-error and erases it.
+// (server.h:875-893 error branch) dispatches a stream-error and erases it.
 TEST(HTTP2ServerProtocol, GoAwayWithErrorImplicitlyClosesHigherOpenClientStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3015,7 +3015,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; server.h:978-981 else arm).
+// (no stream context to store into; server.h:1061-1071 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -3034,7 +3034,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:894-897);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:968-980);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 

@@ -766,11 +766,26 @@ public:
             stream.state               = Http2StreamConcreteState::CLOSED;
 
             // Notify application if request wasn't dispatched or response wasn't fully sent by us yet.
-            if ((!stream.request_dispatched || !stream.end_stream_sent)
-                && stream.error_code != ErrorCode::NO_ERROR) { // Check stream.error_code as rst_stream_received is now true
-                Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM received from client"};
-                this->_io.on(stream_error_event);
+            if (!stream.request_dispatched || !stream.end_stream_sent) {
+                auto &io_handler = this->_io;
+                try {
+                    if (error_code != ErrorCode::NO_ERROR) {
+                        Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM received from client"};
+                        io_handler.on(stream_error_event);
+                    } else if constexpr (requires(IO_Handler &io) { io.on_peer_stream_reset(stream_id); }) {
+                        io_handler.on_peer_stream_reset(stream_id);
+                    }
+                } catch (...) {
+                    // Application observers cannot escape this noexcept frame
+                    // handler. The native reset still closes the stream below.
+                }
+                if constexpr (requires(IO_Handler &io, ServerHttp2Protocol *active) { io.protocol() == active; }) {
+                    if (io_handler.protocol() != this)
+                        return;
+                }
             }
+            // The observer may have erased the stream. Reclaim by fresh lookup
+            // and never use the preceding stream reference after user code.
             this->try_close_stream_context(stream_id);
         } else if (stream_id > _last_client_initiated_stream_id) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "RST_STREAM frame received on idle stream");

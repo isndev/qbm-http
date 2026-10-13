@@ -38,6 +38,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
+  Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
+  Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
+  awaiter types through `auto`. Rebuild translation units and application boundaries that share these
+  template specializations together; ordinary HTTP callback factories keep their existing contracts.
+
 - **Paired schema length bounds share one Unicode scan (Huly QB-549).**
   Cached `minLength` and `maxLength` evaluation uses one validated code-point count,
   retaining ordered keyword errors, offending-value policies and array behavior.
@@ -110,6 +116,41 @@ All notable changes to the qbm-http module are documented here. The format is ba
   The C llhttp parser receives sanitizer compile flags; scheduled tests check out paired
   `develop` branches; doc-lint runs after checker or workflow edits. The pull request template
   points to the public superbuild recipe and clang-tidy includes module headers.
+- **HTTP/1.1 callback reentry preserves the next connection cycle (Huly QB-509).** A closing response
+  publishes disconnected state before its callback. Failure notifications settle a detached old cohort,
+  while new requests and explicit connect intents survive for the next cycle. Reentrant connect starts
+  after old callback/protocol dispatch returns, including with automatic reconnect disabled. Destruction
+  still abandons pending connect observers; explicit disconnect reports cancellation once.
+- **Lifecycle hook registration stays stable during dispatch (Huly QB-511).** Hooks added by a hook
+  become visible after the outermost dispatch returns, preserving active callable state, registration
+  order, and isolation between request contexts.
+- **Retained request contexts keep route-parameter names valid (Huly QB-512).** Compiled chains retain
+  their matching name storage through teardown, 405/error transitions, and `REQUEST_COMPLETE`, including
+  contexts retained after their router or session is gone. Standalone copied `PathParameters` still borrow
+  key names. A pre-handler hook's completion or error chain is preserved when routing resumes.
+- **Conditional cancellation reaches the selected child (Huly QB-535).** Selection is per context and
+  reaches nested pending leaves once. Predicate completion/cancellation and a throw after synchronous
+  child completion cannot replace newer work. The existing child `cancel()` remains a notification,
+  without native-operation preemption guarantees for a shared middleware instance.
+- **Destroyed WebSocket awaiters release their waiter reservations (Huly QB-514).** Abandoned receive,
+  next-frame, and close waiters no longer block a successor or consume its later completion. A second
+  live waiter still fails explicitly; frame buffering and actor cancellation behavior are unchanged.
+- **WebSocket close validates before publishing coroutine state (Huly QB-515).** Rejected codes and
+  invalid UTF-8 reasons leave a valid later close or peer-close echo available. This does not add a full
+  allocation/serialization rollback guarantee for queued bytes or the base WebSocket close state.
+- **HTTP/2 full output drain releases completed stream contexts (Huly QB-498).** EOS uses the same
+  completed/native-closed collection as write progress. Registry ownership is removed before hooks, and
+  reentry or newly queued output cannot invalidate an iterator or earn cleanup before its later write.
+  Collection selects batches of 32 IDs with 128 bytes of stack ID scratch and no heap scratch,
+  refinds and rechecks each ID, and releases one detached context after POST before considering the next.
+  Same-drain rescans catch silent eligibility changes from hooks or destruction, including the no-hook
+  case, within a removal budget fixed to the registry size at entry. Selection remains unordered. First-POST
+  session extraction cancels the remaining contexts. Public API and Session data members are unchanged;
+  this is not a measured performance-gain claim.
+- **Neutral HTTP/2 peer resets cancel unfinished routed work (Huly QB-568).** `RST_STREAM(NO_ERROR)`
+  reaches the stock session lifecycle without becoming a public stream-error event. Context ownership
+  is removed before cancellation; custom protocol I/O handlers acquire no required new callback.
+
 - **JSON Schema validation preserves Unicode and numeric meaning (Huly QB-549, QB-550, QB-551).**
   `minLength`/`maxLength` count Unicode code points rather than UTF-8 bytes, rejecting malformed
   programmatic strings without echoing them in an error. Numeric bounds compare signed, unsigned,

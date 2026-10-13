@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <chrono>
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -139,6 +140,26 @@ public:
             ctx->response().body()   = "bye";
             ctx->response().set_header("Connection", "close");
             ctx->complete();
+        });
+
+        // A normal close-delimited response exercises the persistent client's
+        // EOF delivery before its disconnected notification retires the transport.
+        router().get("/close-delimited", [this](auto ctx) {
+            ++request_count;
+            auto session = ctx->session();
+            ctx->suppress_response();
+            session->publish("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\neof-body");
+            session->close_after_deliver();
+        });
+
+        // Close the real peer before any response bytes exist. The client must
+        // retire its active/pending cohort through the disconnected event.
+        router().get("/peer-close-without-response", [this](auto ctx) {
+            ++request_count;
+            auto session = ctx->session();
+            ASSERT_NE(session, nullptr);
+            ctx->suppress_response();
+            session->disconnect();
         });
 
         // Emits a MULTI-TOKEN Connection header ("keep-alive, close") so the
@@ -1149,3 +1170,399 @@ TEST(Http1ClientTest, OneShotHttpsWithoutSslIsRejectedBeforeConnecting) {
     EXPECT_EQ(server.request_count(), 0);
 }
 #endif
+
+namespace http1_callback_reentry_test {
+struct Observation {
+    bool               cleaning          = false;
+    int                closing_callbacks = 0;
+    int                old_callbacks     = 0;
+    int                new_callbacks     = 0;
+    int                connects          = 0;
+    bool               reconnected       = false;
+    qb::http::Response response;
+};
+struct Cleanup {
+    std::shared_ptr<qb::http1::Client> &client;
+    std::shared_ptr<Observation>        observation;
+    ~Cleanup() {
+        observation->cleaning = true;
+        client->disconnect();
+        drain_client_callbacks();
+    }
+};
+} // namespace http1_callback_reentry_test
+
+// QB-509: new work submitted by a callback belongs to the next connection,
+// not to the response/failed cohort whose callback is currently being delivered.
+TEST(Http1ClientTest, CloseResponseCallbackQueuesItsNextRequestOnANewConnection) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                client   = qb::http1::make_client(server.url(""));
+    auto                observed = std::make_shared<Observation>();
+    Cleanup             cleanup{client, observed};
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/close"), [&, observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->closing_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        EXPECT_FALSE(client->is_connected()) << "Connection: close must retire availability before calling user code";
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto result) {
+            if (observed->cleaning)
+                return;
+            observed->response = std::move(result);
+            ++observed->new_callbacks;
+        }));
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->closing_callbacks, 1);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    EXPECT_EQ(observed->response.status(), qb::http::status::OK);
+    EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+    EXPECT_EQ(server.connection_count(), 2);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 2u);
+    EXPECT_EQ(successful, 2u);
+    EXPECT_EQ(failed, 0u);
+}
+
+TEST(Http1ClientTest, DisconnectFailureCallbackDoesNotFailItsNewRequestWithTheOldCohort) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                client   = qb::http1::make_client(server.url(""));
+    auto                observed = std::make_shared<Observation>();
+    Cleanup             cleanup{client, observed};
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/never"), [&, observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto result) {
+            if (observed->cleaning)
+                return;
+            observed->response = std::move(result);
+            ++observed->new_callbacks;
+        }));
+        throw std::runtime_error("old failure callback threw after submitting new work");
+    }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/item/old-queued"), [observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return server.request_count() == 1; }));
+    client->disconnect();
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->old_callbacks, 2);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    EXPECT_EQ(observed->response.status(), qb::http::status::OK);
+    EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+    EXPECT_EQ(server.connection_count(), 2);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 3u);
+    EXPECT_EQ(successful, 1u);
+    EXPECT_EQ(failed, 2u);
+}
+
+TEST(Http1ClientTest, PeerCloseBeforeResponseKeepsReentrantConnectOutsideTheFailedCohort) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                client   = qb::http1::make_client(server.url(""));
+    auto                observed = std::make_shared<Observation>();
+    Cleanup             cleanup{client, observed};
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    auto connected = qb::http::run_sync(client->connect());
+    ASSERT_TRUE(connected) << connected.error_message;
+    ASSERT_TRUE(client->is_connected());
+
+    // Both requests are submitted before pumping the client loop. Only the
+    // first can reach the peer; the second belongs to its pending cohort.
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/peer-close-without-response"), [&, observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
+        EXPECT_FALSE(client->is_connected());
+        EXPECT_TRUE(client->connect([observed](bool ok, const std::string &) {
+            if (observed->cleaning)
+                return;
+            ++observed->connects;
+            observed->reconnected = ok;
+        }));
+        EXPECT_TRUE(client->is_connecting());
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto result) {
+            if (observed->cleaning)
+                return;
+            observed->response = std::move(result);
+            ++observed->new_callbacks;
+        }));
+    }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/item/old-queued"), [observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->old_callbacks, 2);
+    EXPECT_EQ(observed->connects, 1);
+    EXPECT_TRUE(observed->reconnected);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    EXPECT_EQ(observed->response.status(), qb::http::status::OK);
+    EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+    EXPECT_EQ(server.connection_count(), 2);
+    EXPECT_EQ(server.request_count(), 2);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 3u);
+    EXPECT_EQ(successful, 1u);
+    EXPECT_EQ(failed, 2u);
+}
+
+TEST(Http1ClientTest, DeferredDisconnectCleanupDoesNotResetAReentrantConnect) {
+    using namespace http1_callback_reentry_test;
+    for (const bool auto_reconnect : {true, false}) {
+        SCOPED_TRACE(auto_reconnect);
+        qb::io::async::init();
+        LoopbackHttp1Server server;
+        auto                client   = qb::http1::make_client(server.url(""));
+        auto                observed = std::make_shared<Observation>();
+        Cleanup             cleanup{client, observed};
+        ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&, observed, auto_reconnect](auto response) {
+            if (observed->cleaning)
+                return;
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            client->set_auto_reconnect(auto_reconnect);
+            client->disconnect();
+            EXPECT_TRUE(client->connect([observed](bool ok, const std::string &) {
+                if (observed->cleaning)
+                    return;
+                ++observed->connects;
+                observed->reconnected = ok;
+            }));
+            EXPECT_TRUE(client->is_connecting());
+            EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto result) {
+                if (observed->cleaning)
+                    return;
+                observed->response = std::move(result);
+                ++observed->new_callbacks;
+            }));
+        }));
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->connects != 0; }));
+        ASSERT_TRUE(observed->reconnected);
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+        EXPECT_EQ(observed->connects, 1);
+        EXPECT_EQ(observed->new_callbacks, 1);
+        EXPECT_EQ(observed->response.status(), qb::http::status::OK);
+        EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+        EXPECT_EQ(server.connection_count(), 2);
+        auto [total, successful, failed] = client->get_stats();
+        EXPECT_EQ(total, 2u);
+        EXPECT_EQ(successful, 2u);
+        EXPECT_EQ(failed, 0u);
+    }
+}
+
+TEST(Http1ClientTest, DisconnectingAConnectAttemptRetiresItsCallbacksBeforeNewIntent) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                client   = qb::http1::make_client(server.url(""));
+    auto                observed = std::make_shared<Observation>();
+    Cleanup             cleanup{client, observed};
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->connect([&, observed](bool ok, const std::string &) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_FALSE(ok);
+        EXPECT_FALSE(client->is_connected());
+        EXPECT_TRUE(client->connect([observed](bool connected, const std::string &) {
+            if (observed->cleaning)
+                return;
+            ++observed->connects;
+            observed->reconnected = connected;
+        }));
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto response) {
+            if (observed->cleaning)
+                return;
+            observed->response = std::move(response);
+            ++observed->new_callbacks;
+        }));
+    }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/item/old-queued"), [observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    }));
+    client->disconnect();
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->old_callbacks, 2);
+    EXPECT_EQ(observed->connects, 1);
+    EXPECT_TRUE(observed->reconnected);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    EXPECT_EQ(observed->response.status(), qb::http::status::OK);
+    EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+    EXPECT_EQ(server.request_count(), 1);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 2u);
+    EXPECT_EQ(successful, 1u);
+    EXPECT_EQ(failed, 1u);
+}
+
+TEST(Http1ClientTest, ConnectionFailureCallbackDoesNotFailTheNextAttemptRequestEarly) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    auto    client   = qb::http1::make_client("http://127.0.0.1:1");
+    auto    observed = std::make_shared<Observation>();
+    Cleanup cleanup{client, observed};
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/old"), [observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    }));
+    ASSERT_TRUE(client->connect([&, observed](bool ok, const std::string &) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_FALSE(ok);
+        EXPECT_TRUE(client->connect([observed](bool connected, const std::string &) {
+            if (observed->cleaning)
+                return;
+            ++observed->connects;
+            EXPECT_FALSE(connected);
+        }));
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/new"), [observed](auto response) {
+            if (observed->cleaning)
+                return;
+            EXPECT_EQ(observed->connects, 1) << "new request belongs to the next connection-failure cohort";
+            ++observed->new_callbacks;
+            EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        }));
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->old_callbacks, 2);
+    EXPECT_EQ(observed->connects, 1);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 2u);
+    EXPECT_EQ(successful, 0u);
+    EXPECT_EQ(failed, 2u);
+}
+
+TEST(Http1ClientTest, RequestTimeoutCallbackQueuesNewWorkAfterRetirement) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                client   = qb::http1::make_client(server.url(""));
+    auto                observed = std::make_shared<Observation>();
+    Cleanup             cleanup{client, observed};
+    client->set_request_timeout(1s);
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/never"), [&, observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::GATEWAY_TIMEOUT);
+        EXPECT_FALSE(client->is_connected());
+        client->set_request_timeout(2s);
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto result) {
+            if (observed->cleaning)
+                return;
+            observed->response = std::move(result);
+            ++observed->new_callbacks;
+        }));
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return server.request_count() == 1; }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->old_callbacks, 1);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    EXPECT_EQ(observed->response.status(), qb::http::status::OK);
+    EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+    EXPECT_EQ(server.connection_count(), 2);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 2u);
+    EXPECT_EQ(successful, 1u);
+    EXPECT_EQ(failed, 1u);
+}
+
+TEST(Http1ClientTest, FailedBatchCallbackCanQueueANewBatchAfterTheOldCohort) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    LoopbackHttp1Server            server;
+    auto                           client   = qb::http1::make_client(server.url(""));
+    auto                           observed = std::make_shared<Observation>();
+    Cleanup                        cleanup{client, observed};
+    std::vector<qb::http::Request> requests;
+    requests.emplace_back(request(qb::http::method::GET, "/never"));
+    requests.emplace_back(request(qb::http::method::GET, "/item/old-queued"));
+    ASSERT_TRUE(client->push_requests(std::move(requests), [&, observed](auto responses) {
+        if (observed->cleaning)
+            return;
+        ++observed->old_callbacks;
+        ASSERT_EQ(responses.size(), 2u);
+        EXPECT_EQ(responses[0].status(), qb::http::status::SERVICE_UNAVAILABLE);
+        EXPECT_EQ(responses[1].status(), qb::http::status::SERVICE_UNAVAILABLE);
+        std::vector<qb::http::Request> next;
+        next.emplace_back(request(qb::http::method::GET, "/ping"));
+        next.emplace_back(request(qb::http::method::GET, "/item/next"));
+        EXPECT_TRUE(client->push_requests(std::move(next), [observed](auto results) {
+            if (observed->cleaning)
+                return;
+            ++observed->new_callbacks;
+            ASSERT_EQ(results.size(), 2u);
+            EXPECT_EQ(results[0].status(), qb::http::status::OK);
+            EXPECT_EQ(results[1].status(), qb::http::status::OK);
+            EXPECT_EQ(results[0].body().template as<std::string>(), "pong");
+            EXPECT_EQ(results[1].body().template as<std::string>(), "next");
+        }));
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return server.request_count() == 1; }));
+    client->disconnect();
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->old_callbacks, 1);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    EXPECT_EQ(server.connection_count(), 2);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 4u);
+    EXPECT_EQ(successful, 2u);
+    EXPECT_EQ(failed, 2u);
+}
+
+TEST(Http1ClientTest, EofBodyCallbackQueuesItsNextRequestAfterRetirement) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                client   = qb::http1::make_client(server.url(""));
+    auto                observed = std::make_shared<Observation>();
+    Cleanup             cleanup{client, observed};
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/close-delimited"), [&, observed](auto response) {
+        if (observed->cleaning)
+            return;
+        ++observed->closing_callbacks;
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        EXPECT_EQ(response.body().template as<std::string>(), "eof-body");
+        EXPECT_FALSE(client->is_connected());
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto result) {
+            if (observed->cleaning)
+                return;
+            observed->response = std::move(result);
+            ++observed->new_callbacks;
+        }));
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0; }));
+    EXPECT_EQ(observed->closing_callbacks, 1);
+    EXPECT_EQ(observed->new_callbacks, 1);
+    EXPECT_EQ(observed->response.status(), qb::http::status::OK);
+    EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+    EXPECT_EQ(server.connection_count(), 2);
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 2u);
+    EXPECT_EQ(successful, 2u);
+    EXPECT_EQ(failed, 0u);
+}

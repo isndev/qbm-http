@@ -26,7 +26,8 @@ Six rules decide whether generated qbm-http code is correct; everything else is 
    complete from the callback, and guard on `ctx->is_cancelled()`.
 4. **Handlers and middleware are shared across concurrent requests.** Never store per-request
    state on them — put it in the `Context` via `Slot<T>`. `ctx->session()` is weak-locked and
-   may be `nullptr` after a disconnect.
+   may be `nullptr` after a disconnect. A routed context retains its compiled parameter names
+   even after the router is destroyed; standalone parameter-key views remain borrowed.
 5. **DELETE is `qb::http::method::DEL`** (`router().del(...)`); `method::DELETE` does not
    exist. `Body` and `Headers` are base classes, so it is `req.set_header(...)` and
    `req.body()`, not `req.headers().set(...)`.
@@ -217,6 +218,14 @@ Terminal response helpers (each sets body/status/content-type **and** calls `com
 
 Lifecycle hooks: `ctx->add_lifecycle_hook(fn)` or router-wide `router().add_lifecycle_hook(fn)`. `HookPoint`s: `PRE_ROUTING` (router-level only), `PRE_HANDLER_EXECUTION`, `POST_HANDLER_EXECUTION`, `PRE_RESPONSE_SEND` (best place for final headers), `POST_RESPONSE_SEND`, `REQUEST_COMPLETE`. Hook exceptions are caught and suppressed; a destructor-time hook must not call `shared_from_this()`.
 
+Hooks registered during dispatch are published after the outermost dispatch returns. The current dispatch and nested dispatches retain the old published list; the next separate phase sees additions in registration order. Active callable state is preserved, and registration affects only this context. _(src/qbm/http/routing/context.h:219-245,694-707)_
+
+Router-extracted parameter values are owned; their key views are backed by compiled storage retained through the context's existing `IAsyncTask` chain. A retained context may outlive its router or session, including `REQUEST_COMPLETE`; `session()` remains weak and may return null. A 405 or error-chain transition retains the matching compilation's names. A standalone `PathParameters` copy still borrows keys: retain the original context or copy names into owned strings. _(src/qbm/http/routing/path_parameters.h:32-57; src/qbm/http/routing/async_task.h:92-115; src/qbm/http/routing/router_core.h:84-90,419-428)_
+
+Conditional middleware records the selected pending child on the context; cancellation notifies that child once, including a nested leaf. A predicate that completes/cancels or a child that throws after synchronous completion cannot replace newer work. The unchanged `IMiddleware::cancel()` has no context argument: do not promise per-operation native cancellation inside a shared user child. _(src/qbm/http/middleware/conditional.h:87-111; src/qbm/http/routing/context.h:1268-1300; src/qbm/http/routing/middleware.h:58-61)_
+
+Context and HTTP session templates contain updated private lifecycle bookkeeping. Rebuild consumers that share the same specializations with consistent headers; public signatures do not imply that mixed template definitions have compatible layout.
+
 ## Middleware
 
 ```cpp
@@ -334,6 +343,9 @@ qb::io::async::run();
 - An HTTP/2 batch callback may disconnect or enqueue another batch: the completed batch leaves the registry before user code runs. _(src/qbm/http/2/client.cpp:358-370)_
 - A failed pending send calls user code. The queue drain retains the client and rechecks the connection and h2 protocol before its next iteration, so a callback may disconnect or enqueue work without sending on the old connection. _(src/qbm/http/2/client.cpp:448-485)_
 - There is no plaintext h2c. Never write a response with `stream_id == 0` (it is the HTTP/1.1 sentinel). Server caps concurrency at 50 streams; client at 100. Server push is off by default and not a router feature.
+
+- The stock server collects completed contexts with closed native streams on write progress and full-drain EOS. It selects batches of 32 IDs (128 bytes of stack ID scratch, no heap scratch), refinds and rechecks each ID, then detaches one owner before `POST_RESPONSE_SEND` and releases it before the next candidate. The last release runs `REQUEST_COMPLETE` and member destruction; external owners can postpone that destruction. Same-drain rescans catch silent eligibility changes from hooks or destruction, even with no hooks registered, within the removal budget fixed to the registry size at entry. No iterator or pointer to a native stream crosses user code. Selection is unordered, with no public stream-ID ordering contract. Reentry is suppressed; protocol, connection and output size are checked before each scan/candidate. Changed output size defers collection; first-POST extraction cancels the remaining contexts. EOS means framework output drain, not peer acknowledgment, and partial-write timing remains. The batching changes no public API or Session data members; no measured performance gain is claimed. _(src/qbm/http/2/http2.h:120-175,375-419)_
+- Peer resets of unfinished routed streams cancel the stock context, including `NO_ERROR`, without turning a neutral reset into `Http2StreamErrorEvent`. The optional internal notification adds no required callback to custom protocol I/O. The private `on_peer_stream_reset` hook removes registry ownership before cancellation; late completion remains inert. _(src/qbm/http/2/protocol/server.h:768-789; src/qbm/http/2/http2.h:181-188,455-464)_
 - Reconnection is a RUN with a backoff, not a loop: `client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(100ms).with_max_attempts(5))` (`qb::http::RetryPolicy`, the redis shape; `set_auto_reconnect(bool)` keeps the policy). A loss fails the outstanding work with a 503 and what the failure callbacks push back is what the run reconnects for — attempt 1 at once, then the policy's waits, `on_retry(attempt, next_delay)` before each; exhausted, the waiting requests get `503 Reconnection attempts exhausted (N)` and nothing reconnects until the next `connect()` or push. A push made from a failure callback queues behind the scheduled attempt: never `connect()` from one to "retry faster". `is_reconnecting()` / `reconnect_attempts()` are the observable state. _(src/qbm/http/2/client.h:457-482)_
 
 ## HTTPS / TLS (needs `QB_HAS_SSL`)
@@ -436,6 +448,8 @@ cb.connect(qb::io::uri("ws://localhost:9000/"));
 
 WebSocket notes: a positive `connect` timeout is one deadline across transport and HTTP Upgrade; the ping timer starts only after the 101 is validated. An unoffered server `Sec-WebSocket-Extensions` header fails the handshake, and destroying a stack or `unique_ptr` client during transport connect is safe. `connected`, parsed-handshake/protocol `error`, and `disconnected` callbacks run after parser dispatch and may release the client; a transport connect failure or explicit pending `disconnect()` may report `error` synchronously. A request hook that cancels or replaces the attempt sends no Upgrade. A reconnect retires the old transport and clears its input/output buffers. The masking direction is enforced (client→server masked, server→client not — `operator<<` forces `masked=true` on outbound, do not pre-mask). Reassembly is capped at `protocol_limits::MAX_BODY_SIZE`; `set_max_payload_size(0)` removes the guard. `MessageClose` throws on reserved (`1004/1005/1006/1015`) or out-of-`[1000,4999]` codes. When handing an upgrade off to another actor, call `ctx->suppress_response()` so the routing context destructor does not send a moved-from HTTP response. Coroutine API: `qb::http::ws::coro_client`/`coro_session` with `co_await connect/receive/close_async`.
 
+A destroyed suspended WebSocket receive/next-frame/close awaiter makes its slot inactive; a successor can reserve it, while a genuinely concurrent live waiter still throws. An older awaiter cannot clear a newer reservation. Frame buffering remains bounded; abandoning a close waiter does not retract queued bytes. Close codes and UTF-8 reasons are validated before coroutine state is published, permitting a valid later close after rejection. No full allocation/serialization rollback or new actor-cancellation behavior is promised. Use `auto`/`co_await` and consistent rebuilt headers for the new concrete WebSocket awaiter types; ordinary HTTP callback factories retain their path. _(src/qbm/http/coro.h:93-112,182-218,232-259; src/qbm/http/ws/coro.h:422-475,857-912)_
+
 ## Clients (one-shot + persistent)
 
 ```cpp
@@ -458,6 +472,8 @@ client->set_verify_peer(false);                                      // BEFORE c
 ```
 
 `qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot helpers compare URI schemes case-insensitively for transport selection: unsupported schemes fail locally with 400, and HTTPS without SSL support fails locally with 503; neither opens a socket. Qb-io also resolves default ports for portless mixed-case HTTP(S) URLs (QB-919). A local rejection may invoke the callback before the helper returns; the coroutine awaiter schedules its continuation. Other failures synthesize 503 (cannot connect), 504 (timeout), or 502 (peer disconnect). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it bridges synchronous top-level code and tests, **not** code inside an already driven coroutine. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`. A coroutine parked on a client request shows as `"http"` in qb's `CoroutineScheduler::dump()` when its thread tracks suspensions (3.3).
+
+HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/timeout retires the old request and connect-callback cohort before user notification; new callback submissions belong to the next cycle. An explicit connect accepted during retirement starts after the old callback/protocol dispatch returns, and pending work may queue behind that intent with auto-reconnect disabled. Destruction abandons pending connect observers; explicit disconnect reports cancellation once. _(src/qbm/http/1.1/client.cpp:232-236,272-307,338-349,565-630,690-749)_
 
 ---
 

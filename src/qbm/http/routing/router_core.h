@@ -55,6 +55,8 @@ namespace qb::http {
  */
 template <typename SessionType>
 class RouterCore : public std::enable_shared_from_this<RouterCore<SessionType>> {
+    friend class Context<SessionType>;
+
 private:
     RadixTree<SessionType>                                  _radix_tree; ///< The radix tree used for efficient route matching.
     std::vector<std::shared_ptr<IHandlerNode<SessionType>>> _top_level_nodes;
@@ -77,6 +79,16 @@ private:
     /** @brief Callback invoked by the `Context` when request processing is fully finalized (after response is sent or context cancelled). */
     std::function<void(Context<SessionType> &)>               _on_request_finalized_callback;
     std::vector<typename Context<SessionType>::LifecycleHook> _router_lifecycle_hooks;
+
+    [[nodiscard]] std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>
+    get_retained_error_tasks(std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> previous_chain) const {
+        if (!_user_error_chain_explicitly_set)
+            return nullptr;
+        // This Context may still refer to names from a preceding compilation.
+        // Retain its chain, not the router's current generation, in the one
+        // shared error-list allocation already paid on this cold path.
+        return detail::make_owned_task_chain<SessionType>(std::move(previous_chain), _user_defined_error_chain);
+    }
 
     /**
      * @brief Builds the value for the RFC `Allow` response header from a set of methods.
@@ -410,8 +422,8 @@ public:
             const auto allow         = allowed_header_value(allowed_info->methods);
             ctx->response().status() = qb::http::status::METHOD_NOT_ALLOWED;
             ctx->response().set_header("Allow", allow);
-            tasks_to_execute =
-                std::make_shared<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>(_compiled_method_not_allowed_tasks);
+            tasks_to_execute = detail::make_owned_task_chain<SessionType>(
+                std::shared_ptr<const detail::RouteNameArena>(_radix_tree._name_arena), _compiled_method_not_allowed_tasks);
 
             LOG_HTTP_DEBUG("Route path matched but method is not allowed for: " << std::to_string(request_method) << " " << request_path_sv
                                                                                 << " (405; Allow: " << allow << ")");
@@ -427,6 +439,7 @@ public:
         }
 
         if (!tasks_to_execute || tasks_to_execute->empty()) {
+            ctx->adopt_task_chain_for_hooks(std::move(tasks_to_execute));
             // This is a critical state: no tasks for a matched route or even for 404.
             // Should ideally not happen if compile_default_not_found_handler ensures a task.
             LOG_HTTP_ERROR("Router critical error: No task chain available for " << std::to_string(request_method) << " " << request_path_sv);
@@ -439,8 +452,17 @@ public:
 
         // Context<SessionType>::log_task_chain_snapshot(*tasks_to_execute, "Initial routing decision", 0); // Removed debug log
 
-        ctx->execute_hook(qb::http::HookPoint::PRE_HANDLER_EXECUTION);
-        ctx->set_task_chain_and_start(std::move(tasks_to_execute));
+        if (ctx->_lifecycle_hooks.empty()) {
+            ctx->set_task_chain_and_start(std::move(tasks_to_execute));
+        } else {
+            ctx->adopt_task_chain_for_hooks(std::move(tasks_to_execute));
+            const auto before_hooks = ctx->completion_count();
+            ctx->execute_hook(qb::http::HookPoint::PRE_HANDLER_EXECUTION);
+            // A hook can complete/cancel, or already start an error chain.
+            // Do not restart or replace the operation it selected.
+            if (ctx->completion_count() == before_hooks)
+                ctx->start_adopted_task_chain();
+        }
         return ctx;
     }
 
