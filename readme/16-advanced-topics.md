@@ -174,7 +174,7 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 
 ## `string_view` and lifetime
 
-The retired `RequestView`/`ResponseView` types are not part of this API. `header()` returns a borrowed `const std::string&` into the owning message's header map; `Body::as<std::string_view>()` returns a borrowed view into the owning body's pipe. Neither accessor transfers ownership.
+The retired `RequestView`/`ResponseView` types are not part of this API. For a present header, `header()` returns a borrowed `const std::string&` into the owning message's header map; for an absent header, it returns a reference to a process-wide static empty string. `Body::as<std::string_view>()` returns a borrowed view into the owning body's pipe. Neither accessor transfers ownership.
 <!-- src: qbm/http/src/qbm/http/headers.h:143-159,306-313; qbm/http/src/qbm/http/body.cpp:707-710 -->
 
 - While the owning message and its storage stay alive and unmodified, using those borrowed values is safe. Mutating a header map or body can invalidate a reference or view even inside one handler call.
