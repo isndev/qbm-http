@@ -103,6 +103,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **API documentation checks reject comment-only names and invalid later citations (Huly QB-561, QB-562).**
+  The shipped guard indexes C++ code without comments or literals and examines every
+  citation on a line before accepting it.
 - **Module build and CI paths cover the code they claim to check (Huly QB-557–560, QB-621).**
   The C llhttp parser receives sanitizer compile flags; scheduled tests check out paired
   `develop` branches; doc-lint runs after checker or workflow edits. The pull request template
