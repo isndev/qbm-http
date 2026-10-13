@@ -11,7 +11,7 @@ Closes #
 
 ## Checks
 
-- [ ] Builds clean, and `ctest -R qbm-http` passes. This module is not configurable standalone: build it from the [qb-dev](https://github.com/isndev/qb) superproject, not from this directory.
+- [ ] Builds clean, and `ctest -R qbm-http` passes. This module is not configurable standalone; follow the [public qb + qbm-http superbuild recipe](ci/README.md) from a checkout of both repositories.
 - [ ] Formatted with the repository `.clang-format`.
 - [ ] A bug fix comes with a test that **fails without the fix**. Say so if you injected the defect and watched the test go red; a test nobody has seen fail is not yet evidence.
 - [ ] Documentation touched? `./scripts/doc-lint.sh` passes. Every `file.h:NNN` citation must land on the line that contains the symbol it names.

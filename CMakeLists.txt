@@ -62,6 +62,11 @@ endif()
 
 # Add the internal llhttp dependency
 add_subdirectory(not-qb/llhttp)
+# llhttp is a separate C target. qbm-http's PRIVATE flags cannot instrument its
+# already-compiled objects, so apply the same sanitizer profile explicitly.
+if(QB_SANITIZE_COMPILE_OPTS)
+    target_compile_options(llhttp PRIVATE ${QB_SANITIZE_COMPILE_OPTS})
+endif()
 
 set(QBM_HTTP_EXTRA_SOURCES)
 set(QBM_HTTP_EXTRA_DEPENDS)

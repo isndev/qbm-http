@@ -12,7 +12,7 @@ TLS is not bolted onto qbm-http; it is the qb-io secure transport layer (`qb::io
 
 HTTPS, secure WebSocket (`wss://`), HTTP/2, HTTP/3, and JWT/auth are all **compiled only when the framework is built with OpenSSL**. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<qbm/http/http.h>` resolve the same way in your code as in the module.
 
-<!-- src: qbm/http/CMakeLists.txt:74-82; qbm/http/src/qbm/http/http.h:45-48 -->
+<!-- src: qbm/http/CMakeLists.txt:79-87; qbm/http/src/qbm/http/http.h:45-48 -->
 ```cpp
 #include <qbm/http/http.h>
 
