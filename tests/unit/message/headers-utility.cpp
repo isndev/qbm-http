@@ -7,7 +7,9 @@
 #include <utility>
 #include <vector>
 
+#ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h>
+#endif
 #include <qbm/http/headers.h>
 #include <qbm/http/request.h>
 #include <qbm/http/response.h>
@@ -19,11 +21,13 @@ namespace {
 std::vector<std::string>
 supported_encodings() {
     std::vector<std::string> out;
+#ifdef QB_HAS_COMPRESSION
     for (const auto &factory : qb::compression::builtin::get_compress_factories()) {
         if (factory) {
             out.push_back(factory->algorithm());
         }
     }
+#endif
     return out;
 }
 
@@ -43,6 +47,9 @@ expect_runtime_error_containing(Fn &&fn, std::string_view expected) {
 
 TEST(HeadersUtility, AcceptEncodingDoesNotAdvertiseChunked) {
     const std::string advertised = qb::http::accept_encoding();
+#ifndef QB_HAS_COMPRESSION
+    EXPECT_TRUE(advertised.empty());
+#endif
     EXPECT_EQ(advertised.find("chunked"), std::string::npos);
     // "identity" is a transfer/content coding the server never advertises as a
     // compression algorithm either.
