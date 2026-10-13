@@ -2379,8 +2379,9 @@ check_silent_completion_drain(SilentCompletion transition, bool observe_hooks = 
     }
     static_cast<SessionBase &>(*session).on(qb::io::async::event::eos{});
     EXPECT_EQ(member_cleanup, 3) << "a repeated EOS has no further owner to release";
-    if (observe_hooks)
+    if (observe_hooks) {
         EXPECT_EQ(post_send, 3);
+    }
     ASSERT_TRUE(
         ServerThread::pump_until([&] { return std::all_of(replies.begin(), replies.end(), [](auto &reply) { return reply->replies == 1; }); }));
     for (std::size_t index = 0; index != replies.size(); ++index) {

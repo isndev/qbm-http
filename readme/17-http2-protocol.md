@@ -230,7 +230,7 @@ The rate-limited idle-stream sweep remains in `pending_write`: no more often tha
 <!-- src: qbm/http/src/qbm/http/2/http2.h:120-175,375-419; qbm/http/src/qbm/http/routing/context.h:487-497 -->
 
 Lifecycle controls exercise silent completion from POST, `REQUEST_COMPLETE` and member destruction, including the no-hook case; protocol clearing before another candidate; and multiple batches from valid stream waves that leave more than 50 retained contexts. The earlier extraction control preserves its one-POST behavior.
-<!-- src: qbm/http/tests/system/http2/http2-client.cpp:2405-2407,2409-2411,2413-2415,2417-2419,2421-2498,2505-2631,2176-2252 -->
+<!-- src: qbm/http/tests/system/http2/http2-client.cpp:2406-2408,2410-2412,2414-2416,2418-2420,2422-2499,2506-2632,2176-2252 -->
 
 The sweep is **opportunistic**: it runs only when there is write activity. A purely idle connection with no writes never triggers the stream-level sweep — it is reclaimed instead by the 60 s `DEFAULT_SESSION_TIMEOUT`. Per-stream timestamps (`created_at`, `last_activity`) and `_last_stream_cleanup` use `std::chrono::steady_clock::time_point` directly, even though the durations they are compared against are `qb::duration`; this is a deliberate mixed time model in this slice.
 <!-- src: qbm/http/src/qbm/http/2/http2.h:116,227,375-388; qbm/http/src/qbm/http/2/protocol/stream.h:146-147,164-165 -->
