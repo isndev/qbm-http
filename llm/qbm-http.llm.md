@@ -114,7 +114,7 @@ int code = res.status().code();                         // 200..., st.str() -> "
 ```
 
 - `Body`/`Headers` are **base classes, not members**: call `req.set_header(...)` / `req.body()` directly. `headers()` returns the raw map for bulk inspection; after direct mutation call `refresh_content_type()`.
-- Body extraction is closed: only `std::string`, `std::string_view`, `qb::json`, `Multipart`, `Form` convert out; anything else is a compile error. Two accessors share that set — `as<T>()` **throws** on malformed input, `try_as<T>()` returns `std::optional<T>` and is `noexcept`. **Use `try_as<T>()` for anything a client sent you**, so a bad payload becomes a `nullopt` you turn into a 400 instead of an exception crossing your handler. Assignment/`<<` accept those plus `const char*`, `std::vector<char>`, `Chunk`, and arithmetic (stringified).
+- Body extraction is closed: only `std::string`, `std::string_view`, `qb::json`, `Multipart`, `Form` convert out; anything else is a compile error. Two accessors share that set — `as<T>()` **throws** on malformed input, `try_as<T>()` returns `std::optional<T>` and is `noexcept`. **Use `try_as<T>()` for anything a client sent you**, so a bad payload becomes a `nullopt` you turn into a 400 instead of an exception crossing your handler. Append/constructor accepts `Body`, byte-like strings/ranges, `Chunk`, `Multipart`, `qb::json`, and arithmetic; assignment has explicit support for `std::string`, `std::vector<char>`, `qb::json`, `Multipart`, `Form`, `std::string_view`, and `const char*`. `Form` is assignment-only; arithmetic is append-only.
 - **DELETE is `qb::http::method::DEL`** (`delete` is a keyword); `method::DELETE_METHOD` is an alias. Default `Method` is `UNINITIALIZED`; `Request{uri}` defaults to `GET`.
 
 ## Routing
@@ -146,7 +146,7 @@ router().get("/files/*path", [](auto ctx) {
   });
   ```
 - Precedence: static > parameter > wildcard. A wildcard not last, an empty segment, or a duplicate capture name throws `std::invalid_argument` from `compile()`.
-- **`router().compile()` is mandatory** after all routes/groups/controllers/middleware are declared and before serving (auto-compile on first match is a safety net, not a substitute). Mutating after compile resets the compiled flag.
+- **`router().compile()` is mandatory** after all routes/groups/controllers/middleware are declared and before serving (auto-compile on first match is a safety net, not a substitute). Router-facade mutations reset the compiled flag; direct mutations through retained group/controller handles do not, so recompile explicitly.
 - Class-based handler: implement `qb::http::ICustomRoute<S>` — `process(ctx)` (must `complete()`), `name()`, `cancel()` (must NOT `complete()`). Handler/task instances are **shared across concurrent requests**; keep per-request state on the `Context`, never on the task.
 
 Groups and controllers share the same verb API:
@@ -311,7 +311,7 @@ router().use(qb::http::validation_middleware<qb::http::DefaultSession>(rv));  //
 - Cached schema numeric rules own a typed scalar bound selected when the rule is compiled. Standalone numeric rules retain their JSON storage. Both paths report a non-finite programmatic bound before the nonnumeric-value pass-through and share exact comparison and diagnostic logic.
 - A schema node with valid `minLength` and `maxLength` shares one Unicode count in its cached evaluation. It still reports both keyword errors in order; standalone and parameter rules retain their own evaluation.
 - Most primitive rules are type-gated and pass silently for the wrong kind — always assert `type` first.
-- `SchemaValidator` caches compiled rules lazily and is not thread-safe to first-touch; warm it on the owning thread or use one per core.
+- `SchemaValidator` caches compiled rules lazily and mutates a recursion-depth counter on every validation. Warm-up does not make it safe to share across cores; use one per core or serialize every call.
 
 ## HTTP/2 (needs `QB_HAS_SSL`, TLS-only, ALPN `h2`)
 

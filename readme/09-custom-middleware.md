@@ -319,7 +319,8 @@ You register middleware with `use()` on a `Router`, `RouteGroup`, or `Controller
 <!-- src: qbm/http/src/qbm/http/routing/router.h:154 (coro), :234 (sync functional), :248 (shared_ptr), :259 (in-place) -->
 
 ```cpp
-// 1. Coroutine (ctx, next) -> task<void> handler — co_await inside the middleware.
+// 1. Coroutine (ctx) -> qb::io::async::task<void> handler.
+//    A normal return continues the chain automatically.
 //    Selected by the CoroMiddlewareHandler concept (see the coroutine section above).
 router.use(my_coro_mw, "AuthGate");
 

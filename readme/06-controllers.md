@@ -178,7 +178,7 @@ Effective path = `/api/v1/users/…`; middleware runs outermost-first: global �
 
 <!-- src: qbm/http/src/qbm/http/routing/controller.h:327-372, tests/unit/routing/router-controller.cpp:549-568, 763-786 -->
 
-Middleware declared on a controller applies to **all** routes the controller defines, and only those routes. Declare it from inside `initialize_routes()` with `this->use(...)`, or add it after mounting through the returned handle. **Four** overloads, matching the router and group APIs: a coroutine `(ctx, next) -> task<void>` handler, a sync functional `(ctx, next)` lambda, a `shared_ptr<IMiddleware>`, and in-place construction from the middleware type and its ctor args. The coroutine and sync forms are *separate* overloads selected by concept, not one unified overload. The example below shows three of the four:
+Middleware declared on a controller applies to **all** routes the controller defines, and only those routes. Declare it from inside `initialize_routes()` with `this->use(...)`, or add it after mounting through the returned handle. **Four** overloads, matching the router and group APIs: a coroutine `(ctx) -> qb::io::async::task<void>` handler, a sync functional `(ctx, next)` lambda, a `shared_ptr<IMiddleware>`, and in-place construction from the middleware type and its ctor args. The coroutine and sync forms are *separate* overloads selected by concept, not one unified overload. The example below shows three of the four:
 
 <!-- src: qbm/http/src/qbm/http/routing/controller.h:218 (coro), :327 (sync functional), :342 (shared_ptr), :370 (in-place) -->
 
@@ -260,7 +260,7 @@ You rarely touch this, but the mechanics explain a few behaviors worth knowing. 
 3. It combines inherited middleware with the controller's own middleware into one task list.
 4. It compiles each declared route against that base path and task list, registering the flattened chains in the radix tree.
 
-`compile()` is idempotent and safe to call repeatedly; `initialize_routes()` still fires only once. Any mutation of the routing tree after compilation resets the compiled flag, and `route()` auto-compiles on first use if you forgot — but call `compile()` explicitly once during setup so the cost is paid at startup, not on the first request. See [Routing overview](./03-routing-overview.md) for the compile model.
+`compile()` is idempotent and safe to call repeatedly; `initialize_routes()` still fires only once. Mutations made through the `Router` facade reset its compiled flag, but direct changes through a retained controller handle do not. Call `compile()` explicitly after those changes and once during setup so the cost is paid at startup, not on the first request. See [Routing overview](./03-routing-overview.md) for the compile model.
 
 ## Pitfalls
 

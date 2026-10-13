@@ -254,16 +254,17 @@ It is set in exactly the places the session knows the response can no longer be 
 
 | Trigger | What sets it |
 |:---|:---|
-| Your code disconnects the session while a request is incomplete | `session::on(disconnected)`, and **only** for `DisconnectedReason::ByUser` |
+| The peer closes the socket while a request is incomplete | `session::on(disconnected)`, on the `DisconnectedReason::ByUser` (`0`) path used by a TCP EOF |
 | The session is handed to another handler — a WebSocket upgrade, an ownership transfer | `session::on(extracted)` calls `_context->cancel()` unless `suppress_response()` was called |
 | Your own code | `ctx->cancel()` |
 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:395-398 (disconnected: cancel only when ByUser and incomplete), :359-362 (extracted: cancel then reset) -->
 
-Note what is **not** in that table: a peer that simply closes the socket, and a session inactivity timeout. The timeout
-handler disconnects with `DisconnectedReason::ByTimeout`, which does not take the `ByUser` branch. A long-running
-handler learns that the client went away when its `complete()` finds nothing to write to, not before — so
-`is_cancelled()` is a useful check but not a reliable liveness signal.
+Note what is **not** in that table: an explicit local `disconnect()` and a session inactivity timeout. qb-io remaps a
+local disconnect's default/zero reason to `DisconnectedReason::BySystem` (`1`); the timeout handler uses
+`DisconnectedReason::ByTimeout`. Neither takes the HTTP/1.1 session's reason-`0` cancellation branch. A long-running
+handler therefore cannot treat `is_cancelled()` as a general liveness signal: it is set for peer EOF and extraction,
+but not for either local teardown path.
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:280-300 (timeout disconnects with ByTimeout) -->
 
 ### `http_awaiter` — the client's awaiter is not cancellation-aware
@@ -382,8 +383,8 @@ finish.
 - **Assuming `kill()` cancels a route coroutine.** It does not — the route wrapper spawns outside the actor's scope.
 - **Leaving a client call's timeout at the default.** `qb::duration::zero()` means no deadline, and it holds the
   request's connection open for as long as the upstream wants.
-- **Treating `is_cancelled()` as liveness.** It is set on a user-initiated disconnect and on session extraction — not
-  on a peer close and not on an inactivity timeout.
+- **Treating `is_cancelled()` as liveness.** It is set on peer EOF and session extraction, but not on an explicit local
+  disconnect or an inactivity timeout.
 - **Capturing `this` into a coroutine.** The `ctx` shared pointer is the safe handle; a raw pointer to the server
   actor is not.
 - **Blocking inside a handler for any other reason** — a synchronous file read, a third-party library, a lock. One

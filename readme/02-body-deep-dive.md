@@ -116,7 +116,7 @@ qb::http::Body body{"chunk-", 1, "-of-", 3};   // "chunk-1-of-3"
 | `std::string &&` | copy bytes, then `str.clear()` | yes |
 | `std::string_view` (lvalue or rvalue) | copy the viewed bytes | rvalue overload `noexcept` |
 | `const char (&)[N]` | copy literal | yes |
-| `const char *` | copy, `nullptr` yields empty body | no |
+| `const char *` | copy (`nullptr` is accepted only after it has this pointer type) | no |
 | `std::vector<char> const &` | copy bytes | no |
 | `std::vector<char> &&` | copy bytes, then `vec.clear()` | yes |
 | `qb::json` (const or rvalue) | serialize via `<<` (compact `dump()`); leave body empty on failure | no for both |
@@ -135,8 +135,12 @@ body = std::move(tmp);              // move; tmp is now empty
 
 body = qb::json{{"ok", true}};      // serialized to {"ok":true}
 body = "literal";                   // const char[N] fast path
-body = nullptr;                     // body is now empty
+body.clear();                       // empty the body explicitly
 ```
+
+Do not write `body = nullptr`: the literal has type `std::nullptr_t` and selects the generic assignment template, for
+which no definition exists. A value already typed as `const char *` uses the supported specialization, including when
+that pointer is null, but `clear()` states the intent directly.
 
 A `std::string_view` never owns its data, so the rvalue overload is a copy in disguise — there is nothing to steal. The source string/vector is the only thing emptied on move.
 

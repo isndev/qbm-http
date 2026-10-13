@@ -37,7 +37,7 @@ router.compile();
 ```
 <!-- src: qbm/http/src/qbm/http/middleware/cors.h:534 -->
 
-`Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a coroutine `(ctx, next) -> task<void>` handler, a sync `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the four overloads.
+`Router::use` accepts a `std::shared_ptr<IMiddleware<SessionType>>` (what every factory returns), a coroutine `(ctx) -> qb::io::async::task<void>` handler, a sync `(ctx, next)` lambda, or in-place constructor arguments. See [the middleware overview](./07-middleware.md) for the four overloads.
 
 ## CORS
 

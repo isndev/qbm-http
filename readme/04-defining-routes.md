@@ -266,7 +266,7 @@ router().get("/slow", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSess
 });
 ```
 
-The request is held open until that `complete()` runs. If your async path can fail, complete with `AsyncTaskResult::ERROR` (or call a response helper such as `ctx->internal_server_error(...)`) so the configured error chain runs — see [Error handling strategies](./13-error-handling.md).
+The request is held open until that `complete()` runs. If your async path can fail, complete with `AsyncTaskResult::ERROR` to run the configured error chain. To send a terminal response directly instead, call a helper such as `ctx->internal_server_error(...)`; helpers finalize with `COMPLETE` and do not enter the error chain. See [Error handling strategies](./13-error-handling.md).
 
 ### Coroutine routes
 

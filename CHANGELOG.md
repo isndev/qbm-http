@@ -208,6 +208,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Documentation
 
+- **The HTTP book and agent reference now match the shipped routing, body, validation, cancellation, and WebSocket contracts (Huly QB-600–606, QB-615, QB-618–620, QB-622).** Coroutine middleware takes only `ctx`; direct group/controller mutations require an explicit recompile; schema validators remain core-local; Body append and assignment sets are distinct; cancellation and error-result paths now state their actual status behavior. WebSocket examples use public headers, `qb::io::uri`, and the callback event argument, and the support policy no longer embeds a stale minor line.
+
 - **`content_encoding()` says what it does (Huly QB-100).** The API sheet said "no q-value weighting" and
   `headers.h` said q-values were not parsed: q=0 or a malformed q refuses a coding, and among the acceptable
   codings the FIRST in the header's order wins, not the highest q -- `CompressionMiddleware` ranks by q itself.

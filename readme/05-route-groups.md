@@ -12,7 +12,7 @@ A `qb::http::RouteGroup<SessionType>` is a non-terminal node in the routing tree
 
 `RouteGroup` shares the same fluent route-definition API as the [`Router`](./03-routing-overview.md) and [`Controller`](./06-controllers.md): `get`, `post`, `put`, `del`, `patch`, `options`, `head`, `add_route`, the typed `ICustomRoute` overloads, and four `use()` overloads for middleware. Everything you can do at the router root, you can do on a group — relative to the group's prefix.
 
-Groups are part of the routing tree, so they obey the same compile rule as routes: declare every group, route, controller, and middleware first, then call `router.compile()` once. Any definition mutation resets the compiled flag (`_is_compiled = false`); `route()` auto-compiles on first use if you forgot, but call `compile()` explicitly so the cost is paid at startup, not on the first request.
+Groups are part of the routing tree, so they obey the same compile rule as routes: declare every group, route, controller, and middleware first, then call `router.compile()` once. Router-facade mutations reset its compiled flag; direct mutations through a retained `RouteGroup` do not, so call `router.compile()` explicitly after them. `route()` auto-compiles only when that flag is false; compile explicitly so the cost is paid at startup, not on the first request.
 
 <!-- src: qbm/http/src/qbm/http/routing/route_group.h:49-95 -->
 
@@ -76,8 +76,9 @@ The reason groups matter beyond tidiness is shared middleware. Call `use()` on a
 
 <!-- src: qbm/http/src/qbm/http/routing/route_group.h:148 (coro), :251 (sync functional), :267 (shared_ptr), :297 (in-place) -->
 ```cpp
-// 1. Coroutine middleware (ctx, next) -> task<void>; co_await inside it.
-group->use([](auto ctx, auto next) -> qb::http::task<void> { /* co_await ... */ next(); }, "auth");
+// 1. Coroutine middleware (ctx) -> qb::io::async::task<void>.
+//    Normal coroutine return continues the chain automatically.
+group->use([](auto ctx) -> qb::io::async::task<void> { /* co_await ... */ co_return; }, "auth");
 
 // 2. Sync lambda middleware (ctx, next) -> void; second arg names it for logs.
 group->use([](auto ctx, auto next) { /* ... */ next(); }, "trace");
@@ -91,7 +92,7 @@ group->use<MyMiddleware>(/* ctor args */);
 
 Overloads 1 and 2 are **separate** overloads, selected by concept (`CoroMiddlewareHandler` vs `SyncMiddleware`) — unlike the verb methods (`get`, `post`, …), there is no single unified overload covering both.
 
-The lambda form takes `(ctx, next)` — invoke `next()` to pass control down the chain, or set a response and call `ctx->complete(qb::http::AsyncTaskResult::COMPLETE)` to short-circuit. See [Middleware overview](./07-middleware.md) for the full contract and [Standard middleware](./08-standard-middleware.md) for the built-in handlers (auth, CORS, rate limiting) you typically mount on a group.
+The synchronous lambda form takes `(ctx, next)` — invoke `next()` to pass control down the chain, or set a response and call `ctx->complete(qb::http::AsyncTaskResult::COMPLETE)` to short-circuit. The coroutine form takes only `ctx`; normal return continues automatically. See [Middleware overview](./07-middleware.md) for the full contract and [Standard middleware](./08-standard-middleware.md) for the built-in handlers (auth, CORS, rate limiting) you typically mount on a group.
 
 ### Inheritance and execution order
 
@@ -165,7 +166,7 @@ Path prefixes accumulate as you descend; middleware chains build up the same way
 
 ## Pitfalls
 
-- **Forgetting `compile()`.** A group's prefix and middleware are flattened into the radix tree only at compile time. Declaring a group after `compile()` has run leaves it unrouted until you recompile; declaring one before invalidates the compiled flag, which `compile()` (or the first `route()`) then rebuilds.
+- **Forgetting `compile()`.** A group's prefix and middleware are flattened into the radix tree only at compile time. A group added through `Router::group()` invalidates the compiled flag; later direct mutations through the returned group handle do not. Recompile explicitly after either form.
 - **Dropping the returned pointer.** `group()` and `controller()` are `[[nodiscard]]`. The group lives in the tree regardless, but if you discard the `shared_ptr` you have no handle to add routes or middleware to it. Capture it.
 - **Expecting sibling inheritance.** Middleware flows down to descendants only. Two sibling groups under the same parent inherit the parent's stack but never each other's. Put shared middleware on the common ancestor.
 - **Assuming middleware order is alphabetical or registration-global.** Order is structural: parent-before-child, and within a node, declaration order. The 404 and 405 chains additionally inherit root-group (global) middleware, but a user-defined error chain set via `set_error_task_chain` does **not** — include those behaviors explicitly there. See [Error handling](./13-error-handling.md).
