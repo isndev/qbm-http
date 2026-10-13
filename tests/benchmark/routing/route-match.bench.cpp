@@ -19,11 +19,12 @@
  *   - route-table SIZE: how many sibling routes the radix tree carries.
  *   - middleware-chain DEPTH: how many global pass-through middlewares run before
  *     the matched handler.
+ *   - configured lifecycle hooks (0/1/8) and synchronous conditional selection.
  *
  * Per-iteration setup (building the Request, resetting the session) is hoisted out
  * of the timed region with PauseTiming/ResumeTiming so the reported number isolates
- * `route()`. One out-of-loop correctness assert guards against a bench that silently
- * stops matching and reports bogus throughput.
+ * `route()`. Out-of-loop probes check the response, handler count, decoded path
+ * parameters, hook phases and conditional branch before reporting a number.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -42,12 +43,18 @@
  */
 
 #include <benchmark/benchmark.h>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 
-#include <qbm/http/http.h>    // qb::http::Request, Response, method, status
+#include <qbm/http/http.h> // qb::http::Request, Response, method, status
+#include <qbm/http/middleware/conditional.h>
 #include <qbm/http/routing.h> // qb::http::Router, Context
 
 namespace {
@@ -58,14 +65,20 @@ namespace {
 // can assert on) so the bench measures route(), not session bookkeeping.
 // ---------------------------------------------------------------------------
 struct BenchSession {
-    qb::http::Response _response;
-    qb::http::status   _last_status = qb::http::status::OK;
-    bool               _handler_ran = false;
+    qb::http::Response         _response;
+    qb::http::status           _last_status     = qb::http::status::OK;
+    std::size_t                _response_writes = 0;
+    std::size_t                _handler_calls   = 0;
+    std::size_t                _if_calls        = 0;
+    std::size_t                _else_calls      = 0;
+    std::array<std::size_t, 3> _hook_calls{};
+    std::size_t                _hook_order_errors = 0;
 
     BenchSession &
     operator<<(const qb::http::Response &response) {
         _response    = response;
         _last_status = response.status();
+        ++_response_writes;
         return *this;
     }
 
@@ -76,23 +89,56 @@ struct BenchSession {
 
     void
     reset() {
-        _response    = qb::http::Response();
-        _last_status = qb::http::status::OK;
-        _handler_ran = false;
+        _response          = qb::http::Response();
+        _last_status       = qb::http::status::OK;
+        _response_writes   = 0;
+        _handler_calls     = 0;
+        _if_calls          = 0;
+        _else_calls        = 0;
+        _hook_calls        = {};
+        _hook_order_errors = 0;
     }
 };
 
-// A trivial handler that marks the session and finalizes 200 OK — the same shape as
-// the seed tests' make_verifying_handler, minus the param snapshot we do not need.
+// A trivial handler that marks the session and finalizes 200 OK.
 auto
 ok_handler() {
     return [](std::shared_ptr<qb::http::Context<BenchSession>> ctx) {
         if (auto s = ctx->session())
-            s->_handler_ran = true;
+            ++s->_handler_calls;
         ctx->response().status() = qb::http::status::OK;
         ctx->complete();
     };
 }
+
+// A healthy synchronous conditional child: record selection and continue the
+// same request. Both branches share this work; only the selected counter differs.
+class SelectedChild final : public qb::http::IMiddleware<BenchSession> {
+    bool _is_if;
+
+public:
+    explicit SelectedChild(bool is_if)
+        : _is_if(is_if) {}
+
+    void
+    process(std::shared_ptr<qb::http::Context<BenchSession>> ctx) override {
+        if (auto s = ctx->session()) {
+            if (_is_if)
+                ++s->_if_calls;
+            else
+                ++s->_else_calls;
+        }
+        ctx->complete(qb::http::AsyncTaskResult::CONTINUE);
+    }
+
+    [[nodiscard]] std::string
+    name() const override {
+        return _is_if ? "SelectedIf" : "SelectedElse";
+    }
+
+    void
+    cancel() override {}
+};
 
 // A pass-through global middleware: the cost the chain adds per hop is exactly one
 // CONTINUE through the task pump (mirrors AllInOneMiddleware::Behavior::CONTINUE).
@@ -107,10 +153,45 @@ add_passthrough_middleware(qb::http::Router<BenchSession> &router, int depth) {
 // Build a router carrying `extra_static` filler static routes at /pad/N plus the
 // canonical static/param/wildcard/mixed routes the matcher spec pins, then compile.
 std::unique_ptr<qb::http::Router<BenchSession>>
-make_router(int extra_static, int mw_depth) {
+make_router(int extra_static, int mw_depth, int hook_count, bool conditional) {
     auto router = std::make_unique<qb::http::Router<BenchSession>>();
 
     add_passthrough_middleware(*router, mw_depth);
+    for (int i = 0; i < hook_count; ++i) {
+        // The mutable cookie is copied into each Context by the router. It
+        // verifies phase order without registering a hook during dispatch.
+        router->add_lifecycle_hook([cookie = 0](auto &ctx, qb::http::HookPoint point) mutable {
+            if (auto s = ctx.session()) {
+                switch (point) {
+                    case qb::http::HookPoint::PRE_ROUTING:
+                        if (cookie != 0)
+                            ++s->_hook_order_errors;
+                        cookie = 1;
+                        ++s->_hook_calls[0];
+                        break;
+                    case qb::http::HookPoint::PRE_HANDLER_EXECUTION:
+                        if (cookie != 1)
+                            ++s->_hook_order_errors;
+                        cookie = 2;
+                        ++s->_hook_calls[1];
+                        break;
+                    case qb::http::HookPoint::POST_HANDLER_EXECUTION:
+                        if (cookie != 2)
+                            ++s->_hook_order_errors;
+                        cookie = 3;
+                        ++s->_hook_calls[2];
+                        break;
+                    default:
+                        break;
+                }
+            }
+        });
+    }
+    if (conditional) {
+        router->use(qb::http::conditional_middleware<BenchSession>([](const auto &ctx) { return ctx->request().header("X-Branch") == "if"; },
+                                                                   std::make_shared<SelectedChild>(true),
+                                                                   std::make_shared<SelectedChild>(false)));
+    }
 
     // Filler static routes to grow the radix tree breadth (route-table size sweep).
     for (int i = 0; i < extra_static; ++i)
@@ -127,21 +208,50 @@ make_router(int extra_static, int mw_depth) {
 }
 
 // Drive one request through the matcher with setup hoisted out of the timed region.
-void
-run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::method m, const std::string &path, qb::http::status expected) {
-    auto router = make_router(extra_static, mw_depth);
+using ExpectedParams = std::initializer_list<std::pair<std::string_view, std::string_view>>;
 
-    // One out-of-loop correctness assert: a broken matcher must not report numbers.
+void
+run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::method m, const std::string &path, qb::http::status expected,
+          ExpectedParams expected_params = {}, int hook_count = 0, int conditional_branch = -1) {
+    auto router = make_router(extra_static, mw_depth, hook_count, conditional_branch >= 0);
+
+    // One out-of-loop oracle covers the full result, not just the response status.
     {
         auto              session = std::make_shared<BenchSession>();
         qb::http::Request probe;
-        probe.method()      = m;
-        probe.uri()         = qb::io::uri(path);
+        probe.method() = m;
+        probe.uri()    = qb::io::uri(path);
+        if (conditional_branch >= 0)
+            probe.set_header("X-Branch", conditional_branch == 1 ? "if" : "else");
         probe.major_version = 1;
         probe.minor_version = 1;
-        (void) router->route(session, probe);
-        if (session->_last_status != expected) {
-            state.SkipWithError("route() produced unexpected status for path: " + path);
+        auto ctx            = router->route(session, probe);
+        if (!ctx || session->_last_status != expected || session->_response_writes != 1u
+            || session->_handler_calls != (expected == qb::http::status::OK ? 1u : 0u)) {
+            state.SkipWithError("route() did not produce one expected response/handler for path: " + path);
+            return;
+        }
+        if (ctx->path_parameters().size() != expected_params.size()) {
+            state.SkipWithError("route() produced unexpected parameter count for path: " + path);
+            return;
+        }
+        for (const auto &[key, value] : expected_params) {
+            if (ctx->path_parameters().get(key) != value) {
+                state.SkipWithError("route() produced incorrect decoded parameter for path: " + path);
+                return;
+            }
+        }
+        if (session->_hook_order_errors != 0u
+            || session->_hook_calls
+                   != std::array<std::size_t, 3>{
+                       static_cast<std::size_t>(hook_count), static_cast<std::size_t>(hook_count), static_cast<std::size_t>(hook_count)
+                   }) {
+            state.SkipWithError("route() did not invoke every configured lifecycle hook once per phase");
+            return;
+        }
+        if (session->_if_calls != static_cast<std::size_t>(conditional_branch == 1)
+            || session->_else_calls != static_cast<std::size_t>(conditional_branch == 0)) {
+            state.SkipWithError("route() selected the wrong conditional middleware child");
             return;
         }
     }
@@ -152,8 +262,10 @@ run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::met
         state.PauseTiming();
         session->reset();
         qb::http::Request request;
-        request.method()      = m;
-        request.uri()         = qb::io::uri(path);
+        request.method() = m;
+        request.uri()    = qb::io::uri(path);
+        if (conditional_branch >= 0)
+            request.set_header("X-Branch", conditional_branch == 1 ? "if" : "else");
         request.major_version = 1;
         request.minor_version = 1;
         state.ResumeTiming();
@@ -161,6 +273,11 @@ run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::met
         auto ctx = router->route(session, request);
         benchmark::DoNotOptimize(ctx);
         benchmark::DoNotOptimize(session->_last_status);
+        benchmark::DoNotOptimize(session->_handler_calls);
+        benchmark::DoNotOptimize(session->_hook_calls);
+        benchmark::DoNotOptimize(session->_hook_order_errors);
+        benchmark::DoNotOptimize(session->_if_calls);
+        benchmark::DoNotOptimize(session->_else_calls);
     }
 
     state.SetItemsProcessed(state.iterations());
@@ -175,18 +292,19 @@ BM_Route_StaticHit(benchmark::State &state) {
 
 void
 BM_Route_ParamHit(benchmark::State &state) {
-    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/users/12345", qb::http::status::OK);
+    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/users/12345", qb::http::status::OK, {{"id", "12345"}});
 }
 
 void
 BM_Route_WildcardHit(benchmark::State &state) {
-    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/files/documents/reports/q4.pdf", qb::http::status::OK);
+    run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/files/documents/reports/q4.pdf", qb::http::status::OK,
+              {{"filepath", "documents/reports/q4.pdf"}});
 }
 
 void
 BM_Route_MixedParamWildcardHit(benchmark::State &state) {
     run_match(state, static_cast<int>(state.range(0)), 0, qb::http::method::GET, "/data/user123/details/path/to/item.json",
-              qb::http::status::OK);
+              qb::http::status::OK, {{"user", "user123"}, {"itemPath", "path/to/item.json"}});
 }
 
 void
@@ -203,6 +321,40 @@ BM_Route_StaticHitMiddlewareDepth(benchmark::State &state) {
     run_match(state, 0, static_cast<int>(state.range(0)), qb::http::method::GET, "/r/specific", qb::http::status::OK);
 }
 
+// Fixed table/depth cells isolate the per-context lifecycle cost from the
+// existing route-size and middleware-depth sweeps.
+void
+BM_Route_StaticHitLifecycleHooks(benchmark::State &state) {
+    run_match(state, 0, 0, qb::http::method::GET, "/r/specific", qb::http::status::OK, {}, static_cast<int>(state.range(0)));
+}
+
+void
+BM_Route_ParamHitLifecycleHooks(benchmark::State &state) {
+    run_match(state, 256, 0, qb::http::method::GET, "/users/user%20123", qb::http::status::OK, {{"id", "user 123"}},
+              static_cast<int>(state.range(0)));
+}
+
+void
+BM_Route_MixedParamWildcardHitLifecycleHooks(benchmark::State &state) {
+    run_match(state, 256, 0, qb::http::method::GET, "/data/user%20123/details/path%20to/item.json", qb::http::status::OK,
+              {{"user", "user 123"}, {"itemPath", "path to/item.json"}}, static_cast<int>(state.range(0)));
+}
+
+void
+BM_Route_StaticHitMiddlewareDepth8LifecycleHooks(benchmark::State &state) {
+    run_match(state, 0, 8, qb::http::method::GET, "/r/specific", qb::http::status::OK, {}, static_cast<int>(state.range(0)));
+}
+
+void
+BM_Route_ConditionalSelectedIf(benchmark::State &state) {
+    run_match(state, 0, 0, qb::http::method::GET, "/r/specific", qb::http::status::OK, {}, 0, 1);
+}
+
+void
+BM_Route_ConditionalSelectedElse(benchmark::State &state) {
+    run_match(state, 0, 0, qb::http::method::GET, "/r/specific", qb::http::status::OK, {}, 0, 0);
+}
+
 } // namespace
 
 BENCHMARK(BM_Route_StaticHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
@@ -211,5 +363,12 @@ BENCHMARK(BM_Route_WildcardHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})
 BENCHMARK(BM_Route_MixedParamWildcardHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Route_Miss404)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Route_StaticHitMiddlewareDepth)->Arg(0)->Arg(2)->Arg(8)->Arg(32)->ArgNames({"chain_depth"})->Unit(benchmark::kNanosecond);
+
+BENCHMARK(BM_Route_StaticHitLifecycleHooks)->Arg(0)->Arg(1)->Arg(8)->ArgNames({"hooks"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Route_ParamHitLifecycleHooks)->Arg(0)->Arg(1)->Arg(8)->ArgNames({"hooks"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Route_MixedParamWildcardHitLifecycleHooks)->Arg(0)->Arg(1)->Arg(8)->ArgNames({"hooks"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Route_StaticHitMiddlewareDepth8LifecycleHooks)->Arg(0)->Arg(1)->Arg(8)->ArgNames({"hooks"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Route_ConditionalSelectedIf)->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Route_ConditionalSelectedElse)->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();

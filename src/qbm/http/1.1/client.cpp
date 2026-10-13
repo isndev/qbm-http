@@ -111,6 +111,10 @@ public:
 
     void
     disconnect() override {
+        // Retiring an attempt invalidates its asynchronous connect completion,
+        // even while the old connection must remain alive until dispatch returns.
+        *_alive = false;
+        this->setTimeout(qb::duration::zero());
         this->base_t::disconnect(1);
     }
 
@@ -168,6 +172,9 @@ public:
     void
     on(qb::io::async::event::disconnected const &event) {
         auto owner_guard = _owner.weak_from_this().lock();
+        if (_owner._deferred_connection_reset) {
+            return;
+        }
         // A close-delimited response (no Content-Length, no Transfer-Encoding) is framed by the
         // connection close: deliver its buffered body NOW, before the disconnect tears the active
         // request down. flush_eof dispatches through on(response) → handle_response, completing
@@ -196,6 +203,12 @@ public:
     }
 };
 
+struct Client::failure_cohort {
+    std::unique_ptr<RequestContext>                            active;
+    std::optional<std::deque<std::unique_ptr<RequestContext>>> pending;
+    std::vector<ConnectionCallback>                            callbacks;
+};
+
 template <typename Fn>
 void
 Client::invoke_user_callback(Fn &&fn) noexcept {
@@ -217,6 +230,9 @@ Client::Client(qb::io::uri const &uri) {
 }
 
 Client::~Client() {
+    // Destruction abandons pending connect observers; an explicit disconnect
+    // reports their cancelled attempt while the client still has a live owner.
+    _connection_callbacks.clear();
     disconnect();
 }
 
@@ -261,6 +277,12 @@ Client::connect(ConnectionCallback callback) {
         }
         return true;
     }
+    if (weak_from_this().expired()) {
+        if (callback) {
+            invoke_user_callback([&] { callback(false, "HTTP/1.1 client no longer available"); });
+        }
+        return false;
+    }
     if (_is_connecting) {
         if (callback) {
             _connection_callbacks.emplace_back(std::move(callback));
@@ -273,6 +295,11 @@ Client::connect(ConnectionCallback callback) {
     }
     _intentional_disconnect = false;
     _is_connecting          = true;
+    if (_deferred_connection_reset) {
+        // The request is accepted, but the old protocol/dispose dispatch may
+        // still be on the stack. Deferred cleanup starts this connection intent.
+        return true;
+    }
     if (!_connection || !_connection->is_open()) {
         create_connection();
     }
@@ -309,18 +336,15 @@ Client::connect() {
 
 void
 Client::disconnect() {
-    _intentional_disconnect = true;
-    _is_connected           = false;
-    _is_connecting          = false;
-    fail_active_request("Connection closed", qb::http::status::SERVICE_UNAVAILABLE);
-    fail_all_requests("Connection closed", qb::http::status::SERVICE_UNAVAILABLE);
-    if (_connection) {
-        _connection->disconnect();
-    }
-    if (_callback_depth) {
-        _deferred_connection_reset = true;
-    } else {
-        _connection.reset();
+    auto       self_guard    = weak_from_this().lock();
+    const bool defer_cleanup = _callback_depth != 0;
+    auto       cohort        = detach_failure_cohort(true);
+    _intentional_disconnect  = true;
+    retire_connection(defer_cleanup);
+    fail_retired_requests(cohort, "Connection closed", qb::http::status::SERVICE_UNAVAILABLE, "Connection closed",
+                          qb::http::status::SERVICE_UNAVAILABLE);
+    if (!defer_cleanup) {
+        reset_deferred_connection_if_ready();
     }
 }
 
@@ -471,17 +495,17 @@ Client::process_pending_requests() {
         return;
     }
     if (!_is_connected || !_connection || !_connection->is_open()) {
-        if (!_auto_reconnect) {
-            auto ctx = std::move(_pending_requests.front());
-            _pending_requests.pop_front();
-            ++_failed_requests;
-            invoke_user_callback(
-                [&] { ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client is not connected")); });
-            process_pending_requests();
+        // An explicitly accepted connect owns these requests even when automatic
+        // reconnect is disabled, including an intent waiting behind retirement.
+        if (_is_connecting) {
             return;
         }
-        if (!_is_connecting) {
-            connect(nullptr);
+        if (!_auto_reconnect) {
+            fail_all_requests("HTTP/1.1 client is not connected");
+            return;
+        }
+        if (!connect(nullptr)) {
+            fail_all_requests("HTTP/1.1 client no longer available");
         }
         return;
     }
@@ -542,8 +566,67 @@ Client::reset_deferred_connection_if_ready() {
     if (_callback_depth || !_deferred_connection_reset) {
         return;
     }
-    _deferred_connection_reset = false;
+    const bool start_connection = _is_connecting;
     _connection.reset();
+    _deferred_connection_reset = false;
+    if (start_connection) {
+        _is_connecting = false;
+        connect(nullptr);
+    } else if (!_intentional_disconnect) {
+        process_pending_requests();
+    }
+}
+
+void
+Client::retire_connection(bool defer_cleanup) {
+    _is_connected  = false;
+    _is_connecting = false;
+    if (_deferred_connection_reset) {
+        return;
+    }
+    _deferred_connection_reset = true;
+    if (_connection) {
+        _connection->disconnect();
+    }
+    if (defer_cleanup) {
+        hold_through_current_tick();
+    }
+}
+
+Client::failure_cohort
+Client::detach_failure_cohort(bool fail_pending) {
+    failure_cohort cohort;
+    cohort.active = std::move(_active_request);
+    if (fail_pending && !_pending_requests.empty()) {
+        cohort.pending.emplace(std::move(_pending_requests));
+        _pending_requests.clear();
+    }
+    cohort.callbacks = std::move(_connection_callbacks);
+    _connection_callbacks.clear();
+    return cohort;
+}
+
+void
+Client::fail_retired_requests(failure_cohort &cohort, std::string const &error, qb::http::status active_status,
+                              std::string const &pending_error, qb::http::status pending_status) {
+    for (auto &callback : cohort.callbacks) {
+        if (callback) {
+            invoke_user_callback([&] { callback(false, error); });
+        }
+    }
+    if (cohort.active) {
+        auto ctx = std::move(cohort.active);
+        ++_failed_requests;
+        invoke_user_callback([&] { ctx->callback(create_error_response(active_status, error)); });
+    }
+    if (cohort.pending) {
+        while (!cohort.pending->empty()) {
+            auto ctx = std::move(cohort.pending->front());
+            cohort.pending->pop_front();
+            ++_failed_requests;
+            invoke_user_callback([&] { ctx->callback(create_error_response(pending_status, pending_error)); });
+        }
+    }
 }
 
 void
@@ -583,6 +666,9 @@ Client::fail_pending_request(std::uint64_t request_id, std::string const &error,
 
 void
 Client::handle_connection_success() {
+    if (_deferred_connection_reset) {
+        return;
+    }
     auto self_guard         = weak_from_this().lock();
     _is_connected           = true;
     _is_connecting          = false;
@@ -602,20 +688,13 @@ Client::handle_connection_success() {
 
 void
 Client::handle_connection_failure(std::string const &error) {
+    if (_deferred_connection_reset) {
+        return;
+    }
     auto self_guard = weak_from_this().lock();
-    _is_connected   = false;
-    _is_connecting  = false;
-    auto callbacks  = std::move(_connection_callbacks);
-    _connection_callbacks.clear();
-    for (auto &cb : callbacks) {
-        if (cb) {
-            invoke_user_callback([&] { cb(false, error); });
-        }
-    }
-    if (_active_request) {
-        fail_active_request(error);
-    }
-    fail_all_requests(error);
+    auto cohort     = detach_failure_cohort(true);
+    retire_connection();
+    fail_retired_requests(cohort, error, qb::http::status::BAD_GATEWAY, error, qb::http::status::SERVICE_UNAVAILABLE);
 }
 
 void
@@ -627,68 +706,47 @@ Client::handle_response(qb::http::Response response) {
     auto       ctx        = std::move(_active_request);
     const bool keep_alive = response.keep_alive && !has_connection_close(response);
     ++_successful_requests;
-    invoke_user_callback([&] { ctx->callback(std::move(response)); });
-    if (_intentional_disconnect) {
-        return;
-    }
-    if (!keep_alive) {
-        _is_connected = false;
-        // Tear the connection down but DO NOT reconnect synchronously here: handle_response runs
-        // INSIDE the protocol's onMessage(), which reset()s the parser right after we return.
-        // qb::io::async::callback() executes its lambda IMMEDIATELY (not next-tick), so a reconnect
-        // here would create_connection() and free THIS connection's protocol mid-dispatch → a
-        // heap-use-after-free when onMessage() then touches the freed parser. The reconnect for
-        // still-pending work is owned by the ensuing on(disconnected) → handle_disconnected (a
-        // fresh, safe dispatch), exactly as for an unexpected server-side close.
-        if (_connection) {
-            _connection->disconnect();
+    if (keep_alive) {
+        invoke_user_callback([&] { ctx->callback(std::move(response)); });
+        if (!_intentional_disconnect) {
+            process_pending_requests();
         }
         return;
     }
-    process_pending_requests();
+    // Availability and retirement are published before user code can submit the
+    // next request. The pending remainder stays queued for its normal reconnect
+    // policy; neither its transport nor the parser on this stack is replaced here.
+    retire_connection();
+    invoke_user_callback([&] { ctx->callback(std::move(response)); });
 }
 
 void
 Client::handle_timeout() {
+    if (_deferred_connection_reset) {
+        return;
+    }
     if (_is_connecting && !_is_connected) {
         handle_connection_failure("Connection timeout");
         return;
     }
-    fail_active_request("Request timeout", qb::http::status::GATEWAY_TIMEOUT);
-    if (_connection) {
-        _connection->disconnect();
-    }
+    auto self_guard = weak_from_this().lock();
+    auto cohort     = detach_failure_cohort(!_auto_reconnect);
+    retire_connection();
+    fail_retired_requests(cohort, "Request timeout", qb::http::status::GATEWAY_TIMEOUT, "Connection lost",
+                          qb::http::status::SERVICE_UNAVAILABLE);
 }
 
 void
 Client::handle_disconnected(int reason) {
-    const bool intentional = _intentional_disconnect || reason != 0;
-    _is_connected          = false;
-    _is_connecting         = false;
-    if (_active_request) {
-        fail_active_request(intentional ? "Connection closed" : "Connection lost");
-    }
-    if (_intentional_disconnect) {
+    if (_deferred_connection_reset) {
         return;
     }
-    if (has_pending_work() && _auto_reconnect) {
-        auto weak_self = weak_from_this();
-        // Defer, do NOT reconnect inline. handle_disconnected() runs inside the connection's
-        // on(disconnected) → io::dispose() dispatch; create_connection() below reassigns _connection
-        // and frees THIS connection, so running it synchronously is a use-after-free once dispose()
-        // resumes. defer() posts it to the tail of the loop turn — it runs only after the whole
-        // dispatch has unwound, so the connection is no longer on the stack.
-        qb::io::async::defer([weak_self]() {
-            auto self = weak_self.lock();
-            if (!self || self->_is_connected || self->_is_connecting || !self->has_pending_work()) {
-                return;
-            }
-            self->create_connection();
-            self->connect(nullptr);
-        });
-    } else if (has_pending_work()) {
-        fail_all_requests("Connection lost");
-    }
+    auto       self_guard  = weak_from_this().lock();
+    const bool intentional = _intentional_disconnect || reason != 0;
+    auto       cohort      = detach_failure_cohort(!_auto_reconnect);
+    retire_connection();
+    fail_retired_requests(cohort, intentional ? "Connection closed" : "Connection lost", qb::http::status::BAD_GATEWAY, "Connection lost",
+                          qb::http::status::SERVICE_UNAVAILABLE);
 }
 
 void
@@ -705,9 +763,11 @@ Client::fail_active_request(std::string const &error, qb::http::status status) {
 void
 Client::fail_all_requests(std::string const &error, qb::http::status status) {
     auto self_guard = weak_from_this().lock();
-    while (!_pending_requests.empty()) {
-        auto ctx = std::move(_pending_requests.front());
-        _pending_requests.pop_front();
+    auto pending    = std::move(_pending_requests);
+    _pending_requests.clear();
+    while (!pending.empty()) {
+        auto ctx = std::move(pending.front());
+        pending.pop_front();
         ++_failed_requests;
         invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
     }

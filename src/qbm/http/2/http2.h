@@ -41,6 +41,7 @@
 #error "HTTP/2 requires OpenSSL crypto library (qb::io::transport::stcp)"
 #endif
 
+#include <array>
 #include <filesystem>
 #include <limits>
 #include <qb/io/protocol/handshake.h>
@@ -113,6 +114,79 @@ private:
     Http2Protocol *_http2_protocol; ///< HTTP/2 protocol handler
 
     std::chrono::steady_clock::time_point _last_stream_cleanup; ///< Last time we cleaned up idle streams
+    bool                                  _reclaiming_completed_contexts{false};
+
+    void
+    reclaim_completed_stream_contexts() noexcept {
+        if (_reclaiming_completed_contexts)
+            return;
+        _reclaiming_completed_contexts = true;
+        struct ReclaimGuard {
+            bool &active;
+            ~ReclaimGuard() noexcept {
+                active = false;
+            }
+        } guard{_reclaiming_completed_contexts};
+        const auto pending_bytes = this->out().size();
+
+        auto       remaining    = _contexts.size();
+        const auto can_continue = [&]() noexcept {
+            return _http2_protocol && this->protocol() == _http2_protocol && this->is_connected() && this->out().size() == pending_bytes;
+        };
+
+        // IDs carry no ownership or iterators across callbacks. The stack
+        // buffer is a batch size, not a limit on the context registry.
+        std::array<uint32_t, 32> ids;
+        while (remaining != 0) {
+            if (!can_continue())
+                break;
+            std::size_t count = 0;
+            {
+                for (auto it = _contexts.begin(); it != _contexts.end(); ++it) {
+                    if (it->second && it->second->is_completed() && _http2_protocol->is_stream_closed(it->first)) {
+                        ids[count++] = it->first;
+                        if (count == ids.size() || count == remaining)
+                            break;
+                    }
+                }
+            }
+            if (count == 0)
+                break;
+            for (std::size_t index = 0; index != count && remaining != 0; ++index) {
+                if (!can_continue())
+                    return;
+                std::shared_ptr<ContextType> context;
+                {
+                    auto it = _contexts.find(ids[index]);
+                    if (it == _contexts.end() || !it->second || !it->second->is_completed() || !_http2_protocol->is_stream_closed(it->first))
+                        continue;
+                    context = std::move(it->second);
+                    _contexts.erase(it);
+                }
+                --remaining;
+                context->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
+                // REQUEST_COMPLETE and member destructors can change other
+                // entries too. Finish this release before the next ID.
+                context.reset();
+            }
+            // Catch eligibility created without new output by any callback or
+            // destructor. Only actual removals spend the initial entry budget.
+        }
+    }
+
+    // A neutral peer reset is a lifecycle notification, not a stream error.
+    // The protocol opts in through this private hook without extending the
+    // public error-event contract of custom IO handlers.
+    void
+    on_peer_stream_reset(uint32_t stream_id) noexcept {
+        auto it = _contexts.find(stream_id);
+        if (it == _contexts.end())
+            return;
+        auto context = std::move(it->second);
+        _contexts.erase(it);
+        if (context)
+            context->cancel("HTTP/2 reset");
+    }
 
     /**
      * @brief Validate HTTP/2 stream ID
@@ -303,14 +377,9 @@ public:
         this->updateTimeout();
         // Periodic cleanup of idle streams for DDoS protection
         if (_http2_protocol) {
-            for (auto it = _contexts.begin(); it != _contexts.end();) {
-                if (it->second && _http2_protocol->is_stream_closed(it->first)) {
-                    it->second->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
-                    it = _contexts.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+            reclaim_completed_stream_contexts();
+            if (this->protocol() != _http2_protocol || !this->is_connected())
+                return;
             auto now = std::chrono::steady_clock::now();
             if (now - _last_stream_cleanup >= constants::CLEANUP_INTERVAL) {
                 _http2_protocol->cleanup_idle_streams(constants::STREAM_IDLE_TIMEOUT, constants::STREAM_INCOMPLETE_TIMEOUT);
@@ -333,7 +402,9 @@ public:
                 _contexts.clear();
             }
             this->disconnect(qb::http::DisconnectedReason::ResponseTransmitted);
-        } // For HTTP/2, EOS is per-stream and handled by Http2Protocol stream lifecycle.
+        } else if (_http2_protocol) {
+            reclaim_completed_stream_contexts();
+        }
     }
 
     void
@@ -388,8 +459,9 @@ public:
         // Context for this stream might need to be cleared or marked.
         auto it = _contexts.find(event.stream_id);
         if (it != _contexts.end() && it->second) {
-            it->second->cancel("HTTP/2 stream error: " + event.message);
+            auto context = std::move(it->second);
             _contexts.erase(it);
+            context->cancel("HTTP/2 stream error: " + event.message);
         }
     }
 

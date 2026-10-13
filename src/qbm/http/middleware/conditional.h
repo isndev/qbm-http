@@ -85,15 +85,25 @@ public:
      */
     void
     process(ContextPtr ctx) override {
+        const auto completion_before = ctx->completion_count();
         try {
-            if (_predicate(ctx)) {
-                _if_middleware->process(ctx);
-            } else if (_else_middleware) {
-                _else_middleware->process(ctx);
+            const bool use_if = _predicate(ctx);
+            // A predicate may cancel or complete, including dispatching the next
+            // asynchronous task. Never install this old operation over that task.
+            if (ctx->is_cancelled() || ctx->is_completed() || ctx->completion_count() != completion_before) {
+                return;
+            }
+            auto *child = use_if ? _if_middleware.get() : _else_middleware.get();
+            if (child) {
+                ctx->select_middleware(*child);
+                child->process(ctx);
             } else {
                 ctx->complete(AsyncTaskResult::CONTINUE);
             }
         } catch (...) {
+            if (ctx->is_cancelled() || ctx->is_completed() || ctx->completion_count() != completion_before) {
+                return;
+            }
             // Protect the middleware chain from user predicate/child middleware exceptions.
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
             ctx->response().body()   = "Error during conditional middleware evaluation.";
@@ -113,15 +123,12 @@ public:
 
     /**
      * @brief Handles a cancellation notification.
-     * For this middleware, cancellation is typically propagated to the currently active child middleware (if any)
-     * by the `Context` itself when `Context::cancel()` is called on it. This middleware itself does not
-     * usually hold long-running asynchronous state that needs explicit cancellation here.
+     * Context forwards cancellation directly to the child selected for that request.
+     * Before a child starts, the conditional itself has no pending work to cancel.
      */
     void
     cancel() noexcept override {
-        // If child middleware were stateful and held by this class directly (not just via context execution),
-        // one might call _if_middleware->cancel() or _else_middleware->cancel() here.
-        // However, the current design implies context manages cancellation of the active task.
+        // The instance is shared; its selected child belongs to each Context.
     }
 
 private:

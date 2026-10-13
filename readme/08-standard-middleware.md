@@ -394,7 +394,10 @@ Four more middleware ship for flow control and instrumentation. They take callab
 | Logging | `<qbm/http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
 | Error handling | `<qbm/http/middleware/error_handling.h>` · `ErrorHandlingMiddleware<S>` | `error_handling_middleware<S>(name = "ErrorHandlingMiddleware")` | Centralised error-to-response translation; register handlers for specific status codes / exception types with fluent setters. |
 
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:147, qbm/http/src/qbm/http/middleware/transform.h:128, qbm/http/src/qbm/http/middleware/logging.h:213, qbm/http/src/qbm/http/middleware/error_handling.h:217 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:154, qbm/http/src/qbm/http/middleware/transform.h:128, qbm/http/src/qbm/http/middleware/logging.h:213, qbm/http/src/qbm/http/middleware/error_handling.h:217 -->
+
+Conditional selection is per context. Cancellation of a pending conditional request reaches its selected child, including a nested leaf, without re-evaluating the predicate or changing another context's selection. Completing or cancelling in the predicate prevents the old child from starting. See [Middleware](./07-middleware.md#conditional-middleware) for the cancellation boundary of a shared child instance.
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1268-1300 -->
 
 ## reCAPTCHA
 

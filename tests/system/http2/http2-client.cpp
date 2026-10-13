@@ -1680,3 +1680,824 @@ TEST_F(Http2ClientTest, JitterSpreadsTheWaitsOfARun) {
 }
 
 } // namespace
+
+namespace http2_server_lifecycle_test {
+using Context     = qb::http::Context<H2Session>;
+using SessionBase = qb::http2::use<H2Session>::session<H2Server>;
+
+// Reuse H2Server/H2Session and the existing TLS resources, on one owner loop.
+// This is deliberately not another network fixture: it only configures the
+// existing server type without ServerThread, so ownership can be inspected.
+bool
+configure_owner_loop(H2Server &server) {
+    if (!qb::http::test::certs_available()) {
+        ADD_FAILURE() << "HTTP/2 lifecycle witnesses require the existing TLS certificates";
+        return false;
+    }
+    server.transport().init(qb::io::ssl::Context::server(qb::http::test::ssl_cert_path().string(), qb::http::test::ssl_key_path().string())
+                                .alpn({"h2", "http/1.1"}));
+    if (server.transport().listen_v4(0, "127.0.0.1") != 0)
+        return false;
+    server.start();
+    return server.transport().local_endpoint().port() != 0;
+}
+
+// Observers and held contexts are destroyed while the actual Router is still
+// alive, including ASSERT exits. This guard is test teardown, not the repair.
+struct ReplyObservation {
+    int                replies = 0;
+    qb::http::Response response;
+};
+
+struct ClearSessionsBeforeObservations {
+    H2Server                 &server;
+    std::shared_ptr<Context> &held;
+    ~ClearSessionsBeforeObservations() {
+        held.reset();
+        server.sessions().clear();
+    }
+};
+
+class PendingMiddleware : public qb::http::IMiddleware<H2Session> {
+    std::shared_ptr<Context> &_held;
+    int                      &_cancel_count;
+
+public:
+    PendingMiddleware(std::shared_ptr<Context> &held, int &cancel_count)
+        : _held(held)
+        , _cancel_count(cancel_count) {}
+    void
+    process(std::shared_ptr<Context> context) override {
+        _held = std::move(context);
+    }
+    std::string
+    name() const override {
+        return "PendingMiddleware";
+    }
+    void
+    cancel() noexcept override {
+        ++_cancel_count;
+    }
+};
+} // namespace http2_server_lifecycle_test
+
+// QB-498: native H2 closure and drain are separate observations. Queue a
+// response only after stopping the server watcher, then run one owner-loop
+// turn through the real TLS watcher. A complete write of every queued byte selects
+// eos; there is no pending_write event between enqueue and the assertion.
+TEST(Http2ServerLifecycle, TotalTransportDrainReclaimsCompletedContextsBeforeDisconnect) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    int                             post_send        = 0;
+    int                             request_complete = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    server.router().get("/drain-observe", [&](auto context) { held = std::move(context); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (context.request().uri().path() != "/drain-observe")
+            return;
+        if (point == qb::http::HookPoint::POST_RESPONSE_SEND)
+            ++post_send;
+        if (point == qb::http::HookPoint::REQUEST_COMPLETE)
+            ++request_complete;
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    std::shared_ptr<H2Session> session;
+    for (int request_index = 0; request_index != 3; ++request_index) {
+        if (session)
+            session->start();
+        auto reply = std::make_shared<ReplyObservation>();
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/drain-observe")}, [reply](auto result) {
+            reply->response = std::move(result);
+            ++reply->replies;
+        }));
+        ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+        ASSERT_FALSE(held->is_completed());
+        session = held->session();
+        ASSERT_NE(session, nullptr);
+        session->stop();
+        ASSERT_EQ(session->out().size(), 0u) << "the old handshake/control output must already be drained";
+        std::weak_ptr<Context> weak_context    = held;
+        auto                   externally_held = request_index == 1 ? held : std::shared_ptr<Context>{};
+        const auto             stream_id       = static_cast<std::uint32_t>(held->request().stream_id);
+        held->text("drain-" + std::to_string(request_index));
+        ASSERT_TRUE(held->is_completed());
+        auto *protocol = static_cast<H2Session::Http2Protocol *>(session->protocol());
+        ASSERT_TRUE(protocol->is_stream_closed(stream_id));
+        const auto queued_bytes = session->out().size();
+        ASSERT_GT(queued_bytes, 0u);
+        held.reset();
+        EXPECT_EQ(post_send, request_index) << "enqueue alone is not transport completion";
+        EXPECT_FALSE(weak_context.expired());
+        session->stop();
+        const auto written_before = session->bytes_written();
+        session->start();
+        session->ready_to_write();
+        qb::io::async::run(EVRUN_NOWAIT);
+        session->stop();
+        ASSERT_EQ(session->out().size(), 0u) << "red precondition: this single write must drain entirely";
+        ASSERT_EQ(session->bytes_written() - written_before, queued_bytes);
+        if (externally_held) {
+            EXPECT_FALSE(weak_context.expired()) << "external ownership survives transport completion";
+            EXPECT_EQ(request_complete, request_index);
+            externally_held.reset();
+        }
+        EXPECT_TRUE(weak_context.expired()) << "a completed Context must be released after eos, while the connection stays live";
+        EXPECT_EQ(post_send, request_index + 1);
+        EXPECT_EQ(request_complete, request_index + 1);
+        static_cast<SessionBase &>(*session).on(qb::io::async::event::eos{});
+        EXPECT_EQ(post_send, request_index + 1) << "a repeated drain event must not repeat the lifecycle hook";
+        EXPECT_EQ(request_complete, request_index + 1);
+        ASSERT_TRUE(ServerThread::pump_until([&] { return reply->replies == 1; }));
+        EXPECT_EQ(reply->response.status(), qb::http::status::OK);
+        EXPECT_EQ(reply->response.body().as<std::string>(), "drain-" + std::to_string(request_index));
+        EXPECT_TRUE(client->is_connected());
+    }
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// QB-568: a fully dispatched request is held by real middleware. Send a
+// RST_STREAM from the peer's public transport output, not a direct cancel()
+// and not an incomplete POST. CANCEL is the positive control for NO_ERROR.
+TEST(Http2ServerLifecycle, PeerResetNoErrorCancelsTheActiveContextWithoutClosingTheConnection) {
+    using namespace http2_server_lifecycle_test;
+    namespace h2 = qb::protocol::http2;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    int                             cancellations    = 0;
+    int                             request_complete = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    auto                            group = server.router().group("/reset-owner");
+    group->use(std::make_shared<PendingMiddleware>(held, cancellations));
+    group->get("/hold", [](auto context) { context->text("late handler must not run"); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point == qb::http::HookPoint::REQUEST_COMPLETE && context.request().uri().path() == "/reset-owner/hold")
+            ++request_complete;
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    int expected_cancellations = 0;
+    int expected_completions   = 0;
+    for (const auto code : {h2::ErrorCode::CANCEL, h2::ErrorCode::NO_ERROR}) {
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/reset-owner/hold")}, [](auto) {}));
+        ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+        ASSERT_FALSE(held->is_completed());
+        ASSERT_FALSE(held->is_cancelled());
+        auto session = held->session();
+        ASSERT_NE(session, nullptr);
+        std::weak_ptr<Context> weak_context = held;
+        const auto             stream_id    = static_cast<std::uint32_t>(held->request().stream_id);
+        auto                  *protocol     = static_cast<H2Session::Http2Protocol *>(session->protocol());
+        ASSERT_FALSE(protocol->is_stream_closed(stream_id));
+        h2::Http2FrameData<h2::RstStreamFrame> reset;
+        reset.header.type = static_cast<std::uint8_t>(h2::FrameType::RST_STREAM);
+        reset.header.set_stream_id(stream_id);
+        reset.payload.error_code = code;
+        client->publish(reset);
+        ASSERT_TRUE(ServerThread::pump_until([&] { return protocol->is_stream_closed(stream_id); }));
+        ++expected_cancellations;
+        EXPECT_TRUE(held->is_cancelled()) << "peer reset must reach the active Context even for NO_ERROR";
+        EXPECT_TRUE(held->is_completed());
+        EXPECT_EQ(cancellations, expected_cancellations);
+        EXPECT_FALSE(weak_context.expired()) << "the caller still owns the cancelled Context";
+        client->publish(reset); // Its duplicate is parsed before the following request on this connection.
+        held->complete(qb::http::AsyncTaskResult::CONTINUE);
+        EXPECT_EQ(cancellations, expected_cancellations) << "a late completion must not repeat cancellation";
+        held.reset();
+        EXPECT_TRUE(weak_context.expired()) << "the reset must release the session's ownership";
+        ++expected_completions;
+        EXPECT_EQ(request_complete, expected_completions);
+        EXPECT_TRUE(client->is_connected());
+        auto adjacent = std::make_shared<ReplyObservation>();
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/api/test")}, [adjacent](auto result) {
+            adjacent->response = std::move(result);
+            ++adjacent->replies;
+        }));
+        ASSERT_TRUE(ServerThread::pump_until([&] { return adjacent->replies == 1; }));
+        EXPECT_EQ(adjacent->response.status(), qb::http::status::OK);
+        EXPECT_EQ(adjacent->response.body().as<std::string>(), "HTTP/2 GET Success");
+        EXPECT_EQ(cancellations, expected_cancellations) << "the duplicate reset must not cancel another Context";
+        EXPECT_EQ(request_complete, expected_completions);
+        EXPECT_TRUE(client->is_connected());
+    }
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// A hook can finish a different native stream and recursively report eos.
+// The newly queued response earns its own real drain, not the predecessor's.
+TEST(Http2ServerLifecycle, DrainHookCanCompleteAnotherStreamAndReenterEos) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>        first;
+    std::shared_ptr<Context>        second;
+    int                             first_post_send  = 0;
+    int                             second_post_send = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations first_cleanup{server, first};
+    ClearSessionsBeforeObservations second_cleanup{server, second};
+    server.router().get("/drain-first", [&](auto context) { first = std::move(context); });
+    server.router().get("/drain-second", [&](auto context) { second = std::move(context); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::POST_RESPONSE_SEND)
+            return;
+        if (context.request().uri().path() == "/drain-first") {
+            ++first_post_send;
+            ASSERT_NE(second, nullptr);
+            second->text("second response");
+            auto session = context.session();
+            ASSERT_NE(session, nullptr);
+            static_cast<SessionBase &>(*session).on(qb::io::async::event::eos{});
+            EXPECT_EQ(first_post_send, 1);
+            EXPECT_EQ(second_post_send, 0) << "the second response is still queued";
+        } else if (context.request().uri().path() == "/drain-second") {
+            ++second_post_send;
+        }
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    auto first_reply  = std::make_shared<ReplyObservation>();
+    auto second_reply = std::make_shared<ReplyObservation>();
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/drain-first")}, [first_reply](auto result) {
+        first_reply->response = std::move(result);
+        ++first_reply->replies;
+    }));
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/drain-second")}, [second_reply](auto result) {
+        second_reply->response = std::move(result);
+        ++second_reply->replies;
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return first && second; }));
+    auto session = first->session();
+    ASSERT_NE(session, nullptr);
+    ASSERT_EQ(session, second->session());
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    auto                  *protocol    = static_cast<H2Session::Http2Protocol *>(session->protocol());
+    const auto             first_id    = static_cast<std::uint32_t>(first->request().stream_id);
+    const auto             second_id   = static_cast<std::uint32_t>(second->request().stream_id);
+    std::weak_ptr<Context> weak_first  = first;
+    std::weak_ptr<Context> weak_second = second;
+    first->text("first response");
+    ASSERT_TRUE(protocol->is_stream_closed(first_id));
+    ASSERT_FALSE(protocol->is_stream_closed(second_id));
+    const auto first_bytes = session->out().size();
+    ASSERT_GT(first_bytes, 0u);
+    first.reset();
+    const auto written_before = session->bytes_written();
+    session->start();
+    session->ready_to_write();
+    qb::io::async::run(EVRUN_NOWAIT);
+    session->stop();
+    ASSERT_EQ(session->bytes_written() - written_before, first_bytes);
+    ASSERT_EQ(first_post_send, 1);
+    EXPECT_TRUE(weak_first.expired());
+    ASSERT_TRUE(second->is_completed());
+    ASSERT_TRUE(protocol->is_stream_closed(second_id));
+    const auto second_bytes = session->out().size();
+    ASSERT_GT(second_bytes, 0u);
+    second.reset();
+    EXPECT_FALSE(weak_second.expired()) << "the session must retain the newly queued response until its drain";
+    EXPECT_EQ(second_post_send, 0);
+    const auto second_written_before = session->bytes_written();
+    session->start();
+    session->ready_to_write();
+    qb::io::async::run(EVRUN_NOWAIT);
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    ASSERT_EQ(session->bytes_written() - second_written_before, second_bytes);
+    EXPECT_TRUE(weak_second.expired());
+    EXPECT_EQ(first_post_send, 1);
+    EXPECT_EQ(second_post_send, 1);
+    ASSERT_TRUE(ServerThread::pump_until([&] { return first_reply->replies == 1 && second_reply->replies == 1; }));
+    EXPECT_EQ(first_reply->response.body().as<std::string>(), "first response");
+    EXPECT_EQ(second_reply->response.body().as<std::string>(), "second response");
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// Candidate control: invoke the native reset entry directly after opening a
+// real stream. The observer deletes that protocol; no framer loop or test
+// expression may touch its old pointer after the call returns.
+TEST(Http2ServerLifecycle, NeutralResetObserverCanClearTheActiveProtocol) {
+    using namespace http2_server_lifecycle_test;
+    namespace h2 = qb::protocol::http2;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    int                             cancellations   = 0;
+    int                             protocol_clears = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    auto                            group = server.router().group("/reset-clear");
+    group->use(std::make_shared<PendingMiddleware>(held, cancellations));
+    group->get("/hold", [](auto context) { context->text("late handler must not run"); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::POST_HANDLER_EXECUTION || !context.is_cancelled()
+            || context.request().uri().path() != "/reset-clear/hold")
+            return;
+        auto session = context.session();
+        ASSERT_NE(session, nullptr);
+        context.suppress_response();
+        session->clear_protocols();
+        ++protocol_clears;
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/reset-clear/hold")}, [](auto) {}));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    const auto stream_id = static_cast<std::uint32_t>(held->request().stream_id);
+    auto      *protocol  = static_cast<H2Session::Http2Protocol *>(session->protocol());
+    ASSERT_FALSE(protocol->is_stream_closed(stream_id));
+    std::weak_ptr<Context>                 weak_context = held;
+    h2::Http2FrameData<h2::RstStreamFrame> reset;
+    reset.header.type = static_cast<std::uint8_t>(h2::FrameType::RST_STREAM);
+    reset.header.set_stream_id(stream_id);
+    reset.payload.error_code = h2::ErrorCode::NO_ERROR;
+    protocol->on(std::move(reset));
+    EXPECT_EQ(session->protocol(), qb::io::async::no_protocol());
+    EXPECT_EQ(protocol_clears, 1);
+    EXPECT_EQ(cancellations, 1);
+    EXPECT_TRUE(held->is_cancelled());
+    EXPECT_TRUE(held->is_completed());
+    held.reset();
+    EXPECT_TRUE(weak_context.expired());
+    session->disconnect();
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+TEST(Http2ServerLifecycle, DrainHookCanExtractItsSessionWithoutRetainingMapIterators) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>                    first;
+    std::shared_ptr<Context>                    second;
+    std::optional<H2Session::transport_io_type> extracted;
+    int                                         post_send        = 0;
+    int                                         request_complete = 0;
+    H2Server                                    server;
+    ClearSessionsBeforeObservations             first_cleanup{server, first};
+    ClearSessionsBeforeObservations             second_cleanup{server, second};
+    server.router().get("/drain-extract-first", [&](auto context) { first = std::move(context); });
+    server.router().get("/drain-extract-second", [&](auto context) { second = std::move(context); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (!context.request().uri().path().starts_with("/drain-extract-"))
+            return;
+        if (point == qb::http::HookPoint::REQUEST_COMPLETE)
+            ++request_complete;
+        if (point != qb::http::HookPoint::POST_RESPONSE_SEND)
+            return;
+        ++post_send;
+        if (post_send != 1)
+            return;
+        auto session = context.session();
+        ASSERT_NE(session, nullptr);
+        auto transfer = server.extractSession(session->id());
+        ASSERT_TRUE(transfer.second);
+        extracted.emplace(std::move(transfer.first));
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    auto first_reply  = std::make_shared<ReplyObservation>();
+    auto second_reply = std::make_shared<ReplyObservation>();
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/drain-extract-first")}, [first_reply](auto result) {
+        first_reply->response = std::move(result);
+        ++first_reply->replies;
+    }));
+    ASSERT_TRUE(
+        client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/drain-extract-second")}, [second_reply](auto result) {
+            second_reply->response = std::move(result);
+            ++second_reply->replies;
+        }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return first && second; }));
+    auto session = first->session();
+    ASSERT_NE(session, nullptr);
+    ASSERT_EQ(session, second->session());
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    std::weak_ptr<Context> weak_first  = first;
+    std::weak_ptr<Context> weak_second = second;
+    first->text("first extracted response");
+    second->text("second extracted response");
+    const auto queued_bytes = session->out().size();
+    ASSERT_GT(queued_bytes, 0u);
+    first.reset();
+    second.reset();
+    const auto written_before = session->bytes_written();
+    session->start();
+    session->ready_to_write();
+    qb::io::async::run(EVRUN_NOWAIT);
+    session->stop();
+    ASSERT_EQ(session->bytes_written() - written_before, queued_bytes);
+    ASSERT_TRUE(extracted.has_value());
+    EXPECT_TRUE(server.sessions().empty());
+    EXPECT_TRUE(weak_first.expired());
+    EXPECT_TRUE(weak_second.expired());
+    EXPECT_EQ(post_send, 1) << "extraction removes the remaining context while the first hook runs";
+    EXPECT_EQ(request_complete, 2);
+    ASSERT_TRUE(ServerThread::pump_until([&] { return first_reply->replies == 1 && second_reply->replies == 1; }));
+    EXPECT_EQ(first_reply->response.body().as<std::string>(), "first extracted response");
+    EXPECT_EQ(second_reply->response.body().as<std::string>(), "second extracted response");
+    client->disconnect();
+    extracted->close();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+namespace http2_server_lifecycle_test {
+struct ClearSessionsBeforeContextList {
+    H2Server                              &server;
+    std::vector<std::shared_ptr<Context>> &held;
+    ~ClearSessionsBeforeContextList() {
+        held.clear();
+        server.sessions().clear();
+    }
+};
+
+enum class SilentCompletion { Post, RequestComplete, MemberDestructor };
+
+// A native response may already have been sent by the application while its
+// routed Context is still incomplete. Finalizing it via suppress_response()
+// transfers no new bytes. Two initially complete donors make the ordering of
+// their destruction observable without depending on the map's iteration order.
+void
+check_silent_completion_drain(SilentCompletion transition, bool observe_hooks = true) {
+    qb::io::async::init();
+    std::vector<std::shared_ptr<Context>> held(3);
+    std::weak_ptr<Context>                silent;
+    int                                   post_send         = 0;
+    int                                   request_complete  = 0;
+    int                                   member_cleanup    = 0;
+    int                                   transitions       = 0;
+    const auto                            complete_silently = [&]() {
+        if (auto context = silent.lock(); context && !context->is_completed()) {
+            auto session = context->session();
+            ASSERT_NE(session, nullptr);
+            const auto pending_bytes = session->out().size();
+            context->suppress_response();
+            ++transitions;
+            static_cast<SessionBase &>(*session).on(qb::io::async::event::eos{});
+            EXPECT_EQ(session->out().size(), pending_bytes);
+        }
+    };
+    H2Server                       server;
+    ClearSessionsBeforeContextList cleanup{server, held};
+    server.router().get("/silent-drain/:index", [&](auto context) {
+        const auto index = context->template path_param<std::size_t>("index");
+        ASSERT_TRUE(index.has_value());
+        ASSERT_LT(*index, held.size());
+        // The final member release is user code even if no lifecycle hook was
+        // registered. Keep this payload solely in the Context's custom data.
+        context->set("member-cleanup", std::shared_ptr<int>(new int{0}, [&](int *value) {
+                         delete value;
+                         ++member_cleanup;
+                         if (transition == SilentCompletion::MemberDestructor)
+                             complete_silently();
+                     }));
+        held[*index] = std::move(context);
+    });
+    if (observe_hooks) {
+        server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+            if (!context.request().uri().path().starts_with("/silent-drain/"))
+                return;
+            if (point == qb::http::HookPoint::POST_RESPONSE_SEND) {
+                EXPECT_EQ(request_complete, post_send) << "the preceding Context must finish destruction before another POST";
+                EXPECT_EQ(member_cleanup, post_send) << "member destructors finish before the next candidate";
+                ++post_send;
+                if (transition == SilentCompletion::Post)
+                    complete_silently();
+            } else if (point == qb::http::HookPoint::REQUEST_COMPLETE) {
+                ++request_complete;
+                if (transition == SilentCompletion::RequestComplete)
+                    complete_silently();
+            }
+        });
+    }
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    std::vector<std::shared_ptr<ReplyObservation>> replies;
+    for (std::size_t index = 0; index != held.size(); ++index) {
+        auto reply = std::make_shared<ReplyObservation>();
+        replies.push_back(reply);
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/silent-drain/" + std::to_string(index))},
+                                         [reply](auto response) {
+                                             reply->response = std::move(response);
+                                             ++reply->replies;
+                                         }));
+    }
+    ASSERT_TRUE(
+        ServerThread::pump_until([&] { return std::all_of(held.begin(), held.end(), [](auto &context) { return context != nullptr; }); }));
+    auto session = held.front()->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    auto                               *protocol = static_cast<H2Session::Http2Protocol *>(session->protocol());
+    std::vector<std::weak_ptr<Context>> weak;
+    silent = held[1];
+    for (std::size_t index = 0; index != held.size(); ++index) {
+        ASSERT_EQ(held[index]->session(), session);
+        weak.push_back(held[index]);
+        held[index]->response().body() = "silent-" + std::to_string(index);
+        if (index == 1) {
+            (*session) << held[index]->response();
+            ASSERT_FALSE(held[index]->is_completed());
+        } else {
+            held[index]->complete();
+            ASSERT_TRUE(held[index]->is_completed());
+        }
+        ASSERT_TRUE(protocol->is_stream_closed(static_cast<std::uint32_t>(held[index]->request().stream_id)));
+    }
+    const auto queued_bytes = session->out().size();
+    ASSERT_GT(queued_bytes, 0u);
+    for (auto &context : held)
+        context.reset();
+    const auto written_before = session->bytes_written();
+    session->start();
+    session->ready_to_write();
+    qb::io::async::run(EVRUN_NOWAIT);
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    ASSERT_EQ(session->bytes_written() - written_before, queued_bytes);
+    EXPECT_EQ(transitions, 1);
+    EXPECT_EQ(member_cleanup, 3);
+    for (auto &context : weak)
+        EXPECT_TRUE(context.expired()) << "silently completed native closure must be reclaimed in the same real drain";
+    if (observe_hooks) {
+        EXPECT_EQ(post_send, 3);
+        EXPECT_EQ(request_complete, 3);
+    }
+    static_cast<SessionBase &>(*session).on(qb::io::async::event::eos{});
+    EXPECT_EQ(member_cleanup, 3) << "a repeated EOS has no further owner to release";
+    if (observe_hooks)
+        EXPECT_EQ(post_send, 3);
+    ASSERT_TRUE(
+        ServerThread::pump_until([&] { return std::all_of(replies.begin(), replies.end(), [](auto &reply) { return reply->replies == 1; }); }));
+    for (std::size_t index = 0; index != replies.size(); ++index) {
+        EXPECT_EQ(replies[index]->response.status(), qb::http::status::OK);
+        EXPECT_EQ(replies[index]->response.body().as<std::string>(), "silent-" + std::to_string(index));
+    }
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+void
+publish_control_ping(H2Session &session) {
+    namespace h2 = qb::protocol::http2;
+    h2::Http2FrameData<h2::PingFrame> ping;
+    ping.header.type = static_cast<std::uint8_t>(h2::FrameType::PING);
+    ping.header.set_stream_id(0);
+    session.publish(ping);
+}
+} // namespace http2_server_lifecycle_test
+
+TEST(Http2ServerLifecycle, DrainPostCanSilentlyCompleteAnAlreadyClosedNativeStream) {
+    http2_server_lifecycle_test::check_silent_completion_drain(http2_server_lifecycle_test::SilentCompletion::Post);
+}
+
+TEST(Http2ServerLifecycle, RequestCompleteCanSilentlyCompleteAnotherStreamBeforeTheNextPost) {
+    http2_server_lifecycle_test::check_silent_completion_drain(http2_server_lifecycle_test::SilentCompletion::RequestComplete);
+}
+
+TEST(Http2ServerLifecycle, MemberDestructorCanSilentlyCompleteAnotherStreamBeforeTheNextPost) {
+    http2_server_lifecycle_test::check_silent_completion_drain(http2_server_lifecycle_test::SilentCompletion::MemberDestructor);
+}
+
+TEST(Http2ServerLifecycle, MemberDestructorCanCompleteAnotherStreamWithoutLifecycleHooks) {
+    http2_server_lifecycle_test::check_silent_completion_drain(http2_server_lifecycle_test::SilentCompletion::MemberDestructor, false);
+}
+
+TEST(Http2ServerLifecycle, DrainPostCanClearTheActiveProtocolBeforeAnotherCandidate) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::vector<std::shared_ptr<Context>> held;
+    int                                   post_send        = 0;
+    int                                   request_complete = 0;
+    H2Server                              server;
+    ClearSessionsBeforeContextList        cleanup{server, held};
+    server.router().get("/drain-post-clear", [&](auto context) { held.push_back(std::move(context)); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (context.request().uri().path() != "/drain-post-clear")
+            return;
+        if (point == qb::http::HookPoint::REQUEST_COMPLETE)
+            ++request_complete;
+        if (point == qb::http::HookPoint::POST_RESPONSE_SEND) {
+            ++post_send;
+            auto session = context.session();
+            ASSERT_NE(session, nullptr);
+            session->clear_protocols();
+        }
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    std::vector<std::shared_ptr<ReplyObservation>> replies;
+    for (int index = 0; index != 2; ++index) {
+        auto reply = std::make_shared<ReplyObservation>();
+        replies.push_back(reply);
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/drain-post-clear")}, [reply](auto response) {
+            reply->response = std::move(response);
+            ++reply->replies;
+        }));
+    }
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held.size() == 2; }));
+    auto session = held.front()->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    auto                               *protocol = static_cast<H2Session::Http2Protocol *>(session->protocol());
+    std::vector<std::weak_ptr<Context>> weak;
+    for (auto &context : held) {
+        ASSERT_EQ(context->session(), session);
+        weak.push_back(context);
+        context->text("post cleared protocol");
+        ASSERT_TRUE(protocol->is_stream_closed(static_cast<std::uint32_t>(context->request().stream_id)));
+        context.reset();
+    }
+    const auto queued_bytes   = session->out().size();
+    const auto written_before = session->bytes_written();
+    ASSERT_GT(queued_bytes, 0u);
+    session->start();
+    session->ready_to_write();
+    qb::io::async::run(EVRUN_NOWAIT);
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    ASSERT_EQ(session->bytes_written() - written_before, queued_bytes);
+    EXPECT_EQ(session->protocol(), qb::io::async::no_protocol());
+    EXPECT_EQ(post_send, 1);
+    EXPECT_EQ(request_complete, 1);
+    EXPECT_EQ(std::count_if(weak.begin(), weak.end(), [](auto &context) { return context.expired(); }), 1);
+    static_cast<SessionBase &>(*session).on(qb::io::async::event::eos{});
+    EXPECT_EQ(post_send, 1) << "a cleared protocol stops a repeated drain too";
+    ASSERT_TRUE(
+        ServerThread::pump_until([&] { return std::all_of(replies.begin(), replies.end(), [](auto &reply) { return reply->replies == 1; }); }));
+    for (auto &reply : replies) {
+        EXPECT_EQ(reply->response.status(), qb::http::status::OK);
+        EXPECT_EQ(reply->response.body().as<std::string>(), "post cleared protocol");
+    }
+    session->disconnect();
+    ASSERT_TRUE(ServerThread::pump_until([&] { return server.sessions().empty(); }));
+    EXPECT_EQ(request_complete, 2);
+    for (auto &context : weak)
+        EXPECT_TRUE(context.expired());
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// Two valid 40-stream waves stay below the advertised native cap of 50. The
+// application sends each response before silently finalizing its Context, so
+// the session can retain more than 50 Contexts while native streams are closed.
+// Two Contexts complete initially. Their first POST queues a real PING, so
+// collection of the other must stop until that new output drains.
+TEST(Http2ServerLifecycle, DrainReclaimsMoreThanFiftyContextsFromValidWavesAcrossMultipleBatches) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::vector<std::shared_ptr<Context>> held;
+    int                                   post_send        = 0;
+    int                                   request_complete = 0;
+    H2Server                              server;
+    ClearSessionsBeforeContextList        cleanup{server, held};
+    server.router().get("/drain-wave", [&](auto context) { held.push_back(std::move(context)); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (context.request().uri().path() != "/drain-wave")
+            return;
+        if (point == qb::http::HookPoint::REQUEST_COMPLETE)
+            ++request_complete;
+        if (point == qb::http::HookPoint::POST_RESPONSE_SEND && ++post_send == 1) {
+            auto session = context.session();
+            ASSERT_NE(session, nullptr);
+            publish_control_ping(*session);
+        }
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    client->set_max_concurrent_streams(40);
+    std::vector<std::shared_ptr<ReplyObservation>> replies;
+    std::vector<std::weak_ptr<Context>>            weak;
+    std::shared_ptr<H2Session>                     session;
+    for (std::size_t wave = 0; wave != 2; ++wave) {
+        if (session)
+            session->start();
+        for (int index = 0; index != 40; ++index) {
+            auto reply = std::make_shared<ReplyObservation>();
+            replies.push_back(reply);
+            ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/drain-wave")}, [reply](auto response) {
+                reply->response = std::move(response);
+                ++reply->replies;
+            }));
+        }
+        const auto wave_end = (wave + 1) * 40;
+        ASSERT_TRUE(ServerThread::pump_until([&] { return held.size() == wave_end; }));
+        session = held.back()->session();
+        ASSERT_NE(session, nullptr);
+        session->stop();
+        ASSERT_EQ(session->out().size(), 0u);
+        auto *protocol = static_cast<H2Session::Http2Protocol *>(session->protocol());
+        for (auto index = wave * 40; index != wave_end; ++index) {
+            ASSERT_EQ(held[index]->session(), session);
+            ASSERT_FALSE(held[index]->is_completed());
+            weak.push_back(held[index]);
+            held[index]->response().body() = "wave-" + std::to_string(index);
+            if (index < 2)
+                held[index]->complete();
+            else
+                (*session) << held[index]->response();
+            ASSERT_TRUE(protocol->is_stream_closed(static_cast<std::uint32_t>(held[index]->request().stream_id)));
+        }
+        if (wave == 0) {
+            held.front().reset();
+            held[1].reset();
+        }
+        const auto queued_bytes   = session->out().size();
+        const auto written_before = session->bytes_written();
+        ASSERT_GT(queued_bytes, 0u);
+        session->start();
+        session->ready_to_write();
+        qb::io::async::run(EVRUN_NOWAIT);
+        session->stop();
+        ASSERT_EQ(session->bytes_written() - written_before, queued_bytes);
+        EXPECT_EQ(post_send, wave == 0 ? 1 : 2);
+        EXPECT_EQ(request_complete, wave == 0 ? 1 : 2);
+        if (wave == 0) {
+            EXPECT_EQ(std::count_if(weak.begin(), weak.begin() + 2, [](auto &context) { return context.expired(); }), 1);
+            const auto ping_bytes = session->out().size();
+            ASSERT_EQ(ping_bytes, qb::protocol::http2::FRAME_HEADER_SIZE + 8u);
+            const auto ping_written_before = session->bytes_written();
+            session->start();
+            session->ready_to_write();
+            qb::io::async::run(EVRUN_NOWAIT);
+            session->stop();
+            ASSERT_EQ(session->bytes_written() - ping_written_before, ping_bytes);
+            EXPECT_EQ(post_send, 2);
+            EXPECT_EQ(request_complete, 2);
+            EXPECT_TRUE(weak[0].expired());
+            EXPECT_TRUE(weak[1].expired());
+        }
+        ASSERT_EQ(session->out().size(), 0u);
+        ASSERT_TRUE(ServerThread::pump_until(
+            [&] { return std::all_of(replies.begin(), replies.end(), [](auto &reply) { return reply->replies == 1; }); }));
+        EXPECT_EQ(client->get_active_request_count(), 0u);
+    }
+    ASSERT_EQ(weak.size(), 80u);
+    for (std::size_t index = 2; index != held.size(); ++index) {
+        ASSERT_FALSE(held[index]->is_completed());
+        held[index]->suppress_response();
+        held[index].reset();
+        ASSERT_FALSE(weak[index].expired()) << "the session alone retains each completed Context before the final drain";
+    }
+    EXPECT_EQ(post_send, 2);
+    EXPECT_EQ(request_complete, 2);
+    ASSERT_EQ(session->out().size(), 0u);
+    publish_control_ping(*session);
+    const auto queued_bytes   = session->out().size();
+    const auto written_before = session->bytes_written();
+    ASSERT_EQ(queued_bytes, qb::protocol::http2::FRAME_HEADER_SIZE + 8u);
+    session->start();
+    session->ready_to_write();
+    qb::io::async::run(EVRUN_NOWAIT);
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    ASSERT_EQ(session->bytes_written() - written_before, queued_bytes);
+    EXPECT_EQ(post_send, 80);
+    EXPECT_EQ(request_complete, 80);
+    for (auto &context : weak)
+        EXPECT_TRUE(context.expired());
+    static_cast<SessionBase &>(*session).on(qb::io::async::event::eos{});
+    EXPECT_EQ(post_send, 80);
+    EXPECT_EQ(request_complete, 80);
+    for (std::size_t index = 0; index != replies.size(); ++index) {
+        EXPECT_EQ(replies[index]->response.status(), qb::http::status::OK);
+        EXPECT_EQ(replies[index]->response.body().as<std::string>(), "wave-" + std::to_string(index));
+    }
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}

@@ -34,6 +34,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -222,6 +223,15 @@ protected:
     SetUp() override {
         qb::io::async::init();
     }
+
+    void
+    TearDown() override {
+        if (qb::io::async::listener::current.has_coro_scheduler()) {
+            qb::io::async::run_for(5ms);
+            qb::io::async::listener::current.reset_coro_scheduler();
+        }
+        qb::io::async::listener::current.clear();
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -396,6 +406,190 @@ TEST_F(WsCoroServer, CoroSessionClosesGracefully) {
         EXPECT_EQ(frame.close_code, static_cast<std::uint16_t>(qb::http::ws::CloseStatus::GoingAway));
         EXPECT_EQ(frame.close_reason, "session over");
     }
+}
+
+// QB-514, server side: use the existing named coroutine session fixture and
+// its public frame sink, with a task which actually owns the suspended frame.
+TEST_F(WsCoroServer, AbandonedNextFrameReleasesOnlyItsOwnConsumerSlot) {
+    EchoCoroServer  server;
+    EchoCoroSession session(server);
+    int             resumed = 0;
+    auto            receive = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
+        auto frame = co_await session.next_frame();
+        ++resumed;
+        co_return frame;
+    };
+    {
+        auto abandoned = receive();
+        abandoned.handle().resume();
+        ASSERT_FALSE(abandoned.handle().done());
+    }
+    auto replacement = receive();
+    replacement.handle().resume();
+    ASSERT_FALSE(replacement.handle().done());
+    qb::http::ws::MessageText message;
+    message << "server-replacement";
+    session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
+    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(replacement.handle().done());
+    EXPECT_EQ(replacement.await_resume().payload, "server-replacement");
+    EXPECT_EQ(resumed, 1);
+
+    // A completed predecessor's awaiter is destroyed only after the next
+    // consumer has reserved the slot. Its token cannot release that consumer.
+    auto preceding = receive();
+    preceding.handle().resume();
+    ASSERT_FALSE(preceding.handle().done());
+    qb::http::ws::MessageText preceding_message;
+    preceding_message << "server-preceding";
+    session.on(EchoCoroSession::WS_Protocol::message{preceding_message.size(), preceding_message.data().cbegin(), preceding_message});
+    auto next = receive();
+    next.handle().resume();
+    ASSERT_FALSE(next.handle().done());
+    for (int turn = 0; turn != 16 && !preceding.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(preceding.handle().done());
+    EXPECT_EQ(preceding.await_resume().payload, "server-preceding");
+    EXPECT_FALSE(next.handle().done());
+    qb::http::ws::MessageText next_message;
+    next_message << "server-next";
+    session.on(EchoCoroSession::WS_Protocol::message{next_message.size(), next_message.data().cbegin(), next_message});
+    for (int turn = 0; turn != 16 && !next.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(next.handle().done());
+    EXPECT_EQ(next.await_resume().payload, "server-next");
+    EXPECT_EQ(resumed, 3);
+}
+
+TEST_F(WsCoroServer, FrameAfterAbandonedNextFrameIsAvailableToTheNextConsumer) {
+    EchoCoroServer  server;
+    EchoCoroSession session(server);
+    auto            receive = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
+        co_return co_await session.next_frame();
+    };
+    {
+        auto abandoned = receive();
+        abandoned.handle().resume();
+        ASSERT_FALSE(abandoned.handle().done());
+    }
+    qb::http::ws::MessageText message;
+    message << "server-buffered";
+    session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
+    auto replacement = receive();
+    replacement.handle().resume();
+    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(replacement.handle().done()) << "a dead receiver must not consume the frame";
+    EXPECT_EQ(replacement.await_resume().payload, "server-buffered");
+}
+
+// QB-515: a rejected close must neither reserve completion nor suppress a
+// peer-initiated Close echo. Both code and UTF-8 validation precede publication.
+TEST_F(WsCoroServer, RejectedCloseDoesNotSuppressThePeerCloseEcho) {
+    using Status = qb::http::ws::CloseStatus;
+    for (bool bad_code : {true, false}) {
+        EchoCoroServer  server;
+        EchoCoroSession session(server);
+        bool            rejected = false;
+        auto            reject   = [&]() -> qb::io::async::task<void> {
+            try {
+                (void) co_await session.close_async(bad_code ? static_cast<Status>(1005u) : Status::Normal,
+                                                    bad_code ? std::string_view{"invalid code"} : std::string_view{"\xED\xA0\x80", 3});
+            } catch (const std::invalid_argument &) {
+                rejected = true;
+            }
+        };
+        auto rejected_task = reject();
+        rejected_task.handle().resume();
+        ASSERT_TRUE(rejected_task.handle().done());
+        ASSERT_NO_THROW(rejected_task.await_resume());
+        ASSERT_TRUE(rejected);
+        ASSERT_EQ(session.out().size(), 0u);
+        qb::http::ws::MessageClose peer(Status::Normal, "peer");
+        session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
+        EXPECT_EQ(session.out().size(), 2u + peer.size()) << "the rejected local close sent no frame, so the peer Close needs an echo";
+    }
+}
+
+TEST_F(WsCoroServer, RejectedCloseAllowsAValidCloseOnTheSameSession) {
+    EchoCoroServer  server;
+    EchoCoroSession session(server);
+    using Status   = qb::http::ws::CloseStatus;
+    bool rejected  = false;
+    bool completed = false;
+    auto scenario  = [&]() -> qb::io::async::task<void> {
+        try {
+            (void) co_await session.close_async(static_cast<Status>(1005u));
+        } catch (const std::invalid_argument &) {
+            rejected = true;
+        }
+        completed = (co_await session.close_async(Status::Normal, "valid")).ok;
+    };
+    auto task = scenario();
+    task.handle().resume();
+    ASSERT_TRUE(rejected);
+    ASSERT_FALSE(task.handle().done()) << "the refused close must not leave a completion slot";
+    const auto queued_bytes = session.out().size();
+    ASSERT_GT(queued_bytes, 0u);
+    qb::http::ws::MessageClose peer(Status::Normal, "valid");
+    session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
+    for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(task.handle().done());
+    EXPECT_NO_THROW(task.await_resume());
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(session.out().size(), queued_bytes);
+}
+
+TEST_F(WsCoroServer, ARealConcurrentNextFrameIsStillRejected) {
+    EchoCoroServer  server;
+    EchoCoroSession session(server);
+    auto            receive = [&]() -> qb::io::async::task<qb::http::ws::IncomingFrame> {
+        co_return co_await session.next_frame();
+    };
+    auto first = receive();
+    first.handle().resume();
+    ASSERT_FALSE(first.handle().done());
+    auto second = receive();
+    second.handle().resume();
+    ASSERT_TRUE(second.handle().done());
+    EXPECT_THROW((void) second.await_resume(), std::logic_error);
+    qb::http::ws::MessageText message;
+    message << "server-first";
+    session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
+    for (int turn = 0; turn != 16 && !first.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(first.handle().done());
+    EXPECT_EQ(first.await_resume().payload, "server-first");
+}
+
+TEST_F(WsCoroServer, AbandonedCloseAllowsAReplacementButRejectsAConcurrentClose) {
+    EchoCoroServer  server;
+    EchoCoroSession session(server);
+    auto            close = [&]() -> qb::io::async::task<qb::http::ws::CloseResult> {
+        co_return co_await session.close_async(qb::http::ws::CloseStatus::Normal, "valid");
+    };
+    {
+        auto abandoned = close();
+        abandoned.handle().resume();
+        ASSERT_FALSE(abandoned.handle().done());
+    }
+    auto replacement = close();
+    replacement.handle().resume();
+    ASSERT_FALSE(replacement.handle().done()) << "an abandoned Close must not reserve the completion slot";
+    auto concurrent = close();
+    concurrent.handle().resume();
+    ASSERT_TRUE(concurrent.handle().done());
+    EXPECT_THROW((void) concurrent.await_resume(), std::logic_error);
+    const auto                 queued_bytes = session.out().size();
+    qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::Normal, "valid");
+    session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
+    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_TRUE(replacement.handle().done());
+    EXPECT_TRUE(replacement.await_resume().ok);
+    EXPECT_EQ(session.out().size(), queued_bytes);
 }
 
 } // namespace ws_coro_server_test

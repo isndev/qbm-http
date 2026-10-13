@@ -95,6 +95,7 @@ struct BatchRequestContext {
  */
 class Client : public std::enable_shared_from_this<Client> {
     class callback_scope;
+    struct failure_cohort;
 
     class connection_base {
     public:
@@ -117,8 +118,10 @@ class Client : public std::enable_shared_from_this<Client> {
     // client alive through the current loop turn is owned by the deferred closure that releases
     // it (see `hold_through_current_tick`). Parking it in a member made it a self-referential
     // cycle whenever that closure never got to run.
-    std::size_t _callback_depth            = 0;
-    bool        _deferred_connection_reset = false;
+    std::size_t _callback_depth = 0;
+    // While true, _connection still owns the retired dispatch. connect() may
+    // record a new intent, but only deferred cleanup can replace that owner.
+    bool _deferred_connection_reset = false;
 
     std::unique_ptr<connection_base>                                       _connection;
     std::deque<std::unique_ptr<RequestContext>>                            _pending_requests;
@@ -164,6 +167,8 @@ public:
      * @param callback Invoked with the connection outcome. If already connected,
      *                 it is invoked immediately with success; if a connection is
      *                 in progress, it is queued. May be empty.
+     *                 During retirement, the accepted next attempt starts after
+     *                 the old callbacks and protocol/I/O dispatch have unwound.
      * @return `true` if connected or the attempt was started/queued; `false` if no
      *         attempt could be started and no callback was provided.
      */
@@ -177,7 +182,8 @@ public:
      * @brief Intentionally close the connection and fail all active/pending requests.
      *
      * Disables auto-reconnect for the current cycle; the underlying connection is
-     * reset immediately, or deferred until the current user-callback scope unwinds.
+     * reset before returning, or deferred until the current callback dispatch unwinds.
+     * Requests and connects submitted by failure callbacks belong to the next cycle.
      */
     void disconnect();
 
@@ -290,10 +296,14 @@ private:
     // escaping exception would call std::terminate; this is the single
     // chokepoint that prevents it.
     template <typename Fn>
-    void invoke_user_callback(Fn &&fn) noexcept;
-    void reset_deferred_connection_if_ready();
-    void process_pending_requests();
-    void arm_pending_timeout(std::uint64_t request_id);
+    void           invoke_user_callback(Fn &&fn) noexcept;
+    void           reset_deferred_connection_if_ready();
+    void           retire_connection(bool defer_cleanup = true);
+    failure_cohort detach_failure_cohort(bool fail_pending);
+    void           fail_retired_requests(failure_cohort &cohort, std::string const &error, qb::http::status active_status,
+                                         std::string const &pending_error, qb::http::status pending_status);
+    void           process_pending_requests();
+    void           arm_pending_timeout(std::uint64_t request_id);
     bool fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::REQUEST_TIMEOUT);
     void handle_connection_success();
     void handle_connection_failure(std::string const &error);

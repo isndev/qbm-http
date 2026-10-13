@@ -164,8 +164,8 @@ public:
 
 private:
     using connect_complete_fn = std::function<void(ConnectResult &&)>;
-    using frame_complete_fn   = std::function<void(IncomingFrame &&)>;
-    using close_complete_fn   = std::function<void(CloseResult &&)>;
+    using frame_complete_fn   = qb::http::async::detail::http_completion<IncomingFrame>;
+    using close_complete_fn   = qb::http::async::detail::http_completion<CloseResult>;
 
     std::deque<IncomingFrame> _pending_frames;
     connect_complete_fn       _connect_complete;
@@ -420,7 +420,7 @@ public:
      */
     [[nodiscard]] auto
     receive() {
-        return qb::http::async::make_awaiter<IncomingFrame>([this](auto complete) {
+        return qb::http::async::detail::make_slot_awaiter<IncomingFrame>([this](auto complete) {
             if (!_pending_frames.empty()) {
                 auto frame = std::move(_pending_frames.front());
                 _pending_frames.pop_front();
@@ -448,7 +448,7 @@ public:
      */
     [[nodiscard]] auto
     close_async(CloseStatus status = CloseStatus::Normal, std::string_view reason = "closed normally") {
-        return qb::http::async::make_awaiter<CloseResult>([this, status, reason = std::string(reason)](auto complete) {
+        return qb::http::async::detail::make_slot_awaiter<CloseResult>([this, status, reason = std::string(reason)](auto complete) {
             if (_close_complete) {
                 throw std::logic_error("qb::http::ws::coro_client::close_async(): another "
                                        "close awaiter is already pending");
@@ -457,10 +457,20 @@ public:
                 complete(CloseResult{true});
                 return;
             }
-            _close_sent     = true;
-            _close_complete = std::move(complete);
             MessageClose msg(status, reason);
-            *this << msg;
+            const auto   identity   = complete.identity();
+            const auto   close_sent = _close_sent;
+            _close_sent             = true;
+            _close_complete         = std::move(complete);
+            try {
+                *this << msg;
+            } catch (...) {
+                if (_close_complete.identity() == identity) {
+                    _close_complete = {};
+                    _close_sent     = close_sent;
+                }
+                throw;
+            }
         });
     }
 };
@@ -576,15 +586,15 @@ public:
     using HandshakeHook = std::function<bool(Self &session, qb::http::Request &request, qb::http::Response &response)>;
 
 private:
-    std::deque<IncomingFrame>             _pending_frames;
-    std::function<void(IncomingFrame &&)> _frame_complete;
-    std::function<void(CloseResult &&)>   _close_complete;
-    std::size_t                           _pending_cap{1024};
-    HandshakeHook                         _handshake_hook;
-    bool                                  _upgraded{false};
-    bool                                  _run_spawned{false};
-    bool                                  _disconnected{false};
-    bool                                  _close_sent{false};
+    std::deque<IncomingFrame>                               _pending_frames;
+    qb::http::async::detail::http_completion<IncomingFrame> _frame_complete;
+    qb::http::async::detail::http_completion<CloseResult>   _close_complete;
+    std::size_t                                             _pending_cap{1024};
+    HandshakeHook                                           _handshake_hook;
+    bool                                                    _upgraded{false};
+    bool                                                    _run_spawned{false};
+    bool                                                    _disconnected{false};
+    bool                                                    _close_sent{false};
 
     Self &
     self() noexcept {
@@ -845,7 +855,7 @@ public:
      */
     [[nodiscard]] auto
     next_frame() {
-        return qb::http::async::make_awaiter<IncomingFrame>([this](auto complete) {
+        return qb::http::async::detail::make_slot_awaiter<IncomingFrame>([this](auto complete) {
             if (!_pending_frames.empty()) {
                 auto frame = std::move(_pending_frames.front());
                 _pending_frames.pop_front();
@@ -874,7 +884,7 @@ public:
      */
     [[nodiscard]] auto
     close_async(CloseStatus status = CloseStatus::Normal, std::string_view reason = "closed normally") {
-        return qb::http::async::make_awaiter<CloseResult>([this, status, reason = std::string(reason)](auto complete) {
+        return qb::http::async::detail::make_slot_awaiter<CloseResult>([this, status, reason = std::string(reason)](auto complete) {
             if (_close_complete) {
                 throw std::logic_error("qb::http::ws::coro_session::close_async(): another "
                                        "close awaiter is already pending");
@@ -883,10 +893,20 @@ public:
                 complete(CloseResult{true});
                 return;
             }
-            _close_sent     = true;
-            _close_complete = std::move(complete);
             MessageClose msg(status, reason);
-            *this << msg;
+            const auto   identity   = complete.identity();
+            const auto   close_sent = _close_sent;
+            _close_sent             = true;
+            _close_complete         = std::move(complete);
+            try {
+                *this << msg;
+            } catch (...) {
+                if (_close_complete.identity() == identity) {
+                    _close_complete = {};
+                    _close_sent     = close_sent;
+                }
+                throw;
+            }
         });
     }
 };

@@ -10,9 +10,9 @@ TLS is not bolted onto qbm-http; it is the qb-io secure transport layer (`qb::io
 
 ## The SSL feature gate
 
-HTTPS, secure WebSocket (`wss://`), HTTP/2, HTTP/3, and JWT/auth are all **compiled only when the framework is built with OpenSSL**. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<qbm/http/http.h>` resolve the same way in your code as in the module.
+HTTPS, secure WebSocket (`wss://`), the HTTP/2 client/server transports, HTTP/3, and JWT/auth require an **OpenSSL-enabled framework**. The HTTP/2 wire codec is still compiled without SSL for protocol tests; it provides no plaintext h2c endpoint. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<qbm/http/http.h>` resolve the same way in your code as in the module.
 
-<!-- src: qbm/http/CMakeLists.txt:79-87; qbm/http/src/qbm/http/http.h:45-48 -->
+<!-- src: qbm/http/CMakeLists.txt:79-87,99-110,130-143; qbm/http/src/qbm/http/http.h:45-48 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -196,7 +196,7 @@ The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the conn
 
 HTTP/2 in qbm-http is **TLS-only with ALPN** — there is no plaintext `h2c`. `qb::http2::Server::listen` mirrors the HTTP/1.1 overload but advertises `{"h2", "http/1.1"}`, so a client that negotiates `h2` gets HTTP/2 and one that does not falls back to HTTP/1.1 on the same port.
 
-<!-- src: qbm/http/src/qbm/http/2/http2.h:525-531 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:597-603 -->
 ```cpp
 #include <qbm/http/http.h>   // pulls in <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
@@ -254,7 +254,7 @@ The coroutine overloads carry the same `verify_peer` parameter and `co_await` th
 
 `qb::http1::Client` reuses one connection across requests. It defaults `verify_peer` to `true`; toggle it with `set_verify_peer(bool)` **before** connecting, since it is applied when the secure connection opens. The connect timeout is a `qb::duration` (default 30 seconds).
 
-<!-- src: qbm/http/src/qbm/http/1.1/client.h:130, 134, 227, 252 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:133, 137, 233, 258 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -287,7 +287,7 @@ client->connect([client](bool connected, const std::string &/*err*/) {
 
 ALPN is a TLS extension where the client advertises the application protocols it supports and the server picks one during the handshake. qbm-http wires it for you: an HTTP/1.1 secure server advertises `{"http/1.1"}`, an HTTP/2 server advertises `{"h2", "http/1.1"}` and switches the session based on what was selected, the HTTP/2 client advertises `{"h2"}` only, and HTTP/3 negotiates `"h3"` over QUIC (a separate transport — see [HTTP/3 protocol](./19-http3-protocol.md)). You override the server's advertised set only when you build the context by hand: chain `.alpn({...})` on the `qb::io::ssl::Context` you pass to `transport().init(...)`, which is what both `listen` overloads do. `transport().set_supported_alpn_protocols({...})` is the raw-`SSL_CTX` counterpart, needed only on the `init(SSL_CTX*)` escape hatch.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:211-212; qb/src/qb/io/tcp/ssl/listener.h:310; qbm/http/src/qbm/http/1.1/http.h:630; qbm/http/src/qbm/http/2/http2.h:544 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:211-212; qb/src/qb/io/tcp/ssl/listener.h:310; qbm/http/src/qbm/http/1.1/http.h:630; qbm/http/src/qbm/http/2/http2.h:616 -->
 
 ## Peer verification and trust
 

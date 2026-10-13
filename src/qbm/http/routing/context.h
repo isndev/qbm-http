@@ -20,6 +20,7 @@
 #include <charconv>    // For std::from_chars (typed path/query params)
 #include <cstdint>     // For std::uint64_t
 #include <functional>  // For std::function (LifecycleHook, _on_finalized_callback)
+#include <limits>      // For the lifecycle hook dispatch nesting limit
 #include <memory>      // For std::shared_ptr, std::weak_ptr, std::enable_shared_from_this
 #include <optional>    // For std::optional
 #include <stdexcept>   // For std::bad_any_cast, std::runtime_error (potentially from user code)
@@ -35,12 +36,17 @@
 #include "./path_parameters.h"                 // For qb::http::PathParameters
 #include "./slot.h"                            // For qb::http::Slot<T> &mdash; typed compile-time keys
 #include "./types.h"                           // For HookPoint, AsyncTaskResult, http_method_to_string, HTTP_STATUS_*
+#include "./middleware.h"                      // For the selected child's cancellation interface
 
 // Forward declaration for RouterCore to break circular dependency if Context needs methods from it.
 namespace qb::http {
 template <typename SessionType>
 class RouterCore;
-}
+template <typename SessionType>
+class IMiddleware;
+template <typename SessionType>
+class ConditionalMiddleware;
+} // namespace qb::http
 
 namespace qb::http {
 /**
@@ -67,6 +73,7 @@ namespace qb::http {
 template <typename SessionType>
 class Context : public std::enable_shared_from_this<Context<SessionType>> {
     friend class RouterCore<SessionType>;
+    friend class ConditionalMiddleware<SessionType>;
 
 public:
     /**
@@ -113,11 +120,12 @@ private:
     // Weak pointer to break the circular reference:
     //   HttpSession._context (shared_ptr<Context>) <-> Context._session (originally shared_ptr<Session>).
     // Using weak_ptr here prevents both objects from keeping each other alive indefinitely.
-    std::weak_ptr<SessionType> _session;         ///< Weak pointer to the client session object.
-    PathParameters             _path_parameters; ///< Path parameters extracted from the route match.
-    std::vector<LifecycleHook> _lifecycle_hooks; ///< List of registered lifecycle hook functions.
-    CustomDataMap              _custom_data;     ///< Map for storing arbitrary custom data.
-    std::optional<std::string> _cancellation_reason_internal;
+    std::weak_ptr<SessionType>                  _session;                  ///< Weak pointer to the client session object.
+    PathParameters                              _path_parameters;          ///< Path parameters extracted from the route match.
+    std::vector<LifecycleHook>                  _lifecycle_hooks;          ///< List of registered lifecycle hook functions.
+    std::unique_ptr<std::vector<LifecycleHook>> _deferred_lifecycle_hooks; ///< Allocated only by registration during hook dispatch.
+    CustomDataMap                               _custom_data;              ///< Map for storing arbitrary custom data.
+    std::optional<std::string>                  _cancellation_reason_internal;
     ///< Stores the reason if context processing is cancelled.
 
     /// The current chain of tasks to be executed. Held by `shared_ptr<const ...>` so the immutable,
@@ -147,7 +155,7 @@ private:
      *   - `is_cancelled`: sticky cancellation flag. Orthogonal to `state`:
      *     cancellation can happen at any point while the chain is `Running`
      *     and must survive across finalisation so POST hooks can observe it.
-     *   - `task_in_flight`: true between an `IAsyncTask::execute()` call
+     *   - `task_in_flight`: non-None between an `IAsyncTask::execute()` call
      *     and the matching `complete()`. Consulted exclusively by
      *     `cancel()` to decide whether to call `IAsyncTask::cancel()` on
      *     the in-flight task &mdash; replaces the per-task
@@ -156,19 +164,33 @@ private:
      *     requests.
      *
      * Invariants (asserted in debug builds where applicable):
-     *   - `task_in_flight` => `state == Running`
+     *   - `task_in_flight != None` => `state == Running`
      *   - `is_cancelled` is monotonic: once set, never cleared
      *   - `state` transitions only forward: Ready &rarr; Running &rarr; Finalised
      */
+    enum class InFlightTask : std::uint8_t { None = 0, Task = 1, SelectedChild = 2 };
+
     struct Lifecycle {
-        State           state            = State::Ready;
-        ProcessingPhase phase            = ProcessingPhase::INITIAL;
-        AsyncTaskResult last_result      = AsyncTaskResult::COMPLETE;
-        std::uint64_t   completion_count = 0;
-        bool            is_cancelled     = false;
-        bool            task_in_flight   = false;
+        State           state               = State::Ready;
+        ProcessingPhase phase               = ProcessingPhase::INITIAL;
+        AsyncTaskResult last_result         = AsyncTaskResult::COMPLETE;
+        std::uint64_t   completion_count    = 0;
+        bool            is_cancelled        = false;
+        InFlightTask    task_in_flight      = InFlightTask::None;
+        std::uint32_t   hook_dispatch_depth = 0;
     };
     Lifecycle _lc;
+    // The compiled task owns the conditional and its children transitively. This
+    // borrowed target is consulted only while this Context has SelectedChild in
+    // flight; the existing completion/finalization resets invalidate it before
+    // another task is dispatched. Nested conditionals replace it with their leaf.
+    IMiddleware<SessionType> *_selected_middleware = nullptr;
+
+    void
+    select_middleware(IMiddleware<SessionType> &middleware) noexcept {
+        _selected_middleware = &middleware;
+        _lc.task_in_flight   = InFlightTask::SelectedChild;
+    }
 
     // --- Semantic queries (all `noexcept`) ---
 
@@ -190,10 +212,29 @@ private:
     /**
      * @brief (Private) Executes all registered lifecycle hooks for a given `HookPoint`.
      * Exceptions thrown by hook functions are caught and suppressed.
+     * Registrations during dispatch become visible after the outermost dispatch returns.
      * @param point The `HookPoint` for which to execute hooks.
      */
     void
     execute_hook_internal(HookPoint point) {
+        if (_lifecycle_hooks.empty())
+            return;
+        if (_lc.hook_dispatch_depth == std::numeric_limits<std::uint32_t>::max()) [[unlikely]]
+            throw std::overflow_error("HTTP lifecycle hook dispatch nesting exhausted");
+        ++_lc.hook_dispatch_depth;
+        struct DispatchGuard {
+            Context &context;
+            ~DispatchGuard() noexcept {
+                if (--context._lc.hook_dispatch_depth == 0 && context._deferred_lifecycle_hooks) {
+                    auto pending = std::move(context._deferred_lifecycle_hooks);
+                    // The empty prefix was allocated at registration. Every active callable has
+                    // returned now; move its final state without an allocation or a target copy.
+                    for (std::size_t i = 0; i < context._lifecycle_hooks.size(); ++i)
+                        (*pending)[i] = std::move(context._lifecycle_hooks[i]);
+                    context._lifecycle_hooks.swap(*pending);
+                }
+            }
+        } guard{*this};
         for (const auto &hook : _lifecycle_hooks) {
             if (hook) {
                 try {
@@ -220,7 +261,7 @@ private:
             return;
         }
         _lc.state             = State::Finalised;
-        _lc.task_in_flight    = false;
+        _lc.task_in_flight    = InFlightTask::None;
         _finalization_pending = false;
 
         execute_hook_internal(HookPoint::POST_HANDLER_EXECUTION);
@@ -253,11 +294,11 @@ private:
             const auto  chain_pin       = _task_chain;
             const auto &task_to_execute = (*chain_pin)[_current_task_index];
             if (task_to_execute) {
-                _lc.task_in_flight = true;
+                _lc.task_in_flight = InFlightTask::Task;
                 try {
                     task_to_execute->execute(this->shared_from_this());
                 } catch (...) {
-                    _lc.task_in_flight = false;
+                    _lc.task_in_flight = InFlightTask::None;
                     // Only call complete() if context is not already finalized or cancelled
                     // This prevents double finalization and ensures robust error handling
                     if (!is_cancelled_or_done_internal()) {
@@ -273,6 +314,31 @@ private:
         } else {
             finalize_processing_internal();
         }
+    }
+
+    /** @brief Starts the already adopted chain unless a hook cancelled or finalized the context. */
+    void
+    start_adopted_task_chain() {
+        if (is_cancelled_or_done_internal()) {
+            return;
+        }
+        _current_task_index = 0;
+        _lc.state           = State::Running;
+
+        if (!_task_chain || _task_chain->empty()) {
+            complete(AsyncTaskResult::COMPLETE);
+            return;
+        }
+        proceed_to_next_task_internal();
+    }
+
+    // Ownership adoption precedes hooks without starting a task. On that
+    // hook-only path, an idle cursor preserves PRE_HANDLER CONTINUE's former
+    // terminal behaviour while names remain owned through finalisation.
+    void
+    adopt_task_chain_for_hooks(std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> chain) noexcept {
+        _task_chain         = std::move(chain);
+        _current_task_index = _task_chain ? _task_chain->size() : 0;
     }
 
     /**
@@ -620,12 +686,24 @@ public:
     /**
      * @brief Adds a lifecycle hook function to be called at specific points during request processing.
      * Hooks are executed in the order they are added for a given `HookPoint`.
+     * A hook added by a running hook joins the list after the outermost hook dispatch
+     * returns; nested dispatches still use the original list.
      * @param hook_fn A `LifecycleHook` function (std::function) to be added. If `hook_fn` is null, it's ignored.
      */
     void
     add_lifecycle_hook(LifecycleHook hook_fn) {
         if (hook_fn) {
-            _lifecycle_hooks.push_back(std::move(hook_fn));
+            if (_lc.hook_dispatch_depth != 0) {
+                if (_deferred_lifecycle_hooks) {
+                    _deferred_lifecycle_hooks->push_back(std::move(hook_fn));
+                } else {
+                    auto pending = std::make_unique<std::vector<LifecycleHook>>(_lifecycle_hooks.size());
+                    pending->push_back(std::move(hook_fn));
+                    _deferred_lifecycle_hooks = std::move(pending);
+                }
+            } else {
+                _lifecycle_hooks.push_back(std::move(hook_fn));
+            }
         }
     }
 
@@ -1083,7 +1161,7 @@ public:
      * `complete(ERROR)` and then a stray `complete(COMPLETE)`. `complete(ERROR)` reseats the chain to a
      * configured error chain and dispatches its first task; if that task is asynchronous, `complete(ERROR)`
      * returns WITHOUT finalising, leaving the context `Running` in `ProcessingPhase::ERROR_CHAIN` with
-     * `task_in_flight == true`. The stray `complete(COMPLETE)` then finalises first and clobbers the error
+     * `task_in_flight != None`. The stray `complete(COMPLETE)` then finalises first and clobbers the error
      * chain (whose own later `complete()` becomes the no-op).
      *
      * This window cannot be closed inside `complete()`. At entry, the stray and the *legitimate* in-flight
@@ -1114,7 +1192,7 @@ public:
             return;
         }
 
-        _lc.task_in_flight = false;
+        _lc.task_in_flight = InFlightTask::None;
         _lc.last_result    = result;
         ++_lc.completion_count;
 
@@ -1154,11 +1232,12 @@ public:
                     } else {
                         auto router_core_shared = _router_core_wptr.lock();
                         if (router_core_shared && router_core_shared->is_error_chain_set()) {
-                            auto error_chain_tasks = router_core_shared->get_compiled_error_tasks();
+                            auto error_chain_tasks = router_core_shared->get_retained_error_tasks(_task_chain);
                             if (error_chain_tasks && !error_chain_tasks->empty()) {
                                 set_processing_phase(ProcessingPhase::ERROR_CHAIN);
                                 _task_chain         = std::move(error_chain_tasks);
                                 _current_task_index = 0;
+                                _lc.state           = State::Running;
                                 proceed_to_next_task_internal();
                             } else {
                                 _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -1193,13 +1272,22 @@ public:
         _lc.is_cancelled              = true;
         _cancellation_reason_internal = reason;
 
-        if (_lc.task_in_flight && _task_chain && _current_task_index < _task_chain->size()) {
-            auto current_task_shared_ptr = (*_task_chain)[_current_task_index];
-            if (current_task_shared_ptr) {
+        if (_lc.task_in_flight != InFlightTask::None && _task_chain && _current_task_index < _task_chain->size()) {
+            const auto in_flight = std::exchange(_lc.task_in_flight, InFlightTask::None);
+            if (in_flight == InFlightTask::SelectedChild) {
                 try {
-                    current_task_shared_ptr->cancel();
+                    _selected_middleware->cancel();
                 } catch (...) {
-                    // Log: Context::cancel: Exception during task's cancel() method.
+                    // Cancellation remains final even if the selected child throws.
+                }
+            } else {
+                auto current_task_shared_ptr = (*_task_chain)[_current_task_index];
+                if (current_task_shared_ptr) {
+                    try {
+                        current_task_shared_ptr->cancel();
+                    } catch (...) {
+                        // Log: Context::cancel: Exception during task's cancel() method.
+                    }
                 }
             }
         }
@@ -1251,7 +1339,7 @@ public:
     suppress_response() noexcept {
         _on_finalized_callback = nullptr;
         _lc.state              = State::Finalised;
-        _lc.task_in_flight     = false;
+        _lc.task_in_flight     = InFlightTask::None;
     }
 
     /**

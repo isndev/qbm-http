@@ -179,7 +179,7 @@ qb::io::async::task<void> fetch() {
 
 To drive a single call from synchronous code, wrap it in `run_sync`:
 
-<!-- src: qbm/http/src/qbm/http/coro.h:199-202 -->
+<!-- src: qbm/http/src/qbm/http/coro.h:284-287 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -229,9 +229,9 @@ The three persistent clients share the connect / `push_request` / `push_requests
 
 When you make many requests to the *same origin*, the one-shot helpers reconnect every time. The persistent client keeps one TCP/TLS connection open, sends one active request at a time (queuing the rest), preserves batch order, and reconnects only when it is safe to do so.
 
-The client must be owned by a `std::shared_ptr` — use `qb::http1::make_client`. Its callbacks, timers, and coroutines capture `weak_from_this()` and silently no-op if the client was destroyed, so stack-allocating one breaks `shared_from_this`.
+The client must be owned by a `std::shared_ptr` — use `qb::http1::make_client`. Late transport completions cannot access a destroyed client. Destruction abandons pending connect observers; an explicit `disconnect()` instead reports their cancelled attempt once while the client still has a live owner.
 
-<!-- src: qbm/http/src/qbm/http/1.1/client.h:108-155,206-207 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:96-158,212-213 -->
 ```cpp
 namespace qb::http1 {
     std::shared_ptr<Client> make_client(std::string const& base_uri);
@@ -265,7 +265,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:392-403 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:413-424 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -287,6 +287,13 @@ Notes specific to the persistent HTTP/1.1 client:
 - **Lazy connect.** You can `push_request` before `connect` completes; requests queue and flush once the connection is up.
 - **Connection reuse.** Two sequential requests share one connection — `get_stats()` and a server-side connection counter both confirm a single TCP connection per origin.
 - **TLS.** `https://` base URIs require `QB_HAS_SSL`.
+
+### Reentry from a response or failure callback
+
+A closing response marks the client disconnected **before** its callback runs. The active response is delivered once, while queued remainder follows the normal reconnect policy. On disconnect, connect failure, or timeout, the old request and connect-callback cohort is detached before its notifications. A request submitted by one of those callbacks belongs to the next cycle and cannot be consumed by the old failure loop. Batch order, callback counts, and existing pending-request deadlines are preserved.
+
+If a callback requests `connect()`, the new attempt is accepted but starts only after the old callbacks and protocol/I/O dispatch have unwound. `is_connecting()` can therefore be true while `is_connected()` remains false. Work queued behind this explicit intent is admitted even with `set_auto_reconnect(false)`; without such an intent, a disconnected client with automatic reconnect disabled still rejects work with 503. A direct `disconnect()` outside callback dispatch releases the retired connection before returning. Callback exceptions remain contained, so one throwing old callback does not prevent the remaining old notifications.
+<!-- src: qbm/http/src/qbm/http/1.1/client.cpp:232-236,272-307,338-349,494-510,565-593,597-630,690-749 -->
 
 ## Persistent HTTP/2 client (`qb::http2::Client`)
 

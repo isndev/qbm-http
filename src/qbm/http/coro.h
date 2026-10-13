@@ -68,6 +68,74 @@
 
 namespace qb::http::async {
 
+namespace detail {
+
+// A reserved completion slot observes the awaiter's existing lifetime token.
+// It owns neither the result nor the coroutine frame, and checks the token
+// before touching either. Copies keep the same operation identity.
+template <typename T>
+class http_completion {
+    T                                 *_result{nullptr};
+    std::coroutine_handle<>            _handle{};
+    std::shared_ptr<bool>              _alive;
+    std::shared_ptr<std::atomic<bool>> _completed;
+
+public:
+    http_completion() = default;
+
+    http_completion(T &result, std::coroutine_handle<> handle, std::shared_ptr<bool> alive,
+                    std::shared_ptr<std::atomic<bool>> completed) noexcept
+        : _result(&result)
+        , _handle(handle)
+        , _alive(std::move(alive))
+        , _completed(std::move(completed)) {}
+
+    explicit
+    operator bool() const noexcept {
+        return _alive && *_alive;
+    }
+
+    [[nodiscard]] void const *
+    identity() const noexcept {
+        return _alive.get();
+    }
+
+    void
+    operator()(T &&value) const {
+        if (!*this)
+            return;
+        bool expected = false;
+        if (!_completed->compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+            return;
+        *_result = std::move(value);
+        if (_handle)
+            qb::io::async::coro_scheduler().schedule_resume(_handle);
+    }
+};
+
+template <typename Func>
+class slot_operation {
+    Func _op;
+
+public:
+    explicit slot_operation(Func op) noexcept(std::is_nothrow_move_constructible_v<Func>)
+        : _op(std::move(op)) {}
+
+    template <typename Complete>
+    void
+    operator()(Complete complete) {
+        _op(std::move(complete));
+    }
+};
+
+template <typename Operation>
+struct is_slot_operation : std::false_type {};
+
+template <typename Func>
+struct is_slot_operation<slot_operation<Func>> : std::true_type {};
+
+} // namespace detail
+
 /**
  * @class http_awaiter
  * @brief Generic awaiter adapting a callback-based asynchronous operation.
@@ -124,22 +192,26 @@ public:
     void
     await_suspend(std::coroutine_handle<> h) {
         qb::io::async::track_suspension(h, "http");
-        _handle        = h;
-        auto alive     = _alive;
-        auto completed = _completed;
-        _op([this, alive, completed](T &&value) {
-            if (!*alive) {
-                return;
-            }
-            bool expected = false;
-            if (!completed->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-                return;
-            }
-            _result = std::move(value);
-            if (_handle) {
-                qb::io::async::coro_scheduler().schedule_resume(_handle);
-            }
-        });
+        _handle = h;
+        if constexpr (detail::is_slot_operation<Operation>::value) {
+            _op(detail::http_completion<T>{_result, h, _alive, _completed});
+        } else {
+            auto alive     = _alive;
+            auto completed = _completed;
+            _op([this, alive, completed](T &&value) {
+                if (!*alive) {
+                    return;
+                }
+                bool expected = false;
+                if (!completed->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                    return;
+                }
+                _result = std::move(value);
+                if (_handle) {
+                    qb::io::async::coro_scheduler().schedule_resume(_handle);
+                }
+            });
+        }
     }
 
     [[nodiscard]] T
@@ -175,6 +247,19 @@ template <typename T, typename Func>
 make_awaiter(Func &&op) {
     return awaiter<T>(std::forward<Func>(op));
 }
+
+namespace detail {
+
+// Keep the lifetime-aware completion typed only for operations with a slot.
+// The public callback factories retain their existing erased completion path.
+template <typename T, typename Func>
+[[nodiscard]] auto
+make_slot_awaiter(Func &&op) {
+    using operation_type = slot_operation<std::decay_t<Func>>;
+    return http_awaiter<T, operation_type>(operation_type(std::forward<Func>(op)));
+}
+
+} // namespace detail
 
 } // namespace qb::http::async
 

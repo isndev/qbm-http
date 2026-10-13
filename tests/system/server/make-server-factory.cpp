@@ -35,6 +35,8 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -395,3 +397,367 @@ TEST_F(Http2MakeServerTest, FactoryServerServesHttp1FallbackOverAlpn) {
 #endif // QB_HAS_SSL
 
 } // namespace
+
+namespace server_context_teardown_test {
+using PlainContext = qb::http::Context<qb::http::DefaultSession>;
+
+struct NameObservations {
+    int                      completions = 0;
+    std::vector<std::string> names;
+
+    void
+    observe(PlainContext &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::REQUEST_COMPLETE)
+            return;
+        ++completions;
+        for (const auto &[name, value] : context.path_parameters().get_all()) {
+            EXPECT_EQ(value, "value");
+            names.emplace_back(name);
+        }
+    }
+};
+
+bool
+dispatch_request(const std::shared_ptr<qb::http::DefaultSession> &session, std::string_view method = "GET") {
+    const std::string raw = std::string(method)
+                            + " /records/value HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n"
+                              "Content-Length: 0\r\n\r\n";
+    session->in().write(raw.data(), raw.size());
+    auto      *protocol = session->protocol();
+    const auto size     = protocol->getMessageSize();
+    if (size != raw.size()) {
+        ADD_FAILURE() << "the existing stock parser must consume this complete request";
+        return false;
+    }
+    protocol->onMessage(size);
+    return true;
+}
+
+class PendingErrorTask : public qb::http::IAsyncTask<qb::http::DefaultSession> {
+    int &_calls;
+    int *_cancellations;
+
+public:
+    explicit PendingErrorTask(int &calls, int *cancellations = nullptr)
+        : _calls(calls)
+        , _cancellations(cancellations) {}
+    void
+    execute(std::shared_ptr<PlainContext> context) override {
+        EXPECT_EQ(context->state(), PlainContext::State::Running);
+        ++_calls;
+    }
+    void
+    cancel() override {
+        if (_cancellations)
+            ++*_cancellations;
+    }
+    std::string
+    name() const override {
+        return "PendingErrorTask";
+    }
+};
+
+enum class EarlyDecision { PreRoutingCancel, Cancel, Complete, Continue, Error, EmptyChain };
+
+// Candidate-only lifetime controls: observations after router destruction
+// deliberately rely on the compiled chain's name ownership being installed.
+void
+early_hook_teardown(EarlyDecision decision) {
+    qb::io::async::init();
+    const std::string             parameter_name(128, 'h');
+    NameObservations              observations;
+    std::shared_ptr<PlainContext> held;
+    int                           handlers            = 0;
+    int                           error_tasks         = 0;
+    int                           error_cancellations = 0;
+    auto                          server              = qb::http::make_server();
+    auto                          weak_core           = server->router().get_router_core_weak_ptr();
+    server->router().get("/records/:" + parameter_name, [&](auto context) {
+        ++handlers;
+        context->text("handler must not run");
+    });
+    server->router().set_error_task_chain({std::make_shared<PendingErrorTask>(error_tasks, &error_cancellations)});
+    server->router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        observations.observe(context, point);
+        const auto selected_point =
+            decision == EarlyDecision::PreRoutingCancel ? qb::http::HookPoint::PRE_ROUTING : qb::http::HookPoint::PRE_HANDLER_EXECUTION;
+        if (point != selected_point)
+            return;
+        held = context.shared_from_this();
+        switch (decision) {
+            case EarlyDecision::PreRoutingCancel:
+            case EarlyDecision::Cancel:
+                context.cancel("early hook");
+                break;
+            case EarlyDecision::Complete:
+                context.complete();
+                break;
+            case EarlyDecision::Continue:
+                context.complete(qb::http::AsyncTaskResult::CONTINUE);
+                break;
+            case EarlyDecision::Error:
+                context.complete(qb::http::AsyncTaskResult::ERROR);
+                break;
+            case EarlyDecision::EmptyChain:
+                break;
+        }
+    });
+    server->router().compile();
+    if (decision == EarlyDecision::EmptyChain) {
+        auto core = weak_core.lock();
+        ASSERT_NE(core, nullptr);
+        core->register_compiled_route("/records/:" + parameter_name, qb::http::method::GET, {});
+    }
+    auto session = std::make_shared<qb::http::DefaultSession>(*server);
+    server->sessions().emplace(session->id(), session);
+    ASSERT_TRUE(dispatch_request(session));
+    if (decision == EarlyDecision::EmptyChain)
+        held = session->context(); // The empty-chain terminal branch precedes PRE_HANDLER.
+    ASSERT_NE(held, nullptr);
+    EXPECT_EQ(handlers, 0);
+    EXPECT_EQ(error_tasks, decision == EarlyDecision::Error ? 1 : 0);
+    if (decision == EarlyDecision::Error) {
+        EXPECT_FALSE(held->is_completed());
+        EXPECT_EQ(held->state(), PlainContext::State::Running);
+        EXPECT_EQ(held->get_processing_phase(), PlainContext::ProcessingPhase::ERROR_CHAIN);
+        server->router().compile(); // Error ownership must keep the previous names.
+    } else {
+        EXPECT_TRUE(held->is_completed());
+    }
+    session.reset();
+    server.reset();
+    EXPECT_TRUE(weak_core.expired()) << "retaining names must not retain RouterCore";
+    EXPECT_EQ(held->session(), nullptr);
+    EXPECT_EQ(held->path_param(parameter_name), "value");
+    if (decision == EarlyDecision::Error) {
+        held->cancel("pending error task");
+        held->cancel("duplicate cancellation");
+        EXPECT_EQ(error_cancellations, 1);
+    }
+    EXPECT_TRUE(held->is_completed());
+    EXPECT_EQ(error_tasks, decision == EarlyDecision::Error ? 1 : 0);
+    EXPECT_EQ(observations.completions, 0);
+    held.reset();
+    EXPECT_EQ(observations.completions, 1);
+    EXPECT_EQ(observations.names, (std::vector<std::string>{parameter_name}));
+}
+
+void
+error_after_recompile_teardown(bool method_not_allowed) {
+    qb::io::async::init();
+    const std::string             parameter_name(128, 'e');
+    NameObservations              observations;
+    std::shared_ptr<PlainContext> held;
+    int                           error_tasks = 0;
+    auto                          server      = qb::http::make_server();
+    auto                          weak_core   = server->router().get_router_core_weak_ptr();
+    if (method_not_allowed) {
+        server->router().use([&](std::shared_ptr<PlainContext> context, auto) { held = std::move(context); });
+        server->router().get("/records/:" + parameter_name, [](auto context) { context->text("GET handler must not run"); });
+    } else {
+        server->router().get("/records/:" + parameter_name, [&](auto context) { held = std::move(context); });
+    }
+    server->router().set_error_task_chain({std::make_shared<PendingErrorTask>(error_tasks)});
+    server->router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) { observations.observe(context, point); });
+    server->router().compile();
+    auto session = std::make_shared<qb::http::DefaultSession>(*server);
+    server->sessions().emplace(session->id(), session);
+    ASSERT_TRUE(dispatch_request(session, method_not_allowed ? "POST" : "GET"));
+    ASSERT_NE(held, nullptr);
+    ASSERT_FALSE(held->is_completed());
+    if (method_not_allowed) {
+        EXPECT_EQ(held->get_processing_phase(), PlainContext::ProcessingPhase::METHOD_NOT_ALLOWED_CHAIN);
+        EXPECT_EQ(held->response().status(), qb::http::status::METHOD_NOT_ALLOWED);
+        EXPECT_EQ(held->response().header("Allow"), "GET");
+    }
+    server->router().compile();
+    held->complete(qb::http::AsyncTaskResult::ERROR);
+    ASSERT_FALSE(held->is_completed());
+    EXPECT_EQ(held->get_processing_phase(), PlainContext::ProcessingPhase::ERROR_CHAIN);
+    EXPECT_EQ(error_tasks, 1);
+    session.reset();
+    server.reset();
+    EXPECT_TRUE(weak_core.expired());
+    EXPECT_EQ(held->session(), nullptr);
+    EXPECT_EQ(held->path_param(parameter_name), "value");
+    held->complete();
+    EXPECT_EQ(error_tasks, 1);
+    held.reset();
+    EXPECT_EQ(observations.completions, 1);
+    EXPECT_EQ(observations.names, (std::vector<std::string>{parameter_name}));
+}
+
+// QB-512 uses the real factory server, real DefaultSession, its stock protocol,
+// stock router and stock session registry. No caller retains Context/RouterCore.
+// Input is handed to IProtocol synchronously and no transport write is driven:
+// pendingWrite proves that the Context is still owned at server destruction.
+void
+pending_response_teardown(bool retire_sessions_first, bool wildcard = false) {
+    qb::io::async::init();
+    const std::string        parameter_name(128, 'p');
+    std::vector<std::string> names_seen;
+    int                      completions = 0;
+    auto                     server      = qb::http::make_server();
+    server->router().get(std::string("/records/") + (wildcard ? "*" : ":") + parameter_name, [](auto context) { context->text("queued"); });
+    server->router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point == qb::http::HookPoint::REQUEST_COMPLETE) {
+            ++completions;
+            for (const auto &[name, value] : context.path_parameters().get_all()) {
+                EXPECT_EQ(value, "value");
+                names_seen.emplace_back(name);
+            }
+        }
+    });
+    server->router().compile();
+    auto session = std::make_shared<qb::http::DefaultSession>(*server);
+    server->sessions().emplace(session->id(), session);
+    const std::string raw = "GET /records/value HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+    session->in().write(raw.data(), raw.size());
+    auto      *protocol = session->protocol();
+    const auto size     = protocol->getMessageSize();
+    ASSERT_EQ(size, raw.size());
+    protocol->onMessage(size);
+    ASSERT_NE(session->context(), nullptr);
+    ASSERT_TRUE(session->context()->is_completed());
+    ASSERT_GT(session->out().size(), 0u);
+    std::weak_ptr<qb::http::Context<qb::http::DefaultSession>> weak_context = session->context();
+    session.reset();
+    ASSERT_FALSE(weak_context.expired());
+    if (retire_sessions_first)
+        server->sessions().clear();
+    server.reset();
+    EXPECT_TRUE(weak_context.expired());
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(names_seen, (std::vector<std::string>{parameter_name}));
+}
+} // namespace server_context_teardown_test
+
+TEST(HttpMakeServerTeardown, PendingResponseContextKeepsRouteNamesUntilServerTeardown) {
+    for (const bool wildcard : {false, true}) {
+        SCOPED_TRACE(wildcard ? "wildcard name" : "parameter name");
+        server_context_teardown_test::pending_response_teardown(false, wildcard);
+    }
+}
+
+TEST(HttpMakeServerTeardown, ExplicitSessionTeardownKeepsRouteNamesValid) {
+    for (const bool wildcard : {false, true}) {
+        SCOPED_TRACE(wildcard ? "wildcard name" : "parameter name");
+        server_context_teardown_test::pending_response_teardown(true, wildcard);
+    }
+}
+
+TEST(HttpMakeServerTeardown, ExternallyRetainedContextKeepsNamesAfterRouterAndSessionDestruction) {
+    using namespace server_context_teardown_test;
+    qb::io::async::init();
+    const std::string             parameter_name(128, 'a');
+    NameObservations              observations;
+    std::shared_ptr<PlainContext> held;
+    auto                          server    = qb::http::make_server();
+    auto                          weak_core = server->router().get_router_core_weak_ptr();
+    // No router hooks: use the ordinary setter/start path, and register the
+    // teardown observer from the actual handler after chain adoption.
+    server->router().get("/records/:" + parameter_name, [&](auto context) {
+        held = std::move(context);
+        held->add_lifecycle_hook([&](auto &ctx, qb::http::HookPoint point) { observations.observe(ctx, point); });
+    });
+    server->router().compile();
+    auto session = std::make_shared<qb::http::DefaultSession>(*server);
+    server->sessions().emplace(session->id(), session);
+    ASSERT_TRUE(dispatch_request(session));
+    ASSERT_NE(held, nullptr);
+    ASSERT_FALSE(held->is_completed());
+    session.reset();
+    server.reset();
+    EXPECT_TRUE(weak_core.expired());
+    EXPECT_EQ(held->session(), nullptr);
+    EXPECT_EQ(held->path_param(parameter_name), "value");
+    held->text("late completion with no session");
+    EXPECT_TRUE(held->is_completed());
+    EXPECT_EQ(observations.completions, 0);
+    held.reset();
+    EXPECT_EQ(observations.completions, 1);
+    EXPECT_EQ(observations.names, (std::vector<std::string>{parameter_name}));
+}
+
+TEST(HttpMakeServerTeardown, PreRoutingCancelRetainsTheNamesMatchedAfterFinalization) {
+    server_context_teardown_test::early_hook_teardown(server_context_teardown_test::EarlyDecision::PreRoutingCancel);
+}
+
+TEST(HttpMakeServerTeardown, PreHandlerCancelRetainsNamesWithoutStartingTheHandler) {
+    server_context_teardown_test::early_hook_teardown(server_context_teardown_test::EarlyDecision::Cancel);
+}
+
+TEST(HttpMakeServerTeardown, PreHandlerCompleteRetainsNamesWithoutStartingTheHandler) {
+    server_context_teardown_test::early_hook_teardown(server_context_teardown_test::EarlyDecision::Complete);
+}
+
+TEST(HttpMakeServerTeardown, PreHandlerContinueKeepsItsTerminalPolicyAndNames) {
+    server_context_teardown_test::early_hook_teardown(server_context_teardown_test::EarlyDecision::Continue);
+}
+
+TEST(HttpMakeServerTeardown, PreHandlerErrorStartsItsPendingErrorTaskOnlyOnce) {
+    server_context_teardown_test::early_hook_teardown(server_context_teardown_test::EarlyDecision::Error);
+}
+
+TEST(HttpMakeServerTeardown, EmptyMatchedChainRetainsNamesBeforeItsTerminalCompletion) {
+    server_context_teardown_test::early_hook_teardown(server_context_teardown_test::EarlyDecision::EmptyChain);
+}
+
+TEST(HttpMakeServerTeardown, ErrorAfterRecompileRetainsTheOriginalParameterNames) {
+    server_context_teardown_test::error_after_recompile_teardown(false);
+}
+
+TEST(HttpMakeServerTeardown, MethodNotAllowedErrorAfterRecompileRetainsTheMatchedGeneration) {
+    server_context_teardown_test::error_after_recompile_teardown(true);
+}
+
+#if QB_HAS_SSL
+TEST(HttpMakeServerTeardown, Http2FactoryPendingContextKeepsNamesUntilServerTeardown) {
+    qb::io::async::init();
+    ASSERT_TRUE(qb::http::test::certs_available());
+    const std::string                                             parameter_name(128, 't');
+    std::vector<std::string>                                      names_seen;
+    int                                                           completions = 0;
+    std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> held;
+    auto                                                          server = qb::http2::make_server();
+    server->router().get("/records/:" + parameter_name, [&](auto context) { held = std::move(context); });
+    server->router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::REQUEST_COMPLETE)
+            return;
+        ++completions;
+        for (const auto &[name, value] : context.path_parameters().get_all()) {
+            EXPECT_EQ(value, "value");
+            names_seen.emplace_back(name);
+        }
+    });
+    server->router().compile();
+    server->transport().init(qb::io::ssl::Context::server(qb::http::test::ssl_cert_path().string(), qb::http::test::ssl_key_path().string())
+                                 .alpn({"h2", "http/1.1"}));
+    ASSERT_EQ(server->transport().listen_v4(0, "127.0.0.1"), 0);
+    server->start();
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server->transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/records/value")}, [](auto) {}));
+    ASSERT_TRUE(Http2FactoryServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    ASSERT_EQ(session->out().size(), 0u);
+    held->text("factory response queued before teardown");
+    ASSERT_TRUE(held->is_completed());
+    ASSERT_GT(session->out().size(), 0u);
+    auto *protocol = static_cast<qb::http2::DefaultSession::Http2Protocol *>(session->protocol());
+    ASSERT_TRUE(protocol->is_stream_closed(static_cast<std::uint32_t>(held->request().stream_id)));
+    std::weak_ptr<qb::http::Context<qb::http2::DefaultSession>> weak_context = held;
+    held.reset();
+    session.reset();
+    ASSERT_FALSE(weak_context.expired());
+    server.reset();
+    EXPECT_TRUE(weak_context.expired());
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(names_seen, (std::vector<std::string>{parameter_name}));
+    client->disconnect();
+    Http2FactoryServerThread::pump_until([&] { return !client->is_connected(); });
+}
+#endif

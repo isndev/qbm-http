@@ -2,8 +2,8 @@
  * @file qbm/http/tests/benchmark/ws/ws-throughput.bench.cpp
  * @brief Google-benchmark harness for the RFC 6455 frame hot path (qbm-http WebSocket).
  *
- * Isolates the WebSocket data-plane that runs on every received/sent message,
- * with no event loop and no socket:
+ * Isolates the WebSocket data-plane that runs on every received/sent message.
+ * The frame cells use no event loop or socket:
  *
  *   - ENCODE: `qb::allocator::pipe<char> << MessageText/MessageBinary`, which
  *     drives the serializer in `ws/ws.cpp` — header byte(s), extended length
@@ -19,6 +19,9 @@
  *     server's reply — one full message round-trip per iteration.
  *   - CLIENT FORWARD: deliver a prebuilt message event through the established
  *     CRTP client callback, without a socket or parser setup in the timed loop.
+ *   - CORO RECEIVE: deliver one valid message event to a parked coro_client
+ *     receive operation and run its continuation on the local scheduler, with
+ *     no socket or parser setup.
  *
  * The frame shapes (text/binary sizes 16B..64KiB, plus a Ping control frame) and
  * the masked client→server framing mirror the dropped `ws-stress` throughput
@@ -50,6 +53,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -62,6 +66,7 @@
 #include <benchmark/benchmark.h>
 
 #include <qb/system/allocator/pipe.h>
+#include <qb/io/async.h>
 
 #include <qbm/http/ws.h>
 
@@ -468,6 +473,100 @@ BM_WS_ClientMessageForward(benchmark::State &state) {
     state.SetItemsProcessed(state.iterations());
 }
 
+namespace ws_receive_bench {
+
+struct SchedulerCleanup {
+    ~SchedulerCleanup() {
+        if (qb::io::async::listener::current.has_coro_scheduler()) {
+            qb::io::async::run_for(std::chrono::milliseconds(5));
+            qb::io::async::listener::current.reset_coro_scheduler();
+        }
+        qb::io::async::listener::current.clear();
+    }
+};
+
+// The owner, callback and continuation stay on this thread. There is one live
+// receive awaiter and one valid message per operation on both source trees.
+qb::io::async::task<qb::http::ws::IncomingFrame>
+receive_one(qb::http::ws::coro_client<> &client, std::size_t &completed) {
+    auto frame = co_await client.receive();
+    ++completed;
+    co_return frame;
+}
+
+bool
+drain_until_done(const qb::io::async::task<qb::http::ws::IncomingFrame> &operation) {
+    for (int turn = 0; turn != 16 && !operation.handle().done(); ++turn)
+        qb::io::async::run(EVRUN_NOWAIT);
+    return operation.handle().done();
+}
+
+} // namespace ws_receive_bench
+
+// Socket-less ordinary receive: the public on(message) path copies a valid
+// frame into IncomingFrame and completes one parked coroutine through the
+// scheduler. Message creation and result checks are outside the measured span.
+void
+BM_WS_CoroReceiveMessage(benchmark::State &state) {
+    qb::io::async::init();
+    ws_receive_bench::SchedulerCleanup cleanup;
+    qb::http::ws::coro_client<>        client;
+    const auto                         size = static_cast<std::size_t>(state.range(0));
+    const auto                         text = make_payload(size);
+    qb::http::ws::MessageText          message;
+    message << text;
+
+    // One out-of-loop proof first: delivery must resume the sole consumer
+    // with an owned, exact text payload and no pre-existing buffered frame.
+    {
+        std::size_t completed = 0;
+        auto        operation = ws_receive_bench::receive_one(client, completed);
+        operation.handle().resume();
+        const bool parked = !operation.handle().done();
+        client.on(qb::http::ws::coro_client<>::message{message.size(), message.data().cbegin(), message});
+        if (!parked || !ws_receive_bench::drain_until_done(operation) || completed != 1u) {
+            state.SkipWithError("coroutine receive did not complete exactly one parked operation");
+            return;
+        }
+        const auto frame = operation.await_resume();
+        if (frame.kind != qb::http::ws::IncomingFrame::Kind::Message || !frame.is_text || frame.payload != text) {
+            state.SkipWithError("coroutine receive produced the wrong text frame");
+            return;
+        }
+    }
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        {
+            std::size_t completed = 0;
+            auto        event     = qb::http::ws::coro_client<>::message{message.size(), message.data().cbegin(), message};
+            state.ResumeTiming();
+
+            auto operation = ws_receive_bench::receive_one(client, completed);
+            operation.handle().resume();
+            const bool parked = !operation.handle().done();
+            client.on(std::move(event));
+            const bool done = ws_receive_bench::drain_until_done(operation);
+
+            state.PauseTiming();
+            if (!parked || !done || completed != 1u) {
+                state.SkipWithError("coroutine receive did not complete exactly one parked operation");
+                return;
+            }
+            const auto frame = operation.await_resume();
+            if (frame.kind != qb::http::ws::IncomingFrame::Kind::Message || !frame.is_text || frame.payload != text) {
+                state.SkipWithError("coroutine receive produced the wrong text frame");
+                return;
+            }
+            benchmark::DoNotOptimize(frame.payload.data());
+        }
+        state.ResumeTiming();
+    }
+
+    state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(size));
+    state.SetItemsProcessed(state.iterations());
+}
+
 } // namespace
 
 BENCHMARK(BM_WS_EncodeMaskedText)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
@@ -481,5 +580,7 @@ BENCHMARK(BM_WS_DecodePingAutoPong)->Arg(0)->Arg(32)->Arg(125)->ArgNames({"bytes
 BENCHMARK(BM_WS_EchoRoundTrip)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK(BM_WS_ClientMessageForward)->Unit(benchmark::kNanosecond);
+
+BENCHMARK(BM_WS_CoroReceiveMessage)->Arg(16)->Arg(256)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();

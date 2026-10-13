@@ -15,7 +15,9 @@
  */
 #include <gtest/gtest.h>
 
+#include <initializer_list>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -435,4 +437,294 @@ TEST_F(ConditionalMiddlewareTest, FactoryThrowsOnNullIfMiddlewareOrNullPredicate
     qb::http::ConditionalMiddleware<ConditionalSession>::Predicate null_predicate = nullptr;
     EXPECT_THROW((void) qb::http::conditional_middleware<ConditionalSession>(null_predicate, valid_if_mw, dummy_else_mw),
                  std::invalid_argument);
+}
+
+namespace conditional_cancellation_test {
+// The fields are test observations, not request dispatch state. No timer or
+// scheduler is needed: returning without complete keeps this task in flight.
+class PendingChild : public qb::http::IMiddleware<ConditionalSession> {
+public:
+    int starts        = 0;
+    int cancellations = 0;
+
+    PendingChild() = default;
+
+    explicit PendingChild(qb::http::AsyncTaskResult result, bool throw_after_completion = false)
+        : _result(result)
+        , _throw_after_completion(throw_after_completion) {}
+
+    void
+    process(std::shared_ptr<qb::http::Context<ConditionalSession>> context) override {
+        ++starts;
+        if (_result) {
+            context->complete(*_result);
+            if (_throw_after_completion)
+                throw std::runtime_error("child threw after completing");
+        }
+    }
+    std::string
+    name() const override {
+        return "PendingChild";
+    }
+    void
+    cancel() noexcept override {
+        ++cancellations;
+    }
+
+private:
+    std::optional<qb::http::AsyncTaskResult> _result;
+    bool                                     _throw_after_completion = false;
+};
+} // namespace conditional_cancellation_test
+
+TEST_F(ConditionalMiddlewareTest, CancellationReachesOnlyTheChildSelectedByThatContext) {
+    using Context    = qb::http::Context<ConditionalSession>;
+    auto if_child    = std::make_shared<conditional_cancellation_test::PendingChild>();
+    auto else_child  = std::make_shared<conditional_cancellation_test::PendingChild>();
+    auto conditional = qb::http::conditional_middleware<ConditionalSession>(
+        [](const auto &ctx) { return ctx->request().header("X-Branch") == "if"; }, if_child, else_child);
+    _router = std::make_unique<qb::http::Router<ConditionalSession>>();
+    _router->use(conditional);
+    _router->get("/mw_test", [](std::shared_ptr<Context> ctx) { ctx->text("finished"); });
+    _router->compile();
+    auto first_session  = std::make_shared<ConditionalSession>();
+    auto second_session = std::make_shared<ConditionalSession>();
+    auto first_request  = create_request();
+    first_request.set_header("X-Branch", "if");
+    auto second_request = create_request();
+    second_request.set_header("X-Branch", "else");
+    auto first  = _router->route(first_session, std::move(first_request));
+    auto second = _router->route(second_session, std::move(second_request));
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    ASSERT_FALSE(first->is_completed());
+    ASSERT_FALSE(second->is_completed());
+    ASSERT_EQ(if_child->starts, 1);
+    ASSERT_EQ(else_child->starts, 1);
+    first->cancel("first only");
+    first->cancel("duplicate cancel");
+    EXPECT_EQ(if_child->cancellations, 1);
+    EXPECT_EQ(else_child->cancellations, 0);
+    EXPECT_TRUE(first->is_cancelled());
+    EXPECT_FALSE(second->is_cancelled());
+    second->complete(qb::http::AsyncTaskResult::CONTINUE);
+    EXPECT_TRUE(second->is_completed());
+    EXPECT_EQ(second_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(second_session->_response.body().as<std::string>(), "finished");
+    first->complete(qb::http::AsyncTaskResult::CONTINUE);
+    EXPECT_EQ(first_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(if_child->cancellations, 1);
+    EXPECT_EQ(else_child->cancellations, 0);
+}
+
+TEST_F(ConditionalMiddlewareTest, CancellationOfTwoContextsSelectingTheSameChildIsIndependent) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    auto child         = std::make_shared<PendingChild>();
+    _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, child));
+    _router->get("/mw_test", tracing_handler());
+    _router->compile();
+    auto second_session = std::make_shared<ConditionalSession>();
+    auto first          = _router->route(_session, create_request());
+    auto second         = _router->route(second_session, create_request());
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    ASSERT_FALSE(first->is_completed());
+    ASSERT_FALSE(second->is_completed());
+    ASSERT_EQ(child->starts, 2);
+
+    first->cancel("first");
+    first->cancel("first again");
+    EXPECT_EQ(child->cancellations, 1);
+    EXPECT_TRUE(first->is_cancelled());
+    EXPECT_FALSE(second->is_cancelled());
+    EXPECT_FALSE(second->is_completed());
+
+    second->cancel("second");
+    second->cancel("second again");
+    EXPECT_EQ(child->cancellations, 2);
+    EXPECT_TRUE(second->is_cancelled());
+    EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(second_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+}
+
+TEST_F(ConditionalMiddlewareTest, NestedCancellationReachesThePendingLeaf) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    auto leaf          = std::make_shared<PendingChild>();
+    auto unused        = std::make_shared<PendingChild>();
+    auto inner         = qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return false; }, unused, leaf);
+    _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, inner, unused));
+    _router->get("/mw_test", tracing_handler());
+    _router->compile();
+    auto context = _router->route(_session, create_request());
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->is_completed());
+    ASSERT_EQ(leaf->starts, 1);
+    ASSERT_EQ(unused->starts, 0);
+
+    context->cancel("leaf");
+    context->cancel("leaf again");
+    EXPECT_EQ(leaf->cancellations, 1);
+    EXPECT_EQ(unused->cancellations, 0);
+    EXPECT_TRUE(context->is_completed());
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(ConditionalMiddlewareTest, SynchronousChildCompletionKeepsTheNextCancellationTarget) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    for (const bool next_is_conditional : {false, true}) {
+        for (const bool throw_after_completion : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "conditional next=" << next_is_conditional << ", throw=" << throw_after_completion);
+            auto first = std::make_shared<PendingChild>(qb::http::AsyncTaskResult::CONTINUE, throw_after_completion);
+            auto next  = std::make_shared<PendingChild>();
+            _router    = std::make_unique<qb::http::Router<ConditionalSession>>();
+            _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, first));
+            if (next_is_conditional)
+                _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, next));
+            else
+                _router->use(next);
+            _router->get("/mw_test", tracing_handler());
+            _router->compile();
+            _session->reset();
+            auto context = _router->route(_session, create_request());
+            ASSERT_NE(context, nullptr);
+            ASSERT_FALSE(context->is_completed());
+            ASSERT_EQ(first->starts, 1);
+            ASSERT_EQ(next->starts, 1);
+
+            context->cancel("next task");
+            context->cancel("next task again");
+            EXPECT_EQ(first->cancellations, 0);
+            EXPECT_EQ(next->cancellations, 1);
+            context->complete(qb::http::AsyncTaskResult::CONTINUE);
+            EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+            EXPECT_FALSE(_session->_final_handler_called);
+        }
+    }
+}
+
+TEST_F(ConditionalMiddlewareTest, ChildErrorKeepsTheErrorTaskCancellationTarget) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    auto child         = std::make_shared<PendingChild>(qb::http::AsyncTaskResult::ERROR);
+    auto error_task    = std::make_shared<PendingChild>();
+    _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, child));
+    _router->get("/mw_test", tracing_handler());
+    _router->set_error_task_chain({std::make_shared<qb::http::MiddlewareTask<ConditionalSession>>(error_task)});
+    _router->compile();
+    auto context = _router->route(_session, create_request());
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->is_completed());
+    ASSERT_EQ(child->starts, 1);
+    ASSERT_EQ(error_task->starts, 1);
+    EXPECT_EQ(context->get_processing_phase(), qb::http::Context<ConditionalSession>::ProcessingPhase::ERROR_CHAIN);
+
+    context->cancel("error task");
+    context->cancel("error task again");
+    EXPECT_EQ(child->cancellations, 0);
+    EXPECT_EQ(error_task->cancellations, 1);
+    context->complete();
+    EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(ConditionalMiddlewareTest, PredicateCancellationDoesNotStartAChild) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    for (const bool nested : {false, true}) {
+        SCOPED_TRACE(nested);
+        auto child       = std::make_shared<PendingChild>();
+        auto conditional = qb::http::conditional_middleware<ConditionalSession>(
+            [](const auto &context) {
+                context->cancel("predicate");
+                return true;
+            },
+            child);
+        _router = std::make_unique<qb::http::Router<ConditionalSession>>();
+        if (nested)
+            _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, conditional));
+        else
+            _router->use(conditional);
+        _router->get("/mw_test", tracing_handler());
+        _router->compile();
+        _session->reset();
+        auto context = _router->route(_session, create_request());
+        ASSERT_NE(context, nullptr);
+        EXPECT_TRUE(context->is_cancelled());
+        EXPECT_TRUE(context->is_completed());
+        EXPECT_EQ(child->starts, 0);
+        EXPECT_EQ(child->cancellations, 0);
+        EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        EXPECT_FALSE(_session->_final_handler_called);
+    }
+}
+
+TEST_F(ConditionalMiddlewareTest, PredicateCompletionDoesNotReplaceTheNextCancellationTarget) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    for (const auto result : {qb::http::AsyncTaskResult::CONTINUE, qb::http::AsyncTaskResult::ERROR}) {
+        SCOPED_TRACE(static_cast<int>(result));
+        auto child = std::make_shared<PendingChild>();
+        auto next  = std::make_shared<PendingChild>();
+        _router    = std::make_unique<qb::http::Router<ConditionalSession>>();
+        _router->use(qb::http::conditional_middleware<ConditionalSession>(
+            [result](const auto &context) {
+                context->complete(result);
+                return true;
+            },
+            child));
+        _router->use(next);
+        _router->get("/mw_test", tracing_handler());
+        _router->set_error_task_chain({std::make_shared<qb::http::MiddlewareTask<ConditionalSession>>(next)});
+        _router->compile();
+        _session->reset();
+        auto context = _router->route(_session, create_request());
+        ASSERT_NE(context, nullptr);
+        ASSERT_FALSE(context->is_completed());
+        ASSERT_EQ(child->starts, 0);
+        ASSERT_EQ(next->starts, 1);
+
+        context->cancel("next task after predicate");
+        EXPECT_EQ(child->cancellations, 0);
+        EXPECT_EQ(next->cancellations, 1);
+        EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    }
+}
+
+TEST_F(ConditionalMiddlewareTest, SuppressedContextDoesNotNotifyTheSelectedChild) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    auto child         = std::make_shared<PendingChild>();
+    _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, child));
+    _router->get("/mw_test", tracing_handler());
+    _router->compile();
+    auto context = _router->route(_session, create_request());
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->is_completed());
+    ASSERT_EQ(child->starts, 1);
+
+    context->suppress_response();
+    context->cancel("suppressed");
+    EXPECT_TRUE(context->is_completed());
+    EXPECT_FALSE(context->is_cancelled());
+    EXPECT_EQ(child->cancellations, 0);
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(ConditionalMiddlewareTest, DeferredFinalizationDoesNotCancelACompletedChild) {
+    using PendingChild = conditional_cancellation_test::PendingChild;
+    auto child         = std::make_shared<PendingChild>();
+    _router->use(qb::http::conditional_middleware<ConditionalSession>([](const auto &) { return true; }, child));
+    _router->get("/mw_test", tracing_handler());
+    _router->compile();
+    auto context = _router->route(_session, create_request());
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->is_completed());
+    ASSERT_EQ(child->starts, 1);
+
+    {
+        auto deferral = context->defer_finalization_scope();
+        context->complete();
+        ASSERT_FALSE(context->is_completed());
+        context->cancel("finalization deferred");
+        EXPECT_TRUE(context->is_cancelled());
+        EXPECT_EQ(child->cancellations, 0);
+    }
+    EXPECT_TRUE(context->is_completed());
+    EXPECT_EQ(_session->_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
 }

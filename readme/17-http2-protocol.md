@@ -16,7 +16,7 @@ HTTP/2 is a binary, multiplexed protocol: many concurrent request/response excha
 ### ALPN selects the protocol
 
 There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:224-234,544; qbm/http/src/qbm/http/2/client.cpp:420,440,898-917 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:298-308,616; qbm/http/src/qbm/http/2/client.cpp:420,440,898-917 -->
 
 ### Streams and multiplexing
 
@@ -56,10 +56,10 @@ Stream IDs are not arbitrary:
 
 - **Stream 0** is reserved. In this module `constants::HTTP11_STREAM_ID == 0` doubles as the sentinel for an HTTP/1.1 message; a valid HTTP/2 stream ID is `>= 1`. A response written with `stream_id == 0` (or larger than `uint32_t` max) is rejected by `session::operator<<`.
 - **Client-initiated streams use odd IDs**; **server-pushed streams use even IDs** (the server's next pushed ID starts at 2). The server rejects a client `HEADERS` frame on an even stream ID with `GOAWAY(PROTOCOL_ERROR)`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:59,61,123-124,185-193; qbm/http/src/qbm/http/2/protocol/server.h:85,417-419 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:60,62,197-198,259-267; qbm/http/src/qbm/http/2/protocol/server.h:85,417-419 -->
 
 Each request and response carries its stream ID on `MessageBase::stream_id` (0 for HTTP/1.1). The session stamps the inbound request with the stream it arrived on (`request.stream_id = stream_id`) before routing; `RouterCore::route_request` then copies that value onto the response prototype when it builds the `Context`, so `ctx->response().stream_id` is already correct before your handler runs. Your handler reads it through `ctx->request().stream_id`. At `ctx->complete()` the session only *reads* `res.stream_id` to pick the stream — it does not assign it, and a response whose `stream_id` is 0 or above `uint32_t` max is dropped with an error log.
-<!-- src: qbm/http/src/qbm/http/message_base.h:55-72; qbm/http/src/qbm/http/2/http2.h:264-268,185-193; qbm/http/src/qbm/http/routing/router_core.h:339-341 -->
+<!-- src: qbm/http/src/qbm/http/message_base.h:55-72; qbm/http/src/qbm/http/2/http2.h:338-342,259-267; qbm/http/src/qbm/http/routing/router_core.h:351-353 -->
 
 ### HPACK header compression
 
@@ -85,7 +85,10 @@ A sender must not emit DATA that would exceed *either* window. The protocol laye
 
 - **`RST_STREAM`** abruptly terminates a single stream with an error code, moving it straight to `CLOSED`. The server sends it for refused, malformed, oversized, or idle streams; your handler can trigger one through `session::reset_stream(...)`.
 - **`GOAWAY`** announces connection shutdown and the last peer-initiated stream the sender will process, enabling a graceful drain. On a `NO_ERROR` GOAWAY the server keeps the connection until all in-range client-initiated streams close; a non-`NO_ERROR` GOAWAY deactivates immediately. The client fails any streams beyond `last_stream_id` and finishes its drain once active requests complete.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-779,795-894,884-893; qbm/http/src/qbm/http/2/http2.h:166; qbm/http/src/qbm/http/2/client.cpp:615-635,637-665,932-945 -->
+
+A peer reset of an unfinished routed stream cancels its stock session context, including `RST_STREAM(NO_ERROR)`. The neutral code still produces no public `Http2StreamErrorEvent`; the protocol's optional internal lifecycle notification introduces no required callback for custom I/O handlers. The session removes registry ownership before cancellation, and a late completion cannot revive the cancelled context. This notifies routed work without forcibly cancelling external native I/O or coroutines.
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:768-789; qbm/http/src/qbm/http/2/http2.h:181-188,455-464 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:305,339,449,730-794,810-909,899-908; qbm/http/src/qbm/http/2/http2.h:240; qbm/http/src/qbm/http/2/client.cpp:615-635,637-665,932-945 -->
 
 ## Running an HTTP/2 server
 
@@ -96,7 +99,7 @@ The server is the same shape as the HTTP/1.1 server (acceptor + sessions + route
 `qb::http2::make_server()` returns a `std::unique_ptr<qb::http2::Server<>>` using the built-in `DefaultSession`. Define routes on its `router()`, call `compile()`, then `listen` with your certificate and key, `start()`, and drive the qb-io reactor.
 
 ```cpp
-// src: qbm/http/src/qbm/http/2/http2.h:606-615 (Server), :645-649 (make_server), :525-531 (listen)
+// src: qbm/http/src/qbm/http/2/http2.h:678-687 (Server), :717-721 (make_server), :597-603 (listen)
 #include <qbm/http/http.h>          // umbrella; pulls <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
 #include <filesystem>
@@ -133,7 +136,7 @@ int main(int argc, char *argv[]) {
 ```
 
 `listen` does four things for you: it creates the server SSL context from your cert/key, sets the ALPN list to `{"h2", "http/1.1"}`, binds the listening socket, and arms the accept watcher. That last step is new in 3.0 — before it, `listen()` bound without starting and a separate `start()` was required, which is why older code carries one (still harmless). `listen_no_start()` is the opt-out when the server must finish wiring first. Routing is identical to HTTP/1.1 — groups, controllers, middleware, path parameters, and validation all work unchanged because the HTTP/2 session feeds the same `qb::http::Router`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:525-531,400-402 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:597-603,472-474 -->
 
 ### Custom sessions with the CRTP `use<>` template
 
@@ -168,7 +171,7 @@ public:
 ```
 
 `qb::http2::use<Derived>` exposes three CRTP aliases — `session<ServerHandler>`, `io_handler<SessionType>`, and `server<SessionType>` — and `make_server<MySession>()` constructs the matching server. The `DefaultSession` / `Server<>` pair used by `make_server()` is exactly this template instantiated for you.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:559-569,583-586,606-615,645-649 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:631-641,655-658,678-687,717-721 -->
 
 ### Sending responses and resetting streams
 
@@ -188,7 +191,7 @@ router().get("/api/cancel", [](auto ctx) {
 ```
 
 `session::operator<<(qb::http::Response&)` validates the response before framing it: it rejects `stream_id == 0`, an out-of-range stream ID, or a status code outside `[100, 600)`, and it sets `content-length` automatically when the body is non-empty and no length was provided.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:166-215 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:240-289 -->
 
 ## Server stream management
 
@@ -197,7 +200,7 @@ The server session and protocol handler enforce limits that protect against reso
 ### Concurrency limit
 
 The server advertises `SETTINGS_MAX_CONCURRENT_STREAMS = 50` to clients (reduced from 100 for DDoS resistance) and refuses new client streams with `RST_STREAM(REFUSED_STREAM)` once active client streams reach that cap. The persistent client caps its own outbound concurrency at 100 by default; configure it with `set_max_concurrent_streams`.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:445-450,1474; qbm/http/src/qbm/http/2/http2.h:64; qbm/http/src/qbm/http/2/client.h:216,406 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:445-450,1489; qbm/http/src/qbm/http/2/http2.h:65; qbm/http/src/qbm/http/2/client.h:216,406 -->
 
 ### Session timeout and stream cleanup
 
@@ -210,44 +213,27 @@ Connection and stream lifetimes are governed by four `qb::duration` constants in
 | `STREAM_INCOMPLETE_TIMEOUT` | 10 s | Tighter deadline for streams that opened but never dispatched a request. |
 | `CLEANUP_INTERVAL` | 5 s | Minimum gap between cleanup sweeps. |
 
-<!-- src: qbm/http/src/qbm/http/2/http2.h:60-70 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:61-71 -->
 
 These are real `qb::duration` values (`std::chrono::seconds`) — the protocol layer takes `qb::duration` throughout (`cleanup_idle_streams`, `StreamManager::CleanupCriteria`).
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1356-1357; qbm/http/src/qbm/http/2/protocol/stream.h:461-467 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1371-1372; qbm/http/src/qbm/http/2/protocol/stream.h:461-467 -->
 
-The cleanup mechanism has two parts, both run from the session's `pending_write` handler:
+Completed-context collection runs from both the session's `pending_write` handler and full-output-drain `eos` handler. A context is eligible only when it is logically completed and `is_stream_closed` reports its native stream closed. Collection selects up to 32 stream IDs in a local array: 128 bytes of stack ID scratch, with no heap scratch for that selection. This batch size does not cap the context registry, and it changes neither the public API nor Session data members.
 
-1. **Closed-context reaping** — on every write tick, contexts whose stream the protocol reports as closed (`is_stream_closed`) fire their `POST_RESPONSE_SEND` hook and are erased.
-2. **Idle-stream sweep** — no more often than `CLEANUP_INTERVAL`, the session calls `protocol.cleanup_idle_streams(STREAM_IDLE_TIMEOUT, STREAM_INCOMPLETE_TIMEOUT)`, which sends `RST_STREAM(CANCEL)` to streams past their idle or incomplete deadline and removes them.
+Each saved ID is looked up again and its eligibility rechecked before removal. One context is detached from the registry, receives `POST_RESPONSE_SEND`, and is released before the next ID is considered. If that is its last owner, `REQUEST_COMPLETE` and member destruction finish before the next POST; an external owner can postpone destruction. No iterator or pointer to a native stream survives user code. Selection follows the unordered registry, so there is no public stream-ID ordering guarantee.
 
-```cpp
-// src: qbm/http/src/qbm/http/2/http2.h:300-320 (session pending_write handler, condensed)
-void on(qb::io::async::event::pending_write &&) {
-    this->updateTimeout();
-    if (_http2_protocol) {
-        // 1. reap contexts for streams the protocol already closed
-        for (auto it = _contexts.begin(); it != _contexts.end();) {
-            if (it->second && _http2_protocol->is_stream_closed(it->first)) {
-                it->second->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
-                it = _contexts.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        // 2. rate-limited idle-stream sweep
-        auto now = std::chrono::steady_clock::now();
-        if (now - _last_stream_cleanup >= qb::http2::constants::CLEANUP_INTERVAL) {
-            _http2_protocol->cleanup_idle_streams(
-                qb::http2::constants::STREAM_IDLE_TIMEOUT,
-                qb::http2::constants::STREAM_INCOMPLETE_TIMEOUT);
-            _last_stream_cleanup = now;
-        }
-    }
-}
-```
+The registry size captured at entry bounds actual removals, not scans. Further batches catch contexts made eligible without new output by POST, `REQUEST_COMPLETE`, or member destruction, including when no lifecycle hook is registered. Nested collection is suppressed. Before each scan and candidate, collection rechecks the active protocol, connection and buffered-output size; a changed output size or invalidated connection/protocol stops collection. If the first POST extracts the session, extraction cancels and clears the remaining contexts rather than running their POST hooks.
+
+Full-drain EOS means the framework output buffer is empty, not that the peer acknowledged the response. The existing partial-write cleanup timing remains: collection does not keep per-stream transport-byte acknowledgments. The bounded ID scratch is an implementation detail, not evidence of a measured performance gain or of allocation-free callbacks and destruction.
+
+The rate-limited idle-stream sweep remains in `pending_write`: no more often than `CLEANUP_INTERVAL`, it calls `cleanup_idle_streams(STREAM_IDLE_TIMEOUT, STREAM_INCOMPLETE_TIMEOUT)` to reset and remove expired native streams.
+<!-- src: qbm/http/src/qbm/http/2/http2.h:120-175,375-419; qbm/http/src/qbm/http/routing/context.h:487-497 -->
+
+Lifecycle controls exercise silent completion from POST, `REQUEST_COMPLETE` and member destruction, including the no-hook case; protocol clearing before another candidate; and multiple batches from valid stream waves that leave more than 50 retained contexts. The earlier extraction control preserves its one-POST behavior.
+<!-- src: qbm/http/tests/system/http2/http2-client.cpp:2277-2279,2281-2283,2285-2287,2289-2291,2293-2370,2377-2503,2048-2124 -->
 
 The sweep is **opportunistic**: it runs only when there is write activity. A purely idle connection with no writes never triggers the stream-level sweep — it is reclaimed instead by the 60 s `DEFAULT_SESSION_TIMEOUT`. Per-stream timestamps (`created_at`, `last_activity`) and `_last_stream_cleanup` use `std::chrono::steady_clock::time_point` directly, even though the durations they are compared against are `qb::duration`; this is a deliberate mixed time model in this slice.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:115,153,300-320; qbm/http/src/qbm/http/2/protocol/stream.h:146-147,164-165 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:116,227,375-388; qbm/http/src/qbm/http/2/protocol/stream.h:146-147,164-165 -->
 
 ## Using the HTTP/2 client
 
@@ -327,7 +313,7 @@ The coroutine `connect()` overload has **no default-argument callback overload**
 ### Server push
 
 The client advertises `SETTINGS_ENABLE_PUSH = 0` by default, so per RFC 9113 §8.4 it treats any received `PUSH_PROMISE` as a **connection error** and answers with `GOAWAY(PROTOCOL_ERROR)` — it does not RST the pushed stream and keep the connection alive. On the server, push is **disabled by default** (`SETTINGS_ENABLE_PUSH = 0`) and there is no first-class router API for it; `ServerHttp2Protocol::send_push_promise` exists for low-level integration and additionally requires the peer to have enabled push and a valid even, non-zero promised stream ID, returning a `PushPromiseFailureReason` otherwise. Treat server push as advanced/optional rather than a primary feature.
-<!-- src: qbm/http/src/qbm/http/2/protocol/client.h:722-723,742-753; qbm/http/src/qbm/http/2/protocol/server.h:1222-1249,1472; qbm/http/src/qbm/http/2/protocol/frames.h:317-330 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/client.h:722-723,742-753; qbm/http/src/qbm/http/2/protocol/server.h:1237-1264,1487; qbm/http/src/qbm/http/2/protocol/frames.h:317-330 -->
 
 ## Protocol-layer reference
 
@@ -346,18 +332,18 @@ You rarely touch these directly, but they are the public types behind the conven
 <!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:46-55,64,117,281,320,370,390,410,430,454; qbm/http/src/qbm/http/2/protocol/frames.h:65-81 -->
 
 The protocol enforces RFC 9113 validation you get for free: header names must be lowercase tokens with no NUL/CR/LF; requests require non-empty `:method`/`:scheme`/`:path` and `:authority` pseudo-headers ahead of regular headers; trailers may not carry pseudo-headers or hop-by-hop headers. A request body over `qb::http::protocol_limits::MAX_BODY_SIZE` is reset with `RST_STREAM(ENHANCE_YOUR_CALM)`, and an assembled header block over `qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE` (1 MB) closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:46-58,140-147,338-341,497-499,1539,1659; qbm/http/src/qbm/http/2/protocol/base.h:85,88 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:46-58,140-147,338-341,497-499,1554,1674; qbm/http/src/qbm/http/2/protocol/base.h:85,88 -->
 
 ## Pitfalls
 
 - **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<qbm/http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
-  <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:525-531 -->
+  <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:597-603 -->
 - **The module is a compiled library, not header-only.** `src/qbm/http/2/http2.cpp` and `src/qbm/http/2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<qbm/http/http.h>`; do not `find_package` the headers alone.
-  <!-- src: qbm/http/CMakeLists.txt:79-87,114-165 -->
+  <!-- src: qbm/http/CMakeLists.txt:79-87,114-166 -->
 - **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).
-  <!-- src: qbm/http/src/qbm/http/2/http2.h:185-193 -->
+  <!-- src: qbm/http/src/qbm/http/2/http2.h:259-267 -->
 - **The idle-stream sweep is opportunistic.** It runs only on write activity and no more than once per `CLEANUP_INTERVAL` (5 s). A fully idle connection relies on the 60 s session timeout instead — do not assume `STREAM_IDLE_TIMEOUT` fires on a silent connection.
-  <!-- src: qbm/http/src/qbm/http/2/http2.h:300-320 -->
+  <!-- src: qbm/http/src/qbm/http/2/http2.h:375-388 -->
 - **Server concurrency defaults to 50, client to 100.** They are independent: the server's `SETTINGS_MAX_CONCURRENT_STREAMS = 50` bounds inbound client streams (excess gets `REFUSED_STREAM`); `client->set_max_concurrent_streams(...)` bounds the client's outbound *in-flight* streams (default 100). Raise the server limit only if you have measured headroom.
   <!-- src: qbm/http/src/qbm/http/2/protocol/server.h:445-450; qbm/http/src/qbm/http/2/client.h:216,406 -->
 - **The client also caps total outstanding requests.** Separate from stream concurrency, `set_max_pending_requests(...)` (default 1024) bounds queued + active requests; past it `push_request()`/`push_requests()` reject with `503 Service Unavailable` instead of queuing without limit. Tune it down for tighter backpressure, not up without a reason.
@@ -369,7 +355,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 - **Coroutine `connect()` has no default callback.** For fire-and-forget, write `connect(nullptr)`; bare `connect()` is the coroutine awaiter overload.
   <!-- src: qbm/http/src/qbm/http/2/client.h:267-272 -->
 - **Server push is off by default and not a router feature.** Do not design around server-initiated pushes; the client advertises `SETTINGS_ENABLE_PUSH = 0` and tears the connection down with `GOAWAY(PROTOCOL_ERROR)` on any `PUSH_PROMISE` (RFC 9113 §8.4), and the server disables `SETTINGS_ENABLE_PUSH`.
-  <!-- src: qbm/http/src/qbm/http/2/protocol/client.h:722-723,742-753; qbm/http/src/qbm/http/2/protocol/server.h:1472 -->
+  <!-- src: qbm/http/src/qbm/http/2/protocol/client.h:722-723,742-753; qbm/http/src/qbm/http/2/protocol/server.h:1487 -->
 
 ## See also
 
