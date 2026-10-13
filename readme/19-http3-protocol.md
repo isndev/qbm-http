@@ -159,7 +159,7 @@ The server caps inbound request bodies via `set_max_body_size` (default 64 MiB);
 `push_request` connects lazily on the first request, multiplexes over the live QUIC connection thereafter, and invokes the callback on the I/O thread when the response (or an error response) is ready.
 
 The QUIC `max_streams_bidi` setting limits client-initiated streams open at once, not the total requests one connection can serve. For a request stream delivered through ngtcp2's `stream_open` callback, qb's native backend returns one bidirectional slot on close; ngtcp2 renews implicitly opened streams itself. In the loopback test, 130 sequential requests complete on one connection under the default 100-stream quota. This stream-count credit is separate from request timeouts and the client's pending-work cap.
-<!-- src: qb/src/qb/io/quic.cpp:1020,1465-1492; qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343 -->
+<!-- src: qb/src/qb/io/quic.cpp:1022,1467-1494; qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343 -->
 
 ```cpp
 // src: qbm/http/tests/system/http3/http3-loopback.cpp:198-209 (adapted)
@@ -303,7 +303,7 @@ If the QUIC transport closes synchronously while submitting a queued request, th
 <!-- src: qbm/http/src/qbm/http/3/client.cpp:119-171,365-446,449-506,524-574; qbm/http/src/qbm/http/3/protocol/connection.h:419-426; qbm/http/tests/system/http3/http3-loopback.cpp:2174-2248,2249-2293,2294-2385 -->
 
 If starting the QUIC connection fails, the connect timer expires, or the peer closes the connection, the client closes the old transport before reporting the failure. Old requests are retired before connection callbacks run, so work those callbacks queue belongs to a new attempt. On retry, qb-io refreshes the endpoint's internally owned native backend, binds its existing I/O watcher to the new UDP socket and starts it again.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:93-115,479-521,602-619,762-789; qb/src/qb/io/async/quic/endpoint.h:84-119,425-454 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:93-115,479-521,602-619,762-789; qb/src/qb/io/async/quic/endpoint.h:85-122,458-487 -->
 
 If you disconnect while a connection attempt is still pending, that attempt's connection callbacks receive one failure. Its timeout is tied to the attempt it was armed for; if you connect again with a longer timeout, the cancelled attempt's timer does not end the new handshake.
 <!-- src: qbm/http/src/qbm/http/3/client.cpp:101-114,119-171,449-506,602-619; qbm/http/tests/system/http3/http3-loopback.cpp:2106-2136 -->
