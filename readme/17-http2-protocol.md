@@ -266,13 +266,15 @@ qb::io::async::init();
 auto client = qb::http2::make_client("https://api.example.com");
 client->set_verify_peer(true);              // default; verifies chain + hostname
 
-qb::http::Request req;
-req.uri() = qb::io::uri("/v1/items");        // resolved against the base URI
+qb::http::Request req(qb::io::uri("/v1/items")); // URI constructor sets method to GET
 client->push_request(std::move(req), [](qb::http::Response res) {
     // delivered once, on this thread, when the stream completes
     handle(res.status(), res.body().as<std::string_view>());
 });
 ```
+
+The URI-only `Request` constructor sets `GET`; the default constructor leaves the method `UNINITIALIZED`. The HTTP/2 client resolves a relative URI against its base but does not fill in the method, which becomes the `:method` pseudo-header. For another verb, set the method explicitly before `push_request`.
+<!-- src: qbm/http/src/qbm/http/request.h:50-62,78-86; qbm/http/src/qbm/http/2/client.cpp:225-238; qbm/http/src/qbm/http/2/protocol/client.h:1520-1524 -->
 
 `push_request` triggers an implicit connect when needed, so you do not have to call `connect()` first; queued requests flush once the handshake completes. To run several requests as one batch with a single callback that fires when all responses are in (order preserved), use `push_requests(std::vector<Request>, BatchResponseCallback)` — each request travels on its own stream concurrently.
 <!-- src: qbm/http/src/qbm/http/2/client.h:330,353; qbm/http/tests/system/http2/http2-client-coro.cpp:264-285 -->

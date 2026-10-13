@@ -95,7 +95,8 @@ The clients fill in standard headers for you:
 - **Accept-Encoding** — added automatically when compression is compiled in (`QB_HAS_COMPRESSION`); matching `Content-Encoding` responses are decompressed transparently.
 - **Content-Length** — computed from the body for requests that carry one.
 
-To send a *compressed* request body, compress it yourself and set `Content-Encoding` before handing the request to the client (`request.body().compress("gzip")`). See [Request and Response bodies](./02-body-deep-dive.md).
+For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:765-772; qbm/http/src/qbm/http/1.1/client.cpp:118-131 -->
 
 ## One-shot callback client (HTTP/1.1)
 
