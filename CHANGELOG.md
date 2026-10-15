@@ -43,6 +43,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **HTTP/1.1 chunked trailers follow the HTTP/2 and HTTP/3 contract (Huly QB-1067).** A complete chunked message
+  writes the fields its `Trailer` header announces after the last chunk instead of in its header section (a field a
+  trailer section must not carry stays in the head; a `MessageHead` keeps every field). The parser stores every
+  received trailer field in the message's headers, as HTTP/2 and HTTP/3 surface theirs, and refuses a message whose
+  trailer section carries a field that frames, routes or manages the connection, as they refuse their stream.
 - **The typed `Content-Type` is derived from the raw header on first read, and nothing is allocated for the
   defaults (Huly QB-506 follow-up).** `content_type()` parses the raw `Content-Type` header (its first value,
   or the defaults) the first time it is read after a message was built, parsed, or had that header changed
@@ -160,6 +165,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **The last field of an HTTP/1.1 trailer section is kept (Huly QB-1067).** The parser stored a field when the next
+  one began or when the header section ended; a trailer section has neither after its last field, so it was lost --
+  the only one, for a one-field trailer.
 - **A refused HTTP/1.1 serialization keeps what was queued before it (Huly QB-1066).** The serializers cleared the
   whole output pipe on a refusal, dropping the responses or requests queued ahead of the refused one -- a
   pipelined response lost because the next was invalid. A refusal now takes back only what it wrote, and an

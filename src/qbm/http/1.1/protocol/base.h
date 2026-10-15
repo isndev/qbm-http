@@ -76,6 +76,7 @@ constexpr std::size_t MAX_BODY_RESERVE_HINT = 64 * 1024;
 } // namespace qb::http::protocol_limits
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
+#include "../../headers.h" // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
 #include "../../types.h"
 #include "../../utility.h"
 
@@ -255,6 +256,51 @@ private:
     }
 
     /**
+     * @brief Stores the field the parser holds, if any: in the header section or, after it, in
+     *        the trailer section of a chunked message.
+     * @param parser Parser instance
+     * @return 0, or the refusal of the message
+     *
+     * A header-section field is stored when the next one begins or when the section ends; a
+     * trailer-section field when its value ends (on_value_end): the last one is
+     * followed by neither, and it was dropped (Huly QB-1067). A trailer field joins the message's
+     * headers, as HTTP/2 and HTTP/3 surface theirs; one a trailer section must not carry (framing,
+     * connection, routing, proxy authentication: detail::is_forbidden_trailer_field) refuses the
+     * message, as they refuse their stream -- merged, a trailer `Content-Length` would sit beside
+     * the chunked framing.
+     */
+    static int
+    store_pending_field(http_t *parser) {
+        auto *self = self_of(parser);
+        if (self->_last_header_token != HeaderToken::VALUE || self->_last_header_key.empty()) {
+            return 0;
+        }
+        if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+            return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+        }
+        if (self->_headers_completed && qb::http::detail::is_forbidden_trailer_field(self->_last_header_key)) {
+            return fail_with_reason(parser, "HTTP trailer section carries a field it must not (framing, connection, routing)");
+        }
+        self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
+        self->_last_header_key.clear();
+        self->_last_header_value.clear();
+        return 0;
+    }
+
+    /**
+     * @brief Header value complete callback (llhttp's on_header_value_complete): stores a trailer-section field as soon as its value
+     *        ends, so the last one is not lost and a refusal is the parser's error (a refusal
+     *        returned from on_message_complete would read as the completion llhttp signals there).
+     *        A header-section field keeps its lazy store (store_pending_field).
+     * @param parser Parser instance
+     * @return 0, or the refusal of the message
+     */
+    static int
+    on_value_end(http_t *parser) {
+        return self_of(parser)->_headers_completed ? store_pending_field(parser) : 0;
+    }
+
+    /**
      * @brief Header field name parsing callback
      * @param parser Parser instance
      * @param at Pointer to header field name data
@@ -268,13 +314,8 @@ private:
     static int
     on_header_field(http_t *parser, const char *at, size_t length) {
         auto *self = self_of(parser);
-        if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
-            if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-                return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
-            }
-            self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
-            self->_last_header_key.clear();
-            self->_last_header_value.clear();
+        if (const int refused = store_pending_field(parser)) {
+            return refused;
         }
 
         if (self->_last_header_token != HeaderToken::FIELD) {
@@ -341,13 +382,8 @@ private:
     on_headers_complete(http_t *parser) {
         auto *self = self_of(parser);
         auto &msg  = self->msg;
-        if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
-            if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-                return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
-            }
-            msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
-            self->_last_header_key.clear();
-            self->_last_header_value.clear();
+        if (const int refused = store_pending_field(parser)) {
+            return refused;
         }
         self->_last_header_token = HeaderToken::NONE;
         msg.major_version        = parser->http_major;
@@ -475,7 +511,7 @@ private:
         &Parser::default_http_cb,      // on method complete
         &Parser::default_http_cb,      // on version complete
         &Parser::default_http_cb,      // on header field complete
-        &Parser::default_http_cb,      // on header value complete
+        &Parser::on_value_end,         // on header value complete (stores a trailer field, Huly QB-1067)
         &Parser::default_http_cb,      // on chunk extention name complete
         &Parser::default_http_cb,      // on chunk extension value complete
         &Parser::default_http_cb,      // on chunk header

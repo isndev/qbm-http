@@ -536,4 +536,28 @@ public:
 
 /** @brief Shorthand alias for `Headers`, often used for brevity. */
 using headers = Headers;
+
+namespace detail {
+/**
+ * @brief Whether a field must stay out of a trailer section: it frames the message, manages the
+ *        connection, routes the request or authenticates to a proxy (RFC 9110 §6.5.1).
+ *
+ * The set HTTP/2 and HTTP/3 refuse in theirs: `content-length`, `transfer-encoding`, `trailer`,
+ * `host`, `connection`, `keep-alive`, `proxy-connection`, `te`, `upgrade`, `proxy-authenticate`,
+ * `proxy-authorization`. The HTTP/1.1 parser refuses a chunked message whose trailer section carries
+ * one, and the serializer never moves one there (Huly QB-1067).
+ *
+ * @param name A field name, in any case.
+ */
+[[nodiscard]] bool is_forbidden_trailer_field(std::string_view name) noexcept;
+
+/**
+ * @brief The fields a message's `Trailer` header announces that may travel in a trailer section:
+ *        lowercased, in the order announced, each once; empty when the message has no `Trailer`
+ *        header. A forbidden field (is_forbidden_trailer_field) is left out -- it stays in the
+ *        header section.
+ * @param message The message whose `Trailer` header is read.
+ */
+[[nodiscard]] std::vector<std::string> trailer_section_fields(const Headers &message);
+} // namespace detail
 } // namespace qb::http

@@ -661,3 +661,63 @@ TEST(Http1Serialization, ARequestWithoutAMethodIsRefusedNotAborted) {
     ASSERT_NO_THROW(out << search);
     EXPECT_TRUE(std::string(out.begin(), out.size()).starts_with("M-SEARCH / HTTP/1.1\r\n"));
 }
+
+// The fields a chunked message's `Trailer` header announces travel in its trailer section, after
+// the last chunk, and not in its header section -- the contract HTTP/2 and HTTP/3 send by (Huly
+// QB-1058, QB-1061; RFC 9112 §7.1.2). The serializer wrote every field in the header section and
+// ended the body with a bare `0\r\n\r\n` (Huly QB-1067). A field a trailer section must not carry
+// stays in the header section even when announced; an announced field the message does not set is
+// simply absent; a message framed by Content-Length has no trailer section, so nothing moves.
+TEST(Http1Serialization, AnnouncedTrailerFieldsTravelAfterTheLastChunk) {
+    const auto head_and_tail = [](const std::string &wire) {
+        const auto end = wire.find("\r\n\r\n");
+        return std::pair{wire.substr(0, end + 2), wire.substr(end + 4)};
+    };
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Transfer-Encoding", "chunked");
+    response.set_header("Trailer", "X-Checksum, Server-Timing, Connection, X-Unset");
+    response.set_header("X-Checksum", "abc");
+    response.add_header("Server-Timing", "db;dur=53");
+    response.add_header("Server-Timing", "app;dur=47");
+    response.set_header("Connection", "keep-alive");
+    response.body() = "hello";
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << response);
+    const auto [head, tail] = head_and_tail(std::string(out.begin(), out.size()));
+
+    EXPECT_EQ(head.find("x-checksum:"), std::string::npos) << head;
+    EXPECT_EQ(head.find("server-timing:"), std::string::npos) << head;
+    EXPECT_NE(head.find("\r\nconnection: keep-alive\r\n"), std::string::npos) << "a field trailers must not carry stays in the head";
+    EXPECT_NE(head.find("\r\ntrailer: X-Checksum, Server-Timing, Connection, X-Unset\r\n"), std::string::npos) << head;
+    // The trailer section, in the announced order; every value of a multi-value field.
+    EXPECT_EQ(tail, "5\r\nhello\r\n0\r\nx-checksum: abc\r\nserver-timing: db;dur=53\r\nserver-timing: app;dur=47\r\n\r\n");
+
+    // A request alike; its empty chunked body still ends with the trailer section.
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/up"}};
+    request.set_header("Transfer-Encoding", "chunked");
+    request.set_header("Trailer", "X-Checksum");
+    request.set_header("X-Checksum", "abc");
+    qb::allocator::pipe<char> req_out;
+    ASSERT_NO_THROW(req_out << request);
+    const auto [req_head, req_tail] = head_and_tail(std::string(req_out.begin(), req_out.size()));
+    EXPECT_EQ(req_head.find("x-checksum:"), std::string::npos) << req_head;
+    EXPECT_EQ(req_tail, "0\r\nx-checksum: abc\r\n\r\n");
+
+    // Content-Length framing has no trailer section: the announced field stays in the head.
+    qb::http::Response sized;
+    sized.status() = qb::http::status::OK;
+    sized.set_header("Trailer", "X-Checksum");
+    sized.set_header("X-Checksum", "abc");
+    sized.body() = "hello";
+    qb::allocator::pipe<char> sized_out;
+    ASSERT_NO_THROW(sized_out << sized);
+    EXPECT_NE(std::string(sized_out.begin(), sized_out.size()).find("\r\nx-checksum: abc\r\n"), std::string::npos);
+
+    // A MessageHead writes no trailer section of its own, so it keeps every field in the head: the
+    // caller streaming the chunks writes the end.
+    qb::allocator::pipe<char> head_only;
+    ASSERT_NO_THROW(head_only << qb::http::MessageHead{response});
+    EXPECT_NE(std::string(head_only.begin(), head_only.size()).find("\r\nx-checksum: abc\r\n"), std::string::npos);
+}

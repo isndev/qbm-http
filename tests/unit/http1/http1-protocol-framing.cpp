@@ -845,3 +845,114 @@ TEST(Http1ProtocolFraming, AHandStreamedChunkedBodyFramesAfterItsHead) {
     EXPECT_EQ(io.request_count, 2);
     EXPECT_EQ(io.last_request->uri().path(), "/after");
 }
+
+// ===========================================================================
+// Chunked trailer sections (Huly QB-1067)
+//
+// The parser stored a field when the NEXT field began or when the header section ended; a trailer
+// section has neither after its last field, so the last trailer field was dropped -- the only one,
+// for a one-field trailer. Received trailer fields reach the message the way HTTP/2 and HTTP/3
+// surface theirs: through the ordinary header API (readme 19). A field a trailer section must not
+// carry -- framing, connection management, routing -- refuses the message, as HTTP/2 and HTTP/3
+// refuse their stream: merged, a trailer `Content-Length` would sit beside the chunked framing.
+// ===========================================================================
+
+namespace {
+
+constexpr std::string_view kTrailedRequest = "POST /up HTTP/1.1\r\nHost: x\r\nX-Empty-Head:\r\nTransfer-Encoding: chunked\r\n"
+                                             "Trailer: X-Checksum, X-Note, X-Count\r\n\r\n"
+                                             "5\r\nhello\r\n0\r\n"
+                                             "X-Checksum: abc\r\nX-Note:\r\nX-Count: 2\r\n\r\n";
+
+} // namespace
+
+TEST(Http1ProtocolFraming, EveryChunkedTrailerFieldReachesTheMessage) {
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, kTrailedRequest);
+    feed(io, "GET /next HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_TRUE(proto.ok());
+    ASSERT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.last_request->body().as<std::string>(), "hello");
+    EXPECT_EQ(io.last_request->header("X-Checksum"), "abc");
+    EXPECT_EQ(io.last_request->header("X-Count"), "2") << "the last trailer field must not be dropped";
+    // An empty value is a value: the field is there, empty, and the next name stays its own.
+    EXPECT_TRUE(io.last_request->has_header("X-Note"));
+    EXPECT_EQ(io.last_request->header("X-Note"), "");
+    EXPECT_TRUE(io.last_request->has_header("X-Empty-Head"));
+    EXPECT_EQ(io.last_request->header("Transfer-Encoding"), "chunked");
+
+    // The next message starts clean: no trailer field of the previous one leaks into it.
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.request_count, 2);
+    EXPECT_EQ(io.last_request->uri().path(), "/next");
+    EXPECT_FALSE(io.last_request->has_header("X-Count"));
+    EXPECT_FALSE(io.last_request->has_header("X-Checksum"));
+
+    // A response's trailer section, on the client side, alike -- a one-field one included.
+    ClientFakeIO                             cio;
+    qb::protocol::http::client<ClientFakeIO> cproto(cio);
+    feed(cio, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: Server-Timing\r\n\r\n"
+              "4\r\nWiki\r\n0\r\nServer-Timing: db;dur=53\r\n\r\n");
+    ASSERT_GT(step(cproto, cio), 0u);
+    ASSERT_TRUE(cproto.ok());
+    ASSERT_EQ(cio.response_count, 1);
+    EXPECT_EQ(cio.last_response->body().as<std::string>(), "Wiki");
+    EXPECT_EQ(cio.last_response->header("Server-Timing"), "db;dur=53");
+}
+
+TEST(Http1ProtocolFraming, ATrailerFieldThatFramesOrRoutesRefusesTheMessage) {
+    for (const char *field :
+         {"Content-Length: 5", "Transfer-Encoding: chunked", "Trailer: X-A", "Host: elsewhere.test", "Connection: close", "TE: trailers",
+          "Upgrade: h2c", "Keep-Alive: timeout=5"}) {
+        // First and last in its trailer section, so both storing paths are covered.
+        for (const bool last : {true, false}) {
+            ServerFakeIO                             io;
+            qb::protocol::http::server<ServerFakeIO> proto(io);
+            std::string                              raw = "POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                                           "5\r\nhello\r\n0\r\n";
+            raw += field;
+            raw += "\r\n";
+            if (!last)
+                raw += "X-After: 1\r\n";
+            raw += "\r\n";
+            feed(io, raw);
+            (void) step(proto, io);
+            EXPECT_FALSE(proto.ok()) << field << (last ? " (last)" : " (not last)");
+            EXPECT_EQ(io.request_count, 0) << field << (last ? " (last)" : " (not last)") << ": the message must not be dispatched";
+        }
+    }
+
+    // An ordinary field is not refused, whatever its name looks like.
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, "POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Content-Length-Hint: 5\r\n\r\n");
+    ASSERT_GT(step(proto, io), 0u);
+    EXPECT_TRUE(proto.ok());
+    EXPECT_EQ(io.last_request->header("X-Content-Length-Hint"), "5");
+}
+
+TEST(Http1ProtocolFraming, AnnouncedTrailerFieldsRoundTripThroughTheTrailerSection) {
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/up"}};
+    request.set_header("Transfer-Encoding", "chunked");
+    request.set_header("Trailer", "X-Checksum");
+    request.set_header("X-Checksum", "abc");
+    request.body() = "hello";
+
+    qb::allocator::pipe<char> wire;
+    ASSERT_NO_THROW(wire << request);
+    const std::string raw{wire.begin(), wire.size()};
+    const auto        head_end = raw.find("\r\n\r\n");
+    ASSERT_NE(head_end, std::string::npos);
+    EXPECT_EQ(raw.substr(0, head_end).find("x-checksum:"), std::string::npos) << "an announced field leaves the header section: " << raw;
+
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, raw);
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_TRUE(proto.ok());
+    EXPECT_EQ(io.last_request->body().as<std::string>(), "hello");
+    EXPECT_EQ(io.last_request->header("X-Checksum"), "abc");
+}

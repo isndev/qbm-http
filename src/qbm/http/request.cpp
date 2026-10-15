@@ -309,6 +309,12 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
         throw std::length_error("qb::http::Request serialization: Content-Length does not match body size.");
     }
 
+    // A complete chunked message's announced trailer fields travel after its last chunk, not in its
+    // header section: HTTP/2's and HTTP/3's contract (RFC 9112 §7.1.2, Huly QB-1067). A MessageHead writes
+    // no trailer section of its own, so it keeps every field in the head.
+    const std::vector<std::string> trailer_fields =
+        transfer.chunked && !head_only && r.has_header("Trailer") ? qb::http::detail::trailer_section_fields(r) : std::vector<std::string>{};
+
     // Performance: Pre-calculate approximate output size to minimize allocations
     std::size_t estimated_size = 64; // Base request line size
     estimated_size += path_size;
@@ -351,6 +357,9 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
 
     // HTTP Headers
     for (const auto &it : r.headers()) {
+        if (!trailer_fields.empty() && std::find(trailer_fields.begin(), trailer_fields.end(), it.first) != trailer_fields.end()) {
+            continue; // in the trailer section, below
+        }
         for (const auto &value : it.second) {
             if (!header_is_valid(it.first, value)) {
                 throw std::length_error("qb::http::Request serialization: invalid header name/value.");
@@ -367,7 +376,22 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
         if (!head_only) {
             if (length)
                 out << qb::http::Chunk(r.body().raw().begin(), length);
-            out << qb::http::Chunk();
+            if (trailer_fields.empty()) {
+                out << qb::http::Chunk();
+            } else {
+                // The last-chunk, the trailer section, then the empty line that ends the message.
+                out << '0' << qb::http::endl;
+                for (const auto &name : trailer_fields) {
+                    const auto field = r.headers().find(name);
+                    if (field == r.headers().cend()) {
+                        continue; // announced, not set
+                    }
+                    for (const auto &value : field->second) {
+                        out << name << ": " << value << qb::http::endl;
+                    }
+                }
+                out << qb::http::endl;
+            }
         }
     } else if (length) {
         if (!content_length) {
