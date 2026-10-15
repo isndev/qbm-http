@@ -14,6 +14,7 @@
  * @ingroup Http
  */
 #include "./headers.h" // Includes utility, types, icase_unordered_map, string, string_view, etc.
+#include <algorithm>   // For std::find, std::transform (trailer_section_fields)
 #include <charconv>    // For std::to_chars (used in accept_encoding)
 #include <optional>
 #include <stdexcept> // For std::runtime_error (thrown by parse_header_attributes)
@@ -543,4 +544,72 @@ Headers::derive_content_type() const noexcept {
     }
     _content_type_derived = true;
 }
+
+namespace {
+/// The entry of `name` among `headers`' (lowercase) names, matched without folding `name` into a string.
+template <typename Map>
+[[nodiscard]] auto
+find_by_scan(Map &headers, std::string_view name) noexcept {
+    auto it = headers.begin();
+    for (; it != headers.end(); ++it) {
+        if (it->first.size() == name.size() && utility::iequals(it->first, name)) {
+            break;
+        }
+    }
+    return it;
+}
+} // namespace
+
+bool
+Headers::has_long_name(std::string_view name) const noexcept {
+    return find_by_scan(_headers, name) != _headers.cend();
+}
+
+void
+Headers::erase_long_name(std::string_view name) noexcept {
+    if (const auto it = find_by_scan(_headers, name); it != _headers.end()) {
+        _headers.erase(it);
+    }
+}
+
+namespace detail {
+bool
+is_forbidden_trailer_field(std::string_view name) noexcept {
+    static constexpr std::string_view forbidden[] = {"content-length",     "transfer-encoding", "trailer", "host",    "connection",
+                                                     "keep-alive",         "proxy-connection",  "te",      "upgrade", "proxy-authenticate",
+                                                     "proxy-authorization"};
+    for (const auto field : forbidden) {
+        if (field.size() == name.size() && utility::iequals(field, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string>
+trailer_section_fields(const Headers &message) {
+    std::vector<std::string> fields;
+    const auto               it = message.headers().find("trailer");
+    if (it == message.headers().cend()) {
+        return fields;
+    }
+    for (const auto &value : it->second) {
+        std::string_view rest{value};
+        while (!rest.empty()) {
+            const auto comma = rest.find(',');
+            const auto name  = utility::trim_http_whitespace(rest.substr(0, comma));
+            rest.remove_prefix(comma == std::string_view::npos ? rest.size() : comma + 1);
+            if (name.empty() || is_forbidden_trailer_field(name)) {
+                continue;
+            }
+            std::string lower(name.size(), '\0');
+            std::transform(name.begin(), name.end(), lower.begin(), utility::ascii_to_lower);
+            if (std::find(fields.begin(), fields.end(), lower) == fields.end()) {
+                fields.push_back(std::move(lower));
+            }
+        }
+    }
+    return fields;
+}
+} // namespace detail
 } // namespace qb::http

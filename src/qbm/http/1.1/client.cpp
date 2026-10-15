@@ -179,7 +179,10 @@ public:
         // connection close: deliver its buffered body NOW, before the disconnect tears the active
         // request down. flush_eof dispatches through on(response) → handle_response, completing
         // the request, so handle_disconnected below then finds nothing to fail. No-op otherwise.
-        if (_http_protocol) {
+        // Only the peer's close (reason 0) ends such a body: a disconnect for another reason -- a
+        // cap qb-io enforced (-3, -2), a protocol error (-1) -- cut it, and the request fails below,
+        // as the one-shot client's does (Huly QB-1066).
+        if (_http_protocol && event.reason == 0) {
             _http_protocol->flush_eof();
         }
         _owner.handle_disconnected(event.reason);

@@ -772,7 +772,9 @@ private:
         // Ensure Content-Type, Content-Length, etc. are cleared or not sent for 304.
         // The qb::http::Response class or server layer should handle this distinction.
         // For safety, we can clear them here from the perspective of the middleware's responsibility.
-        ctx->response().headers().erase("Content-Type");
+        // remove_header, not a raw erase: the typed content_type() a previous read cached follows the
+        // raw map only through the typed mutators (Huly QB-1068).
+        ctx->response().remove_header("Content-Type");
         ctx->response().headers().erase("Content-Length");
         // Add other headers that should be removed for 304?
         // Transfer-Encoding, Content-Encoding?
@@ -787,7 +789,7 @@ private:
         ctx->response().set_header("Content-Range", "bytes */" + std::to_string(total_file_size));
         // According to RFC 7231, a 416 response SHOULD NOT include other representation metadata.
         // Content-Type is often omitted or kept minimal.
-        ctx->response().headers().erase("Content-Type"); // Remove if previously set
+        ctx->response().remove_header("Content-Type"); // Remove if previously set; the typed mutator (Huly QB-1068)
         ctx->response().headers().erase("ETag");
         ctx->response().headers().erase("Last-Modified");
         ctx->response().body().clear();

@@ -16,9 +16,12 @@
 #ifdef QB_HAS_COMPRESSION
 #include "./1.1/protocol/base.h" // protocol_limits::MAX_BODY_SIZE — decompressed output cap
 #endif
+#include <algorithm>
 #include <charconv>
 #include <stdexcept>
 #include <string>
+
+#include <qb/utility/branch_hints.h> // QB_NOINLINE, QB_COLD
 
 namespace qb::allocator {
 /**
@@ -59,6 +62,42 @@ pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
     return *this;
 }
 } // namespace qb::allocator
+
+namespace qb::http::detail {
+QB_NOINLINE QB_COLD bool
+write_trailed_chunked_message(qb::allocator::pipe<char> &out, const Headers &message, const qb::allocator::pipe<char> &body,
+                              const std::size_t length) {
+    if (!message.has_header("Trailer")) {
+        return false;
+    }
+    const auto fields = trailer_section_fields(message);
+    for (const auto &it : message.headers()) {
+        if (std::find(fields.begin(), fields.end(), it.first) != fields.end()) {
+            continue; // in the trailer section, below
+        }
+        for (const auto &value : it.second) {
+            out << it.first << ": " << value << qb::http::endl;
+        }
+    }
+    out << qb::http::endl;
+    if (length) {
+        out << qb::http::Chunk(body.begin(), length);
+    }
+    // The last-chunk, the trailer section, then the empty line that ends the message.
+    out << '0' << qb::http::endl;
+    for (const auto &name : fields) {
+        const auto field = message.headers().find(name);
+        if (field == message.headers().cend()) {
+            continue; // announced, not set
+        }
+        for (const auto &value : field->second) {
+            out << name << ": " << value << qb::http::endl;
+        }
+    }
+    out << qb::http::endl;
+    return true;
+}
+} // namespace qb::http::detail
 
 namespace qb::http {
 // Placed explicit copy constructor and assignment operator definitions here

@@ -25,6 +25,7 @@
 #include <vector>      // For std::vector (used to store multiple header values)
 
 #include <qb/system/container/unordered_map.h> // For qb::icase_unordered_map
+#include <qb/utility/branch_hints.h>           // QB_COLD (the long-name lookups, Huly QB-1068)
 
 #include "./types.h"   // For common HTTP types (though not directly used in Headers API, often a peer include)
 #include "./utility.h" // For utility::split_string, utility::iequals, utility::trim_http_whitespace
@@ -289,6 +290,18 @@ protected:
     /// Derives the typed `Content-Type` from the raw map: the first value of the header, or the defaults.
     void derive_content_type() const noexcept;
 
+    /**
+     * @brief Whether a field is named `name` (any case) when `name` is longer than the map folds on
+     *        the stack (`lookup_fold_capacity`): the map would convert it into a `std::string`, so it is
+     *        matched against each stored, already-lowercase name instead -- nothing allocated. Out of
+     *        line: no field in common use is that long (Huly QB-1068).
+     */
+    [[nodiscard]] QB_COLD bool has_long_name(std::string_view name) const noexcept;
+
+    /// Erases the field named `name` (any case), `name` being longer than the map folds on the stack,
+    /// without allocating: see has_long_name (Huly QB-1068).
+    QB_COLD void erase_long_name(std::string_view name) noexcept;
+
 public:
     /** @brief Default constructor. Initializes an empty set of headers and a default `ContentType`. */
     Headers() noexcept = default;
@@ -408,15 +421,30 @@ public:
 
     /**
      * @brief Checks if a header with the given name exists.
-     * Header names are checked case-insensitively.
+     * Header names are checked case-insensitively. Allocates nothing, whatever the name's length
+     * (Huly QB-1068): it cannot throw.
      * @tparam HeaderNameType The type of the header name.
      * @param name The name of the header to check.
      * @return `true` if at least one header with the given name exists, `false` otherwise.
      */
     template <typename HeaderNameType>
+    requires std::is_convertible_v<const HeaderNameType &, std::string_view>
     [[nodiscard]] bool
     has_header(HeaderNameType &&name) const noexcept {
-        return _headers.has(std::forward<HeaderNameType>(name));
+        // A name the map folds on the stack allocates nothing; a longer one would (Huly QB-1068). A
+        // string literal's length is known here, so its check costs nothing.
+        if constexpr (std::is_array_v<std::remove_reference_t<HeaderNameType>>) {
+            if constexpr (std::extent_v<std::remove_reference_t<HeaderNameType>> <= headers_map_type::lookup_fold_capacity + 1) {
+                return _headers.has(std::forward<HeaderNameType>(name));
+            } else {
+                return has_long_name(std::string_view(name));
+            }
+        } else {
+            if (std::string_view(name).size() <= headers_map_type::lookup_fold_capacity) [[likely]] {
+                return _headers.has(std::forward<HeaderNameType>(name));
+            }
+            return has_long_name(std::string_view(name));
+        }
     }
 
     /**
@@ -436,7 +464,9 @@ public:
      * Derived from the raw `Content-Type` header (its first value, or the defaults when it is
      * absent) on the first read after the message was built, parsed or had that header changed
      * through a typed mutator or `refresh_content_type()`; later reads return the cached object.
-     * A message whose typed Content-Type is never read never parses it.
+     * A message whose typed Content-Type is never read never parses it. That first read may
+     * allocate (a type or charset longer than the small-string capacity); as a `noexcept` read, an
+     * allocation failure there terminates the program, as one in qb's `push` does (Huly QB-1068).
      *
      * @return A constant reference to the internal `ContentType` object.
      */
@@ -469,16 +499,30 @@ public:
     }
 
     /**
-     * @brief Removes all occurrences of a header by its name (case-insensitive).
+     * @brief Removes all occurrences of a header by its name (case-insensitive). Allocates nothing,
+     *        whatever the name's length (Huly QB-1068): it cannot throw.
      * @tparam HeaderNameType The type of the header name.
      * @param name The name of the header to remove.
      */
     template <typename HeaderNameType>
+    requires std::is_convertible_v<const HeaderNameType &, std::string_view>
     void
     remove_header(HeaderNameType &&name) noexcept {
         const bool is_content_type = is_content_type_header(name);
-        // Assuming icase_unordered_map::erase(key) is noexcept
-        _headers.erase(std::forward<HeaderNameType>(name));
+        // Nothing allocated, so nothing thrown, whatever the name's length (Huly QB-1068): the map
+        // folds a name of up to lookup_fold_capacity bytes on the stack, and a longer one -- no field
+        // in common use is -- is matched against each stored name and erased by position.
+        if constexpr (std::is_array_v<std::remove_reference_t<HeaderNameType>>) {
+            if constexpr (std::extent_v<std::remove_reference_t<HeaderNameType>> <= headers_map_type::lookup_fold_capacity + 1) {
+                _headers.erase(std::forward<HeaderNameType>(name));
+            } else {
+                erase_long_name(std::string_view(name));
+            }
+        } else if (std::string_view(name).size() <= headers_map_type::lookup_fold_capacity) [[likely]] {
+            _headers.erase(std::forward<HeaderNameType>(name));
+        } else {
+            erase_long_name(std::string_view(name));
+        }
         if (is_content_type) {
             _content_type_derived = false;
         }
@@ -536,4 +580,28 @@ public:
 
 /** @brief Shorthand alias for `Headers`, often used for brevity. */
 using headers = Headers;
+
+namespace detail {
+/**
+ * @brief Whether a field must stay out of a trailer section: it frames the message, manages the
+ *        connection, routes the request or authenticates to a proxy (RFC 9110 §6.5.1).
+ *
+ * The set HTTP/2 and HTTP/3 refuse in theirs: `content-length`, `transfer-encoding`, `trailer`,
+ * `host`, `connection`, `keep-alive`, `proxy-connection`, `te`, `upgrade`, `proxy-authenticate`,
+ * `proxy-authorization`. The HTTP/1.1 parser refuses a chunked message whose trailer section carries
+ * one, and the serializer never moves one there (Huly QB-1067).
+ *
+ * @param name A field name, in any case.
+ */
+[[nodiscard]] bool is_forbidden_trailer_field(std::string_view name) noexcept;
+
+/**
+ * @brief The fields a message's `Trailer` header announces that may travel in a trailer section:
+ *        lowercased, in the order announced, each once; empty when the message has no `Trailer`
+ *        header. A forbidden field (is_forbidden_trailer_field) is left out -- it stays in the
+ *        header section.
+ * @param message The message whose `Trailer` header is read.
+ */
+[[nodiscard]] std::vector<std::string> trailer_section_fields(const Headers &message);
+} // namespace detail
 } // namespace qb::http

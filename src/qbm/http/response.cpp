@@ -25,6 +25,8 @@
 #include <string>
 #include <vector>
 
+#include <qb/utility/branch_hints.h> // QB_NOINLINE, QB_COLD
+
 namespace qb::http {
 
 void
@@ -90,6 +92,19 @@ Response::update_cookie_headers() {
 
 namespace qb::allocator {
 namespace {
+/// Throws a serialization refusal. Out of line and cold: the serializer inlines every write of the
+/// message, and the refusals' message building kept it larger than its common path needs (Huly QB-1066).
+[[noreturn]] QB_NOINLINE QB_COLD void
+refuse(const char *why) {
+    throw std::length_error(why);
+}
+
+/// Throws the refusal of a size over its limit: `<prefix>(<size>) exceeds <limit_name> (<limit>)<suffix>`.
+[[noreturn]] QB_NOINLINE QB_COLD void
+refuse_size(const char *prefix, const std::size_t size, const char *limit_name, const std::size_t limit, const char *suffix) {
+    throw std::length_error(std::string(prefix) + std::to_string(size) + ") exceeds " + limit_name + " (" + std::to_string(limit) + suffix);
+}
+
 [[nodiscard]] bool
 is_header_name_char(const unsigned char c) noexcept {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' || c == '%'
@@ -113,11 +128,6 @@ header_value_is_valid(const std::string &value) noexcept {
         const auto uc = static_cast<unsigned char>(c);
         return c == '\t' || (uc >= 0x20 && uc != 0x7f);
     });
-}
-
-[[nodiscard]] bool
-header_is_valid(const std::string &name, const std::string &value) noexcept {
-    return header_name_is_valid(name) && header_value_is_valid(value);
 }
 
 struct transfer_encoding_result {
@@ -152,7 +162,7 @@ declared_content_length(Message const &msg) {
     for (const auto &raw : it->second) {
         const auto parsed = parse_content_length(raw);
         if (!parsed || (parsed_length && *parsed_length != *parsed)) {
-            throw std::length_error("qb::http::Response serialization: invalid or conflicting Content-Length header.");
+            refuse("qb::http::Response serialization: invalid or conflicting Content-Length header.");
         }
         parsed_length = *parsed;
     }
@@ -201,7 +211,7 @@ response_forbids_nonzero_content_length(qb::http::Response const &r) noexcept {
 
 /**
  * @brief The HTTP/1.1 serialization of a response, with or without its content.
- * @param out Where the bytes go. On a refusal it is cleared and nothing is emitted.
+ * @param out Where the bytes go. A refusal writes nothing to it: what the pipe held before is kept.
  * @param r The response.
  * @param content_suppressed True for `MessageHead`: the status line and the header section only,
  *        framing headers included, and nothing after them -- no body, no chunked last-chunk (the
@@ -212,49 +222,33 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     // SECURITY FIX: Validate body size to prevent DoS
     const std::size_t body_size = content_suppressed ? 0u : r.body().size();
     if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: body size (" + std::to_string(body_size)
-                                + ") exceeds "
-                                  "qb::http::protocol_limits::MAX_BODY_SIZE ("
-                                + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE)
-                                + "); refusing to emit a truncated or empty wire representation.");
+        refuse_size("qb::http::Response serialization: body size (", body_size, "qb::http::protocol_limits::MAX_BODY_SIZE",
+                    qb::http::protocol_limits::MAX_BODY_SIZE, "); refusing to emit a truncated or empty wire representation.");
     }
 
     const auto length = body_size;
     if (length && response_must_not_carry_body(r)) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: this status code must not carry a body.");
+        refuse("qb::http::Response serialization: this status code must not carry a body.");
     }
 
     const auto transfer = transfer_encoding(r);
     if (!transfer.ok) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
+        refuse("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
     }
     if (transfer.chunked && response_must_not_carry_body(r)) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
+        refuse("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
     }
 
-    std::optional<std::uint64_t> content_length;
-    try {
-        content_length = declared_content_length(r);
-    } catch (...) {
-        out.clear();
-        throw;
-    }
+    const std::optional<std::uint64_t> content_length = declared_content_length(r);
 
     if (transfer.chunked && content_length) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
+        refuse("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
     }
     if (response_forbids_nonzero_content_length(r) && content_length && *content_length != 0u) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
+        refuse("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
     }
     if (length && !transfer.chunked && content_length && *content_length != length) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: Content-Length does not match body size.");
+        refuse("qb::http::Response serialization: Content-Length does not match body size.");
     }
 
     // Performance: Pre-calculate approximate output size to minimize allocations
@@ -265,14 +259,12 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     // Add headers size
     for (const auto &it : r.headers()) {
         if (!header_name_is_valid(it.first)) {
-            out.clear();
-            throw std::length_error("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
+            refuse("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
         }
         estimated_size += it.first.size() + 2; // ": "
         for (const auto &value : it.second) {
             if (!header_value_is_valid(value)) {
-                out.clear();
-                throw std::length_error("qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
+                refuse("qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
             }
             estimated_size += value.size() + 2; // CRLF
         }
@@ -283,25 +275,32 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     // SECURITY FIX: Cap maximum serialized size to prevent overflow
     constexpr std::size_t MAX_SERIALIZED_SIZE = 110 * 1024 * 1024; // 110MB (slightly above MAX_BODY_SIZE + headers)
     if (estimated_size > MAX_SERIALIZED_SIZE) {
-        out.clear();
-        throw std::length_error("qb::http::Response serialization: estimated wire size exceeds internal cap (decompression "
-                                "or header explosion); refusing to allocate.");
+        refuse("qb::http::Response serialization: estimated wire size exceeds internal cap (decompression "
+               "or header explosion); refusing to allocate.");
     }
 
     // Reserve space in pipe to reduce allocations
     out.reserve(estimated_size);
+
+    // Every refusal is above: nothing is written before the message is known to be writable, so a
+    // refused message leaves the pipe as it found it -- what was queued before it included (it used to
+    // clear() it, Huly QB-1066).
 
     // HTTP Status Line
     out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
         << qb::http::endl;
 
     // HTTP Headers
+    // A complete chunked message whose `Trailer` header announces fields writes them after its last
+    // chunk instead, as HTTP/2 and HTTP/3 do (RFC 9112 §7.1.2, Huly QB-1067): out of line, so this
+    // common path stays what it was. A MessageHead writes no trailer section, so it keeps every field.
+    if (transfer.chunked && !content_suppressed && qb::http::detail::write_trailed_chunked_message(out, r, r.body().raw(), length)) {
+        return;
+    }
     for (const auto &it : r.headers()) {
+        // Every name and value was validated above, with the same predicates: no second pass (it doubled
+        // the validation and its refusal could no longer be reached).
         for (const auto &value : it.second) {
-            if (!header_is_valid(it.first, value)) {
-                out.clear();
-                throw std::length_error("qb::http::Response serialization: invalid header name/value.");
-            }
             out << it.first << ": " << value << qb::http::endl;
         }
     }

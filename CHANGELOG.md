@@ -63,6 +63,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `Client::push_requests` return `false` when the bound refused the request or a batch member (the
   503 already delivered through the callback), as the HTTP/1.1 and HTTP/2 clients do; they returned
   `true` for any non-null callback.
+- **The HTTP/1.1 serializers validate each field once, and their refusals are out of line (QB-1066/1067/1068
+  follow-up).** Every header name and value was validated twice -- a first pass refused before anything was
+  written, a second one, with the same predicates, while writing, whose refusal could no longer be reached. The
+  second pass is gone, the refusals are cold out-of-line calls (messages unchanged), the trailer section is written
+  by an out-of-line function a message reaches only when it is chunked and announces trailers, and the parser
+  stores trailer fields through a callback installed for chunked messages only: a response costs about 27 % fewer
+  instructions to serialize, a request 23 %, and parsing what it did before these follow-ups.
+- **HTTP/1.1 chunked trailers follow the HTTP/2 and HTTP/3 contract (Huly QB-1067).** A complete chunked message
+  writes the fields its `Trailer` header announces after the last chunk instead of in its header section (a field a
+  trailer section must not carry stays in the head; a `MessageHead` keeps every field). The parser stores every
+  received trailer field in the message's headers, as HTTP/2 and HTTP/3 surface theirs, and refuses a message whose
+  trailer section carries a field that frames, routes or manages the connection, as they refuse their stream.
 - **The typed `Content-Type` is derived from the raw header on first read, and nothing is allocated for the
   defaults (Huly QB-506 follow-up).** `content_type()` parses the raw `Content-Type` header (its first value,
   or the defaults) the first time it is read after a message was built, parsed, or had that header changed
@@ -387,6 +399,30 @@ All notable changes to the qbm-http module are documented here. The format is ba
   vanished, and a token whose two identifiers looked like JSON was refused. The signed branch now
   reads the token's own payload, as the unsigned branch already did. `JwtMiddleware` keeps its
   claim coercion except for the textual claims (`iss`, `sub`, `aud`, `jti`, `username`).
+- **`Headers::has_header` and `remove_header` allocate nothing, whatever the name's length (Huly QB-1068).** Both are
+  `noexcept`, and the header map converts a lookup key past its 128-byte stack fold into a `std::string`: a
+  `std::bad_alloc` there was `std::terminate`. A longer name is now matched against each stored name. The typed
+  `content_type()`'s first read may still allocate; its contract now says so (an allocation failure in that
+  `noexcept` read terminates, as one in qb's `push` does).
+- **The static files middleware's 304 and 416 responses drop the typed Content-Type too (Huly QB-1068).** They erased
+  the raw header, which the typed `content_type()` cached by an earlier read does not follow: a later reader -- the
+  compression middleware's content-type check included -- saw the type the response no longer carried. They use
+  `remove_header` now.
+- **The last field of an HTTP/1.1 trailer section is kept (Huly QB-1067).** The parser stored a field when the next
+  one began or when the header section ended; a trailer section has neither after its last field, so it was lost --
+  the only one, for a one-field trailer.
+- **A refused HTTP/1.1 serialization keeps what was queued before it (Huly QB-1066).** The serializers cleared the
+  whole output pipe on a refusal, dropping the responses or requests queued ahead of the refused one -- a
+  pipelined response lost because the next was invalid. Every refusal now comes before the first byte is
+  written, and none clears the pipe. Behaviour change: the tests that pinned the clearing now pin this.
+- **Serializing a `Request` without a method is refused instead of aborting the process (Huly QB-1066).** A
+  default-constructed `Request` has `Method::UNINITIALIZED`, and the serializer named the method through llhttp's
+  `http_method_name()`, whose switch ends in `abort()`. Such a request, or any method value llhttp does not map,
+  now throws `std::length_error`; so does an invalid URI. An empty path is sent as `/` (RFC 9112 §3.2.1), where
+  the request line read `GET  HTTP/1.1`.
+- **The persistent HTTP/1.1 client delivers a close-delimited response at the peer's close only (Huly QB-1066).**
+  It delivered the buffered body as complete on any disconnect, a read or message cap included; it now does so
+  only for a graceful close, as the one-shot client does, and the request fails otherwise.
 - **`Headers::remove_header` and `CookieJar::remove` find a name passed as a `const std::string` (Huly QB-279).**
   The case-insensitive map's `erase` looked that one key form up unfolded (fixed in qb's `icase_basic_map`), so the
   header or cookie stayed whenever the name passed had an upper-case letter.

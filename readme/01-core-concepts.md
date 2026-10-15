@@ -178,7 +178,7 @@ const std::string &enc1 = req.header("Accept-Encoding", 1); // "deflate"
 
 `Headers` caches a parsed `Content-Type` so you do not re-parse the MIME type and charset on every read. The cache is lazy: `content_type()` derives it from the raw header (its first value, or the defaults) on the first read after the message was built, parsed or had that header changed, and a message whose typed `Content-Type` nobody reads never parses it. `set_content_type(value)` sets the raw header; `content_type()` returns the parsed view.
 
-<!-- src: qbm/http/tests/unit/message/headers-utility.cpp:126-129 -->
+<!-- src: qbm/http/tests/unit/message/headers-utility.cpp:128-131 -->
 ```cpp
 qb::http::Headers headers;
 headers.set_header("Content-Type", "text/html; charset=UTF-16");
