@@ -9,6 +9,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **`qb::http::MessageHead{msg}` writes a message's start line and header section, and nothing after them (Huly
+  QB-493).** `out << MessageHead{request_or_response}` validates exactly as the full serialization and stops at the
+  empty line that ends the header section: no body, no chunked last-chunk. The HTTP/1.1 server session now writes
+  every `HEAD` response this way, and it is the head to write before a body streamed by hand as `Chunk`s (see the
+  first entry under Changed).
 - **HTTP/3 active cancellation retains the client through its callback (Huly QB-960).** A
   cancellation callback may release the last external `shared_ptr`; the client stays alive until
   the active stream has been reset and the pending queue has resumed.
@@ -38,6 +43,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **Serializing a `Request` or `Response` writes a COMPLETE message: an empty chunked body is its last-chunk (Huly
+  QB-493).** A message declaring `Transfer-Encoding: chunked` with no body used to serialize as its header section
+  alone, which left the peer waiting for a body that never came (RFC 9112 §7.1). Behaviour change, source compatible:
+  code that relied on that header-only output to stream its own `Chunk`s afterwards writes
+  `qb::http::MessageHead{msg}` first instead. The repository's one such site, the `http1-loopback` chunked round
+  trip, now does.
+- **The request serializer refuses a request-target byte the request line cannot carry (Huly QB-494).** SP, HTAB, CR,
+  LF, NUL, any other control byte and DEL in the URI's raw query now throw `std::length_error` before a byte is
+  written, as an invalid header value already did: `qb::io::uri` keeps the query's raw bytes (its path admits only
+  path characters already), so percent-encode them.
+  Percent-encoded forms and every printable byte keep their exact bytes. A one-shot client answers such a request
+  400 without sending it; the persistent client already answered a serialization failure 400.
+- **`Body::as<Multipart>()` refuses a document its closing delimiter does not end (Huly QB-491).** A body that stops
+  inside a part or its headers now throws, and `try_as<Multipart>()` yields `nullopt`, instead of returning the
+  parts read so far as a complete document. Bytes after the closing delimiter (the epilogue) stay ignored.
 - **The HTTP/1.1 parser accepts a trailing horizontal tab after the `Content-Length` digits and after `chunked`
   (Huly QB-555).** It is optional whitespace (RFC 9110 §5.6.3), as a trailing space already was; the message frames
   exactly as the space form does. Such a request used to be refused, and such a response read until the connection
@@ -116,6 +136,32 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **`Headers::remove_header` and `CookieJar::remove` find a name passed as a `const std::string` (Huly QB-279).**
+  The case-insensitive map's `erase` looked that one key form up unfolded (fixed in qb's `icase_basic_map`), so the
+  header or cookie stayed whenever the name passed had an upper-case letter.
+- **`set_header` accepts a view of, or the `header()` reference to, the value it replaces (Huly QB-490).** It cleared
+  the stored values before building the new one, reading freed storage (a heap-use-after-free under
+  AddressSanitizer, garbage bytes otherwise); the new value is now built first.
+- **`content_encoding()` keeps a coding refused after the wildcard out of the wildcard (Huly QB-492).** `*, gzip;q=0`
+  returned `gzip`: the refusals were collected while walking the field, too late for a `*` listed before them. They
+  are collected first; selection still follows the field's order, not the q-values (QB-100).
+- **A dispatched HTTP/1.1 message's typed `content_type()` matches its raw `Content-Type` on every framing path (Huly
+  QB-506).** Only a chunked message refreshed it; Content-Length, empty, `HEAD` and close-delimited messages kept
+  `application/octet-stream`. The parser now refreshes it where the header section ends, and a chunked message
+  without a `Content-Type` no longer gains an empty one.
+- **The one-shot HTTP/1.1 client answers exactly once (Huly QB-507).** A response delimited by the connection close
+  (no Content-Length, no Transfer-Encoding) is delivered at EOF instead of a 502; a session disposed for any other
+  reason before a verdict -- a protocol error, a read limit -- answers 502 instead of never, so a coroutine awaiting it
+  no longer waits forever; and a compression or serialization failure answers 400 instead of letting the exception
+  out of the connect completion.
+- **A `HEAD` response that declares `Transfer-Encoding` is sent (Huly QB-493).** The server session added a
+  `Content-Length` beside it, which the serializer refuses, and dropped the connection; it now keeps the response's
+  own framing and writes its header section only.
+- **A copied or moved `Parser` parses into itself (Huly QB-510).** The callbacks reached the parser through a
+  self-pointer the implicit copy and move copied verbatim, so a copy wrote into its source -- or into a destroyed
+  object. They now find it through the state llhttp executes; copy and move are complete at every phase.
+- **`MultipartParser` keeps its end state when bytes follow the closing delimiter in the same feed (Huly QB-491).**
+  It returned without committing it, so `succeeded()` was false for any document followed by a CRLF.
 - **The vendored llhttp's provenance note says what the code is (Huly QB-554).** The files claimed llhttp 9.2.1 with
   only the symbol prefix changed; they are llhttp at upstream commit 8371b40 (between 9.2.1 and 9.3.0, whose version
   macros still read 9.2.1), with a local `HTTP_UNINITIALIZED` enumerator, an `api.c` wasm table as upstream wrote it

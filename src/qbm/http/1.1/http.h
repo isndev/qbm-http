@@ -161,7 +161,10 @@ private:
         }
 
         if (_active_request_method == qb::http::method::HEAD) {
-            if (!response.has_header("Content-Length") && !response.body().empty()) {
+            // The response to HEAD describes the content a GET would carry (RFC 9110 §9.3.2): the
+            // body's length becomes its Content-Length -- unless it already declares its framing,
+            // a Transfer-Encoding included (the two never go together, RFC 9112 §6.2).
+            if (!response.has_header("Content-Length") && !response.has_header("Transfer-Encoding") && !response.body().empty()) {
                 response.set_header("Content-Length", std::to_string(response.body().size()));
             }
             response.body().clear();
@@ -189,7 +192,10 @@ private:
             auto response = std::move(*_ready_response);
             _ready_response.reset();
             prepare_response_for_active_request(response);
-            *this << response;
+            if (_active_request_method == qb::http::method::HEAD)
+                *this << MessageHead{response}; // the header section only: no body, no last-chunk
+            else
+                *this << response;
             this->updateTimeout();
         } catch (const std::exception &e) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 response send threw: " << e.what());
@@ -702,17 +708,38 @@ struct Reply {
  *
  * Handles an HTTP client session, including connection establishment,
  * request transmission, and response handling.
+ *
+ * The callback runs EXACTLY once: with the response, with 504 on a timeout, with 503 when
+ * the connection cannot be made, with 400 when the request cannot be put on the wire, and
+ * with 502 when the session is disposed before any of those -- a peer close before a
+ * complete response, a protocol error, a read limit. A response delimited by the connection
+ * close (no Content-Length, no Transfer-Encoding, RFC 9112 §6.3) is complete at EOF and is
+ * delivered then (Huly QB-507).
  */
 template <typename Func, typename Transport>
 class session
     : public io::async::tcp::client<session<Func, Transport>, Transport>
     , public io::use<session<Func, Transport>>::timeout {
-    Func    _func;
-    Request _request;
-
 public:
     using http_protocol = http::protocol<session<Func, Transport>>;
 
+private:
+    Func           _func;
+    Request        _request;
+    http_protocol *_http_protocol = nullptr; ///< Typed handle, for the EOF delivery of a close-delimited response
+    bool           _answered      = false;   ///< The callback ran; it never runs twice
+    bool           _flushing_eof  = false;   ///< Inside the EOF delivery, which a disposal is already tearing down
+
+    /// Run the callback, at most once.
+    void
+    answer(Response &&response) {
+        if (_answered)
+            return;
+        _answered = true;
+        _func(Reply{std::move(_request), std::move(response)});
+    }
+
+public:
     /**
      * @brief Constructor
      * @param func Callback function for the response
@@ -727,7 +754,7 @@ public:
             return req;
         }(request))) {
         LOG_HTTP_DEBUG("HTTP/1.1 client session created for " << _request.method() << " " << _request.uri().source());
-        this->template switch_protocol<http_protocol>(*this);
+        _http_protocol = this->template switch_protocol<http_protocol>(*this);
         this->setTimeout(qb::duration::zero());
     }
 
@@ -756,22 +783,32 @@ public:
                     Response response;
                     response.status() = qb::http::status::SERVICE_UNAVAILABLE;
 
-                    _func(Reply{std::move(_request), std::move(response)});
+                    answer(std::move(response));
                     delete this;
                 } else {
                     LOG_HTTP_DEBUG("HTTP/1.1 client connection established to " << remote_uri);
                     this->transport() = std::forward<decltype(transport)>(transport);
                     this->start();
+                    // Compressing and serializing can refuse the request (an unknown coding, a header or a
+                    // request-target the serializer rejects). That is this request's answer, given here:
+                    // the exception must not leave the connect completion.
+                    try {
 #ifdef QB_HAS_COMPRESSION
-                    if (_request.has_header("Content-Encoding")) {
-                        LOG_HTTP_DEBUG("Compressing request body with " << _request.header("Content-Encoding"));
-                        _request.body().compress(_request.header("Content-Encoding"));
-                    }
+                        if (_request.has_header("Content-Encoding")) {
+                            LOG_HTTP_DEBUG("Compressing request body with " << _request.header("Content-Encoding"));
+                            _request.body().compress(_request.header("Content-Encoding"));
+                        }
 #else
-                    _request.remove_header("Content-Encoding");
+                        _request.remove_header("Content-Encoding");
 #endif
-                    LOG_HTTP_DEBUG("Sending HTTP/1.1 request: " << _request.method() << " " << _request.uri().source());
-                    *this << _request;
+                        LOG_HTTP_DEBUG("Sending HTTP/1.1 request: " << _request.method() << " " << _request.uri().source());
+                        *this << _request;
+                    } catch (std::exception const &e) {
+                        LOG_HTTP_ERROR("HTTP/1.1 client cannot send the request: " << e.what());
+                        answer(Response{qb::http::status::BAD_REQUEST});
+                        this->disconnect(1);
+                        return;
+                    }
                     this->setTimeout(timeout);
                 }
             },
@@ -797,8 +834,9 @@ public:
             response.status() = qb::http::status::BAD_REQUEST;
         }
 #endif
-        _func(Reply{std::move(_request), std::move(response)});
-        this->disconnect(1);
+        answer(std::move(response));
+        if (!_flushing_eof)
+            this->disconnect(1);
     }
 
     /**
@@ -808,19 +846,28 @@ public:
     void
     on(qb::io::async::event::timeout const &) {
         LOG_HTTP_WARN("HTTP/1.1 client request timed out.");
-        _func(Reply{std::move(_request), Response{qb::http::status::GATEWAY_TIMEOUT}});
+        answer(Response{qb::http::status::GATEWAY_TIMEOUT});
         this->disconnect(2);
     }
 
     /**
      * @brief Handle disconnection event
      * @param event Disconnection event
+     *
+     * Every disposal passes here before on(dispose). A peer close (reason 0) first completes a
+     * close-delimited response the protocol has buffered; flush_eof() never delivers a failed or
+     * oversized message. A session still unanswered then -- whatever the reason -- answers 502.
      */
     void
     on(qb::io::async::event::disconnected const &event) {
-        if (!event.reason) {
-            LOG_HTTP_WARN("HTTP/1.1 client disconnected unexpectedly by peer.");
-            _func(Reply{std::move(_request), Response{qb::http::status::BAD_GATEWAY}});
+        if (!_answered && !event.reason && _http_protocol) {
+            _flushing_eof = true;
+            _http_protocol->flush_eof(); // dispatches to on(response) when a close-delimited body is pending
+            _flushing_eof = false;
+        }
+        if (!_answered) {
+            LOG_HTTP_WARN("HTTP/1.1 client disconnected before a complete response. Reason: " << event.reason);
+            answer(Response{qb::http::status::BAD_GATEWAY});
         } else {
             LOG_HTTP_DEBUG("HTTP/1.1 client disconnected. Reason: " << event.reason);
         }

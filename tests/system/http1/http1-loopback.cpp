@@ -240,8 +240,11 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
                 {{"Host", {"127.0.0.1:" + std::to_string(port)}}, {"Connection", {"keep-alive"}}, {"Transfer-Encoding", {"chunked"}}}
             };
 
+            // The body is streamed by hand: write the request's HEAD, then its chunks and the
+            // terminator. `client << r` would write a complete message -- an empty chunked body is
+            // its last-chunk alone -- so the hand-written chunks would read as a second request.
             for (auto i = 0u; i < NB_ITERATION; ++i) {
-                client << r;
+                client << qb::http::MessageHead{r};
                 client << qb::http::Chunk(STRING_MESSAGE, sizeof(STRING_MESSAGE) - 1) << qb::http::Chunk();
             }
 

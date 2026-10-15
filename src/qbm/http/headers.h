@@ -123,6 +123,8 @@ inline constexpr std::string_view default_user_agent = "qb/" QB_VERSION;
  * Compares the client's accepted encodings with the server's supported compression algorithms
  * (if `QB_HAS_COMPRESSION` is defined). q=0 or a malformed q excludes a coding; among the acceptable
  * ones the FIRST in the header's order wins, not the highest q (`CompressionMiddleware` ranks by q).
+ * A `*` stands for any coding the field does not exclude, wherever that exclusion is listed — after
+ * the wildcard as well as before it (RFC 9110 §12.5.3).
  *
  * @param accept_encoding_header The `Accept-Encoding` header value received from the client.
  * @return The name of the selected encoding (e.g., `"gzip"`, `"deflate"`), or an empty string
@@ -430,16 +432,20 @@ public:
      * @tparam HeaderNameType Type of the header name.
      * @tparam HeaderValueType Type of the header value (convertible to `std::string`).
      * @param name The name of the header. Forwarded to map key construction.
-     * @param value The value to set for the header. Forwarded to `std::string` construction.
+     * @param value The value to set for the header. Forwarded to `std::string` construction. It
+     *        may alias a value this header holds (a view of it, or the reference `header()`
+     *        returns): the new value is built before the old ones are destroyed.
      */
     template <typename HeaderNameType, typename HeaderValueType>
     void
     set_header(HeaderNameType &&name, HeaderValueType &&value) {
         const bool is_content_type = is_content_type_header(name);
+        // Build the new value FIRST: clear() destroys the storage `value` may point into (Huly QB-490).
+        std::string new_value(std::forward<HeaderValueType>(value));
         // Map/vector operations can allocate
         auto &values_vec = _headers[std::forward<HeaderNameType>(name)];
         values_vec.clear();
-        values_vec.emplace_back(std::forward<HeaderValueType>(value));
+        values_vec.emplace_back(std::move(new_value));
         if (is_content_type) {
             _content_type = ContentType{values_vec.front()};
         }

@@ -20,7 +20,7 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 
 The one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the original request with the server response so you can correlate the two — useful for tracing or request IDs.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:691-694 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:697-700 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
@@ -94,19 +94,19 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:721-727,789-799; qbm/http/src/qbm/http/1.1/client.cpp:149-163,369-387; qbm/http/src/qbm/http/headers.cpp:306-311 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:748-754,826-836; qbm/http/src/qbm/http/1.1/client.cpp:149-163,369-387; qbm/http/src/qbm/http/headers.cpp:319-324 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:225-238,564-579; qbm/http/src/qbm/http/3/client.cpp:193-205,739-748; qbm/http/src/qbm/http/body.h:291-312 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:765-772; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-803; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
 
 ## One-shot callback client (HTTP/1.1)
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`. Network responses and failures invoke it on the I/O thread; a locally rejected scheme or missing SSL capability invokes it on the calling thread before the helper returns.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:785-800,870-885,920-925 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:822-837,917-932,967-972 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -142,7 +142,7 @@ int main() {
 }
 ```
 
-Each supported one-shot request creates a heap-allocated session for one request/response and deletes it on completion or disposal — never stack-allocate or manually delete it. The transport selector compares URI schemes case-insensitively; qb-io also resolves default ports for portless mixed-case HTTP(S) URLs. An unsupported scheme is rejected locally with `BAD_REQUEST` (400); HTTPS when SSL is unavailable is rejected locally with `SERVICE_UNAVAILABLE` (503), without creating a session or opening a socket. Those local rejections can invoke a callback before the helper returns; the coroutine overload schedules its continuation normally. Other failures yield 503 when the connection cannot be opened, `GATEWAY_TIMEOUT` (504) on timeout, and `BAD_GATEWAY` (502) when the peer disconnects unexpectedly. The callback fires exactly once for each verdict.
+Each supported one-shot request creates a heap-allocated session for one request/response and deletes it on completion or disposal — never stack-allocate or manually delete it. The transport selector compares URI schemes case-insensitively; qb-io also resolves default ports for portless mixed-case HTTP(S) URLs. An unsupported scheme is rejected locally with `BAD_REQUEST` (400); HTTPS when SSL is unavailable is rejected locally with `SERVICE_UNAVAILABLE` (503), without creating a session or opening a socket. Those local rejections can invoke a callback before the helper returns; the coroutine overload schedules its continuation normally. Other failures yield 503 when the connection cannot be opened, `GATEWAY_TIMEOUT` (504) on timeout, `BAD_REQUEST` (400) when the request cannot be compressed or serialized (an unknown `Content-Encoding`, a raw space or control byte in the URI's query), and `BAD_GATEWAY` (502) when the session is disposed before a complete response — the peer closes early, the response is not HTTP, a read limit is hit. A response delimited by the connection close (no `Content-Length`, no `Transfer-Encoding`) is complete at EOF and delivered then. The callback fires exactly once, whatever ends the session.
 
 For `REQUEST`, set `request.method()` yourself; the verb-named functions set it for you.
 
@@ -150,7 +150,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1056-1061 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1103-1108 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -203,7 +203,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1056-1061 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1103-1108 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
@@ -270,7 +270,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:475-486 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:505-516 -->
 ```cpp
 #include <qbm/http/http.h>
 

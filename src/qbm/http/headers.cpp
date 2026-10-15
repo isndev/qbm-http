@@ -104,28 +104,16 @@ parse_accept_encoding_q(std::string_view token_full) noexcept {
 #endif // QB_HAS_COMPRESSION
 } // namespace
 
+namespace {
 /**
- * @brief Parses attributes from a raw HTTP header value string.
- *
- * This function implements a state machine to parse header attributes from a character buffer.
- * It handles formats like `name1=value1; name2="quoted value2"; name3=value3, name4=value4`.
- * Delimiters can be semicolons (`;`) or commas (`,`). Attribute names are treated case-insensitively
- * due to the `qb::icase_unordered_map` return type for keys, while values are stored as `std::string`.
- *
- * The parser expects attribute names and values to adhere to length limits defined by
- * `ATTRIBUTE_NAME_MAX` and `ATTRIBUTE_VALUE_MAX` from `headers.h`.
- * It also disallows control characters within names and unquoted values.
- * Leading/trailing whitespace around names and unquoted values is trimmed.
- *
- * @param ptr Pointer to the start of the header attribute data.
- * @param len Length of the data in bytes.
- * @return A `qb::icase_unordered_map<std::string>` where keys are attribute names
- *         and values are the corresponding attribute values.
- * @throws std::runtime_error If parsing fails due to malformed data (e.g., control characters found,
- *                            max attribute name/value length exceeded, unterminated quoted value).
+ * @brief The attribute state machine behind parse_header_attributes(): it reports each attribute to
+ *        @p emit as it completes -- `emit(std::string_view name, std::string &&value)`, the name trimmed --
+ *        instead of collecting them, so a caller that needs one attribute builds no map. Same grammar,
+ *        same limits, same exceptions.
  */
-qb::icase_unordered_map<std::string>
-parse_header_attributes(const char *ptr, const size_t len) {
+template <typename Emit>
+void
+for_each_header_attribute(const char *ptr, const size_t len, Emit &&emit) {
     // Security: Limit maximum input size to prevent DoS attacks via excessive memory allocation
     constexpr size_t MAX_HEADER_ATTRIBUTES_SIZE = 64 * 1024; // 64KB limit as per security best practices
     if (len > MAX_HEADER_ATTRIBUTES_SIZE) {
@@ -134,8 +122,6 @@ parse_header_attributes(const char *ptr, const size_t len) {
     if (ptr == nullptr && len > 0) {
         throw std::runtime_error("Invalid null pointer with non-zero length");
     }
-
-    qb::icase_unordered_map<std::string> dict;
 
     enum class AttributeParseState {
         // Using enum class for better type safety
@@ -164,7 +150,7 @@ parse_header_attributes(const char *ptr, const size_t len) {
                 } else if (c == ';' || c == ',') {
                     // Attribute without a value, or separator after a previous valueless attribute
                     if (!current_attribute_name.empty()) {
-                        dict.emplace(std::string(utility::trim_http_whitespace(current_attribute_name)), "");
+                        emit(utility::trim_http_whitespace(current_attribute_name), std::string());
                         current_attribute_name.clear();
                     }
                     // Stay in NAME state for the next attribute.
@@ -182,8 +168,8 @@ parse_header_attributes(const char *ptr, const size_t len) {
                     // Value is not (yet) inside quotes
                     if (c == ';' || c == ',') {
                         // Delimiter ends an unquoted value
-                        dict.emplace(std::string(utility::trim_http_whitespace(current_attribute_name)),
-                                     std::string(utility::trim_http_whitespace(current_attribute_value)));
+                        emit(utility::trim_http_whitespace(current_attribute_name),
+                             std::string(utility::trim_http_whitespace(current_attribute_value)));
                         current_attribute_name.clear();
                         current_attribute_value.clear();
                         parse_state = AttributeParseState::NAME;
@@ -223,8 +209,8 @@ parse_header_attributes(const char *ptr, const size_t len) {
                         value_escape = true;
                     } else if (c == value_quote_char) {
                         // End of quoted value
-                        dict.emplace(std::string(utility::trim_http_whitespace(current_attribute_name)),
-                                     current_attribute_value); // Quoted value is not trimmed here
+                        emit(utility::trim_http_whitespace(current_attribute_name),
+                             std::string(current_attribute_value)); // Quoted value is not trimmed here
                         current_attribute_name.clear();
                         current_attribute_value.clear();
                         value_quote_char = '\0';
@@ -257,15 +243,42 @@ parse_header_attributes(const char *ptr, const size_t len) {
         if (parse_state == AttributeParseState::VALUE && (value_quote_char != '\0' || value_escape)) {
             throw std::runtime_error("Unterminated quoted attribute value at end of header string.");
         }
-        // If ended in AFTER_QUOTED_VALUE state, value was quoted and already emplaced.
+        // If ended in AFTER_QUOTED_VALUE state, value was quoted and already emitted.
         // If ended in NAME state, it's an attribute without a value.
-        // If ended in VALUE state (unquoted), emplace it.
+        // If ended in VALUE state (unquoted), emit it.
         if (parse_state == AttributeParseState::NAME || parse_state == AttributeParseState::VALUE) {
-            dict.emplace(std::string(utility::trim_http_whitespace(current_attribute_name)),
-                         std::string(utility::trim_http_whitespace(current_attribute_value)));
+            emit(utility::trim_http_whitespace(current_attribute_name), std::string(utility::trim_http_whitespace(current_attribute_value)));
         }
     }
+}
+} // namespace
 
+/**
+ * @brief Parses attributes from a raw HTTP header value string.
+ *
+ * This function implements a state machine to parse header attributes from a character buffer.
+ * It handles formats like `name1=value1; name2="quoted value2"; name3=value3, name4=value4`.
+ * Delimiters can be semicolons (`;`) or commas (`,`). Attribute names are treated case-insensitively
+ * due to the `qb::icase_unordered_map` return type for keys, while values are stored as `std::string`.
+ *
+ * The parser expects attribute names and values to adhere to length limits defined by
+ * `ATTRIBUTE_NAME_MAX` and `ATTRIBUTE_VALUE_MAX` from `headers.h`.
+ * It also disallows control characters within names and unquoted values.
+ * Leading/trailing whitespace around names and unquoted values is trimmed.
+ *
+ * @param ptr Pointer to the start of the header attribute data.
+ * @param len Length of the data in bytes.
+ * @return A `qb::icase_unordered_map<std::string>` where keys are attribute names
+ *         and values are the corresponding attribute values.
+ * @throws std::runtime_error If parsing fails due to malformed data (e.g., control characters found,
+ *                            max attribute name/value length exceeded, unterminated quoted value).
+ */
+qb::icase_unordered_map<std::string>
+parse_header_attributes(const char *ptr, const size_t len) {
+    qb::icase_unordered_map<std::string> dict;
+    // The first occurrence of a name wins: emplace() never replaces.
+    for_each_header_attribute(ptr, len,
+                              [&dict](std::string_view name, std::string &&value) { dict.emplace(std::string(name), std::move(value)); });
     return dict;
 }
 
@@ -359,8 +372,10 @@ accept_encoding() {
  * This function parses the `accept_encoding_header` string (e.g., "gzip, deflate, br") from the client.
  * It then iterates through the server's available compression algorithms (if `QB_HAS_COMPRESSION` is defined)
  * and returns the name of the first algorithm found in the client's accepted list that is also supported
- * by the server. The order of encodings in the client's `Accept-Encoding` header is generally respected.
- * Quality values (q-values) are not used for weighting in this simple implementation; first match wins.
+ * by the server. The order of encodings in the client's `Accept-Encoding` header is respected: q-values
+ * only decide acceptability (q=0 or a malformed q excludes a coding), never rank, so the first acceptable
+ * match wins. A wildcard `*` stands for any coding the field does not exclude, wherever the exclusion is
+ * listed (RFC 9110 §12.5.3), so the exclusions are collected before any token is matched.
  *
  * @param accept_encoding_header The `Accept-Encoding` header value received from the client.
  * @return The name of the selected encoding (e.g., `"gzip"`, `"deflate"`), or an empty string
@@ -371,11 +386,14 @@ content_encoding(std::string_view accept_encoding_header) {
 #ifdef QB_HAS_COMPRESSION
     // Split client's Accept-Encoding header into individual tokens (encodings).
     // Delimiters include comma and semicolon (q-values are attached to tokens before this split).
-    std::vector<std::string> client_accepted_tokens = utility::split_string<std::string>(accept_encoding_header, ",");
+    const std::vector<std::string> client_accepted_tokens = utility::split_string<std::string>(accept_encoding_header, ",");
 
-    const auto              &server_compress_factories = qb::compression::builtin::get_compress_factories();
-    std::vector<std::string> explicitly_disabled_encodings;
-
+    struct accepted_coding {
+        std::string_view name;    ///< The coding, parameters stripped (a view into client_accepted_tokens)
+        int              q_milli; ///< Its qvalue in thousandths; <= 0 excludes it (q=0 or malformed)
+    };
+    std::vector<accepted_coding> codings;
+    codings.reserve(client_accepted_tokens.size());
     for (const auto &client_token_full : client_accepted_tokens) {
         std::string_view client_encoding_name = utility::trim_http_whitespace(client_token_full);
         const int        q_milli              = parse_accept_encoding_q(client_encoding_name);
@@ -386,35 +404,35 @@ content_encoding(std::string_view accept_encoding_header) {
             client_encoding_name = client_encoding_name.substr(0, q_param_pos);
             client_encoding_name = utility::trim_http_whitespace(client_encoding_name); // Trim again after substr
         }
+        codings.push_back({client_encoding_name, q_milli});
+    }
 
-        if (q_milli <= 0) {
-            if (!client_encoding_name.empty() && client_encoding_name != "*") {
-                explicitly_disabled_encodings.emplace_back(client_encoding_name);
-            }
-            continue; // Explicitly unacceptable (`q=0`) or malformed q-value.
+    // A coding the field excludes, wherever it is listed: a wildcard must not resurrect it, even when
+    // the exclusion comes AFTER the wildcard (Huly QB-492).
+    const auto excluded = [&codings](std::string_view algo) {
+        return std::any_of(codings.begin(), codings.end(), [&](const accepted_coding &c) {
+            return c.q_milli <= 0 && !c.name.empty() && c.name != "*" && utility::iequals(c.name, algo);
+        });
+    };
+
+    const auto &server_compress_factories = qb::compression::builtin::get_compress_factories();
+    for (const auto &coding : codings) {
+        if (coding.q_milli <= 0 || coding.name.empty()) {
+            continue; // Explicitly unacceptable (`q=0`), a malformed q-value, or an empty token.
         }
 
-        if (client_encoding_name.empty() || client_encoding_name == "*") {
-            // Wildcard '*' could mean any encoding not explicitly mentioned. Server can pick its best.
-            // If a specific coding was already disabled via `q=0`, wildcard must not resurrect it.
-            if (client_encoding_name == "*") {
-                for (const auto &server_factory : server_compress_factories) {
-                    if (!server_factory) {
-                        continue;
-                    }
-                    const auto &algo     = server_factory->algorithm();
-                    const bool  disabled = std::any_of(explicitly_disabled_encodings.begin(), explicitly_disabled_encodings.end(),
-                                                       [&](const std::string &name) { return utility::iequals(name, algo); });
-                    if (!disabled) {
-                        return algo;
-                    }
+        if (coding.name == "*") {
+            // The wildcard stands for any coding the field does not exclude; the server picks its first.
+            for (const auto &server_factory : server_compress_factories) {
+                if (server_factory && !excluded(server_factory->algorithm())) {
+                    return server_factory->algorithm();
                 }
             }
             continue;
         }
 
         for (const auto &server_factory : server_compress_factories) {
-            if (server_factory && utility::iequals(server_factory->algorithm(), client_encoding_name)) {
+            if (server_factory && utility::iequals(server_factory->algorithm(), coding.name)) {
                 return server_factory->algorithm(); // Found a directly supported match
             }
         }
@@ -428,25 +446,33 @@ content_encoding(std::string_view accept_encoding_header) {
 
 std::pair<std::string, std::string>
 Headers::ContentType::parse(std::string_view content_type_str) {
-    std::pair<std::string, std::string> ret{std::string(default_content_type), std::string(default_charset)};
-
     const auto semicolon_pos = content_type_str.find(';');
     const auto media_type =
         utility::trim_http_whitespace(semicolon_pos == std::string_view::npos ? content_type_str : content_type_str.substr(0, semicolon_pos));
     if (media_type.empty()) {
-        return ret;
+        return {std::string(default_content_type), std::string(default_charset)};
     }
-    ret.first = std::string(media_type);
+    std::pair<std::string, std::string> ret{std::string(media_type), std::string(default_charset)};
 
     if (semicolon_pos != std::string_view::npos) {
+        // The parameters' FIRST `charset` decides, and a malformed parameter list anywhere keeps the
+        // default -- the rules of parse_header_attributes() and its map, read here without building the map:
+        // this runs for every received message that carries a Content-Type (Huly QB-506).
         try {
-            auto attrs      = parse_header_attributes(content_type_str.substr(semicolon_pos + 1));
-            auto charset_it = attrs.find("charset");
-            if (charset_it != attrs.end() && !charset_it->second.empty()) {
-                ret.second = charset_it->second;
+            const auto  params = content_type_str.substr(semicolon_pos + 1);
+            bool        seen   = false;
+            std::string charset;
+            for_each_header_attribute(params.data(), params.size(), [&](std::string_view name, std::string &&value) {
+                if (!seen && utility::iequals(name, "charset")) {
+                    seen    = true;
+                    charset = std::move(value);
+                }
+            });
+            if (!charset.empty()) {
+                ret.second = std::move(charset);
             }
         } catch (...) {
-            ret.second = std::string(default_charset);
+            // keep the default charset
         }
     }
 
@@ -458,7 +484,10 @@ Headers::refresh_content_type() noexcept {
     const auto it = _headers.find("Content-Type");
     if (it != _headers.end() && !it->second.empty()) {
         _content_type = ContentType{it->second.front()};
-    } else {
+    } else if (_content_type.type() != default_content_type || _content_type.charset() != default_charset) {
+        // Absent: back to the defaults. A cache that already holds them (a fresh message, the
+        // common case for the HTTP/1.1 parser that calls this for every header section) is left
+        // alone rather than re-parsed into the same two strings.
         _content_type = ContentType{default_content_type};
     }
 }

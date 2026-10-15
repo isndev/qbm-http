@@ -311,3 +311,147 @@ TEST(Http1Serialization, ResponseRejectsTransferEncodingForNoBodyStatus) {
     EXPECT_THROW(out << response, std::length_error);
     EXPECT_EQ(out.size(), 0u);
 }
+
+// RFC 9112 §7.1: a chunked body ends with the last-chunk "0\r\n\r\n", even when it
+// carries no data. The serializers wrote data chunk and terminator only in the
+// non-empty branch, so an empty chunked message ended at the header section and the
+// peer waited for a body that never came (Huly QB-493). Response also omitted its
+// Content-Length: 0 fallback there, so nothing delimited the message at all.
+TEST(Http1Serialization, RequestTerminatesAnEmptyChunkedBody) {
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/upload"}};
+    request.set_header("Transfer-Encoding", "chunked");
+
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << request);
+    const std::string wire{out.begin(), out.size()};
+
+    EXPECT_TRUE(wire.starts_with("POST /upload HTTP/1.1\r\n")) << wire;
+    EXPECT_TRUE(wire.ends_with("\r\n\r\n0\r\n\r\n")) << "an empty chunked body still needs its last-chunk: " << wire;
+    EXPECT_EQ(wire.find("content-length"), std::string::npos) << wire;
+}
+
+TEST(Http1Serialization, ResponseTerminatesAnEmptyChunkedBody) {
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Transfer-Encoding", "chunked");
+
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << response);
+    const std::string wire{out.begin(), out.size()};
+
+    EXPECT_TRUE(wire.starts_with("HTTP/1.1 200 ")) << wire;
+    EXPECT_TRUE(wire.ends_with("\r\n\r\n0\r\n\r\n")) << "an empty chunked body still needs its last-chunk: " << wire;
+    EXPECT_EQ(wire.find("content-length"), std::string::npos) << wire;
+}
+
+// `MessageHead{msg}` writes a message's start line and header section and nothing after them:
+// no body, and no last-chunk either. The response to a HEAD request keeps the framing headers
+// of the content a GET would have carried (RFC 9110 §9.3.2, RFC 9112 §6.1) — the Response does
+// not know the method it answers, so the HTTP/1.1 session states the suppression explicitly; and
+// a body streamed by hand needs its head on its own, since serializing the message writes a
+// COMPLETE one (an empty chunked body is its last-chunk alone, QB-493).
+TEST(Http1Serialization, MessageHeadEndsAtItsHeaderSection) {
+    {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.set_header("Transfer-Encoding", "chunked");
+        response.body() = "ignored: the content a GET would carry";
+
+        qb::allocator::pipe<char> out;
+        ASSERT_NO_THROW(out << qb::http::MessageHead{response});
+        const std::string wire{out.begin(), out.size()};
+
+        EXPECT_TRUE(wire.starts_with("HTTP/1.1 200 ")) << wire;
+        EXPECT_NE(wire.find("transfer-encoding: chunked\r\n"), std::string::npos) << wire;
+        EXPECT_EQ(wire.find("\r\n\r\n"), wire.size() - 4) << "nothing may follow the header section: " << wire;
+        EXPECT_EQ(wire.find("ignored"), std::string::npos) << wire;
+    }
+    {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.set_header("Content-Length", "37");
+
+        qb::allocator::pipe<char> out;
+        ASSERT_NO_THROW(out << qb::http::MessageHead{response});
+        const std::string wire{out.begin(), out.size()};
+
+        EXPECT_NE(wire.find("content-length: 37\r\n"), std::string::npos) << wire;
+        EXPECT_EQ(wire.find("\r\n\r\n"), wire.size() - 4) << wire;
+    }
+    {
+        // A request head: what a hand-streamed chunked upload writes before its chunks. A declared
+        // Content-Length is not checked against the (ignored) body.
+        qb::http::Request chunked{qb::http::method::POST, {"http://example.test/upload?part=1"}};
+        chunked.set_header("Transfer-Encoding", "chunked");
+        qb::http::Request sized{qb::http::method::PUT, {"http://example.test/blob"}};
+        sized.set_header("Content-Length", "4096");
+
+        for (auto const *request : {&chunked, &sized}) {
+            qb::allocator::pipe<char> out;
+            ASSERT_NO_THROW(out << qb::http::MessageHead{*request});
+            const std::string wire{out.begin(), out.size()};
+            EXPECT_EQ(wire.find("\r\n\r\n"), wire.size() - 4) << wire;
+        }
+        qb::allocator::pipe<char> out;
+        out << qb::http::MessageHead{chunked};
+        EXPECT_TRUE(std::string(out.begin(), out.size()).starts_with("POST /upload?part=1 HTTP/1.1\r\n"));
+    }
+    {
+        // The validation is the full serializer's: a no-body status still refuses TE, and a
+        // request-target still refuses a raw SP.
+        qb::http::Response response;
+        response.status() = qb::http::status::NOT_MODIFIED;
+        response.set_header("Transfer-Encoding", "chunked");
+        qb::allocator::pipe<char> out;
+        EXPECT_THROW(out << qb::http::MessageHead{response}, std::length_error);
+        EXPECT_EQ(out.size(), 0u);
+
+        qb::http::Request request{qb::http::method::GET, {"http://example.test/q?a=1 b"}};
+        EXPECT_THROW(out << qb::http::MessageHead{request}, std::length_error);
+        EXPECT_EQ(out.size(), 0u);
+    }
+}
+
+// RFC 9112 §3.2: the request-target is the request line's middle token, so a byte
+// that ends or breaks that line — SP, HTAB, CR, LF, NUL, any other control, DEL —
+// cannot be carried raw. qb::io::uri keeps every query byte up to '#' (a generic URI
+// parser), and the serializer copied that raw query into the request line after a
+// length check only, emitting a malformed request (Huly QB-494). Percent-encoded
+// forms are text and keep their bytes, as does every printable delimiter.
+TEST(Http1Serialization, RequestRejectsBytesARequestTargetCannotCarry) {
+    struct Case {
+        const char *name;
+        std::string query;
+    };
+    const Case cases[] = {
+        {"SP", "a=1 b"},
+        {"HTAB", "a=1\tb"},
+        {"CR", "a=1\rb"},
+        {"LF", "a=1\nb"},
+        {"CRLF + forged header", "a=1\r\nX-Injected: yes"},
+        {"NUL", std::string("a=1\0b", 5)},
+        {"other control", "a=1\x01"
+                          "b"},
+        {"DEL", "a=1\x7f"
+                "b"},
+    };
+    for (auto const &c : cases) {
+        const qb::io::uri target{"http://example.test/search?" + c.query};
+        ASSERT_EQ(target.encoded_queries(), c.query) << c.name << ": the premise is a URI that keeps the raw byte";
+
+        qb::http::Request         request{qb::http::method::GET, target};
+        qb::allocator::pipe<char> out;
+        EXPECT_THROW(out << request, std::length_error) << "serialized a request-target with a raw " << c.name;
+        EXPECT_EQ(out.size(), 0u) << c.name << ": nothing may be emitted before the refusal";
+    }
+
+    // Controls: encoded forms and printable punctuation keep their exact bytes.
+    for (const std::string query : {"a=%20%09%0D%0A%00%7F", "a=1&b=2;c=/x?y:z@w!$'()*+,~-._", "q=%E2%82%AC&raw=\xE2\x82\xAC"}) {
+        const qb::io::uri         target{"http://example.test/search?" + query};
+        qb::http::Request         request{qb::http::method::GET, target};
+        qb::allocator::pipe<char> out;
+        ASSERT_NO_THROW(out << request) << query;
+        const std::string wire{out.begin(), out.size()};
+        EXPECT_TRUE(wire.starts_with("GET /search?" + query + " HTTP/1.1\r\n")) << wire;
+    }
+}

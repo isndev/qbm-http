@@ -163,10 +163,10 @@ const std::string &enc1 = req.header("Accept-Encoding", 1); // "deflate"
 | Member | Behavior |
 |---|---|
 | `header(name, index = 0)` | value at `index`; on a miss returns a reference to a process-wide static empty string (never a temporary). For a custom fallback use `header_or(name, fallback, index = 0)`, which returns `std::string` by value |
-| `set_header(name, value)` | replace all values for `name` with this one |
+| `set_header(name, value)` | replace all values for `name` with this one; `value` may be a view of, or the `header()` reference to, a value it replaces |
 | `add_header(name, value)` | append a value (multi-value support) |
 | `has_header(name)` | presence test (case-insensitive) |
-| `remove_header(name)` | erase all values for `name` |
+| `remove_header(name)` | erase all values for `name`, however it is spelled and whatever string type carries it |
 | `headers()` | the underlying `headers_map` (direct mutation) |
 | `attributes(name, index = 0, default_to_parse = "")` | parse the header value's parameters into a `qb::icase_unordered_map<std::string>` (e.g. `Content-Disposition` fields) |
 | `header_count()` | number of distinct header names |
@@ -178,7 +178,7 @@ const std::string &enc1 = req.header("Accept-Encoding", 1); // "deflate"
 
 `Headers` caches a parsed `Content-Type` so you do not re-parse the MIME type and charset on every read. `set_content_type(value)` updates both the raw header and the cached helper; `content_type()` returns the parsed view.
 
-<!-- src: qbm/http/tests/unit/message/headers-utility.cpp:125-128 -->
+<!-- src: qbm/http/tests/unit/message/headers-utility.cpp:126-129 -->
 ```cpp
 qb::http::Headers headers;
 headers.set_header("Content-Type", "text/html; charset=UTF-16");

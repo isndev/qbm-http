@@ -743,8 +743,9 @@ Body::as<qb::json>() const {
  * The function extracts the boundary from the body's first line,
  * then uses a MultipartReader to parse each part.
  *
- * @throws std::runtime_error If the body doesn't contain a valid boundary
- *                            or if parsing fails
+ * @throws std::runtime_error If the body doesn't contain a valid boundary,
+ *                            if parsing fails, or if the document is not closed
+ *                            (its closing delimiter is missing or cut short)
  */
 template <>
 Multipart
@@ -780,6 +781,11 @@ Body::as<Multipart>() const {
     reader.feed(_data.begin(), _data.size());
     if (reader.hasError())
         throw std::runtime_error("failed to parse multipart: " + std::string(reader.getErrorMessage()));
+    // The whole body has been fed, so the document must have ENDED: a reader still inside a part
+    // or its headers is waiting for bytes this body does not have — a truncated document, not a
+    // shorter one (Huly QB-491). Bytes after the closing delimiter (the epilogue) stay ignored.
+    if (!reader.succeeded())
+        throw std::runtime_error("failed to parse multipart: the closing delimiter is missing or incomplete");
 
     return mp;
 }

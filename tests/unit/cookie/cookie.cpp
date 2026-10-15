@@ -1078,3 +1078,21 @@ TEST_F(CookieTest, ParseSetCookieSameSiteStrictAndNone) {
         EXPECT_EQ(SameSite::None, result->same_site().value());
     }
 }
+
+// The jar is keyed case-insensitively (names fold through qb::icase_unordered_map), but remove()
+// takes a `const std::string &` — the one key form the container's erase looked up UNFOLDED. A
+// cookie whose name has an upper-case letter could be added and found, never removed (Huly
+// QB-279, fixed in qb's icase_basic_map). The fixture's lower-case names never showed it.
+TEST_F(CookieJarTest, RemoveFindsANameWrittenWithUpperCaseLetters) {
+    CookieJar mixed;
+    mixed.add("SessionId", "abc");
+    mixed.add("theme", "dark");
+    ASSERT_TRUE(mixed.has("SessionId"));
+
+    EXPECT_TRUE(mixed.remove("SessionId")) << "the cookie it was added under";
+    EXPECT_FALSE(mixed.has("sessionid"));
+    EXPECT_EQ(mixed.size(), 1u);
+    EXPECT_TRUE(mixed.remove("THEME")) << "a name spelled differently";
+    EXPECT_EQ(mixed.size(), 0u);
+    EXPECT_FALSE(mixed.remove("SessionId")) << "a second removal finds nothing";
+}

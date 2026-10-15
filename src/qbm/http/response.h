@@ -355,4 +355,14 @@ namespace qb::allocator {
  */
 template <>
 pipe<char> &pipe<char>::put<qb::http::Response>(const qb::http::Response &r);
+
+/**
+ * @brief HTTP Response head serialization: the status line and header section of
+ *        `r.message`, and nothing after them (see `qb::http::MessageHead`).
+ * @param r The response to serialize without its content
+ * @return Reference to the pipe for method chaining
+ * @throws std::length_error on the same validation failures as the full serialization.
+ */
+template <>
+pipe<char> &pipe<char>::put<qb::http::MessageHead<qb::http::Response>>(const qb::http::MessageHead<qb::http::Response> &r);
 } // namespace qb::allocator

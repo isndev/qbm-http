@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -420,4 +421,149 @@ TEST(HeadersUtility, HeaderAttributesRejectUnterminatedQuotedValueBelowLimit) {
 // instead of dereferencing it.
 TEST(HeadersUtility, HeaderAttributesRejectNullPointerWithLength) {
     EXPECT_THROW((void) qb::http::parse_header_attributes(nullptr, 5), std::runtime_error);
+}
+
+// RFC 9110 §12.5.3: "*" matches any coding NOT explicitly listed, so a q=0 entry
+// excludes its coding from the wildcard wherever it sits in the field. The selector
+// walked the tokens in order and collected exclusions only as it met them, so a q=0
+// listed AFTER the wildcard came too late and the excluded coding was returned
+// (Huly QB-492). Selection order stays the header's (QB-100): among acceptable
+// codings the first one listed wins, not the highest q.
+TEST(HeadersUtility, WildcardHonoursAnExclusionListedAfterIt) {
+    const auto sup = supported_encodings();
+    if (sup.empty()) {
+        // No codec compiled in: nothing is ever selected, whatever the field says.
+        EXPECT_TRUE(qb::http::content_encoding("*, gzip;q=0").empty());
+        return;
+    }
+    // What the wildcard picks on its own: the first registered factory.
+    const std::string &a = sup.front();
+    ASSERT_EQ(qb::http::content_encoding("*"), a);
+    const std::string next = sup.size() > 1 ? sup[1] : std::string{};
+
+    EXPECT_EQ(qb::http::content_encoding("*, " + a + ";q=0"), next) << "q=0 after the wildcard";
+    EXPECT_EQ(qb::http::content_encoding("*;q=1, " + a + "; q=0"), next) << "q=0 with OWS before the parameter";
+
+    std::string upper = a;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    EXPECT_EQ(qb::http::content_encoding("*, " + upper + ";Q=0"), next) << "the coding and the parameter name are case-insensitive";
+
+    EXPECT_EQ(qb::http::content_encoding("*, " + a + ";q=abc"), next) << "a malformed q excludes, after the wildcard as before it";
+
+    // Controls: the order the existing tests pin is unchanged.
+    EXPECT_EQ(qb::http::content_encoding(a + ";q=0, *"), next) << "q=0 before the wildcard";
+    EXPECT_EQ(qb::http::content_encoding("*;q=0.8, " + a + ";q=0.5"), a)
+        << "a positive q is no exclusion: the wildcard, listed first, still wins";
+    EXPECT_EQ(qb::http::content_encoding(a + ";q=0.1, *"), a) << "the explicit coding listed first wins";
+}
+
+// QB-279 at the Headers layer: remove_header() must fold the name whatever form it
+// arrives in. A `const std::string` lvalue used to select the container's non-folding
+// erase and leave the header — and its typed Content-Type cache — in place.
+TEST(HeadersUtility, RemoveHeaderFoldsEveryNameForm) {
+    const auto filled = [] {
+        qb::http::Headers h;
+        h.add_header("Content-Length", "5");
+        h.add_header("Content-Type", "text/html; charset=utf-16");
+        h.add_header("Set-Cookie", "a=1");
+        h.add_header("Set-Cookie", "b=2");
+        return h;
+    };
+    const auto expect_removed = [](qb::http::Headers const &h, const char *form) {
+        EXPECT_FALSE(h.has_header("content-length")) << form;
+        EXPECT_FALSE(h.has_header("CONTENT-TYPE")) << form;
+        EXPECT_FALSE(h.has_header("set-cookie")) << form << ": every value of a multi-value header must go";
+        EXPECT_EQ(h.header_count(), 0u) << form;
+        EXPECT_EQ(h.content_type().type(), qb::http::Headers::default_content_type) << form << ": the typed cache kept a removed header";
+        EXPECT_EQ(h.content_type().charset(), qb::http::Headers::default_charset) << form;
+    };
+
+    {
+        auto              h  = filled();
+        const std::string cl = "Content-Length", ct = "Content-Type", sc = "SET-COOKIE";
+        h.remove_header(cl);
+        h.remove_header(ct);
+        h.remove_header(sc);
+        expect_removed(h, "const std::string");
+    }
+    {
+        auto        h  = filled();
+        std::string cl = "Content-Length", ct = "Content-Type", sc = "SET-COOKIE";
+        h.remove_header(cl);
+        h.remove_header(ct);
+        h.remove_header(sc);
+        expect_removed(h, "std::string lvalue");
+    }
+    {
+        auto h = filled();
+        h.remove_header(std::string("Content-Length"));
+        h.remove_header(std::string("Content-Type"));
+        h.remove_header(std::string("SET-COOKIE"));
+        expect_removed(h, "std::string rvalue");
+    }
+    {
+        auto h = filled();
+        h.remove_header(std::string_view("Content-Length"));
+        h.remove_header(std::string_view("Content-Type"));
+        h.remove_header(std::string_view("SET-COOKIE"));
+        expect_removed(h, "std::string_view");
+    }
+    {
+        auto h = filled();
+        h.remove_header("Content-Length");
+        h.remove_header("Content-Type");
+        h.remove_header("SET-COOKIE");
+        expect_removed(h, "string literal");
+    }
+}
+
+// set_header() used to clear the stored values and only then build the new one from
+// its argument, so an argument that aliases a stored value — a view of it, or the
+// reference header() returns — was read after its storage was destroyed (Huly QB-490;
+// AddressSanitizer reports the heap-use-after-free). The values are longer than any
+// small-string buffer so the destroyed storage is a real heap block.
+TEST(HeadersUtility, SetHeaderAcceptsAViewOfItsOwnValue) {
+    const std::string content_type = "application/vnd.example+json; charset=utf-16; profile=" + std::string(48, 'p');
+    const std::string long_value   = "head-" + std::string(40, 'm') + "-middle-" + std::string(40, 'n') + "-tail";
+
+    {
+        qb::http::Headers h;
+        h.set_header("Content-Type", content_type);
+        h.set_header("Content-Type", std::string_view(h.header("Content-Type")));
+        EXPECT_EQ(h.header("Content-Type"), content_type) << "a full view of the current value";
+        EXPECT_EQ(h.headers().at("content-type").size(), 1u);
+        EXPECT_EQ(h.content_type().type(), "application/vnd.example+json");
+        EXPECT_EQ(h.content_type().charset(), "utf-16");
+    }
+    {
+        qb::http::Headers h;
+        h.set_header("X-Long", long_value);
+        h.set_header("X-Long", std::string_view(h.header("X-Long")).substr(5, 48));
+        EXPECT_EQ(h.header("X-Long"), long_value.substr(5, 48)) << "a central sub-view of the current value";
+        EXPECT_EQ(h.headers().at("x-long").size(), 1u);
+    }
+    {
+        qb::http::Headers h;
+        h.set_header("X-Long", long_value);
+        h.set_header("X-Long", h.header("X-Long"));
+        EXPECT_EQ(h.header("X-Long"), long_value) << "the const reference header() returns";
+        EXPECT_EQ(h.headers().at("x-long").size(), 1u);
+    }
+    {
+        qb::http::Headers h;
+        h.add_header("X-Multi", long_value);
+        h.add_header("X-Multi", content_type);
+        h.set_header("X-Multi", h.header("X-Multi", 1));
+        EXPECT_EQ(h.header("X-Multi"), content_type) << "a reference to the second of several values";
+        EXPECT_EQ(h.headers().at("x-multi").size(), 1u);
+    }
+    {
+        // Control: an independent source.
+        qb::http::Headers h;
+        h.set_header("Content-Type", "text/plain");
+        const std::string independent = content_type;
+        h.set_header("Content-Type", independent);
+        EXPECT_EQ(h.header("Content-Type"), content_type);
+        EXPECT_EQ(h.content_type().charset(), "utf-16");
+    }
 }

@@ -121,12 +121,25 @@ namespace qb::http {
  * The parser implements the HTTP/1.1 specification and correctly handles
  * all standard HTTP message elements, providing a robust foundation for
  * both client and server implementations.
+ *
+ * A Parser holds no pointer to itself, so its implicit copy and move are complete at
+ * every phase (request line, header block, body): the copy continues the parse into its
+ * own message and leaves the source alone.
  */
 template <typename MessageType>
 struct Parser : public http_t {
     using String = std::string;
 
 private:
+    /// The Parser an llhttp callback runs for. llhttp hands each callback the state it is
+    /// executing, which IS this object's `http_t` base — whatever the Parser was copied or moved
+    /// from. Nothing is read through `http_t::data`: a self-pointer stored there was copied
+    /// verbatim by the implicit copy and move, so a copy parsed into its source (Huly QB-510).
+    [[nodiscard]] static Parser *
+    self_of(http_t *parser) noexcept {
+        return static_cast<Parser *>(parser);
+    }
+
     static int
     fail_with_reason(http_t *parser, const char *reason) noexcept {
         http_set_error_reason(parser, reason);
@@ -198,7 +211,7 @@ private:
     static int
     on_url(http_t *parser, const char *at, size_t length) {
         if constexpr (MessageType::type == HTTP_REQUEST) {
-            auto      *self          = static_cast<Parser *>(parser->data);
+            auto      *self          = self_of(parser);
             const auto next_url_size = self->_url_bytes_seen + length;
             if (next_url_size > protocol_limits::MAX_URL_LENGTH) {
                 return fail_with_reason(parser, "HTTP URL exceeds configured size limit");
@@ -234,7 +247,7 @@ private:
     static int
     on_status(http_t *parser, const char *, size_t) {
         if constexpr (MessageType::type == HTTP_RESPONSE) {
-            auto &msg    = static_cast<Parser *>(parser->data)->msg;
+            auto &msg    = self_of(parser)->msg;
             msg.status() = static_cast<http_status>(parser->status_code);
             // msg.status      = String(at, length);
         }
@@ -254,7 +267,7 @@ private:
      */
     static int
     on_header_field(http_t *parser, const char *at, size_t length) {
-        auto *self = static_cast<Parser *>(parser->data);
+        auto *self = self_of(parser);
         if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
             if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
                 return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
@@ -292,7 +305,7 @@ private:
      */
     static int
     on_header_value(http_t *parser, const char *at, size_t length) {
-        auto *self = static_cast<Parser *>(parser->data);
+        auto *self = self_of(parser);
         if (self->_last_header_token != HeaderToken::VALUE) {
             self->_last_header_value.clear();
         }
@@ -315,14 +328,17 @@ private:
      * 1. Sets the HTTP version
      * 2. Reserves memory for the body based on Content-Length if available
      * 3. Sets the upgrade flag if applicable
-     * 4. Marks headers as completed and pauses the parser
+     * 4. Refreshes the message's typed Content-Type from its raw header
+     * 5. Marks headers as completed and pauses the parser
      *
      * The parser is paused to allow the application to process headers
-     * before continuing with the body.
+     * before continuing with the body. Every framing path crosses this point — the
+     * protocol frames Content-Length, empty, HEAD and close-delimited bodies itself and
+     * never reaches on_message_complete — so the typed Content-Type is set here.
      */
     static int
     on_headers_complete(http_t *parser) {
-        auto *self = static_cast<Parser *>(parser->data);
+        auto *self = self_of(parser);
         auto &msg  = self->msg;
         if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
             if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
@@ -372,8 +388,11 @@ private:
             self->_chunked.reserve(
                 std::min<std::size_t>(static_cast<std::size_t>(parser->content_length), protocol_limits::MAX_BODY_RESERVE_HINT));
         }
-        msg.upgrade              = static_cast<bool>(parser->upgrade);
-        msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));
+        msg.upgrade    = static_cast<bool>(parser->upgrade);
+        msg.keep_alive = static_cast<bool>(http_should_keep_alive(parser));
+        // The typed cache follows the raw map on EVERY framing path, not only the chunked one
+        // that reaches on_message_complete (Huly QB-506).
+        msg.refresh_content_type();
         self->_headers_completed = true;
         return HPE_PAUSED;
     }
@@ -392,7 +411,7 @@ private:
      */
     static int
     on_body(http_t *parser, const char *at, size_t length) {
-        auto *self = static_cast<Parser *>(parser->data);
+        auto *self = self_of(parser);
         if (length > protocol_limits::MAX_CHUNK_SIZE) {
             return fail_with_reason(parser, "HTTP chunk exceeds configured chunk size limit");
         }
@@ -413,14 +432,15 @@ private:
      *
      * Called when the entire HTTP message has been parsed.
      * Finalizes message processing by:
-     * 1. Setting the content type from the Content-Type header
-     * 2. Moving the accumulated body data to the message body
-     * 3. Returning 1 to signal message completion
+     * 1. Moving the accumulated body data to the message body
+     * 2. Returning 1 to signal message completion
+     *
+     * The typed Content-Type was set when the header section ended (on_headers_complete); it is
+     * not re-derived here, so a message without a Content-Type does not gain an empty one.
      */
     static int
     on_message_complete(http_t *parser) {
-        auto p = static_cast<Parser *>(parser->data);
-        p->msg.set_content_type(p->msg.header("Content-Type"));
+        auto p              = self_of(parser);
         p->msg.body().raw() = std::move(p->_chunked);
         return 1;
     }
@@ -513,10 +533,12 @@ public:
      * Clears all parser state and prepares it for parsing a new message.
      * This includes:
      * 1. Reinitializing the parser with the appropriate message type
-     * 2. Setting the data pointer to this instance for callbacks
-     * 3. Resetting the message object
-     * 4. Clearing the headers_completed flag
-     * 5. Clearing any accumulated body data
+     * 2. Resetting the message object
+     * 3. Clearing the headers_completed flag
+     * 4. Clearing any accumulated body data
+     *
+     * `http_t::data` is left as http_init() sets it: the callbacks find this object through
+     * the state llhttp executes, never through a stored self-pointer (Huly QB-510).
      *
      * This method should be called before reusing the parser for a new
      * message or after an error occurs to restore the parser to a clean state.
@@ -524,7 +546,6 @@ public:
     void
     reset() noexcept {
         http_init(static_cast<http_t *>(this), MessageType::type, &settings);
-        this->data = this;
         // Explicitly destroy and reconstruct msg instead of calling msg.reset().
         // server::onMessage() moves msg out (via std::move) before calling reset(),
         // leaving msg in a moved-from state.  Calling assignment operators on a

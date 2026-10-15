@@ -24,25 +24,28 @@ qb::http::Chunk last;                                // size 0 -> end of stream
 
 Because `Chunk` does not own its bytes, the referenced memory must stay valid for as long as the chunk is serialized — exactly the lifetime discipline described under [`string_view` lifetime](#string_view-and-lifetime) below.
 
-**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection (`qbm/http/src/qbm/http/1.1/protocol/base.h:56-57,394-402`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer.
+**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection (`qbm/http/src/qbm/http/1.1/protocol/base.h:56-57,413-421`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer.
 
 **Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as a *single* chunk followed by the terminating chunk, in one write:
 
 ```cpp
-// src: qbm/http/src/qbm/http/response.cpp:327-329
+// src: qbm/http/src/qbm/http/response.cpp:312-318
 if (transfer.chunked) {
-    *this << qb::http::endl
-          << qb::http::Chunk(r.body().raw().begin(), length)  // whole body, one chunk
-          << qb::http::Chunk();                                // terminator
+    out << qb::http::endl;
+    if (!content_suppressed) {                                       // false unless a MessageHead
+        if (length)
+            out << qb::http::Chunk(r.body().raw().begin(), length); // whole body, one chunk
+        out << qb::http::Chunk();                                   // terminator, an empty body included
+    }
 }
 ```
 
-So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/src/qbm/http/response.cpp:243-270`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
+So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/src/qbm/http/response.cpp:226-253`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
 
 If you need true incremental, time-spaced delivery (server-sent events, a long-lived download generated on the fly), you have three options, in increasing order of fit:
 
 - **Buffer and send chunked.** Fine when the body is large but bounded and produced quickly. Build the body, set `Transfer-Encoding: chunked`, `complete()`.
-- **Write `Chunk`s directly to a long-lived session.** The body-level helpers `body().add_chunk(chunk)` and `body().add_final_chunk()` (`qbm/http/src/qbm/http/body.h:224-238`) append chunk framing into the pipe; combined with direct session writes (`*session << ...`) you can emit chunks across multiple event-loop ticks. This is a low-level pattern: you own the framing, the `Content-Length`/`Transfer-Encoding` headers, and the terminating chunk, and you must call `ctx->suppress_response()` so the context does not also send a response (see [actor composition](#composing-with-qb-actors)).
+- **Write `Chunk`s directly to a long-lived session.** The body-level helpers `body().add_chunk(chunk)` and `body().add_final_chunk()` (`qbm/http/src/qbm/http/body.h:224-238`) append chunk framing into the pipe; combined with direct session writes (`*session << ...`) you can emit chunks across multiple event-loop ticks. This is a low-level pattern: you own the framing, the `Content-Length`/`Transfer-Encoding` headers, and the terminating chunk, and you must call `ctx->suppress_response()` so the context does not also send a response (see [actor composition](#composing-with-qb-actors)). Write the head with `*session << qb::http::MessageHead{response}` — the status line and header section, nothing after them — then the chunks: `*session << response` writes a COMPLETE message, so an empty chunked body would already carry its terminator.
 - **Use a protocol designed for streaming.** HTTP/2 DATA frames (`END_STREAM`) and HTTP/3 give you real multiplexed streaming; WebSocket gives you bidirectional message framing. For genuinely streaming workloads, reach for [HTTP/2](./17-http2-protocol.md) or [WebSocket](./20-websocket.md) rather than HTTP/1.1 chunking. These are feature-gated: HTTP/2 and WebSocket compile only with `QB_HAS_SSL`, and HTTP/3 needs `QBM_HTTP_HAS_HTTP3` (`QB_HAS_SSL` + `QB_HAS_QUIC` + libnghttp3). HTTP/1.1 chunking has no such gate.
 
 > HTTP/2 and HTTP/3 do not use chunked transfer encoding. `Transfer-Encoding` is a hop-by-hop header forbidden in HTTP/2 messages (`qb::http::well_known::is_hop_by_hop`); streaming there is expressed with DATA frames and the `END_STREAM` flag. See [HTTP/2 protocol specifics](./17-http2-protocol.md).
@@ -51,10 +54,10 @@ If you need true incremental, time-spaced delivery (server-sent events, a long-l
 
 The HTTP/1.1 server session (`internal::session` in `qbm/http/src/qbm/http/1.1/http.h`) owns the persistence decision per connection.
 
-**Keep-alive.** Two inputs decide whether a connection survives a response: the per-message `keep_alive` flag the parser computes from the request (llhttp's `http_should_keep_alive`, factoring HTTP version and the `Connection` header), and an application-level override you set with `session::keep_alive(bool)` (`qbm/http/src/qbm/http/1.1/http.h:450-452`). The effective decision is `request.keep_alive || session_override`. After the response is fully transmitted (`event::eos`), the session either closes — `disconnect(DisconnectedReason::ResponseTransmitted)` — or stays open for the next request:
+**Keep-alive.** Two inputs decide whether a connection survives a response: the per-message `keep_alive` flag the parser computes from the request (llhttp's `http_should_keep_alive`, factoring HTTP version and the `Connection` header), and an application-level override you set with `session::keep_alive(bool)` (`qbm/http/src/qbm/http/1.1/http.h:456-458`). The effective decision is `request.keep_alive || session_override`. After the response is fully transmitted (`event::eos`), the session either closes — `disconnect(DisconnectedReason::ResponseTransmitted)` — or stays open for the next request:
 
 ```cpp
-// src: qbm/http/src/qbm/http/1.1/http.h:343-347
+// src: qbm/http/src/qbm/http/1.1/http.h:349-353
 if (!_active_should_keep_alive) {
     this->disconnect(DisconnectedReason::ResponseTransmitted);
     return;
@@ -62,13 +65,13 @@ if (!_active_should_keep_alive) {
 start_next_request_if_possible();
 ```
 
-The session also normalizes the outgoing `Connection` header for you: it adds `Connection: close` when the connection will not persist, and `Connection: keep-alive` for an HTTP/1.0 response that will (`qbm/http/src/qbm/http/1.1/http.h:170-176`). A response that itself carries `Connection: close` forces the connection shut regardless of the keep-alive inputs.
+The session also normalizes the outgoing `Connection` header for you: it adds `Connection: close` when the connection will not persist, and `Connection: keep-alive` for an HTTP/1.0 response that will (`qbm/http/src/qbm/http/1.1/http.h:173-179`). A response that itself carries `Connection: close` forces the connection shut regardless of the keep-alive inputs.
 
-**Pipelining.** While a response is in flight, further requests on the same connection queue rather than interleave. The queue is bounded by `session::max_pipelined_requests(std::size_t)` (default 128). Exceeding the cap disconnects the connection with `DisconnectedReason::ByProtocolError` (`qbm/http/src/qbm/http/1.1/http.h:138,256-263`). Each queued request is routed in order once the active context finishes (`start_next_request_if_possible`), so handlers for one connection never run concurrently — they are serialized on the session's I/O thread.
+**Pipelining.** While a response is in flight, further requests on the same connection queue rather than interleave. The queue is bounded by `session::max_pipelined_requests(std::size_t)` (default 128). Exceeding the cap disconnects the connection with `DisconnectedReason::ByProtocolError` (`qbm/http/src/qbm/http/1.1/http.h:138,262-269`). Each queued request is routed in order once the active context finishes (`start_next_request_if_possible`), so handlers for one connection never run concurrently — they are serialized on the session's I/O thread.
 
-**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/src/qbm/http/1.1/http.h:427`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/)).
+**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/src/qbm/http/1.1/http.h:433`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/)).
 
-**HEAD requests.** The session strips the response body for a `HEAD` request while preserving `Content-Length`, so a `HEAD` reply reports the size the corresponding `GET` would return without sending the bytes (`qbm/http/src/qbm/http/1.1/http.h:163-168`).
+**HEAD requests.** The session strips the response body for a `HEAD` request while preserving `Content-Length` — the body's size becomes it unless the response already declares `Content-Length` or `Transfer-Encoding` — so a `HEAD` reply reports the size the corresponding `GET` would return without sending the bytes (`qbm/http/src/qbm/http/1.1/http.h:163-171`). It serializes the reply as `qb::http::MessageHead{response}`: the header section only, so a chunked `HEAD` reply carries `Transfer-Encoding: chunked` and no last-chunk (`:195-198`).
 
 ## Protocol upgrade: HTTP to WebSocket
 
@@ -89,7 +92,7 @@ void on(Protocol::request&& request) {      // HTTP upgrade arrives
 These are the levers that matter, grounded in how the types are built rather than benchmarks.
 
 - **Borrowed reads of owned data.** Parsed header names and values live in owning `std::string` storage; `header()` returns a borrowed `const std::string&`. `Body::as<std::string_view>()` borrows from the body's owning pipe without another body copy. Parsing and assigning a `string_view` to `Body` can still allocate and copy; no allocation-free parsing or measured speedup is implied. See [lifetime](#string_view-and-lifetime).
-<!-- src: qbm/http/src/qbm/http/headers.h:143-159,306-313; qbm/http/src/qbm/http/body.cpp:603-606,707-710 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:145-161,308-315; qbm/http/src/qbm/http/body.cpp:603-606,707-710 -->
 
 - **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/src/qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). `body.raw()` gives you the pipe directly for custom (de)serialization. Assigning a `std::string` copies its bytes into the pipe even with an rvalue; the rvalue overload then clears the source string:
 
@@ -100,7 +103,7 @@ These are the levers that matter, grounded in how the types are built rather tha
   ```
 
   Assigning `std::string_view` also copies its bytes into the pipe. Moving an entire `Body` instead uses its move assignment for the owned pipe; that is a different operation from moving a string or a view into a `Body`.
-  <!-- src: qbm/http/src/qbm/http/body.h:65-75; qbm/http/src/qbm/http/body.cpp:588-606,892-895 -->
+  <!-- src: qbm/http/src/qbm/http/body.h:65-75; qbm/http/src/qbm/http/body.cpp:588-606,898-901 -->
 
   Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/src/qbm/http/body.h:104-158`). `Form` is deliberately not appendable — assign it wholesale (`body = form`), not `body << form`.
 
@@ -111,7 +114,7 @@ These are the levers that matter, grounded in how the types are built rather tha
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
 - **One declared encoding, one transformation.** With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an *uncompressed* request body when `Content-Encoding` is set, and decompress encoded responses. Do not precompress an HTTP/1.1 request before passing it to those clients. The response serializer emits the body's bytes unchanged: if you compress manually, set `Content-Encoding` after `body().compress(...)`; if you leave the body plain, use the compression middleware, which negotiates `Accept-Encoding`, compresses when worthwhile, and sets the header itself. An existing `Content-Encoding` makes that middleware skip response compression. See [Asynchronous HTTP client](./14-async-http-client.md) and [Standard middleware](./08-standard-middleware.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:765-799; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:315-335; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:298-323; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
 
 ### Never block the event loop
 
@@ -175,7 +178,7 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 ## `string_view` and lifetime
 
 The retired `RequestView`/`ResponseView` types are not part of this API. For a present header, `header()` returns a borrowed `const std::string&` into the owning message's header map; for an absent header, it returns a reference to a process-wide static empty string. `Body::as<std::string_view>()` returns a borrowed view into the owning body's pipe. Neither accessor transfers ownership.
-<!-- src: qbm/http/src/qbm/http/headers.h:143-159,306-313; qbm/http/src/qbm/http/body.cpp:707-710 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:145-161,308-315; qbm/http/src/qbm/http/body.cpp:707-710 -->
 
 - While the owning message and its storage stay alive and unmodified, using those borrowed values is safe. Mutating a header map or body can invalidate a reference or view even inside one handler call.
 - If data must outlive the message or its storage — stored in an async callback, carried in an event to another actor, cached past the response — **copy it into an owning type** (`std::string`, `std::vector<char>`) or move the owning message/`Body` with the lifetime you need. A borrowed value that outlives its owner is a dangling read and undefined behavior.
@@ -183,8 +186,8 @@ The retired `RequestView`/`ResponseView` types are not part of this API. For a p
 
 ## Pitfalls
 
-- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/src/qbm/http/response.cpp:327-329`). For real streaming use direct session writes, HTTP/2, or WebSocket.
-- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/src/qbm/http/response.cpp:264-266`). Set one framing mode, not both.
+- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/src/qbm/http/response.cpp:312-318`). For real streaming use direct session writes, HTTP/2, or WebSocket.
+- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/src/qbm/http/response.cpp:247-249`). Set one framing mode, not both.
 - **Blocking inside a handler.** It stalls every connection on that core. Defer with `qb::io::async::callback`, offload to a worker actor, or `co_await`.
 - **Forgetting `ctx->complete()`.** The request hangs until the inactivity timeout closes it. Terminal response helpers complete for you; raw `body =`/`status()` do not.
 - **Calling `complete()` from `cancel()`.** Contract violation — the `Context` manages its own finalization (`qbm/http/src/qbm/http/routing/async_task.h:65-79`).
