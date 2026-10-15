@@ -1099,3 +1099,43 @@ TEST_F(StaticFilesMiddlewareTest, CancelIsNoop) {
 }
 
 } // namespace
+
+// The typed content_type() is derived from the raw Content-Type on its first read and cached; the
+// typed mutators (and refresh_content_type) drop that cache, a raw headers() edit does not. The 304
+// and 416 paths erased the raw header, so a Content-Type an earlier middleware set AND read survived
+// in the typed view of a response that no longer carries it -- for any later reader, the compression
+// middleware's content-type check included (Huly QB-1068).
+TEST_F(StaticFilesMiddlewareTest, NotModifiedAndUnsatisfiableRangeDropTheTypedContentTypeToo) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_etags(true);
+    options.with_range_requests(true);
+    auto sf_mw = make_mw(options);
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    const std::string etag = std::string(_session->_response.header("ETag"));
+    ASSERT_FALSE(etag.empty());
+
+    const auto run_after_a_reader = [&](qb::http::Request request) {
+        _router = std::make_unique<qb::http::Router<MockMiddlewareSession>>();
+        _router->use([](auto ctx, auto next) {
+            ctx->response().set_header("Content-Type", "text/html; charset=utf-8");
+            (void) ctx->response().content_type(); // a read caches the typed view
+            next();
+        });
+        _router->use(sf_mw);
+        _router->get("/*catch_all", dummy_final_handler());
+        _router->compile();
+        _session->reset();
+        _router->route(_session, std::move(request));
+    };
+
+    run_after_a_reader(create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", etag}}));
+    ASSERT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
+    EXPECT_FALSE(_session->_response.has_header("Content-Type"));
+    EXPECT_EQ(_session->_response.content_type().type(), "application/octet-stream") << "304: the typed view must follow the raw map";
+
+    run_after_a_reader(create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=1000-2000"}}));
+    ASSERT_EQ(_session->_response.status(), qb::http::status::RANGE_NOT_SATISFIABLE);
+    EXPECT_FALSE(_session->_response.has_header("Content-Type"));
+    EXPECT_EQ(_session->_response.content_type().type(), "application/octet-stream") << "416: the typed view must follow the raw map";
+}

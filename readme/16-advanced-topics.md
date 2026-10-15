@@ -100,7 +100,7 @@ void on(Protocol::request&& request) {      // HTTP upgrade arrives
 These are the levers that matter, grounded in how the types are built rather than benchmarks.
 
 - **Borrowed reads of owned data.** Parsed header names and values live in owning `std::string` storage; `header()` returns a borrowed `const std::string&`. `Body::as<std::string_view>()` borrows from the body's owning pipe without another body copy. Parsing and assigning a `string_view` to `Body` can still allocate and copy; no allocation-free parsing or measured speedup is implied. See [lifetime](#string_view-and-lifetime).
-<!-- src: qbm/http/src/qbm/http/headers.h:153-169,359-366; qbm/http/src/qbm/http/body.cpp:603-606,707-710 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:153-169,379-386; qbm/http/src/qbm/http/body.cpp:603-606,707-710 -->
 
 - **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/src/qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). `body.raw()` gives you the pipe directly for custom (de)serialization. Assigning a `std::string` copies its bytes into the pipe even with an rvalue; the rvalue overload then clears the source string:
 
@@ -186,7 +186,7 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 ## `string_view` and lifetime
 
 The retired `RequestView`/`ResponseView` types are not part of this API. For a present header, `header()` returns a borrowed `const std::string&` into the owning message's header map; for an absent header, it returns a reference to a process-wide static empty string. `Body::as<std::string_view>()` returns a borrowed view into the owning body's pipe. Neither accessor transfers ownership.
-<!-- src: qbm/http/src/qbm/http/headers.h:153-169,359-366; qbm/http/src/qbm/http/body.cpp:707-710 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:153-169,379-386; qbm/http/src/qbm/http/body.cpp:707-710 -->
 
 - While the owning message and its storage stay alive and unmodified, using those borrowed values is safe. Mutating a header map or body can invalidate a reference or view even inside one handler call.
 - If data must outlive the message or its storage — stored in an async callback, carried in an event to another actor, cached past the response — **copy it into an owning type** (`std::string`, `std::vector<char>`) or move the owning message/`Body` with the lifetime you need. A borrowed value that outlives its owner is a dangling read and undefined behavior.

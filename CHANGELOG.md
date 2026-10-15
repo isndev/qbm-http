@@ -165,6 +165,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **`Headers::has_header` and `remove_header` allocate nothing, whatever the name's length (Huly QB-1068).** Both are
+  `noexcept`, and the header map converts a lookup key past its 128-byte stack fold into a `std::string`: a
+  `std::bad_alloc` there was `std::terminate`. A longer name is now matched against each stored name. The typed
+  `content_type()`'s first read may still allocate; its contract now says so (an allocation failure in that
+  `noexcept` read terminates, as one in qb's `push` does).
+- **The static files middleware's 304 and 416 responses drop the typed Content-Type too (Huly QB-1068).** They erased
+  the raw header, which the typed `content_type()` cached by an earlier read does not follow: a later reader -- the
+  compression middleware's content-type check included -- saw the type the response no longer carried. They use
+  `remove_header` now.
 - **The last field of an HTTP/1.1 trailer section is kept (Huly QB-1067).** The parser stored a field when the next
   one began or when the header section ended; a trailer section has neither after its last field, so it was lost --
   the only one, for a one-field trailer.

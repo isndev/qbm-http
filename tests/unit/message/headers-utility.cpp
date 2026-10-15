@@ -16,6 +16,8 @@
 #include <qbm/http/response.h>
 #include <qbm/http/utility.h>
 
+#include "../../shared/allocation_counter.h" // AllocScope, allocation_counter_is_live(): the replaced operator new
+
 namespace {
 // Discover codecs from the registered factories, independently of the
 // content_encoding() selector under test.
@@ -695,5 +697,41 @@ TEST(HeadersUtility, SetHeaderAcceptsAViewOfItsOwnValue) {
         h.set_header("Content-Type", independent);
         EXPECT_EQ(h.header("Content-Type"), content_type);
         EXPECT_EQ(h.content_type().charset(), "utf-16");
+    }
+}
+
+// Headers::has_header and remove_header are noexcept, and the map behind them converts a lookup key
+// longer than its stack fold (qb's lookup_fold_capacity, 128 bytes) into a std::string: an
+// allocation inside a noexcept function, so a std::bad_alloc there is std::terminate (Huly QB-1068).
+// They allocate nothing now, whatever the name's length: a longer name is matched against each
+// stored name. The replaced operator new of shared/allocation_counter.h is the oracle; it self-skips
+// where it cannot see allocations (ThreadSanitizer) rather than passing on a dead counter.
+TEST(HeadersUtility, NoexceptNameLookupsAllocateNothingWhateverTheNameLength) {
+    if (!allocation_counter_is_live()) {
+        GTEST_SKIP() << "the replaced operator new does not see allocations on this toolchain";
+    }
+    for (const std::size_t length : {std::size_t{12}, std::size_t{128}, std::size_t{129}, std::size_t{200}, std::size_t{4096}}) {
+        qb::http::Headers h;
+        h.set_header(std::string(length, 'N'), "v"); // stored folded, looked up in another case below
+        h.set_header("Content-Type", "text/plain");
+        h.set_header(std::string(length, 'M'), "other"); // same length, another name
+        const std::string name(length, 'n');
+
+        bool        had   = false;
+        bool        still = true;
+        std::size_t bytes = 0;
+        {
+            AllocScope scope;
+            had = h.has_header(name);
+            h.remove_header(name);
+            still = h.has_header(name);
+            bytes = AllocScope::bytes();
+        }
+        EXPECT_TRUE(had) << length;
+        EXPECT_FALSE(still) << length;
+        EXPECT_EQ(bytes, 0u) << "a " << length << "-byte name allocated " << bytes << " bytes in a noexcept lookup";
+        EXPECT_TRUE(h.has_header(std::string(length, 'm'))) << length << ": only the named field is removed";
+        EXPECT_TRUE(h.has_header("content-type")) << length;
+        EXPECT_EQ(h.header_count(), 2u) << length;
     }
 }

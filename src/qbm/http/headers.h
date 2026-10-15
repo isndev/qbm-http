@@ -289,6 +289,26 @@ protected:
     /// Derives the typed `Content-Type` from the raw map: the first value of the header, or the defaults.
     void derive_content_type() const noexcept;
 
+    /**
+     * @brief The entry of `name` (any case), found without allocating, whatever its length: the map
+     *        folds a name of up to `lookup_fold_capacity` bytes on the stack; a longer one would be
+     *        converted into a `std::string`, so it is matched against each stored (lowercase) name
+     *        instead. The noexcept lookups go through here (Huly QB-1068).
+     */
+    [[nodiscard]] auto
+    find_without_allocating(std::string_view name) const noexcept {
+        if (name.size() <= headers_map_type::lookup_fold_capacity) {
+            return _headers.find(name);
+        }
+        auto it = _headers.cbegin();
+        for (; it != _headers.cend(); ++it) {
+            if (it->first.size() == name.size() && utility::iequals(it->first, name)) {
+                break;
+            }
+        }
+        return it;
+    }
+
 public:
     /** @brief Default constructor. Initializes an empty set of headers and a default `ContentType`. */
     Headers() noexcept = default;
@@ -408,15 +428,17 @@ public:
 
     /**
      * @brief Checks if a header with the given name exists.
-     * Header names are checked case-insensitively.
+     * Header names are checked case-insensitively. Allocates nothing, whatever the name's length
+     * (Huly QB-1068): it cannot throw.
      * @tparam HeaderNameType The type of the header name.
      * @param name The name of the header to check.
      * @return `true` if at least one header with the given name exists, `false` otherwise.
      */
     template <typename HeaderNameType>
+    requires std::is_convertible_v<const HeaderNameType &, std::string_view>
     [[nodiscard]] bool
     has_header(HeaderNameType &&name) const noexcept {
-        return _headers.has(std::forward<HeaderNameType>(name));
+        return find_without_allocating(std::string_view(name)) != _headers.cend();
     }
 
     /**
@@ -436,7 +458,9 @@ public:
      * Derived from the raw `Content-Type` header (its first value, or the defaults when it is
      * absent) on the first read after the message was built, parsed or had that header changed
      * through a typed mutator or `refresh_content_type()`; later reads return the cached object.
-     * A message whose typed Content-Type is never read never parses it.
+     * A message whose typed Content-Type is never read never parses it. That first read may
+     * allocate (a type or charset longer than the small-string capacity); as a `noexcept` read, an
+     * allocation failure there terminates the program, as one in qb's `push` does (Huly QB-1068).
      *
      * @return A constant reference to the internal `ContentType` object.
      */
@@ -469,16 +493,25 @@ public:
     }
 
     /**
-     * @brief Removes all occurrences of a header by its name (case-insensitive).
+     * @brief Removes all occurrences of a header by its name (case-insensitive). Allocates nothing,
+     *        whatever the name's length (Huly QB-1068): it cannot throw.
      * @tparam HeaderNameType The type of the header name.
      * @param name The name of the header to remove.
      */
     template <typename HeaderNameType>
+    requires std::is_convertible_v<const HeaderNameType &, std::string_view>
     void
     remove_header(HeaderNameType &&name) noexcept {
         const bool is_content_type = is_content_type_header(name);
-        // Assuming icase_unordered_map::erase(key) is noexcept
-        _headers.erase(std::forward<HeaderNameType>(name));
+        // Nothing allocated, so nothing thrown, whatever the name's length (Huly QB-1068): the map
+        // folds a name of up to lookup_fold_capacity bytes on the stack, and a longer one -- no field
+        // in common use is -- is matched against each stored name and erased by position.
+        const std::string_view key(name);
+        if (key.size() <= headers_map_type::lookup_fold_capacity) {
+            _headers.erase(key);
+        } else if (const auto it = find_without_allocating(key); it != _headers.cend()) {
+            _headers.erase(it);
+        }
         if (is_content_type) {
             _content_type_derived = false;
         }
