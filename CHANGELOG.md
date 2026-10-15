@@ -115,6 +115,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 server sends response trailers in the trailer block (Huly QB-1058).** Every response
+  header, announced trailer fields included, went out in the leading HEADERS, and the trailer
+  block that ended the stream was empty. The fields a response's `Trailer` header names now leave
+  only in the trailer block, after the body; a field trailers forbid stays in the leading block.
+  Same contract as HTTP/3. The per-response set that recorded every header sent
+  (`Http2ServerStream::headers_sent_in_initial_frame`) is gone.
+- **HTTP/2 server answers HEADERS after END_STREAM with STREAM_CLOSED (Huly QB-1058).** A
+  HEADERS frame on a stream the client had ended was reset with `PROTOCOL_ERROR`; RFC 9113 §5.1
+  prescribes a stream error of type `STREAM_CLOSED`. The client now applies a
+  `SETTINGS_INITIAL_WINDOW_SIZE` change through the same `Http2StreamBase` rule as the server.
 - **HTTP/2 client closes its socket when a connection ends (Huly QB-1021).** The client is the io
   of every connection it makes, and qb-io's `dispose()` stops a standalone client's watcher without
   closing its transport: after an explicit `disconnect()` (or a drained GOAWAY) the socket stayed

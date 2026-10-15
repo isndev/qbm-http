@@ -1412,7 +1412,11 @@ TEST(HTTP2ServerProtocol, LargeBodyIsChunkedAcrossMultipleDataFrames) {
 
 // ---------------------------------------------------------------------------
 // Trailers: a response carrying a "Trailer" header sends body DATA (no
-// END_STREAM) followed by a trailers HEADERS frame that ends the stream.
+// END_STREAM) followed by a trailers HEADERS frame that ends the stream. The
+// fields it announces travel in that trailer block, and only there; one that
+// trailers forbid (content-length) stays in the leading HEADERS. They used to
+// be sent in the leading HEADERS, and the trailer block went out empty (Huly
+// QB-1058).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, ResponseWithTrailersSendsHeadersDataThenTrailers) {
@@ -1428,8 +1432,9 @@ TEST(HTTP2ServerProtocol, ResponseWithTrailersSendsHeadersDataThenTrailers) {
     qb::http::Response response;
     response.status() = qb::http::status::OK;
     response.body()   = "payload";
-    response.set_header("Trailer", "x-checksum");
+    response.set_header("Trailer", "X-Checksum, content-length");
     response.set_header("x-checksum", "abc123");
+    response.set_header("content-length", "7");
 
     ASSERT_TRUE(protocol.send_response(1, response));
     EXPECT_TRUE(protocol.ok());
@@ -1463,6 +1468,29 @@ TEST(HTTP2ServerProtocol, ResponseWithTrailersSendsHeadersDataThenTrailers) {
     EXPECT_FALSE(data_carried_es);    // DATA must NOT end the stream (trailers do)
     EXPECT_TRUE(trailers_end_stream); // trailers HEADERS carries END_STREAM
     EXPECT_EQ(sum_data_bytes(io.output, 1), 7u);
+
+    // Decode both blocks, in order, with one decoder (they share the server's HPACK state).
+    qb::protocol::hpack::Decoder                               decoder;
+    std::vector<std::vector<qb::protocol::hpack::HeaderField>> blocks;
+    for (const auto &f : frames) {
+        if (f.stream_id != 1 || f.type != FrameType::HEADERS) {
+            continue;
+        }
+        std::vector<qb::protocol::hpack::HeaderField> fields;
+        bool                                          incomplete = false;
+        ASSERT_TRUE(decoder.decode(emitted_payload(io.output, f), fields, incomplete));
+        blocks.push_back(std::move(fields));
+    }
+    ASSERT_EQ(blocks.size(), 2u);
+    auto count = [](const std::vector<qb::protocol::hpack::HeaderField> &fields, std::string_view name) {
+        return std::count_if(fields.begin(), fields.end(), [&](const auto &f) { return f.name == name; });
+    };
+    EXPECT_EQ(count(blocks[0], "trailer"), 1) << "the announcement leads";
+    EXPECT_EQ(count(blocks[0], "content-length"), 1) << "a field trailers forbid stays in the leading HEADERS";
+    EXPECT_EQ(count(blocks[0], "x-checksum"), 0) << "an announced trailer field is not sent in the leading HEADERS";
+    ASSERT_EQ(blocks[1].size(), 1u) << "the trailer block carries the announced field";
+    EXPECT_EQ(blocks[1][0].name, "x-checksum");
+    EXPECT_EQ(blocks[1][0].value, "abc123");
 }
 
 // ---------------------------------------------------------------------------
@@ -2012,14 +2040,16 @@ TEST(HTTP2ServerProtocol, UnexpectedHeadersAfterEndStreamNoTrailersIsStreamError
 
     const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
 
-    // A second HEADERS on the now half-closed-remote stream with no trailers
-    // expected -> RST_STREAM(PROTOCOL_ERROR), connection survives.
+    // A second HEADERS on the now half-closed-remote stream -> a stream error of type
+    // STREAM_CLOSED (RFC 9113 §5.1), connection survives. It used to be PROTOCOL_ERROR (Huly
+    // QB-1058).
     const auto encoded = encode_hpack_headers(default_request_headers("/again"));
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
     drive(protocol, io);
 
     EXPECT_TRUE(protocol.ok());
     EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
+    EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::STREAM_CLOSED);
 }
 
 TEST(HTTP2ServerProtocol, NonContinuationFrameWhileHeaderBlockOpenIsConnectionError) {
@@ -2182,7 +2212,7 @@ TEST(HTTP2ServerProtocol, HeaderBlockOnAClosedOrEndedStreamStillFeedsTheHpackTab
                    client.block({{"x-late", "v"}}));
         drive(protocol, io);
         ASSERT_TRUE(protocol.ok()) << "answered=" << stream_answered;
-        ASSERT_TRUE(last_rst_stream_error(io.output, 1).has_value()) << "answered=" << stream_answered;
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::STREAM_CLOSED) << "answered=" << stream_answered;
 
         push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 3,
                    client.block(request_with("GET", "/next", {{"x-late", "v"}})));

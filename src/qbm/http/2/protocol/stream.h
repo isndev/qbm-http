@@ -330,8 +330,7 @@ struct Http2ServerStream : public Http2StreamBase {
     std::string       method;                     ///< HTTP method from request
 
     // Response sending state for the current response_to_send
-    size_t                         send_buffer_offset = 0;        ///< Current offset in response_to_send.body().raw()
-    qb::unordered_set<std::string> headers_sent_in_initial_frame; ///< Headers already sent in the first HEADERS frame for this response
+    size_t send_buffer_offset = 0; ///< Current offset in response_to_send.body().raw()
 
     // Push promise support
     uint32_t parent_stream_id =

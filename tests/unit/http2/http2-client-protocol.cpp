@@ -912,6 +912,53 @@ TEST(HTTP2ClientProtocol, RaisingInitialWindowSizeFlushesStalledStreamBody) {
 }
 
 // ===========================================================================
+// A lowered SETTINGS_INITIAL_WINDOW_SIZE can leave a stream window negative: a
+// debt, never an error (RFC 9113 §6.9.2). Nothing is sent until WINDOW_UPDATE
+// credit repays it; a change that pushes a window past 2^31-1 is a connection
+// FLOW_CONTROL_ERROR. The client applies the shared Http2StreamBase rule, the
+// server's too (Huly QB-1058).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, LoweringInitialWindowSizeLeavesTheStreamInDebtUntilCreditArrives) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 10}}));
+
+    const std::size_t before = io.output.size();
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/debt");
+    req.body()   = std::string(100, 'd');
+    ASSERT_TRUE(protocol.send_request(std::move(req), 1));
+    ASSERT_EQ(sum_data_payload_for_stream(io.output, 1, before), 10u); // window 10 -> 0
+
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 4}})); // 0 -> -6
+    EXPECT_TRUE(protocol.ok()) << "a negative window is legal";
+    protocol.on(make_window_update_frame(1, 6)); // -6 -> 0: the debt is repaid, nothing to send yet
+    EXPECT_EQ(sum_data_payload_for_stream(io.output, 1, before), 10u);
+    protocol.on(make_window_update_frame(1, 20)); // 0 -> 20
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(sum_data_payload_for_stream(io.output, 1, before), 30u);
+}
+
+TEST(HTTP2ClientProtocol, InitialWindowSizeChangePushingAWindowPastTheMaximumIsFlowControlError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/max");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 1));
+    protocol.on(make_window_update_frame(1, 0x7FFFFFFFu - 65535u)); // the stream window is now exactly 2^31-1
+    ASSERT_TRUE(protocol.ok());
+
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 65536}})); // +1
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::FLOW_CONTROL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
+}
+
+// ===========================================================================
 // SETTINGS ACK with a non-empty payload is a FRAME_SIZE_ERROR connection error.
 // ===========================================================================
 TEST(HTTP2ClientProtocol, SettingsAckWithPayloadIsFrameSizeError) {

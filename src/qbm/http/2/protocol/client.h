@@ -1925,7 +1925,7 @@ private:
      */
     void
     update_initial_peer_window_size(uint32_t new_size) noexcept {
-        int32_t delta             = static_cast<int32_t>(new_size) - static_cast<int32_t>(_initial_peer_window_size);
+        const uint32_t old_size   = _initial_peer_window_size;
         _initial_peer_window_size = new_size;
 
         // Update all stream windows. The per-stream window bump is an in-place field mutation (safe
@@ -1934,14 +1934,14 @@ private:
         // iteration would resume from a freed node. So defer the flushes: bump every window in-loop,
         // collect the unblocked ids, flush after (re-find()ing each, since an earlier flush may have
         // erased it).
-        if (delta != 0) {
+        if (new_size != old_size) {
             std::vector<uint32_t> unblocked_ids;
             for (auto &[stream_id, stream] : _client_streams) {
                 if (stream_id % 2 != 0) { // Client-initiated streams
-                    int64_t old_stream_peer_window = stream.peer_window_size;
-                    stream.peer_window_size += delta;
-
-                    if (stream.peer_window_size > MAX_WINDOW_SIZE_LIMIT) {
+                    const int64_t old_stream_peer_window = stream.peer_window_size;
+                    // The shared rule (Http2StreamBase::update_peer_window_size, the server's too): a
+                    // decrease may leave a legal debt, only a window past 2^31-1 is an error.
+                    if (!stream.update_peer_window_size(new_size, old_size)) {
                         send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR,
                                               "SETTINGS_INITIAL_WINDOW_SIZE change caused stream window to exceed limit");
                         return;
