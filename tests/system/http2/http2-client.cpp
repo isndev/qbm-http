@@ -2750,7 +2750,10 @@ namespace http2_client_goaway_test {
 /// it negotiates ALPN h2, answers the client's SETTINGS with its own -- in Silent mode a 2^31-1 initial
 /// window and connection window, so the client can queue far more than the socket buffers hold -- and
 /// then records every frame until EOF (Reading) or stops reading once its SETTINGS are acknowledged
-/// (Silent) until released.
+/// (Silent) until released. Once the client's GOAWAY has arrived, the end of the connection is read
+/// from the socket itself, so a clean EOF (the client's FIN) and a reset are told apart. Silent also
+/// accepts the client's next connection and completes its TLS handshake, so the moment the client
+/// reconnects after a disconnect() -- after its previous transport was disposed -- is observable.
 class RawH2Peer {
 public:
     enum class Mode { Reading, Silent };
@@ -2792,6 +2795,21 @@ public:
     [[nodiscard]] bool
     eof() const noexcept {
         return _eof.load();
+    }
+    /// The connection ended with a reset (ECONNRESET), not the client's FIN.
+    [[nodiscard]] bool
+    reset() const noexcept {
+        return _reset.load();
+    }
+    /// Ask the peer to send the client a PING (frames the client will have left unread if it stops
+    /// reading before they are processed).
+    void
+    send_ping() noexcept {
+        _ping_requested = true;
+    }
+    [[nodiscard]] bool
+    ping_sent() const noexcept {
+        return _ping_sent.load();
     }
     [[nodiscard]] std::vector<Frame>
     frames() const {
@@ -2845,15 +2863,63 @@ private:
         }
         sock.set_nonblocking(true);
 
-        constexpr std::size_t preface_size = 24;
-        std::vector<uint8_t>  in;
-        bool                  preface_seen = false;
-        bool                  answered     = false;
-        char                  buffer[16384];
+        constexpr std::size_t    preface_size = 24;
+        std::vector<uint8_t>     in;
+        bool                     preface_seen = false;
+        bool                     answered     = false;
+        char                     buffer[16384];
+        bool                     goaway_seen = false;
+        qb::io::tcp::ssl::socket next; // Silent: the client's next connection
         while (!_release && std::chrono::steady_clock::now() < deadline) {
+            if (_ping_requested && !_ping_sent && answered) {
+                std::vector<uint8_t> ping;
+                append_frame(ping, 0x6, 0, 0, {1, 2, 3, 4, 5, 6, 7, 8});
+                if (!write_all(sock, ping)) {
+                    _eof = true;
+                    break;
+                }
+                _ping_sent = true;
+            }
             if (_mode == Mode::Silent && _settings_acked) {
-                std::this_thread::sleep_for(1ms); // reads nothing more: the client's sends pile up
+                // Reads nothing more on this connection: the client's sends pile up. Its next
+                // connection is accepted and its TLS handshake driven.
+                if (!next.is_open()) {
+                    if (_listener.accept(next) == 0 && next.is_open()) {
+                        next.set_nonblocking(true);
+                    }
+                } else {
+                    static_cast<void>(next.read(buffer, sizeof(buffer)));
+                }
+                std::this_thread::sleep_for(1ms);
                 continue;
+            }
+            if (goaway_seen) {
+                // The client's GOAWAY is in: what ends the connection is read from the socket itself
+                // -- 0, the client's FIN; an error, a reset. A FIN followed by a reset still reads 0, so
+                // the peer then answers with its own GOAWAY, twice: a client that only shut its sending
+                // side down still receives it, one that closed its socket resets it.
+                const auto raw = ::recv(sock.native_handle(), buffer, static_cast<int>(sizeof(buffer)), 0);
+                if (raw == 0) {
+                    std::vector<uint8_t> reply;
+                    append_frame(reply, 0x7, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0});
+                    for (int attempt = 0; attempt < 2 && !_reset; ++attempt) {
+                        std::this_thread::sleep_for(20ms);
+                        _reset = !write_all(sock, reply);
+                    }
+                    _eof = true;
+                    break;
+                }
+                if (raw < 0) {
+                    const int err = qb::io::socket::get_last_errno();
+                    if (qb::io::socket::not_recv_error(err)) {
+                        std::this_thread::sleep_for(1ms);
+                        continue;
+                    }
+                    _reset = true;
+                    _eof   = true;
+                    break;
+                }
+                continue; // a TLS record after the GOAWAY: ignored
             }
             const int n = sock.read(buffer, sizeof(buffer));
             if (n < 0) {
@@ -2885,6 +2951,8 @@ private:
                 in.erase(in.begin(), in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
                 if (f.type == 0x4 && (f.flags & 0x1)) {
                     _settings_acked = true;
+                } else if (f.type == 0x7) {
+                    goaway_seen = true;
                 } else if (f.type == 0x4 && !answered) {
                     std::vector<uint8_t> reply;
                     if (_mode == Mode::Silent) {
@@ -2920,6 +2988,9 @@ private:
     std::atomic<bool>          _release{false};
     std::atomic<bool>          _settings_acked{false};
     std::atomic<bool>          _eof{false};
+    std::atomic<bool>          _reset{false};
+    std::atomic<bool>          _ping_requested{false};
+    std::atomic<bool>          _ping_sent{false};
     mutable std::mutex         _mutex;
     std::vector<Frame>         _frames;
     std::thread                _thread;
@@ -2975,6 +3046,37 @@ TEST_F(Http2ClientGoawayTest, ExplicitDisconnectSendsGoawayBeforeClosing) {
     EXPECT_EQ(error_code, 0u) << "NO_ERROR";
     EXPECT_EQ(last_stream_id, 0u) << "a client's last-stream-id names server-initiated streams: none were accepted";
     EXPECT_EQ(last.stream_id, 0u);
+    EXPECT_FALSE(peer.reset()) << "the connection ended with a reset, not the client's FIN";
+}
+
+// The server's own bytes may still sit unread in the client's socket when it closes -- here a PING
+// that arrives after the client stopped reading. The connection must still end with the GOAWAY then
+// the client's FIN: qb-io ends a connection the object ended by shutting its sending side down (Huly
+// QB-1060), and the client no longer closes the socket outright on dispose, which, with those bytes
+// unread, made the kernel answer with a reset (Huly QB-1021, QB-1059).
+TEST_F(Http2ClientGoawayTest, ExplicitDisconnectEndsWithGoawayThenEofEvenWithUnreadServerBytes) {
+    RawH2Peer peer(RawH2Peer::Mode::Reading);
+    ASSERT_NE(peer.port(), 0);
+    auto client    = make_client(peer.port());
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
+
+    // The PING reaches the client's socket while its loop does not run: it stays unread.
+    peer.send_ping();
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!peer.ping_sent() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(peer.ping_sent());
+    std::this_thread::sleep_for(50ms);
+
+    client->disconnect();
+    ASSERT_TRUE(ServerThread::pump_until([&] { return peer.eof(); }));
+    const auto frames = peer.frames();
+    ASSERT_FALSE(frames.empty());
+    EXPECT_EQ(frames.back().type, 0x7) << "the GOAWAY, then the end of the connection";
+    EXPECT_FALSE(peer.reset()) << "the connection ended with a reset: the client closed with the server's bytes unread";
 }
 
 TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinTheFlushLimit) {
@@ -2996,11 +3098,14 @@ TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinT
         qb::io::async::run(EVRUN_NOWAIT); // the io writes until the socket refuses
     }
     ASSERT_GT(client->out().size(), 0u) << "the socket buffers absorbed the whole body: nothing would wait for the peer";
-    ASSERT_TRUE(client->transport().is_open());
 
+    // A connect() asked while the transport closes starts once its dispose() has run: the moment
+    // the client reconnects is the moment the close was done.
     const auto started = std::chrono::steady_clock::now();
     client->disconnect();
-    ASSERT_TRUE(ServerThread::pump_until([&] { return !client->transport().is_open(); }, 10s)) << "a peer that stopped reading held the close";
+    bool reconnected = false;
+    client->connect([&](bool ok, const std::string &) { reconnected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return reconnected; }, 10s)) << "a peer that stopped reading held the close";
     const auto elapsed = std::chrono::steady_clock::now() - started;
     EXPECT_GE(elapsed, qb::http2::Client::GOAWAY_FLUSH_LIMIT - 100ms) << "the GOAWAY was given its chance to be delivered";
     EXPECT_LE(elapsed, qb::http2::Client::GOAWAY_FLUSH_LIMIT + 2s) << "the close is bounded by the flush limit";

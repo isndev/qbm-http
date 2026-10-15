@@ -193,8 +193,9 @@ Client::close_connection(const std::string &error_message) {
     _preserve_pending_on_next_disconnect = true;
 
     if (announce) {
-        // The io closes once the GOAWAY is out. A server that stopped reading never lets it out:
-        // the limit closes the socket anyway, so the close is bounded.
+        // The io ends the connection once the GOAWAY is out (dispose() shuts the sending side
+        // down, Huly QB-1060). A server that stopped reading never lets it out: the limit ends it
+        // anyway, so the close is bounded.
         _graceful_close_pending = true;
         qb::io::async::callback(
             [weak_self = weak_from_this(), epoch = ++_graceful_close_epoch] {
@@ -1109,14 +1110,11 @@ Client::on(qb::io::async::event::dispose const &) {
     // (a second failure pass over the work the disconnected callbacks had just re-queued, a state
     // reset that clobbered a reconnection already started) is that handler's, once.
     LOG_HTTP_DEBUG_PA(_client_id, "Client disposal event");
-
-    // The watcher is stopped: close the socket. dispose() leaves the transport open, so an explicit
-    // disconnect() -- or a drained GOAWAY -- kept the connection, and the server's work for it,
-    // alive until this client connected again or was destroyed: the peer never saw EOF (Huly
-    // QB-1021). The next connection's transport is installed only by its connect completion,
-    // which never runs inside dispose(), so this is always the transport that ended.
-    this->transport().disconnect(); // FIN to the peer (quiet TLS shutdown: no close_notify)
-    this->transport().close();      // and the descriptor
+    // The transport is not touched here: dispose() has already ended it (Huly QB-1060) -- closed
+    // when the server ended the connection, its sending side shut down when this client did, so the
+    // server reads everything queued, the GOAWAY last, then EOF (Huly QB-1021, QB-1059). Closing it
+    // here as well reset a server whose bytes this client had left unread, and refused what the
+    // server still sent: its next send failed.
 }
 
 // Factory functions

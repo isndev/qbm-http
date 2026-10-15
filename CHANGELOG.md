@@ -141,9 +141,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **HTTP/2 client announces an explicit disconnect with GOAWAY (Huly QB-1059).**
   `qb::http2::Client::disconnect()` closed a live connection with no GOAWAY. It now queues
   `GOAWAY(NO_ERROR)` behind what the connection still had to send, through the new
-  `ClientHttp2Protocol::send_shutdown_goaway()`, and lets the io deliver it before the socket
-  closes; a server that stopped reading holds the close at most
-  `Client::GOAWAY_FLUSH_LIMIT` (1 s). Every GOAWAY the client sends now names the last stream the
+  `ClientHttp2Protocol::send_shutdown_goaway()`, and lets the io deliver it before the connection
+  ends -- its sending side shut down, the server reading the GOAWAY then EOF; a server that stopped
+  reading holds that end at most `Client::GOAWAY_FLUSH_LIMIT` (1 s). Every GOAWAY the client sends now names the last stream the
   server initiated that the client accepted (0 while push is disabled), as RFC 9113 §6.8 defines
   it for the sender, instead of the client's own last request.
 - **HTTP/2 server sends response trailers in the trailer block (Huly QB-1058).** Every response
@@ -156,12 +156,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   HEADERS frame on a stream the client had ended was reset with `PROTOCOL_ERROR`; RFC 9113 §5.1
   prescribes a stream error of type `STREAM_CLOSED`. The client now applies a
   `SETTINGS_INITIAL_WINDOW_SIZE` change through the same `Http2StreamBase` rule as the server.
-- **HTTP/2 client closes its socket when a connection ends (Huly QB-1021).** The client is the io
-  of every connection it makes, and qb-io's `dispose()` stops a standalone client's watcher without
-  closing its transport: after an explicit `disconnect()` (or a drained GOAWAY) the socket stayed
-  open, and the server kept the connection and its routed contexts alive, until the client
-  connected again or was destroyed. `Client::on(event::dispose)` now shuts down and closes the
-  transport; the peer sees EOF on the next loop pass. The system test
+- **HTTP/2 client's disconnect reaches the server as EOF (Huly QB-1021).** The client is the io of
+  every connection it makes, and qb-io's `dispose()` used to stop a standalone client's watcher and
+  leave its transport as it was: after an explicit `disconnect()` (or a drained GOAWAY) the socket
+  stayed open, and the server kept the connection and its routed contexts alive until the client
+  connected again or was destroyed. qb-io's `dispose()` now ends the transport itself (qb QB-1060):
+  a connection the client ended has its sending side shut down, so the server reads everything
+  queued, then EOF, with no reset. The client relies on it; it does not close the socket itself, a
+  full close that reset a server whose bytes it had left unread. The system test
   `AbruptDisconnectWithInflightStreamsIsClean` no longer closes the transport by hand.
 - **HTTP/2 batch failure answers its unanswered members with 503 (Huly QB-495).** A failure pass
   (explicit `disconnect()`, connection loss, exhausted reconnection run) detached the batch registry before

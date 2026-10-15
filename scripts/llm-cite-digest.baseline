@@ -191,15 +191,15 @@ llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:232-236	889fc62c5cea	Client:
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client::connect(ConnectionCallback callback) {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:1107-1120	3cf3177f2fa4	Client::on(qb::io::async::event::dispose const &) {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:154-213	d2b3267dced4	Client::close_connection(const std::string &error_message) {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:331-338	bc81daa2929c	batch_context->responses.resize(batch_context->requests.size());
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:356-367	744de9ed5944	// Each member is admitted as push_request() admits one, against the ...
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:388-400	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:478-524	51b878e29227	void
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:490-498	0efd396defa1	if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:1108-1118	d3378449e84c	Client::on(qb::io::async::event::dispose const &) {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:154-214	779e6a184be6	Client::close_connection(const std::string &error_message) {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:332-339	bc81daa2929c	batch_context->responses.resize(batch_context->requests.size());
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:357-368	744de9ed5944	// Each member is admitted as push_request() admits one, against the ...
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:389-401	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:479-525	51b878e29227	void
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:491-499	0efd396defa1	if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:163-163	b5d9130b44cc	class Client
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:471-496	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:472-497	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:93-93	99ed1922a069	using RetryPolicy = qb::http::RetryPolicy;
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:120-188	76a53daa8eb6	reclaim_completed_stream_contexts() noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:375-419	4896d69f346b	on([[maybe_unused]] qb::io::async::event::pending_write &&event) {
@@ -290,9 +290,9 @@ llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client::con
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:690-749	9b0d7a6bfc68	Client::handle_connection_failure(std::string const &error) {
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:388-400	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:478-524	51b878e29227	void
-llm/qbm-http.llm.md	src/qbm/http/2/client.h:471-496	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:389-401	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:479-525	51b878e29227	void
+llm/qbm-http.llm.md	src/qbm/http/2/client.h:472-497	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:120-175	dcec662d7684	reclaim_completed_stream_contexts() noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:181-188	5d21e024e005	on_peer_stream_reset(uint32_t stream_id) noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:375-419	4896d69f346b	on([[maybe_unused]] qb::io::async::event::pending_write &&event) {
