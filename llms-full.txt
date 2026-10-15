@@ -1040,7 +1040,7 @@ Stock session lifecycle: write progress and full-drain EOS collect logically com
 `class Client : public std::enable_shared_from_this<Client>, public qb::io::async::tcp::client<Client,qb::io::transport::stcp>, public qb::io::use<Client>::timeout` — TLS+ALPN-h2 only; **non-copyable, non-movable**; via `make_client`/`shared_ptr`.
 - `explicit Client(const std::string& base_uri); explicit Client(const qb::io::uri&);`
 - `bool connect(ConnectionCallback)` (pass `nullptr` for fire-and-forget; no default arg) / `[[nodiscard]] async::awaiter<ConnectResult> connect();`
-- `void disconnect(); bool is_connected()/is_connecting() const noexcept` (connected = TCP + h2 handshake).
+- `void disconnect(); bool is_connected()/is_connecting() const noexcept` (connected = TCP + h2 handshake). `disconnect()` fails the outstanding work at once (`503`) and closes the socket when its deferred teardown runs, so the server sees the connection end (`src/qbm/http/2/client.cpp:1079-1092`).
 - `bool push_request(Request, ResponseCallback)` / `[[nodiscard]] async::awaiter<Response> push_request(Request)` (lazy connect). Past the pending cap both **reject with `503 Service Unavailable`** (DoS guard, matches http1/http3).
 - `bool push_requests(std::vector<Request>, BatchResponseCallback)` / `[[nodiscard]] async::awaiter<std::vector<Response>> push_requests(std::vector<Request>)` (separate streams, request order).
 - A completed batch leaves the client's batch registry before its callback runs; that callback may call `disconnect()` or enqueue another batch (`src/qbm/http/2/client.cpp:365-377`).

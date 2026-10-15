@@ -1081,6 +1081,14 @@ Client::on(qb::io::async::event::dispose const &) {
     // (a second failure pass over the work the disconnected callbacks had just re-queued, a state
     // reset that clobbered a reconnection already started) is that handler's, once.
     LOG_HTTP_DEBUG_PA(_client_id, "Client disposal event");
+
+    // The watcher is stopped: close the socket. dispose() leaves the transport open, so an explicit
+    // disconnect() -- or a drained GOAWAY -- kept the connection, and the server's work for it,
+    // alive until this client connected again or was destroyed: the peer never saw EOF (Huly
+    // QB-1021). The next connection's transport is installed only by its connect completion,
+    // which never runs inside dispose(), so this is always the transport that ended.
+    this->transport().disconnect(); // FIN to the peer (quiet TLS shutdown: no close_notify)
+    this->transport().close();      // and the descriptor
 }
 
 // Factory functions

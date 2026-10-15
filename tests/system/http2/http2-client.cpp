@@ -894,7 +894,7 @@ TEST_F(Http2ClientTest, Http1FallbackPostEchoesBodyOverAlpn) {
 // `on(disconnected&&)` must cancel every still-open stream context and clear
 // the context map. We force an in-flight stream by issuing a request whose
 // handler the server never completes, wait until that Context is retained,
-// then drop the transport from under it.
+// then disconnect the client from under it.
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
@@ -918,9 +918,9 @@ TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
     EXPECT_EQ(client->get_active_request_count(), 1u);
     EXPECT_EQ(response_count.load(), 0);
 
-    // A high-level disconnect schedules local disposal; explicitly shut down
-    // the transport to deliver peer EOF for this server-side cancellation test.
-    ASSERT_EQ(client->transport().disconnect(), 0);
+    // disconnect() alone: its deferred disposal closes the transport, the peer sees EOF and
+    // cancels the stream. It used to leave the socket open -- and the server's context alive --
+    // until the client connected again or was destroyed (Huly QB-1021).
     client->disconnect();
 
     ASSERT_TRUE(ServerThread::pump_until([&] {

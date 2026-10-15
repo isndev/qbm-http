@@ -115,6 +115,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 client closes its socket when a connection ends (Huly QB-1021).** The client is the io
+  of every connection it makes, and qb-io's `dispose()` stops a standalone client's watcher without
+  closing its transport: after an explicit `disconnect()` (or a drained GOAWAY) the socket stayed
+  open, and the server kept the connection and its routed contexts alive, until the client
+  connected again or was destroyed. `Client::on(event::dispose)` now shuts down and closes the
+  transport; the peer sees EOF on the next loop pass. The system test
+  `AbruptDisconnectWithInflightStreamsIsClean` no longer closes the transport by hand.
 - **HTTP/2 batch failure answers its unanswered members with 503 (Huly QB-495).** A failure pass
   (explicit `disconnect()`, connection loss, exhausted reconnection run) detached the batch registry before
   failing the members, so their failures found no batch and recorded nothing, and the final pass

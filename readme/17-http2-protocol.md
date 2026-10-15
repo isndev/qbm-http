@@ -277,6 +277,9 @@ The completed batch is retired before its callback runs. The callback may discon
 If the client fails a batch before every member is answered — an explicit `disconnect()`, a lost connection, an exhausted reconnection run — the batch callback still runs exactly once. The responses already received are kept as received (an empty `200` stays a `200`, a member refused at admission keeps its `400`), and every member still unanswered gets `503 Service Unavailable` with the failure reason as its body.
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:309-316,720-735; qbm/http/tests/system/http2/http2-client.cpp:1180-1216 -->
 
+`disconnect()` fails the outstanding work at once (`503`, body `"Connection closed"`) and tears the connection down on the next pass of the event loop, closing its socket then: the server sees the connection end and cancels the streams it still had open for this client. Nothing needs to touch `transport()`.
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:136-151,1079-1092; qbm/http/tests/system/http2/http2-client.cpp:900-936 -->
+
 If sending a queued request fails, its callback runs before the client tries the next pending request. That callback may disconnect or queue different work. The client retains itself during this drain and checks that the connection and HTTP/2 protocol are still live at each iteration; it does not send the next item through the retired protocol.
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:455-501 -->
 

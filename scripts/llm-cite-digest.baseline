@@ -191,6 +191,7 @@ llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:232-236	889fc62c5cea	Client:
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client::connect(ConnectionCallback callback) {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:1079-1092	3cf3177f2fa4	Client::on(qb::io::async::event::dispose const &) {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:309-316	bc81daa2929c	batch_context->responses.resize(batch_context->requests.size());
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:365-377	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:455-501	51b878e29227	void
