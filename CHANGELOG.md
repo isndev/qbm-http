@@ -55,6 +55,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `assign(value)` re-parses in place. `content_type()` is no longer `constexpr` (it could not be evaluated at
   compile time before either). The derivation is a `const` read's side effect on `mutable` members; a message
   is, like every qb object, used by one thread at a time.
+  A parameter list in the plain shape (`name=value` tokens, no quote, no backslash, no control byte) is read
+  without the attribute state machine, with the machine's exact verdict; every other shape still goes through it.
 - **Serializing a `Request` or `Response` writes a COMPLETE message: an empty chunked body is its last-chunk (Huly
   QB-493).** A message declaring `Transfer-Encoding: chunked` with no body used to serialize as its header section
   alone, which left the peer waiting for a body that never came (RFC 9112 §7.1). Behaviour change, source compatible:

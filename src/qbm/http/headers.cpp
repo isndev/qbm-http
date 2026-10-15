@@ -444,6 +444,54 @@ content_encoding(std::string_view accept_encoding_header) {
     return ""; // No suitable encoding found or compression disabled
 }
 
+namespace {
+/**
+ * @brief The charset of a Content-Type parameter list in the PLAIN shape, read without the state
+ *        machine's accumulators: `name=value` tokens separated by `;` or `,`, no quote, no backslash,
+ *        no control byte (HTAB apart), no byte above 0x7E, at most 256 bytes -- the shape every
+ *        `application/json; charset=utf-8` has.
+ *
+ * The verdict is for_each_header_attribute()'s, read from the same bytes: the FIRST `charset` decides,
+ * an empty one included; a name is the segment before its `=`, trimmed. Returns false -- and leaves the
+ * verdict to the machine, whose exceptions keep the default -- for any list outside that shape, and for
+ * the two plain-looking lists the machine refuses or rewrites: a `=` with no name before it, and a name
+ * with whitespace inside (the machine joins its pieces).
+ */
+bool
+plain_charset(std::string_view params, std::string &out) noexcept {
+    if (params.size() > 256) {
+        return false;
+    }
+    for (const char c : params) {
+        const auto uc = static_cast<unsigned char>(c);
+        if ((uc < 0x20 && c != '\t') || uc > 0x7E || c == '"' || c == '\'' || c == '\\') {
+            return false;
+        }
+    }
+    bool seen = false;
+    while (!params.empty()) {
+        const auto             end     = params.find_first_of(";,");
+        const std::string_view segment = params.substr(0, end);
+        params.remove_prefix(end == std::string_view::npos ? params.size() : end + 1);
+        const auto             eq   = segment.find('=');
+        const std::string_view name = utility::trim_http_whitespace(segment.substr(0, eq));
+        if (name.find_first_of(" \t") != std::string_view::npos) {
+            return false;
+        }
+        if (eq != std::string_view::npos && name.empty()) {
+            return false;
+        }
+        if (!seen && utility::iequals(name, "charset")) {
+            seen = true;
+            if (eq != std::string_view::npos) {
+                out.assign(utility::trim_http_whitespace(segment.substr(eq + 1)));
+            }
+        }
+    }
+    return true;
+}
+} // namespace
+
 void
 Headers::ContentType::assign(std::string_view content_type_str) {
     _type.clear();
@@ -461,6 +509,10 @@ Headers::ContentType::assign(std::string_view content_type_str) {
         // default -- the rules of parse_header_attributes() and its map, read here without building the map:
         // this runs for every received message whose typed Content-Type is read (Huly QB-506).
         const auto params = content_type_str.substr(semicolon_pos + 1);
+        if (plain_charset(params, _charset)) {
+            return;
+        }
+        _charset.clear();
         try {
             bool seen = false;
             for_each_header_attribute(params.data(), params.size(), [&](std::string_view name, std::string &&value) {

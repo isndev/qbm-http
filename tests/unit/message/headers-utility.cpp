@@ -237,6 +237,76 @@ TEST(HeadersUtility, DefaultContentTypeIsOneProcessWideObject) {
     EXPECT_EQ(parsed.second, qb::http::Headers::default_charset);
 }
 
+// ContentType reads a plain `name=value; ...` parameter list without the attribute state machine
+// and leaves every other shape to it. Whatever the path, the charset must be exactly what the
+// attribute map (parse_header_attributes, first occurrence wins, a thrown list keeps the default)
+// says: the semantics the typed cache has always had.
+TEST(HeadersUtility, ContentTypeCharsetAgreesWithTheAttributeMapOnEveryShape) {
+    const auto reference = [](std::string_view params) -> std::string {
+        try {
+            const auto attrs = qb::http::parse_header_attributes(params);
+            const auto it    = attrs.find("charset");
+            if (it != attrs.end() && !it->second.empty()) {
+                return it->second;
+            }
+        } catch (...) {
+        }
+        return std::string(qb::http::Headers::default_charset);
+    };
+    std::vector<std::string> shapes = {
+        " charset=utf-16",
+        "charset=utf-16",
+        "  charset   =   utf-16   ",
+        "\tcharset=\tutf-16\t",
+        "charset=\"utf-16\"",
+        "charset='utf-16'",
+        "charset=\"ut\\\"f\"",
+        "charset=",
+        "charset",
+        "charset; charset=utf-16",
+        "charset=; charset=utf-16",
+        "boundary=abc; charset=utf-16",
+        "boundary=abc, charset=utf-16",
+        "CHARSET=UTF-16",
+        "ChArSeT=Utf-16; charset=latin1",
+        "char set=utf-16",
+        "charset=ut f-16",
+        "=utf-16",
+        "charset=utf-16; =x",
+        "charset=utf-16;=",
+        "charset=utf-16; \x01",
+        "charset=utf\x7f",
+        "charset=utf-16; q=\"unterminated",
+        "charset=\"utf-16",
+        "charset=utf-16\\",
+        "charset=a=b",
+        ";;charset=utf-16;;",
+        ",charset=utf-16,",
+        "charset=utf-16 ; boundary=\"a;b\"",
+        "boundary=\"a;b\"; charset=utf-16",
+        "boundary=\"a;b\" x; charset=utf-16",
+        " ",
+        "",
+        ";",
+        "charset=\xC3\xA9",
+        "charset=utf-16;boundary=x",
+        "charset=utf-16\r\n",
+        "charset=utf-1\x06",
+        "charset=utf-16; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW",
+        "charset==utf-16",
+        "charset=utf-16=x",
+    };
+    shapes.push_back("charset=" + std::string(300, 'a'));                  // over the plain cap, under the limits
+    shapes.push_back("charset=" + std::string(9000, 'a'));                 // over the value limit: the machine throws
+    shapes.push_back(std::string(1100, 'n') + "=v; charset=utf-16");       // over the name limit: the machine throws
+    shapes.push_back("boundary=" + std::string(250, 'b') + "; charset=x"); // long but plain
+    for (const auto &params : shapes) {
+        const qb::http::Headers::ContentType typed{"text/plain;" + params};
+        EXPECT_EQ(typed.type(), "text/plain") << "params: [" << params << "]";
+        EXPECT_EQ(typed.charset(), reference(params)) << "params: [" << params << "]";
+    }
+}
+
 TEST(HeadersUtility, ContentTypeParsesCaseInsensitiveQuotedCharset) {
     qb::http::Headers headers;
 
