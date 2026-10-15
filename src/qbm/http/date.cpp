@@ -69,11 +69,34 @@ two_digits(int num) {
     return (num < 10 ? "0" : "") + std::to_string(num);
 }
 
+/**
+ * @brief Read a fixed-width numeric field: exactly @p width ASCII digits at @p pos.
+ *
+ * Every byte of the field must be a digit. std::from_chars alone accepts a sign and stops at the
+ * first non-digit without failing, so "0x" read as 0 and the caller stepped over both bytes, and
+ * "-9" read as -9 (Huly QB-599).
+ *
+ * @return false if the field runs past @p str or holds anything but digits.
+ */
+[[nodiscard]] static bool
+parse_fixed_digits(std::string_view str, std::size_t pos, std::size_t width, int &out) noexcept {
+    if (pos > str.size() || width > str.size() - pos)
+        return false;
+    int value = 0;
+    for (std::size_t i = pos; i < pos + width; ++i) {
+        const char c = str[i];
+        if (c < '0' || c > '9')
+            return false;
+        value = value * 10 + (c - '0');
+    }
+    out = value;
+    return true;
+}
+
 std::optional<std::chrono::system_clock::time_point>
 make_time_point_utc(int year, int month, int day, int hour, int minute, int second) noexcept {
-    // Range-check the year too: from_chars accepts a leading '-', so a malformed HTTP-date like
-    // "... -999 ..." would otherwise yield a valid-but-nonsensical time_point (the round-trip
-    // below still passes for it). 4-digit HTTP-date years fall inside [1, 9999].
+    // Range-check the year too: the fields are all-digit (parse_fixed_digits), but "0000" is still
+    // one, and the round-trip below would pass for it. 4-digit HTTP-date years fall inside [1, 9999].
     if (year < 1 || year > 9999 || month < 0 || month > 11 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59
         || second < 0 || second > 59) {
         return std::nullopt;
@@ -166,11 +189,11 @@ parse_rfc1123_date(std::string_view str) {
     if (pos >= str.size())
         return std::nullopt;
 
-    // Extract day (2 digits) - Using from_chars for better performance (no exceptions, no allocations)
+    // Extract day (2 digits, every byte a digit)
     if (pos + 2 > str.size())
         return std::nullopt;
     int day = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 2, day).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 2, day))
         return std::nullopt;
     if (pos + 2 >= str.size() || str[pos + 2] != ' ')
         return std::nullopt;
@@ -187,29 +210,29 @@ parse_rfc1123_date(std::string_view str) {
         return std::nullopt;
     pos += 4; // Move past month and space
 
-    // Extract year (4 digits) - Using from_chars for better performance
+    // Extract year (4 digits, every byte a digit)
     if (pos + 4 > str.size())
         return std::nullopt;
     int year = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 4, year).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 4, year))
         return std::nullopt;
     if (pos + 4 >= str.size() || str[pos + 4] != ' ')
         return std::nullopt;
     pos += 5; // Move past year and space
 
-    // Extract time - Using from_chars for better performance
+    // Extract time (HH:MM:SS, every field two digits)
     if (pos + 8 > str.size())
         return std::nullopt;
     int hour = 0, minute = 0, second = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 2, hour).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 2, hour))
         return std::nullopt;
     if (str[pos + 2] != ':')
         return std::nullopt;
-    if (std::from_chars(str.data() + pos + 3, str.data() + pos + 5, minute).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos + 3, 2, minute))
         return std::nullopt;
     if (str[pos + 5] != ':')
         return std::nullopt;
-    if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos + 6, 2, second))
         return std::nullopt;
 
     pos += 8;
@@ -236,11 +259,11 @@ parse_rfc850_date(std::string_view str) {
     if (pos >= str.size())
         return std::nullopt;
 
-    // Extract day (2 digits) - Using from_chars for better performance
+    // Extract day (2 digits, every byte a digit)
     if (pos + 2 > str.size())
         return std::nullopt;
     int day = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 2, day).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 2, day))
         return std::nullopt;
     if (pos + 2 >= str.size() || str[pos + 2] != '-')
         return std::nullopt;
@@ -257,11 +280,11 @@ parse_rfc850_date(std::string_view str) {
         return std::nullopt;
     pos += 4; // Move past month and hyphen
 
-    // Extract year (2 digits) - Using from_chars for better performance
+    // Extract year (2 digits, every byte a digit)
     if (pos + 2 > str.size())
         return std::nullopt;
     int year = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 2, year).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 2, year))
         return std::nullopt;
     if (year < 70) {
         year += 2000; // Y2K pivot for 2-digit years
@@ -272,19 +295,19 @@ parse_rfc850_date(std::string_view str) {
         return std::nullopt;
     pos += 3; // Move past year and space
 
-    // Extract time - Using from_chars for better performance
+    // Extract time (HH:MM:SS, every field two digits)
     if (pos + 8 > str.size())
         return std::nullopt;
     int hour = 0, minute = 0, second = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 2, hour).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 2, hour))
         return std::nullopt;
     if (str[pos + 2] != ':')
         return std::nullopt;
-    if (std::from_chars(str.data() + pos + 3, str.data() + pos + 5, minute).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos + 3, 2, minute))
         return std::nullopt;
     if (str[pos + 5] != ':')
         return std::nullopt;
-    if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos + 6, 2, second))
         return std::nullopt;
 
     pos += 8;
@@ -337,28 +360,30 @@ parse_asctime_date(std::string_view str) {
         return std::nullopt;
     pos += day_len + 1; // Move past day and space
 
-    // Extract time - Using from_chars for better performance
+    // Extract time (HH:MM:SS, every field two digits)
     if (pos + 8 > str.size())
         return std::nullopt;
     int hour = 0, minute = 0, second = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 2, hour).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 2, hour))
         return std::nullopt;
     if (str[pos + 2] != ':')
         return std::nullopt;
-    if (std::from_chars(str.data() + pos + 3, str.data() + pos + 5, minute).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos + 3, 2, minute))
         return std::nullopt;
     if (str[pos + 5] != ':')
         return std::nullopt;
-    if (std::from_chars(str.data() + pos + 6, str.data() + pos + 8, second).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos + 6, 2, second))
         return std::nullopt;
 
+    if (str[pos + 8] != ' ')
+        return std::nullopt;
     pos += 9; // Move past time and space
 
-    // Extract year (4 digits) - Using from_chars for better performance
+    // Extract year (4 digits)
     if (pos + 4 != str.size())
         return std::nullopt;
     int year = 0;
-    if (std::from_chars(str.data() + pos, str.data() + pos + 4, year).ec != std::errc{})
+    if (!parse_fixed_digits(str, pos, 4, year))
         return std::nullopt;
 
     return make_time_point_utc(year, month, day, hour, minute, second);

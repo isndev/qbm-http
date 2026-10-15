@@ -42,6 +42,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   (Huly QB-555).** It is optional whitespace (RFC 9110 §5.6.3), as a trailing space already was; the message frames
   exactly as the space form does. Such a request used to be refused, and such a response read until the connection
   closed. A local patch of the vendored llhttp, recorded in `THIRD-PARTY-NOTICES`.
+- **HTTP dates refuse a fixed-width numeric field that is not all digits (Huly QB-599).** `08:4x:37` or a signed
+  two-digit year used to parse (as `08:04:37`, or the year 1991 for `-9`); they now yield `nullopt`, as the
+  `parse_http_date` contract promises for an unknown format. Cookie `Expires` and `If-Modified-Since` read through it.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete

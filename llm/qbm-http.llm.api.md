@@ -139,7 +139,7 @@ Format as RFC 1123 GMT date (empty on failure); cookie variant is functionally i
 Usage: `auto s = qb::http::date::format_http_date(std::chrono::system_clock::now());`
 
 ### `date.h:75`
-`std::optional<system_clock::time_point> parse_http_date(std::string_view) noexcept;` (+ `const std::string&` overload)
+`std::optional<system_clock::time_point> parse_http_date(std::string_view) noexcept;` (+ `const std::string&` overload) — every fixed-width numeric field must be all digits (no sign, no trailing byte: `08:4x:37` is `nullopt`, QB-599)
 `std::optional<system_clock::time_point> parse_cookie_date(...) noexcept;`
 Parse RFC 1123 / RFC 850 / asctime; `nullopt` on failure.
 
