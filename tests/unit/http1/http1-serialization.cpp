@@ -481,8 +481,8 @@ TEST(Http1Serialization, RequestRejectsBytesARequestTargetCannotCarry) {
         EXPECT_FALSE(refused(good)) << "n=" << n << ": an all-printable query was refused";
     }
     // The four edges of the byte classes, inside the overlapped last block of a 33-byte query.
-    for (const auto &[byte, bad] : {std::pair{'\x20', true}, std::pair{'\x21', false}, std::pair{'\x7e', false}, std::pair{'\x7f', true},
-                                    std::pair{'\x80', false}}) {
+    for (const auto &[byte, bad] :
+         {std::pair{'\x20', true}, std::pair{'\x21', false}, std::pair{'\x7e', false}, std::pair{'\x7f', true}, std::pair{'\x80', false}}) {
         std::string query(33, 'q');
         query[20] = byte;
         EXPECT_EQ(refused(query), bad) << "byte 0x" << std::hex << (static_cast<unsigned>(byte) & 0xffu);
