@@ -392,6 +392,11 @@ public:
 
         if (data_event.header.flags & FLAG_END_STREAM) {
             stream.end_stream_received = true;
+            // END_STREAM ends the message: a trailer block can no longer follow, whatever the
+            // response's `trailer` header announced -- the announcement is a hint, not a promise
+            // (RFC 9110 §6.6.2). The client used to keep waiting for it, and the response never
+            // completed (Huly QB-1061).
+            stream.trailers_expected = false;
             if (stream.state == Http2StreamConcreteState::OPEN) {
                 stream.state = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
             } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
@@ -1248,6 +1253,21 @@ public:
             }
         }
 
+        // A request that sets the fields its `trailer` header announces ends with them as soon as
+        // its body is out: here when the body fit the windows (or there is none), else when they
+        // reopen (try_send_pending_data_for_stream). They used to wait for a WINDOW_UPDATE the
+        // server had no reason to send, and the request never ended (Huly QB-1061). A request
+        // that announces fields it does not set leaves them to send_request_trailers().
+        if (stream_obj.client_will_send_trailers && !stream_obj.has_pending_data_to_send && !stream_obj.end_stream_sent
+            && !stream_obj.queued_trailer_fields) {
+            auto trailer_fields = announced_trailer_fields(stream_obj.original_request_to_send);
+            if (!trailer_fields.empty()) {
+                // The stream may be closed and erased past this call: nothing below touches it.
+                (void) send_request_trailer_block(stream_obj, std::move(trailer_fields));
+                return true;
+            }
+        }
+
         if (stream_obj.state == Http2StreamConcreteState::CLOSED) {
             try_close_stream_context_by_id(stream_obj.id, ErrorCode::NO_ERROR);
         }
@@ -1699,24 +1719,17 @@ private:
                     }
                 }
 
-                // Check for trailer announcement
+                // A trailer announcement: the stream ends with a trailer section
                 if (name_lower == "trailer") {
                     stream_context.client_will_send_trailers = true;
-                    // Parse the value of the "Trailer" header to get the names of the expected trailer fields
-                    // The "Trailer" header value is a comma-separated list of field names.
-                    std::string trailer_header_value_str;
-                    if (!value.empty()) { // value is std::string from http_request.headers() iter
-                        trailer_header_value_str = value;
-                    }
-                    // qb::http::utility::split_and_trim_header_list expects std::string_view
-                    auto trailer_names = qb::http::utility::split_and_trim_header_list(std::string_view(trailer_header_value_str), ',');
-                    for (const auto &trailer_name : trailer_names) {
-                        if (!trailer_name.empty()) { // Ensure no empty names from parsing
-                            stream_context._expected_trailer_names.push_back(trailer_name);
-                        }
-                    }
                 }
             }
+        }
+
+        // The fields the `trailer` header announces leave in the trailer section
+        // (announced_trailer_fields), not here: they used to be sent twice (Huly QB-1061).
+        if (stream_context.client_will_send_trailers) {
+            remove_announced_trailer_fields(out_hf_vector, http_request);
         }
 
         // Add content-length if body is present and not using trailers
@@ -2489,31 +2502,7 @@ private:
             if (active_stream.queued_trailer_fields) {
                 trailer_fields_to_send = std::move(*active_stream.queued_trailer_fields);
             } else {
-                for (const std::string &trailer_name_str : active_stream._expected_trailer_names) {
-                    if (trailer_name_str.empty() || trailer_name_str[0] == ':') {
-                        continue; // a pseudo-header or an empty name listed in "Trailer"
-                    }
-
-                    const auto &header_map       = active_stream.original_request_to_send.headers();
-                    auto        it_header_values = header_map.find(trailer_name_str);
-                    if (it_header_values == header_map.end()) {
-                        continue; // listed in "Trailer" but absent from the request headers
-                    }
-                    std::string name_lower = trailer_name_str;
-                    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                                   [](char c) { return qb::http::utility::ascii_to_lower(c); });
-                    for (const auto &value_type : it_header_values->second) {
-                        std::string value_std_str;
-                        using OriginalReqStringType = typename qb::http::Request::string_type;
-
-                        if constexpr (std::is_same_v<OriginalReqStringType, std::string_view>) {
-                            value_std_str.assign(value_type.data(), value_type.length());
-                        } else {
-                            value_std_str = value_type;
-                        }
-                        trailer_fields_to_send.emplace_back(name_lower, std::move(value_std_str));
-                    }
-                }
+                trailer_fields_to_send = announced_trailer_fields(active_stream.original_request_to_send);
             }
             // The stream may be closed and erased past this call: nothing below touches it.
             (void) send_request_trailer_block(active_stream, std::move(trailer_fields_to_send));

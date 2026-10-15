@@ -726,6 +726,35 @@ TEST(HTTP2ClientProtocol, AssemblesResponseWithTrailers) {
 }
 
 // ===========================================================================
+// A response may announce trailers and send none: the `Trailer` header is a
+// hint, and END_STREAM on the last DATA frame ends the message -- nothing can
+// follow it (RFC 9110 §6.6.2, RFC 9113 §8.1). The response completes, with no
+// trailer fields, once. The client used to wait for a trailer block that could
+// never come: the request never completed (Huly QB-1061).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, ResponseAnnouncingTrailersButEndingOnDataCompletes) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/announced");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 12));
+
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"trailer", "x-checksum"}}));
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "body-without-trailers"));
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 1) << "the response never completed";
+    EXPECT_EQ(io.last_app_id, 12u);
+    EXPECT_EQ(io.last_response_error, h2::ErrorCode::NO_ERROR);
+    EXPECT_EQ(io.stream_error_count, 0);
+    ASSERT_TRUE(io.last_status.has_value());
+    EXPECT_EQ(*io.last_status, 200);
+    EXPECT_EQ(*io.last_body, "body-without-trailers");
+}
+
+// ===========================================================================
 // GOAWAY (graceful, NO_ERROR): dispatches a GOAWAY event, protocol stays ok.
 // ===========================================================================
 TEST(HTTP2ClientProtocol, GracefulGoawayDispatchesEventAndStaysOk) {
@@ -1556,6 +1585,56 @@ TEST(HTTP2ClientProtocol, RequestTrailerBlockIsSplitAtThePeerMaxFrameSize) {
         ASSERT_EQ(server_io.request_count, 1) << "value " << value_size;
         EXPECT_EQ(server_io.last_request->header("x-a"), value);
     }
+}
+
+// ===========================================================================
+// The fields a request's `Trailer` header announces travel in the trailer
+// block, and only there; the other fields stay in the leading HEADERS -- the
+// contract the server follows for responses (Huly QB-1058) and HTTP/3 for both.
+// The client used to send them twice: in the leading HEADERS, then again in the
+// trailer block (Huly QB-1061).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, AnnouncedRequestTrailerFieldsLeaveOnlyInTheTrailerBlock) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    const std::size_t                          before = io.output.size(); // past the preface and SETTINGS
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/announces");
+    req.body()   = "ab";
+    req.set_header("trailer", "X-Checksum");
+    req.set_header("x-checksum", "cafe");
+    req.set_header("x-other", "1");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 9));
+    ASSERT_TRUE(protocol.ok());
+
+    // Decode every header block of stream 1, in order, with one decoder (they share the client's
+    // HPACK state).
+    qb::protocol::hpack::Decoder                               decoder;
+    std::vector<std::vector<qb::protocol::hpack::HeaderField>> blocks;
+    for (std::size_t off = before; off + h2::FRAME_HEADER_SIZE <= io.output.size();) {
+        const auto fh = peek_frame_header(io.output, off);
+        if (fh.get_type() == h2::FrameType::HEADERS && fh.get_stream_id() == 1) {
+            const auto          *first = reinterpret_cast<const uint8_t *>(io.output.cbegin() + off + h2::FRAME_HEADER_SIZE);
+            std::vector<uint8_t> payload(first, first + fh.get_payload_length());
+            std::vector<qb::protocol::hpack::HeaderField> fields;
+            bool                                          incomplete = false;
+            ASSERT_TRUE(decoder.decode(payload, fields, incomplete));
+            blocks.push_back(std::move(fields));
+        }
+        off += h2::FRAME_HEADER_SIZE + fh.get_payload_length();
+    }
+    ASSERT_EQ(blocks.size(), 2u) << "leading HEADERS, then the trailer block";
+    auto count = [](const std::vector<qb::protocol::hpack::HeaderField> &fields, std::string_view name) {
+        return std::count_if(fields.begin(), fields.end(), [&](const auto &f) { return f.name == name; });
+    };
+    EXPECT_EQ(count(blocks[0], "trailer"), 1) << "the announcement leads";
+    EXPECT_EQ(count(blocks[0], "x-other"), 1);
+    EXPECT_EQ(count(blocks[0], "x-checksum"), 0) << "an announced trailer field is not sent in the leading HEADERS";
+    ASSERT_EQ(blocks[1].size(), 1u);
+    EXPECT_EQ(blocks[1][0].name, "x-checksum");
+    EXPECT_EQ(blocks[1][0].value, "cafe");
 }
 
 // ===========================================================================

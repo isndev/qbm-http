@@ -115,6 +115,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 client request trailers are sent once, and always (Huly QB-1061).** The fields a
+  request's `Trailer` header announces went out in the leading HEADERS and again in the trailer
+  block. When the body fit the flow-control windows, or there was none, that trailer block waited
+  for a WINDOW_UPDATE the server had no reason to send, so the request never ended. The client now
+  follows the QB-1058 contract, through the same helpers (`announced_trailer_names`,
+  `is_trailer_field`, `announced_trailer_fields` in `protocol/base.h`, shared with the server). The
+  announced fields leave only in the trailer block, which `send_request` sends as soon as the body
+  is out. A request that announces fields without setting them still hands them over with
+  `send_request_trailers`. `Http2ClientStream::_expected_trailer_names` is gone.
+- **HTTP/2 client completes a response that announced trailers and sent none (Huly QB-1061).** A
+  response whose `Trailer` header announced fields but whose last DATA frame ended the stream was
+  never dispatched: the client waited for a trailer block that could no longer come. END_STREAM on
+  DATA now completes it, with no trailer fields, once.
 - **HTTP/2 client announces an explicit disconnect with GOAWAY (Huly QB-1059).**
   `qb::http2::Client::disconnect()` closed a live connection with no GOAWAY. It now queues
   `GOAWAY(NO_ERROR)` behind what the connection still had to send, through the new

@@ -65,41 +65,6 @@ namespace qb::protocol::http2 {
 constexpr std::string_view STATUS_HEADER_NAME_SV = ":status";
 
 /**
- * @brief The lowercased field names a response announces in its `trailer` header (RFC 9110
- *        §6.6.2): the fields the server sends in the trailer section, after the body.
- * @param response Response to inspect.
- * @return The announced names, empty when the response has no `trailer` header.
- */
-inline std::vector<std::string>
-announced_trailer_names(const qb::http::Response &response) {
-    std::vector<std::string> names;
-    const auto               it = response.headers().find("trailer");
-    if (it == response.headers().end()) {
-        return names;
-    }
-    for (const auto &value : it->second) {
-        for (auto &name : qb::http::utility::split_and_trim_header_list(value, ',')) {
-            std::transform(name.begin(), name.end(), name.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
-            names.push_back(std::move(name));
-        }
-    }
-    return names;
-}
-
-/**
- * @brief True when a response field travels in the trailer section: its @p name_lower is
- *        announced by the `trailer` header and allowed in trailers. A field that is announced
- *        but forbidden there (`content-length`, `trailer` itself, a connection header) stays in
- *        the leading HEADERS, so every field is sent exactly once.
- */
-inline bool
-is_response_trailer_field(std::string_view name_lower, const std::vector<std::string> &announced) {
-    return !announced.empty() && !name_lower.empty() && name_lower.front() != ':'
-           && std::find(announced.begin(), announced.end(), name_lower) != announced.end()
-           && !HeaderValidator::is_forbidden_trailer_header(name_lower);
-}
-
-/**
  * @brief HTTP/2 server protocol implementation
  *
  * This class implements the server-side HTTP/2 protocol handler. It processes
@@ -1137,10 +1102,7 @@ public:
         std::vector<qb::protocol::hpack::HeaderField> hf_vector;
         hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
         std::optional<std::uint64_t> declared_content_length;
-        // The fields the `trailer` header announces leave in the trailer section after the body
-        // (try_send_pending_data_for_stream), not here: they used to be sent in this block, and
-        // the trailer block then went out empty (Huly QB-1058). Same contract as HTTP/3.
-        const auto announced_trailers = announced_trailer_names(http_response);
+        bool                         announces_trailers = false;
         for (const auto &header_item : http_response.headers()) { // Assuming http_response.headers() gives iterable key-value pairs
             std::string name_lower = header_item.first;
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
@@ -1168,10 +1130,15 @@ public:
                     }
                     declared_content_length = *parsed;
                 }
-                if (!is_response_trailer_field(name_lower, announced_trailers)) {
-                    hf_vector.emplace_back(name_lower, value);
-                }
+                hf_vector.emplace_back(name_lower, value);
             }
+            announces_trailers = announces_trailers || name_lower == qb::http::well_known::TRAILER_SV;
+        }
+        // The fields the `trailer` header announces leave in the trailer section after the body
+        // (try_send_pending_data_for_stream), not here: they used to be sent in this block, and
+        // the trailer block then went out empty (Huly QB-1058). Same contract as HTTP/3.
+        if (announces_trailers) {
+            remove_announced_trailer_fields(hf_vector, http_response);
         }
 
         const auto &body_pipe        = http_response.body().raw();
@@ -2363,28 +2330,9 @@ private:
         if (body_fully_sent_or_empty && stream.is_trailers && !stream.end_stream_sent) {
             // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": All body sent, proceeding to send trailers.");
 
-            std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers;
-            const qb::http::Response                     &original_response  = stream.response_to_send;
-            const auto                                    announced_trailers = announced_trailer_names(original_response);
-
             // Exactly the fields the `trailer` header announces, which send_response() kept out of
             // the leading HEADERS (Huly QB-1058).
-            for (const auto &header_item : original_response.headers()) {
-                std::string name_lower = header_item.first;
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                               [](char c) { return qb::http::utility::ascii_to_lower(c); });
-                if (!is_response_trailer_field(name_lower, announced_trailers)) {
-                    continue;
-                }
-                for (const auto &value : header_item.second) {
-                    // HTTP/2 field names are lowercase (RFC 9113 §8.2.1): validated and sent as such,
-                    // like the response's own headers in send_response().
-                    if (!HeaderValidator::is_valid_header_field(name_lower, value)) {
-                        continue;
-                    }
-                    hf_vector_trailers.push_back({name_lower, value});
-                }
-            }
+            std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers = announced_trailer_fields(stream.response_to_send);
 
             // Trailers always end the stream; a block larger than the peer's frame size is split
             // over CONTINUATION frames (Huly QB-522).

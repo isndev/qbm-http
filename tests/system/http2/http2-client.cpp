@@ -2993,3 +2993,42 @@ TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinT
 }
 
 } // namespace http2_client_goaway_test
+
+// ===========================================================================
+// A request whose `Trailer` header announces a field it sets ends with that
+// field as its trailer section as soon as the body is out -- here a body that
+// fits the windows at once. The trailer block used to wait for a WINDOW_UPDATE
+// the server had no reason to send: the request never ended and never got its
+// response (Huly QB-1061).
+// ===========================================================================
+namespace http2_client_trailers_test {
+
+TEST_F(Http2ClientTest, RequestSettingItsAnnouncedTrailersCompletesOnce) {
+    auto client = make_test_client();
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::POST;
+    request.uri()    = qb::io::uri("/api/data");
+    request.body()   = R"({"t":1})";
+    request.set_header("trailer", "X-Checksum");
+    request.set_header("x-checksum", "cafe");
+
+    std::optional<qb::http::Response> response;
+    int                               calls = 0;
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response = std::move(r);
+        ++calls;
+    }));
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); })) << "the request never ended";
+    EXPECT_EQ(response->status(), qb::http::status::CREATED);
+    EXPECT_EQ(response->body().template as<std::string>(), R"(Data received: {"t":1} - created successfully)");
+    for (int pass = 0; pass < 20; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls, 1);
+    client->disconnect();
+}
+
+} // namespace http2_client_trailers_test

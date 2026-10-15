@@ -333,6 +333,91 @@ public:
 };
 
 /**
+ * @brief The lowercased field names a message announces in its `trailer` header (RFC 9110
+ *        §6.6.2): the fields its sender puts in the trailer section, after the body.
+ * @tparam Message `qb::http::Request` or `qb::http::Response`.
+ * @param message Message to inspect.
+ * @return The announced names, empty when the message has no `trailer` header.
+ */
+template <typename Message>
+std::vector<std::string>
+announced_trailer_names(const Message &message) {
+    std::vector<std::string> names;
+    // A scan rather than find(): find() builds and hashes a lowercased key for every message,
+    // which costs more than walking its few header names, and nearly no message has trailers.
+    for (const auto &[header_name, values] : message.headers()) {
+        if (header_name.size() != 7 || !qb::http::utility::iequals(header_name, "trailer")) {
+            continue;
+        }
+        for (const auto &value : values) {
+            for (auto &name : qb::http::utility::split_and_trim_header_list(value, ',')) {
+                std::transform(name.begin(), name.end(), name.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
+                names.push_back(std::move(name));
+            }
+        }
+    }
+    return names;
+}
+
+/**
+ * @brief True when a field travels in the trailer section: its @p name_lower is announced by the
+ *        `trailer` header and allowed in trailers. A field that is announced but forbidden there
+ *        (`content-length`, `trailer` itself, a connection header) stays in the leading HEADERS,
+ *        so every field is sent exactly once.
+ */
+inline bool
+is_trailer_field(std::string_view name_lower, const std::vector<std::string> &announced) {
+    return !announced.empty() && !name_lower.empty() && name_lower.front() != ':'
+           && std::find(announced.begin(), announced.end(), name_lower) != announced.end()
+           && !HeaderValidator::is_forbidden_trailer_header(name_lower);
+}
+
+/**
+ * @brief A message's trailer section: the fields its `trailer` header announces that trailers
+ *        allow, set on the message, names lowercased, invalid fields left out. What the leading
+ *        HEADERS leave out (is_trailer_field) is exactly what this sends -- for a response
+ *        (ServerHttp2Protocol, Huly QB-1058) as for a request (ClientHttp2Protocol, Huly QB-1061),
+ *        the contract HTTP/3 follows.
+ * @tparam Message `qb::http::Request` or `qb::http::Response`.
+ */
+template <typename Message>
+std::vector<qb::protocol::hpack::HeaderField>
+announced_trailer_fields(const Message &message) {
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+    const auto                                    announced = announced_trailer_names(message);
+    if (announced.empty()) {
+        return fields;
+    }
+    for (const auto &[name, values] : message.headers()) {
+        std::string name_lower(name.data(), name.size());
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
+        if (!is_trailer_field(name_lower, announced)) {
+            continue;
+        }
+        for (const auto &value : values) {
+            if (HeaderValidator::is_valid_header_field(name_lower, value)) {
+                fields.emplace_back(name_lower, std::string(value.data(), value.size()));
+            }
+        }
+    }
+    return fields;
+}
+
+/**
+ * @brief Take out of a leading header block the fields @p message announces as trailers
+ *        (is_trailer_field): they leave in its trailer section (announced_trailer_fields). Called
+ *        only for a message that carries a `trailer` header, so a message without one pays nothing.
+ */
+template <typename Message>
+void
+remove_announced_trailer_fields(std::vector<qb::protocol::hpack::HeaderField> &leading, const Message &message) {
+    const auto announced = announced_trailer_names(message);
+    if (!announced.empty()) {
+        std::erase_if(leading, [&](const qb::protocol::hpack::HeaderField &f) { return is_trailer_field(f.name, announced); });
+    }
+}
+
+/**
  * @brief Helper class for HTTP/2 error handling and reporting
  *
  * Centralizes error handling logic and provides consistent error reporting
