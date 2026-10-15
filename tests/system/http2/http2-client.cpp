@@ -3045,4 +3045,38 @@ TEST_F(Http2ClientTest, RequestSettingItsAnnouncedTrailersCompletesOnce) {
     client->disconnect();
 }
 
+// The high-level client never calls send_request_trailers(): a request that
+// announces trailers without setting them ends its stream once the body is out,
+// with an empty trailer block, rather than waiting for its request timeout. The
+// protocol keeps that stream open for send_request_trailers(), and the client
+// used to inherit it: the request never ended (Huly QB-1061).
+TEST_F(Http2ClientTest, RequestAnnouncingUnsetTrailersCompletesPromptly) {
+    auto client = make_test_client();
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::POST;
+    request.uri()    = qb::io::uri("/api/data");
+    request.body()   = R"({"t":2})";
+    request.set_header("trailer", "X-Checksum"); // announced, never set
+
+    std::optional<qb::http::Response> response;
+    int                               calls = 0;
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response = std::move(r);
+        ++calls;
+    }));
+    client->connect(nullptr);
+
+    const auto started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); })) << "the request waited for trailers no one would send";
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 2s) << "completed by the body, not by a timeout";
+    EXPECT_EQ(response->status(), qb::http::status::CREATED);
+    EXPECT_EQ(response->body().template as<std::string>(), R"(Data received: {"t":2} - created successfully)");
+    for (int pass = 0; pass < 20; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls, 1);
+    client->disconnect();
+}
+
 } // namespace http2_client_trailers_test

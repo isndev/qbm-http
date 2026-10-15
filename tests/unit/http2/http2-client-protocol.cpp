@@ -1638,6 +1638,50 @@ TEST(HTTP2ClientProtocol, AnnouncedRequestTrailerFieldsLeaveOnlyInTheTrailerBloc
 }
 
 // ===========================================================================
+// A request that announces trailer fields it does not set keeps its stream open
+// for send_request_trailers() -- the protocol's contract -- unless the caller
+// never hands trailers over (set_explicit_request_trailers(false), what
+// qb::http2::Client does): the stream then ends once the body is out, with an
+// empty trailer block (Huly QB-1061).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, UnsetAnnouncedTrailersWaitForTheCallerUnlessExplicitTrailersAreOff) {
+    for (const bool explicit_trailers : {true, false}) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        EXPECT_TRUE(protocol.explicit_request_trailers()) << "the protocol's default";
+        protocol.set_explicit_request_trailers(explicit_trailers);
+        const std::size_t before = io.output.size();
+
+        qb::http::Request req;
+        req.method() = qb::http::method::POST;
+        req.uri()    = qb::io::uri("https://example.test/unset");
+        req.body()   = "ab";
+        req.set_header("trailer", "x-checksum"); // announced, never set
+        ASSERT_TRUE(protocol.send_request(std::move(req), 4));
+        ASSERT_TRUE(protocol.ok());
+
+        std::vector<h2::FrameHeader> headers_frames;
+        bool                         data_ended = false;
+        for (std::size_t off = before; off + h2::FRAME_HEADER_SIZE <= io.output.size();) {
+            const auto fh = peek_frame_header(io.output, off);
+            if (fh.get_stream_id() == 1 && fh.get_type() == h2::FrameType::HEADERS) {
+                headers_frames.push_back(fh);
+            }
+            data_ended = data_ended || (fh.get_type() == h2::FrameType::DATA && (fh.flags & h2::FLAG_END_STREAM));
+            off += h2::FRAME_HEADER_SIZE + fh.get_payload_length();
+        }
+        EXPECT_FALSE(data_ended) << "a trailer section was announced: the last DATA does not end the stream";
+        if (explicit_trailers) {
+            EXPECT_EQ(headers_frames.size(), 1u) << "the stream waits for send_request_trailers()";
+        } else {
+            ASSERT_EQ(headers_frames.size(), 2u) << "leading HEADERS, then the empty trailer block";
+            EXPECT_TRUE(headers_frames[1].flags & h2::FLAG_END_STREAM);
+            EXPECT_EQ(headers_frames[1].get_payload_length(), 0u);
+        }
+    }
+}
+
+// ===========================================================================
 // Automatic trailers: a body that waited for flow-control credit is followed by
 // the request headers the "Trailer" header names. Those names come from the
 // header's VALUE, as written ("X-Checksum"), and HTTP/2 field names must be

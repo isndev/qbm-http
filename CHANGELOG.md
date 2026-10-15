@@ -129,8 +129,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   follows the QB-1058 contract, through the same helpers (`announced_trailer_names`,
   `is_trailer_field`, `announced_trailer_fields` in `protocol/base.h`, shared with the server). The
   announced fields leave only in the trailer block, which `send_request` sends as soon as the body
-  is out. A request that announces fields without setting them still hands them over with
-  `send_request_trailers`. `Http2ClientStream::_expected_trailer_names` is gone.
+  is out. A request that announces fields without setting them waits, on `ClientHttp2Protocol`,
+  for `send_request_trailers`; `qb::http2::Client`, which never calls it, sets the new
+  `set_explicit_request_trailers(false)`, so the stream ends after the body with an empty trailer
+  block instead of waiting for the request timeout. `Http2ClientStream::_expected_trailer_names`
+  is gone.
 - **HTTP/2 client completes a response that announced trailers and sent none (Huly QB-1061).** A
   response whose `Trailer` header announced fields but whose last DATA frame ended the stream was
   never dispatched: the client waited for a trailer block that could no longer come. END_STREAM on

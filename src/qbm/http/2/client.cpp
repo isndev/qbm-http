@@ -946,6 +946,10 @@ Client::on(qb::io::async::event::handshake &&) {
         _h2_protocol = this->template switch_protocol<H2Protocol>(*this, nullptr);
         if (_h2_protocol) {
             LOG_HTTP_DEBUG_PA(_client_id, "HTTP/2 protocol switched successfully");
+            // This client never hands trailers over with send_request_trailers(): a request that
+            // announces trailer fields it does not set ends once its body is out, rather than
+            // waiting for its request timeout (Huly QB-1061).
+            _h2_protocol->set_explicit_request_trailers(false);
 
             // ✅ Let the framework handle the preface automatically
             // The framework will send the HTTP/2 connection preface when appropriate

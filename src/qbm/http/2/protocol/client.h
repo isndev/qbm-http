@@ -164,6 +164,11 @@ private:
 
     bool _initial_settings_ack_received_placeholder = false; // Placeholder for actual ACK tracking.
 
+    /// What ends a request that announces trailer fields it does not set: true (the protocol's
+    /// contract) keeps the stream open, after the body, for send_request_trailers(); false ends
+    /// it once the body is out, with an empty trailer block (Huly QB-1061).
+    bool _explicit_request_trailers = true;
+
     std::optional<OpaqueDataArray> _outstanding_ping_data;
 
     // Add as a private member to ClientHttp2Protocol class
@@ -1257,11 +1262,13 @@ public:
         // its body is out: here when the body fit the windows (or there is none), else when they
         // reopen (try_send_pending_data_for_stream). They used to wait for a WINDOW_UPDATE the
         // server had no reason to send, and the request never ended (Huly QB-1061). A request
-        // that announces fields it does not set leaves them to send_request_trailers().
+        // that announces fields it does not set leaves them to send_request_trailers(), unless
+        // the caller never hands trailers over (set_explicit_request_trailers(false)): its stream
+        // then ends here, with an empty trailer block.
         if (stream_obj.client_will_send_trailers && !stream_obj.has_pending_data_to_send && !stream_obj.end_stream_sent
             && !stream_obj.queued_trailer_fields) {
             auto trailer_fields = announced_trailer_fields(stream_obj.original_request_to_send);
-            if (!trailer_fields.empty()) {
+            if (!trailer_fields.empty() || !_explicit_request_trailers) {
                 // The stream may be closed and erased past this call: nothing below touches it.
                 (void) send_request_trailer_block(stream_obj, std::move(trailer_fields));
                 return true;
@@ -1290,6 +1297,25 @@ public:
     [[nodiscard]] bool
     stream_ids_exhausted() const noexcept {
         return _next_client_stream_id > MAX_CLIENT_STREAM_ID;
+    }
+
+    /**
+     * @brief Choose what ends a request that announces trailer fields (a `trailer` header) it
+     *        does not set. A request that sets them sends them, after its body, either way.
+     * @param explicit_trailers true (the default): its stream stays open, after the body, for
+     *        send_request_trailers(). false: the stream ends once the body is out, with an empty
+     *        trailer block -- for a caller that never hands trailers over, as qb::http2::Client,
+     *        which would otherwise wait for its request timeout (Huly QB-1061).
+     */
+    void
+    set_explicit_request_trailers(bool explicit_trailers) noexcept {
+        _explicit_request_trailers = explicit_trailers;
+    }
+
+    /// See set_explicit_request_trailers().
+    [[nodiscard]] bool
+    explicit_request_trailers() const noexcept {
+        return _explicit_request_trailers;
     }
 
     /**
