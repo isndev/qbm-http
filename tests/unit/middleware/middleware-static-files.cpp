@@ -724,6 +724,34 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryListingEncodesUtf8Filename) {
 }
 #endif
 
+// The listing's link prefix is the request path, which may legally hold '&' (a sub-delim, RFC
+// 3986 section 3.3): written raw into an href, `&copy;` is a character reference and the browser
+// follows another path (Huly QB-543). The prefix is escaped for the attribute; '%' stays as is,
+// so an already percent-encoded path is not encoded twice; and the link, attribute-decoded,
+// opens the entry it names.
+TEST_F(StaticFilesMiddlewareTest, DirectoryListingEscapesTheRequestPathPrefix) {
+    create_test_file(_test_root_dir / "a&copy;b" / "f.txt", "inside a&copy;b");
+    create_test_file(_test_root_dir / "x y" / "g.txt", "inside x y");
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_directory_listing(true).with_serve_index_file(false);
+
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/a&copy;b/"));
+    ASSERT_EQ(_session->_response.status(), qb::http::status::OK);
+    std::string body = _session->_response.body().as<std::string>();
+    EXPECT_NE(body.find("<a href=\"/a&amp;copy;b/f.txt\">f.txt</a>"), std::string::npos) << body;
+    EXPECT_EQ(body.find("href=\"/a&copy;"), std::string::npos) << "the prefix reached the attribute unescaped: " << body;
+
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/x%20y/"));
+    ASSERT_EQ(_session->_response.status(), qb::http::status::OK);
+    body = _session->_response.body().as<std::string>();
+    EXPECT_NE(body.find("<a href=\"/x%20y/g.txt\">g.txt</a>"), std::string::npos) << "'%' must not be encoded twice: " << body;
+
+    // The attribute value decodes to the path that was listed, and that path opens the entry.
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/a&copy;b/f.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "inside a&copy;b");
+}
+
 TEST_F(StaticFilesMiddlewareTest, DirectoryListingDisabledServeIndexFalse) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     options.with_directory_listing(false).with_serve_index_file(false);
@@ -1022,6 +1050,32 @@ TEST_F(StaticFilesMiddlewareTest, ConfiguredIndexPathCannotEscapeRoot) {
     configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::FORBIDDEN);
     EXPECT_NE(_session->_response.body().as<std::string>(), "Contents of file outside root");
+}
+
+// A filesystem root is a valid static root (Huly QB-542): its canonical form already ends with
+// the separator ("/" on POSIX, "C:\" on Windows), so the containment check must not demand
+// another one after it. The fixture's own file is reached through the root that contains it;
+// a sibling that only shares the configured root's string prefix stays refused.
+TEST_F(StaticFilesMiddlewareTest, FilesystemRootServesItsDescendants) {
+    const std::filesystem::path fs_root = _test_root_dir.root_path();
+    ASSERT_FALSE(fs_root.empty());
+    // The request path is the file's path below that root, percent-encoded segment by segment.
+    std::string target;
+    for (const auto &segment : (_test_root_dir / "file1.txt").relative_path()) {
+        target += '/';
+        target += qb::http::utility::uri_encode_component(segment.string());
+    }
+    qb::http::StaticFilesOptions options(fs_root);
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, target));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << target;
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt") << target;
+
+    // Control: an ordinary root keeps its separator boundary against a prefix-sharing sibling.
+    create_test_file(_test_root_dir.parent_path() / (_test_root_dir.filename().string() + "_sibling") / "f.txt", kOutsideRootSecret);
+    qb::http::StaticFilesOptions ordinary(_test_root_dir);
+    configure_router_and_run(make_mw(ordinary),
+                             create_request(qb::http::method::GET, "/../" + _test_root_dir.filename().string() + "_sibling/f.txt"));
+    expect_traversal_denied();
 }
 
 // --- DoS guard: max_file_size ----------------------------------------------

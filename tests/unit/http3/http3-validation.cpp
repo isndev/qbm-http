@@ -199,6 +199,24 @@ TEST(Http3ProtocolValidationTest, AuthorityIncludesPortWhenPresent) {
     EXPECT_EQ(h3detail::authority(qb::io::uri("https://h:8443/")), "h:8443");
 }
 
+// An IP-literal host is written between brackets, the port after them (RFC 3986 section 3.2.2), and
+// :authority carries exactly that (RFC 9114 section 4.3.1). qb::io::uri keeps the literal without its
+// brackets in host() -- what a socket wants -- so the builder must restore them (Huly QB-572).
+TEST(Http3ProtocolValidationTest, AuthorityBracketsAnIPv6Literal) {
+    EXPECT_EQ(h3detail::authority(qb::io::uri("https://[::1]:8443/")), "[::1]:8443");
+    EXPECT_EQ(h3detail::authority(qb::io::uri("https://[::1]/")), "[::1]:443");
+    EXPECT_EQ(h3detail::authority(qb::io::uri("https://[2001:db8::7]:4433/p?q=1")), "[2001:db8::7]:4433");
+    EXPECT_EQ(h3detail::authority(qb::io::uri("https://127.0.0.1:8443/")), "127.0.0.1:8443");
+
+    qb::http::Request req{qb::http::method::GET, qb::io::uri("https://[::1]:8443/path")};
+    req.set_header("host", "[::1]:8443"); // a Host header does not repair :authority: it is folded away
+    const auto block = h3detail::make_request_headers(req);
+    ASSERT_TRUE(block.has_value());
+    ASSERT_GE(block->storage.size(), 3u);
+    EXPECT_EQ(block->storage[2].first, ":authority");
+    EXPECT_EQ(block->storage[2].second, "[::1]:8443");
+}
+
 TEST(Http3ProtocolValidationTest, AnnouncedTrailersParsesTrailerHeaderList) {
     {
         qb::http::Request req{qb::io::uri("https://h/")};

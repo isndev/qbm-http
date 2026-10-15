@@ -25,6 +25,9 @@
  *                                           parked, an inbound frame is dropped
  *                                           and the subsequent `receive()` does
  *                                           NOT observe it (asserted post-state).
+ *   - `LoweringThePendingCapBounds*Queue` — a cap lowered under a fuller queue
+ *                                           bounds it at once, on the client and
+ *                                           on the server session.
  *
  * This TU REQUIRES the SSL/crypto library to LINK (`ws/ws.h` `#error`s without
  * `QB_HAS_SSL` because the handshake uses `qb::io::crypto` SHA-1/base64), but it
@@ -41,6 +44,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -449,3 +453,104 @@ TEST(WsCloseFrameNegative, AbandonedCloseAllowsAReplacementButRejectsAConcurrent
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// 5. Lowering the pending cap bounds a queue already above it (Huly QB-518).
+//    The lowered cap applies at once: the oldest frames are dropped down to it,
+//    and later arrivals keep the queue there. A queue built under a larger cap
+//    used to keep its length forever, one pop per push. A cap of 0 only stops
+//    buffering what arrives; it never purges what is already buffered. Both
+//    coroutine endpoints share the policy: the client and the server session
+//    (whose fixture types live in a NAMED namespace, as every type handed to a
+//    coroutine-spawning framework template must).
+// ---------------------------------------------------------------------------
+
+namespace ws_close_frame_negative_test {
+
+class PendingCapServer;
+
+class PendingCapSession : public qb::http::ws::coro_session<PendingCapSession, PendingCapServer> {
+public:
+    using base = qb::http::ws::coro_session<PendingCapSession, PendingCapServer>;
+    using base::base;
+
+    qb::io::async::task<void>
+    run() {
+        co_return; // never spawned: these sessions are driven without an upgrade
+    }
+};
+
+class PendingCapServer : public qb::io::use<PendingCapServer>::tcp::server<PendingCapSession> {
+public:
+    void
+    on(IOSession &) {}
+};
+
+// Receive until nothing is buffered: a receive that does not complete within a few loop turns
+// found the buffer empty and is abandoned (an abandoned receive releases its slot, QB-514).
+template <typename Receive>
+std::vector<std::string>
+drain_buffered(Receive receive) {
+    std::vector<std::string> payloads;
+    for (;;) {
+        auto pending = receive();
+        pending.handle().resume();
+        for (int turn = 0; turn != 16 && !pending.handle().done(); ++turn)
+            qb::io::async::run(EVRUN_NOWAIT);
+        if (!pending.handle().done())
+            return payloads;
+        payloads.push_back(pending.await_resume().payload);
+    }
+}
+
+template <typename Endpoint>
+void
+deliver_text(Endpoint &endpoint, std::string const &text) {
+    qb::http::ws::MessageText message;
+    message << text;
+    endpoint.on(qb::protocol::ws_internal::event_message{message.size(), message.data().cbegin(), message});
+}
+
+template <typename Endpoint, typename Receive>
+void
+expect_lowered_cap_applies(Endpoint &endpoint, Receive receive) {
+    for (int i = 1; i <= 5; ++i)
+        deliver_text(endpoint, "f" + std::to_string(i)); // buffered under the default cap
+    endpoint.set_pending_cap(3);
+    EXPECT_EQ(drain_buffered(receive), (std::vector<std::string>{"f3", "f4", "f5"}))
+        << "a cap lowered from 1024 to 3 must bound the queue at once, keeping the newest frames";
+
+    endpoint.set_pending_cap(1024);
+    for (int i = 1; i <= 5; ++i)
+        deliver_text(endpoint, "g" + std::to_string(i));
+    endpoint.set_pending_cap(2);
+    deliver_text(endpoint, "g6");
+    EXPECT_EQ(drain_buffered(receive), (std::vector<std::string>{"g5", "g6"}))
+        << "after the cap went from 1024 to 2, an arrival must leave the two newest frames";
+
+    // Control: a cap of 0 discards what arrives and keeps what is buffered.
+    endpoint.set_pending_cap(1024);
+    for (int i = 1; i <= 3; ++i)
+        deliver_text(endpoint, "h" + std::to_string(i));
+    endpoint.set_pending_cap(0);
+    deliver_text(endpoint, "h4");
+    EXPECT_EQ(drain_buffered(receive), (std::vector<std::string>{"h1", "h2", "h3"}));
+}
+
+TEST(WsCloseFrameNegative, LoweringThePendingCapBoundsTheClientQueue) {
+    CoroutineCleanup cleanup;
+    qb::io::async::init();
+    qb::http::ws::coro_client<> ws;
+    expect_lowered_cap_applies(ws, [&ws]() -> qb::io::async::task<qb::http::ws::IncomingFrame> { co_return co_await ws.receive(); });
+}
+
+TEST(WsCloseFrameNegative, LoweringThePendingCapBoundsTheSessionQueue) {
+    CoroutineCleanup cleanup;
+    qb::io::async::init();
+    PendingCapServer  server;
+    PendingCapSession session{server};
+    expect_lowered_cap_applies(session,
+                               [&session]() -> qb::io::async::task<qb::http::ws::IncomingFrame> { co_return co_await session.next_frame(); });
+}
+
+} // namespace ws_close_frame_negative_test

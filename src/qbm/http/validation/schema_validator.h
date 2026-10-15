@@ -123,7 +123,10 @@ private:
     bool validate_additional_properties_keyword(const qb::json &value, const qb::json &schema_node, const std::string &path,
                                                 Result &result) const;
 
-    // Note: propertyNames is handled by a PropertyNamesRule which calls back to SchemaValidator.
+    // Each property NAME validated against the propertyNames sub-schema, through
+    // validate_recursive like every other sub-schema: one depth budget for the whole
+    // validation (Huly QB-552). Errors read as PropertyNamesRule reports them.
+    bool validate_property_names_keyword(const qb::json &value, const qb::json &names_schema, const std::string &path, Result &result) const;
 
     // Applies rules that are not structural or type-based (e.g., minLength, maximum).
     bool apply_primitive_rules(const qb::json &value, const qb::json &schema_node, const std::string &path, Result &result) const;
@@ -157,9 +160,11 @@ private:
     mutable std::unordered_map<const qb::json *, std::vector<std::shared_ptr<IRule>>> _rules_cache;
 
     /// Maximum schema nesting depth accepted by validate_recursive. Guards against stack
-    /// overflow from a pathologically deep schema (properties/items/allOf/anyOf/oneOf/not
-    /// nesting). Schemas are developer/config-controlled, but may be loaded from external
-    /// config, so a bound is prudent. Real schemas nest well under this.
+    /// overflow from a pathologically deep schema (properties/items/additionalProperties/
+    /// propertyNames/allOf/anyOf/oneOf/not nesting: every sub-schema is validated through
+    /// validate_recursive, so they all draw on this one budget). Schemas are
+    /// developer/config-controlled, but may be loaded from external config, so a bound is
+    /// prudent. Real schemas nest well under this.
     static constexpr int MAX_SCHEMA_DEPTH = 64;
 
     /// Live recursion depth of the current validate() call. `mutable` because the recursion

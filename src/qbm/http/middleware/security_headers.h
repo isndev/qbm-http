@@ -17,6 +17,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <qb/utility/build_macros.h>
@@ -24,6 +26,7 @@
 #include <qb/io/crypto.h>
 #endif
 
+#include "../origin.h"
 #include "../response.h"
 #include "../routing/middleware.h"
 #include "../types.h" // For HookPoint, AsyncTaskResult
@@ -44,6 +47,28 @@ namespace internal {
  * @return Hex-encoded random string of the requested length.
  */
 [[nodiscard]] std::string generate_random_nonce(size_t length = 32);
+
+/**
+ * @brief Whether the connection a request arrived on is secure transport (RFC 6797 section 7).
+ *
+ * HSTS follows the CONNECTION, never the request target: an HTTP/1.1 request on a TLS
+ * connection is ordinarily origin-form (`GET /path`) and its URI carries no scheme at all,
+ * while an absolute-form `GET https://...` can arrive on plain TCP. A session that exposes its
+ * transport -- every HTTP/1.1 and HTTP/2 session, `tcp` or `stcp` -- answers from that
+ * transport's `is_secure()`, decided at compile time. A session that exposes none (an HTTP/3
+ * stream session, whose request URI is rebuilt from `:scheme`; a test double) falls back to
+ * the scheme of the request URI.
+ */
+template <typename SessionType>
+[[nodiscard]] bool
+arrived_over_secure_transport(const Context<SessionType> &ctx) noexcept {
+    if constexpr (requires(SessionType &session) { std::remove_cvref_t<decltype(session.transport())>::is_secure(); }) {
+        (void) ctx;
+        return std::remove_cvref_t<decltype(std::declval<SessionType &>().transport())>::is_secure();
+    } else {
+        return origin::scheme_eq(ctx.request().uri().scheme(), "https");
+    }
+}
 } // namespace internal
 
 /**
@@ -309,7 +334,7 @@ public:
             if (point == HookPoint::PRE_RESPONSE_SEND) {
                 const auto &opts = *options_capture; // Dereference shared_ptr to get options
 
-                if (opts.get_hsts_value() && ctx_ref.request().uri().scheme() == "https") {
+                if (opts.get_hsts_value() && internal::arrived_over_secure_transport(ctx_ref)) {
                     ctx_ref.response().set_header("Strict-Transport-Security", *opts.get_hsts_value());
                 }
                 if (opts.get_set_x_content_type_options_nosniff()) {

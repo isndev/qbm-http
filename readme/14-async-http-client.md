@@ -97,7 +97,7 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:721-727,789-799; qbm/http/src/qbm/http/1.1/client.cpp:149-163,369-387; qbm/http/src/qbm/http/headers.cpp:306-311 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:248-261,604-619; qbm/http/src/qbm/http/3/client.cpp:193-205,739-748; qbm/http/src/qbm/http/body.h:291-312 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:248-261,604-619; qbm/http/src/qbm/http/3/client.cpp:190-202,759-768; qbm/http/src/qbm/http/body.h:291-312 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:765-772; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
@@ -220,7 +220,7 @@ The three persistent clients share the connect / `push_request` / `push_requests
 | Base URI scheme | `http://` or `https://` | `https://` only | `https://` only |
 | Concurrency | one active request, rest queued | multiplexed streams | multiplexed streams |
 | `set_max_concurrent_streams` | — | ✓ (default 100) | ✓ (default 100) |
-| `set_max_pending_requests` | ✓ | ✓ | — |
+| `set_max_pending_requests` | ✓ | ✓ | ✓ (default 10000) |
 | `push_request_with_id` / `cancel_request` | — | — | ✓ |
 | `set_max_body_size` | — | — | ✓ (default 64 MiB) |
 | `set_auto_reconnect` | ✓ (default true) | ✓ (default true) | ✓ (default true) |
@@ -389,7 +389,7 @@ For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol spec
 
 HTTP/3 runs over QUIC. The entire `qb::http3` slice is compile-time gated behind `QBM_HTTP_HAS_HTTP3` — including its header — so guard any HTTP/3 code with that macro. Only ALPN `h3` is accepted, the base URI must be `https`, and (as with HTTP/2) requests must be same-origin.
 
-<!-- src: qbm/http/src/qbm/http/3/client.h:110-114,184-191,210-243,245-279,389 -->
+<!-- src: qbm/http/src/qbm/http/3/client.h:110-114,184-191,214-256,258-293,406 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 namespace qb::http3 {
@@ -422,7 +422,7 @@ namespace qb::http3 {
 
 The callback form, run-to-completion driven by the event loop:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:181-200 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:183-202 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 auto client = qb::http3::make_client("https://127.0.0.1:31943");
@@ -439,7 +439,7 @@ client->disconnect();
 
 And the coroutine form with lazy connect:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:285-296 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:287-298 -->
 ```cpp
 auto client = qb::http3::make_client("https://127.0.0.1:31992");
 client->set_verify_peer(false);  // self-signed local endpoint; default is true
@@ -452,7 +452,7 @@ The HTTP/3 client adds two capabilities the others lack:
 - **`push_request_with_id` / `cancel_request`** — submit a request and keep a `request_id` so you can cancel it later. A cancelled request completes with a `CLIENT_CLOSED_REQUEST` response.
 - **`set_max_body_size`** — caps the reassembled response body (default 64 MiB); a larger response resets the stream instead of buffering unbounded data.
 
-Request callbacks always run exactly once: on success with the server `Response`, or with a synthesized error (`SERVICE_UNAVAILABLE` on shutdown/disconnect, `REQUEST_TIMEOUT` on timeout, `BAD_GATEWAY` on stream close, `CLIENT_CLOSED_REQUEST` on cancel). A null callback is rejected — `push_request` returns `false` and `push_request_with_id` returns `0`.
+Request callbacks always run exactly once: on success with the server `Response`, or with a synthesized error (`SERVICE_UNAVAILABLE` on shutdown/disconnect, `REQUEST_TIMEOUT` on timeout, `BAD_GATEWAY` on stream close, `CLIENT_CLOSED_REQUEST` on cancel). A null callback is rejected — `push_request` returns `false` and `push_request_with_id` returns `0`. A request the pending-request cap refuses gets its `503` through the callback and `push_request` returns `false`; `push_requests` returns `false` when the cap refused at least one member — the HTTP/1.1 and HTTP/2 clients answer the same.
 
 For the QUIC transport and the dual-stack (h2 + h3) server, see [HTTP/3 protocol](./19-http3-protocol.md).
 

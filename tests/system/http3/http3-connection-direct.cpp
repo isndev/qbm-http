@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -828,6 +829,109 @@ TEST(Http3ConnectionDirect, ShutdownThenDrainedGateReportsCompletion) {
 
     // With no in-flight requests, a shutdown connection drains immediately.
     EXPECT_TRUE(pair.server.is_drained()) << "a quiescent connection must report drained after shutdown()";
+}
+
+// =============================================================================
+// MOVE — a moved connection is the connection (Huly QB-502)
+// =============================================================================
+
+/**
+ * @test A connection moved outside every native call keeps its nghttp3 identity and its state
+ * @brief nghttp3 calls back with the user data it was given at creation, and offers no way to change
+ *        it, so the identity it holds must not be the address of the object that moves. The client is
+ *        bound, moved, and its source destroyed; binding again must be the documented no-op (the
+ *        streams are already bound), and a full request/response exchange must run through the
+ *        destination -- under ASan, any callback still reaching the destroyed source is a
+ *        heap-use-after-free.
+ */
+TEST(Http3ConnectionDirect, AMovedConnectionKeepsItsNativeIdentityAndBindings) {
+    ClientOwner      client_owner;
+    ServerOwner      server_owner;
+    ServerConnection server{server_owner, 1, ServerConnection::role::server};
+    ASSERT_TRUE(server.bind_local_streams());
+    auto source = std::make_unique<ClientConnection>(client_owner, 1, ClientConnection::role::client);
+    ASSERT_TRUE(source->bind_local_streams());
+    const auto opened = client_owner.next_uni;
+
+    ClientConnection client{std::move(*source)};
+    source.reset();
+    ASSERT_TRUE(client.ok());
+    EXPECT_TRUE(client.bind_local_streams()) << "the streams were bound before the move";
+    EXPECT_EQ(client_owner.next_uni, opened) << "a moved connection must not open its control streams a second time";
+    pump(client_owner, client, server_owner, server);
+
+    qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/after-move")};
+    ASSERT_TRUE(client.submit_request(0, request));
+    pump(client_owner, client, server_owner, server);
+    ASSERT_EQ(server_owner.requests.size(), 1u);
+    EXPECT_EQ(server_owner.requests.front().uri().path(), "/after-move");
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = "answered after the move";
+    ASSERT_TRUE(server.submit_response(0, response));
+    pump(client_owner, client, server_owner, server);
+    ASSERT_EQ(client_owner.responses.size(), 1u);
+    EXPECT_EQ(client_owner.responses.front().body().template as<std::string>(), "answered after the move");
+    EXPECT_FALSE(client_owner.close.has_value()) << (client_owner.close ? client_owner.close->second : std::string{});
+}
+
+/**
+ * @test The shutdown state travels with a move
+ * @brief A server connection that started its graceful shutdown before being moved must still report
+ *        drained once the peer has the GOAWAY: `is_drained()` gates the transport close.
+ */
+TEST(Http3ConnectionDirect, AMovedConnectionKeepsItsShutdownState) {
+    ClientOwner      client_owner;
+    ServerOwner      server_owner;
+    ClientConnection client{client_owner, 1, ClientConnection::role::client};
+    ASSERT_TRUE(client.bind_local_streams());
+    auto source = std::make_unique<ServerConnection>(server_owner, 1, ServerConnection::role::server);
+    ASSERT_TRUE(source->bind_local_streams());
+    pump(client_owner, client, server_owner, *source);
+    ASSERT_TRUE(source->shutdown());
+
+    ServerConnection server{std::move(*source)};
+    source.reset();
+    pump(client_owner, client, server_owner, server);
+    EXPECT_TRUE(server.is_drained()) << "a shutdown started before the move must be seen through to drained";
+    EXPECT_FALSE(client_owner.shutdowns.empty()) << "the GOAWAY reached the peer";
+}
+
+// =============================================================================
+// :authority — an IPv6 literal keeps its brackets (Huly QB-572)
+// =============================================================================
+
+/**
+ * @test An IPv6 literal host is bracketed in :authority and reaches the server as the same origin
+ * @brief RFC 3986 section 3.2.2 writes an IP-literal host between brackets, and RFC 9114 section
+ *        4.3.1 carries the URI authority in :authority. The bare `::1:8443` the builder used to emit is
+ *        not an authority; the server, rebuilding the request URI from it, could not recover the host.
+ */
+TEST(Http3ConnectionDirect, IPv6AuthorityKeepsItsBracketsEndToEnd) {
+    Pair          pair;
+    std::uint64_t stream = 0;
+    struct case_t {
+        std::string target, host, port, received;
+    };
+    for (auto const &[target, host, port, received] : std::vector<case_t>{
+             {"https://[::1]:8443/v6?q=1", "::1", "8443", "https://[::1]:8443/v6?q=1"},
+             {"https://[2001:db8::7]/v6", "2001:db8::7", "443", "https://[2001:db8::7]:443/v6"}
+         }) {
+        qb::http::Request request{qb::http::method::GET, qb::io::uri(target)};
+        ASSERT_EQ(request.uri().host(), host) << "the client side parses the literal without its brackets";
+        ASSERT_TRUE(pair.client.submit_request(stream, request)) << target;
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), stream / 4 + 1) << target;
+        auto const &got = pair.server_owner.requests.back();
+        // The server rebuilds the URI from :scheme, :authority and :path: its source is the authority as received.
+        EXPECT_EQ(got.uri().source(), received) << "the :authority on the wire was not the URI's authority";
+        EXPECT_EQ(got.uri().host(), host) << target;
+        EXPECT_EQ(got.uri().port(), port) << target;
+        EXPECT_EQ(got.uri().path(), "/v6") << target;
+        stream += 4;
+    }
+    EXPECT_FALSE(pair.server_owner.close.has_value());
 }
 
 // =============================================================================

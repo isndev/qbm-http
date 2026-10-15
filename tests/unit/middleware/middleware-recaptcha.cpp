@@ -14,6 +14,7 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -195,6 +196,44 @@ TEST_F(RecaptchaMiddlewareTest, ValidTokenPassesWithInjectedVerifier) {
     EXPECT_GE(_session->_recaptcha_result_in_context->score, 0.5f);
     EXPECT_EQ(_session->_recaptcha_result_in_context->action, "submit");
     EXPECT_EQ(_session->_recaptcha_result_in_context->hostname, "test.com");
+}
+
+// challenge_ts is the instant Google announces, not the instant the reply is parsed (Huly QB-537).
+// Google documents it as an ISO 8601 timestamp, in practice RFC 3339 (`2026-01-02T03:04:05Z`); an
+// offset, a fraction and the lower-case `t`/`z` RFC 3339 section 5.6 allows denote the same
+// instant, and an absent or unreadable value is reported as absent, never as "now".
+TEST_F(RecaptchaMiddlewareTest, ChallengeTimestampIsTheAnnouncedInstant) {
+    using namespace std::chrono;
+    const auto result_for = [this](const std::string &google_body) {
+        auto recap_mw = qb::http::recaptcha_middleware<MockRecaptchaSession>(qb::http::RecaptchaOptions("test_secret"));
+        recap_mw->verification_client(ok_verifier(google_body));
+        run_recaptcha(recap_mw, recaptcha_request("token"));
+        EXPECT_TRUE(_session->_recaptcha_result_in_context.has_value()) << google_body;
+        return _session->_recaptcha_result_in_context.value_or(qb::http::RecaptchaResult{});
+    };
+    const system_clock::time_point announced = sys_days{year{2026} / 1 / 2} + hours{3} + minutes{4} + seconds{5};
+
+    for (const char *ts : {"2026-01-02T03:04:05Z", "2026-01-02t03:04:05z", "2026-01-02T05:04:05+02:00", "2026-01-01T22:34:05-04:30"}) {
+        const auto result = result_for(std::string(R"({"success":true,"hostname":"test.com","challenge_ts":")") + ts + "\"}");
+        EXPECT_TRUE(result.success) << ts;
+        EXPECT_TRUE(result.has_challenge_ts) << ts;
+        EXPECT_EQ(result.challenge_ts, announced) << ts;
+    }
+
+    const auto fractional = result_for(R"({"success":true,"challenge_ts":"2026-01-02T03:04:05.25Z"})");
+    EXPECT_TRUE(fractional.has_challenge_ts);
+    EXPECT_EQ(fractional.challenge_ts, announced + milliseconds{250});
+
+    // Absent, unreadable, or not a real date: no instant is invented.
+    for (const char *body :
+         {R"({"success":true})", R"({"success":true,"challenge_ts":"not-a-date"})", R"({"success":true,"challenge_ts":"2026-02-30T03:04:05Z"})",
+          R"({"success":true,"challenge_ts":"2026-01-02T03:04:05"})", R"({"success":true,"challenge_ts":"2026-01-02T24:00:00Z"})",
+          R"({"success":true,"challenge_ts":42})"}) {
+        const auto result = result_for(body);
+        EXPECT_TRUE(result.success) << body << ": a timestamp problem never decides the verification verdict";
+        EXPECT_FALSE(result.has_challenge_ts) << body;
+        EXPECT_EQ(result.challenge_ts, system_clock::time_point{}) << body;
+    }
 }
 
 TEST_F(RecaptchaMiddlewareTest, TokenExtractionFromUrlEncodedFormBody) {

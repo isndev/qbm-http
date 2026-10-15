@@ -31,6 +31,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -117,7 +118,7 @@ TEST(WebSocketFrameEncodeValidation, SetSubprotocolsRejectsBadAndAcceptsGoodToke
 // and the client `validate_handshake_response`. The over-the-wire system tests
 // only exercise their happy path; the cases below pin the case-folding,
 // token-grammar, comma-list, OWS-trim and constant-time-equality branches
-// directly (ws.h:814-888) with no socket.
+// directly (ws.h:834-908) with no socket.
 // ---------------------------------------------------------------------------
 
 TEST(WsHandshakeDetail, IequalAsciiFoldsCaseAndRejectsMismatches) {
@@ -318,7 +319,7 @@ TEST(WsHandshakeValidator, ServerRejectsNonGetMethod) {
 TEST(WsHandshakeValidator, ServerRejectsMissingUpgradeFlag) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
-    req.upgrade           = false; // ws.h:911-912 branch
+    req.upgrade           = false; // ws.h:931-932 branch
     qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
@@ -327,7 +328,7 @@ TEST(WsHandshakeValidator, ServerRejectsMissingUpgradeFlag) {
 TEST(WsHandshakeValidator, ServerRejectsWrongUpgradeHeaderValue) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
-    req.set_header("Upgrade", "h2c"); // not "websocket" => ws.h:913-914
+    req.set_header("Upgrade", "h2c"); // not "websocket" => ws.h:933-934
     qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
@@ -336,7 +337,7 @@ TEST(WsHandshakeValidator, ServerRejectsWrongUpgradeHeaderValue) {
 TEST(WsHandshakeValidator, ServerRejectsConnectionWithoutUpgradeToken) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
-    req.set_header("Connection", "keep-alive"); // no Upgrade token => ws.h:915-916
+    req.set_header("Connection", "keep-alive"); // no Upgrade token => ws.h:935-936
     qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
@@ -345,7 +346,7 @@ TEST(WsHandshakeValidator, ServerRejectsConnectionWithoutUpgradeToken) {
 TEST(WsHandshakeValidator, ServerRejectsWrongKeyLength) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
-    req.set_header("Sec-WebSocket-Key", "short"); // != 24 chars => ws.h:923-924
+    req.set_header("Sec-WebSocket-Key", "short"); // != 24 chars => ws.h:943-944
     qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
@@ -354,8 +355,8 @@ TEST(WsHandshakeValidator, ServerRejectsWrongKeyLength) {
 TEST(WsHandshakeValidator, ServerRejectsNonBase64KeyOfCorrectLength) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
-    // 24 chars containing base64-illegal bytes => decode throws (ws.h:926-929)
-    // or yields a wrong size / non-canonical re-encode (ws.h:931-934).
+    // 24 chars containing base64-illegal bytes => decode throws (ws.h:946-949)
+    // or yields a wrong size / non-canonical re-encode (ws.h:951-954).
     req.set_header("Sec-WebSocket-Key", "************************");
     qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
@@ -368,7 +369,7 @@ TEST(WsHandshakeValidator, ServerRejectsNonCanonicalBase64Key) {
     // 24 chars that DO decode to exactly 16 bytes, but with non-zero trailing
     // bits in the final sextet — so re-encoding canonicalises them and the
     // round-trip differs from the input, tripping the canonical-form check
-    // (ws.h:933-934). The decoder is noexcept, so this is the only way to fail
+    // (ws.h:953-954). The decoder is noexcept, so this is the only way to fail
     // *after* a successful 16-byte decode.
     req.set_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZR==");
     qb::http::Response                      resp;
@@ -379,7 +380,7 @@ TEST(WsHandshakeValidator, ServerRejectsNonCanonicalBase64Key) {
 TEST(WsHandshakeValidator, ServerRejectsWrongVersion) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
-    req.set_header("Sec-WebSocket-Version", "8"); // != 13 => ws.h:937-938
+    req.set_header("Sec-WebSocket-Version", "8"); // != 13 => ws.h:957-958
     qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
     EXPECT_FALSE(proto.ok());
@@ -418,7 +419,7 @@ TEST(WsHandshakeValidator, ClientRejectsMissingUpgradeFlag) {
     HsClientFakeIO     io;
     const std::string  key  = "dGhlIHNhbXBsZSBub25jZQ==";
     qb::http::Response resp = valid_handshake_response(key);
-    resp.upgrade            = false; // ws.h:1010-1011
+    resp.upgrade            = false; // ws.h:1030-1031
     qb::protocol::ws_client<HsClientFakeIO> proto(io, resp, key);
     EXPECT_FALSE(proto.ok());
 }
@@ -427,7 +428,7 @@ TEST(WsHandshakeValidator, ClientRejectsWrongStatus) {
     HsClientFakeIO     io;
     const std::string  key  = "dGhlIHNhbXBsZSBub25jZQ==";
     qb::http::Response resp = valid_handshake_response(key);
-    resp.status()           = qb::http::status::OK; // not 101 => ws.h:1012-1013
+    resp.status()           = qb::http::status::OK; // not 101 => ws.h:1032-1033
     qb::protocol::ws_client<HsClientFakeIO> proto(io, resp, key);
     EXPECT_FALSE(proto.ok());
 }
@@ -436,7 +437,7 @@ TEST(WsHandshakeValidator, ClientRejectsWrongUpgradeHeader) {
     HsClientFakeIO     io;
     const std::string  key  = "dGhlIHNhbXBsZSBub25jZQ==";
     qb::http::Response resp = valid_handshake_response(key);
-    resp.set_header("Upgrade", "h2c"); // ws.h:1014-1015
+    resp.set_header("Upgrade", "h2c"); // ws.h:1034-1035
     qb::protocol::ws_client<HsClientFakeIO> proto(io, resp, key);
     EXPECT_FALSE(proto.ok());
 }
@@ -445,7 +446,7 @@ TEST(WsHandshakeValidator, ClientRejectsConnectionWithoutUpgradeToken) {
     HsClientFakeIO     io;
     const std::string  key  = "dGhlIHNhbXBsZSBub25jZQ==";
     qb::http::Response resp = valid_handshake_response(key);
-    resp.set_header("Connection", "close"); // ws.h:1016-1017
+    resp.set_header("Connection", "close"); // ws.h:1036-1037
     qb::protocol::ws_client<HsClientFakeIO> proto(io, resp, key);
     EXPECT_FALSE(proto.ok());
 }
@@ -454,7 +455,7 @@ TEST(WsHandshakeValidator, ClientRejectsEmptyAccept) {
     HsClientFakeIO     io;
     const std::string  key  = "dGhlIHNhbXBsZSBub25jZQ==";
     qb::http::Response resp = valid_handshake_response(key);
-    resp.set_header("Sec-WebSocket-Accept", ""); // ws.h:1019-1021
+    resp.set_header("Sec-WebSocket-Accept", ""); // ws.h:1039-1041
     qb::protocol::ws_client<HsClientFakeIO> proto(io, resp, key);
     EXPECT_FALSE(proto.ok());
 }
@@ -470,7 +471,7 @@ TEST(WsHandshakeValidator, ClientRejectsMismatchedAccept) {
 }
 
 // ===========================================================================
-// Coverage Wave-2: callback-based ws::Client event dispatch (ws.h:1801-1976).
+// Coverage Wave-2: callback-based ws::Client event dispatch (ws.h:1830-2005).
 //
 // The callback `Client` is default-constructible with no socket (the encode
 // tests already prove this). Registering each callback and dispatching the
@@ -643,7 +644,97 @@ run_framer(WsFramer &proto, WsFramerFakeIO &io) {
     }
 }
 
+// An I/O handler with an error observer of its own (Huly QB-516): the framer reports a protocol
+// failure to it synchronously, from getMessageSize(), which is noexcept. It records what it saw
+// and, when asked to, throws as application code may.
+struct ObservedFramerFakeIO {
+    using base_io_t                  = ObservedFramerFakeIO;
+    static constexpr bool has_server = true;
+
+    qb::allocator::pipe<char> input;
+    qb::allocator::pipe<char> output;
+    struct error {};
+
+    std::function<bool()> framer_ok;
+    bool                  throw_from_observer = false;
+    int                   errors_observed     = 0;
+    bool                  ok_when_observed    = false;
+
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    qb::allocator::pipe<char> &
+    out() noexcept {
+        return output;
+    }
+
+    template <typename T>
+    ObservedFramerFakeIO &
+    operator<<(const T &msg) {
+        output.put(msg);
+        return *this;
+    }
+    void
+    on(qb::protocol::ws_internal::event_message &&) {}
+    void
+    on(qb::protocol::ws_internal::event_close &&) {}
+    void
+    on(qb::protocol::ws_internal::event_ping &&) {}
+    void
+    on(qb::protocol::ws_internal::event_pong &&) {}
+    void
+    on(error &&) {
+        ++errors_observed;
+        ok_when_observed = framer_ok && framer_ok();
+        if (throw_from_observer) {
+            throw std::runtime_error("application error observer");
+        }
+    }
+};
+
+// Feed a frame whose HEADER is invalid (RSV1 set, no extension negotiated: RFC 6455 section 5.2)
+// so the failure is decided inside getMessageSize(), then check the contract of that failure: the
+// observer runs exactly once, already sees the connection failed, a throw from it stays inside
+// the framer, and the 1002 Close is queued once.
+void
+expect_header_failure_is_contained(bool throw_from_observer) {
+    ObservedFramerFakeIO                          io;
+    qb::protocol::ws_server<ObservedFramerFakeIO> proto(io, valid_upgrade_request());
+    ASSERT_TRUE(proto.ok());
+    io.framer_ok = [&proto] {
+        return proto.ok();
+    };
+    io.throw_from_observer = throw_from_observer;
+    const auto handshake   = io.output.size();
+
+    push_masked_frame(io.input, 0xC1u /*FIN + RSV1 + text*/, "x");
+    std::size_t consumed = 0;
+    EXPECT_NO_THROW(consumed = proto.getMessageSize());
+    EXPECT_EQ(consumed, io.input.size()) << "a failed connection drops what is left of its input";
+    EXPECT_FALSE(proto.ok());
+    EXPECT_EQ(io.errors_observed, 1);
+    EXPECT_FALSE(io.ok_when_observed) << "the observer ran while the framer still accepted input";
+
+    ASSERT_GE(io.output.size(), handshake + 4u) << "a Close frame is queued";
+    const auto *close = reinterpret_cast<const unsigned char *>(io.output.cbegin() + handshake);
+    EXPECT_EQ(close[0], 0x88u) << "FIN + Close, unmasked from a server";
+    EXPECT_EQ(io.output.size(), handshake + 2u + close[1]) << "exactly one Close frame is queued";
+    EXPECT_EQ((close[2] << 8) | close[3], 1002);
+
+    EXPECT_EQ(proto.getMessageSize(), 0u);
+    EXPECT_EQ(io.errors_observed, 1) << "the failure is reported once";
+}
+
 } // namespace
+
+TEST(WsFramerErrors, HeaderFailureObserverSeesTheConnectionAlreadyFailed) {
+    expect_header_failure_is_contained(false);
+}
+
+TEST(WsFramerErrors, HeaderFailureObserverThatThrowsIsContained) {
+    expect_header_failure_is_contained(true);
+}
 
 TEST(WsFramerErrors, FinalContinuationWithNoInitialDataFrameFails) {
     WsFramerFakeIO io;
@@ -651,7 +742,7 @@ TEST(WsFramerErrors, FinalContinuationWithNoInitialDataFrameFails) {
     ASSERT_TRUE(proto.ok());
 
     // A FIN continuation frame (opcode 0x0 + FIN) with no preceding data frame:
-    // _data_opcode is still 0 => ws.h:569-572 ProtocolError.
+    // _data_opcode is still 0 => ws.h:589-592 ProtocolError.
     push_masked_frame(io.input, 0x80u /*FIN + Continuation*/, "x");
     run_framer(proto, io);
     EXPECT_FALSE(proto.ok());
@@ -663,7 +754,7 @@ TEST(WsFramerErrors, ControlFrameWithExtendedLengthFails) {
     ASSERT_TRUE(proto.ok());
 
     // A close frame (control) whose length field uses the 16-bit extended form
-    // (indicator 126) => ws.h:678-680 rejects the announced length above the
+    // (indicator 126) => ws.h:698-700 rejects the announced length above the
     // 125-byte control-frame cap, before reading extended length bytes.
     push_masked_frame(io.input, qb::http::ws::opcode::Close, "ab", /*force=*/126);
     run_framer(proto, io);
@@ -676,7 +767,7 @@ TEST(WsFramerErrors, NonMinimal16BitLengthFails) {
     ASSERT_TRUE(proto.ok());
 
     // A text frame that uses the 16-bit length form (indicator 126) for a tiny
-    // payload (< 126) => ws.h:708-710 "Non-minimal payload length encoding".
+    // payload (< 126) => ws.h:728-730 "Non-minimal payload length encoding".
     push_masked_frame(io.input, qb::http::ws::opcode::Text, "hi", /*force=*/126);
     run_framer(proto, io);
     EXPECT_FALSE(proto.ok());
@@ -688,7 +779,7 @@ TEST(WsFramerErrors, NonMinimal64BitLengthFails) {
     ASSERT_TRUE(proto.ok());
 
     // A text frame using the 64-bit length form (indicator 127) for a value that
-    // fits in 16 bits => ws.h:711-713 "Non-minimal payload length encoding".
+    // fits in 16 bits => ws.h:731-733 "Non-minimal payload length encoding".
     push_masked_frame(io.input, qb::http::ws::opcode::Text, "hi", /*force=*/127);
     run_framer(proto, io);
     EXPECT_FALSE(proto.ok());
@@ -700,7 +791,7 @@ TEST(WsFramerErrors, GetMessageSizeReturnsZeroAfterFailure) {
     ASSERT_TRUE(proto.ok());
 
     // Fail the parser with a reserved opcode, then assert getMessageSize()
-    // short-circuits to 0 on the next call (ws.h:626-629 !this->ok()).
+    // short-circuits to 0 on the next call (ws.h:646-649 !this->ok()).
     push_masked_frame(io.input, 0x83u /*FIN + reserved opcode 0x3*/, "x");
     run_framer(proto, io);
     ASSERT_FALSE(proto.ok());
@@ -712,7 +803,7 @@ TEST(WsFramerErrors, ResetClearsPerFrameState) {
     WsFramer       proto(io, valid_upgrade_request());
     ASSERT_TRUE(proto.ok());
 
-    // Feed a complete masked text frame, then call reset() (ws.h:783-788) — the
+    // Feed a complete masked text frame, then call reset() (ws.h:803-808) — the
     // framer must accept a fresh frame afterwards and dispatch it.
     push_masked_frame(io.input, qb::http::ws::opcode::Text, "first");
     run_framer(proto, io);

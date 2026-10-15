@@ -205,7 +205,11 @@ public:
      * @brief Queue a request, delivering the response via @p callback.
      * @param request  Request to send (made absolute against the base origin).
      * @param callback Response handler; must be non-null.
-     * @return @c true if accepted; @c false if @p callback is null.
+     * @return @c false if @p callback is null, or if the request would take the queued + active
+     *         count past set_max_pending_requests() -- @p callback has then already received its
+     *         503, as with the HTTP/1.1 and HTTP/2 clients. @c true otherwise, an invalid request
+     *         (400) or one refused after the server's GOAWAY (503) included: those are answered
+     *         through @p callback.
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
     /**
@@ -230,9 +234,18 @@ public:
     [[nodiscard]] qb::http::async::awaiter<qb::http::Response> push_request(qb::http::Request request);
     /**
      * @brief Queue a batch of requests, delivering all responses via @p callback.
+     *
+     * The members are admitted in order, each exactly as push_request() would admit it: an
+     * invalid member completes with its 400, and a member that would take the queued + active
+     * count past set_max_pending_requests() completes with a 503, both at its index and before
+     * any state is allocated for it. @p callback runs once, with every result in request order
+     * -- at once when no member was admitted.
+     *
      * @param requests Requests to send; an empty batch completes immediately.
      * @param callback Batch handler; must be non-null for a non-empty batch.
-     * @return @c true if accepted; @c false if @p callback is null.
+     * @return @c false if @p callback is null, or if the bound refused at least one member, as
+     *         push_request() answers a refused request and the HTTP/1.1 and HTTP/2 batches do;
+     *         @c true otherwise.
      */
     bool push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback);
     /**
@@ -248,7 +261,8 @@ public:
         _max_concurrent_streams = value;
     }
     /// Set the cap on queued+active requests (bounds `_pending_requests`); a push past the
-    /// bound is failed synchronously with 503. Mirrors `http2::Client` for API parity.
+    /// bound is failed synchronously with 503 -- a single push, or each batch member past it
+    /// (see push_requests()). The setter mirrors `http2::Client` for API parity.
     void
     set_max_pending_requests(std::size_t value) noexcept {
         _max_pending_requests = value;
@@ -351,6 +365,9 @@ private:
     void ensure_absolute_uri(qb::http::Request &request);
     /// Validate/normalize @p request; @return an error response if rejected.
     [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
+    /// Admit one request (push_request() and push_request_with_id()); @return its id, or 0 when it
+    /// was answered at once. @p refused_by_bound is set when the pending bound refused it.
+    [[nodiscard]] request_id admit_request(qb::http::Request request, ResponseCallback callback, bool &refused_by_bound);
     /// Submit as many queued requests as the concurrency limit allows.
     void process_pending_requests();
     /// Mark the connection up, notify callbacks, and flush pending requests.

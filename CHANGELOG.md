@@ -9,6 +9,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **`RecaptchaResult::has_challenge_ts` (Huly QB-537).** Whether Google's reply carried a
+  readable `challenge_ts`, beside `has_score`; appended after `challenge_ts`, so positional
+  aggregate initialisation keeps compiling.
 - **HTTP/3 active cancellation retains the client through its callback (Huly QB-960).** A
   cancellation callback may release the last external `shared_ptr`; the client stays alive until
   the active stream has been reset and the pending queue has resumed.
@@ -44,6 +47,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   block. The `Encoder` class also gained private state for pending table-size updates: rebuild
   translation units that embed an `Encoder` (the HTTP/2 protocol templates) together.
 
+- **`JwtMiddleware` textual claims and HSTS are corrected observably (Huly QB-553, QB-539).** No
+  signature changes. `"jwt_payload"` holds `iss`, `sub`, `aud`, `jti` and `username` as the strings
+  that were signed (a numeric-looking `sub` was a JSON number); HSTS is no longer sent on a plain-TCP
+  connection for an absolute-form `https://` request target.
+- **A refused coroutine WebSocket upgrade left below 300 answers `400` (Huly QB-610).** No signature
+  change; a hook that refused with the default `200` (or a `101`) used to send it.
+- **An HTTP/3 batch past the pending-request bound gets 503s instead of queuing beyond it (Huly
+  QB-499).** No signature change; see the Fixed entry. `Client::push_request` and
+  `Client::push_requests` return `false` when the bound refused the request or a batch member (the
+  503 already delivered through the callback), as the HTTP/1.1 and HTTP/2 clients do; they returned
+  `true` for any non-null callback.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -258,6 +272,70 @@ All notable changes to the qbm-http module are documented here. The format is ba
   x86-64 GCC/Clang and MSVC builds). `validate_huffman_encoded_data` returns the decoder's verdict:
   eight `'0'` symbols, five zero octets, are valid. Witnesses in
   `tests/unit/http2/hpack-encoder-strategy.cpp`, `hpack-codec.cpp` and `http2-protocol-roundtrip.cpp`.
+- **HTTP/3 batches respect the pending-request bound (Huly QB-499).** `Client::push_requests` and
+  its coroutine form admit each member as `push_request` would: a member that would take the
+  queued + active count past `set_max_pending_requests` completes with a 503 at its index before
+  any context or timer is allocated for it. The callback still runs once, in request order, and at
+  once when no member was admitted; `push_requests` returns `false` when a member was refused.
+- **A moved HTTP/3 connection keeps its callbacks and state (Huly QB-502).** nghttp3 calls back
+  with the user data it was given at creation and cannot be told another, so `connection<Owner>`
+  now hands it a heap anchor that a move re-points: callbacks reach the destination, and the bound
+  local streams, a started shutdown and parked closes travel with it. The source can be destroyed
+  at once; the move used to leave every callback on it (a heap-use-after-free under ASan).
+- **A moved `dual_stack_server` routes on its own stacks (Huly QB-504).** Explicit move
+  construction and assignment keep the router facade bound to the server that owns the stacks; the
+  implicit moves copied its pointer to the source.
+- **HTTP/3 keeps the brackets of an IPv6 `:authority` (Huly QB-572).** A request to
+  `https://[::1]:8443/` sent `:authority: ::1:8443`; the builder now writes the IP literal between
+  brackets with the port after them (RFC 3986 section 3.2.2, RFC 9114 section 4.3.1), and the
+  persistent client completes a relative target from its base the same way.
+- **A WebSocket reconnect after the peer's EOF starts in the same loop pass (Huly QB-1069).** Since
+  qb-io's `dispose()` closes a standalone client's transport when the peer ended the connection (Huly
+  QB-1060), the cleanup the client defers for it found no socket to close and left the connection
+  marked retiring: a `connect()` from the `disconnected` callback waited one more loop pass for a
+  launch with nothing to retire. The cleanup now clears that state when the transport is closed
+  already.
+- **A WebSocket protocol-error observer cannot terminate the process (Huly QB-516).** A frame
+  header the parser refuses fails the connection from `getMessageSize()`, which is `noexcept`. The
+  failure now marks the connection closed before any application code runs, queues its Close
+  once, and contains an exception from an `on(error)` observer of the I/O handler. The public
+  client already ran its `on_error` deferred, outside the parser.
+- **Lowering a coroutine WebSocket pending cap bounds the queue (Huly QB-518).** A queue already
+  above a lowered `set_pending_cap` kept its length, one pop per push; the setter now drops the
+  oldest frames down to the new cap at once, on `coro_client` and `coro_session`, and the arrival
+  path is unchanged. A cap of 0 still only discards arrivals and never purges what is buffered.
+- **A refused coroutine WebSocket upgrade answers an error (Huly QB-610).** A handshake hook that
+  returned `false` or threw without choosing a status answered `200 OK`, and one that left `101`
+  announced the upgrade it refused. A refusal with a status below 300 is now answered `400 Bad
+  Request`; 3xx, 4xx and 5xx are sent as set.
+- **A sub-millisecond rate-limit window ends at its own length (Huly QB-536).** The reset, the
+  stale-entry sweep and `X-RateLimit-Reset` compared the elapsed time truncated to whole
+  milliseconds, so a 500 us window never ended before 1 ms. They compare in the clock's own units.
+- **reCAPTCHA `challenge_ts` is the announced instant (Huly QB-537).** The result recorded the
+  parsing time. The RFC 3339 timestamp Google sends is now parsed (fraction, `Z` or numeric offset)
+  and converted to UTC; an absent or unreadable value leaves `challenge_ts` at the epoch with
+  `has_challenge_ts == false`. The verification verdict never depends on it.
+- **HSTS follows the connection (Huly QB-539).** `SecurityHeadersMiddleware` decided from the
+  request URI's scheme, which an ordinary origin-form request on an HTTP/1.1 TLS connection does
+  not carry: configured HSTS was missing on HTTPS. The decision is now the session transport's
+  `is_secure()` for HTTP/1.1 and HTTP/2 sessions (RFC 6797 sections 7.1, 7.2), falling back to the
+  URI scheme only for a session without a transport (HTTP/3 stream sessions, test doubles).
+- **Static files under a filesystem root are served (Huly QB-542).** A root that already ends with
+  a separator (`/`, `C:\`) refused every descendant: the containment check demanded a second
+  separator. A prefix-sharing sibling of an ordinary root stays refused.
+- **The directory listing escapes its link prefix (Huly QB-543).** The request path was written
+  raw into `href`, so a legal `&copy;` in it became a character reference. The prefix is now
+  escaped for the attribute; percent-encodings are left as they are.
+- **One schema-nesting budget per validation (Huly QB-552).** `additionalProperties` and
+  `propertyNames` validated through a fresh `SchemaValidator` whose count restarted at zero, so a
+  chain of them never met the 64-level bound that `properties`, `items` and the combinators
+  enforce. They validate in place now, under the same budget, with the cached rules and without
+  copying the sub-schema. The standalone `PropertyNamesRule` is unchanged.
+- **A verified token gives back its `User` verbatim (Huly QB-553).** `auth::Manager::verify_token`
+  re-read every verified claim as JSON, so an id or username such as `"123"`, `"true"` or `"null"`
+  vanished, and a token whose two identifiers looked like JSON was refused. The signed branch now
+  reads the token's own payload, as the unsigned branch already did. `JwtMiddleware` keeps its
+  claim coercion except for the textual claims (`iss`, `sub`, `aud`, `jti`, `username`).
 - **API documentation checks reject comment-only names and invalid later citations (Huly QB-561, QB-562).**
   The shipped guard indexes C++ code without comments or literals and examines every
   citation on a line before accepting it.

@@ -223,6 +223,34 @@ public:
         , _http3(qb::http3::make_server<Http3Session>())
         , _router(*this) {}
 
+    dual_stack_server(dual_stack_server const &)            = delete;
+    dual_stack_server &operator=(dual_stack_server const &) = delete;
+
+    /**
+     * @brief Move-construct: take both stacks; the facade stays bound to THIS server.
+     *
+     * The facade holds the address of its owner, so a member-wise move (the implicit one, until
+     * 3.3) left the destination's router() driving the source, whose stacks had just left it
+     * (Huly QB-504). The source keeps no stack: destroy it or assign to it, nothing else. Move a
+     * server before it listens; a listening server's endpoints already belong to the event loop.
+     */
+    dual_stack_server(dual_stack_server &&other) noexcept
+        : _http2(std::move(other._http2))
+        , _http3(std::move(other._http3))
+        , _router(*this) {}
+
+    /**
+     * @brief Move-assign: take both stacks of @p other; the facade stays bound to THIS server.
+     *
+     * The stacks this server held are destroyed. Same rules as the move constructor.
+     */
+    dual_stack_server &
+    operator=(dual_stack_server &&other) noexcept {
+        _http2 = std::move(other._http2);
+        _http3 = std::move(other._http3);
+        return *this;
+    }
+
     /**
      * @brief Access the unified router facade.
      * @return Reference to the facade that mirrors routes onto both stacks.

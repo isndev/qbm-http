@@ -18,23 +18,25 @@
  *     `ServerThread<>` RAII (loopback_server.h): readiness via condition variable,
  *     ephemeral ports, worker-thread run loop. Each test configures its own
  *     routes/middleware in the worker-thread `configure` lambda.
- *   - SecurityHeaders is RE-ENABLED as a plain-HTTP variant: HSTS is correctly
- *     suppressed for non-`https` schemes by the middleware, so the test asserts
- *     the scheme-independent headers (nonce CSP, nosniff, frame-options, ...) and
- *     explicitly asserts HSTS is ABSENT over plain HTTP. No more `DISABLED_`.
+ *   - SecurityHeaders runs over plain HTTP AND TLS: HSTS follows the connection
+ *     (RFC 6797 section 7), absent over plain TCP even for an https target, sent
+ *     over TLS for an origin-form request; the plain case also asserts the other
+ *     headers (nonce CSP, nosniff, frame-options, ...). No more `DISABLED_`.
  *   - Compression is verified by ACTUALLY gzip-inflating the response body
  *     (`Body::uncompress`) and comparing to the original, not just header sniffing.
  *   - The rate-limit `sleep_for(3s)` window wait is replaced by a deterministic
  *     `reset_all_clients()` on the middleware instance — no wall-clock dependency.
  *   - `std::cout`/`std::cerr` debug noise and the file-local `main()` are stripped.
  *
- * REQUIRES: live. No SSL dependency — this TU builds and runs on QB_HAS_SSL=OFF.
+ * REQUIRES: live. Builds and runs on QB_HAS_SSL=OFF; the TLS case is compiled only with SSL.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -42,6 +44,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -50,6 +53,9 @@
 #include <qbm/http/middleware/all.h>
 
 #include "../../shared/loopback_server.h"
+#ifdef QB_HAS_SSL
+#include "../../shared/ssl_test_resource.h"
+#endif
 
 #include <qb/json.h>
 #include <qb/system/parse.h>
@@ -303,7 +309,7 @@ TEST_F(MiddlewarePipelineTest, SecurityHeadersMiddlewarePlainHttp) {
     EXPECT_EQ("no-referrer", response.header("Referrer-Policy"));
     EXPECT_EQ("microphone=(), geolocation=()", response.header("Permissions-Policy"));
 
-    // HSTS is correctly suppressed for non-https schemes.
+    // HSTS is not sent over plain TCP (RFC 6797 section 7.2).
     EXPECT_TRUE(std::string(response.header("Strict-Transport-Security")).empty()) << "HSTS must not be emitted over plain HTTP";
 
     // The user-provided CSP is emitted verbatim regardless of the nonce feature.
@@ -326,6 +332,98 @@ TEST_F(MiddlewarePipelineTest, SecurityHeadersMiddlewarePlainHttp) {
     EXPECT_TRUE(std::string(response.header("X-Observed-Nonce")).empty()) << "no CSP nonce should be produced without QB_HAS_SSL";
 #endif
 }
+
+// RFC 6797 sections 7.1 and 7.2: an HSTS host sends Strict-Transport-Security over secure
+// transport, and never over plain transport. The decision belongs to the connection, not to the
+// request target (Huly QB-539): an absolute-form target that says https, sent on a plain socket,
+// still arrives over plain TCP. (Its twin, the origin-form request over TLS, is below.)
+TEST_F(MiddlewarePipelineTest, HstsIsNotSentOverPlainTcpForAnHttpsAbsoluteTarget) {
+    auto server = start_pipeline_server(_port, [](PipelineServer &srv) {
+        qb::http::SecurityHeadersOptions options;
+        options.with_hsts("max-age=31536000").with_x_content_type_options_nosniff();
+        srv.router().use<qb::http::SecurityHeadersMiddleware<PipelineSession>>(options);
+        srv.router().get("/hsts", [](std::shared_ptr<PipelineCtx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "hsts";
+            ctx->complete();
+        });
+    });
+    ASSERT_TRUE(server->ready());
+
+    qb::io::tcp::socket sock;
+    ASSERT_EQ(sock.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(_port)}), 0);
+    (void) sock.set_nonblocking(true);
+    const std::string request =
+        "GET https://localhost:" + std::to_string(_port) + "/hsts HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
+
+    std::string head;
+    for (int i = 0; i < 400 && head.find("\r\n\r\n") == std::string::npos; ++i) {
+        char buf[512];
+        if (const int n = sock.read(buf, sizeof(buf)); n > 0) {
+            head.append(buf, static_cast<std::size_t>(n));
+        } else {
+            std::this_thread::sleep_for(5ms);
+        }
+    }
+    sock.close();
+    ASSERT_EQ(head.rfind("HTTP/1.1 200", 0), 0u) << head;
+    std::string lowered = head;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    EXPECT_EQ(lowered.find("strict-transport-security"), std::string::npos) << "HSTS sent over plain TCP: " << head;
+    EXPECT_NE(lowered.find("x-content-type-options"), std::string::npos) << "the middleware did run: " << head;
+}
+
+#ifdef QB_HAS_SSL
+class TlsPipelineServer;
+
+class TlsPipelineSession : public qb::http::use<TlsPipelineSession>::ssl::session<TlsPipelineServer> {
+public:
+    explicit TlsPipelineSession(TlsPipelineServer &server)
+        : session(server) {}
+};
+
+class TlsPipelineServer : public qb::http::use<TlsPipelineServer>::ssl::server<TlsPipelineSession> {};
+
+// The twin: the ordinary request a browser sends to an HTTPS origin is origin-form (`GET /hsts`),
+// its URI carries no scheme at all, and the header must still be sent because the connection is TLS.
+TEST_F(MiddlewarePipelineTest, HstsIsSentOverTlsForAnOriginFormRequest) {
+    ASSERT_TRUE(qb::http::test::certs_available())
+        << "Missing TLS test resources: " << qb::http::test::ssl_cert_path() << " / " << qb::http::test::ssl_key_path();
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+
+    qb::http::test::ServerThread<TlsPipelineServer> server([cert, key](TlsPipelineServer &srv) -> bool {
+        auto tls = qb::io::ssl::Context::server(cert, key);
+        if (!tls.ok()) {
+            return false;
+        }
+        srv.transport().init(std::move(tls));
+        qb::http::SecurityHeadersOptions options;
+        options.with_hsts("max-age=31536000");
+        srv.router().use<qb::http::SecurityHeadersMiddleware<TlsPipelineSession>>(options);
+        srv.router().get("/hsts", [](std::shared_ptr<qb::http::Context<TlsPipelineSession>> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "hsts";
+            ctx->complete();
+        });
+        srv.router().compile();
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
+            return false;
+        }
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(server.ready());
+    const auto port = server.server().transport().local_endpoint().port();
+
+    qb::http::Request request{{"https://localhost:" + std::to_string(port) + "/hsts"}};
+    // Self-signed test certificate: opt out of secure-by-default verification.
+    const auto response = qb::http::run_sync(qb::http::GET(request, qb::duration::zero(), /*verify_peer=*/false)).response;
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.header("Strict-Transport-Security"), "max-age=31536000");
+}
+#endif // QB_HAS_SSL
 
 // ---------------------------------------------------------------------------
 // CompressionMiddleware (actually inflates the response body)
