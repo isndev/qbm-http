@@ -115,6 +115,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 batch admits its members one by one against the pending bound (Huly QB-1063).**
+  `qb::http2::Client::push_requests` refused a whole batch with 503s when it would exceed
+  `set_max_pending_requests`, its admissible members included. Each member is now admitted as
+  `push_request` admits one, as the HTTP/1.1 and HTTP/3 clients do (QB-499). A member past the
+  bound gets `503` at its index before anything is allocated for it, the others are sent, and the
+  callback runs once, in request order. `push_requests` returns `false` when a member was
+  refused, as `push_request` does.
 - **HTTP/2 client request trailers are sent once, and always (Huly QB-1061).** The fields a
   request's `Trailer` header announces went out in the leading HEADERS and again in the trailer
   block. When the body fit the flow-control windows, or there was none, that trailer block waited

@@ -16,7 +16,7 @@ HTTP/2 is a binary, multiplexed protocol: many concurrent request/response excha
 ### ALPN selects the protocol
 
 There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:298-308,616; qbm/http/src/qbm/http/2/client.cpp:449,469,939-958 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:298-308,616; qbm/http/src/qbm/http/2/client.cpp:450,470,940-959 -->
 
 ### Streams and multiplexing
 
@@ -57,7 +57,7 @@ Stream IDs are not arbitrary:
 - **Stream 0** is reserved. In this module `constants::HTTP11_STREAM_ID == 0` doubles as the sentinel for an HTTP/1.1 message; a valid HTTP/2 stream ID is `>= 1`. A response written with `stream_id == 0` (or larger than `uint32_t` max) is rejected by `session::operator<<`.
 - **Client-initiated streams use odd IDs**; **server-pushed streams use even IDs** (the server's next pushed ID starts at 2). The server rejects a client `HEADERS` frame on an even stream ID with `GOAWAY(PROTOCOL_ERROR)`.
 - **Stream IDs are 31-bit and never reused.** A client connection that has opened stream 2³¹−1 opens no more (`ClientHttp2Protocol::stream_ids_exhausted()`, `send_request` refuses): the persistent `qb::http2::Client` drains it like a graceful `GOAWAY` and sends its pending requests on a new connection (RFC 9113 §5.1.1).
-<!-- src: qbm/http/src/qbm/http/2/http2.h:60,62,197-198,259-267; qbm/http/src/qbm/http/2/protocol/server.h:85,418-420; qbm/http/src/qbm/http/2/protocol/client.h:1156-1161,1282-1293; qbm/http/src/qbm/http/2/client.cpp:489-497 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:60,62,197-198,259-267; qbm/http/src/qbm/http/2/protocol/server.h:85,418-420; qbm/http/src/qbm/http/2/protocol/client.h:1156-1161,1282-1293; qbm/http/src/qbm/http/2/client.cpp:490-498 -->
 
 Each request and response carries its stream ID on `MessageBase::stream_id` (0 for HTTP/1.1). The session stamps the inbound request with the stream it arrived on (`request.stream_id = stream_id`) before routing; `RouterCore::route_request` then copies that value onto the response prototype when it builds the `Context`, so `ctx->response().stream_id` is already correct before your handler runs. Your handler reads it through `ctx->request().stream_id`. At `ctx->complete()` the session only *reads* `res.stream_id` to pick the stream — it does not assign it, and a response whose `stream_id` is 0 or above `uint32_t` max is dropped with an error log.
 <!-- src: qbm/http/src/qbm/http/message_base.h:55-72; qbm/http/src/qbm/http/2/http2.h:338-342,259-267; qbm/http/src/qbm/http/routing/router_core.h:351-353 -->
@@ -97,7 +97,7 @@ Both directions follow the HTTP/3 contract: set the `Trailer` header to the fiel
 
 A peer reset of an unfinished routed stream cancels its stock session context, including `RST_STREAM(NO_ERROR)`. The neutral code still produces no public `Http2StreamErrorEvent`; the protocol's optional internal lifecycle notification introduces no required callback for custom I/O handlers. The session removes registry ownership before cancellation, and a late completion cannot revive the cancelled context. This notifies routed work without forcibly cancelling external native I/O or coroutines.
 <!-- src: qbm/http/src/qbm/http/2/protocol/server.h:788-809; qbm/http/src/qbm/http/2/http2.h:181-188,455-464 -->
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:306,340,452,750-814,830-896,888-895; qbm/http/src/qbm/http/2/http2.h:240; qbm/http/src/qbm/http/2/client.cpp:653-673,675-705,973-986 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:306,340,452,750-814,830-896,888-895; qbm/http/src/qbm/http/2/http2.h:240; qbm/http/src/qbm/http/2/client.cpp:654-674,676-706,974-987 -->
 
 ## Running an HTTP/2 server
 
@@ -239,7 +239,7 @@ The rate-limited idle-stream sweep remains in `pending_write`: no more often tha
 <!-- src: qbm/http/src/qbm/http/2/http2.h:120-175,375-419; qbm/http/src/qbm/http/routing/context.h:487-497 -->
 
 Lifecycle controls exercise silent completion from POST, `REQUEST_COMPLETE` and member destruction, including the no-hook case; protocol clearing before another candidate; and multiple batches from valid stream waves that leave more than 50 retained contexts. The earlier extraction control preserves its one-POST behavior.
-<!-- src: qbm/http/tests/system/http2/http2-client.cpp:2499-2501,2503-2505,2507-2509,2511-2513,2515-2592,2599-2725,2269-2345 -->
+<!-- src: qbm/http/tests/system/http2/http2-client.cpp:2513-2515,2517-2519,2521-2523,2525-2527,2529-2606,2613-2739,2283-2359 -->
 
 The sweep is **opportunistic**: it runs only when there is write activity. A purely idle connection with no writes never triggers the stream-level sweep — it is reclaimed instead by the 60 s `DEFAULT_SESSION_TIMEOUT`. Per-stream timestamps (`created_at`, `last_activity`) and `_last_stream_cleanup` use `std::chrono::steady_clock::time_point` directly, even though the durations they are compared against are `qb::duration`; this is a deliberate mixed time model in this slice.
 <!-- src: qbm/http/src/qbm/http/2/http2.h:116,227,375-388; qbm/http/src/qbm/http/2/protocol/stream.h:146-147,164-165 -->
@@ -275,23 +275,23 @@ The URI-only `Request` constructor sets `GET`; the default constructor leaves th
 <!-- src: qbm/http/src/qbm/http/2/client.h:344,367; qbm/http/tests/system/http2/http2-client-coro.cpp:264-285 -->
 
 The completed batch is retired before its callback runs. The callback may disconnect the client or enqueue another batch; it still receives the completed responses exactly once.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:387-399; qbm/http/tests/system/http2/http2-client.cpp:558-609 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:388-400; qbm/http/tests/system/http2/http2-client.cpp:558-609 -->
 
 If the client fails a batch before every member is answered — an explicit `disconnect()`, a lost connection, an exhausted reconnection run — the batch callback still runs exactly once. The responses already received are kept as received (an empty `200` stays a `200`, a member refused at admission keeps its `400`), and every member still unanswered gets `503 Service Unavailable` with the failure reason as its body.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:331-338,742-757; qbm/http/tests/system/http2/http2-client.cpp:1182-1218 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:331-338,743-758; qbm/http/tests/system/http2/http2-client.cpp:1196-1232 -->
 
 `disconnect()` fails the outstanding work at once (`503`, body `"Connection closed"`), then closes the connection the way RFC 9113 §6.8 asks: `GOAWAY(NO_ERROR)` leaves after whatever the connection still had to send, and the socket closes once it is out — the server sees the announcement, then the end of the connection, and cancels the streams it still had open for this client. A server that has stopped reading cannot hold the close: past `Client::GOAWAY_FLUSH_LIMIT` (1 s) the socket closes anyway. Nothing needs to touch `transport()`. The client's `GOAWAY` names the last stream the server initiated that the client accepted (0 while push stays disabled), never the client's own requests.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:136-151,154-213,1102-1115; qbm/http/src/qbm/http/2/client.h:306-318; qbm/http/src/qbm/http/2/protocol/client.h:1295-1320; qbm/http/tests/system/http2/http2-client.cpp:902-938,2931-2995 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:136-151,154-213,1103-1116; qbm/http/src/qbm/http/2/client.h:306-318; qbm/http/src/qbm/http/2/protocol/client.h:1295-1320; qbm/http/tests/system/http2/http2-client.cpp:902-938,2945-3009 -->
 
 If sending a queued request fails, its callback runs before the client tries the next pending request. That callback may disconnect or queue different work. The client retains itself during this drain and checks that the connection and HTTP/2 protocol are still live at each iteration; it does not send the next item through the retired protocol.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:477-523 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:478-524 -->
 
 ### Bounding outstanding work
 
-Beyond the stream-concurrency cap, the client bounds the **total outstanding request set** (queued + in-flight). The limit is `set_max_pending_requests(size_t)` (default `_max_pending_requests = 1024`); once the combined count of pending and active requests reaches it, `push_request()` and `push_requests()` **reject immediately with `503 Service Unavailable`** rather than growing the queue without bound. This is a DoS guard that matches the HTTP/1.1 and HTTP/3 clients — a disconnected or saturated client cannot accumulate work indefinitely. The callback (or the per-element responses for a batch) receives the synthesized 503; the coroutine overloads surface the same 503 as their resolved `Response`.
+Beyond the stream-concurrency cap, the client bounds the **total outstanding request set** (queued + in-flight). The limit is `set_max_pending_requests(size_t)` (default `_max_pending_requests = 1024`); once the combined count of pending and active requests reaches it, `push_request()` **rejects immediately with `503 Service Unavailable`** rather than growing the queue without bound. `push_requests()` admits a batch member by member against the same bound, as the HTTP/1.1 and HTTP/3 clients do: the members within it are sent, a member past it gets the `503` at its index before anything is allocated for it, and the batch callback still runs once, in request order (`push_requests()` then returns `false`, as `push_request()` does for a refused request). This is a DoS guard — a disconnected or saturated client cannot accumulate work indefinitely. The coroutine overloads surface the same 503 as their resolved `Response`.
 
 ```cpp
-// src: qbm/http/src/qbm/http/2/client.h:426-433; qbm/http/src/qbm/http/2/client.cpp:280-285,344-349
+// src: qbm/http/src/qbm/http/2/client.h:426-433; qbm/http/src/qbm/http/2/client.cpp:280-285,356-367
 client->set_max_pending_requests(256);       // tighten the outstanding-work bound
 if (!client->push_request(std::move(req), cb)) {
     // false return == rejected; cb already fired with a 503 response
@@ -363,7 +363,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
   <!-- src: qbm/http/src/qbm/http/2/http2.h:375-388 -->
 - **Server concurrency defaults to 50, client to 100.** They are independent: the server's `SETTINGS_MAX_CONCURRENT_STREAMS = 50` bounds inbound client streams (excess gets `REFUSED_STREAM`); `client->set_max_concurrent_streams(...)` bounds the client's outbound *in-flight* streams (default 100). Raise the server limit only if you have measured headroom.
   <!-- src: qbm/http/src/qbm/http/2/protocol/server.h:448-454; qbm/http/src/qbm/http/2/client.h:216,420 -->
-- **The client also caps total outstanding requests.** Separate from stream concurrency, `set_max_pending_requests(...)` (default 1024) bounds queued + active requests; past it `push_request()`/`push_requests()` reject with `503 Service Unavailable` instead of queuing without limit. Tune it down for tighter backpressure, not up without a reason.
+- **The client also caps total outstanding requests.** Separate from stream concurrency, `set_max_pending_requests(...)` (default 1024) bounds queued + active requests; past it `push_request()` rejects with `503 Service Unavailable` instead of queuing without limit, and `push_requests()` answers `503` at the index of each member past it while sending the others. Tune it down for tighter backpressure, not up without a reason.
   <!-- src: qbm/http/src/qbm/http/2/client.h:218,426-433; qbm/http/src/qbm/http/2/client.cpp:280-285 -->
 - **The client is non-movable; keep the `shared_ptr`.** Constructing one on the stack or trying to move it will not compile. Use `make_client(...)` and store the returned `std::shared_ptr`.
   <!-- src: qbm/http/src/qbm/http/2/client.h:164,264-267,661 -->

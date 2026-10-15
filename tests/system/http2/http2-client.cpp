@@ -985,11 +985,14 @@ TEST_F(Http2ClientTest, ExhaustedStreamIdsRenewTheConnection) {
     client->disconnect();
 }
 
-// A batch whose size exceeds the outstanding-request bound is rejected up-front:
-// the call returns false and the callback fires synchronously with a 503 per
-// request (no connection, no event loop needed). Mirrors the single-request
-// limit guard, on the batch path.
-TEST_F(Http2ClientTest, BatchExceedingPendingLimitIsRejectedWith503) {
+// A batch is admitted member by member, as push_request admits one: the members
+// within the outstanding-request bound are sent, a member past it is answered
+// 503 at its index before anything exists for it, and the callback runs once,
+// with every response in request order. push_requests returns false, as
+// push_request does for a request the bound refuses. The whole batch used to be
+// refused up front, its admissible members included (Huly QB-1063): HTTP/1 and
+// HTTP/3 (Huly QB-499) admit member by member.
+TEST_F(Http2ClientTest, BatchPastThePendingLimitRefusesOnlyTheMembersOverIt) {
     auto client = make_test_client();
     client->set_max_pending_requests(2);
 
@@ -1001,17 +1004,28 @@ TEST_F(Http2ClientTest, BatchExceedingPendingLimitIsRejectedWith503) {
         reqs.push_back(std::move(r));
     }
 
-    bool                            done = false;
+    int                             calls = 0;
     std::vector<qb::http::Response> out;
     EXPECT_FALSE(client->push_requests(reqs, [&](std::vector<qb::http::Response> rs) {
-        out  = std::move(rs);
-        done = true;
-    }));
-    ASSERT_TRUE(done); // rejection callback is synchronous
+        out = std::move(rs);
+        ++calls;
+    })) << "one member was refused by the bound";
+    EXPECT_EQ(calls, 0) << "two members were admitted: the batch waits for their responses";
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return calls > 0; }));
     ASSERT_EQ(out.size(), 3u);
-    for (auto &r : out) {
-        EXPECT_EQ(r.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    for (std::size_t i = 0; i < 2; ++i) {
+        EXPECT_EQ(out[i].status(), qb::http::status::OK) << "member " << i;
+        EXPECT_EQ(out[i].body().template as<std::string>(), "HTTP/2 GET Success") << "member " << i;
     }
+    EXPECT_EQ(out[2].status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(out[2].body().template as<std::string>(), "HTTP/2 client pending request limit reached");
+    for (int pass = 0; pass < 20; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls, 1);
+    client->disconnect();
 }
 
 // Connecting to a port with no listener fails via the transport connect-completion
@@ -1041,7 +1055,7 @@ TEST_F(Http2ClientTest, ConnectToRefusedPortFails) {
 
 // A single request that would exceed the outstanding-request bound is rejected
 // synchronously with a 503 and push_request returns false — the single-request
-// twin of BatchExceedingPendingLimitIsRejectedWith503.
+// twin of BatchPastThePendingLimitRefusesOnlyTheMembersOverIt.
 TEST_F(Http2ClientTest, SingleRequestOverPendingLimitIsRejectedWith503) {
     auto client = make_test_client();
     client->set_max_pending_requests(0); // the very first push already exceeds the bound

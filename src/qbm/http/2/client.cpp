@@ -337,19 +337,8 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         slot.status() = 0;
     }
 
-    // Reject the whole batch up-front if it would exceed the outstanding-request bound (DoS guard).
-    if (_pending_requests.size() + _active_requests.size() + batch_context->requests.size() > _max_pending_requests) {
-        _failed_requests += batch_context->requests.size();
-        std::vector<qb::http::Response> responses;
-        responses.reserve(batch_context->requests.size());
-        for (size_t i = 0; i < batch_context->requests.size(); ++i) {
-            responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/2 client pending request limit reached"));
-        }
-        callback(std::move(responses));
-        return false;
-    }
-
-    uint64_t batch_id = _next_batch_id++;
+    uint64_t batch_id     = _next_batch_id++;
+    bool     admitted_all = true;
 
     LOG_HTTP_DEBUG_PA(_client_id,
                       "Queuing batch request with " << batch_context->requests.size() << " requests (batch ID: " << batch_id << ")");
@@ -362,6 +351,18 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
             ++_failed_requests;
             batch_context->responses[i] = std::move(*error);
             ++batch_context->completed_count;
+            continue;
+        }
+        // Each member is admitted as push_request() admits one, against the outstanding
+        // (pending + active) bound: a member past it is answered 503 at its index before its
+        // context exists. The whole batch used to be refused, its admissible members included;
+        // HTTP/1 and HTTP/3 (Huly QB-499) admit member by member (Huly QB-1063).
+        if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
+            ++_failed_requests;
+            batch_context->responses[i] =
+                create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/2 client pending request limit reached");
+            ++batch_context->completed_count;
+            admitted_all = false;
             continue;
         }
 
@@ -406,7 +407,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     if (batch_context->completed_count == batch_context->requests.size()) {
         batch_context->all_completed = true;
         batch_context->callback(std::move(batch_context->responses));
-        return true;
+        return admitted_all;
     }
 
     // Store batch context
@@ -420,7 +421,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         connect(nullptr);
     }
 
-    return true;
+    return admitted_all;
 }
 
 void
