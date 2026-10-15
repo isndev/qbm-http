@@ -230,6 +230,13 @@ public:
     [[nodiscard]] qb::http::async::awaiter<qb::http::Response> push_request(qb::http::Request request);
     /**
      * @brief Queue a batch of requests, delivering all responses via @p callback.
+     *
+     * The members are admitted in order, each exactly as push_request() would admit it: an
+     * invalid member completes with its 400, and a member that would take the queued + active
+     * count past set_max_pending_requests() completes with a 503, both at its index and before
+     * any state is allocated for it. @p callback runs once, with every result in request order
+     * -- at once when no member was admitted.
+     *
      * @param requests Requests to send; an empty batch completes immediately.
      * @param callback Batch handler; must be non-null for a non-empty batch.
      * @return @c true if accepted; @c false if @p callback is null.
@@ -248,7 +255,8 @@ public:
         _max_concurrent_streams = value;
     }
     /// Set the cap on queued+active requests (bounds `_pending_requests`); a push past the
-    /// bound is failed synchronously with 503. Mirrors `http2::Client` for API parity.
+    /// bound is failed synchronously with 503 -- a single push, or each batch member past it
+    /// (see push_requests()). The setter mirrors `http2::Client` for API parity.
     void
     set_max_pending_requests(std::size_t value) noexcept {
         _max_pending_requests = value;

@@ -176,11 +176,8 @@ Client::ensure_absolute_uri(qb::http::Request &request) {
     if (!request.uri().host().empty()) {
         return;
     }
-    std::string absolute = "https://" + std::string(_base_uri.host());
-    if (!_base_uri.port().empty()) {
-        absolute.push_back(':');
-        absolute += _base_uri.port();
-    }
+    // The base authority as a URI writes it: an IPv6 literal between brackets (Huly QB-572).
+    std::string absolute = "https://" + qb::protocol::http3::detail::authority(_base_uri);
     absolute += request.uri().path().empty() ? "/" : std::string(request.uri().path());
     if (!request.uri().encoded_queries().empty()) {
         absolute.push_back('?');
@@ -313,6 +310,16 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         if (auto error = prepare_request(requests[i])) {
             ++_failed_requests;
             batch->responses[i] = std::move(*error);
+            batch->completed[i] = true;
+            ++batch->completed_count;
+            continue;
+        }
+        // The bound counts queued + active requests whatever queued them: each member is
+        // admitted as push_request would admit it, BEFORE its context and timer exist, and a
+        // member past the bound is answered 503 at its index (Huly QB-499).
+        if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
+            ++_failed_requests;
+            batch->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client pending request limit reached");
             batch->completed[i] = true;
             ++batch->completed_count;
             continue;

@@ -44,6 +44,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "../../shared/loopback_server.h"
@@ -304,6 +306,39 @@ TEST_F(Http3LoopbackTest, RelativeUriUsesClientBaseUri) {
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().as<std::string>(), "relative-ok");
 
+    client->disconnect();
+    server->close();
+}
+
+// An IPv6 origin works end to end (Huly QB-572): the persistent client's :authority keeps the
+// literal's brackets (RFC 3986 section 3.2.2, RFC 9114 section 4.3.1), whether the request arrives
+// as an absolute same-origin URI or as a relative target the client completes from its base.
+TEST_F(Http3LoopbackTest, Ipv6OriginRoundTripsAbsoluteAndRelativeRequests) {
+    const auto port   = next_port();
+    const auto origin = "https://[::1]:" + std::to_string(port);
+    auto       server = qb::http3::make_server();
+    server->router().get("/v6", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        // The server rebuilds the URI from :scheme, :authority and :path: its source is the authority as received.
+        ctx->response().body() = std::string(ctx->request().uri().source());
+        ctx->complete();
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(origin), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(origin);
+    client->set_verify_peer(false);
+    for (auto const &target : {origin + "/v6", std::string("/v6")}) {
+        std::atomic<bool>  done{false};
+        qb::http::Response response;
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(target)}, [&](qb::http::Response res) {
+            response = std::move(res);
+            done     = true;
+        }));
+        ASSERT_TRUE(pump([&] { return done.load(); })) << target;
+        EXPECT_EQ(response.status(), qb::http::status::OK) << target << ": " << response.body().as<std::string>();
+        EXPECT_EQ(response.body().as<std::string>(), origin + "/v6") << target;
+    }
     client->disconnect();
     server->close();
 }
@@ -2901,6 +2936,57 @@ TEST_F(Http3LoopbackTest, DualStackClosingHttp2SideKeepsHttp3SideServing) {
     qb::io::async::listener::current.clear();
 }
 
+// A dual-stack server that is moved before it listens keeps a router facade bound to the stacks it
+// owns (Huly QB-504). The facade held a raw pointer to its owner and the implicit moves copied it,
+// so the destination's router() still drove the source -- whose stacks had just left it. Routes are
+// registered through a move-constructed server, then through the move-assigned one that ends up
+// owning both stacks, and every route answers on HTTP/2 and on HTTP/3.
+TEST_F(Http3LoopbackTest, DualStackMovedBeforeListenRoutesOnItsOwnStacks) {
+    using dual = qb::http::dual_stack_server<>;
+    static_assert(std::is_nothrow_move_constructible_v<dual>);
+    static_assert(std::is_nothrow_move_assignable_v<dual>);
+    static_assert(!std::is_copy_constructible_v<dual> && !std::is_copy_assignable_v<dual>);
+
+    const auto answer = [](std::string body) {
+        return [body = std::move(body)](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = body;
+            ctx->complete();
+        };
+    };
+    dual built;
+    dual moved{std::move(built)};
+    moved.router().get("/via-move-constructed", answer("constructed"));
+    dual assigned;
+    assigned = std::move(moved);
+    assigned.router().get("/via-move-assigned", answer("assigned"));
+    assigned.router().compile();
+
+    const auto h2_port = next_tcp_port();
+    const auto h3_port = next_port();
+    ASSERT_TRUE(assigned.listen(qb::io::uri(https_origin(h2_port)), qb::io::uri(https_origin(h3_port)), cert_path(), key_path()));
+
+    auto http2_client = qb::http2::make_client(https_origin(h2_port));
+    http2_client->set_connect_timeout(5s);
+    http2_client->set_verify_peer(false);
+    auto http3_client = qb::http3::make_client(https_origin(h3_port));
+    http3_client->set_verify_peer(false);
+    for (auto const &[path, body] :
+         std::vector<std::pair<std::string, std::string>>{{"/via-move-constructed", "constructed"}, {"/via-move-assigned", "assigned"}}) {
+        const auto h2 = qb::http::run_sync(http2_client->push_request(qb::http::Request{qb::io::uri(path)}));
+        EXPECT_EQ(h2.status(), qb::http::status::OK) << "HTTP/2 " << path;
+        EXPECT_EQ(h2.body().as<std::string>(), body) << "HTTP/2 " << path;
+        const auto h3 = qb::http::run_sync(http3_client->push_request(qb::http::Request{qb::io::uri(path)}));
+        EXPECT_EQ(h3.status(), qb::http::status::OK) << "HTTP/3 " << path;
+        EXPECT_EQ(h3.body().as<std::string>(), body) << "HTTP/3 " << path;
+    }
+
+    http2_client->disconnect();
+    http3_client->disconnect();
+    assigned.close();
+    qb::io::async::listener::current.clear();
+}
+
 // ---------------------------------------------------------------------------
 // Synchronous request-validation / limit guards + awaiter self-expiry.
 // Each of these exercises a push_request/push_requests early-return branch that
@@ -2962,6 +3048,77 @@ TEST_F(Http3LoopbackTest, PendingRequestLimitRejectsWith503) {
     EXPECT_EQ(total, 1u);
     EXPECT_EQ(successful, 0u);
     EXPECT_EQ(failed, 1u);
+}
+
+// The bound of set_max_pending_requests counts queued + active requests whatever API queued them
+// (Huly QB-499): a batch is admitted member by member, in order, exactly as the same requests pushed
+// one by one. A member past the bound is answered 503 at its index before any context or timer
+// exists for it; an invalid member keeps its 400; the callback runs once, with every result.
+TEST_F(Http3LoopbackTest, PendingRequestLimitAdmitsBatchMembersOneByOne) {
+    const auto is_limit = [](qb::http::Response const &r) {
+        return r.status() == qb::http::status::SERVICE_UNAVAILABLE && r.body().as<std::string>().find("limit") != std::string::npos;
+    };
+
+    // A bound of 0 refuses a whole valid batch synchronously, and starts no connection for it.
+    {
+        // Declared before the client, which outlives them otherwise: its destructor fails what it still holds.
+        int                             calls = 0;
+        std::vector<qb::http::Response> got;
+        auto                            client = qb::http3::make_client(https_origin(next_port()));
+        client->set_max_pending_requests(0);
+        std::vector<qb::http::Request> batch;
+        batch.emplace_back(qb::io::uri("/a"));
+        batch.emplace_back(qb::io::uri("/b"));
+        EXPECT_TRUE(client->push_requests(std::move(batch), [&](std::vector<qb::http::Response> rs) {
+            ++calls;
+            got = std::move(rs);
+        }));
+        ASSERT_EQ(calls, 1) << "every member was over the bound: the batch is complete at once";
+        ASSERT_EQ(got.size(), 2u);
+        EXPECT_TRUE(is_limit(got[0]));
+        EXPECT_TRUE(is_limit(got[1]));
+        EXPECT_FALSE(client->is_connecting()) << "no member was admitted, so nothing may connect";
+        auto [total, successful, failed] = client->get_stats();
+        EXPECT_EQ(total, 2u);
+        EXPECT_EQ(successful, 0u);
+        EXPECT_EQ(failed, 2u);
+    }
+
+    // A bound of 2 with one request already queued leaves room for exactly one more: the first valid
+    // member is admitted, the cross-origin member keeps its 400 at its index, and the valid members
+    // after it are refused. Disconnecting fails what was admitted and completes the batch, once.
+    {
+        int                             calls = 0;
+        std::vector<qb::http::Response> got;
+        std::vector<qb::http::Response> single;
+        auto                            client = qb::http3::make_client(https_origin(next_port())); // no server: requests stay queued
+        client->set_verify_peer(false);
+        client->set_max_pending_requests(2);
+        ASSERT_TRUE(
+            client->push_request(qb::http::Request{qb::io::uri("/first")}, [&](qb::http::Response r) { single.push_back(std::move(r)); }));
+        ASSERT_TRUE(client->is_connecting()) << "the first request must be queued behind a connection attempt";
+
+        std::vector<qb::http::Request> batch;
+        batch.emplace_back(qb::io::uri("/m0"));
+        batch.emplace_back(qb::io::uri("https://not-the-configured-origin.invalid:443/m1"));
+        batch.emplace_back(qb::io::uri("/m2"));
+        batch.emplace_back(qb::io::uri("/m3"));
+        EXPECT_TRUE(client->push_requests(std::move(batch), [&](std::vector<qb::http::Response> rs) {
+            ++calls;
+            got = std::move(rs);
+        }));
+        EXPECT_EQ(calls, 0) << "one member is admitted and outstanding";
+        client->disconnect();
+        ASSERT_EQ(calls, 1);
+        ASSERT_EQ(got.size(), 4u);
+        EXPECT_EQ(got[0].status(), qb::http::status::SERVICE_UNAVAILABLE);
+        EXPECT_FALSE(is_limit(got[0])) << "the admitted member is failed by the disconnect, not by the bound";
+        EXPECT_EQ(got[1].status(), qb::http::status::BAD_REQUEST);
+        EXPECT_TRUE(is_limit(got[2])) << got[2].body().as<std::string>();
+        EXPECT_TRUE(is_limit(got[3])) << got[3].body().as<std::string>();
+        ASSERT_EQ(single.size(), 1u);
+        EXPECT_FALSE(is_limit(single[0]));
+    }
 }
 
 // Cancelling an id that matches no pending or active request returns false

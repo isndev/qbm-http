@@ -373,12 +373,31 @@ request_target(qb::io::uri const &uri) {
 
 /**
  * @brief Build the @c :authority value (host plus optional ":port").
+ *
+ * An IP-literal host is written between brackets with the port after them (RFC 3986
+ * section 3.2.2), and @c :authority carries the URI authority in that form (RFC 9114
+ * section 4.3.1). @c qb::io::uri::host() returns the literal without its brackets -- the form a
+ * socket wants -- so they are restored here; a reg-name or an IPv4 address never holds a ':'
+ * (Huly QB-572).
+ *
  * @param uri Request URI.
- * @return The host, with @c :port appended when the URI specifies one.
+ * @return The host, bracketed when it is an IPv6 literal, with @c :port appended when the URI
+ *         specifies one.
  */
 inline std::string
 authority(qb::io::uri const &uri) {
-    std::string value(uri.host());
+    const std::string_view host       = uri.host();
+    const bool             bracketed  = host.size() >= 2 && host.front() == '[' && host.back() == ']';
+    const bool             ip_literal = !bracketed && host.find(':') != std::string_view::npos;
+    std::string            value;
+    value.reserve(host.size() + 3 + uri.port().size());
+    if (ip_literal) {
+        value.push_back('[');
+    }
+    value += host;
+    if (ip_literal) {
+        value.push_back(']');
+    }
     if (!uri.port().empty()) {
         value.push_back(':');
         value += uri.port();
@@ -606,6 +625,15 @@ private:
     // parked here and replayed by the outermost engine call, once the stack is nghttp3-free.
     int                                                  _engine_depth = 0;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> _parked_closes;
+    // The identity nghttp3 calls back with. nghttp3 keeps the user data it was handed at creation
+    // and offers no call to change it, so that user data is this heap anchor, never `this`: it
+    // holds the address of the connection that currently owns the engine, and a move re-points it.
+    // A moved connection therefore keeps receiving its own callbacks, and the source can go
+    // (Huly QB-502). Allocated once per connection, read once per callback.
+    struct native_anchor {
+        connection *self;
+    };
+    std::unique_ptr<native_anchor> _anchor = std::make_unique<native_anchor>(native_anchor{this});
 
     // RAII over one engine call. Holds its own copy of the alive flag: the owner can destroy this
     // connection from inside the call, and the scope must then touch nothing.
@@ -700,7 +728,7 @@ private:
 
     [[nodiscard]] static connection *
     self(void *conn_user_data) noexcept {
-        return static_cast<connection *>(conn_user_data);
+        return static_cast<native_anchor *>(conn_user_data)->self;
     }
 
     // nghttp3 invokes the callbacks below across a C ABI. A C++ exception that
@@ -1142,8 +1170,8 @@ public:
         settings.max_field_section_size = 64 * 1024;
 
         const auto cb = callbacks();
-        const auto rv = _role == role::server ? nghttp3_conn_server_new(&_conn, &cb, &settings, nghttp3_mem_default(), this)
-                                              : nghttp3_conn_client_new(&_conn, &cb, &settings, nghttp3_mem_default(), this);
+        const auto rv = _role == role::server ? nghttp3_conn_server_new(&_conn, &cb, &settings, nghttp3_mem_default(), _anchor.get())
+                                              : nghttp3_conn_client_new(&_conn, &cb, &settings, nghttp3_mem_default(), _anchor.get());
         if (rv != 0) {
             throw std::runtime_error("nghttp3_conn_new failed");
         }
@@ -1160,8 +1188,16 @@ public:
     connection &operator=(connection const &) = delete;
 
     /**
-     * @brief Move-construct, transferring ownership of the nghttp3 connection.
-     * @param rhs Source connection; its @c _conn is reset to null.
+     * @brief Move-construct, transferring the nghttp3 connection and all of its state.
+     *
+     * The destination is the connection: nghttp3's callbacks reach it (its native identity is
+     * re-pointed), and it keeps the stream state, the bound local streams, a started shutdown and
+     * any close still parked. The source is left empty -- @c ok() is false -- and may be
+     * destroyed at once.
+     *
+     * @pre No nghttp3 call of @p rhs is on the stack: a connection is moved between events,
+     *      never from inside one of its own callbacks.
+     * @param rhs Source connection.
      */
     connection(connection &&rhs) noexcept
         : _owner(rhs._owner)
@@ -1169,7 +1205,16 @@ public:
         , _connection_id(rhs._connection_id)
         , _conn(std::exchange(rhs._conn, nullptr))
         , _streams(std::move(rhs._streams))
-        , _alive(std::move(rhs._alive)) {}
+        , _local_streams_bound(std::exchange(rhs._local_streams_bound, false))
+        , _shutdown_started(std::exchange(rhs._shutdown_started, false))
+        , _alive(std::move(rhs._alive))
+        , _engine_depth(std::exchange(rhs._engine_depth, 0))
+        , _parked_closes(std::move(rhs._parked_closes))
+        , _anchor(std::move(rhs._anchor)) {
+        if (_anchor) {
+            _anchor->self = this;
+        }
+    }
 
     /**
      * @brief Whether the underlying nghttp3 connection is live.

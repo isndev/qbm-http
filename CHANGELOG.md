@@ -47,6 +47,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   connection for an absolute-form `https://` request target.
 - **A refused coroutine WebSocket upgrade left below 300 answers `400` (Huly QB-610).** No signature
   change; a hook that refused with the default `200` (or a `101`) used to send it.
+- **An HTTP/3 batch past the pending-request bound gets 503s instead of queuing beyond it (Huly
+  QB-499).** No signature change; see the Fixed entry.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -118,6 +120,23 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/3 batches respect the pending-request bound (Huly QB-499).** `Client::push_requests` and
+  its coroutine form admit each member as `push_request` would: a member that would take the
+  queued + active count past `set_max_pending_requests` completes with a 503 at its index before
+  any context or timer is allocated for it. The callback still runs once, in request order, and at
+  once when no member was admitted.
+- **A moved HTTP/3 connection keeps its callbacks and state (Huly QB-502).** nghttp3 calls back
+  with the user data it was given at creation and cannot be told another, so `connection<Owner>`
+  now hands it a heap anchor that a move re-points: callbacks reach the destination, and the bound
+  local streams, a started shutdown and parked closes travel with it. The source can be destroyed
+  at once; the move used to leave every callback on it (a heap-use-after-free under ASan).
+- **A moved `dual_stack_server` routes on its own stacks (Huly QB-504).** Explicit move
+  construction and assignment keep the router facade bound to the server that owns the stacks; the
+  implicit moves copied its pointer to the source.
+- **HTTP/3 keeps the brackets of an IPv6 `:authority` (Huly QB-572).** A request to
+  `https://[::1]:8443/` sent `:authority: ::1:8443`; the builder now writes the IP literal between
+  brackets with the port after them (RFC 3986 section 3.2.2, RFC 9114 section 4.3.1), and the
+  persistent client completes a relative target from its base the same way.
 - **A WebSocket protocol-error observer cannot terminate the process (Huly QB-516).** A frame
   header the parser refuses fails the connection from `getMessageSize()`, which is `noexcept`. The
   failure now marks the connection closed before any application code runs, queues its Close
