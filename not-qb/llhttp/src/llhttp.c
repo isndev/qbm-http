@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: MIT
  * Copyright Fedor Indutny, 2018.
  *
- * Vendored from llhttp 9.2.1 (https://github.com/nodejs/llhttp), regenerated with the
- * `http_` symbol prefix so it cannot collide with — or be substituted by — a system
- * llhttp. Only the symbol prefix differs; the parser is upstream's.
+ * Vendored from llhttp (https://github.com/nodejs/llhttp) at upstream commit 8371b40
+ * (2024-08-27, between the 9.2.1 and 9.3.0 releases: its version macros still say 9.2.1),
+ * regenerated with the `http_` symbol prefix so it cannot collide with — or be substituted
+ * by — a system llhttp. Besides that prefix it carries a few local changes, each listed in
+ * qbm-http's THIRD-PARTY-NOTICES (section 1) with the procedure that regenerates it.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -2544,6 +2546,11 @@ static llparse_state_t http__internal__run(
         return s_n_http__internal__n_header_value_content_length_ws;
       }
       switch (*p) {
+        case 9: {
+          /* qb local patch (Huly QB-555): HTAB is OWS too (RFC 9110 5.6.3), as SP below. */
+          p++;
+          goto s_n_http__internal__n_header_value_content_length_ws;
+        }
         case 10: {
           goto s_n_http__internal__n_invoke_or_flags_17;
         }
@@ -2769,6 +2776,11 @@ static llparse_state_t http__internal__run(
         return s_n_http__internal__n_header_value_te_chunked_last;
       }
       switch (*p) {
+        case 9: {
+          /* qb local patch (Huly QB-555): HTAB is OWS too (RFC 9110 5.6.3), as SP below. */
+          p++;
+          goto s_n_http__internal__n_header_value_te_chunked_last;
+        }
         case 10: {
           goto s_n_http__internal__n_invoke_update_header_state_8;
         }

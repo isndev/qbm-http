@@ -38,6 +38,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **The HTTP/1.1 parser accepts a trailing horizontal tab after the `Content-Length` digits and after `chunked`
+  (Huly QB-555).** It is optional whitespace (RFC 9110 §5.6.3), as a trailing space already was; the message frames
+  exactly as the space form does. Such a request used to be refused, and such a response read until the connection
+  closed. A local patch of the vendored llhttp, recorded in `THIRD-PARTY-NOTICES`.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -109,6 +113,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **The vendored llhttp's provenance note says what the code is (Huly QB-554).** The files claimed llhttp 9.2.1 with
+  only the symbol prefix changed; they are llhttp at upstream commit 8371b40 (between 9.2.1 and 9.3.0, whose version
+  macros still read 9.2.1), with a local `HTTP_UNINITIALIZED` enumerator, an `api.c` wasm table as upstream wrote it
+  later, and the QB-555 patch. `THIRD-PARTY-NOTICES` lists each difference and the procedure that regenerates the
+  sources, verified byte for byte.
 - **API documentation checks reject comment-only names and invalid later citations (Huly QB-561, QB-562).**
   The shipped guard indexes C++ code without comments or literals and examines every
   citation on a line before accepting it.

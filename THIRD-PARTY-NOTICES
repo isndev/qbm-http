@@ -24,7 +24,11 @@ installed tree alone, without going back to the source repository.
    ------
    Upstream    https://github.com/nodejs/llhttp
    Author      Fedor Indutny
-   Version     9.2.1 (http_VERSION_MAJOR/MINOR/PATCH in src/qbm/http/vendor/llhttp.h)
+   Version     upstream commit 8371b40077c0177d743bb3dfed7e2b56cba18328 (2024-08-27,
+               "Added support for RTSP and ICE response and the on_protocol_complete
+               callback", #477), between the v9.2.1 and v9.3.0 releases. Its package
+               version was still 9.2.1, which is what http_VERSION_MAJOR/MINOR/PATCH in
+               src/qbm/http/vendor/llhttp.h say -- the parser is NOT the 9.2.1 release.
    License     MIT
    Vendored    not-qb/llhttp/   (sources, compiled into libllhttp.a)
                src/qbm/http/vendor/llhttp.h  (the single public header)
@@ -34,11 +38,39 @@ installed tree alone, without going back to the source repository.
                and in-header — every vendored llhttp file, including the installed
                public header, now opens with the full MIT notice.
 
-   This is a FORK, not a swappable dependency: it is llhttp 9.2.1 regenerated with
-   the `http_` symbol prefix (http_t, http_errno, http_init/http_execute) so it
-   cannot collide with, or be substituted by, a system llhttp. Only the symbol
-   prefix differs; the parser logic is upstream's, which is why upstream's MIT
-   notice and Fedor Indutny's copyright apply to it unchanged.
+   This is a FORK, not a swappable dependency: it is llhttp regenerated with the
+   `http_` symbol prefix (http_t, http_errno, http_init/http_execute) so it cannot
+   collide with, or be substituted by, a system llhttp. The parser logic is
+   upstream's, which is why upstream's MIT notice and Fedor Indutny's copyright apply
+   to it unchanged. Against upstream at that commit, the vendored files differ by
+   exactly:
+
+     - the prefix: every llhttp_ / llhttp__ / LLHTTP_ identifier is http_ / http__ /
+       http_, and the word "llhttp" reads "http" in ten comment lines of each of
+       llhttp.h and include/api.h;
+     - the MIT notice that opens every file;
+     - src/qbm/http/vendor/llhttp.h: `HTTP_UNINITIALIZED = -1` in enum http_method,
+       the value qb::http::Method::UNINITIALIZED stands on (src/qbm/http/types.h);
+     - not-qb/llhttp/src/api.c: the wasm settings table, compiled for __wasm__ only,
+       uses designated initializers -- upstream's api.c reads the same since commit
+       dc5dc9a, released in 9.3.0;
+     - not-qb/llhttp/src/llhttp.c: a trailing HTAB after the Content-Length digits or
+       after `chunked` is optional whitespace, as a trailing SP already was
+       (RFC 9110 §5.6.3, Huly QB-555) -- two `case 9:` branches, each marked
+       "qb local patch (Huly QB-555)".
+
+   What the commit adds over the v9.2.1 release: the `on_protocol` and
+   `on_protocol_complete` callbacks, HPE_CB_PROTOCOL_COMPLETE (38) and the RTSP/ICE
+   protocol states. qbm-http installs no-op callbacks for both
+   (src/qbm/http/1.1/protocol/base.h).
+
+   Regenerating: in a checkout of nodejs/llhttp at that commit, `npm ci`, then
+   `make build/c/llhttp.c build/llhttp.h`, then the prefix rename above. The result
+   equals not-qb/llhttp/src/llhttp.c byte for byte apart from the MIT notice and the
+   QB-555 branches (verified 2026-10-15), and build/llhttp.h equals the public header
+   apart from the notice, the comment wording and HTTP_UNINITIALIZED; re-apply the
+   local changes listed above. Output generated at a later commit does not compare
+   line for line: dc5dc9a also changed upstream's code generator.
 
    Both the static archive and the public header reach the consumer, so the MIT
    permission notice is distributed two ways: inside every source file (and thus

@@ -253,3 +253,74 @@ TEST_F(RequestSmugglingTest, PerMessageDosCountersDoNotAccumulateAcrossAConnecti
         parser.reset();
     }
 }
+
+// --- Trailing OWS after a framing value -----------------------------------------------------
+// RFC 9110 §5.5 / RFC 9112 §5: a field value excludes the optional whitespace (OWS = SP / HTAB)
+// that surrounds it. The vendored llhttp consumed a trailing SP after the Content-Length digits
+// and after `chunked`, but not a trailing HTAB: `Content-Length: 5<HTAB>` was refused as an
+// invalid Content-Length, and `Transfer-Encoding: chunked<HTAB>` fell into the generic token
+// state that drops the chunked flag — a request was then refused, a response read as
+// close-delimited (Huly QB-555). Read as the RFC reads it, the HTAB form frames exactly like the
+// SP form: the same length, the same body, the next message untouched.
+
+namespace {
+
+/// Parses `head` + `body` + `next` as one stream; returns the offset at which the first message
+/// ended (where `next` must start), or npos when the first message did not complete.
+template <typename Message>
+[[nodiscard]] std::size_t
+first_message_end(std::string const &head, std::string const &body, std::string const &next, std::string *parsed_body = nullptr) {
+    const std::string         stream = head + body + next;
+    qb::http::Parser<Message> parser;
+    if (parser.parse(stream.data(), stream.size()) != HPE_PAUSED)
+        return std::string::npos;
+    const std::size_t body_offset = static_cast<std::size_t>(parser.error_pos - stream.data());
+    if (body_offset != head.size())
+        return std::string::npos;
+    parser.resume();
+    if (parser.parse(stream.data() + body_offset, stream.size() - body_offset) != HPE_CB_MESSAGE_COMPLETE)
+        return std::string::npos;
+    if (parsed_body)
+        *parsed_body = parser.get_parsed_message().body().template as<std::string>();
+    return static_cast<std::size_t>(parser.error_pos - stream.data());
+}
+
+} // namespace
+
+TEST_F(RequestSmugglingTest, TrailingOwsAfterAFramingValueIsAcceptedAndFramesExactly) {
+    const std::string next = "GET /next HTTP/1.1\r\nHost: x\r\n\r\n";
+
+    for (const char *cl : {"5 ", "5\t", "5 \t", "5\t ", " 5\t", "\t5\t"}) {
+        const std::string head = std::string("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: ") + cl + "\r\n\r\n";
+        std::string       body;
+        EXPECT_EQ(first_message_end<Request>(head, "hello", next, &body), head.size() + 5) << "Content-Length: [" << cl << "]";
+        EXPECT_EQ(body, "hello") << "Content-Length: [" << cl << "]";
+    }
+
+    const std::string chunks = "5\r\nhello\r\n0\r\n\r\n";
+    for (const char *te : {"chunked ", "chunked\t", "chunked \t", "chunked\t ", "\tchunked\t"}) {
+        const std::string head = std::string("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: ") + te + "\r\n\r\n";
+        std::string       body;
+        EXPECT_EQ(first_message_end<Request>(head, chunks, next, &body), head.size() + chunks.size()) << "request TE: [" << te << "]";
+        EXPECT_EQ(body, "hello") << "request TE: [" << te << "]";
+
+        // The response side used to lose the chunked flag the same way and read until EOF.
+        const std::string rhead = std::string("HTTP/1.1 200 OK\r\nTransfer-Encoding: ") + te + "\r\n\r\n";
+        body.clear();
+        EXPECT_EQ(first_message_end<Response>(rhead, chunks, "HTTP/1.1 204 No Content\r\n\r\n", &body), rhead.size() + chunks.size())
+            << "response TE: [" << te << "]";
+        EXPECT_EQ(body, "hello") << "response TE: [" << te << "]";
+    }
+
+    // Whitespace is accepted only AROUND the value: a byte after it, or a control byte that is
+    // not OWS, is still refused.
+    const Vector refused[] = {
+        {"HTAB then a digit", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\t6\r\n\r\nhello"},
+        {"HTAB then garbage", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\tx\r\n\r\nhello"},
+        {"vertical tab after the digits", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\x0b\r\n\r\nhello"},
+        {"HTAB then another coding", "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\tgzip\r\n\r\n0\r\n\r\n"},
+        {"vertical tab after chunked", "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\x0b\r\n\r\n0\r\n\r\n"},
+    };
+    for (auto const &v : refused)
+        EXPECT_FALSE(accepted(v.raw)) << "accepted: " << v.name;
+}
