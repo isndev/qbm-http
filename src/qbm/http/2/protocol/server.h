@@ -834,94 +834,61 @@ public:
                                                                                           << static_cast<int>(goaway_event.payload.error_code)
                                                                                           << ", Debug: " << debug_data_str);
 
-        _graceful_shutdown_initiated = true;
-        FramerBase::set_last_peer_initiated_stream_id_processed_in_goaway(goaway_event.payload.last_stream_id);
+        // RFC 9113 §6.8: the last-stream-id of a GOAWAY a CLIENT sends is the highest
+        // SERVER-initiated stream -- a push -- it processed or might process. It says nothing
+        // about the client's own requests: their sender still expects their responses. A NO_ERROR
+        // GOAWAY therefore closes the pushes above that bound (never processed) and stops new
+        // streams, and every request already accepted is answered; the connection closes when
+        // the last stream has finished (try_close_stream_context). An error GOAWAY ends the
+        // connection and every stream with it. This used to apply the bound to the CLIENT's
+        // requests, closing the ones above it -- every request, for last-stream-id 0 -- and the
+        // connection before their responses (Huly QB-530).
+        _graceful_shutdown_initiated         = true;
+        const uint32_t last_pushed_stream_id = goaway_event.payload.last_stream_id;
+        FramerBase::set_last_peer_initiated_stream_id_processed_in_goaway(last_pushed_stream_id);
         const ErrorCode error_code = goaway_event.payload.error_code;
 
-        Http2GoAwayEvent event_to_dispatch{error_code, goaway_event.payload.last_stream_id, debug_data_str};
+        Http2GoAwayEvent event_to_dispatch{error_code, last_pushed_stream_id, debug_data_str};
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             this->get_io_handler().on(event_to_dispatch);
         }
 
-        for (auto it_stream = _server_streams.begin(); it_stream != _server_streams.end();) {
-            if (it_stream->first % 2 == 0) { // Server-pushed stream
-                Http2ServerStream &pushed_stream_ref   = it_stream->second;
-                bool               close_pushed_stream = false;
-
-                if (pushed_stream_ref.id > FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway()
-                    && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() != 0) {
-                    // This condition might be too aggressive. GOAWAY's last_stream_id refers to peer-initiated streams.
-                    // A pushed stream (server-initiated) is primarily affected if its *parent* client stream is affected.
-                }
-
-                // More accurately, close pushed stream if its parent client stream is > last_stream_id sent by client in GOAWAY
-                // or if the parent stream is now closed/reset due to this GOAWAY.
-                if (pushed_stream_ref.parent_stream_id > goaway_event.payload.last_stream_id && goaway_event.payload.last_stream_id != 0) {
-                    close_pushed_stream = true;
-                }
-                // Additionally, if the parent stream itself is being cleaned up because it *is* one of the closed client streams:
-                auto parent_client_stream_iter = _server_streams.find(pushed_stream_ref.parent_stream_id);
-                if (parent_client_stream_iter != _server_streams.end()) {
-                    // If parent client stream ID is > last_stream_id from GOAWAY (and it's a client stream)
-                    if (parent_client_stream_iter->first % 2 != 0 && parent_client_stream_iter->first > goaway_event.payload.last_stream_id) {
-                        // This parent client stream will be closed by other logic handling GOAWAY for client streams.
-                        // So, the pushed stream associated with it should also be closed.
-                        close_pushed_stream = true;
-                    }
-                } else {
-                    // Parent stream doesn't exist anymore, so this pushed stream is orphaned.
-                    close_pushed_stream = true;
-                }
-
-                if (close_pushed_stream && pushed_stream_ref.state != Http2StreamConcreteState::CLOSED) {
-                    // QB_LOG_WARN_PA(this->getName(), "Server: Pushed stream " << pushed_stream_ref.id << " (parent: " <<
-                    // pushed_stream_ref.parent_stream_id
-                    //                << ") being closed due to GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id <<
-                    //                ").");
-                    pushed_stream_ref.state      = Http2StreamConcreteState::CLOSED;
-                    pushed_stream_ref.error_code = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::CANCEL : error_code;
-                    Http2StreamErrorEvent push_stream_error{
-                        pushed_stream_ref.id, pushed_stream_ref.error_code, "Pushed stream implicitly closed due to client GOAWAY"
-                    };
-                    if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
-                        this->get_io_handler().on(push_stream_error);
-                    }
-                    it_stream = _server_streams.erase(it_stream); // Erase and advance iterator
-                    continue;
-                }
-            } else if (it_stream->first % 2 != 0) { // Client-initiated stream
-                Http2ServerStream &client_stream_ref = it_stream->second;
-                if (client_stream_ref.id > goaway_event.payload.last_stream_id && client_stream_ref.state != Http2StreamConcreteState::IDLE
-                    && // Don't try to error out streams that never fully started
-                    client_stream_ref.state != Http2StreamConcreteState::CLOSED) {
-                    // QB_LOG_WARN_PA(this->getName(), "Server: Client stream " << client_stream_ref.id
-                    //                << " implicitly closed by GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id <<
-                    //                ").");
-                    client_stream_ref.state               = Http2StreamConcreteState::CLOSED;
-                    client_stream_ref.rst_stream_received = true; // Treat as if RST received from client perspective for this stream
-                    client_stream_ref.error_code          = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::STREAM_CLOSED : error_code;
-                    Http2StreamErrorEvent client_stream_error{
-                        client_stream_ref.id, client_stream_ref.error_code, "Client stream implicitly closed by client GOAWAY"
-                    };
-                    if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
-                        this->get_io_handler().on(client_stream_error);
-                    }
-                    it_stream = _server_streams.erase(it_stream); // Erase and advance iterator
-                    continue;
-                }
+        // Collect first, then close each by fresh lookup: the application observer may act on
+        // the protocol (respond, reset) while we notify it.
+        std::vector<uint32_t> ids_to_close;
+        for (const auto &[sid, stream] : _server_streams) {
+            if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::CLOSED) {
+                continue;
             }
-            ++it_stream;
+            const bool pushed = (sid % 2) == 0;
+            if (error_code != ErrorCode::NO_ERROR || (pushed && sid > last_pushed_stream_id)) {
+                ids_to_close.push_back(sid);
+            }
+        }
+        for (const uint32_t sid : ids_to_close) {
+            auto it = _server_streams.find(sid);
+            if (it == _server_streams.end() || it->second.state == Http2StreamConcreteState::CLOSED) {
+                continue;
+            }
+            const bool      pushed       = (sid % 2) == 0;
+            const ErrorCode stream_error = error_code != ErrorCode::NO_ERROR ? error_code : ErrorCode::CANCEL;
+            // Erased before the observer runs, so nothing it does can reach a dangling stream.
+            _server_streams.erase(it);
+            Http2StreamErrorEvent stream_event{
+                sid, stream_error, pushed ? "Pushed stream not processed by the client (GOAWAY)" : "Stream closed by the client's GOAWAY"
+            };
+            if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
+                this->get_io_handler().on(stream_event);
+            }
         }
 
         if (error_code != ErrorCode::NO_ERROR) {
             _connection_active = false;
             this->not_ok(error_code); // Signal specific error
-        } else {
-            // For NO_ERROR GOAWAY, connection closes once all relevant streams are done.
-            if (this->are_all_relevant_streams_closed(FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway())) {
-                _connection_active = false;
-                this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
-            }
+        } else if (_connection_active && this->are_all_relevant_streams_closed(last_pushed_stream_id)) {
+            // Nothing left to finish: the graceful shutdown is complete at once.
+            _connection_active = false;
+            this->not_ok(ErrorCode::NO_ERROR);
         }
     }
 
@@ -2048,20 +2015,13 @@ private:
                 _server_streams.erase(it);
                 LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Stream context cleaned up successfully");
 
-                if (_graceful_shutdown_initiated && this->_last_peer_initiated_stream_id_processed_in_goaway != 0) {
-                    LOG_HTTP_DEBUG("ServerHttp2Protocol: Checking if graceful shutdown can complete after stream " << stream_id << " cleanup");
-                    if (this->are_all_relevant_streams_closed(FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway())) {
-                        _connection_active = false;
-                        LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all relevant streams closed");
-                        this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
-                    }
-                } else if (_graceful_shutdown_initiated && _server_streams.empty()
-                           && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() == 0) {
-                    // We initiated GOAWAY (so last_peer_id_processed might be 0 from our side if we didn't process any from peer before
-                    // deciding to goaway) and all our streams are now gone.
+                // The drain a client's NO_ERROR GOAWAY started completes with the last stream it
+                // left us, whatever its id (our own GOAWAY deactivated the connection when sent).
+                if (_graceful_shutdown_initiated && _connection_active
+                    && this->are_all_relevant_streams_closed(FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway())) {
                     _connection_active = false;
                     LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all streams closed");
-                    // this->not_ok() was already called by send_goaway_and_close.
+                    this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
                 }
             } else {
                 LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream not ready for cleanup yet");
@@ -2472,23 +2432,21 @@ private:
      * @return true if all relevant streams are closed
      */
     [[nodiscard]] bool
-    are_all_relevant_streams_closed(uint32_t last_known_stream_id) const noexcept {
-        // Specific implementation for server-side graceful shutdown.
-        // Checks if all streams up to and including last_known_stream_id that were
-        // initiated by the peer (client) are in a closed state.
+    are_all_relevant_streams_closed(uint32_t /*last_known_stream_id*/) const noexcept {
+        // During the drain a client's NO_ERROR GOAWAY starts, everything still open must finish:
+        // the client's requests whatever their id -- the GOAWAY's last-stream-id bounds the
+        // server's own streams, not them -- and the pushes at or below that bound, the ones above
+        // it having been closed on receipt (Huly QB-530).
         if (_graceful_shutdown_initiated) {
             for (const auto &pair : _server_streams) {
                 const Http2ServerStream &stream = pair.second;
-                // Check client-initiated streams (odd IDs) up to the last ID client acknowledged processing.
-                if (stream.id % 2 != 0 && stream.id <= last_known_stream_id) {
-                    if (stream.state != Http2StreamConcreteState::CLOSED && stream.state != Http2StreamConcreteState::IDLE
-                        && // IDLE might be considered effectively closed for new work
-                        !stream.rst_stream_sent && !stream.rst_stream_received) {
-                        return false; // Found an active client-initiated stream that should be closed.
-                    }
+                if (stream.state != Http2StreamConcreteState::CLOSED && stream.state != Http2StreamConcreteState::IDLE
+                    && // IDLE might be considered effectively closed for new work
+                    !stream.rst_stream_sent && !stream.rst_stream_received) {
+                    return false; // A stream is still to finish.
                 }
             }
-            return true; // All relevant client-initiated streams are closed.
+            return true;
         }
         return false; // Not in graceful shutdown or no streams to check in that context
     }

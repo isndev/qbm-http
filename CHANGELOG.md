@@ -115,6 +115,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A client's graceful GOAWAY lets the server answer its requests (Huly QB-530).** The server
+  applied the last-stream-id of a client's GOAWAY to the client's own requests, closing every
+  request above it -- all of them for the common `last_stream_id = 0` -- and then the connection,
+  before their responses. That id bounds the server-initiated streams the client processed
+  (RFC 9113 §6.8): a `NO_ERROR` GOAWAY now drops only the pushes above it and refuses new streams,
+  every accepted request is answered, and the connection closes once the last stream finishes. An
+  error GOAWAY closes every stream and the connection. Witnesses in
+  `tests/unit/http2/http2-server-protocol.cpp`.
 - **HTTP/2 server responses: HEAD sends no DATA; a promised stream can be answered (Huly QB-527,
   QB-529).** `send_response` took the body of a HEAD response as content and sent it in DATA
   frames, while HTTP/1.1 and HTTP/3 strip it; a HEAD response now ends the stream on its HEADERS,

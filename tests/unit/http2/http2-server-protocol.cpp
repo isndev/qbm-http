@@ -2321,11 +2321,11 @@ TEST(HTTP2ServerProtocol, NewStreamDuringGracefulShutdownIsRefused) {
 }
 
 // ---------------------------------------------------------------------------
-// GOAWAY(error) implicitly closes active client streams above last_stream_id
-// and notifies the application per stream (client-stream cleanup loop).
+// GOAWAY(error) from the client ends the connection, and every stream with it:
+// each active stream is closed and reported to the application (Huly QB-530).
 // ---------------------------------------------------------------------------
 
-TEST(HTTP2ServerProtocol, GoAwayErrorImplicitlyClosesHigherClientStreams) {
+TEST(HTTP2ServerProtocol, GoAwayErrorClosesEveryStreamAndTheConnection) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     do_handshake(protocol, io);
@@ -2337,9 +2337,8 @@ TEST(HTTP2ServerProtocol, GoAwayErrorImplicitlyClosesHigherClientStreams) {
     open_post_stream_open(protocol, io, 5, "/c");
     ASSERT_TRUE(protocol.ok());
 
-    // GOAWAY with an error code (INTERNAL_ERROR=0x2) and last_stream_id=1.
-    // Streams 3 and 5 are > last_stream_id and active -> each is implicitly
-    // closed and reported via Http2StreamErrorEvent.
+    // GOAWAY with an error code (INTERNAL_ERROR=0x2) and last_stream_id=1: the
+    // bound concerns server-initiated streams; the error ends all three requests.
     std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, static_cast<uint8_t>(ErrorCode::INTERNAL_ERROR)};
     push_frame(io, FrameType::GOAWAY, 0, 0, payload);
     drive(protocol, io);
@@ -2348,8 +2347,8 @@ TEST(HTTP2ServerProtocol, GoAwayErrorImplicitlyClosesHigherClientStreams) {
     EXPECT_FALSE(protocol.ok());
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, ErrorCode::INTERNAL_ERROR);
-    // At least the two streams above last_stream_id (3, 5) were reported closed.
-    EXPECT_GE(io.stream_error_count, 2);
+    EXPECT_EQ(io.stream_error_count, 3) << "streams 1, 3 and 5 are reported closed";
+    EXPECT_EQ(io.last_stream_error, ErrorCode::INTERNAL_ERROR);
 }
 
 // ---------------------------------------------------------------------------
@@ -3034,79 +3033,108 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
 }
 
 // ---------------------------------------------------------------------------
-// GOAWAY receipt with a server-pushed (even) stream present.
-// Injecting a client GOAWAY whose last_stream_id is below the pushed stream's
-// parent forces the pushed-stream-orphan cleanup arm (server.h:840-843,859-873) and the
-// client-stream implicit-close arm (server.h:875-893).
+// The last-stream-id of a GOAWAY a CLIENT sends is the highest SERVER-initiated
+// stream -- a push -- the client processed (RFC 9113 §6.8). It says nothing about
+// the client's own requests, which the client still expects answered. A NO_ERROR
+// GOAWAY therefore closes only the pushes above that bound; every request stays
+// (Huly QB-530; these two tests used to assert the inverse: requests above the
+// bound closed, pushes closed with their parent).
 // ---------------------------------------------------------------------------
 
-TEST(HTTP2ServerProtocol, GoAwayReceiptClosesPushedAndHigherClientStreams) {
-    Http2FakeIO    io;
-    ServerProtocol protocol(io);
+namespace {
+// Push-enabled handshake, requests 1 and 3 left OPEN, pushes 2 (on 1) and 4 (on 3).
+void
+open_requests_and_pushes(ServerProtocol &protocol, Http2FakeIO &io) {
     push_preface(io);
     push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}}));
     drive(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/one");
+    open_post_stream_open(protocol, io, 3, "/three");
+    for (const auto &[parent, promised] : {std::pair<uint32_t, uint32_t>{1, 2}, std::pair<uint32_t, uint32_t>{3, 4}}) {
+        qb::http::Request req{qb::io::uri{"https://example.test/asset-" + std::to_string(promised) + ".css"}};
+        req.method() = qb::http::method::GET;
+        ASSERT_FALSE(protocol.send_push_promise(parent, promised, std::move(req)).has_value());
+    }
     ASSERT_TRUE(protocol.ok());
-
-    // Two open client streams (1 and 3) and a pushed stream (2) parented on 1.
-    open_post_stream_open(protocol, io, 1, "/parent");
-    open_post_stream_open(protocol, io, 3, "/other");
-    ASSERT_TRUE(protocol.ok());
-
-    qb::http::Request promised{qb::io::uri{"https://example.test/asset.css"}};
-    promised.method() = qb::http::method::GET;
-    ASSERT_FALSE(protocol.send_push_promise(1, 2, std::move(promised)).has_value());
-
-    const int stream_err_before = io.stream_error_count;
-
-    // Client GOAWAY(last_stream_id=1, NO_ERROR): stream 3 is above the high-water
-    // mark so it is implicitly closed; pushed stream 2's parent (1) is at the
-    // boundary, but the cleanup loop walks both even and odd branches.
-    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(1, ErrorCode::NO_ERROR));
-    drive(protocol, io);
-
-    EXPECT_EQ(io.goaway_count, 1);
-    // The implicit-close of stream 3 (above last_stream_id) dispatches a stream
-    // error event to the application.
-    EXPECT_GT(io.stream_error_count, stream_err_before);
 }
+} // namespace
 
-// GOAWAY whose last_stream_id is below a pushed stream's PARENT forces the
-// pushed-stream orphan-close arm: parent (3) > last_stream_id (1) sets
-// close_pushed_stream, so pushed stream 4 is closed + erased and a stream-error
-// event fires for it (server.h:840-843,859-873).
-TEST(HTTP2ServerProtocol, GoAwayReceiptClosesOrphanedPushedStream) {
+TEST(HTTP2ServerProtocol, ClientGoawayClosesOnlyPushesAboveItsLastStreamId) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
-    push_preface(io);
-    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}}));
-    drive(protocol, io);
-    ASSERT_TRUE(protocol.ok());
-
-    // Seed stream 1 (kept low), then open parent stream 3 and push stream 4 on it.
-    open_post_stream_open(protocol, io, 1, "/low");
-    open_post_stream_open(protocol, io, 3, "/parent");
-    ASSERT_TRUE(protocol.ok());
-
-    qb::http::Request promised{qb::io::uri{"https://example.test/asset.css"}};
-    promised.method() = qb::http::method::GET;
-    ASSERT_FALSE(protocol.send_push_promise(3, 4, std::move(promised)).has_value());
-
+    open_requests_and_pushes(protocol, io);
     const int stream_err_before = io.stream_error_count;
 
-    // GOAWAY(last_stream_id=1): parent stream 3 is above it (will be implicitly
-    // closed), so its pushed child stream 4 is orphaned and closed too.
-    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(1, ErrorCode::NO_ERROR));
+    // last_stream_id=2: the client processed push 2, never push 4.
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(2, ErrorCode::NO_ERROR));
     drive(protocol, io);
 
     EXPECT_EQ(io.goaway_count, 1);
-    // Two implicit closes (pushed stream 4 + client stream 3) -> >= 2 events.
-    EXPECT_GE(io.stream_error_count - stream_err_before, 2);
+    EXPECT_TRUE(protocol.ok()) << "requests 1 and 3 and push 2 are still to finish";
+    EXPECT_EQ(io.stream_error_count - stream_err_before, 1) << "push 4 only";
+    EXPECT_TRUE(protocol.is_stream_closed(4));
+    EXPECT_FALSE(protocol.is_stream_closed(2));
+    EXPECT_FALSE(protocol.is_stream_closed(1));
+    EXPECT_FALSE(protocol.is_stream_closed(3));
 }
 
-// GOAWAY(error) implicitly closing a higher client stream that is still OPEN
-// (server.h:875-893 error branch) dispatches a stream-error and erases it.
-TEST(HTTP2ServerProtocol, GoAwayWithErrorImplicitlyClosesHigherOpenClientStream) {
+TEST(HTTP2ServerProtocol, ClientGoawayWithLastZeroClosesEveryPushButNoRequest) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    open_requests_and_pushes(protocol, io);
+    const int stream_err_before = io.stream_error_count;
+
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(0, ErrorCode::NO_ERROR));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count - stream_err_before, 2) << "pushes 2 and 4";
+    EXPECT_TRUE(protocol.is_stream_closed(2));
+    EXPECT_TRUE(protocol.is_stream_closed(4));
+    EXPECT_FALSE(protocol.is_stream_closed(1));
+    EXPECT_FALSE(protocol.is_stream_closed(3));
+}
+
+// The witness of the ticket: no push at all, two accepted requests awaiting
+// their responses, and a graceful GOAWAY(NO_ERROR, last=0). Both are answered;
+// a new stream is refused; the connection closes once the last one is done.
+TEST(HTTP2ServerProtocol, ClientGoawayLetsAcceptedRequestsFinishThenCloses) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/a");
+    open_get_stream_end_stream(protocol, io, 3, "/b");
+    ASSERT_EQ(io.request_count, 2);
+
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(0, ErrorCode::NO_ERROR));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok()) << "two requests are still to be answered";
+    EXPECT_EQ(io.stream_error_count, 0);
+
+    open_get_stream_end_stream(protocol, io, 5, "/late");
+    EXPECT_EQ(last_rst_stream_error(io.output, 5), ErrorCode::REFUSED_STREAM) << "no new stream during the drain";
+    EXPECT_EQ(io.request_count, 2);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::NO_CONTENT;
+    EXPECT_TRUE(protocol.send_response(1, response));
+    EXPECT_TRUE(protocol.ok()) << "stream 3 is still to be answered";
+    EXPECT_FALSE(protocol.send_response(3, response)) << "the last response completes the drain";
+    EXPECT_TRUE(protocol.is_stream_closed(3));
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::NO_ERROR);
+
+    std::size_t headers_frames = 0;
+    for (const auto &f : parse_emitted_frames(io.output)) {
+        headers_frames += (f.type == FrameType::HEADERS && (f.stream_id == 1 || f.stream_id == 3)) ? 1u : 0u;
+    }
+    EXPECT_EQ(headers_frames, 2u) << "both responses were sent";
+}
+
+// GOAWAY(error) closes the OPEN client streams too, whatever its last-stream-id,
+// dispatching a stream-error for each.
+TEST(HTTP2ServerProtocol, GoAwayWithErrorClosesOpenClientStreams) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     do_handshake(protocol, io);
@@ -3117,12 +3145,11 @@ TEST(HTTP2ServerProtocol, GoAwayWithErrorImplicitlyClosesHigherOpenClientStream)
     ASSERT_TRUE(protocol.ok());
 
     const int stream_err_before = io.stream_error_count;
-    // last_stream_id=1: stream 3 is above it and OPEN -> implicit close.
     push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(1, ErrorCode::PROTOCOL_ERROR));
     drive(protocol, io);
 
     EXPECT_EQ(io.goaway_count, 1);
-    EXPECT_GT(io.stream_error_count, stream_err_before);
+    EXPECT_EQ(io.stream_error_count - stream_err_before, 2) << "streams 1 and 3";
     EXPECT_FALSE(protocol.ok()); // error GOAWAY closes the connection
 }
 
