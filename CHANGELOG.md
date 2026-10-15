@@ -140,6 +140,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `https://[::1]:8443/` sent `:authority: ::1:8443`; the builder now writes the IP literal between
   brackets with the port after them (RFC 3986 section 3.2.2, RFC 9114 section 4.3.1), and the
   persistent client completes a relative target from its base the same way.
+- **A WebSocket reconnect after the peer's EOF starts in the same loop pass (Huly QB-1069).** Since
+  qb-io's `dispose()` closes a standalone client's transport when the peer ended the connection (Huly
+  QB-1060), the cleanup the client defers for it found no socket to close and left the connection
+  marked retiring: a `connect()` from the `disconnected` callback waited one more loop pass for a
+  launch with nothing to retire. The cleanup now clears that state when the transport is closed
+  already.
 - **A WebSocket protocol-error observer cannot terminate the process (Huly QB-516).** A frame
   header the parser refuses fails the connection from `getMessageSize()`, which is `noexcept`. The
   failure now marks the connection closed before any application code runs, queues its Close

@@ -1191,7 +1191,15 @@ private:
                 return;
             if (epoch != _connection_epoch)
                 return;
-            if (_disconnect_pending && _disconnect_notified && this->transport().native_handle() == old_fd) {
+            if (!_disconnect_pending || !_disconnect_notified)
+                return;
+            // dispose() closes the transport itself when the peer's EOF or a socket error ended the
+            // connection (qb-io, Huly QB-1060): nothing is left to retire, and a connect() from the
+            // disconnect callback, deferred after this one, must start at once (Huly QB-1069).
+            if (!this->transport().is_open()) {
+                _disconnect_pending  = false;
+                _disconnect_notified = false;
+            } else if (this->transport().native_handle() == old_fd) {
                 this->transport().close();
                 _disconnect_pending  = false;
                 _disconnect_notified = false;
@@ -1743,7 +1751,8 @@ public:
         const auto weak    = std::weak_ptr<int>(_object_lifetime);
         const auto session = _session_epoch;
         // dispose() stops the watcher only after this hook returns. Close its
-        // socket at the listener tail, ahead of the user disconnect callback.
+        // socket at the listener tail, ahead of the user disconnect callback
+        // (dispose() closed it already when the peer ended the connection).
         schedule_transport_cleanup();
         if (pending)
             queue_error();

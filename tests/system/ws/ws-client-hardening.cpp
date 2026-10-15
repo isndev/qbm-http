@@ -455,8 +455,7 @@ public:
 
     void on(Protocol::request &&request);
     void on(qb::io::async::event::disconnected &&);
-    void
-    on(WS_Protocol::message &&) {}
+    void on(WS_Protocol::message &&);
     void
     on(WS_Protocol::ping &&) {}
     void
@@ -470,6 +469,7 @@ public:
     bool               select_unoffered_extension        = false;
     bool               send_message_after_upgrade        = false;
     bool               send_second_message_after_upgrade = false;
+    bool               disconnect_on_message             = false; ///< hang up, no Close frame: the client reads EOF
     std::atomic<int>  *requests                          = nullptr;
     std::atomic<int>  *closed                            = nullptr;
     std::atomic<bool> *client_offered_extension          = nullptr;
@@ -506,6 +506,12 @@ ExtensionResponseSession::on(Protocol::request &&request) {
     if (probe.requests) {
         probe.requests->fetch_add(1);
     }
+}
+
+void
+ExtensionResponseSession::on(WS_Protocol::message &&) {
+    if (this->server().disconnect_on_message)
+        this->disconnect();
 }
 
 void
@@ -755,6 +761,73 @@ TEST(WebSocketClientHardening, EstablishedMessageCallbackCanReconnect) {
     ASSERT_TRUE(pump_until([&] { return connected == 2; }, 4000ms));
     EXPECT_EQ(messages, 1);
     EXPECT_EQ(order, "CMC");
+    client.disconnect();
+}
+
+// Counts the connector's connect attempts, and connects for real: whether a reconnect has started is
+// read off the socket the connector opens for it.
+class CountingSocket : public qb::io::tcp::socket {
+public:
+    inline static unsigned connect_calls = 0;
+
+    int
+    n_connect(qb::io::endpoint const &ep) noexcept {
+        ++connect_calls;
+        return qb::io::tcp::socket::n_connect(ep);
+    }
+
+    int
+    n_connect(qb::io::uri const &u) noexcept {
+        ++connect_calls;
+        return qb::io::tcp::socket::n_connect(u);
+    }
+};
+
+struct CountingTransport : qb::io::stream<CountingSocket> {
+    static constexpr bool
+    is_secure() noexcept {
+        return false;
+    }
+};
+
+// After the peer's EOF, qb-io's dispose() closes the client's transport itself (Huly QB-1060), so the
+// cleanup the client deferred for it finds nothing to close. It must still clear the retirement it
+// stood for: a connect() from the disconnect callback, which runs after it in the same drain, then
+// starts at once. It used to find the old connection still marked retiring and wait one more loop
+// pass for a launch that had nothing left to retire (Huly QB-1069).
+TEST(WebSocketClientHardening, ReconnectAfterPeerEofStartsInTheSamePass) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(0, [](ExtensionResponseServer &s) { s.disconnect_on_message = true; });
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0);
+    const qb::io::uri                                       first("ws://127.0.0.1:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://127.0.0.1:" + std::to_string(bound_port(second_server)) + "/path");
+    CountingSocket::connect_calls                        = 0;
+    int                                     connected    = 0;
+    int                                     disconnected = 0;
+    int                                     errors       = 0;
+    unsigned                                before       = 0;
+    unsigned                                after        = 0;
+    qb::http::ws::Client<CountingTransport> client;
+    client.on_connected([&](auto &) {
+        if (++connected == 1) {
+            qb::http::ws::MessageText hang_up;
+            hang_up << "hang up";
+            client << hang_up;
+        }
+    });
+    client.on_error([&](auto &) { ++errors; });
+    client.on_disconnected([&](auto &) {
+        if (++disconnected == 1) {
+            before = CountingSocket::connect_calls;
+            client.connect(second, 2s);
+            after = CountingSocket::connect_calls;
+        }
+    });
+    client.connect(first, 2s);
+    ASSERT_TRUE(pump_until([&] { return connected == 2 || errors > 0; }, 4000ms));
+    EXPECT_EQ(errors, 0);
+    EXPECT_EQ(disconnected, 1);
+    EXPECT_GT(after, before) << "the reconnect requested after the peer's EOF did not start in the callback's pass";
     client.disconnect();
 }
 
