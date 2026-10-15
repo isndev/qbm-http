@@ -3028,14 +3028,15 @@ TEST_F(Http3LoopbackTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
 
 // set_max_pending_requests(0) makes the first push exceed the bound, so the
 // request is failed synchronously with a 503 ("pending request limit reached")
-// before any connect attempt is started.
+// before any connect attempt is started, and push_request returns false, as the
+// HTTP/1.1 and HTTP/2 clients answer a request their bound refuses (Huly QB-499).
 TEST_F(Http3LoopbackTest, PendingRequestLimitRejectsWith503) {
     auto client = qb::http3::make_client(https_origin(next_port()));
     client->set_max_pending_requests(0);
 
     std::atomic<bool>  done{false};
     qb::http::Response response;
-    EXPECT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/x")}, [&](qb::http::Response r) {
+    EXPECT_FALSE(client->push_request(qb::http::Request{qb::io::uri("/x")}, [&](qb::http::Response r) {
         response = std::move(r);
         done     = true;
     }));
@@ -3053,7 +3054,8 @@ TEST_F(Http3LoopbackTest, PendingRequestLimitRejectsWith503) {
 // The bound of set_max_pending_requests counts queued + active requests whatever API queued them
 // (Huly QB-499): a batch is admitted member by member, in order, exactly as the same requests pushed
 // one by one. A member past the bound is answered 503 at its index before any context or timer
-// exists for it; an invalid member keeps its 400; the callback runs once, with every result.
+// exists for it; an invalid member keeps its 400; the callback runs once, with every result; and
+// push_requests returns false as soon as the bound refused a member.
 TEST_F(Http3LoopbackTest, PendingRequestLimitAdmitsBatchMembersOneByOne) {
     const auto is_limit = [](qb::http::Response const &r) {
         return r.status() == qb::http::status::SERVICE_UNAVAILABLE && r.body().as<std::string>().find("limit") != std::string::npos;
@@ -3069,7 +3071,7 @@ TEST_F(Http3LoopbackTest, PendingRequestLimitAdmitsBatchMembersOneByOne) {
         std::vector<qb::http::Request> batch;
         batch.emplace_back(qb::io::uri("/a"));
         batch.emplace_back(qb::io::uri("/b"));
-        EXPECT_TRUE(client->push_requests(std::move(batch), [&](std::vector<qb::http::Response> rs) {
+        EXPECT_FALSE(client->push_requests(std::move(batch), [&](std::vector<qb::http::Response> rs) {
             ++calls;
             got = std::move(rs);
         }));
@@ -3103,7 +3105,7 @@ TEST_F(Http3LoopbackTest, PendingRequestLimitAdmitsBatchMembersOneByOne) {
         batch.emplace_back(qb::io::uri("https://not-the-configured-origin.invalid:443/m1"));
         batch.emplace_back(qb::io::uri("/m2"));
         batch.emplace_back(qb::io::uri("/m3"));
-        EXPECT_TRUE(client->push_requests(std::move(batch), [&](std::vector<qb::http::Response> rs) {
+        EXPECT_FALSE(client->push_requests(std::move(batch), [&](std::vector<qb::http::Response> rs) {
             ++calls;
             got = std::move(rs);
         }));
@@ -3119,6 +3121,57 @@ TEST_F(Http3LoopbackTest, PendingRequestLimitAdmitsBatchMembersOneByOne) {
         ASSERT_EQ(single.size(), 1u);
         EXPECT_FALSE(is_limit(single[0]));
     }
+}
+
+// The return value of push_requests is the same on the three clients: false as soon as the pending
+// bound refused a member, as push_request answers a refused request; the members within the bound
+// are still sent and answered (Huly QB-499, the HTTP/2 twin is QB-1063). Bound 2, batch of 3: the
+// first two go over the wire and come back 200, the third is answered 503 at its index.
+TEST_F(Http3LoopbackTest, BatchPastThePendingLimitRefusesOnlyTheMembersOverIt) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/item/:id", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = ctx->path_param("id");
+        ctx->complete();
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_max_pending_requests(2);
+
+    std::vector<qb::http::Request> requests;
+    for (int i = 0; i < 3; ++i) {
+        requests.emplace_back(qb::io::uri("/item/" + std::to_string(i)));
+    }
+
+    int                             calls = 0;
+    std::vector<qb::http::Response> responses;
+    EXPECT_FALSE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
+        ++calls;
+        responses = std::move(res);
+    })) << "the bound refused the third member";
+
+    pump([&] { return calls != 0; });
+
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(responses.size(), 3u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::OK);
+    EXPECT_EQ(responses[0].body().as<std::string>(), "0");
+    EXPECT_EQ(responses[1].status(), qb::http::status::OK);
+    EXPECT_EQ(responses[1].body().as<std::string>(), "1");
+    EXPECT_EQ(responses[2].status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_NE(responses[2].body().as<std::string>().find("limit"), std::string::npos) << responses[2].body().as<std::string>();
+
+    auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(total, 3u);
+    EXPECT_EQ(successful, 2u);
+    EXPECT_EQ(failed, 1u);
+
+    client->disconnect();
+    server->close();
 }
 
 // Cancelling an id that matches no pending or active request returns false

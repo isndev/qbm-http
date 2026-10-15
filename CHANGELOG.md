@@ -48,7 +48,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **A refused coroutine WebSocket upgrade left below 300 answers `400` (Huly QB-610).** No signature
   change; a hook that refused with the default `200` (or a `101`) used to send it.
 - **An HTTP/3 batch past the pending-request bound gets 503s instead of queuing beyond it (Huly
-  QB-499).** No signature change; see the Fixed entry.
+  QB-499).** No signature change; see the Fixed entry. `Client::push_request` and
+  `Client::push_requests` return `false` when the bound refused the request or a batch member (the
+  503 already delivered through the callback), as the HTTP/1.1 and HTTP/2 clients do; they returned
+  `true` for any non-null callback.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -124,7 +127,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   its coroutine form admit each member as `push_request` would: a member that would take the
   queued + active count past `set_max_pending_requests` completes with a 503 at its index before
   any context or timer is allocated for it. The callback still runs once, in request order, and at
-  once when no member was admitted.
+  once when no member was admitted; `push_requests` returns `false` when a member was refused.
 - **A moved HTTP/3 connection keeps its callbacks and state (Huly QB-502).** nghttp3 calls back
   with the user data it was given at creation and cannot be told another, so `connection<Owner>`
   now hands it a heap anchor that a move re-points: callbacks reach the destination, and the bound

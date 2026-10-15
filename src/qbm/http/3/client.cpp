@@ -206,12 +206,22 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
     if (!callback) {
         return false;
     }
-    (void) push_request_with_id(std::move(request), std::move(callback));
-    return true;
+    // false when the pending bound refused the request, its callback already holding the 503, as
+    // the HTTP/1.1 and HTTP/2 clients answer; an invalid request, or one refused after GOAWAY, is
+    // answered through its callback and returns true, as there (Huly QB-499).
+    bool refused_by_bound = false;
+    (void) admit_request(std::move(request), std::move(callback), refused_by_bound);
+    return !refused_by_bound;
 }
 
 request_id
 Client::push_request_with_id(qb::http::Request request, ResponseCallback callback) {
+    bool refused_by_bound = false;
+    return admit_request(std::move(request), std::move(callback), refused_by_bound);
+}
+
+request_id
+Client::admit_request(qb::http::Request request, ResponseCallback callback, bool &refused_by_bound) {
     if (!callback) {
         return 0;
     }
@@ -229,6 +239,7 @@ Client::push_request_with_id(qb::http::Request request, ResponseCallback callbac
     }
     if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
         ++_failed_requests;
+        refused_by_bound = true;
         callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client pending request limit reached"));
         return 0;
     }
@@ -303,6 +314,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     batch->callback     = std::move(callback);
     batch->responses.resize(requests.size());
     batch->completed.assign(requests.size(), false);
+    bool admitted_all = true; // false once the bound refuses a member, as push_request() answers
 
     _total_requests += requests.size();
 
@@ -322,6 +334,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
             batch->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client pending request limit reached");
             batch->completed[i] = true;
             ++batch->completed_count;
+            admitted_all = false;
             continue;
         }
         auto ctx              = std::make_unique<RequestContext>();
@@ -355,7 +368,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         // Reached whenever every request in the batch fails prepare_request synchronously (a batch
         // of malformed URIs), i.e. exactly when the caller most needs its error results.
         batch->callback(std::move(batch->responses));
-        return true;
+        return admitted_all;
     }
 
     _active_batches.emplace(batch_id, std::move(batch));
@@ -365,7 +378,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     } else if (!_is_connecting) {
         connect(nullptr);
     }
-    return true;
+    return admitted_all;
 }
 
 void
@@ -897,14 +910,10 @@ Client::push_request(qb::http::Request request) {
                 complete(std::move(response));
                 return;
             }
-            auto complete_holder = std::make_shared<std::function<void(qb::http::Response &&)>>(std::move(complete));
-            if (!self->push_request(std::move(req),
-                                    [complete_holder](qb::http::Response response) mutable { (*complete_holder)(std::move(response)); })) {
-                qb::http::Response response;
-                response.status() = qb::http::status::SERVICE_UNAVAILABLE;
-                response.body()   = "Unable to queue HTTP/3 request";
-                (*complete_holder)(std::move(response));
-            }
+            // The callback answers every outcome, a refusal by the pending bound included (push_request
+            // returns false then, its 503 already delivered), so the return value adds nothing here.
+            (void) self->push_request(std::move(req),
+                                      [complete = std::move(complete)](qb::http::Response response) mutable { complete(std::move(response)); });
         });
 }
 

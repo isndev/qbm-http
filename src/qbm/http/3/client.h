@@ -205,7 +205,11 @@ public:
      * @brief Queue a request, delivering the response via @p callback.
      * @param request  Request to send (made absolute against the base origin).
      * @param callback Response handler; must be non-null.
-     * @return @c true if accepted; @c false if @p callback is null.
+     * @return @c false if @p callback is null, or if the request would take the queued + active
+     *         count past set_max_pending_requests() -- @p callback has then already received its
+     *         503, as with the HTTP/1.1 and HTTP/2 clients. @c true otherwise, an invalid request
+     *         (400) or one refused after the server's GOAWAY (503) included: those are answered
+     *         through @p callback.
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
     /**
@@ -239,7 +243,9 @@ public:
      *
      * @param requests Requests to send; an empty batch completes immediately.
      * @param callback Batch handler; must be non-null for a non-empty batch.
-     * @return @c true if accepted; @c false if @p callback is null.
+     * @return @c false if @p callback is null, or if the bound refused at least one member, as
+     *         push_request() answers a refused request and the HTTP/1.1 and HTTP/2 batches do;
+     *         @c true otherwise.
      */
     bool push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback);
     /**
@@ -359,6 +365,9 @@ private:
     void ensure_absolute_uri(qb::http::Request &request);
     /// Validate/normalize @p request; @return an error response if rejected.
     [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
+    /// Admit one request (push_request() and push_request_with_id()); @return its id, or 0 when it
+    /// was answered at once. @p refused_by_bound is set when the pending bound refused it.
+    [[nodiscard]] request_id admit_request(qb::http::Request request, ResponseCallback callback, bool &refused_by_bound);
     /// Submit as many queued requests as the concurrency limit allows.
     void process_pending_requests();
     /// Mark the connection up, notify callbacks, and flush pending requests.

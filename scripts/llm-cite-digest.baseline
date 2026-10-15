@@ -204,22 +204,22 @@ llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:77-77	f77072de4b7f	clas
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:101-114	45b714835123	++_connect_epoch;
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:119-171	df2ba8d86127	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:20-36	7102845211c2	namespace {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:224-232	fbca8dc77a4b	if (_remote_shutdown) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:264-275	e5fe730a7e64	auto active = std::find_if(_active_requests.begin(), _active_requests...
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:288-299	85307606f7b1	if (_remote_shutdown) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:317-326	155af8c8f782	// The bound counts queued + active requests whatever queued them: ea...
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:372-453	dcc465a81469	Client::process_pending_requests() {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:456-513	00a417bbcb3e	Client::handle_connection_success(std::string const &alpn) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:486-528	61a61d660c57	Client::handle_connection_failure(std::string const &error) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:531-581	bf17bb6a1872	Client::fail_all_requests(std::string const &error) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:609-626	798dcfe47fe0	void
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:735-743	8ab08f2c0ee9	Client::on_http3_shutdown(std::uint64_t, std::uint64_t) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:759-773	0c4a7626b3ae	Client::dispatch(qb::io::async::quic::event::connected const &ev) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:234-239	7181f4b8953b	if (_remote_shutdown) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:275-286	e5fe730a7e64	auto active = std::find_if(_active_requests.begin(), _active_requests...
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:299-310	85307606f7b1	if (_remote_shutdown) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:329-339	a31b4bf3f1c8	// The bound counts queued + active requests whatever queued them: ea...
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:385-466	dcc465a81469	Client::process_pending_requests() {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:469-526	00a417bbcb3e	Client::handle_connection_success(std::string const &alpn) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:499-541	61a61d660c57	Client::handle_connection_failure(std::string const &error) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:544-594	bf17bb6a1872	Client::fail_all_requests(std::string const &error) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:622-639	798dcfe47fe0	void
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:748-756	8ab08f2c0ee9	Client::on_http3_shutdown(std::uint64_t, std::uint64_t) {
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:76-85	a5700db54ea4	Client::connect(ConnectionCallback callback) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:769-796	e3199d853432	void
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:799-803	767e2c878891	Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:799-837	30c86e5aefce	Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
-llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:840-858	ab2d1495b1a8	Client::dispatch(qb::io::async::quic::event::stream_data_acked const ...
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:772-786	0c4a7626b3ae	Client::dispatch(qb::io::async::quic::event::connected const &ev) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:782-809	e3199d853432	void
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:812-816	767e2c878891	Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:812-850	30c86e5aefce	Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:853-871	ab2d1495b1a8	Client::dispatch(qb::io::async::quic::event::stream_data_acked const ...
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:93-115	13c1e3c6b3c8	if (callback) {
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.h:110-110	b5d9130b44cc	class Client
 llm/qbm-http.llm.api.md	src/qbm/http/3/dual_stack.h:226-252	e15188a14076	dual_stack_server(dual_stack_server const &)            = delete;
@@ -301,19 +301,19 @@ llm/qbm-http.llm.md	src/qbm/http/2/protocol/server.h:768-789	2d277ef17046	// Not
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:101-114	45b714835123	++_connect_epoch;
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:119-171	df2ba8d86127	Client::disconnect() {
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:20-36	7102845211c2	namespace {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:224-232	fbca8dc77a4b	if (_remote_shutdown) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:264-275	e5fe730a7e64	auto active = std::find_if(_active_requests.begin(), _active_requests...
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:288-299	85307606f7b1	if (_remote_shutdown) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:372-453	dcc465a81469	Client::process_pending_requests() {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:456-513	00a417bbcb3e	Client::handle_connection_success(std::string const &alpn) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:486-528	61a61d660c57	Client::handle_connection_failure(std::string const &error) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:531-581	bf17bb6a1872	Client::fail_all_requests(std::string const &error) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:609-626	798dcfe47fe0	void
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:735-743	8ab08f2c0ee9	Client::on_http3_shutdown(std::uint64_t, std::uint64_t) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:759-796	5ea6c41569d4	Client::dispatch(qb::io::async::quic::event::connected const &ev) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:234-239	7181f4b8953b	if (_remote_shutdown) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:275-286	e5fe730a7e64	auto active = std::find_if(_active_requests.begin(), _active_requests...
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:299-310	85307606f7b1	if (_remote_shutdown) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:385-466	dcc465a81469	Client::process_pending_requests() {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:469-526	00a417bbcb3e	Client::handle_connection_success(std::string const &alpn) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:499-541	61a61d660c57	Client::handle_connection_failure(std::string const &error) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:544-594	bf17bb6a1872	Client::fail_all_requests(std::string const &error) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:622-639	798dcfe47fe0	void
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:748-756	8ab08f2c0ee9	Client::on_http3_shutdown(std::uint64_t, std::uint64_t) {
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:76-85	a5700db54ea4	Client::connect(ConnectionCallback callback) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:799-837	30c86e5aefce	Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
-llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:840-858	ab2d1495b1a8	Client::dispatch(qb::io::async::quic::event::stream_data_acked const ...
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:772-809	5ea6c41569d4	Client::dispatch(qb::io::async::quic::event::connected const &ev) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:812-850	30c86e5aefce	Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
+llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:853-871	ab2d1495b1a8	Client::dispatch(qb::io::async::quic::event::stream_data_acked const ...
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:93-115	13c1e3c6b3c8	if (callback) {
 llm/qbm-http.llm.md	src/qbm/http/coro.h:182-218	70a40f61a616	~http_awaiter() {
 llm/qbm-http.llm.md	src/qbm/http/coro.h:232-259	898def4c2bda	using awaiter = http_awaiter<T, std::function<void(std::function<void...
