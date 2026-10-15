@@ -115,6 +115,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 idle sweep measures idleness from the last progress (Huly QB-531).** Nothing on the
+  server ever refreshed a stream's activity time, so the sweep compared every stream's age with
+  the 30 s idle budget and cancelled a response still sending like a dead one. Response HEADERS or
+  DATA sent and a stream WINDOW_UPDATE received now mark the stream (a flag store on the frame
+  path), and the sweep -- which already reads the clock -- stamps the time it observed them; idle
+  time runs from there. A request not yet complete keeps an absolute age bound
+  (`STREAM_INCOMPLETE_TIMEOUT`), so a slow upload cannot hold a stream. Witnesses in
+  `tests/unit/http2/http2-server-protocol.cpp`.
 - **A client's graceful GOAWAY lets the server answer its requests (Huly QB-530).** The server
   applied the last-stream-id of a client's GOAWAY to the client's own requests, closing every
   request above it -- all of them for the common `last_stream_id = 0` -- and then the connection,

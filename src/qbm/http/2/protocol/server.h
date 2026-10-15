@@ -971,8 +971,7 @@ public:
             }
 
             stream.peer_window_size += window_increment;
-            // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " peer window updated from " << old_stream_peer_window << " to
-            // " << stream.peer_window_size);
+            stream.progressed_since_idle_sweep = true; // the client is reading this stream
 
             if (stream.has_pending_data_to_send) {
                 // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " has pending data. Attempting to send.");
@@ -1182,6 +1181,7 @@ public:
             LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Failed to send response HEADERS");
             return false;
         }
+        stream.progressed_since_idle_sweep = true;
 
         // Update stream state AFTER successful send of HEADERS frame
         if (header_flags & FLAG_END_STREAM) {
@@ -1352,13 +1352,20 @@ public:
      * Removes streams that have been idle for too long or incomplete for too long.
      * This prevents resource exhaustion from malicious clients opening many streams.
      *
+     * A stream's idle time runs from its last real progress -- response HEADERS or DATA sent, a
+     * stream WINDOW_UPDATE received -- as seen by the sweep that observed it (the frame path only
+     * marks the stream, the sweep stamps the time): a response still progressing is not idle
+     * (Huly QB-531). A request not yet complete is also bounded by its age since the stream
+     * opened, whatever happened on it, so a slow upload cannot hold a stream indefinitely.
+     *
      * @param max_idle Maximum idle time before cleanup (default: 30s)
-     * @param max_incomplete Maximum time for incomplete streams (default: 10s)
+     * @param max_incomplete Maximum age of a stream whose request is not complete (default: 10s)
      * @return Number of streams cleaned up
      */
     uint32_t
     cleanup_idle_streams(qb::duration max_idle = std::chrono::seconds(30), qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
-        uint32_t cleaned_count = 0;
+        uint32_t   cleaned_count = 0;
+        const auto now           = std::chrono::steady_clock::now();
 
         for (auto it = _server_streams.begin(); it != _server_streams.end();) {
             auto    &stream    = it->second;
@@ -1370,8 +1377,12 @@ public:
                 continue;
             }
 
-            auto idle_time         = stream.get_idle_time();
-            auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
+            if (stream.progressed_since_idle_sweep) {
+                stream.progressed_since_idle_sweep = false;
+                stream.last_activity               = now;
+            }
+            const auto idle_time         = now - stream.last_activity;
+            const auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
 
             // Check for incomplete streams (not dispatched yet)
             bool is_incomplete = !stream.request_dispatched
@@ -1379,7 +1390,7 @@ public:
 
             // Check for idle timeout
             bool should_cleanup = false;
-            if (is_incomplete && idle_time > max_incomplete) {
+            if (is_incomplete && now - stream.created_at > max_incomplete) {
                 LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << idle_time_seconds << "s)");
                 should_cleanup = true;
             } else if (idle_time > max_idle) {
@@ -1868,6 +1879,7 @@ private:
                 return false;                            // Indicate send failure
             }
 
+            stream.progressed_since_idle_sweep = true;
             if (header_to_send.flags & FLAG_END_STREAM) {
                 stream.end_stream_sent = true;
                 stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
@@ -2293,6 +2305,7 @@ private:
                 // Decrement flow control windows by actual data chunk size
                 stream.peer_window_size -= current_chunk_size;
                 this->_connection_send_window -= current_chunk_size;
+                stream.progressed_since_idle_sweep = true;
                 // REVERTED PADDING LOGIC (flow control decrement)
 
                 if (data_frame_event.header.flags & FLAG_END_STREAM) {

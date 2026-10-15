@@ -551,7 +551,7 @@ Fluent setters (each returns `RetryPolicy&`): `with_max_attempts(int)`, `with_in
   - `bool send_response(uint32_t stream_id, const qb::http::Response&)` — a response to `HEAD` ends the stream on its HEADERS (no DATA, `content-length` kept);
   - `[[nodiscard]] std::optional<PushPromiseFailureReason> send_push_promise(uint32_t associated, uint32_t promised /*even, non-zero*/, qb::http::Request pseudo_headers)` (needs peer `SETTINGS_ENABLE_PUSH=1`); on success answer the reserved stream with `send_response(promised, response)`;
   - `void send_rst_stream(uint32_t, ErrorCode, const std::string& msg="", bool close_context=true) noexcept`;
-  - `uint32_t cleanup_idle_streams(qb::duration max_idle=std::chrono::seconds(30), qb::duration max_incomplete=std::chrono::seconds(10)) noexcept`;
+  - `uint32_t cleanup_idle_streams(qb::duration max_idle=std::chrono::seconds(30), qb::duration max_incomplete=std::chrono::seconds(10)) noexcept` — idle counts from the last progress the sweep observed (response HEADERS/DATA sent, stream WINDOW_UPDATE received); `max_incomplete` bounds the AGE of a stream whose request is incomplete;
   - `[[nodiscard]] bool is_stream_closed(uint32_t) const`; `static bool is_valid_header_field(const std::string& name, const std::string& value) noexcept`.
 - `template<typename IO_Handler> using client_protocol/server_protocol = ClientHttp2Protocol/ServerHttp2Protocol<IO_Handler>` (`http2.h:72-76`).
 - `bool qb::http::well_known::is_hop_by_hop(const std::string& header_name)` (`src/qbm/http/2/protocol/server.h:52`) — classifies hop-by-hop headers (forbidden in HTTP/2).

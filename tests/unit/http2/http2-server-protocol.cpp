@@ -28,6 +28,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../../shared/http2_fake_io.h"
@@ -2749,6 +2750,67 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsLeavesFreshStreamsAlone) {
     // should_cleanup == false (++it) branch is taken and nothing is removed.
     EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1h), 0u);
     EXPECT_FALSE(protocol.is_stream_closed(1));
+}
+
+// ---------------------------------------------------------------------------
+// The idle sweep measures a dispatched stream's idleness from its last real
+// progress -- response HEADERS or DATA sent, a stream WINDOW_UPDATE received --
+// not from its creation; an incomplete request keeps an absolute age bound
+// (max_incomplete). It used to compare every stream's AGE with the idle budget,
+// so a response still progressing was cancelled like a dead one (Huly QB-531).
+// The sleeps only guarantee a minimum elapsed time (steady clock): the stream
+// that progressed is measured from the sweep that saw the progress, whatever the
+// host load.
+// ---------------------------------------------------------------------------
+
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsMeasuresIdleSinceTheLastProgress) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 10);       // the response leaves 10 octets at a time
+    open_get_stream_end_stream(protocol, io, 1, "/slow");  // answered, progressing
+    open_get_stream_end_stream(protocol, io, 3, "/stuck"); // dispatched, never answered
+    ASSERT_EQ(io.request_count, 2);
+    std::this_thread::sleep_for(5ms); // both streams are now at least 5 ms old
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(100, 'p');
+    ASSERT_TRUE(protocol.send_response(1, response)); // HEADERS + 10 octets: progress
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 10u);
+
+    // A 1 ms idle budget: stream 1 progressed since the last sweep, stream 3 never did.
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1ms, /*max_incomplete=*/1h), 1u);
+    EXPECT_FALSE(protocol.is_stream_closed(1)) << "a progressing response is not idle";
+    EXPECT_TRUE(protocol.is_stream_closed(3));
+
+    // More progress: the client grants credit, 10 more octets leave.
+    std::this_thread::sleep_for(5ms);
+    make_window_update_frame(io, 1, 10);
+    drive(protocol, io);
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 20u);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1ms, 1h), 0u);
+    EXPECT_FALSE(protocol.is_stream_closed(1));
+
+    // No progress since that sweep: the stream is idle now, and reclaimed.
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1ms, 1h), 1u);
+    EXPECT_TRUE(protocol.is_stream_closed(1));
+}
+
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsKeepsAnAgeBoundForIncompleteRequests) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/upload"); // the request body never ends
+    std::this_thread::sleep_for(5ms);
+    make_window_update_frame(io, 1, 10); // activity on the stream does not extend an incomplete request
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1ms), 1u);
+    EXPECT_TRUE(protocol.is_stream_closed(1));
 }
 
 // ---------------------------------------------------------------------------

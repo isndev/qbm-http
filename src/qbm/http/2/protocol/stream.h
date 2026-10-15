@@ -350,6 +350,10 @@ struct Http2ServerStream : public Http2StreamBase {
     bool has_pending_data_to_send = false;  ///< True if response_to_send.body() has data remaining or if trailers are pending after body.
     qb::http::Response response_to_send;    ///< The complete response object being sent (headers, body, trailers).
     bool               is_trailers = false; ///< True if response_to_send includes trailers that need to be sent after the body.
+    /// Real progress since the server's last idle sweep: response HEADERS or DATA sent, a stream
+    /// WINDOW_UPDATE received. A store on the frame path; the sweep, which reads the clock anyway,
+    /// turns it into `last_activity` (ServerHttp2Protocol::cleanup_idle_streams).
+    bool progressed_since_idle_sweep = false;
 
     /**
      * @brief Construct a new server stream
