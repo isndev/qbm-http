@@ -13,9 +13,9 @@
  */
 #include "./body.h"
 #include <qb/io/uri.h>
-#ifdef QB_HAS_COMPRESSION
-#include "./1.1/protocol/base.h" // protocol_limits::MAX_BODY_SIZE — decompressed output cap
-#endif
+#include "./message_base.h" // write_trailed_chunked_message: the header and trailer sections (Huly QB-1073)
+// protocol_limits: MAX_BODY_SIZE (the decompressed output cap), the header field limits (trailers())
+#include "./1.1/protocol/base.h"
 #include <algorithm>
 #include <charconv>
 #include <stdexcept>
@@ -64,20 +64,78 @@ pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
 } // namespace qb::allocator
 
 namespace qb::http::detail {
-QB_NOINLINE QB_COLD bool
-write_trailed_chunked_message(qb::allocator::pipe<char> &out, const Headers &message, const qb::allocator::pipe<char> &body,
-                              const std::size_t length) {
-    if (!message.has_header("Trailer")) {
+namespace {
+// The rules the HTTP/1.1 serializers apply to a header field (request.cpp, response.cpp), kept apart
+// here: a second caller of theirs made g++ stop inlining them into the serializers' hot loops.
+[[nodiscard]] bool
+trailer_name_is_valid(std::string_view name) noexcept {
+    if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
         return false;
     }
-    const auto fields = trailer_section_fields(message);
+    return std::all_of(name.begin(), name.end(), [](const char c) {
+        const auto uc = static_cast<unsigned char>(c);
+        return (uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z') || (uc >= '0' && uc <= '9') || c == '!' || c == '#' || c == '$' || c == '%'
+               || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|'
+               || c == '~';
+    });
+}
+
+[[nodiscard]] bool
+trailer_value_is_valid(std::string_view value) noexcept {
+    if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+        return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](const char c) {
+        const auto uc = static_cast<unsigned char>(c);
+        return c == '\t' || (uc >= 0x20 && uc != 0x7f);
+    });
+}
+
+/// Refuses, before anything is written, a field of trailers() that cannot travel (Huly QB-1073).
+void
+check_trailer_section(const Headers &trailers, const char *serializer) {
+    const auto refuse = [serializer](const char *why) {
+        throw std::length_error(std::string(serializer) + why);
+    };
+    for (const auto &[name, values] : trailers.headers()) {
+        if (is_forbidden_trailer_field(name)) {
+            refuse(": trailers() carries a field a trailer section must not (framing, connection, routing, proxy "
+                   "authentication).");
+        }
+        if (!trailer_name_is_valid(name)) {
+            refuse(": trailer field name is invalid or exceeds MAX_HEADER_NAME_LENGTH.");
+        }
+        for (const auto &value : values) {
+            if (!trailer_value_is_valid(value)) {
+                refuse(": trailer field value is invalid or exceeds MAX_HEADER_VALUE_LENGTH.");
+            }
+        }
+    }
+}
+} // namespace
+
+QB_NOINLINE QB_COLD bool
+write_trailed_chunked_message(qb::allocator::pipe<char> &out, const internal::MessageBase &message, const start_line_writer start_line,
+                              const char *serializer, const qb::allocator::pipe<char> &body, const std::size_t length) {
+    const bool carries = message.has_trailers();
+    if (!carries && !message.has_header("Trailer")) {
+        return false;
+    }
+    if (carries) {
+        check_trailer_section(message.trailers(), serializer);
+    }
+    const auto plan = plan_outgoing_trailers(message, carries ? &message.trailers() : nullptr);
+    start_line(out, message);
     for (const auto &it : message.headers()) {
-        if (std::find(fields.begin(), fields.end(), it.first) != fields.end()) {
+        if (std::find(plan.moved.begin(), plan.moved.end(), it.first) != plan.moved.end()) {
             continue; // in the trailer section, below
         }
         for (const auto &value : it.second) {
             out << it.first << ": " << value << qb::http::endl;
         }
+    }
+    if (!plan.announcement.empty()) {
+        out << "trailer: " << plan.announcement << qb::http::endl;
     }
     out << qb::http::endl;
     if (length) {
@@ -85,14 +143,8 @@ write_trailed_chunked_message(qb::allocator::pipe<char> &out, const Headers &mes
     }
     // The last-chunk, the trailer section, then the empty line that ends the message.
     out << '0' << qb::http::endl;
-    for (const auto &name : fields) {
-        const auto field = message.headers().find(name);
-        if (field == message.headers().cend()) {
-            continue; // announced, not set
-        }
-        for (const auto &value : field->second) {
-            out << name << ": " << value << qb::http::endl;
-        }
+    for (const auto &[name, value] : plan.fields) {
+        out << name << ": " << value << qb::http::endl;
     }
     out << qb::http::endl;
     return true;

@@ -24,12 +24,12 @@ qb::http::Chunk last;                                // size 0 -> end of stream
 
 Because `Chunk` does not own its bytes, the referenced memory must stay valid for as long as the chunk is serialized — exactly the lifetime discipline described under [`string_view` lifetime](#string_view-and-lifetime) below.
 
-**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection (`qbm/http/src/qbm/http/1.1/protocol/base.h:56-57,461-469`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer. The fields of a trailer section — after the last chunk — reach the message through the ordinary header API, every one of them, as HTTP/2's and HTTP/3's trailers do; a trailer field that frames, routes or manages the connection (`content-length`, `transfer-encoding`, `host`, `connection`, ...) refuses the message, as those protocols refuse their stream (Huly QB-1067).
+**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection (`qbm/http/src/qbm/http/1.1/protocol/base.h:56-57,463-471`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer. The fields of a trailer section — after the last chunk — reach the message's `trailers()`, every one of them, and, for 3.x, the ordinary header API too, as HTTP/2's and HTTP/3's trailers do (Huly QB-1073); a trailer field that frames, routes or manages the connection (`content-length`, `transfer-encoding`, `host`, `connection`, ...) refuses the message, as those protocols refuse their stream (Huly QB-1067).
 
 **Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as a *single* chunk followed by the terminating chunk, in one write:
 
 ```cpp
-// src: qbm/http/src/qbm/http/response.cpp:311-317
+// src: qbm/http/src/qbm/http/response.cpp:326-332
 if (transfer.chunked) {
     out << qb::http::endl;
     if (!content_suppressed) {                                       // false unless a MessageHead
@@ -40,9 +40,9 @@ if (transfer.chunked) {
 }
 ```
 
-A message whose `Trailer` header announces fields takes another, out-of-line path (`qb::http::detail::write_trailed_chunked_message`, `chunk.h`): the announced fields travel in a trailer section after the last chunk, and not in the header section — the contract HTTP/2 and HTTP/3 send by. A field a trailer section must not carry stays in the head even when announced, and a `MessageHead` (which writes no trailer section of its own) keeps every field in the head (Huly QB-1067).
+A message whose `Trailer` header announces fields, or that carries `trailers()`, takes another, out-of-line path (`qb::http::detail::write_trailed_chunked_message`, `chunk.h`), which writes it whole, start line included, once it has checked `trailers()`: the announced fields, then `trailers()`, travel in a trailer section after the last chunk, and not in the header section — the contract HTTP/2 and HTTP/3 send by — and the head gains a `trailer` field naming `trailers()` when the message announces nothing itself. A field a trailer section must not carry stays in the head even when announced, one set in `trailers()` refuses the message before a byte is written, and a `MessageHead` (which writes no trailer section of its own) keeps every field in the head and writes no `trailers()` (Huly QB-1067, QB-1073). A message framed by `Content-Length` has no trailer section: its `trailers()` are not written.
 
-So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/src/qbm/http/response.cpp:231-248`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
+So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/src/qbm/http/response.cpp:241-258`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
 
 If you need true incremental, time-spaced delivery (server-sent events, a long-lived download generated on the fly), you have three options, in increasing order of fit:
 
@@ -94,18 +94,18 @@ void on(Protocol::request&& request) {      // HTTP upgrade arrives
 These are the levers that matter, grounded in how the types are built rather than benchmarks.
 
 - **Borrowed reads of owned data.** Parsed header names and values live in owning `std::string` storage; `header()` returns a borrowed `const std::string&`. `Body::as<std::string_view>()` borrows from the body's owning pipe without another body copy. Parsing and assigning a `string_view` to `Body` can still allocate and copy; no allocation-free parsing or measured speedup is implied. See [lifetime](#string_view-and-lifetime).
-<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:642-645,746-749 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:694-697,798-801 -->
 
 - **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/src/qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). `body.raw()` gives you the pipe directly for custom (de)serialization. Assigning a `std::string` copies its bytes into the pipe even with an rvalue; the rvalue overload then clears the source string:
 
   ```cpp
-  // src: qbm/http/src/qbm/http/body.cpp:627-630 (std::string rvalue assignment)
+  // src: qbm/http/src/qbm/http/body.cpp:679-682 (std::string rvalue assignment)
   std::string payload = build_large_json();
   ctx->response().body() = std::move(payload);   // copies bytes into the pipe, then clears payload
   ```
 
   Assigning `std::string_view` also copies its bytes into the pipe. Moving an entire `Body` instead uses its move assignment for the owned pipe; that is a different operation from moving a string or a view into a `Body`.
-  <!-- src: qbm/http/src/qbm/http/body.h:65-75; qbm/http/src/qbm/http/body.cpp:627-645,937-940 -->
+  <!-- src: qbm/http/src/qbm/http/body.h:65-75; qbm/http/src/qbm/http/body.cpp:679-697,989-992 -->
 
   Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/src/qbm/http/body.h:104-158`). `Form` is deliberately not appendable — assign it wholesale (`body = form`), not `body << form`.
 
@@ -116,7 +116,7 @@ These are the levers that matter, grounded in how the types are built rather tha
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
 - **One declared encoding, one transformation.** With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an *uncompressed* request body when `Content-Encoding` is set, and decompress encoded responses. Do not precompress an HTTP/1.1 request before passing it to those clients. The response serializer emits the body's bytes unchanged: if you compress manually, set `Content-Encoding` after `body().compress(...)`; if you leave the body plain, use the compression middleware, which negotiates `Accept-Encoding`, compresses when worthwhile, and sets the header itself. An existing `Content-Encoding` makes that middleware skip response compression. See [Asynchronous HTTP client](./14-async-http-client.md) and [Standard middleware](./08-standard-middleware.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:293-322; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:314-337; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
 
 ### Never block the event loop
 
@@ -180,7 +180,7 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 ## `string_view` and lifetime
 
 The retired `RequestView`/`ResponseView` types are not part of this API. For a present header, `header()` returns a borrowed `const std::string&` into the owning message's header map; for an absent header, it returns a reference to a process-wide static empty string. `Body::as<std::string_view>()` returns a borrowed view into the owning body's pipe. Neither accessor transfers ownership.
-<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:746-749 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:798-801 -->
 
 - While the owning message and its storage stay alive and unmodified, using those borrowed values is safe. Mutating a header map or body can invalidate a reference or view even inside one handler call.
 - If data must outlive the message or its storage — stored in an async callback, carried in an event to another actor, cached past the response — **copy it into an owning type** (`std::string`, `std::vector<char>`) or move the owning message/`Body` with the lifetime you need. A borrowed value that outlives its owner is a dangling read and undefined behavior.
@@ -188,8 +188,8 @@ The retired `RequestView`/`ResponseView` types are not part of this API. For a p
 
 ## Pitfalls
 
-- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/src/qbm/http/response.cpp:311-317`). For real streaming use direct session writes, HTTP/2, or WebSocket.
-- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/src/qbm/http/response.cpp:244-245`). Set one framing mode, not both.
+- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/src/qbm/http/response.cpp:326-332`). For real streaming use direct session writes, HTTP/2, or WebSocket.
+- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/src/qbm/http/response.cpp:254-255`). Set one framing mode, not both.
 - **Blocking inside a handler.** It stalls every connection on that core. Defer with `qb::io::async::callback`, offload to a worker actor, or `co_await`.
 - **Forgetting `ctx->complete()`.** The request hangs until the inactivity timeout closes it. Terminal response helpers complete for you; raw `body =`/`status()` do not.
 - **Calling `complete()` from `cancel()`.** Contract violation — the `Context` manages its own finalization (`qbm/http/src/qbm/http/routing/async_task.h:65-79`).

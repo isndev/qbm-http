@@ -586,10 +586,12 @@ namespace detail {
  * @brief Whether a field must stay out of a trailer section: it frames the message, manages the
  *        connection, routes the request or authenticates to a proxy (RFC 9110 §6.5.1).
  *
- * The set HTTP/2 and HTTP/3 refuse in theirs: `content-length`, `transfer-encoding`, `trailer`,
- * `host`, `connection`, `keep-alive`, `proxy-connection`, `te`, `upgrade`, `proxy-authenticate`,
- * `proxy-authorization`. The HTTP/1.1 parser refuses a chunked message whose trailer section carries
- * one, and the serializer never moves one there (Huly QB-1067).
+ * ONE list for HTTP/1.1, HTTP/2 and HTTP/3, received and sent (Huly QB-1073): `content-length`,
+ * `transfer-encoding`, `trailer`, `host`, `connection`, `keep-alive`, `proxy-connection`, `te`,
+ * `upgrade`, `http2-settings`, `proxy-authenticate`, `proxy-authorization`. A received trailer
+ * section that carries one refuses its message (HTTP/1.1) or its stream (HTTP/2, HTTP/3); a field
+ * the `Trailer` header announces that is one stays in the header section; one in `trailers()`
+ * refuses the message to send.
  *
  * @param name A field name, in any case.
  */
@@ -598,10 +600,39 @@ namespace detail {
 /**
  * @brief The fields a message's `Trailer` header announces that may travel in a trailer section:
  *        lowercased, in the order announced, each once; empty when the message has no `Trailer`
- *        header. A forbidden field (is_forbidden_trailer_field) is left out -- it stays in the
- *        header section.
+ *        header. A forbidden field (is_forbidden_trailer_field) or a pseudo-header is left out -- it
+ *        stays in the header section.
  * @param message The message whose `Trailer` header is read.
  */
 [[nodiscard]] std::vector<std::string> trailer_section_fields(const Headers &message);
+
+/**
+ * @brief The trailer section a message sends, built the same way by HTTP/1.1 (a chunked message),
+ *        HTTP/2 and HTTP/3 (Huly QB-1073).
+ *
+ * Its fields, names lowercase, in order: the header-section fields the `Trailer` header announces
+ * that a trailer section may carry (trailer_section_fields, the 3.x way of sending trailers: they
+ * leave the header section), then every field of the message's `trailers()`. The views point into
+ * the message: valid while it is neither changed nor destroyed.
+ */
+struct outgoing_trailers {
+    /// The header-section fields that leave for the trailer section (trailer_section_fields).
+    std::vector<std::string> moved;
+    /// The trailer section, in sending order: one entry per value.
+    std::vector<std::pair<std::string_view, std::string_view>> fields;
+    /// The `trailer` value the header section gains -- the names `trailers()` carries, each once --
+    /// when the message announces nothing itself (RFC 9110 §6.6.2); empty otherwise.
+    std::string announcement;
+    /// A field of `trailers()` a trailer section must not carry (is_forbidden_trailer_field): the
+    /// message is refused. Empty when there is none.
+    std::string_view forbidden;
+};
+
+/**
+ * @brief Builds a message's outgoing trailer section (outgoing_trailers).
+ * @param message The message's header section.
+ * @param trailers The message's `trailers()`, or nullptr when it carries none.
+ */
+[[nodiscard]] outgoing_trailers plan_outgoing_trailers(const Headers &message, const Headers *trailers);
 } // namespace detail
 } // namespace qb::http

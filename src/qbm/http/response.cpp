@@ -130,6 +130,16 @@ header_value_is_valid(const std::string &value) noexcept {
     });
 }
 
+/// The status line serialize_response writes, for a response with a trailer section that
+/// write_trailed_chunked_message writes whole (Huly QB-1073). Out of line and cold: kept apart from
+/// the line serialize_response writes inline. Http1Serialization tests hold the two lines equal.
+QB_NOINLINE QB_COLD void
+write_status_line(pipe<char> &out, const qb::http::internal::MessageBase &message) {
+    const auto &r = static_cast<const qb::http::Response &>(message);
+    out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
+        << qb::http::endl;
+}
+
 struct transfer_encoding_result {
     bool ok      = true;
     bool chunked = false;
@@ -286,17 +296,22 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     // refused message leaves the pipe as it found it -- what was queued before it included (it used to
     // clear() it, Huly QB-1066).
 
-    // HTTP Status Line
+    // A complete chunked message with a trailer section -- the fields its `Trailer` header announces,
+    // its trailers() -- is written whole out of line instead, status line included, the trailer
+    // section after its last chunk as HTTP/2 and HTTP/3 send it (RFC 9112 §7.1.2, Huly QB-1067,
+    // QB-1073): it checks trailers() before writing a byte, and this common path stays what it was. A
+    // MessageHead writes no trailer section, so it keeps every field.
+    if (transfer.chunked && !content_suppressed
+        && qb::http::detail::write_trailed_chunked_message(out, r, &write_status_line, "qb::http::Response serialization", r.body().raw(),
+                                                           length)) {
+        return;
+    }
+
+    // HTTP Status Line (write_status_line writes the same line for a message with a trailer section)
     out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
         << qb::http::endl;
 
     // HTTP Headers
-    // A complete chunked message whose `Trailer` header announces fields writes them after its last
-    // chunk instead, as HTTP/2 and HTTP/3 do (RFC 9112 §7.1.2, Huly QB-1067): out of line, so this
-    // common path stays what it was. A MessageHead writes no trailer section, so it keeps every field.
-    if (transfer.chunked && !content_suppressed && qb::http::detail::write_trailed_chunked_message(out, r, r.body().raw(), length)) {
-        return;
-    }
     for (const auto &it : r.headers()) {
         // Every name and value was validated above, with the same predicates: no second pass (it doubled
         // the validation and its refusal could no longer be reached).

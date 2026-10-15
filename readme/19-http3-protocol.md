@@ -211,7 +211,7 @@ client->push_requests(std::move(requests), [](std::vector<qb::http::Response> re
 });
 ```
 
-The members are admitted one by one, in order, exactly as `push_request` admits a single request: an invalid member completes with its `400`, and a member that would take the queued + active count past `set_max_pending_requests` completes with a `503` — both at their index, before any state is allocated for them. The callback runs once with every result, at once when no member was admitted. `push_requests` returns `false` as soon as the cap refused a member — as `push_request` answers a refused request, and as the HTTP/1.1 and HTTP/2 batches do — and `true` otherwise. <!-- src: qbm/http/src/qbm/http/3/client.cpp:329-339, qbm/http/src/qbm/http/3/client.h:235-250 -->
+The members are admitted one by one, in order, exactly as `push_request` admits a single request: an invalid member completes with its `400`, and a member that would take the queued + active count past `set_max_pending_requests` completes with a `503` — both at their index, before any state is allocated for them. The callback runs once with every result, at once when no member was admitted. `push_requests` returns `false` as soon as the cap refused a member — as `push_request` answers a refused request, and as the HTTP/1.1 and HTTP/2 batches do — and `true` otherwise. <!-- src: qbm/http/src/qbm/http/3/client.cpp:330-340, qbm/http/src/qbm/http/3/client.h:235-250 -->
 
 ### Cancellation
 
@@ -242,22 +242,24 @@ All setters are `noexcept` and take effect on subsequent connects/requests:
 
 ## Trailers
 
-HTTP/3 trailers use the same `Request`/`Response` header container as HTTP/2. Announce trailer field names with the `Trailer` header, then set those fields on the same message; the adapter emits the announced fields in the HTTP/3 trailer section rather than duplicating them in the leading header block:
+HTTP/3 trailers follow the HTTP/1.1 and HTTP/2 contract (Huly QB-1073): the message's `trailers()` -- or, the older way, the fields its `Trailer` header announces -- leave in the HTTP/3 trailer section after the body, rather than in the leading header block, which gains a `trailer` field naming `trailers()` when the message announces nothing itself:
 
 ```cpp
-ctx->response().set_header("trailer", "x-checksum");
-ctx->response().set_header("x-checksum", checksum);
+ctx->response().trailers().set_header("x-checksum", checksum);
 ctx->complete();
 ```
 
-Incoming trailers are surfaced through the ordinary header APIs on `Request` / `Response`.
+The adapter builds and checks the trailer section before it submits anything: a field the one trailer list forbids (`qb::http::detail::is_forbidden_trailer_field`) refuses a field of `trailers()`, and stays in the header block when only announced -- HTTP/3 refused that message, after its headers were queued. An announced field the message does not set, or an empty body, no longer refuses it either.
+
+Incoming trailers are in the message's `trailers()`, and, for 3.x, in its headers too; a trailer section carrying a forbidden field -- `host` and `te` included, which HTTP/3 accepted there -- refuses the stream.
+<!-- src: qbm/http/src/qbm/http/3/protocol/connection.h:390-413,1059-1078,1364-1412 -->
 
 ## Dual stack
 
 HTTP/2 and HTTP/3 use **different transports** — TCP/TLS for HTTP/1.1 and HTTP/2, UDP/QUIC for HTTP/3 — so they cannot share a socket. `qb::http::make_dual_stack_server()` runs both servers behind a single route facade, registering each route on *both* routers. It returns a `std::unique_ptr<qb::http::dual_stack_server<...>>`.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:2744-2754 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:2752-2762 (adapted)
 auto server = qb::http::make_dual_stack_server();
 
 server->router().get("/shared", [](auto ctx) {
@@ -296,19 +298,19 @@ server->close();               // tear down the UDP endpoint
 ```
 
 On the **client** side, a server-initiated GOAWAY sets an internal shutdown flag. Its pending-request callbacks run with `503 Service Unavailable`, and new same-origin requests are rejected with `503` while shutdown is in progress. If one of those callbacks calls `client->disconnect()` during the native HTTP/3 read, `is_connected()` becomes false at once. GOAWAY can still invoke other pending-request callbacks during that read; destruction of the protocol, QUIC close and failure of still-active requests wait until the read returns. A `connect(callback)` attempted during that interval reports failure without starting a handshake, new requests receive an immediate `503`, and the explicit close starts no automatic reconnect.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:76-85,119-171,234-239,299-310,748-756,812-850; qbm/http/tests/system/http3/http3-loopback.cpp:1930-2020 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:76-85,119-171,235-240,300-311,749-757,813-851; qbm/http/tests/system/http3/http3-loopback.cpp:1930-2020 -->
 
 An ordinary `disconnect()` also marks the client down before it invokes failure callbacks. Connect and new request attempts from those callbacks get an immediate failure until the close finishes. A callback may release the last external `shared_ptr` to the client: event dispatch keeps the object alive through the endpoint's outer handler and releases it on a later loop turn. Explicit cancellation of an active request likewise retains the client through its callback and stream reset. The pending-request drain keeps the client alive too and rechecks the live protocol and connection before each submission, including after a failed submission calls user code.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:20-36,119-171,275-286,385-466,772-786,812-850,853-871; qbm/http/tests/system/http3/http3-loopback.cpp:2022-2047,2049-2096,3316-3342 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:20-36,119-171,276-287,386-467,773-787,813-851,854-872; qbm/http/tests/system/http3/http3-loopback.cpp:2022-2047,2049-2096,3324-3350 -->
 
 If the QUIC transport closes synchronously while submitting a queued request, the client completes that request with `503` even though it has left the pending queue and has not yet entered the active registry. This notification still runs if an old request's failure callback throws during teardown; the saved exception propagates afterward. During connect success or failure, the client notifies the other callbacks before propagating a callback exception. An explicit disconnect also completes transport cleanup before propagating it. A throw reached through nghttp3's native callback path becomes a protocol callback failure.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:119-171,385-466,469-526,544-594; qbm/http/src/qbm/http/3/protocol/connection.h:438-445; qbm/http/tests/system/http3/http3-loopback.cpp:2209-2283,2284-2328,2329-2420 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:119-171,386-467,470-527,545-595; qbm/http/src/qbm/http/3/protocol/connection.h:702-710; qbm/http/tests/system/http3/http3-loopback.cpp:2209-2286,2287-2331,2332-2423 -->
 
 If starting the QUIC connection fails, the connect timer expires, or the peer closes the connection, the client closes the old transport before reporting the failure. Old requests are retired before connection callbacks run, so work those callbacks queue belongs to a new attempt. On retry, qb-io refreshes the endpoint's internally owned native backend, binds its existing I/O watcher to the new UDP socket and starts it again.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:93-115,499-541,622-639,782-809; qb/src/qb/io/async/quic/endpoint.h:98-135,478-507 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:93-115,500-542,623-640,783-810; qb/src/qb/io/async/quic/endpoint.h:98-135,478-507 -->
 
 If you disconnect while a connection attempt is still pending, that attempt's connection callbacks receive one failure. Its timeout is tied to the attempt it was armed for; if you connect again with a longer timeout, the cancelled attempt's timer does not end the new handshake.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:101-114,119-171,469-526,622-639; qbm/http/tests/system/http3/http3-loopback.cpp:2141-2171 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:101-114,119-171,470-527,623-640; qbm/http/tests/system/http3/http3-loopback.cpp:2141-2171 -->
 
 ## Limits and guards
 
@@ -329,7 +331,7 @@ HTTP/3 enforces the same safety posture as HTTP/1.1 and HTTP/2, plus QUIC-specif
 - **CSPRNG failure is fail-closed.** If OpenSSL `RAND_bytes` fails inside the nghttp3 rand callback, the process calls `std::abort()` rather than hand predictable material to QUIC. This is intentional.
 - **`dual_stack_server::listen` does not start HTTP/3.** It starts the HTTP/2 server but relies on the qb-io loop to drive the QUIC endpoint. Make sure a loop is running (`qb::io::async::run(...)`), or no HTTP/3 traffic moves.
 - **Move a `dual_stack_server` before it listens, not after.** Its moves keep the route facade bound to the server that owns the stacks; the moved-from server holds no stack and may only be destroyed or assigned to. <!-- src: qbm/http/src/qbm/http/3/dual_stack.h:226-252 -->
-- **An IPv6 origin is written with brackets on the wire.** `:authority` carries an IP literal between brackets with the port after them (`[::1]:8443`), for an absolute request and for a relative one completed from the client's base URI; `uri().host()` keeps returning the bare literal a socket wants. <!-- src: qbm/http/src/qbm/http/3/protocol/connection.h:374-406, qbm/http/src/qbm/http/3/client.cpp:179-180 -->
+- **An IPv6 origin is written with brackets on the wire.** `:authority` carries an IP literal between brackets with the port after them (`[::1]:8443`), for an absolute request and for a relative one completed from the client's base URI; `uri().host()` keeps returning the bare literal a socket wants. It is `qb::http::origin::authority`, the authority every protocol writes: the scheme's default port (`:443`) and an IPv6 zone identifier are left out. <!-- src: qbm/http/src/qbm/http/origin.cpp:114-148, qbm/http/src/qbm/http/3/protocol/connection.h:445, qbm/http/src/qbm/http/3/client.cpp:179-181 -->
 - **`router()` on the dual stack registers on both protocols.** There is no per-protocol routing through the facade; reach `http2_server().router()` / `http3_server().router()` directly if you need divergent route tables.
 - **Keep QUIC affinity.** The HTTP/3 v1 surface does not expose server push, and a request stream stays on its owning listener thread. Fan CPU/business work out through actors or application queues and post the response back to the owning listener — do not move QUIC streams between threads.
 

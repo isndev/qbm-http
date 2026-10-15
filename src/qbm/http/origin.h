@@ -1,10 +1,11 @@
 /**
  * @file qbm/http/origin.h
- * @brief Shared HTTP origin comparison helpers.
+ * @brief Shared HTTP origin helpers: comparison, and the authority a request sends.
  *
  * Provides case-insensitive scheme/host comparison and effective-port
  * resolution used to determine whether two URIs share the same web origin
- * (scheme + host + effective port), as defined by RFC 6454.
+ * (scheme + host + effective port), as defined by RFC 6454, and the one
+ * authority writer every protocol uses for `Host` and `:authority`.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -15,6 +16,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include <qb/io/uri.h>
@@ -77,5 +79,24 @@ namespace qb::http::origin {
  * @return `true` if both URIs share the same origin, `false` otherwise.
  */
 [[nodiscard]] bool same(qb::io::uri const &lhs, qb::io::uri const &rhs) noexcept;
+
+/**
+ * @brief The authority a request sends for @p uri: the `Host` field value of HTTP/1.1 and of the
+ *        WebSocket handshake (RFC 9110 §7.2), the `:authority` pseudo-header of HTTP/2 and HTTP/3
+ *        (RFC 9113 §8.3.1, RFC 9114 §4.3.1) -- one writer for the five places that wrote it
+ *        (Huly QB-1064).
+ *
+ * - The host as the URI writes it; an IPv6 literal between brackets (RFC 3986 §3.2.2) --
+ *   `qb::io::uri::host()` returns it without them, the form a socket wants.
+ * - An IPv6 literal's zone identifier (`fe80::1%25eth0`) is left out: it has local significance
+ *   only and is never sent on the wire (RFC 9844 §6, RFC 6874 §4 before it).
+ * - `:port` unless it is the scheme's default (http and ws 80, https and wss 443, the scheme
+ *   compared case-insensitively) -- `qb::io::uri` fills the default in when the URI names none.
+ *
+ * @param uri URI to inspect.
+ * @return The authority, e.g. `example.test`, `example.test:8443`, `[2001:db8::1]:8080`; empty when
+ *         the URI has no host.
+ */
+[[nodiscard]] std::string authority(qb::io::uri const &uri);
 
 } // namespace qb::http::origin

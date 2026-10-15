@@ -189,6 +189,27 @@ headers.content_type().charset(); // "UTF-16"
 
 Defaults apply when the header is absent or unparseable: `application/octet-stream` for the type, `utf-8` for the charset.
 
+### Trailers
+
+A message's trailer section -- the fields that follow its content (RFC 9110 §6.5) -- is a `Headers` of its own, `trailers()`, the same on HTTP/1.1 (a chunked message), HTTP/2 and HTTP/3 (Huly QB-1073).
+
+<!-- src: qbm/http/src/qbm/http/message_base.h:248-289 -->
+```cpp
+// Received: a status a server sends after the content.
+if (response.has_trailers()) {
+    const std::string &status = std::as_const(response).trailers().header("grpc-status");
+}
+
+// Sent: after the body, announced by a `trailer` field the protocol adds when the message has none.
+ctx->response().trailers().set_header("grpc-status", "0");
+```
+
+- **Received** fields are in `trailers()` and, for 3.x source compatibility, in the header fields too, after the header-section values of their name: `header("grpc-status")` keeps answering, and only `trailers()` tells you the field came after the content. Do not trust a trailer field as a header one: that is why RFC 9110 §6.5.1 asks a recipient not to merge them.
+- **Sent** fields follow the body, after the fields a `Trailer` header announces (the older way to send trailers, which keeps working). HTTP/1.1 has a trailer section only in a chunked message (`Transfer-Encoding: chunked`): a message framed by `Content-Length`, or a `MessageHead`, sends none.
+- **One list** of the fields a trailer section must never carry, for the three protocols, `qb::http::detail::is_forbidden_trailer_field`: `content-length`, `transfer-encoding`, `trailer`, `host`, `connection`, `keep-alive`, `proxy-connection`, `te`, `upgrade`, `http2-settings`, `proxy-authenticate`, `proxy-authorization`. A received trailer section carrying one refuses its message (HTTP/1.1) or its stream (HTTP/2, HTTP/3); set in `trailers()`, one refuses the message before anything of it is sent.
+- The non-const `trailers()` allocates the section on its first call. `has_trailers()` and the const accessor allocate nothing, and a message nobody gives trailers carries one null pointer.
+<!-- src: qbm/http/src/qbm/http/headers.h:586-598 -->
+
 ## The body
 
 `qb::http::Body` is the message payload, backed by `qb::allocator::pipe<char>` — a dynamic buffer tuned for I/O that minimizes reallocation. Because `Request` and `Response` inherit `Body` through `MessageBase`, `req.body()` and `res.body()` hand you the `Body` subobject directly.

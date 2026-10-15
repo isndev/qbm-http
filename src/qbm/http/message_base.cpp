@@ -12,8 +12,35 @@
  */
 #include "message_base.h"
 
+#include <string>
+
 namespace qb::http {
 namespace internal {
+
+Headers *
+TrailerSection::create() {
+    return new Headers();
+}
+
+Headers *
+TrailerSection::clone(const Headers &fields) {
+    return new Headers(fields);
+}
+
+void
+TrailerSection::destroy(Headers *fields) noexcept {
+    delete fields;
+}
+
+void
+TrailerSection::assign(const TrailerSection &other) {
+    // The copy is made first: a throwing allocation leaves this section as it was.
+    Headers *const copy = other._fields ? clone(*other._fields) : nullptr;
+    if (_fields) {
+        destroy(_fields);
+    }
+    _fields = copy;
+}
 
 void
 MessageBase::reset() noexcept {
@@ -25,7 +52,26 @@ MessageBase::reset() noexcept {
     upgrade                              = false;
     stream_id                            = 0;
     keep_alive                           = false;
+    _trailers.reset();
+}
+
+const Headers &
+MessageBase::trailers() const noexcept {
+    if (const Headers *const fields = _trailers.get()) {
+        return *fields;
+    }
+    static const Headers none;
+    return none;
 }
 
 } // namespace internal
+
+namespace detail {
+void
+store_received_trailer(internal::MessageBase &message, std::string_view name, std::string_view value) {
+    message.trailers().add_header(std::string(name), std::string(value));
+    // 3.x: the header fields keep receiving the trailer fields, after the header-section values.
+    message.add_header(std::string(name), std::string(value));
+}
+} // namespace detail
 } // namespace qb::http

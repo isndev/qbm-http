@@ -171,26 +171,35 @@ TEST(HTTP2ProtocolCoverage, ServerRequestTrailersAreAcceptedAndRequestDispatched
     EXPECT_EQ(io.request_count, 1) << "trailers with END_STREAM dispatch the request";
     EXPECT_EQ(io.stream_error_count, 0);
     ASSERT_TRUE(io.last_request.has_value());
-    // The trailer field is folded into the request's header set.
+    // The trailer field is the request's trailers(), apart from its header section (Huly QB-1073),
+    // and -- 3.x source compatibility -- is folded into its header set too.
+    EXPECT_EQ(io.last_request->trailers().header("x-checksum"), "abc123");
+    EXPECT_EQ(io.last_request->trailers().header_count(), 1u) << "no header-section field is a trailer field";
     EXPECT_EQ(io.last_request->header("x-checksum"), "abc123");
     EXPECT_EQ(io.last_request->body().as<std::string>(), body);
 }
 
+// Every field of the one trailer list HTTP/1.1, HTTP/2 and HTTP/3 share
+// (qb::http::detail::is_forbidden_trailer_field) resets the stream: proxy authentication included,
+// which HTTP/2 accepted in a trailer section while HTTP/1.1 refused it (Huly QB-1073, RFC 9110 §6.5.1).
 TEST(HTTP2ProtocolCoverage, ServerForbiddenTrailerHeaderIsStreamError) {
-    Http2FakeIO io;
-    Server      protocol(io);
-    handshake(protocol, io);
-    open_post_stream(protocol, io, 1);
-    ASSERT_TRUE(protocol.ok());
+    for (const char *name :
+         {"transfer-encoding", "content-length", "trailer", "host", "connection", "keep-alive", "proxy-connection", "te", "upgrade",
+          "http2-settings", "proxy-authenticate", "proxy-authorization"}) {
+        Http2FakeIO io;
+        Server      protocol(io);
+        handshake(protocol, io);
+        open_post_stream(protocol, io, 1);
+        ASSERT_TRUE(protocol.ok());
 
-    // "transfer-encoding" is forbidden in a trailer section (RFC 9113 §8.1).
-    const std::vector<qb::protocol::hpack::HeaderField> trailers = {{"transfer-encoding", "chunked"}};
-    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, encode_hpack_headers(trailers));
-    drive(protocol, io);
+        const std::vector<qb::protocol::hpack::HeaderField> trailers = {{name, "x"}};
+        push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 1, encode_hpack_headers(trailers));
+        drive(protocol, io);
 
-    // Stream-level rejection: a RST_STREAM is emitted and the request is NOT dispatched.
-    EXPECT_TRUE(output_has_frame(io.output, FT::RST_STREAM));
-    EXPECT_EQ(io.request_count, 0);
+        // Stream-level rejection: a RST_STREAM is emitted and the request is NOT dispatched.
+        EXPECT_TRUE(output_has_frame(io.output, FT::RST_STREAM)) << name;
+        EXPECT_EQ(io.request_count, 0) << name;
+    }
 }
 
 TEST(HTTP2ProtocolCoverage, ServerPseudoHeaderInTrailersIsStreamError) {

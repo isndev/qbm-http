@@ -26,6 +26,7 @@
 
 #include <charconv>
 #include <optional>
+#include "../../origin.h" // origin::authority: the :authority every protocol writes (Huly QB-1064)
 #include "./base.h"
 
 namespace qb::protocol::http2 {
@@ -1188,7 +1189,12 @@ public:
 
         std::vector<hpack::HeaderField> hf_vector;
         // Pass by const ref to prepare_request_headers as http_request will be moved later if needed.
-        prepare_request_headers(http_request, hf_vector, stream_obj);
+        if (const char *refused = prepare_request_headers(http_request, hf_vector, stream_obj)) [[unlikely]] {
+            // Nothing was sent: a request whose trailers() a trailer section cannot carry (Huly QB-1073).
+            LOG_HTTP_WARN_PA(stream_id, "Client: Request refused: " << refused);
+            _client_streams.erase(iter);
+            return false;
+        }
         // stream_obj.client_will_send_trailers is set by prepare_request_headers
 
         LOG_HTTP_DEBUG_PA(stream_id, "Client: Prepared " << hf_vector.size() << " headers for encoding");
@@ -1267,7 +1273,7 @@ public:
         // then ends here, with an empty trailer block.
         if (stream_obj.client_will_send_trailers && !stream_obj.has_pending_data_to_send && !stream_obj.end_stream_sent
             && !stream_obj.queued_trailer_fields) {
-            auto trailer_fields = announced_trailer_fields(stream_obj.original_request_to_send);
+            auto trailer_fields = outgoing_trailer_fields(stream_obj.original_request_to_send);
             if (!trailer_fields.empty() || !_explicit_request_trailers) {
                 // The stream may be closed and erased past this call: nothing below touches it.
                 (void) send_request_trailer_block(stream_obj, std::move(trailer_fields));
@@ -1384,7 +1390,7 @@ public:
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
                            [](char c) { return qb::http::utility::ascii_to_lower(c); });
 
-            if (HeaderValidator::is_forbidden_trailer_header(name_lower)) {
+            if (qb::http::detail::is_forbidden_trailer_field(name_lower)) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + header_item.first);
                 return false;
             }
@@ -1667,8 +1673,10 @@ private:
      * @param http_request The HTTP request
      * @param out_hf_vector Output vector for header fields
      * @param stream_context Stream context
+     * @return nullptr when the block is ready; otherwise why the request is refused (its trailers()
+     *         carries a field a trailer section cannot, Huly QB-1073).
      */
-    void
+    [[nodiscard]] const char *
     prepare_request_headers(const qb::http::Request &http_request, std::vector<hpack::HeaderField> &out_hf_vector,
                             Http2ClientStream &stream_context) {
         // Add pseudo-headers first (required order)
@@ -1682,17 +1690,11 @@ private:
         }
         out_hf_vector.emplace_back(":scheme", scheme);
 
-        // Add :authority header
+        // Add :authority header: the URI's authority as every protocol writes it (qb::http::origin::authority,
+        // Huly QB-1064), else the request's Host header.
         std::string authority;
         if (!uri.host().empty()) {
-            authority                         = std::string(uri.host());
-            const bool already_bracketed_ipv6 = authority.size() >= 2 && authority.front() == '[' && authority.back() == ']';
-            if (!already_bracketed_ipv6 && authority.find(':') != std::string::npos) {
-                authority = "[" + authority + "]";
-            }
-            if (!uri.port().empty()) {
-                authority += ":" + std::string(uri.port());
-            }
+            authority = qb::http::origin::authority(uri);
         } else if (http_request.has_header("host")) {
             authority = http_request.header("host");
         }
@@ -1753,15 +1755,23 @@ private:
         }
 
         // The fields the `trailer` header announces leave in the trailer section
-        // (announced_trailer_fields), not here: they used to be sent twice (Huly QB-1061).
+        // (outgoing_trailer_fields), not here: they used to be sent twice (Huly QB-1061). A request
+        // with trailers() ends with a trailer section too, announced if it announces nothing itself;
+        // one a trailer section cannot carry is refused before anything is sent (Huly QB-1073).
+        if (http_request.has_trailers()) {
+            stream_context.client_will_send_trailers = true;
+        }
         if (stream_context.client_will_send_trailers) {
-            remove_announced_trailer_fields(out_hf_vector, http_request);
+            if (const char *refused = prepare_trailed_header_block(out_hf_vector, http_request)) {
+                return refused;
+            }
         }
 
         // Add content-length if body is present and not using trailers
         if (!http_request.body().empty() && !stream_context.client_will_send_trailers) {
             out_hf_vector.emplace_back("content-length", std::to_string(http_request.body().raw().size()));
         }
+        return nullptr;
     }
 
     bool
@@ -2230,11 +2240,19 @@ private:
             return;
         }
 
+        // A second header block is a trailer section when it ends the stream, announced or not: the
+        // `trailer` header is a SHOULD (RFC 9110 §6.6.2, RFC 9113 §8.1), and a trailer section a
+        // server did not announce reset the stream (Huly QB-1073). One that leaves the stream open is
+        // neither a trailer section nor a response. An unannounced one is then awaited as an announced
+        // one is: the response completes once its block does, CONTINUATION frames included.
         if (stream.headers_received_main && !stream.trailers_expected) {
-            const uint32_t stream_id = stream.id; // send_rst_stream() erases the stream
-            send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "Multiple HEADERS frames not as trailers");
-            begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
-            return;
+            if (!(headers_event.header.flags & FLAG_END_STREAM)) {
+                const uint32_t stream_id = stream.id; // send_rst_stream() erases the stream
+                send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "Multiple HEADERS frames not as trailers");
+                begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
+                return;
+            }
+            stream.trailers_expected = true;
         }
 
         if (stream.expecting_continuation) {
@@ -2417,6 +2435,13 @@ private:
                     send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header: " + hf.name);
                     return false;
                 }
+                // A trailer section never frames, routes or authenticates: the list HTTP/1.1, HTTP/2
+                // and HTTP/3 share. A response trailer `content-length` or `trailer` was accepted
+                // here, and merged into the response's headers (Huly QB-1073).
+                if (is_trailers_block && qb::http::detail::is_forbidden_trailer_field(name_lower)) {
+                    send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + hf.name);
+                    return false;
+                }
                 if (name_lower == "content-length") {
                     auto parsed = HeaderValidator::parse_content_length(hf.value);
                     if (!parsed) {
@@ -2434,7 +2459,12 @@ private:
                     stream.expected_content_length = *parsed;
                 }
 
-                response.add_header(std::string(hf.name), std::string(hf.value));
+                if (is_trailers_block) {
+                    // To the response's trailers(), and its header fields for 3.x (Huly QB-1073).
+                    qb::http::detail::store_received_trailer(response, hf.name, hf.value);
+                } else {
+                    response.add_header(std::string(hf.name), std::string(hf.value));
+                }
             }
         }
 
@@ -2528,7 +2558,7 @@ private:
             if (active_stream.queued_trailer_fields) {
                 trailer_fields_to_send = std::move(*active_stream.queued_trailer_fields);
             } else {
-                trailer_fields_to_send = announced_trailer_fields(active_stream.original_request_to_send);
+                trailer_fields_to_send = outgoing_trailer_fields(active_stream.original_request_to_send);
             }
             // The stream may be closed and erased past this call: nothing below touches it.
             (void) send_request_trailer_block(active_stream, std::move(trailer_fields_to_send));

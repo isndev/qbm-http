@@ -471,7 +471,7 @@ TEST(WsHandshakeValidator, ClientRejectsMismatchedAccept) {
 }
 
 // ===========================================================================
-// Coverage Wave-2: callback-based ws::Client event dispatch (ws.h:1830-2005).
+// Coverage Wave-2: callback-based ws::Client event dispatch (ws.h:1805-1980).
 //
 // The callback `Client` is default-constructible with no socket (the encode
 // tests already prove this). Registering each callback and dispatching the

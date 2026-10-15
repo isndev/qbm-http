@@ -2224,8 +2224,11 @@ TEST_F(Http3LoopbackTest, FailedSubmitCallbackMayDisconnectAndQueueAnotherReques
 
     int                failed_calls = 0, good_calls = 0;
     qb::http::Response good_response;
-    qb::http::Request  invalid{qb::http::method::POST, qb::io::uri("/missing-trailer")};
-    invalid.set_header("trailer", "x-checksum"); // the declared field is absent
+    qb::http::Request  invalid{qb::http::method::POST, qb::io::uri("/forbidden-trailer")};
+    // A trailer field no trailer section may carry: the submission is refused (Huly QB-1073). An
+    // announced field the request does not set -- what this test used -- is sent now, as HTTP/1.1 and
+    // HTTP/2 send it: an empty trailer section.
+    invalid.trailers().set_header("content-length", "7");
     invalid.body() = "payload";
     EXPECT_NO_THROW(client->push_request(std::move(invalid), [&](qb::http::Response response) {
         ++failed_calls;
@@ -2622,6 +2625,8 @@ TEST_F(Http3LoopbackTest, ResponseTrailersAreDeliveredAsHeaders) {
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.body().as<std::string>(), "body-with-trailer");
     EXPECT_EQ(response.header("x-checksum"), "response-trailer");
+    // The trailer field is the response's trailers(); the header fields keep it for 3.x (Huly QB-1073).
+    EXPECT_EQ(response.trailers().header("x-checksum"), "response-trailer");
 
     client->disconnect();
     server->close();
@@ -2632,7 +2637,9 @@ TEST_F(Http3LoopbackTest, RequestTrailersAreDeliveredToRouter) {
     auto       server = qb::http3::make_server();
     server->router().post("/trailers", [](auto ctx) {
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body()   = ctx->request().header("x-client-checksum");
+        // The trailer field reaches the router as the request's trailers() -- and, for 3.x, as one of
+        // its header fields (Huly QB-1073).
+        ctx->response().body() = ctx->request().trailers().header("x-client-checksum") + "|" + ctx->request().header("x-client-checksum");
         ctx->complete();
     });
     server->router().compile();
@@ -2650,7 +2657,7 @@ TEST_F(Http3LoopbackTest, RequestTrailersAreDeliveredToRouter) {
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
     EXPECT_EQ(response.status(), qb::http::status::OK);
-    EXPECT_EQ(response.body().as<std::string>(), "request-trailer");
+    EXPECT_EQ(response.body().as<std::string>(), "request-trailer|request-trailer");
 
     client->disconnect();
     server->close();
@@ -2672,9 +2679,10 @@ TEST_F(Http3LoopbackTest, ClientRejectsForbiddenOutgoingRequestTrailer) {
     auto client = qb::http3::make_client(https_origin(port));
     client->set_verify_peer(false);
 
+    // A field of trailers() a trailer section must not carry refuses the request (Huly QB-1073). An
+    // announced one (`trailer: content-length`) stays in the header section, as on HTTP/1.1 and HTTP/2.
     qb::http::Request request{qb::http::method::POST, qb::io::uri("/forbidden-trailer")};
-    request.set_header("trailer", "content-length");
-    request.set_header("content-length", "7");
+    request.trailers().set_header("content-length", "7");
     request.body() = "payload";
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
@@ -2718,9 +2726,9 @@ TEST_F(Http3LoopbackTest, ServerRejectsForbiddenOutgoingResponseTrailer) {
     const auto port   = next_port();
     auto       server = qb::http3::make_server();
     server->router().get("/forbidden-trailer", [](auto ctx) {
+        // A field of trailers() a trailer section must not carry refuses the response (Huly QB-1073).
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().set_header("trailer", "content-length");
-        ctx->response().set_header("content-length", "3");
+        ctx->response().trailers().set_header("content-length", "3");
         ctx->response().body() = "abc";
         ctx->complete();
     });

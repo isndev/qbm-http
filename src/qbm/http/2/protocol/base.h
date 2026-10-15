@@ -257,13 +257,14 @@ public:
     }
 
     /**
-     * @brief Check if a header name is forbidden in an HTTP/2 trailer section.
-     * @param name Header name (lowercase)
+     * @brief Check if a header name is forbidden in an HTTP/2 trailer section: the one list HTTP/1.1,
+     *        HTTP/2 and HTTP/3 share, `qb::http::detail::is_forbidden_trailer_field` (Huly QB-1073).
+     * @param name Header name (any case)
      * @return true if forbidden in trailers
      */
     static bool
-    is_forbidden_trailer_header(std::string_view name) {
-        return is_forbidden_response_header(name) || name == "trailer" || name == "content-length";
+    is_forbidden_trailer_header(std::string_view name) noexcept {
+        return qb::http::detail::is_forbidden_trailer_field(name);
     }
 
     /**
@@ -333,88 +334,63 @@ public:
 };
 
 /**
- * @brief The lowercased field names a message announces in its `trailer` header (RFC 9110
- *        §6.6.2): the fields its sender puts in the trailer section, after the body.
- * @tparam Message `qb::http::Request` or `qb::http::Response`.
- * @param message Message to inspect.
- * @return The announced names, empty when the message has no `trailer` header.
- */
-template <typename Message>
-std::vector<std::string>
-announced_trailer_names(const Message &message) {
-    std::vector<std::string> names;
-    // A scan rather than find(): find() builds and hashes a lowercased key for every message,
-    // which costs more than walking its few header names, and nearly no message has trailers.
-    for (const auto &[header_name, values] : message.headers()) {
-        if (header_name.size() != 7 || !qb::http::utility::iequals(header_name, "trailer")) {
-            continue;
-        }
-        for (const auto &value : values) {
-            for (auto &name : qb::http::utility::split_and_trim_header_list(value, ',')) {
-                std::transform(name.begin(), name.end(), name.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
-                names.push_back(std::move(name));
-            }
-        }
-    }
-    return names;
-}
-
-/**
- * @brief True when a field travels in the trailer section: its @p name_lower is announced by the
- *        `trailer` header and allowed in trailers. A field that is announced but forbidden there
- *        (`content-length`, `trailer` itself, a connection header) stays in the leading HEADERS,
- *        so every field is sent exactly once.
- */
-inline bool
-is_trailer_field(std::string_view name_lower, const std::vector<std::string> &announced) {
-    return !announced.empty() && !name_lower.empty() && name_lower.front() != ':'
-           && std::find(announced.begin(), announced.end(), name_lower) != announced.end()
-           && !HeaderValidator::is_forbidden_trailer_header(name_lower);
-}
-
-/**
- * @brief A message's trailer section: the fields its `trailer` header announces that trailers
- *        allow, set on the message, names lowercased, invalid fields left out. What the leading
- *        HEADERS leave out (is_trailer_field) is exactly what this sends -- for a response
- *        (ServerHttp2Protocol, Huly QB-1058) as for a request (ClientHttp2Protocol, Huly QB-1061),
- *        the contract HTTP/3 follows.
+ * @brief A message's trailer section as HTTP/2 sends it: the fields of
+ *        qb::http::detail::plan_outgoing_trailers -- those its `trailer` header announces that a
+ *        trailer section may carry, then its `trailers()` -- names lowercase, a field HTTP/2 cannot
+ *        encode left out. The same section HTTP/1.1 and HTTP/3 send, for a response
+ *        (ServerHttp2Protocol, Huly QB-1058) as for a request (ClientHttp2Protocol, Huly QB-1061);
+ *        `trailers()` since Huly QB-1073. Cold: called only for a message with a trailer section.
  * @tparam Message `qb::http::Request` or `qb::http::Response`.
  */
 template <typename Message>
 std::vector<qb::protocol::hpack::HeaderField>
-announced_trailer_fields(const Message &message) {
+outgoing_trailer_fields(const Message &message) {
+    const auto plan = qb::http::detail::plan_outgoing_trailers(message, message.has_trailers() ? &message.trailers() : nullptr);
     std::vector<qb::protocol::hpack::HeaderField> fields;
-    const auto                                    announced = announced_trailer_names(message);
-    if (announced.empty()) {
-        return fields;
-    }
-    for (const auto &[name, values] : message.headers()) {
-        std::string name_lower(name.data(), name.size());
-        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
-        if (!is_trailer_field(name_lower, announced)) {
-            continue;
-        }
-        for (const auto &value : values) {
-            if (HeaderValidator::is_valid_header_field(name_lower, value)) {
-                fields.emplace_back(name_lower, std::string(value.data(), value.size()));
-            }
+    fields.reserve(plan.fields.size());
+    for (const auto &[name, value] : plan.fields) {
+        if (HeaderValidator::is_valid_header_field(name, value)) {
+            fields.emplace_back(std::string(name), std::string(value));
         }
     }
     return fields;
 }
 
 /**
- * @brief Take out of a leading header block the fields @p message announces as trailers
- *        (is_trailer_field): they leave in its trailer section (announced_trailer_fields). Called
- *        only for a message that carries a `trailer` header, so a message without one pays nothing.
+ * @brief Prepares the leading header block of a message that has a trailer section (a `trailer`
+ *        header, or `trailers()`): the fields the trailer section takes leave the block, and a
+ *        `trailer` field announcing `trailers()` joins it when the message announces nothing itself
+ *        (qb::http::detail::plan_outgoing_trailers, Huly QB-1073). Called only for such a message,
+ *        so a message without trailers pays nothing.
+ * @return nullptr when the block is ready; otherwise why the message is refused: its `trailers()`
+ *         carries a field a trailer section must not, or one HTTP/2 cannot encode. Nothing has been
+ *         sent at that point.
  */
 template <typename Message>
-void
-remove_announced_trailer_fields(std::vector<qb::protocol::hpack::HeaderField> &leading, const Message &message) {
-    const auto announced = announced_trailer_names(message);
-    if (!announced.empty()) {
-        std::erase_if(leading, [&](const qb::protocol::hpack::HeaderField &f) { return is_trailer_field(f.name, announced); });
+const char *
+prepare_trailed_header_block(std::vector<qb::protocol::hpack::HeaderField> &leading, const Message &message) {
+    const auto plan = qb::http::detail::plan_outgoing_trailers(message, message.has_trailers() ? &message.trailers() : nullptr);
+    if (!plan.forbidden.empty()) {
+        return "trailers() carries a field a trailer section must not (framing, connection, routing, proxy authentication)";
     }
+    if (message.has_trailers()) {
+        for (const auto &[name, values] : message.trailers().headers()) {
+            for (const auto &value : values) {
+                if (!HeaderValidator::is_valid_header_field(name, value)) {
+                    return "trailers() carries an invalid field";
+                }
+            }
+        }
+    }
+    if (!plan.moved.empty()) {
+        std::erase_if(leading, [&](const qb::protocol::hpack::HeaderField &f) {
+            return std::find(plan.moved.begin(), plan.moved.end(), f.name) != plan.moved.end();
+        });
+    }
+    if (!plan.announcement.empty()) {
+        leading.emplace_back("trailer", plan.announcement);
+    }
+    return nullptr;
 }
 
 /**

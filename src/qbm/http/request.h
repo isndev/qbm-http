@@ -59,7 +59,8 @@ public:
         , _method(Method::UNINITIALIZED)
         , _uri()
         , _cookies() {
-        this->internal::MessageBase::reset();
+        // MessageBase() is already what MessageBase::reset() makes of a message: resetting it again
+        // here was an out-of-line call per message built -- every parse (Huly QB-1073).
     }
 
     /**

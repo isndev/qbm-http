@@ -90,14 +90,14 @@ post_req.body() = R"({"name":"test","value":123})";
 
 The HTTP/1.1 one-shot and persistent clients fill in these standard headers for you:
 
-- **Host** — set automatically from `request.uri()` (bracketed IPv6, default ports omitted for `http:80` / `https:443`).
+- **Host** — set automatically from `request.uri()` by `qb::http::origin::authority`, the authority every protocol writes: an IPv6 literal between brackets without its zone identifier, the scheme's default port omitted (`http:80`, `https:443`; Huly QB-1064).
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:748-754,826-836; qbm/http/src/qbm/http/1.1/client.cpp:149-163,372-390; qbm/http/src/qbm/http/headers.cpp:320-325 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:248-261,604-619; qbm/http/src/qbm/http/3/client.cpp:190-202,759-768; qbm/http/src/qbm/http/body.h:291-312 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:248-261,604-619; qbm/http/src/qbm/http/3/client.cpp:191-203,760-769; qbm/http/src/qbm/http/body.h:291-312 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:796-803; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->

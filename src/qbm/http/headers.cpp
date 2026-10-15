@@ -575,9 +575,11 @@ Headers::erase_long_name(std::string_view name) noexcept {
 namespace detail {
 bool
 is_forbidden_trailer_field(std::string_view name) noexcept {
-    static constexpr std::string_view forbidden[] = {"content-length",     "transfer-encoding", "trailer", "host",    "connection",
-                                                     "keep-alive",         "proxy-connection",  "te",      "upgrade", "proxy-authenticate",
-                                                     "proxy-authorization"};
+    // The union of the lists HTTP/1.1, HTTP/2 and HTTP/3 kept apart until Huly QB-1073: each refused
+    // a field another accepted (proxy authentication over HTTP/2, `host` and `te` over HTTP/3).
+    static constexpr std::string_view forbidden[] = {"content-length",     "transfer-encoding",  "trailer", "host",    "connection",
+                                                     "keep-alive",         "proxy-connection",   "te",      "upgrade", "http2-settings",
+                                                     "proxy-authenticate", "proxy-authorization"};
     for (const auto field : forbidden) {
         if (field.size() == name.size() && utility::iequals(field, name)) {
             return true;
@@ -599,8 +601,8 @@ trailer_section_fields(const Headers &message) {
             const auto comma = rest.find(',');
             const auto name  = utility::trim_http_whitespace(rest.substr(0, comma));
             rest.remove_prefix(comma == std::string_view::npos ? rest.size() : comma + 1);
-            if (name.empty() || is_forbidden_trailer_field(name)) {
-                continue;
+            if (name.empty() || name.front() == ':' || is_forbidden_trailer_field(name)) {
+                continue; // a pseudo-header or a forbidden field never leaves the header section
             }
             std::string lower(name.size(), '\0');
             std::transform(name.begin(), name.end(), lower.begin(), utility::ascii_to_lower);
@@ -610,6 +612,41 @@ trailer_section_fields(const Headers &message) {
         }
     }
     return fields;
+}
+
+outgoing_trailers
+plan_outgoing_trailers(const Headers &message, const Headers *trailers) {
+    outgoing_trailers plan;
+    plan.moved = trailer_section_fields(message);
+    for (const auto &name : plan.moved) {
+        const auto field = message.headers().find(name);
+        if (field == message.headers().cend()) {
+            continue; // announced, not set
+        }
+        for (const auto &value : field->second) {
+            plan.fields.emplace_back(field->first, value);
+        }
+    }
+    if (trailers == nullptr) {
+        return plan;
+    }
+    const bool announced = message.has_header("trailer");
+    for (const auto &[name, values] : trailers->headers()) {
+        if (is_forbidden_trailer_field(name)) {
+            plan.forbidden = name;
+            return plan;
+        }
+        for (const auto &value : values) {
+            plan.fields.emplace_back(name, value);
+        }
+        if (!announced && !values.empty()) {
+            if (!plan.announcement.empty()) {
+                plan.announcement += ", ";
+            }
+            plan.announcement += name;
+        }
+    }
+    return plan;
 }
 } // namespace detail
 } // namespace qb::http

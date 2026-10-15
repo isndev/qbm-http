@@ -176,8 +176,9 @@ Client::ensure_absolute_uri(qb::http::Request &request) {
     if (!request.uri().host().empty()) {
         return;
     }
-    // The base authority as a URI writes it: an IPv6 literal between brackets (Huly QB-572).
-    std::string absolute = "https://" + qb::protocol::http3::detail::authority(_base_uri);
+    // The base authority as every protocol writes it: an IPv6 literal between brackets (Huly QB-572,
+    // QB-1064).
+    std::string absolute = "https://" + qb::http::origin::authority(_base_uri);
     absolute += request.uri().path().empty() ? "/" : std::string(request.uri().path());
     if (!request.uri().encoded_queries().empty()) {
         absolute.push_back('?');

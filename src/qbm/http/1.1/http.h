@@ -898,12 +898,12 @@ using HTTPS = session<Func, qb::io::transport::stcp>;
 } // namespace async
 
 /**
- * @brief Compute the value for the HTTP @c Host header derived from @p uri.
+ * @brief Compute the value for the HTTP @c Host header derived from @p uri:
+ *        qb::http::origin::authority, the authority every protocol writes (Huly QB-1064).
  *
- * The host is bracketed when it is an unbracketed IPv6 literal, and the port is
- * appended only when it is non-default for the URI scheme (the @c http:80 and
- * @c https:443 default ports are omitted). The scheme is compared
- * case-insensitively (ASCII).
+ * The host is bracketed when it is an IPv6 literal, whose zone identifier is left out, and the
+ * port is appended only when it is non-default for the URI scheme (http and ws 80, https and wss
+ * 443 are omitted). The scheme is compared case-insensitively (ASCII).
  *
  * @param uri The source URI to derive the @c Host header value from.
  * @return The @c Host header value (host, optionally bracketed, with a

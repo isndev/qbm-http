@@ -20,10 +20,12 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -169,6 +171,48 @@ push_raw_header_carrier(FakeIO &io, h2::FrameType type, uint8_t flags, uint32_t 
     if (!fragment.empty()) {
         push_bytes(io, fragment.data(), fragment.size());
     }
+}
+
+// One header block the client emitted on a stream: its HEADERS flags and its decoded fields.
+struct SentHeaderBlock {
+    uint8_t                                       flags = 0;
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+
+    [[nodiscard]] std::size_t
+    count(std::string_view name) const {
+        return static_cast<std::size_t>(std::count_if(fields.begin(), fields.end(), [&](const auto &f) { return f.name == name; }));
+    }
+    [[nodiscard]] std::string
+    value(std::string_view name) const {
+        for (const auto &f : fields) {
+            if (f.name == name) {
+                return f.value;
+            }
+        }
+        return {};
+    }
+};
+
+// The header blocks emitted on `stream_id` from `from` on, decoded in order with one decoder (they
+// share the client's HPACK state). Every block fits one frame here.
+[[nodiscard]] std::vector<SentHeaderBlock>
+sent_header_blocks(const qb::allocator::pipe<char> &output, uint32_t stream_id, std::size_t from) {
+    qb::protocol::hpack::Decoder decoder;
+    std::vector<SentHeaderBlock> blocks;
+    for (std::size_t off = from; off + h2::FRAME_HEADER_SIZE <= output.size();) {
+        const auto fh = peek_frame_header(output, off);
+        if (fh.get_type() == h2::FrameType::HEADERS && fh.get_stream_id() == stream_id) {
+            const auto          *first = reinterpret_cast<const uint8_t *>(output.cbegin() + off + h2::FRAME_HEADER_SIZE);
+            std::vector<uint8_t> payload(first, first + fh.get_payload_length());
+            SentHeaderBlock      block;
+            block.flags     = fh.flags;
+            bool incomplete = false;
+            EXPECT_TRUE(decoder.decode(payload, block.fields, incomplete));
+            blocks.push_back(std::move(block));
+        }
+        off += h2::FRAME_HEADER_SIZE + fh.get_payload_length();
+    }
+    return blocks;
 }
 
 } // namespace
@@ -723,6 +767,13 @@ TEST(HTTP2ClientProtocol, AssemblesResponseWithTrailers) {
     ASSERT_TRUE(io.last_status.has_value());
     EXPECT_EQ(*io.last_status, 200);
     EXPECT_EQ(*io.last_body, "body-with-trailers");
+    // The trailer field is the response's trailers(), apart from its header section (Huly QB-1073),
+    // and -- 3.x source compatibility -- one of its header fields too.
+    ASSERT_TRUE(io.last_response.has_value());
+    EXPECT_EQ(io.last_response->trailers().header("x-checksum"), "abc123");
+    EXPECT_EQ(io.last_response->trailers().header_count(), 1u) << "the `trailer` announcement is a header field";
+    EXPECT_EQ(io.last_response->header("x-checksum"), "abc123");
+    EXPECT_TRUE(io.last_response->has_header("trailer"));
 }
 
 // ===========================================================================
@@ -752,6 +803,110 @@ TEST(HTTP2ClientProtocol, ResponseAnnouncingTrailersButEndingOnDataCompletes) {
     ASSERT_TRUE(io.last_status.has_value());
     EXPECT_EQ(*io.last_status, 200);
     EXPECT_EQ(*io.last_body, "body-without-trailers");
+}
+
+// ===========================================================================
+// A response trailer section carrying a field the shared list forbids
+// (qb::http::detail::is_forbidden_trailer_field) resets the stream, as the
+// server does for a request's: the client checked only the connection-specific
+// fields there, and accepted -- and merged into the response's headers -- a
+// trailer `content-length`, `trailer` or proxy-authentication field (Huly
+// QB-1073, RFC 9110 §6.5.1).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, ResponseTrailerFieldThatFramesOrRoutesIsRefused) {
+    const std::vector<std::pair<std::string, std::string>> forbidden = {
+        {"content-length", "4"},
+        {"trailer", "x-a"},
+        {"proxy-authenticate", "Basic"},
+        {"proxy-authorization", "Basic eA=="},
+        {"host", "example.test"},
+        {"te", "trailers"},
+        {"connection", "close"},
+        {"keep-alive", "timeout=5"},
+        {"transfer-encoding", "chunked"},
+        {"proxy-connection", "close"},
+        {"upgrade", "h2c"},
+        {"http2-settings", "AAMAAABk"}
+    };
+    for (const auto &[name, value] : forbidden) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/forbidden-trailer");
+        ASSERT_TRUE(protocol.send_request(std::move(req), 21));
+
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"trailer", "x-a"}}));
+        protocol.on(make_data_frame(1, 0, "body"));
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{name, value}}));
+
+        EXPECT_TRUE(protocol.ok()) << name << ": a stream error, not a connection one";
+        EXPECT_EQ(io.response_count, 0) << name << ": the response must not be delivered";
+        EXPECT_EQ(io.stream_error_count, 1) << name;
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR) << name;
+    }
+}
+
+// ===========================================================================
+// A trailer section the response did not announce completes it: the `trailer`
+// header is a SHOULD (RFC 9110 §6.6.2), and RFC 9113 §8.1 lets one HEADERS
+// block that ends the stream follow the DATA frames. The client reset such a
+// stream ("Multiple HEADERS frames not as trailers") -- what a server sending
+// an unannounced trailer section gets (Huly QB-1073). Split over CONTINUATION
+// frames alike, the response completes once its block does. A second header
+// block that does NOT end the stream is still refused
+// (SecondMainHeadersNotAsTrailersRstsStream).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, ResponseTrailersWithoutAnnouncementComplete) {
+    {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        qb::http::Request                          req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/unannounced");
+        ASSERT_TRUE(protocol.send_request(std::move(req), 22));
+
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+        protocol.on(make_data_frame(1, 0, "body"));
+        EXPECT_EQ(io.response_count, 0);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{"x-checksum", "abc123"}}));
+
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.stream_error_count, 0);
+        ASSERT_EQ(io.response_count, 1);
+        EXPECT_EQ(*io.last_body, "body");
+        ASSERT_TRUE(io.last_response.has_value());
+        EXPECT_EQ(io.last_response->header("x-checksum"), "abc123");
+    }
+    {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        qb::http::Request                          req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/unannounced-continuation");
+        ASSERT_TRUE(protocol.send_request(std::move(req), 23));
+
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+        protocol.on(make_data_frame(1, 0, "body"));
+        const auto block = encode_hpack_headers({{"x-checksum", "abc123"}});
+        ASSERT_GE(block.size(), 2u);
+        const std::size_t    cut = block.size() / 2;
+        std::vector<uint8_t> first(block.begin(), block.begin() + cut);
+        std::vector<uint8_t> rest(block.begin() + cut, block.end());
+        push_raw_header_carrier(io, h2::FrameType::HEADERS, h2::FLAG_END_STREAM, 1, first);
+        drive(protocol, io);
+        EXPECT_EQ(io.response_count, 0) << "the trailer block is not complete yet";
+        push_raw_header_carrier(io, h2::FrameType::CONTINUATION, h2::FLAG_END_HEADERS, 1, rest);
+        drive(protocol, io);
+
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.goaway_count, 0);
+        EXPECT_EQ(io.stream_error_count, 0);
+        ASSERT_EQ(io.response_count, 1);
+        ASSERT_TRUE(io.last_response.has_value());
+        EXPECT_EQ(io.last_response->header("x-checksum"), "abc123");
+    }
 }
 
 // ===========================================================================
@@ -1635,6 +1790,98 @@ TEST(HTTP2ClientProtocol, AnnouncedRequestTrailerFieldsLeaveOnlyInTheTrailerBloc
     ASSERT_EQ(blocks[1].size(), 1u);
     EXPECT_EQ(blocks[1][0].name, "x-checksum");
     EXPECT_EQ(blocks[1][0].value, "cafe");
+}
+
+// ===========================================================================
+// :authority is the authority every protocol sends (qb::http::origin::authority,
+// Huly QB-1064): the scheme's default port left out -- qb::io::uri fills it in,
+// and HTTP/2 sent "example.test:443" where HTTP/1.1 sent `Host: example.test` --
+// and an IPv6 zone identifier, which has local significance only, never sent
+// (RFC 9844 §6).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, RequestAuthorityIsWhatEveryProtocolSends) {
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"https://example.test/a", "example.test"},
+        {"https://example.test:443/a", "example.test"},
+        {"https://example.test:8443/a", "example.test:8443"},
+        {"https://[2001:db8::1]:8443/a", "[2001:db8::1]:8443"},
+        {"https://[fe80::1%25eth0]:8443/a", "[fe80::1]:8443"},
+    };
+    for (const auto &[uri, authority] : cases) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        const std::size_t                          before = io.output.size();
+
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri(uri);
+        ASSERT_TRUE(protocol.send_request(std::move(req), 1)) << uri;
+        const auto blocks = sent_header_blocks(io.output, 1, before);
+        ASSERT_EQ(blocks.size(), 1u) << uri;
+        EXPECT_EQ(blocks[0].value(":authority"), authority) << uri;
+    }
+}
+
+// ===========================================================================
+// A request's trailers() leave in its trailer section once the body is out --
+// without send_request_trailers(), on a protocol that otherwise waits for it --
+// announced by a `trailer` field the leading HEADERS gain (RFC 9110 §6.6.2).
+// An empty body alike: the leading HEADERS then do not end the stream (Huly
+// QB-1073).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, RequestTrailersContainerLeavesAfterTheBody) {
+    for (const bool with_body : {true, false}) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        ASSERT_TRUE(protocol.explicit_request_trailers()) << "the protocol's default: it would wait for send_request_trailers()";
+        const std::size_t before = io.output.size();
+
+        qb::http::Request req;
+        req.method() = qb::http::method::POST;
+        req.uri()    = qb::io::uri("https://example.test/container");
+        if (with_body) {
+            req.body() = "ab";
+        }
+        req.trailers().set_header("x-checksum", "cafe");
+        ASSERT_TRUE(protocol.send_request(std::move(req), 10));
+        ASSERT_TRUE(protocol.ok());
+
+        const auto blocks = sent_header_blocks(io.output, 1, before);
+        ASSERT_EQ(blocks.size(), 2u) << "leading HEADERS, then the trailer block (body " << with_body << ")";
+        EXPECT_FALSE(blocks[0].flags & h2::FLAG_END_STREAM);
+        EXPECT_EQ(blocks[0].value("trailer"), "x-checksum") << "the announcement the request did not write";
+        EXPECT_EQ(blocks[0].count("x-checksum"), 0u);
+        EXPECT_TRUE(blocks[1].flags & h2::FLAG_END_STREAM);
+        ASSERT_EQ(blocks[1].fields.size(), 1u);
+        EXPECT_EQ(blocks[1].value("x-checksum"), "cafe");
+    }
+}
+
+// ===========================================================================
+// A field of a request's trailers() a trailer section must not carry refuses the
+// request before anything is sent: send_request() returns false and no HEADERS
+// leave (Huly QB-1073).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, RequestWithAForbiddenTrailerFieldIsRefusedBeforeAnythingIsSent) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    const std::size_t                          before = io.output.size();
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/forbidden");
+    req.body()   = "ab";
+    req.trailers().set_header("content-length", "2");
+    EXPECT_FALSE(protocol.send_request(std::move(req), 11));
+    EXPECT_TRUE(protocol.ok()) << "the connection is untouched";
+    EXPECT_EQ(io.output.size(), before) << "nothing was sent";
+
+    // The next request is sent normally.
+    qb::http::Request next;
+    next.method() = qb::http::method::GET;
+    next.uri()    = qb::io::uri("https://example.test/next");
+    EXPECT_TRUE(protocol.send_request(std::move(next), 12));
+    EXPECT_GT(io.output.size(), before);
 }
 
 // ===========================================================================

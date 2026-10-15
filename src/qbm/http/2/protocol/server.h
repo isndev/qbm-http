@@ -24,7 +24,8 @@
  */
 #pragma once
 
-#include "./base.h" // For qb::protocol::http2::Http2Protocol and frame types
+#include "../../origin.h" // origin::authority: the :authority every protocol writes (Huly QB-1064)
+#include "./base.h"       // For qb::protocol::http2::Http2Protocol and frame types
 
 namespace qb::http::well_known {
 /// HTTP/2 ":method" request pseudo-header name.
@@ -1134,11 +1135,17 @@ public:
             }
             announces_trailers = announces_trailers || name_lower == qb::http::well_known::TRAILER_SV;
         }
-        // The fields the `trailer` header announces leave in the trailer section after the body
-        // (try_send_pending_data_for_stream), not here: they used to be sent in this block, and
-        // the trailer block then went out empty (Huly QB-1058). Same contract as HTTP/3.
-        if (announces_trailers) {
-            remove_announced_trailer_fields(hf_vector, http_response);
+        // The trailer section -- the fields the `trailer` header announces, then trailers() -- leaves
+        // after the body (try_send_pending_data_for_stream), not here: announced fields used to be
+        // sent in this block, and the trailer block then went out empty (Huly QB-1058). A field of
+        // trailers() a trailer section must not carry refuses the response before anything is sent
+        // (Huly QB-1073). Same contract as HTTP/1.1 and HTTP/3.
+        const bool trailed = announces_trailers || http_response.has_trailers();
+        if (trailed) {
+            if (const char *refused = prepare_trailed_header_block(hf_vector, http_response)) {
+                this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, refused);
+                return false;
+            }
         }
 
         const auto &body_pipe        = http_response.body().raw();
@@ -1173,7 +1180,11 @@ public:
         // A response to HEAD carries the representation's metadata -- content-length included --
         // and no content (RFC 9110 §9.3.2): its HEADERS end the stream even when the handler filled
         // the body to compute that metadata, as the HTTP/1.1 and HTTP/3 paths do (Huly QB-527).
-        bool has_body = !body_pipe.empty() && !response_to_head;
+        // A trailer section follows the body, an empty one included: those HEADERS end the stream
+        // then, never the leading ones -- with an empty body they did, and the trailer fields were
+        // lost (Huly QB-1073).
+        stream.is_trailers = trailed && !response_to_head;
+        bool has_body      = (!body_pipe.empty() || stream.is_trailers) && !response_to_head;
 
         if (!has_body) {
             header_flags |= FLAG_END_STREAM; // No body, HEADERS ends the stream
@@ -1290,15 +1301,8 @@ public:
         // They MAY include other headers that are valid for requests.
 
         const auto &promised_uri = promised_request_pseudo_headers.uri();
-        std::string promised_authority(promised_uri.host());
-        const bool  already_bracketed_ipv6 =
-            promised_authority.size() >= 2 && promised_authority.front() == '[' && promised_authority.back() == ']';
-        if (!already_bracketed_ipv6 && promised_authority.find(':') != std::string::npos) {
-            promised_authority = "[" + promised_authority + "]";
-        }
-        if (!promised_uri.port().empty()) {
-            promised_authority += ":" + std::string(promised_uri.port());
-        }
+        // The authority every protocol writes for a URI (qb::http::origin::authority, Huly QB-1064).
+        std::string promised_authority = qb::http::origin::authority(promised_uri);
 
         std::string promised_path = promised_uri.path().empty() ? std::string{"/"} : std::string(promised_uri.path());
         if (!promised_uri.encoded_queries().empty()) {
@@ -1621,9 +1625,8 @@ private:
             return false;
         }
 
-        // Convert decoded_header_fields to qb::http::Headers and qb::http::Request (if main headers)
-        // and apply to stream.assembled_request or stream.response_to_send.trailers()
-        // Also, validate pseudo-headers for main request headers.
+        // Convert decoded_header_fields into stream.assembled_request: its header fields for the main
+        // block (pseudo-headers validated), its trailers() for a trailer block.
 
         // Store original current header block fragment for potential PUSH_PROMISE validation if this is a request
         if (!is_trailers_block) {
@@ -1767,11 +1770,12 @@ private:
                     this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid trailer header field name or value format.");
                     return false;
                 }
-                if (HeaderValidator::is_forbidden_trailer_header(name)) {
+                if (qb::http::detail::is_forbidden_trailer_field(name)) {
                     this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + name);
                     return false;
                 }
-                stream.assembled_request.add_header(name, value); // Add to request trailers
+                // To the request's trailers(), and its header fields for 3.x (Huly QB-1073).
+                qb::http::detail::store_received_trailer(stream.assembled_request, name, value);
             }
 
             // As per RFC 9113, a trailer section's final frame MUST contain END_STREAM.
@@ -1819,8 +1823,7 @@ private:
         // send_buffer_offset tracks progress within stream.response_to_send.body(), which is http_response.body()
         // uint32_t sent_bytes_this_function_call = 0; // Tracks what this specific call achieves
 
-        stream.is_trailers = http_response.has_header("Trailer"); // Or a more robust check for actual trailer fields intended
-                                                                  // For now, presence of "Trailer" header implies intent.
+        // stream.is_trailers was set by send_response(): the response has a trailer section.
 
         while (stream.send_buffer_offset < body_size) {
             if (stream.peer_window_size <= 0 || _connection_send_window <= 0) {
@@ -1950,7 +1953,7 @@ private:
             // Assemble qb::http::Request from stream.assembled_request
             // The pseudo-headers should have already populated method and URI components.
             // Body should be in stream.assembled_request.body()
-            // Trailers in stream.assembled_request.trailers()
+            // Trailers in stream.assembled_request.trailers() (and its header fields, Huly QB-1073)
             // Create a final qb::http::Request object.
             // For simplicity, let's assume stream.assembled_request is already mostly a qb::http::Request.
             // If it's a different intermediate struct, copy/move to qb::http::Request here.
@@ -2331,8 +2334,8 @@ private:
             // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": All body sent, proceeding to send trailers.");
 
             // Exactly the fields the `trailer` header announces, which send_response() kept out of
-            // the leading HEADERS (Huly QB-1058).
-            std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers = announced_trailer_fields(stream.response_to_send);
+            // the leading HEADERS (Huly QB-1058), then the response's trailers() (Huly QB-1073).
+            std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers = outgoing_trailer_fields(stream.response_to_send);
 
             // Trailers always end the stream; a block larger than the peer's frame size is split
             // over CONTINUATION frames (Huly QB-522).

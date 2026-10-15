@@ -76,7 +76,8 @@ constexpr std::size_t MAX_BODY_RESERVE_HINT = 64 * 1024;
 } // namespace qb::http::protocol_limits
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
-#include "../../headers.h" // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
+#include "../../headers.h"      // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
+#include "../../message_base.h" // detail::store_received_trailer (trailers(), Huly QB-1073)
 #include "../../types.h"
 #include "../../utility.h"
 
@@ -256,17 +257,18 @@ private:
     }
 
     /**
-     * @brief Stores the trailer field the parser holds, if any, into the message's headers.
+     * @brief Stores the trailer field the parser holds, if any, into the message's trailer section.
      * @param parser Parser instance
      * @return 0, or the refusal of the message
      *
      * A header-section field is stored when the next one begins or when the section ends (inline
      * in on_header_field / on_headers_complete); a trailer-section field when its value ends, here
      * through on_value_end: the last one is followed by neither, and it was dropped (Huly QB-1067).
-     * A trailer field joins the message's headers, as HTTP/2 and HTTP/3 surface theirs; one a
-     * trailer section must not carry (framing, connection, routing, proxy authentication:
-     * detail::is_forbidden_trailer_field) refuses the message, as they refuse their stream --
-     * merged, a trailer `Content-Length` would sit beside the chunked framing.
+     * A trailer field goes to the message's `trailers()` -- and to its header fields too, for 3.x
+     * compatibility -- as HTTP/2 and HTTP/3 store theirs (detail::store_received_trailer, Huly
+     * QB-1073); one a trailer section must not carry (framing, connection, routing, proxy
+     * authentication: detail::is_forbidden_trailer_field) refuses the message, as they refuse
+     * their stream -- merged, a trailer `Content-Length` would sit beside the chunked framing.
      */
     static int
     store_trailer_field(http_t *parser) {
@@ -280,7 +282,7 @@ private:
         if (qb::http::detail::is_forbidden_trailer_field(self->_last_header_key)) {
             return fail_with_reason(parser, "HTTP trailer section carries a field it must not (framing, connection, routing)");
         }
-        self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
+        qb::http::detail::store_received_trailer(self->msg, self->_last_header_key, self->_last_header_value);
         self->_last_header_key.clear();
         self->_last_header_value.clear();
         return 0;

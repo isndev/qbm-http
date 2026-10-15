@@ -387,6 +387,85 @@ TEST(ResponseTest, ResetRestoresOkAndClearsBody) {
 }
 
 // ===========================================================================
+// Trailer section (trailers(), Huly QB-1073)
+// ===========================================================================
+
+// A message's trailer section is a container of its own, apart from its header fields, and it is
+// allocated only when written to: the const accessor and has_trailers() read a message without one
+// at no cost -- an empty section, one process-wide object.
+TEST(MessageTrailersTest, TrailersAreApartFromTheHeaderSectionAndMadeOnDemand) {
+    Request        req;
+    const Request &creq = req;
+    const Response res;
+    EXPECT_FALSE(req.has_trailers());
+    EXPECT_EQ(creq.trailers().header_count(), 0u);
+    EXPECT_EQ(&creq.trailers(), &res.trailers()) << "a message without trailers shares the one empty section";
+
+    (void) req.trailers(); // the non-const accessor makes the (empty) section
+    EXPECT_FALSE(req.has_trailers()) << "an empty section is no trailer";
+    EXPECT_NE(&creq.trailers(), &res.trailers());
+
+    req.trailers().set_header("Grpc-Status", "0");
+    req.trailers().add_header("X-Sum", "a");
+    req.trailers().add_header("X-Sum", "b");
+    EXPECT_TRUE(req.has_trailers());
+    EXPECT_EQ(creq.trailers().header("grpc-status"), "0");
+    EXPECT_EQ(creq.trailers().header("x-sum", 1), "b");
+    EXPECT_FALSE(req.has_header("Grpc-Status")) << "a trailer field set to send is not a header field";
+    EXPECT_EQ(req.header_count(), 0u);
+}
+
+// Copying a message copies its trailer section (each copy owns its own), moving moves it, and reset()
+// drops it -- Request and Response alike.
+TEST(MessageTrailersTest, TrailersFollowCopyMoveAndReset) {
+    Response original;
+    original.trailers().set_header("X-Sum", "1");
+
+    Response copy = original;
+    copy.trailers().set_header("X-Sum", "2");
+    EXPECT_EQ(original.trailers().header("X-Sum"), "1") << "a copy owns its own section";
+    EXPECT_EQ(copy.trailers().header("X-Sum"), "2");
+
+    Response assigned;
+    assigned.trailers().set_header("X-Old", "o");
+    assigned = original;
+    EXPECT_EQ(assigned.trailers().header("X-Sum"), "1");
+    EXPECT_FALSE(assigned.trailers().has_header("X-Old"));
+    const Response none;
+    assigned = none;
+    EXPECT_FALSE(assigned.has_trailers()) << "copying a message without trailers drops the section";
+
+    Response moved = std::move(copy);
+    EXPECT_EQ(moved.trailers().header("X-Sum"), "2");
+    Response move_assigned;
+    move_assigned = std::move(moved);
+    EXPECT_EQ(move_assigned.trailers().header("X-Sum"), "2");
+
+    move_assigned.reset();
+    EXPECT_FALSE(move_assigned.has_trailers());
+
+    Request req;
+    req.trailers().set_header("X-Sum", "r");
+    Request req_copy = req;
+    EXPECT_EQ(req_copy.trailers().header("X-Sum"), "r");
+    req.reset();
+    EXPECT_FALSE(req.has_trailers());
+    EXPECT_TRUE(req_copy.has_trailers());
+}
+
+// A received trailer field goes to trailers() and, for 3.x source compatibility, to the header fields
+// after the header-section values of the same name: header() still answers the header-section value.
+TEST(MessageTrailersTest, AReceivedTrailerFieldIsStoredInBothSections) {
+    Response res;
+    res.set_header("Server-Timing", "head");
+    qb::http::detail::store_received_trailer(res, "Server-Timing", "tail");
+    EXPECT_EQ(res.trailers().header("server-timing"), "tail");
+    EXPECT_EQ(res.trailers().header_count(), 1u);
+    EXPECT_EQ(res.header("Server-Timing"), "head");
+    EXPECT_EQ(res.header("Server-Timing", 1), "tail");
+}
+
+// ===========================================================================
 // origin helpers
 // ===========================================================================
 
@@ -438,6 +517,35 @@ TEST(OriginTest, SameOriginRequiresSchemeHostPort) {
     EXPECT_FALSE(same(qb::io::uri("http://example.com/"), qb::io::uri("https://example.com/")));
     EXPECT_FALSE(same(qb::io::uri("http://a.com/"), qb::io::uri("http://b.com/")));
     EXPECT_FALSE(same(qb::io::uri("http://example.com:80/"), qb::io::uri("http://example.com:8080/")));
+}
+
+// The authority every protocol sends -- HTTP/1.1 and WebSocket `Host`, HTTP/2 and HTTP/3
+// `:authority` -- from one writer (Huly QB-1064): the host, an IPv6 literal between brackets without
+// its zone identifier (RFC 9844 §6), `:port` unless it is the scheme's default.
+TEST(OriginTest, AuthorityIsWhatEveryProtocolSends) {
+    using qb::http::origin::authority;
+    // IPv4 and a reg-name: a non-default port kept, the default one omitted.
+    EXPECT_EQ(authority(qb::io::uri("http://127.0.0.1:8080/p")), "127.0.0.1:8080");
+    EXPECT_EQ(authority(qb::io::uri("http://127.0.0.1/p")), "127.0.0.1");
+    EXPECT_EQ(authority(qb::io::uri("http://127.0.0.1:80/p")), "127.0.0.1");
+    EXPECT_EQ(authority(qb::io::uri("https://example.test/p")), "example.test");
+    EXPECT_EQ(authority(qb::io::uri("https://example.test:443/p")), "example.test");
+    EXPECT_EQ(authority(qb::io::uri("https://example.test:8443/p")), "example.test:8443");
+    EXPECT_EQ(authority(qb::io::uri("http://example.test:443/p")), "example.test:443") << "443 is https's default, not http's";
+    EXPECT_EQ(authority(qb::io::uri("ws://example.test:80/chat")), "example.test");
+    EXPECT_EQ(authority(qb::io::uri("wss://example.test:443/chat")), "example.test");
+    EXPECT_EQ(authority(qb::io::uri("WSS://example.test:443/chat")), "example.test") << "the scheme compares case-insensitively";
+    EXPECT_EQ(authority(qb::io::uri("HTTP://example.test:80/")), "example.test");
+    EXPECT_EQ(authority(qb::io::uri("xyzzy://example.test:80/")), "example.test:80") << "no default port for that scheme";
+    // IPv6: between brackets, the port after them.
+    EXPECT_EQ(authority(qb::io::uri("http://[2001:db8::1]:8080/p")), "[2001:db8::1]:8080");
+    EXPECT_EQ(authority(qb::io::uri("https://[::1]/p")), "[::1]");
+    EXPECT_EQ(authority(qb::io::uri("https://[::1]:443/p")), "[::1]");
+    // An IPv6 zone identifier stays local: never sent.
+    EXPECT_EQ(authority(qb::io::uri("http://[fe80::1%25eth0]:8080/p")), "[fe80::1]:8080");
+    EXPECT_EQ(authority(qb::io::uri("https://[fe80::a:b%25en0]/p")), "[fe80::a:b]");
+    // No host, no authority.
+    EXPECT_EQ(authority(qb::io::uri("/relative/path")), "");
 }
 
 } // namespace

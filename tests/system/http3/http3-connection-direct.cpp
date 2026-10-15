@@ -460,8 +460,123 @@ TEST(Http3ConnectionDirect, AnnouncedRequestTrailersAreDeliveredToServer) {
     ASSERT_EQ(pair.server_owner.requests.size(), 1u);
     auto const &got = pair.server_owner.requests.front();
     EXPECT_EQ(got.body().template as<std::string>(), "chunk");
-    EXPECT_EQ(got.header("x-checksum"), "deadbeef") << "the announced trailer must reach the server as a header";
+    EXPECT_EQ(got.header("x-checksum"), "deadbeef") << "3.x: the trailer field is one of the header fields too";
+    EXPECT_EQ(got.trailers().header("x-checksum"), "deadbeef") << "the trailer field is the request's trailers() (Huly QB-1073)";
+    EXPECT_EQ(got.trailers().header_count(), 1u);
     EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+/**
+ * @test trailers() crosses an HTTP/3 exchange both ways
+ * @brief What a request or a response carries in its trailers() is what the peer finds in its own --
+ *        the header fields keep it too, for 3.x -- with a body or without one, announced by a
+ *        `trailer` field the sender adds (Huly QB-1073).
+ */
+TEST(Http3ConnectionDirect, TrailersContainerCrossesBothDirections) {
+    for (const bool with_body : {true, false}) {
+        Pair pair;
+
+        qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/both-ways")};
+        if (with_body) {
+            request.body() = "request-body";
+        }
+        request.trailers().set_header("x-request-sum", "r1");
+        ASSERT_TRUE(pair.client.submit_request(0, request)) << "body " << with_body;
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "body " << with_body;
+        auto const &got = pair.server_owner.requests.front();
+        EXPECT_EQ(got.body().template as<std::string>(), with_body ? "request-body" : "");
+        EXPECT_EQ(got.trailers().header_count(), 1u);
+        EXPECT_EQ(got.trailers().header("x-request-sum"), "r1");
+        EXPECT_EQ(got.header("trailer"), "x-request-sum") << "the announcement is a header field";
+        EXPECT_EQ(got.header("x-request-sum"), "r1");
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        if (with_body) {
+            response.body() = "response-body";
+        }
+        response.trailers().set_header("grpc-status", "0");
+        ASSERT_TRUE(pair.server.submit_response(0, response)) << "body " << with_body;
+        pair.settle();
+        ASSERT_EQ(pair.client_owner.responses.size(), 1u) << "body " << with_body;
+        auto const &received = pair.client_owner.responses.front();
+        EXPECT_EQ(received.body().template as<std::string>(), with_body ? "response-body" : "");
+        EXPECT_EQ(received.trailers().header_count(), 1u);
+        EXPECT_EQ(received.trailers().header("grpc-status"), "0");
+        EXPECT_FALSE(pair.client_owner.close.has_value());
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+}
+
+/**
+ * @test A response that announces a trailer field it does not set ends after its body
+ * @brief The `trailer` header is a hint: HTTP/1.1 and HTTP/2 end such a message with an empty trailer
+ *        section. HTTP/3 refused it -- submit_response returned false after the headers and body
+ *        were already queued (Huly QB-1073).
+ */
+TEST(Http3ConnectionDirect, AnAnnouncedButUnsetTrailerFieldEndsTheResponseAfterItsBody) {
+    Pair              pair;
+    qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/announced")};
+    ASSERT_TRUE(pair.client.submit_request(0, request));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = "body";
+    response.set_header("trailer", "x-checksum"); // announced, never set
+    ASSERT_TRUE(pair.server.submit_response(0, response));
+    pair.settle();
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u);
+    EXPECT_EQ(pair.client_owner.responses.front().body().template as<std::string>(), "body");
+    EXPECT_FALSE(pair.client_owner.responses.front().has_header("x-checksum"));
+}
+
+/**
+ * @test A trailer section follows an empty body
+ * @brief Without a data reader nghttp3 ends the stream on the HEADERS, and the trailer submission that
+ *        follows fails: an empty-bodied response with trailers was refused, after its headers were
+ *        queued (Huly QB-1073). The reader is given whenever trailers follow.
+ */
+TEST(Http3ConnectionDirect, ATrailerSectionFollowsAnEmptyBody) {
+    Pair              pair;
+    qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/empty")};
+    ASSERT_TRUE(pair.client.submit_request(0, request));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("trailer", "x-checksum");
+    response.set_header("x-checksum", "abc");
+    ASSERT_TRUE(pair.server.submit_response(0, response));
+    pair.settle();
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u);
+    EXPECT_TRUE(pair.client_owner.responses.front().body().empty());
+    EXPECT_EQ(pair.client_owner.responses.front().header("x-checksum"), "abc");
+}
+
+/**
+ * @test A forbidden field of trailers() refuses the submission before anything is queued
+ * @brief The trailer section is built and checked before the headers are submitted: a field it must
+ *        not carry (the shared list) refuses the message, and the stream stays unused (Huly QB-1073).
+ */
+TEST(Http3ConnectionDirect, AForbiddenTrailerFieldRefusesTheSubmissionBeforeAnythingIsQueued) {
+    Pair              pair;
+    qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/forbidden")};
+    request.body() = "abc";
+    request.trailers().set_header("content-length", "3");
+    EXPECT_FALSE(pair.client.submit_request(0, request));
+    pair.settle();
+    EXPECT_TRUE(pair.server_owner.requests.empty());
+
+    // The stream was left unused: the same stream id still takes a request.
+    qb::http::Request next{qb::http::method::GET, qb::io::uri("https://example.test/next")};
+    ASSERT_TRUE(pair.client.submit_request(0, next));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().uri().path(), "/next");
 }
 
 // =============================================================================
@@ -524,12 +639,12 @@ TEST(Http3ConnectionDirect, SubmitResponseRejectsForbiddenHeader) {
 }
 
 /**
- * @test submit_response rejects a declared trailer with no valid trailer block
- * @brief A response that announces `trailer` but whose announced field resolves to nothing valid
- *        (here a forbidden `content-length` trailer name) makes make_trailers return nullopt while a
- *        trailer header is present, so submit_response returns false.
+ * @test An announced field a trailer section must not carry stays in the header section
+ * @brief A response that announces `trailer: content-length` sends its `content-length` in its header
+ *        section, as HTTP/1.1 and HTTP/2 do: one rule for the three protocols (Huly QB-1073). HTTP/3
+ *        refused it -- submit_response returned false, after the headers were queued.
  */
-TEST(Http3ConnectionDirect, SubmitResponseRejectsAnnouncedButInvalidTrailer) {
+TEST(Http3ConnectionDirect, AnAnnouncedForbiddenTrailerFieldStaysInTheHeaderSection) {
     Pair pair;
 
     qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/x")};
@@ -539,9 +654,14 @@ TEST(Http3ConnectionDirect, SubmitResponseRejectsAnnouncedButInvalidTrailer) {
     qb::http::Response response;
     response.status() = qb::http::status::OK;
     response.set_header("trailer", "content-length"); // content-length is a forbidden trailer name
-    response.set_header("content-length", "0");
+    response.set_header("content-length", "3");
+    response.body() = "abc";
 
-    EXPECT_FALSE(pair.server.submit_response(0, response));
+    ASSERT_TRUE(pair.server.submit_response(0, response));
+    pair.settle();
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u);
+    EXPECT_EQ(pair.client_owner.responses.front().header("content-length"), "3");
+    EXPECT_EQ(pair.client_owner.responses.front().body().template as<std::string>(), "abc");
 }
 
 // =============================================================================
@@ -716,6 +836,26 @@ TEST(Http3ConnectionDirect, ATrailerFieldInsideTheTrailerSectionRefusesTheStream
     pair.server.read_stream(0, h3_data_frame("abc"), false);
     pair.server.read_stream(0, h3_headers_frame(0, {{"trailer", "x-t"}}), true);
     expect_server_refused_stream_and_serves_next(pair, states);
+}
+
+/**
+ * @test A routing or request-modifier field in the trailer section refuses the stream only
+ * @brief `host`, `te` and proxy authentication are in the one trailer list HTTP/1.1, HTTP/2 and HTTP/3
+ *        share (qb::http::detail::is_forbidden_trailer_field); HTTP/3 accepted `host` and `te` there,
+ *        and merged them into the request (Huly QB-1073). The stream is reset, the connection kept.
+ */
+TEST(Http3ConnectionDirect, ARoutingFieldInsideTheTrailerSectionRefusesTheStreamNotTheConnection) {
+    for (const char *name : {"host", "te", "proxy-authorization"}) {
+        SCOPED_TRACE(name);
+        Pair       pair;
+        const auto states     = pair.server.stream_state_count();
+        auto       fields     = request_fields();
+        fields.front().second = "POST";
+        pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+        pair.server.read_stream(0, h3_data_frame("abc"), false);
+        pair.server.read_stream(0, h3_headers_frame(0, {{name, "trailers"}}), true);
+        expect_server_refused_stream_and_serves_next(pair, states);
+    }
 }
 
 /**
@@ -916,7 +1056,9 @@ TEST(Http3ConnectionDirect, IPv6AuthorityKeepsItsBracketsEndToEnd) {
     };
     for (auto const &[target, host, port, received] : std::vector<case_t>{
              {"https://[::1]:8443/v6?q=1", "::1", "8443", "https://[::1]:8443/v6?q=1"},
-             {"https://[2001:db8::7]/v6", "2001:db8::7", "443", "https://[2001:db8::7]:443/v6"}
+             // The scheme's default port is not sent (qb::http::origin::authority, Huly QB-1064): the
+             // server's URI fills it in again, its source text names none.
+             {"https://[2001:db8::7]/v6", "2001:db8::7", "443", "https://[2001:db8::7]/v6"}
          }) {
         qb::http::Request request{qb::http::method::GET, qb::io::uri(target)};
         ASSERT_EQ(request.uri().host(), host) << "the client side parses the literal without its brackets";

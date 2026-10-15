@@ -163,8 +163,9 @@ struct Http2ClientFakeIO {
     h2::ErrorCode last_stream_error   = h2::ErrorCode::NO_ERROR;
     h2::ErrorCode last_goaway_error   = h2::ErrorCode::NO_ERROR;
 
-    std::optional<int>         last_status;
-    std::optional<std::string> last_body;
+    std::optional<int>                last_status;
+    std::optional<std::string>        last_body;
+    std::optional<qb::http::Response> last_response; ///< The whole last response, for field assertions.
 
     uint32_t last_promised_stream_id   = 0;
     uint32_t last_associated_stream_id = 0;
@@ -188,8 +189,9 @@ struct Http2ClientFakeIO {
     void
     capture(qb::http::Response &&response) {
         ++response_count;
-        last_status = response.status().code();
-        last_body   = response.body().template as<std::string>();
+        last_status   = response.status().code();
+        last_body     = response.body().template as<std::string>();
+        last_response = std::move(response);
     }
 
     void

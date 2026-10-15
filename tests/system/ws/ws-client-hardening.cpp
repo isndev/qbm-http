@@ -619,9 +619,13 @@ TEST(WebSocketClientHardening, RequestHookDisconnectStopsUpgradeSend) {
         s.closed   = &closed;
     });
     int                                                     errors = 0;
+    std::string                                             host;
     {
         qb::http::ws::client client;
-        client.on_sending_http_request([&](auto &) { client.disconnect(); });
+        client.on_sending_http_request([&](auto &event) {
+            host = event.request.header("host");
+            client.disconnect();
+        });
         client.on_error([&](auto &) { ++errors; });
         client.connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
         ASSERT_TRUE(pump_until([&] { return errors == 1; }));
@@ -629,6 +633,9 @@ TEST(WebSocketClientHardening, RequestHookDisconnectStopsUpgradeSend) {
     }
     ASSERT_TRUE(pump_until([&] { return closed.load(std::memory_order_acquire) == 1; }));
     EXPECT_EQ(requests.load(), 0);
+    // The handshake's Host is the authority every protocol writes (qb::http::origin::authority, Huly
+    // QB-1064): the non-default port kept.
+    EXPECT_EQ(host, "localhost:" + std::to_string(bound_port(server)));
 }
 
 TEST(WebSocketClientHardening, RequestHookMayDestroyClient) {

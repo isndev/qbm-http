@@ -28,6 +28,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -162,6 +163,45 @@ first_frame_at_or_after(const qb::allocator::pipe<char> &output, FrameType type,
     }
     const auto fh = peek_frame_header(output, off);
     return EmittedFrame{fh.get_type(), fh.flags, fh.get_stream_id(), fh.get_payload_length(), off + qb::protocol::http2::FRAME_HEADER_SIZE};
+}
+
+// One emitted header block: the flags of its HEADERS frame and its decoded fields.
+struct EmittedHeaderBlock {
+    uint8_t                                       flags = 0;
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+
+    [[nodiscard]] std::size_t
+    count(std::string_view name) const {
+        return static_cast<std::size_t>(std::count_if(fields.begin(), fields.end(), [&](const auto &f) { return f.name == name; }));
+    }
+    [[nodiscard]] std::string
+    value(std::string_view name) const {
+        for (const auto &f : fields) {
+            if (f.name == name) {
+                return f.value;
+            }
+        }
+        return {};
+    }
+};
+
+// The HEADERS blocks emitted on a stream, in order, decoded with one decoder (they share the
+// server's HPACK state). CONTINUATION frames are not expected here: every block fits one frame.
+[[nodiscard]] std::vector<EmittedHeaderBlock>
+emitted_header_blocks(const qb::allocator::pipe<char> &output, uint32_t stream_id) {
+    qb::protocol::hpack::Decoder    decoder;
+    std::vector<EmittedHeaderBlock> blocks;
+    for (const auto &f : parse_emitted_frames(output)) {
+        if (f.stream_id != stream_id || f.type != FrameType::HEADERS) {
+            continue;
+        }
+        EmittedHeaderBlock block;
+        block.flags     = f.flags;
+        bool incomplete = false;
+        EXPECT_TRUE(decoder.decode(emitted_payload(output, f), block.fields, incomplete));
+        blocks.push_back(std::move(block));
+    }
+    return blocks;
 }
 
 } // namespace
@@ -1491,6 +1531,110 @@ TEST(HTTP2ServerProtocol, ResponseWithTrailersSendsHeadersDataThenTrailers) {
     ASSERT_EQ(blocks[1].size(), 1u) << "the trailer block carries the announced field";
     EXPECT_EQ(blocks[1][0].name, "x-checksum");
     EXPECT_EQ(blocks[1][0].value, "abc123");
+}
+
+// A response with an empty body still sends its trailer section: HEADERS, then the trailer HEADERS
+// ending the stream (RFC 9113 §8.1 lets the DATA frames be none). The leading HEADERS ended the
+// stream instead, and the announced field -- taken out of them for the trailer block -- was sent
+// nowhere (Huly QB-1073).
+TEST(HTTP2ServerProtocol, ResponseWithAnEmptyBodyStillSendsItsTrailerSection) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/empty-trailers");
+    ASSERT_EQ(io.request_count, 1);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Trailer", "X-Checksum");
+    response.set_header("x-checksum", "abc123");
+    ASSERT_TRUE(protocol.send_response(1, response));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count, 0);
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 0u);
+
+    const auto blocks = emitted_header_blocks(io.output, 1);
+    ASSERT_EQ(blocks.size(), 2u) << "the leading HEADERS, then the trailer section";
+    EXPECT_FALSE(blocks[0].flags & qb::protocol::http2::FLAG_END_STREAM) << "the trailer section ends the stream, not the leading HEADERS";
+    EXPECT_EQ(blocks[0].count("x-checksum"), 0u);
+    EXPECT_TRUE(blocks[1].flags & qb::protocol::http2::FLAG_END_STREAM);
+    EXPECT_EQ(blocks[1].value("x-checksum"), "abc123");
+}
+
+// A response's trailers() leave in its trailer section, after the body, announced by a `trailer`
+// field the leading HEADERS gain when the response announces nothing itself (RFC 9110 §6.6.2); one
+// that announces keeps its own announcement. The fields its `trailer` header announces travel with
+// them (Huly QB-1073).
+TEST(HTTP2ServerProtocol, ResponseTrailersContainerLeavesAfterTheBody) {
+    {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        open_get_stream_end_stream(protocol, io, 1, "/trailers-container");
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body()   = "payload";
+        response.trailers().set_header("grpc-status", "0");
+        response.trailers().set_header("grpc-message", "ok");
+        ASSERT_TRUE(protocol.send_response(1, response));
+        EXPECT_EQ(io.stream_error_count, 0);
+        EXPECT_EQ(data_payload_bytes(io.output, 1), "payload");
+        EXPECT_FALSE(data_end_stream_seen(io.output, 1)) << "the trailer section ends the stream";
+
+        const auto blocks = emitted_header_blocks(io.output, 1);
+        ASSERT_EQ(blocks.size(), 2u);
+        EXPECT_EQ(blocks[0].count("grpc-status"), 0u) << "a trailer field is not a header field";
+        const auto announced = blocks[0].value("trailer");
+        EXPECT_NE(announced.find("grpc-status"), std::string::npos) << announced;
+        EXPECT_NE(announced.find("grpc-message"), std::string::npos) << announced;
+        EXPECT_TRUE(blocks[1].flags & qb::protocol::http2::FLAG_END_STREAM);
+        EXPECT_EQ(blocks[1].fields.size(), 2u);
+        EXPECT_EQ(blocks[1].value("grpc-status"), "0");
+        EXPECT_EQ(blocks[1].value("grpc-message"), "ok");
+    }
+    {
+        // Its own announcement, an announced header field and trailers(): one trailer section.
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        open_get_stream_end_stream(protocol, io, 1, "/both");
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body()   = "payload";
+        response.set_header("Trailer", "X-Checksum, X-Extra");
+        response.set_header("x-checksum", "abc123");
+        response.trailers().set_header("x-extra", "e");
+        ASSERT_TRUE(protocol.send_response(1, response));
+
+        const auto blocks = emitted_header_blocks(io.output, 1);
+        ASSERT_EQ(blocks.size(), 2u);
+        EXPECT_EQ(blocks[0].count("trailer"), 1u) << "no second announcement";
+        EXPECT_EQ(blocks[0].value("trailer"), "X-Checksum, X-Extra");
+        EXPECT_EQ(blocks[0].count("x-checksum"), 0u);
+        ASSERT_EQ(blocks[1].fields.size(), 2u);
+        EXPECT_EQ(blocks[1].fields[0].name, "x-checksum");
+        EXPECT_EQ(blocks[1].fields[1].name, "x-extra");
+    }
+}
+
+// A field of trailers() a trailer section must not carry refuses the response before anything is
+// sent: no HEADERS on the stream, a stream error (Huly QB-1073).
+TEST(HTTP2ServerProtocol, ResponseWithAForbiddenTrailerFieldIsRefusedBeforeAnythingIsSent) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/forbidden-trailer");
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = "payload";
+    response.trailers().set_header("content-length", "7");
+    EXPECT_FALSE(protocol.send_response(1, response));
+    EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "nothing of the response was sent";
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 0u);
+    EXPECT_EQ(io.stream_error_count, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2984,7 +3128,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (server.h:1165-1170).
+// with INTERNAL_ERROR (server.h:1172-1177).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3012,7 +3156,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (server.h:1147-1152).
+// (server.h:1154-1159).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3032,7 +3176,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (server.h:1127-1130).
+// (server.h:1128-1131).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3052,7 +3196,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (server.h:1121-1126).
+// A non-numeric content-length response header is rejected (server.h:1122-1127).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3075,7 +3219,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:919-924).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:920-925).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3094,7 +3238,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (server.h:926-944).
+// on(WindowUpdateFrame) for stream 0 (server.h:927-945).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3287,7 +3431,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an idle (never-opened, lower-numbered) stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (server.h:276-279).
+// STREAM_CLOSED) on the connection-receive-window path (server.h:277-280).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -3310,7 +3454,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (server.h:272-274).
+// (server.h:273-275).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3327,7 +3471,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; server.h:1047-1057 else arm).
+// (no stream context to store into; server.h:1048-1058 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -3346,7 +3490,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:955-967);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:956-968);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 

@@ -26,8 +26,10 @@
 
 #if defined(QBM_HTTP_HAS_HTTP3)
 
+#include <algorithm>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace h3detail = qb::protocol::http3::detail;
 
@@ -175,12 +177,19 @@ TEST(Http3ProtocolValidationTest, IsForbiddenH3HeaderMatchesConnectionFields) {
     EXPECT_FALSE(h3detail::is_forbidden_h3_header("content-type"));
 }
 
+// Empty, a pseudo-header, or a field of the one trailer list HTTP/1.1, HTTP/2 and HTTP/3 share
+// (qb::http::detail::is_forbidden_trailer_field): `host` and `te` included, which HTTP/3 accepted in
+// a trailer section while HTTP/1.1 and HTTP/2 refused them (Huly QB-1073).
 TEST(Http3ProtocolValidationTest, IsForbiddenH3TrailerRejectsControlAndPseudoFields) {
     EXPECT_TRUE(h3detail::is_forbidden_h3_trailer(""));        // empty
     EXPECT_TRUE(h3detail::is_forbidden_h3_trailer(":status")); // pseudo-header
-    EXPECT_TRUE(h3detail::is_forbidden_h3_trailer("content-length"));
-    EXPECT_TRUE(h3detail::is_forbidden_h3_trailer("trailer"));
+    for (const char *name :
+         {"content-length", "transfer-encoding", "trailer", "host", "connection", "keep-alive", "proxy-connection", "te", "upgrade",
+          "http2-settings", "proxy-authenticate", "proxy-authorization", "Host", "TE"}) {
+        EXPECT_TRUE(h3detail::is_forbidden_h3_trailer(name)) << name;
+    }
     EXPECT_FALSE(h3detail::is_forbidden_h3_trailer("x-trace"));
+    EXPECT_FALSE(h3detail::is_forbidden_h3_trailer("server-timing"));
 }
 
 // ---------------------------------------------------------------------------
@@ -192,47 +201,77 @@ TEST(Http3ProtocolValidationTest, RequestTargetBuildsOriginForm) {
     EXPECT_EQ(h3detail::request_target(qb::io::uri("https://h/a/b?x=1")), "/a/b?x=1");
 }
 
-TEST(Http3ProtocolValidationTest, AuthorityIncludesPortWhenPresent) {
-    // qb::io::uri populates the default scheme port (443 for https), so authority()
-    // appends ":443" even when the URI omits an explicit port.
-    EXPECT_EQ(h3detail::authority(qb::io::uri("https://h/")), "h:443");
-    EXPECT_EQ(h3detail::authority(qb::io::uri("https://h:8443/")), "h:8443");
+namespace {
+// The :authority a request's header block carries.
+std::string
+sent_authority(const char *uri, const char *host_header = nullptr) {
+    qb::http::Request req{qb::http::method::GET, qb::io::uri(uri)};
+    if (host_header) {
+        req.set_header("host", host_header); // a Host header does not repair :authority: it is folded away
+    }
+    const auto block = h3detail::make_request_headers(req);
+    EXPECT_TRUE(block.has_value()) << uri;
+    if (!block || block->storage.size() < 3u) {
+        return "<no block>";
+    }
+    EXPECT_EQ(block->storage[2].first, ":authority");
+    return block->storage[2].second;
+}
+} // namespace
+
+// :authority is the authority every protocol sends (qb::http::origin::authority, Huly QB-1064): the
+// port when it is not the scheme's default. qb::io::uri fills the default in (443 for https), and
+// HTTP/3 sent it -- "h:443" where HTTP/1.1 sent `Host: h`.
+TEST(Http3ProtocolValidationTest, AuthorityOmitsTheSchemesDefaultPort) {
+    EXPECT_EQ(sent_authority("https://h/"), "h");
+    EXPECT_EQ(sent_authority("https://h:443/"), "h");
+    EXPECT_EQ(sent_authority("https://h:8443/"), "h:8443");
 }
 
 // An IP-literal host is written between brackets, the port after them (RFC 3986 section 3.2.2), and
 // :authority carries exactly that (RFC 9114 section 4.3.1). qb::io::uri keeps the literal without its
-// brackets in host() -- what a socket wants -- so the builder must restore them (Huly QB-572).
+// brackets in host() -- what a socket wants -- so the builder must restore them (Huly QB-572); a zone
+// identifier stays local, never sent (RFC 9844 section 6, Huly QB-1064).
 TEST(Http3ProtocolValidationTest, AuthorityBracketsAnIPv6Literal) {
-    EXPECT_EQ(h3detail::authority(qb::io::uri("https://[::1]:8443/")), "[::1]:8443");
-    EXPECT_EQ(h3detail::authority(qb::io::uri("https://[::1]/")), "[::1]:443");
-    EXPECT_EQ(h3detail::authority(qb::io::uri("https://[2001:db8::7]:4433/p?q=1")), "[2001:db8::7]:4433");
-    EXPECT_EQ(h3detail::authority(qb::io::uri("https://127.0.0.1:8443/")), "127.0.0.1:8443");
-
-    qb::http::Request req{qb::http::method::GET, qb::io::uri("https://[::1]:8443/path")};
-    req.set_header("host", "[::1]:8443"); // a Host header does not repair :authority: it is folded away
-    const auto block = h3detail::make_request_headers(req);
-    ASSERT_TRUE(block.has_value());
-    ASSERT_GE(block->storage.size(), 3u);
-    EXPECT_EQ(block->storage[2].first, ":authority");
-    EXPECT_EQ(block->storage[2].second, "[::1]:8443");
+    EXPECT_EQ(sent_authority("https://[::1]:8443/"), "[::1]:8443");
+    EXPECT_EQ(sent_authority("https://[::1]/"), "[::1]");
+    EXPECT_EQ(sent_authority("https://[2001:db8::7]:4433/p?q=1"), "[2001:db8::7]:4433");
+    EXPECT_EQ(sent_authority("https://127.0.0.1:8443/"), "127.0.0.1:8443");
+    EXPECT_EQ(sent_authority("https://[fe80::1%25eth0]:8443/"), "[fe80::1]:8443");
+    EXPECT_EQ(sent_authority("https://[::1]:8443/path", "[::1]:8443"), "[::1]:8443");
 }
 
-TEST(Http3ProtocolValidationTest, AnnouncedTrailersParsesTrailerHeaderList) {
+// A message's trailer section, planned once (Huly QB-1073): none without a `trailer` header or
+// trailers(); else the announced fields that leave the header section -- lowercased, a forbidden one
+// left in it -- then trailers().
+TEST(Http3ProtocolValidationTest, PlanTrailersReadsTheAnnouncementAndTheContainer) {
     {
         qb::http::Request req{qb::io::uri("https://h/")};
-        req.set_header("trailer", "x-a, x-b");
-        auto trailers = h3detail::announced_trailers(req);
-        ASSERT_EQ(trailers.size(), 2u);
-        EXPECT_EQ(trailers[0], "x-a");
-        EXPECT_EQ(trailers[1], "x-b");
-        EXPECT_TRUE(h3detail::is_announced_trailer("X-A", trailers)); // case-insensitive
-        EXPECT_TRUE(h3detail::is_announced_trailer("x-b", trailers));
-        EXPECT_FALSE(h3detail::is_announced_trailer("x-c", trailers));
+        EXPECT_FALSE(h3detail::plan_trailers(req).has_value());
     }
     {
         qb::http::Request req{qb::io::uri("https://h/")};
-        auto              trailers = h3detail::announced_trailers(req);
-        EXPECT_TRUE(trailers.empty());
+        req.set_header("trailer", "X-A, x-b, content-length");
+        req.set_header("x-a", "1");
+        const auto plan = h3detail::plan_trailers(req);
+        ASSERT_TRUE(plan.has_value());
+        ASSERT_EQ(plan->moved.size(), 2u) << "a forbidden field stays in the header section";
+        EXPECT_EQ(plan->moved[0], "x-a");
+        EXPECT_EQ(plan->moved[1], "x-b");
+        ASSERT_EQ(plan->fields.size(), 1u) << "x-b is announced, not set";
+        EXPECT_EQ(plan->fields[0].first, "x-a");
+        EXPECT_TRUE(plan->announcement.empty()) << "the request announces itself";
+    }
+    {
+        qb::http::Request req{qb::io::uri("https://h/")};
+        req.trailers().set_header("Grpc-Status", "0");
+        const auto plan = h3detail::plan_trailers(req);
+        ASSERT_TRUE(plan.has_value());
+        EXPECT_TRUE(plan->moved.empty());
+        ASSERT_EQ(plan->fields.size(), 1u);
+        EXPECT_EQ(plan->fields[0].first, "grpc-status");
+        EXPECT_EQ(plan->announcement, "grpc-status");
+        EXPECT_TRUE(plan->forbidden.empty());
     }
 }
 
@@ -259,8 +298,8 @@ TEST(Http3ProtocolValidationTest, MakeRequestHeadersOrdersPseudoHeadersAndDropsH
         (void) value;
         EXPECT_NE(name, "host");
     }
-    // :authority carries the default https port (443) populated by qb::io::uri.
-    EXPECT_EQ(block->storage[2].second, "example.test:443");
+    // :authority leaves the default https port out, as every protocol's authority does (Huly QB-1064).
+    EXPECT_EQ(block->storage[2].second, "example.test");
     EXPECT_EQ(block->storage[3].second, "/path?q=1");
 }
 
@@ -332,32 +371,55 @@ TEST(Http3ProtocolValidationTest, MakeResponseHeadersRejectsForbiddenHeader) {
     EXPECT_FALSE(h3detail::make_response_headers(res).has_value());
 }
 
-TEST(Http3ProtocolValidationTest, MakeTrailersHonorsAnnouncedTrailers) {
+// The trailer block and the header block split a message the way HTTP/1.1 and HTTP/2 do (Huly
+// QB-1073): an announced field leaves the header block for the trailer block, a forbidden one stays in
+// the header block -- the response was refused -- and a forbidden field of trailers() refuses it.
+TEST(Http3ProtocolValidationTest, MakeTrailerBlockHonorsTheTrailerSection) {
+    const auto count = [](const h3detail::header_block &block, std::string_view name) {
+        return std::count_if(block.storage.begin(), block.storage.end(), [&](const auto &f) { return f.first == name; });
+    };
     {
-        // No trailer header -> no trailer block.
-        qb::http::Response res;
-        res.status() = qb::http::status::OK;
-        EXPECT_FALSE(h3detail::make_trailers(res).has_value());
-    }
-    {
-        // Announced and present valid trailer -> non-empty block.
+        // Announced and present valid trailer -> in the trailer block, not in the header block.
         qb::http::Response res;
         res.status() = qb::http::status::OK;
         res.set_header("trailer", "x-checksum");
         res.set_header("x-checksum", "abc123");
-        auto block = h3detail::make_trailers(res);
+        const auto plan = h3detail::plan_trailers(res);
+        ASSERT_TRUE(plan.has_value());
+        auto block = h3detail::make_trailer_block(*plan);
         ASSERT_TRUE(block.has_value());
-        EXPECT_FALSE(block->nva.empty());
+        ASSERT_EQ(block->nva.size(), 1u);
         EXPECT_EQ(block->storage.front().first, "x-checksum");
         EXPECT_EQ(block->storage.front().second, "abc123");
+        const auto headers = h3detail::make_response_headers(res, plan);
+        ASSERT_TRUE(headers.has_value());
+        EXPECT_EQ(count(*headers, "x-checksum"), 0);
+        EXPECT_EQ(count(*headers, "trailer"), 1);
     }
     {
-        // Announcing a forbidden trailer name -> nullopt.
+        // Announcing a forbidden trailer name: the field stays in the header block, no trailer field.
         qb::http::Response res;
         res.status() = qb::http::status::OK;
         res.set_header("trailer", "content-length");
         res.set_header("content-length", "5");
-        EXPECT_FALSE(h3detail::make_trailers(res).has_value());
+        res.body()      = "hello";
+        const auto plan = h3detail::plan_trailers(res);
+        ASSERT_TRUE(plan.has_value());
+        EXPECT_TRUE(plan->fields.empty());
+        const auto headers = h3detail::make_response_headers(res, plan);
+        ASSERT_TRUE(headers.has_value());
+        EXPECT_EQ(count(*headers, "content-length"), 1);
+    }
+    {
+        // trailers() announced when the response announces nothing; a forbidden one refuses it.
+        qb::http::Response res;
+        res.status() = qb::http::status::OK;
+        res.trailers().set_header("grpc-status", "0");
+        const auto headers = h3detail::make_response_headers(res);
+        ASSERT_TRUE(headers.has_value());
+        ASSERT_EQ(count(*headers, "trailer"), 1);
+        res.trailers().set_header("te", "trailers");
+        EXPECT_FALSE(h3detail::make_response_headers(res).has_value());
     }
 }
 

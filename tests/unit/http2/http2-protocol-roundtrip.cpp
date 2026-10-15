@@ -433,8 +433,108 @@ TEST(HTTP2RoundTrip, ClientRequestTrailersReachServerAndFoldIntoRequest) {
     ASSERT_EQ(server_io.request_count, 1);
     ASSERT_TRUE(server_io.last_request.has_value());
     EXPECT_EQ(server_io.last_request->body().as<std::string>(), "payload-bytes");
-    // The trailer field is folded into the dispatched request's header set.
+    // The trailer field is the dispatched request's trailers() (Huly QB-1073) and, for 3.x, is
+    // folded into its header set too.
+    EXPECT_EQ(server_io.last_request->trailers().header("x-checksum"), "cafef00d");
+    EXPECT_EQ(server_io.last_request->trailers().header_count(), 1u);
     EXPECT_EQ(server_io.last_request->header("x-checksum"), "cafef00d");
+}
+
+// ===========================================================================
+// trailers() end to end, both directions (Huly QB-1073): what a request or a
+// response carries in its trailers() is what the peer finds in its own --
+// apart from the header section, which keeps it too for 3.x -- with a body or
+// without one; the announcement the sender adds is a header field.
+// ===========================================================================
+
+TEST(HTTP2RoundTrip, TrailersContainerCrossesBothDirections) {
+    for (const bool with_body : {true, false}) {
+        RichClientIO   client_io;
+        ClientProtocol client(client_io);
+        Http2FakeIO    server_io;
+        ServerProtocol server(server_io);
+        mutual_handshake(client, client_io, server, server_io);
+
+        qb::http::Request req;
+        req.method() = qb::http::method::POST;
+        req.uri()    = qb::io::uri("https://example.test/both-ways");
+        if (with_body) {
+            req.body() = "request-body";
+        }
+        req.trailers().set_header("x-request-sum", "r1");
+        ASSERT_TRUE(client.send_request(std::move(req), 77));
+        pump(server, server_io, client_io);
+        ASSERT_TRUE(server.ok());
+        ASSERT_EQ(server_io.request_count, 1) << "body " << with_body;
+        const auto &request = *server_io.last_request;
+        EXPECT_EQ(request.body().as<std::string>(), with_body ? "request-body" : "");
+        EXPECT_EQ(request.trailers().header_count(), 1u);
+        EXPECT_EQ(request.trailers().header("x-request-sum"), "r1");
+        EXPECT_FALSE(request.trailers().has_header("trailer")) << "the announcement is a header field";
+        EXPECT_EQ(request.header("trailer"), "x-request-sum");
+        EXPECT_EQ(request.header("x-request-sum"), "r1") << "3.x: the header fields keep the trailer field";
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        if (with_body) {
+            response.body() = "response-body";
+        }
+        response.trailers().set_header("grpc-status", "0");
+        ASSERT_TRUE(server.send_response(server_io.last_request_stream_id, response));
+        pump(client, client_io, server_io);
+        ASSERT_TRUE(client.ok());
+        const auto *received = client_io.find(77);
+        ASSERT_NE(received, nullptr) << "body " << with_body;
+        EXPECT_EQ(received->status().code(), 200);
+        EXPECT_EQ(received->body().as<std::string>(), with_body ? "response-body" : "");
+        EXPECT_EQ(received->trailers().header_count(), 1u);
+        EXPECT_EQ(received->trailers().header("grpc-status"), "0");
+        EXPECT_EQ(received->header("grpc-status"), "0");
+        EXPECT_EQ(client_io.stream_error_count, 0);
+        EXPECT_EQ(server_io.stream_error_count, 0);
+    }
+}
+
+// A response announcing a trailer field it never sets ends with an empty trailer section, which the
+// client takes as the end of the response: no trailer field, the announcement a header field, no
+// stream error -- with a body or without one (Huly QB-1073).
+TEST(HTTP2RoundTrip, AnAnnouncedButUnsetTrailerFieldEndsTheResponse) {
+    for (const bool with_body : {true, false}) {
+        RichClientIO   client_io;
+        ClientProtocol client(client_io);
+        Http2FakeIO    server_io;
+        ServerProtocol server(server_io);
+        mutual_handshake(client, client_io, server, server_io);
+
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/announced-unset");
+        ASSERT_TRUE(client.send_request(std::move(req), 78));
+        pump(server, server_io, client_io);
+        ASSERT_TRUE(server.ok());
+        ASSERT_EQ(server_io.request_count, 1) << "body " << with_body;
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        if (with_body) {
+            response.body() = "response-body";
+        }
+        response.set_header("Trailer", "X-Checksum"); // announced, never set
+        ASSERT_TRUE(server.send_response(server_io.last_request_stream_id, response));
+        pump(client, client_io, server_io);
+        ASSERT_TRUE(client.ok());
+        EXPECT_EQ(client_io.response_count, 1) << "body " << with_body;
+        const auto *received = client_io.find(78);
+        ASSERT_NE(received, nullptr) << "body " << with_body;
+        EXPECT_EQ(received->status().code(), 200);
+        EXPECT_EQ(received->body().as<std::string>(), with_body ? "response-body" : "");
+        EXPECT_FALSE(received->has_trailers()) << "body " << with_body;
+        EXPECT_EQ(received->trailers().header_count(), 0u);
+        EXPECT_EQ(received->header("trailer"), "X-Checksum");
+        EXPECT_FALSE(received->has_header("x-checksum"));
+        EXPECT_EQ(client_io.stream_error_count, 0);
+        EXPECT_EQ(server_io.stream_error_count, 0);
+    }
 }
 
 // ===========================================================================

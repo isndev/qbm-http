@@ -15,7 +15,10 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
+#include <utility>
 #include <qb/io/uri.h>
+#include <qb/utility/branch_hints.h> // QB_NOINLINE, QB_COLD (TrailerSection)
 #include "body.h"
 #include "headers.h"
 
@@ -24,6 +27,82 @@ namespace qb::http {
  * @brief Internal implementation details for the HTTP module.
  */
 namespace internal {
+/**
+ * @brief Owns a message's trailer section, allocated when it is first written to: a message
+ *        without one carries a null pointer and nothing else (Huly QB-1073).
+ *
+ * Copying deep-copies the section, so a copied message owns its own trailers, as it owns its own
+ * header fields; moving moves the pointer. Everything a section that exists needs -- allocation,
+ * copy, destruction -- is out of line and cold: a message without trailers pays one pointer test
+ * where it is copied, reset or destroyed, and nothing else (measured, Huly QB-1073).
+ */
+class TrailerSection {
+public:
+    TrailerSection() noexcept = default;
+
+    TrailerSection(const TrailerSection &other)
+        : _fields(other._fields ? clone(*other._fields) : nullptr) {}
+
+    TrailerSection(TrailerSection &&other) noexcept
+        : _fields(std::exchange(other._fields, nullptr)) {}
+
+    TrailerSection &
+    operator=(const TrailerSection &other) {
+        if ((_fields || other._fields) && this != &other) [[unlikely]] {
+            assign(other);
+        }
+        return *this;
+    }
+
+    TrailerSection &
+    operator=(TrailerSection &&other) noexcept {
+        if (this != &other) {
+            Headers *const previous = std::exchange(_fields, std::exchange(other._fields, nullptr));
+            if (previous) [[unlikely]] {
+                destroy(previous);
+            }
+        }
+        return *this;
+    }
+
+    ~TrailerSection() {
+        if (_fields) [[unlikely]] {
+            destroy(_fields);
+        }
+    }
+
+    /// The section, or nullptr while nothing was written to it.
+    [[nodiscard]] Headers *
+    get() const noexcept {
+        return _fields;
+    }
+
+    /// The section, created empty on the first call.
+    [[nodiscard]] Headers &
+    get_or_create() {
+        if (!_fields) [[unlikely]] {
+            _fields = create();
+        }
+        return *_fields;
+    }
+
+    /// Drops the section: the message carries no trailer field any more.
+    void
+    reset() noexcept {
+        if (_fields) [[unlikely]] {
+            destroy(std::exchange(_fields, nullptr));
+        }
+    }
+
+private:
+    [[nodiscard]] QB_NOINLINE QB_COLD static Headers *create();
+    [[nodiscard]] QB_NOINLINE QB_COLD static Headers *clone(const Headers &fields);
+    QB_NOINLINE QB_COLD static void                   destroy(Headers *fields) noexcept;
+    QB_NOINLINE QB_COLD void                          assign(const TrailerSection &other);
+
+    Headers *_fields = nullptr; ///< Owned; null while the message carries no trailer section.
+};
+
 /**
  * @brief Base class for HTTP messages (Requests and Responses).
  *
@@ -71,11 +150,16 @@ struct MessageBase
      */
     bool keep_alive{false};
 
+private:
+    /// The trailer section (trailers()): null for a message that carries none.
+    TrailerSection _trailers;
+
+public:
     /**
      * @brief Default constructor.
      *
-     * Initializes a message with HTTP version 1.1 (`major_version = 1`, `minor_version = 1`)
-     * and calls `reset()` to ensure a clean initial state for headers.
+     * Initializes a message with HTTP version 1.1 (`major_version = 1`, `minor_version = 1`), no
+     * header field, no trailer section, an empty body: the state `reset()` restores.
      * The `upgrade` flag is default-initialized to `false`.
      */
     MessageBase() noexcept
@@ -83,9 +167,7 @@ struct MessageBase
         , minor_version(1)
         , upgrade(false)
         , stream_id(0)
-        , keep_alive(false) {
-        this->Headers::_headers.clear();
-    }
+        , keep_alive(false) {}
 
     /**
      * @brief Copy constructor.
@@ -162,8 +244,63 @@ public:
     body() const noexcept {
         return static_cast<Body const &>(*this);
     }
+
+    /**
+     * @brief The message's trailer section: the fields that follow its content (RFC 9110 §6.5),
+     *        kept apart from its header section -- HTTP/1.1 (a chunked message), HTTP/2 and HTTP/3
+     *        alike (Huly QB-1073).
+     *
+     * **Received**: every field of the peer's trailer section, in arrival order. For 3.x source
+     * compatibility each one is ALSO added to the header fields (`headers()`, `header()`), after
+     * the header-section values of the same name, as before 3.3: code that reads a trailer through
+     * `headers()` keeps working. Read `trailers()` to tell a trailer field from a header field --
+     * RFC 9110 §6.5.1 forbids trusting a trailer field as a header one. A field a trailer section
+     * must not carry (framing, connection, routing, proxy authentication:
+     * `detail::is_forbidden_trailer_field`) refuses the message or its stream before it reaches
+     * here.
+     *
+     * **Sent**: the fields set here travel in the trailer section, after the body, announced by a
+     * `Trailer` header the protocol adds when the message carries none. HTTP/1.1 has a trailer
+     * section only in a chunked message (`Transfer-Encoding: chunked`): a message framed otherwise
+     * sends no trailers. A forbidden field set here refuses the message.
+     *
+     * The section is allocated by the first call of this non-const accessor: a message nobody
+     * gives trailers carries no allocation. To read without allocating, use the const accessor or
+     * has_trailers().
+     *
+     * @return The trailer section, created empty on the first call.
+     */
+    [[nodiscard]] Headers &
+    trailers() {
+        return _trailers.get_or_create();
+    }
+
+    /**
+     * @brief The message's trailer section, or an empty one (one process-wide object) when it
+     *        carries none. Allocates nothing.
+     */
+    [[nodiscard]] const Headers &trailers() const noexcept;
+
+    /// Whether the message carries at least one trailer field (trailers()). Allocates nothing.
+    [[nodiscard]] bool
+    has_trailers() const noexcept {
+        const Headers *const fields = _trailers.get();
+        return fields != nullptr && fields->header_count() != 0;
+    }
 };
 } // namespace internal
+
+namespace detail {
+/**
+ * @brief Stores a field of a received trailer section in @p message: in its `trailers()` and, for
+ *        3.x source compatibility, in its header fields after the header-section values (Huly
+ *        QB-1073). The one place the three protocols store a received trailer field.
+ * @param message The message being received.
+ * @param name The field name, in any case.
+ * @param value The field value.
+ */
+void store_received_trailer(internal::MessageBase &message, std::string_view name, std::string_view value);
+} // namespace detail
 
 /**
  * @brief A message serialized without its content: the start line and the header section only.

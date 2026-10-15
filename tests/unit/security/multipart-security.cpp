@@ -184,7 +184,7 @@ TEST_F(MultipartSecurityTest, ParseSideRejectsOversizedPartHeaderName) {
 
 TEST_F(MultipartSecurityTest, ParseSideRejectsOversizedPartHeaderValue) {
     // Per-part header value size is capped on the parse path at
-    // multipart_limits::MAX_HEADER_VALUE_LENGTH (body.cpp:235); a single part
+    // multipart_limits::MAX_HEADER_VALUE_LENGTH (body.cpp:287); a single part
     // whose header value exceeds it is rejected before accumulating unbounded.
     const std::string boundary = "bnd";
     const std::string huge_value(multipart_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V');

@@ -138,6 +138,17 @@ TEST(Http1Serialization, HostValueOmitsHttpsDefaultPortOnIpv6) {
     EXPECT_EQ(qb::http::host_header_value(u), "[2001:db8::1]");
 }
 
+// An IPv6 literal's zone identifier has local significance only and is never sent on the wire
+// (RFC 9844 §6, RFC 6874 §4 before it): the Host value leaves it out, as every protocol's authority
+// does (qb::http::origin::authority, Huly QB-1064). It was sent.
+TEST(Http1Serialization, HostValueLeavesAnIpv6ZoneOut) {
+    const qb::io::uri zoned{"http://[fe80::1%25eth0]:8080/p"};
+    ASSERT_TRUE(zoned.is_valid());
+    EXPECT_EQ(qb::http::host_header_value(zoned), "[fe80::1]:8080");
+    const qb::io::uri zoned_default{"https://[fe80::1%25eth0]:443/p"};
+    EXPECT_EQ(qb::http::host_header_value(zoned_default), "[fe80::1]");
+}
+
 TEST(Http1Serialization, HostValueRetainsNonDefaultPort) {
     const qb::io::uri u{"https://api.example.com:4443/secure"};
     EXPECT_EQ(qb::http::host_header_value(u), "api.example.com:4443");
@@ -154,18 +165,16 @@ TEST(Http1Serialization, HostValueDefaultPortsSchemeCaseInsensitive) {
 }
 
 // A URI whose scheme has no registered default port leaves uri.port() empty, so
-// host_header_value returns the bare host via the empty-port early return
-// (http.cpp:48-50). "http"/"https"/"ws" all inject a default port, so a custom
-// scheme is used to keep the port genuinely absent.
+// host_header_value (qb::http::origin::authority) returns the bare host. "http"/"https"/"ws"
+// all inject a default port, so a custom scheme is used to keep the port genuinely absent.
 TEST(Http1Serialization, HostValueWithoutPortReturnsBareHost) {
     const qb::io::uri u{"custom-scheme://api.example.com/path"};
     EXPECT_TRUE(u.port().empty());
     EXPECT_EQ(qb::http::host_header_value(u), "api.example.com");
 }
 
-// A scheme that has the SAME length as "http" but differs in a character makes
-// scheme_eq_ignore_case take the char-mismatch branch (http.cpp:30-33 return
-// false), so the non-default port is appended even though it is 80.
+// A scheme that has the SAME length as "http" but differs in a character is not
+// http: it has no default port, so the port is appended even though it is 80.
 TEST(Http1Serialization, HostValueAppendsPortWhenSchemeLengthMatchesButDiffers) {
     // "ftp" is length 3 (vs "http" length 4) — pick a 4-char non-http scheme so
     // the length guard passes and the per-char compare runs to a mismatch.
@@ -720,4 +729,114 @@ TEST(Http1Serialization, AnnouncedTrailerFieldsTravelAfterTheLastChunk) {
     qb::allocator::pipe<char> head_only;
     ASSERT_NO_THROW(head_only << qb::http::MessageHead{response});
     EXPECT_NE(std::string(head_only.begin(), head_only.size()).find("\r\nx-checksum: abc\r\n"), std::string::npos);
+}
+
+// A message's trailers() travel in its trailer section, after the last chunk of a chunked message,
+// after the fields its `Trailer` header announces; the head gains a `trailer` field naming them when
+// the message announces nothing itself (RFC 9110 §6.6.2). HTTP/1.1 has no trailer section in any
+// other framing: a message framed by Content-Length, or a MessageHead, writes no trailers() (Huly
+// QB-1073).
+TEST(Http1Serialization, TrailersContainerTravelsAfterTheLastChunkOfAChunkedMessage) {
+    const auto head_and_tail = [](const std::string &wire) {
+        const auto end = wire.find("\r\n\r\n");
+        return std::pair{wire.substr(0, end + 2), wire.substr(end + 4)};
+    };
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Transfer-Encoding", "chunked");
+    response.trailers().set_header("Server-Timing", "db;dur=53");
+    response.body() = "hello";
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << response);
+    {
+        const auto [head, tail] = head_and_tail(std::string(out.begin(), out.size()));
+        EXPECT_NE(head.find("\r\ntrailer: server-timing\r\n"), std::string::npos) << "the announcement the message did not write: " << head;
+        EXPECT_EQ(head.find("server-timing:"), std::string::npos) << head;
+        EXPECT_EQ(tail, "5\r\nhello\r\n0\r\nserver-timing: db;dur=53\r\n\r\n");
+    }
+
+    // Announced header fields first, then trailers(); the message's own announcement is kept as is.
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/up"}};
+    request.set_header("Transfer-Encoding", "chunked");
+    request.set_header("Trailer", "X-Checksum, X-Late");
+    request.set_header("X-Checksum", "abc");
+    request.trailers().set_header("X-Late", "z");
+    qb::allocator::pipe<char> req_out;
+    ASSERT_NO_THROW(req_out << request);
+    {
+        const auto [head, tail] = head_and_tail(std::string(req_out.begin(), req_out.size()));
+        EXPECT_NE(head.find("\r\ntrailer: X-Checksum, X-Late\r\n"), std::string::npos) << head;
+        EXPECT_EQ(head.find("\r\ntrailer:", head.find("\r\ntrailer:") + 1), std::string::npos) << "one announcement: " << head;
+        EXPECT_EQ(tail, "0\r\nx-checksum: abc\r\nx-late: z\r\n\r\n");
+    }
+
+    // Content-Length framing has no trailer section: trailers() is written nowhere.
+    qb::http::Response sized;
+    sized.status() = qb::http::status::OK;
+    sized.trailers().set_header("Server-Timing", "db;dur=53");
+    sized.body() = "hello";
+    qb::allocator::pipe<char> sized_out;
+    ASSERT_NO_THROW(sized_out << sized);
+    EXPECT_EQ(std::string(sized_out.begin(), sized_out.size()).find("server-timing"), std::string::npos);
+
+    // Nor does a MessageHead: the caller streaming the chunks writes the end.
+    qb::allocator::pipe<char> head_only;
+    ASSERT_NO_THROW(head_only << qb::http::MessageHead{response});
+    EXPECT_EQ(std::string(head_only.begin(), head_only.size()).find("server-timing"), std::string::npos);
+
+    // A message with a trailer section is written whole out of line, its start line included: the
+    // same start line as the inline serializer writes for the same message without one.
+    const auto first_line = [](const auto &message) {
+        qb::allocator::pipe<char> wire;
+        wire << message;
+        const std::string text(wire.begin(), wire.size());
+        return text.substr(0, text.find("\r\n"));
+    };
+    qb::http::Request queried{qb::http::method::PUT, {"http://example.test/a/b?x=1&y=two"}};
+    queried.major_version = 1;
+    queried.minor_version = 0;
+    queried.set_header("Transfer-Encoding", "chunked");
+    qb::http::Request queried_trailed = queried;
+    queried_trailed.trailers().set_header("X-Sum", "1");
+    EXPECT_EQ(first_line(queried_trailed), first_line(queried));
+    EXPECT_EQ(first_line(queried_trailed), "PUT /a/b?x=1&y=two HTTP/1.0");
+    qb::http::Response not_found;
+    not_found.status() = qb::http::status::NOT_FOUND;
+    not_found.set_header("Transfer-Encoding", "chunked");
+    qb::http::Response not_found_trailed = not_found;
+    not_found_trailed.trailers().set_header("X-Sum", "1");
+    EXPECT_EQ(first_line(not_found_trailed), first_line(not_found));
+    EXPECT_EQ(first_line(not_found_trailed), "HTTP/1.1 404 Not Found");
+}
+
+// A field of trailers() a trailer section must not carry, or one no header could carry, refuses
+// the message before anything is written: what the pipe held before is kept (Huly QB-1066, QB-1073).
+TEST(Http1Serialization, ATrailerFieldThatCannotTravelRefusesTheMessage) {
+    const auto refused = [](auto &&message) {
+        qb::allocator::pipe<char> out;
+        out << "queued";
+        try {
+            out << message;
+        } catch (const std::length_error &) {
+            return std::string(out.begin(), out.size()) == "queued";
+        }
+        return false;
+    };
+    for (const std::string name : {"Content-Length", "Transfer-Encoding", "Trailer", "Host", "TE", "Connection", "Proxy-Authorization"}) {
+        qb::http::Response response;
+        response.set_header("Transfer-Encoding", "chunked");
+        response.body() = "hello";
+        response.trailers().set_header(name, "5");
+        EXPECT_TRUE(refused(response)) << name;
+
+        qb::http::Request request{qb::http::method::POST, {"http://example.test/up"}};
+        request.set_header("Transfer-Encoding", "chunked");
+        request.trailers().set_header(name, "5");
+        EXPECT_TRUE(refused(request)) << name;
+    }
+    qb::http::Response invalid;
+    invalid.set_header("Transfer-Encoding", "chunked");
+    invalid.trailers().set_header("X-Bad", "a\r\nInjected: 1");
+    EXPECT_TRUE(refused(invalid)) << "a CR LF in a trailer value";
 }

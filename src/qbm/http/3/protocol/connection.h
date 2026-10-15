@@ -53,6 +53,7 @@
 #include "../../1.1/protocol/base.h"
 #include "../../headers.h"
 #include "../../logger.h"
+#include "../../origin.h" // origin::authority: the :authority every protocol writes (Huly QB-1064)
 #include "../../request.h"
 #include "../../response.h"
 #include "../../utility.h"
@@ -96,15 +97,15 @@ is_forbidden_h3_header(std::string_view name) {
 }
 
 /**
- * @brief Test whether a name is disallowed as an HTTP/3 trailer field.
+ * @brief Test whether a name is disallowed as an HTTP/3 trailer field: empty, a pseudo-header, or a
+ *        field of the one list HTTP/1.1, HTTP/2 and HTTP/3 share,
+ *        `qb::http::detail::is_forbidden_trailer_field` (Huly QB-1073) -- `host` and `te` were
+ *        missing here.
  * @param name Trailer field name (case-insensitive).
- * @return @c true if @p name is empty, a pseudo-header, @c content-length,
- *         @c trailer, or any field forbidden by ::is_forbidden_h3_header.
  */
 inline bool
-is_forbidden_h3_trailer(std::string_view name) {
-    const auto lower = lower_header_name(name);
-    return lower.empty() || lower.front() == ':' || lower == "content-length" || lower == "trailer" || is_forbidden_h3_header(lower);
+is_forbidden_h3_trailer(std::string_view name) noexcept {
+    return name.empty() || name.front() == ':' || qb::http::detail::is_forbidden_trailer_field(name);
 }
 
 /**
@@ -307,44 +308,6 @@ is_valid_incoming_header_field(std::string_view name, std::string_view value) no
 }
 
 /**
- * @brief Collect the lowercased field names announced in a @c trailer header.
- * @tparam Message Message type exposing @c has_header() and @c headers().
- * @param msg Message to inspect.
- * @return The set of trailer field names declared by the @c trailer header
- *         (empty when none is present).
- */
-template <typename Message>
-std::vector<std::string>
-announced_trailers(Message const &msg) {
-    std::vector<std::string> trailers;
-    if (!msg.has_header("trailer")) {
-        return trailers;
-    }
-    auto it = msg.headers().find("trailer");
-    if (it == msg.headers().end()) {
-        return trailers;
-    }
-    for (auto const &value : it->second) {
-        auto names = qb::http::utility::split_and_trim_header_list(value, ',');
-        for (auto &name : names) {
-            trailers.push_back(lower_header_name(name));
-        }
-    }
-    return trailers;
-}
-
-/**
- * @brief Test whether a field name appears in the announced trailer set.
- * @param name     Field name (case-insensitive).
- * @param trailers Lowercased trailer names from ::announced_trailers.
- * @return @c true if @p name was announced as a trailer.
- */
-inline bool
-is_announced_trailer(std::string_view name, std::vector<std::string> const &trailers) noexcept {
-    return std::find(trailers.begin(), trailers.end(), lower_header_name(name)) != trailers.end();
-}
-
-/**
  * @brief Copy an nghttp3 reference-counted buffer into a @c std::string.
  * @param buf nghttp3 buffer handle.
  * @return A copy of the buffer's bytes.
@@ -372,55 +335,22 @@ request_target(qb::io::uri const &uri) {
 }
 
 /**
- * @brief Build the @c :authority value (host plus optional ":port").
- *
- * An IP-literal host is written between brackets with the port after them (RFC 3986
- * section 3.2.2), and @c :authority carries the URI authority in that form (RFC 9114
- * section 4.3.1). @c qb::io::uri::host() returns the literal without its brackets -- the form a
- * socket wants -- so they are restored here; a reg-name or an IPv4 address never holds a ':'
- * (Huly QB-572).
- *
- * @param uri Request URI.
- * @return The host, bracketed when it is an IPv6 literal, with @c :port appended when the URI
- *         specifies one.
- */
-inline std::string
-authority(qb::io::uri const &uri) {
-    const std::string_view host       = uri.host();
-    const bool             bracketed  = host.size() >= 2 && host.front() == '[' && host.back() == ']';
-    const bool             ip_literal = !bracketed && host.find(':') != std::string_view::npos;
-    std::string            value;
-    value.reserve(host.size() + 3 + uri.port().size());
-    if (ip_literal) {
-        value.push_back('[');
-    }
-    value += host;
-    if (ip_literal) {
-        value.push_back(']');
-    }
-    if (!uri.port().empty()) {
-        value.push_back(':');
-        value += uri.port();
-    }
-    return value;
-}
-
-/**
  * @brief Append a message's regular (non-pseudo, non-trailer) headers to a block.
  * @tparam Message Message type exposing @c headers().
  * @param block  Destination field block.
  * @param msg    Source message.
  * @param fields Running field count, enforced against
  *               @c protocol_limits::MAX_HEADERS_COUNT and updated in place.
+ * @param trailers The message's trailer section (qb::http::detail::plan_outgoing_trailers), or
+ *               nullptr when it has none: the fields it takes are skipped, and its announcement is
+ *               added (Huly QB-1073).
  * @return @c false (leaving @p block partially populated) if a forbidden field,
  *         an invalid field, or the field-count limit is encountered; @c true on
- *         success. @c host is dropped (folded into @c :authority) and announced
- *         trailers are skipped.
+ *         success. @c host is dropped (folded into @c :authority).
  */
 template <typename Message>
 bool
-add_regular_headers(header_block &block, Message const &msg, std::size_t &fields) {
-    const auto trailers = announced_trailers(msg);
+add_regular_headers(header_block &block, Message const &msg, std::size_t &fields, qb::http::detail::outgoing_trailers const *trailers) {
     for (auto const &[name, values] : msg.headers()) {
         const auto lower = lower_header_name(name);
         if (lower.empty() || lower.front() == ':' || is_forbidden_h3_header(lower)) {
@@ -429,8 +359,8 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
         if (lower == "host") {
             continue;
         }
-        if (lower != "trailer" && is_announced_trailer(lower, trailers)) {
-            continue;
+        if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), lower) != trailers->moved.end()) {
+            continue; // in the trailer section
         }
         for (auto const &value : values) {
             if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)) {
@@ -439,54 +369,67 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
             block.add(lower, value);
         }
     }
+    if (trailers && !trailers->announcement.empty()) {
+        if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT) {
+            return false;
+        }
+        block.add("trailer", trailers->announcement);
+    }
     return true;
 }
 
 /**
- * @brief Build the trailer field block for a message, if any are announced.
- * @tparam Message Message type exposing @c headers().
- * @param msg Source message.
- * @return The trailer field block, or @c std::nullopt when no trailers are
- *         announced or none resolve to non-empty fields. Returns @c std::nullopt
- *         on the first forbidden trailer, invalid field, or count-limit breach.
+ * @brief Build the trailer field block of a message's trailer section
+ *        (qb::http::detail::plan_outgoing_trailers): the fields its @c trailer header announces that
+ *        a trailer section may carry, then its @c trailers() -- the section HTTP/1.1 and HTTP/2
+ *        send (Huly QB-1073).
+ * @param trailers The message's trailer section.
+ * @return The trailer field block -- empty when the section has no field (announced, not set) --
+ *         or @c std::nullopt on an invalid field or a count-limit breach.
  */
-template <typename Message>
-std::optional<header_block>
-make_trailers(Message const &msg) {
-    const auto trailers = announced_trailers(msg);
-    if (trailers.empty()) {
-        return std::nullopt;
-    }
+inline std::optional<header_block>
+make_trailer_block(qb::http::detail::outgoing_trailers const &trailers) {
     header_block block;
     std::size_t  fields = 0;
-    for (auto const &[name, values] : msg.headers()) {
-        const auto lower = lower_header_name(name);
-        if (!is_announced_trailer(lower, trailers)) {
-            continue;
-        }
-        if (is_forbidden_h3_trailer(lower)) {
+    for (auto const &[name, value] : trailers.fields) {
+        if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(name, value)) {
             return std::nullopt;
         }
-        for (auto const &value : values) {
-            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)) {
-                return std::nullopt;
-            }
-            block.add(lower, value);
-        }
+        block.add(std::string(name), std::string(value));
     }
-    return block.nva.empty() ? std::nullopt : std::optional<header_block>{std::move(block)};
+    return block;
+}
+
+/**
+ * @brief The trailer section a message sends, or @c std::nullopt when it has none (no @c trailer
+ *        header, no @c trailers()): a message without trailers pays one lookup.
+ */
+template <typename Message>
+std::optional<qb::http::detail::outgoing_trailers>
+plan_trailers(Message const &msg) {
+    if (!msg.has_trailers() && !msg.has_header("trailer")) {
+        return std::nullopt;
+    }
+    return qb::http::detail::plan_outgoing_trailers(msg, msg.has_trailers() ? &msg.trailers() : nullptr);
 }
 
 /**
  * @brief Build the request header field block (pseudo-headers + regular headers).
  * @param request Request to serialize.
+ * @param trailers Its trailer section (plan_trailers): the fields it takes are left out, its
+ *        announcement added.
  * @return The field block, or @c std::nullopt if the target exceeds
  *         @c MAX_URL_LENGTH, the declared @c content-length disagrees with the
- *         body size, or regular-header assembly fails. A @c content-length is
- *         synthesized when the body is non-empty and none was supplied.
+ *         body size, regular-header assembly fails, or @c trailers() carries a field
+ *         a trailer section must not. A @c content-length is synthesized when the
+ *         body is non-empty and none was supplied. @c :authority is
+ *         qb::http::origin::authority, the authority every protocol writes (Huly QB-1064).
  */
 inline std::optional<header_block>
-make_request_headers(qb::http::Request const &request) {
+make_request_headers(qb::http::Request const &request, std::optional<qb::http::detail::outgoing_trailers> const &trailers) {
+    if (trailers && !trailers->forbidden.empty()) {
+        return std::nullopt;
+    }
     header_block block;
     std::size_t  fields = 4;
     auto         target = request_target(request.uri());
@@ -499,9 +442,9 @@ make_request_headers(qb::http::Request const &request) {
     }
     block.add(":method", std::string(request.method()));
     block.add(":scheme", request.uri().scheme().empty() ? "https" : std::string(request.uri().scheme()));
-    block.add(":authority", authority(request.uri()));
+    block.add(":authority", qb::http::origin::authority(request.uri()));
     block.add(":path", std::move(target));
-    if (!add_regular_headers(block, request, fields)) {
+    if (!add_regular_headers(block, request, fields, trailers ? &*trailers : nullptr)) {
         return std::nullopt;
     }
     if (!request.body().empty() && !request.has_header("content-length")) {
@@ -511,6 +454,12 @@ make_request_headers(qb::http::Request const &request) {
         block.add("content-length", std::to_string(request.body().size()));
     }
     return block;
+}
+
+/// make_request_headers with the request's own trailer section (plan_trailers).
+inline std::optional<header_block>
+make_request_headers(qb::http::Request const &request) {
+    return make_request_headers(request, plan_trailers(request));
 }
 
 /**
@@ -533,16 +482,22 @@ response_body_length_must_match(qb::http::Response const &response, qb::http::Me
 /**
  * @brief Build the response header field block (@c :status + regular headers).
  * @param response Response to serialize.
- * @return The field block, or @c std::nullopt if regular-header assembly fails
- *         or the field-count limit is hit. A @c content-length is synthesized
- *         when the body is non-empty and none was supplied.
+ * @param trailers Its trailer section (plan_trailers): the fields it takes are left out, its
+ *        announcement added.
+ * @return The field block, or @c std::nullopt if regular-header assembly fails,
+ *         the field-count limit is hit, or @c trailers() carries a field a trailer
+ *         section must not. A @c content-length is synthesized when the body is
+ *         non-empty and none was supplied.
  */
 inline std::optional<header_block>
-make_response_headers(qb::http::Response const &response) {
+make_response_headers(qb::http::Response const &response, std::optional<qb::http::detail::outgoing_trailers> const &trailers) {
+    if (trailers && !trailers->forbidden.empty()) {
+        return std::nullopt;
+    }
     header_block block;
     std::size_t  fields = 1;
     block.add(":status", std::to_string(response.status().code()));
-    if (!add_regular_headers(block, response, fields)) {
+    if (!add_regular_headers(block, response, fields, trailers ? &*trailers : nullptr)) {
         return std::nullopt;
     }
     if (!response.body().empty() && !response.has_header("content-length")) {
@@ -552,6 +507,12 @@ make_response_headers(qb::http::Response const &response) {
         block.add("content-length", std::to_string(response.body().size()));
     }
     return block;
+}
+
+/// make_response_headers with the response's own trailer section (plan_trailers).
+inline std::optional<header_block>
+make_response_headers(qb::http::Response const &response) {
+    return make_response_headers(response, plan_trailers(response));
 }
 
 } // namespace detail
@@ -1104,10 +1065,13 @@ private:
             if (detail::is_forbidden_h3_trailer(name)) {
                 return false;
             }
+        }
+        // To the message's trailers(), and its header fields for 3.x (Huly QB-1073).
+        for (auto const &[name, value] : st.incoming_headers.storage) {
             if (_role == role::server) {
-                st.request.add_header(name, value);
+                qb::http::detail::store_received_trailer(st.request, name, value);
             } else {
-                st.response.add_header(name, value);
+                qb::http::detail::store_received_trailer(st.response, name, value);
             }
         }
         return true;
@@ -1414,23 +1378,32 @@ public:
                 && *declared_length.value != response.body().size())) {
             return false;
         }
-        st.tx_body   = response.body().template as<std::string>();
-        st.tx_offset = 0;
-        auto headers = detail::make_response_headers(response);
+        // The trailer section, built and validated before anything is submitted: a refusal used
+        // to come after the headers and body were queued, and an announced field left unset, or an
+        // empty body, refused a response HTTP/1.1 and HTTP/2 send (Huly QB-1073).
+        const auto plan    = detail::plan_trailers(response);
+        auto       headers = detail::make_response_headers(response, plan);
         if (!headers) {
             return false;
         }
+        std::optional<detail::header_block> trailers;
+        if (plan && !plan->fields.empty()) {
+            trailers = detail::make_trailer_block(*plan);
+            if (!trailers) {
+                return false;
+            }
+        }
+        st.tx_body   = response.body().template as<std::string>();
+        st.tx_offset = 0;
+        // The trailers follow the body, an empty one included: without a reader nghttp3 ends the
+        // stream on the HEADERS, and the trailer submission then fails.
         const auto rv = nghttp3_conn_submit_response(_conn, static_cast<int64_t>(stream_id), headers->nva.data(), headers->nva.size(),
-                                                     st.tx_body.empty() ? nullptr : &st.reader);
+                                                     st.tx_body.empty() && !trailers ? nullptr : &st.reader);
         if (rv != 0) {
             return false;
         }
         st.body_submitted = true;
-        if (auto trailers = detail::make_trailers(response)) {
-            if (nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
-                return false;
-            }
-        } else if (response.has_header("trailer")) {
+        if (trailers && nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
             return false;
         }
         (void) nghttp3_conn_set_stream_user_data(_conn, static_cast<int64_t>(stream_id), &st);
@@ -1456,24 +1429,30 @@ public:
         if (st.body_submitted) {
             return false;
         }
-        st.request   = request;
-        st.tx_body   = request.body().template as<std::string>();
-        st.tx_offset = 0;
-        auto headers = detail::make_request_headers(request);
+        // The trailer section, built and validated before anything is submitted (Huly QB-1073):
+        // see submit_response.
+        const auto plan    = detail::plan_trailers(request);
+        auto       headers = detail::make_request_headers(request, plan);
         if (!headers) {
             return false;
         }
+        std::optional<detail::header_block> trailers;
+        if (plan && !plan->fields.empty()) {
+            trailers = detail::make_trailer_block(*plan);
+            if (!trailers) {
+                return false;
+            }
+        }
+        st.request    = request;
+        st.tx_body    = request.body().template as<std::string>();
+        st.tx_offset  = 0;
         const auto rv = nghttp3_conn_submit_request(_conn, static_cast<int64_t>(stream_id), headers->nva.data(), headers->nva.size(),
-                                                    st.tx_body.empty() ? nullptr : &st.reader, &st);
+                                                    st.tx_body.empty() && !trailers ? nullptr : &st.reader, &st);
         if (rv != 0) {
             return false;
         }
         st.body_submitted = true;
-        if (auto trailers = detail::make_trailers(request)) {
-            if (nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
-                return false;
-            }
-        } else if (request.has_header("trailer")) {
+        if (trailers && nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
             return false;
         }
         drain();

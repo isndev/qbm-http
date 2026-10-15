@@ -1256,32 +1256,6 @@ private:
         return sv.substr(first, last - first + 1);
     }
 
-    /// Build a RFC-compatible Host header value from a URI.
-    /// - Keep default ports implicit (80 for ws/http, 443 for wss/https).
-    /// - Bracket IPv6 literals when needed.
-    [[nodiscard]] static std::string
-    make_host_header_value(::qb::io::uri const &uri) {
-        std::string host                   = std::string(uri.host());
-        const bool  already_bracketed_ipv6 = host.size() >= 2 && host.front() == '[' && host.back() == ']';
-        if (!already_bracketed_ipv6 && host.find(':') != std::string::npos) {
-            host = "[" + host + "]";
-        }
-
-        const std::string_view port = uri.port();
-        if (port.empty()) {
-            return host;
-        }
-
-        const std::string_view scheme              = uri.scheme();
-        const bool             is_default_ws_port  = ((scheme == "ws" || scheme == "http") && port == "80");
-        const bool             is_default_wss_port = ((scheme == "wss" || scheme == "https") && port == "443");
-        if (!is_default_ws_port && !is_default_wss_port) {
-            host += ":";
-            host += port;
-        }
-        return host;
-    }
-
 public:
     using http_protocol = http::protocol<WebSocket<T, Transport>>;
     using ws_protocol   = http::ws::protocol<WebSocket<T, Transport>>;
@@ -1507,7 +1481,8 @@ public:
                         this->start();
 
                         http::WebSocketRequest request(_ws_key);
-                        request.headers()["host"].emplace_back(make_host_header_value(_remote));
+                        // The authority every protocol writes for Host (origin::authority, Huly QB-1064).
+                        request.headers()["host"].emplace_back(::qb::http::origin::authority(_remote));
                         request.uri() = _remote;
 
                         if (!_offered_subprotocols.empty()) {

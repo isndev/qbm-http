@@ -883,6 +883,16 @@ TEST(Http1ProtocolFraming, EveryChunkedTrailerFieldReachesTheMessage) {
     EXPECT_EQ(io.last_request->header("X-Note"), "");
     EXPECT_TRUE(io.last_request->has_header("X-Empty-Head"));
     EXPECT_EQ(io.last_request->header("Transfer-Encoding"), "chunked");
+    // The trailer section is the message's trailers(), apart from its header section (Huly QB-1073);
+    // the header fields above keep it too, for 3.x source compatibility.
+    const auto &trailers = io.last_request->trailers();
+    EXPECT_EQ(trailers.header_count(), 3u);
+    EXPECT_EQ(trailers.header("X-Checksum"), "abc");
+    EXPECT_EQ(trailers.header("x-count"), "2");
+    EXPECT_TRUE(trailers.has_header("X-Note"));
+    EXPECT_FALSE(trailers.has_header("X-Empty-Head")) << "a header-section field is not a trailer field";
+    EXPECT_FALSE(trailers.has_header("Trailer"));
+    EXPECT_FALSE(trailers.has_header("Host"));
 
     // The next message starts clean: no trailer field of the previous one leaks into it.
     ASSERT_GT(step(proto, io), 0u);
@@ -890,6 +900,7 @@ TEST(Http1ProtocolFraming, EveryChunkedTrailerFieldReachesTheMessage) {
     EXPECT_EQ(io.last_request->uri().path(), "/next");
     EXPECT_FALSE(io.last_request->has_header("X-Count"));
     EXPECT_FALSE(io.last_request->has_header("X-Checksum"));
+    EXPECT_FALSE(io.last_request->has_trailers());
 
     // A response's trailer section, on the client side, alike -- a one-field one included.
     ClientFakeIO                             cio;
@@ -901,12 +912,18 @@ TEST(Http1ProtocolFraming, EveryChunkedTrailerFieldReachesTheMessage) {
     ASSERT_EQ(cio.response_count, 1);
     EXPECT_EQ(cio.last_response->body().as<std::string>(), "Wiki");
     EXPECT_EQ(cio.last_response->header("Server-Timing"), "db;dur=53");
+    EXPECT_EQ(cio.last_response->trailers().header_count(), 1u);
+    EXPECT_EQ(cio.last_response->trailers().header("Server-Timing"), "db;dur=53");
 }
 
+// Every field of the one trailer list HTTP/1.1, HTTP/2 and HTTP/3 share
+// (qb::http::detail::is_forbidden_trailer_field) refuses the message -- `HTTP2-Settings` included,
+// which HTTP/2 refused and HTTP/1.1 accepted (Huly QB-1073).
 TEST(Http1ProtocolFraming, ATrailerFieldThatFramesOrRoutesRefusesTheMessage) {
     for (const char *field :
          {"Content-Length: 5", "Transfer-Encoding: chunked", "Trailer: X-A", "Host: elsewhere.test", "Connection: close", "TE: trailers",
-          "Upgrade: h2c", "Keep-Alive: timeout=5"}) {
+          "Upgrade: h2c", "Keep-Alive: timeout=5", "Proxy-Connection: close", "Proxy-Authenticate: Basic",
+          "Proxy-Authorization: Basic eA==", "HTTP2-Settings: AAMAAABk"}) {
         // First and last in its trailer section, so both storing paths are covered.
         for (const bool last : {true, false}) {
             ServerFakeIO                             io;
@@ -955,4 +972,39 @@ TEST(Http1ProtocolFraming, AnnouncedTrailerFieldsRoundTripThroughTheTrailerSecti
     ASSERT_TRUE(proto.ok());
     EXPECT_EQ(io.last_request->body().as<std::string>(), "hello");
     EXPECT_EQ(io.last_request->header("X-Checksum"), "abc");
+    EXPECT_EQ(io.last_request->trailers().header("X-Checksum"), "abc") << "an announced field arrives as a trailer field";
+}
+
+// What a chunked message carries in its trailers() is what the peer's parser finds in its own:
+// sent after the last chunk, announced by a `Trailer` field the message did not write, an empty
+// body included (Huly QB-1073).
+TEST(Http1ProtocolFraming, TrailersContainerRoundTripsThroughAChunkedMessage) {
+    for (const std::string body : {"hello", ""}) {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.set_header("Transfer-Encoding", "chunked");
+        response.body() = body;
+        response.trailers().set_header("Server-Timing", "db;dur=53");
+        response.trailers().add_header("X-Sum", "a");
+        response.trailers().add_header("X-Sum", "b");
+
+        qb::allocator::pipe<char> wire;
+        ASSERT_NO_THROW(wire << response);
+        const std::string raw{wire.begin(), wire.size()};
+
+        ClientFakeIO                             cio;
+        qb::protocol::http::client<ClientFakeIO> cproto(cio);
+        feed(cio, raw);
+        ASSERT_GT(step(cproto, cio), 0u) << raw;
+        ASSERT_TRUE(cproto.ok()) << raw;
+        ASSERT_EQ(cio.response_count, 1);
+        const auto &received = *cio.last_response;
+        EXPECT_EQ(received.body().as<std::string>(), body);
+        EXPECT_EQ(received.trailers().header_count(), 2u) << raw;
+        EXPECT_EQ(received.trailers().header("server-timing"), "db;dur=53");
+        ASSERT_EQ(received.trailers().headers().at("x-sum").size(), 2u);
+        EXPECT_EQ(received.trailers().header("x-sum", 1), "b");
+        EXPECT_FALSE(received.trailers().has_header("Trailer")) << "the announcement is a header field";
+        EXPECT_TRUE(received.has_header("Trailer"));
+    }
 }

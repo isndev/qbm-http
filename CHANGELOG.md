@@ -9,6 +9,33 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **`trailers()`: a message's trailer section, kept apart from its header fields, on HTTP/1.1,
+  HTTP/2 and HTTP/3 (Huly QB-1073; RFC 9110 §6.5).** `Request` and `Response` gain
+  `Headers &trailers()`, `const Headers &trailers() const noexcept` and `bool has_trailers() const
+  noexcept`. Received: every field of the peer's trailer section is in `trailers()`, and -- the 3.x
+  source-compatibility decision -- in the header fields too, after the header-section values of the
+  same name, as before: code that read a trailer through `header()` keeps working, and `trailers()`
+  tells a trailer field from a header field, which RFC 9110 §6.5.1 asks a recipient not to confuse.
+  Sent: the fields of `trailers()` travel in the trailer section after the body -- after the fields
+  the `Trailer` header announces, the 3.x way, which keeps working -- announced by a `trailer` field
+  the protocol adds when the message carries none; HTTP/1.1 has a trailer section only in a chunked
+  message (`Transfer-Encoding: chunked`), and a message framed otherwise, or a `MessageHead`, sends no
+  trailers. A field of `trailers()` a trailer section must not carry, or that no header field could
+  be, refuses the message before anything of it is sent. The section is allocated on first write: a
+  message without trailers carries one null pointer; measured with callgrind on g++-14 against
+  `8a2abfa` (Ir per operation), the member costs +27 per HTTP/1.1 parse alone, and the message
+  constructors no longer reset the state the base constructor just built (an out-of-line call), so a
+  parse costs 66-67 fewer instructions in total, a message built, moved twice, copied and destroyed
+  141 fewer, and the HTTP/1.1 serializers, which reach the trailer path only for a chunked message,
+  5-24 fewer.
+- **`qb::http::origin::authority(uri)`: the authority every protocol sends (Huly QB-1064).** One
+  writer for the HTTP/1.1 and WebSocket `Host` value and the HTTP/2 and HTTP/3 `:authority`, which
+  five places wrote (HTTP/1.1 `host_header_value`, the HTTP/2 client and its server's push promise,
+  the WebSocket client, HTTP/3): the host, an IPv6 literal between brackets without its zone
+  identifier, `:port` unless it is the scheme's default. `host_header_value` returns it. Cost
+  (callgrind, `8a2abfa`): the HTTP/1.1 Host value of three URIs 1115 -> 1066 instructions; an HTTP/2
+  request/response round trip with the same `:authority` text 84764 -> 83857 (with the trailer
+  changes), HTTP/3 request/response field blocks 6504 -> 6234 and 4215 -> 3938.
 - **`validation::Result::add_error(path, rule, message, qb::json)` (Huly QB-1008).** The call a
   `CustomRule` makes with the `const qb::json &` it received did not compile under nlohmann 3.12
   (vcpkg, Homebrew): json's conversion operator to `std::optional<json>` competes with the optional's
@@ -54,6 +81,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **One trailer list and one trailer section for HTTP/1.1, HTTP/2 and HTTP/3 (Huly QB-1073).** The
+  three protocols kept three lists of the fields a trailer section must not carry, and each refused
+  a field another accepted. `qb::http::detail::is_forbidden_trailer_field` is now the one list, their
+  union: `content-length`, `transfer-encoding`, `trailer`, `host`, `connection`, `keep-alive`,
+  `proxy-connection`, `te`, `upgrade`, `http2-settings`, `proxy-authenticate`,
+  `proxy-authorization`. A received trailer section carrying one now refuses the message (HTTP/1.1:
+  `http2-settings` added) or the stream (HTTP/2: proxy authentication added, and the client now
+  checks the list at all, see Fixed; HTTP/3: `host` and `te` added). The trailer section a message
+  sends is built by one function, `qb::http::detail::plan_outgoing_trailers`, for the three; the
+  HTTP/2 helpers `announced_trailer_names`, `is_trailer_field`, `announced_trailer_fields`,
+  `remove_announced_trailer_fields` and the HTTP/3 helpers `announced_trailers`,
+  `is_announced_trailer`, `make_trailers` are replaced by `outgoing_trailer_fields`,
+  `prepare_trailed_header_block`, `plan_trailers` and `make_trailer_block` (internal namespaces);
+  `HeaderValidator::is_forbidden_trailer_header` answers with the one list. An announced field a
+  trailer section must not carry stays in the header section on HTTP/3 as on HTTP/1.1 and HTTP/2:
+  HTTP/3 refused the message, after its headers were queued.
+- **`Host` and `:authority` leave out the scheme's default port and an IPv6 zone identifier (Huly
+  QB-1064).** HTTP/2 and HTTP/3 sent `:authority: example.test:443` for `https://example.test/` --
+  `qb::io::uri` fills the default port in -- where HTTP/1.1 sent `Host: example.test`; every protocol
+  now sends the latter (RFC 3986 §6.2.3), and a server still rebuilds the same URI, port included. A
+  zone identifier (`[fe80::1%25eth0]`) has local significance only and is no longer sent (RFC 9844
+  §6). The WebSocket client compared the scheme case-sensitively: `WS://host:80` kept its `:80`.
 - **`hpack::convenience::encode_headers` throws on an invalid field (Huly QB-563).** It used to return
   the bytes of the fields ahead of the invalid one as if they were the whole block; it now throws
   `std::invalid_argument` and never returns a partial block. An empty list still returns an empty
@@ -200,6 +249,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **The HTTP/2 client refuses a response trailer section that frames, routes or authenticates
+  (Huly QB-1073).** It checked only the connection-specific fields there: a trailer `content-length`,
+  `trailer`, `proxy-authenticate` or `proxy-authorization` was accepted and merged into the
+  response's headers. The stream is now reset (`PROTOCOL_ERROR`), as the server does for a request.
+- **The HTTP/2 client completes a response whose trailer section was not announced (Huly QB-1073).**
+  The `Trailer` header is a SHOULD (RFC 9110 §6.6.2); a header block that ends the stream after the
+  DATA frames is the trailer section (RFC 9113 §8.1), split over CONTINUATION frames or not. The
+  client reset such a stream ("Multiple HEADERS frames not as trailers"). A second header block that
+  leaves the stream open is still refused.
+- **An HTTP/2 response with an empty body sends its trailer section (Huly QB-1073).** Its leading
+  HEADERS ended the stream, and the announced trailer fields, taken out of them, were sent nowhere.
+- **HTTP/3 sends a message whose trailer section is empty or whose body is (Huly QB-1073).** A
+  request or response announcing a trailer field it did not set was refused, as was one with trailers
+  and no body (nghttp3 ended the stream on the HEADERS without a data reader, and the trailer
+  submission failed) -- each after its headers had been queued. The trailer section is now built and
+  checked before anything is submitted, and a reader is given whenever trailers follow.
 - **HTTP/2 batch admits its members one by one against the pending bound (Huly QB-1063).**
   `qb::http2::Client::push_requests` refused a whole batch with 503s when it would exceed
   `set_max_pending_requests`, its admissible members included. Each member is now admitted as
@@ -211,8 +276,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   request's `Trailer` header announces went out in the leading HEADERS and again in the trailer
   block. When the body fit the flow-control windows, or there was none, that trailer block waited
   for a WINDOW_UPDATE the server had no reason to send, so the request never ended. The client now
-  follows the QB-1058 contract, through the same helpers (`announced_trailer_names`,
-  `is_trailer_field`, `announced_trailer_fields` in `protocol/base.h`, shared with the server). The
+  follows the QB-1058 contract, through the same helpers in `protocol/base.h`, shared with the
+  server (since Huly QB-1073 `outgoing_trailer_fields` and `prepare_trailed_header_block`). The
   announced fields leave only in the trailer block, which `send_request` sends as soon as the body
   is out. A request that announces fields without setting them waits, on `ClientHttp2Protocol`,
   for `send_request_trailers`; `qb::http2::Client`, which never calls it, sets the new
