@@ -457,6 +457,15 @@ Client::process_pending_requests() {
     // so every iteration must recheck the connection whose protocol we use.
     while (is_connected() && _h2_protocol && !_received_graceful_goaway && !_pending_requests.empty()
            && _active_requests.size() < _max_concurrent_streams) {
+        if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
+            // This connection has opened its last stream (2^31-1, RFC 9113 §5.1.1): drain it like a
+            // graceful GOAWAY -- the active requests finish on it, the pending ones wait for the
+            // next connection, which the drain's close opens through the reconnection logic (Huly
+            // QB-525).
+            _received_graceful_goaway = true;
+            finish_graceful_goaway_if_drained();
+            return;
+        }
         auto context = std::move(_pending_requests.front());
         _pending_requests.pop_front();
 
@@ -642,13 +651,14 @@ Client::finish_graceful_goaway_if_drained() {
 
     LOG_HTTP_INFO_PA(_client_id, "Graceful GOAWAY drain complete");
 
-    _received_graceful_goaway = false;
-    _is_connected             = false;
-    _is_connecting            = false;
-    _handshake_completed      = false;
-    _h2_protocol              = nullptr;
-    _transport_closing        = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
-    _transport_started        = false;
+    const bool stream_ids_exhausted = _h2_protocol && _h2_protocol->stream_ids_exhausted();
+    _received_graceful_goaway       = false;
+    _is_connected                   = false;
+    _is_connecting                  = false;
+    _handshake_completed            = false;
+    _h2_protocol                    = nullptr;
+    _transport_closing = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
+    _transport_started = false;
 
     if (!_pending_requests.empty() && _auto_reconnect) {
         _preserve_pending_on_next_disconnect = true;
@@ -657,7 +667,8 @@ Client::finish_graceful_goaway_if_drained() {
     }
 
     if (!_pending_requests.empty()) {
-        fail_all_requests("Server sent GOAWAY and automatic reconnection is disabled");
+        fail_all_requests(stream_ids_exhausted ? "HTTP/2 connection used its last stream identifier and automatic reconnection is disabled"
+                                               : "Server sent GOAWAY and automatic reconnection is disabled");
     }
 
     _preserve_pending_on_next_disconnect = true;

@@ -56,6 +56,14 @@ parse_status_code(std::string_view status) noexcept {
 using OpaqueDataArray = std::array<uint8_t, 8>;
 
 /**
+ * @brief Test seam: reaches protocol state the wire cannot reach in reasonable time (2^30
+ *        requests to exhaust the client stream ids). Declared only; the qbm-http test suite
+ *        specializes it, no production code names it.
+ */
+template <typename Protocol>
+struct ProtocolTestPeer;
+
+/**
  * @brief Constants for header field names and values
  */
 constexpr std::string_view TE_TRAILERS_VALUE   = "trailers";
@@ -88,6 +96,8 @@ class ClientHttp2Protocol : public qb::protocol::http2::Http2Protocol<IO_Handler
 public:
     using FramerBase = qb::protocol::http2::Http2Protocol<IO_Handler, ClientHttp2Protocol<IO_Handler>>;
     friend class qb::protocol::http2::Http2Protocol<IO_Handler, ClientHttp2Protocol<IO_Handler>>;
+    template <typename>
+    friend struct ProtocolTestPeer;
 
 private:
     // Stream management
@@ -209,6 +219,7 @@ public:
         _client_streams.clear();
         _current_header_block_fragment.clear();
         _current_header_stream_id    = 0;
+        _next_client_stream_id       = 1; // a new connection's identifiers start over
         _last_initiated_stream_id    = 0;
         _connection_active           = true;
         _graceful_shutdown_initiated = false;
@@ -1137,6 +1148,12 @@ public:
                                                                                 << ", Peer max: " << _peer_max_concurrent_streams);
             return false;
         }
+        if (stream_ids_exhausted()) [[unlikely]] {
+            // The next id would carry the reserved bit: FrameHeader masks it, so the wire would
+            // name a stream already used while the stream map keeps the unmasked key (Huly QB-525).
+            LOG_HTTP_WARN_PA(0, "Client: Cannot send request. This connection has used its last stream identifier");
+            return false;
+        }
 
         uint32_t stream_id = _next_client_stream_id;
         _next_client_stream_id += 2;
@@ -1240,6 +1257,19 @@ public:
     [[nodiscard]] uint32_t
     last_initiated_stream_id() const noexcept {
         return _last_initiated_stream_id;
+    }
+
+    /// The highest stream identifier a client may open: identifiers are 31-bit (RFC 9113 §5.1.1).
+    static constexpr uint32_t MAX_CLIENT_STREAM_ID = 0x7FFFFFFFu;
+
+    /**
+     * @brief True once this connection has opened its last client stream (2^31-1): send_request()
+     *        refuses from then on, and new streams need a new connection (RFC 9113 §5.1.1). The
+     *        persistent `qb::http2::Client` drains the connection and opens the next one.
+     */
+    [[nodiscard]] bool
+    stream_ids_exhausted() const noexcept {
+        return _next_client_stream_id > MAX_CLIENT_STREAM_ID;
     }
 
     /**

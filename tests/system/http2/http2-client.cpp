@@ -935,6 +935,54 @@ TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
     EXPECT_FALSE(response.body().template as<std::string>().empty());
 }
 
+} // namespace
+
+// Test seam (declared by the protocol): jump the client stream-id counter to the 31-bit bound.
+template <>
+struct qb::protocol::http2::ProtocolTestPeer<qb::http2::Client::H2Protocol> {
+    static void
+    set_next_stream_id(qb::http2::Client::H2Protocol &protocol, uint32_t id) {
+        protocol._next_client_stream_id = id;
+    }
+};
+
+namespace {
+
+// A connection that has used its last client stream id (2^31-1, RFC 9113 §5.1.1)
+// is drained like a graceful GOAWAY: the request on the last id is answered on it,
+// the next one waits and is sent on stream 1 of a new connection (Huly QB-525).
+// It used to go out as stream 2^31+1, masked to 1 on the wire: the server reset a
+// stream it had already seen and the request never completed.
+TEST_F(Http2ClientTest, ExhaustedStreamIdsRenewTheConnection) {
+    auto client    = make_test_client();
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+
+    auto *protocol = dynamic_cast<qb::http2::Client::H2Protocol *>(client->protocol());
+    ASSERT_NE(protocol, nullptr);
+    qb::protocol::http2::ProtocolTestPeer<qb::http2::Client::H2Protocol>::set_next_stream_id(*protocol, 0x7FFFFFFFu);
+
+    std::vector<qb::http::Response> responses;
+    for (int i = 0; i < 2; ++i) {
+        qb::http::Request request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri("/api/test");
+        ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) { responses.push_back(std::move(r)); }));
+    }
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return responses.size() == 2; })) << responses.size() << " response(s)";
+    for (const auto &r : responses) {
+        EXPECT_EQ(r.status(), qb::http::status::OK);
+        EXPECT_EQ(r.body().template as<std::string>(), "HTTP/2 GET Success");
+    }
+    ASSERT_TRUE(ServerThread::pump_until([&] { return client->is_connected(); }));
+    auto *renewed = dynamic_cast<qb::http2::Client::H2Protocol *>(client->protocol());
+    ASSERT_NE(renewed, nullptr);
+    EXPECT_EQ(renewed->last_initiated_stream_id(), 1u) << "the second request opened stream 1 of a new connection";
+    client->disconnect();
+}
+
 // A batch whose size exceeds the outstanding-request bound is rejected up-front:
 // the call returns false and the callback fires synchronously with a 503 per
 // request (no connection, no event loop needed). Mirrors the single-request

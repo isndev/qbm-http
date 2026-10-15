@@ -115,6 +115,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 client renews a connection whose stream identifiers are exhausted (Huly QB-525).** The
+  client stream counter grew past 2^31-1: the next id carried the reserved bit, the frame header
+  masked it to stream 1 on the wire while the stream map kept the unmasked key, and the request
+  never completed. `ClientHttp2Protocol::send_request` now refuses once the last identifier is
+  used (`stream_ids_exhausted()`), and `qb::http2::Client` drains that connection like a graceful
+  GOAWAY and sends its pending requests on a new one (RFC 9113 §5.1.1). A reset protocol counts
+  from 1 again. Witnesses in `tests/unit/http2/http2-client-protocol.cpp` and
+  `tests/system/http2/http2-client.cpp`; they reach the bound through `ProtocolTestPeer`, a
+  test-only friend the protocol declares.
 - **HTTP/2 idle sweep measures idleness from the last progress (Huly QB-531).** Nothing on the
   server ever refreshed a stream's activity time, so the sweep compared every stream's age with
   the 30 s idle budget and cancelled a response still sending like a dead one. Response HEADERS or

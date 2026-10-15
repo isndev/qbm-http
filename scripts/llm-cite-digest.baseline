@@ -192,15 +192,17 @@ llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client:
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:358-370	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:448-485	cc6007b23834	void
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:448-494	51b878e29227	void
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:460-468	0efd396defa1	if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:163-163	b5d9130b44cc	class Client
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:457-482	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:93-93	99ed1922a069	using RetryPolicy = qb::http::RetryPolicy;
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:120-188	76a53daa8eb6	reclaim_completed_stream_contexts() noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:375-419	4896d69f346b	on([[maybe_unused]] qb::io::async::event::pending_write &&event) {
+llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/client.h:1262-1273	1daa7ae2426e	/// The highest stream identifier a client may open: identifiers are ...
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:52-52	ae8950d5071e	is_hop_by_hop(const std::string &header_name) {
-llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:785-806	2d277ef17046	// Notify application if request wasn't dispatched or response wasn't...
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:77-77	f77072de4b7f	class ServerHttp2Protocol : public Http2Protocol<IO_Handler, ServerHt...
+llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:785-806	2d277ef17046	// Notify application if request wasn't dispatched or response wasn't...
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:101-114	45b714835123	++_connect_epoch;
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:119-171	df2ba8d86127	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:20-36	7102845211c2	namespace {
@@ -283,7 +285,7 @@ llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::dis
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:690-749	9b0d7a6bfc68	Client::handle_connection_failure(std::string const &error) {
 llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:358-370	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:448-485	cc6007b23834	void
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:448-494	51b878e29227	void
 llm/qbm-http.llm.md	src/qbm/http/2/client.h:457-482	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:120-175	dcec662d7684	reclaim_completed_stream_contexts() noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:181-188	5d21e024e005	on_peer_stream_reset(uint32_t stream_id) noexcept {

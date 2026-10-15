@@ -176,6 +176,16 @@ push_raw_header_carrier(FakeIO &io, h2::FrameType type, uint8_t flags, uint32_t 
 // The framer drive loop is the shared harness helper.
 using qb::http::test::drive;
 
+// Test seam (declared by the protocol): jump the client stream-id counter to the 31-bit bound
+// instead of sending 2^30 requests.
+template <>
+struct qb::protocol::http2::ProtocolTestPeer<qb::protocol::http2::ClientHttp2Protocol<Http2ClientFakeIO>> {
+    static void
+    set_next_stream_id(qb::protocol::http2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol, uint32_t id) {
+        protocol._next_client_stream_id = id;
+    }
+};
+
 // ===========================================================================
 // Construction: client preface + initial SETTINGS frame.
 // ===========================================================================
@@ -228,6 +238,38 @@ TEST(HTTP2ClientProtocol, SendGetEmitsHeadersWithEndStreamAndOddStreamId) {
     req2.uri()    = qb::io::uri("https://example.test/get2");
     ASSERT_TRUE(protocol.send_request(std::move(req2), 43));
     EXPECT_EQ(protocol.last_initiated_stream_id(), 3u);
+}
+
+// ===========================================================================
+// Stream identifiers are 31-bit (RFC 9113 §5.1.1): 2^31-1 is the last odd id a
+// client may open. The next request is REFUSED on this connection -- a client
+// opens a new connection for new streams -- instead of taking 2^31+1, which the
+// frame header masked to stream 1 on the wire while the stream map kept the
+// unmasked key (Huly QB-525). A reset protocol counts from 1 again.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, StreamIdsStopAtTheThirtyOneBitBound) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    h2::ProtocolTestPeer<h2::ClientHttp2Protocol<Http2ClientFakeIO>>::set_next_stream_id(protocol, 0x7FFFFFFFu);
+
+    auto get = [] {
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/id");
+        return req;
+    };
+    const std::size_t before = io.output.size();
+    ASSERT_TRUE(protocol.send_request(get(), 1));
+    EXPECT_EQ(protocol.last_initiated_stream_id(), 0x7FFFFFFFu);
+    const auto headers_off = find_frame_offset(io.output, h2::FrameType::HEADERS, before);
+    ASSERT_NE(headers_off, SIZE_MAX);
+    EXPECT_EQ(peek_frame_header(io.output, headers_off).get_stream_id(), 0x7FFFFFFFu);
+
+    const std::size_t after_last = io.output.size();
+    EXPECT_FALSE(protocol.send_request(get(), 2)) << "no 32-bit stream id, no masked id 1";
+    EXPECT_EQ(io.output.size(), after_last) << "nothing was sent";
+    EXPECT_EQ(protocol.last_initiated_stream_id(), 0x7FFFFFFFu);
+    EXPECT_TRUE(protocol.ok()) << "the connection itself is fine: the request waits for a new one";
 }
 
 // ===========================================================================
