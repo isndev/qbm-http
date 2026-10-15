@@ -29,7 +29,7 @@ namespace qb::protocol::http2 {
 // --- SettingsHelper ---
 
 SettingsHelper::ValidationResult
-SettingsHelper::validate_setting(Http2SettingIdentifier id, uint32_t value, bool /*is_from_client*/) {
+SettingsHelper::validate_setting(Http2SettingIdentifier id, uint32_t value, bool is_from_client) {
     switch (id) {
         case Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE:
             // No RFC-mandated limits, decoder will cap internally
@@ -39,6 +39,12 @@ SettingsHelper::validate_setting(Http2SettingIdentifier id, uint32_t value, bool
             if (value > 1) {
                 return ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR,
                                                  "SETTINGS_ENABLE_PUSH must be 0 or 1, got: " + std::to_string(value));
+            }
+            // RFC 9113 §6.5.2: "A server MUST NOT explicitly set this value to 1 ... A client MUST
+            // treat receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to 1 as a connection
+            // error of type PROTOCOL_ERROR." The sender's role decides (Huly QB-567).
+            if (!is_from_client && value == 1) {
+                return ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "SETTINGS_ENABLE_PUSH=1 sent by a server");
             }
             return ValidationResult::valid();
 

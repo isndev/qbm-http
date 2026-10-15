@@ -115,6 +115,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 framer ends and opens header blocks on empty fragments too; ENABLE_PUSH checked by role
+  (Huly QB-497, QB-567).** An empty final CONTINUATION carrying END_HEADERS left the framer
+  expecting another CONTINUATION, so the next ordinary frame (a PING, a new request) killed the
+  connection with PROTOCOL_ERROR; an empty HEADERS without END_HEADERS escaped the CONTINUATION
+  gate. One end-of-block transition now follows every HEADERS, PUSH_PROMISE and CONTINUATION
+  frame, empty or not, on both roles (RFC 9113 §6.10). A server's `SETTINGS_ENABLE_PUSH = 1` is a
+  connection PROTOCOL_ERROR at the client (RFC 9113 §6.5.2); 0 stays accepted. Witnesses in
+  `tests/unit/http2/http2-frame-layer.cpp` and `http2-client-protocol.cpp`.
 - **HPACK encoder keeps one compression state with the peer (Huly QB-520, QB-526, QB-563, QB-523,
   QB-524).** A table size change -- the peer lowering `SETTINGS_HEADER_TABLE_SIZE`, or the
   encoder's own capacity -- is announced by a Dynamic Table Size Update at the start of the next

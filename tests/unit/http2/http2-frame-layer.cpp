@@ -260,6 +260,14 @@ TEST(HTTP2FrameLayerSettings, EnablePushBooleanRule) {
     const auto bad = SettingsHelper::validate_setting(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 2, true);
     EXPECT_FALSE(bad.is_valid);
     EXPECT_EQ(bad.error_code, h2::ErrorCode::PROTOCOL_ERROR);
+
+    // From a SERVER only 0 is legal (RFC 9113 §6.5.2: "A server MUST NOT explicitly
+    // set this value to 1"; a client treats it as a connection PROTOCOL_ERROR). Huly QB-567.
+    EXPECT_TRUE(SettingsHelper::validate_setting(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 0, false).is_valid);
+    const auto from_server = SettingsHelper::validate_setting(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1, false);
+    EXPECT_FALSE(from_server.is_valid);
+    EXPECT_EQ(from_server.error_code, h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_FALSE(SettingsHelper::validate_setting(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 2, false).is_valid);
 }
 
 TEST(HTTP2FrameLayerSettings, EnableConnectProtocolBooleanRule) {
@@ -1321,6 +1329,77 @@ TEST(HTTP2FramerDrive, EmptyEndHeadersContinuationCompletesHeaderBlock) {
 
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.request_count, 1);
+
+    // END_HEADERS ended the block: the framer must stop expecting a CONTINUATION
+    // for stream 1 (RFC 9113 §6.10, Huly QB-497). The next ordinary frames — a
+    // PING, then a new request on stream 3 — are accepted, not refused as "Expected
+    // CONTINUATION".
+    io.output.reset();
+    push_frame(io, FT::PING, 0, 0, std::vector<uint8_t>(8, 0x5A));
+    push_frame(io, FT::HEADERS, FLAG_END_HEADERS | FLAG_END_STREAM, 3, encode_hpack_headers(default_request_headers("/after")));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_TRUE(qb::http::test::output_has_frame(io.output, FT::PING)) << "the PING was answered";
+    EXPECT_EQ(io.request_count, 2);
+}
+
+// The mirror defect: an EMPTY HEADERS frame without END_HEADERS opens a header
+// block exactly like a non-empty one, so the next frame must be a CONTINUATION
+// on that stream. A PING in between is a connection PROTOCOL_ERROR (RFC 9113
+// §6.10); the zero-payload dispatch used to skip the CONTINUATION gate.
+TEST(HTTP2FramerDrive, EmptyHeadersWithoutEndHeadersRequiresContinuation) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    push_frame(io, FT::HEADERS, FLAG_END_STREAM, 1, {}); // empty fragment, no END_HEADERS
+    push_frame(io, FT::PING, 0, 0, std::vector<uint8_t>(8, 0x00));
+    drive(protocol, io);
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// Control: the same empty HEADERS completed by a CONTINUATION carrying the whole
+// block is a valid request.
+TEST(HTTP2FramerDrive, EmptyHeadersCompletedByContinuationIsARequest) {
+    Http2FakeIO      io;
+    FrameLayerServer protocol(io);
+    fl_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+
+    push_frame(io, FT::HEADERS, FLAG_END_STREAM, 1, {});
+    push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 1, encode_hpack_headers(default_request_headers("/late")));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+}
+
+// The same end-of-block transition on the CLIENT framer: a response header block
+// closed by an empty CONTINUATION must leave the connection usable.
+TEST(HTTP2FramerDrive, ClientEmptyEndHeadersContinuationLeavesFramerReady) {
+    qb::http::test::Http2ClientFakeIO                                           io;
+    qb::protocol::http2::ClientHttp2Protocol<qb::http::test::Http2ClientFakeIO> client(io);
+
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/a");
+    ASSERT_TRUE(client.send_request(std::move(req), /*app_id=*/1));
+    io.output.reset();
+
+    push_frame(io, FT::SETTINGS, 0, 0, {});
+    push_frame(io, FT::HEADERS, FLAG_END_STREAM, 1, encode_hpack_headers({{":status", "204"}})); // no END_HEADERS
+    push_frame(io, FT::CONTINUATION, FLAG_END_HEADERS, 1, {});
+    push_frame(io, FT::PING, 0, 0, std::vector<uint8_t>(8, 0x11));
+    drive(client, io);
+
+    EXPECT_TRUE(client.ok());
+    EXPECT_EQ(io.response_count, 1);
+    EXPECT_TRUE(qb::http::test::output_has_frame(io.output, FT::PING)) << "the PING was answered";
 }
 
 // --- padded HEADERS failure path (base.h:1128-1130) ------------------------

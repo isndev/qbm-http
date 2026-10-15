@@ -1658,18 +1658,30 @@ TEST(HTTP2ClientProtocol, ServerSettingsRaiseMaxFrameSizeAffectsChunking) {
 }
 
 // ===========================================================================
-// SETTINGS — invalid SETTINGS_ENABLE_PUSH value (2) is a connection error.
+// SETTINGS — a server may send SETTINGS_ENABLE_PUSH only as 0 (RFC 9113 §6.5.2):
+// 1 is a connection PROTOCOL_ERROR like the out-of-range 2 (Huly QB-567); 0 is
+// accepted and acknowledged.
 // ===========================================================================
-TEST(HTTP2ClientProtocol, ServerSettingsInvalidEnablePushIsConnectionError) {
+TEST(HTTP2ClientProtocol, ServerSettingsEnablePushOtherThanZeroIsConnectionError) {
+    for (const uint32_t value : {2u, 1u}) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+        protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, value}}));
+
+        EXPECT_FALSE(protocol.ok()) << "ENABLE_PUSH=" << value;
+        ASSERT_TRUE(protocol.get_last_error_code().has_value());
+        EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+        EXPECT_EQ(io.goaway_count, 1);
+    }
+
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
-
-    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 2}}));
-
-    EXPECT_FALSE(protocol.ok());
-    ASSERT_TRUE(protocol.get_last_error_code().has_value());
-    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
-    EXPECT_EQ(io.goaway_count, 1);
+    io.output.reset();
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 0}}));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_NE(find_frame_offset(io.output, h2::FrameType::SETTINGS), SIZE_MAX) << "SETTINGS ACK sent";
 }
 
 // ===========================================================================

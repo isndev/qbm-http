@@ -210,7 +210,8 @@ public:
      * @brief Validate a single setting entry
      * @param id Setting identifier
      * @param value Setting value
-     * @param is_from_client Whether setting came from client (affects validation)
+     * @param is_from_client Whether setting came from client (affects validation: a server may
+     *                       send SETTINGS_ENABLE_PUSH only as 0, RFC 9113 §6.5.2)
      * @return Validation result
      */
     static ValidationResult validate_setting(Http2SettingIdentifier id, uint32_t value, bool is_from_client);
@@ -985,6 +986,31 @@ protected:
 
 private:
     /**
+     * @brief The header-block state a HEADERS, PUSH_PROMISE or CONTINUATION frame leaves the
+     *        framer in, once the side protocol has taken its fragment.
+     * @details RFC 9113 §6.10: until a frame carrying END_HEADERS, the next frame on the
+     *          connection must be a CONTINUATION on the same stream; END_HEADERS ends the block.
+     *          The fragment's size plays no part: an EMPTY fragment opens or closes a block
+     *          exactly like a non-empty one. One transition for every such frame and both
+     *          dispatch paths (zero-length payload or not), so an empty final CONTINUATION no
+     *          longer leaves the framer waiting for another one (Huly QB-497) and an empty
+     *          HEADERS without END_HEADERS no longer escapes the CONTINUATION gate.
+     */
+    void
+    track_header_block_after_dispatch() noexcept {
+        if (!this->ok()) {
+            return;
+        }
+        if (_current_frame_header.flags & FLAG_END_HEADERS) {
+            _continuation_required  = false;
+            _continuation_stream_id = 0;
+        } else {
+            _continuation_required  = true;
+            _continuation_stream_id = _current_frame_header.get_stream_id();
+        }
+    }
+
+    /**
      * @brief Handle frames with zero payload
      */
     void
@@ -1016,6 +1042,7 @@ private:
                 Http2FrameData<HeadersFrame> hf;
                 hf.header = _current_frame_header;
                 static_cast<SideProtocol *>(this)->on(std::move(hf));
+                track_header_block_after_dispatch(); // an empty fragment opens a block too
             } break;
 
             case FrameType::DATA: {
@@ -1054,6 +1081,7 @@ private:
                 Http2FrameData<ContinuationFrame> cf;
                 cf.header = _current_frame_header;
                 static_cast<SideProtocol *>(this)->on(std::move(cf));
+                track_header_block_after_dispatch(); // an empty final fragment ends the block too
             } break;
 
             default:
@@ -1174,10 +1202,7 @@ private:
         std::size_t header_block_size = p_len - pad_length;
         headers_f.payload.header_block_fragment.assign(p_data, p_data + header_block_size);
         static_cast<SideProtocol *>(this)->on(std::move(headers_f));
-        if (this->ok()) {
-            _continuation_required  = (_current_frame_header.flags & FLAG_END_HEADERS) == 0;
-            _continuation_stream_id = _continuation_required ? _current_frame_header.get_stream_id() : 0;
-        }
+        track_header_block_after_dispatch();
         return true;
     }
 
@@ -1278,10 +1303,7 @@ private:
         pp_f.payload.header_block_fragment.assign(p_data, p_data + (p_len - pad_length));
 
         static_cast<SideProtocol *>(this)->on(std::move(pp_f));
-        if (this->ok()) {
-            _continuation_required  = (_current_frame_header.flags & FLAG_END_HEADERS) == 0;
-            _continuation_stream_id = _continuation_required ? _current_frame_header.get_stream_id() : 0;
-        }
+        track_header_block_after_dispatch();
         return true;
     }
 
@@ -1366,10 +1388,7 @@ private:
         cont_f.payload.header_block_fragment.assign(payload_data, payload_data + payload_size);
 
         static_cast<SideProtocol *>(this)->on(std::move(cont_f));
-        if (this->ok() && (_current_frame_header.flags & FLAG_END_HEADERS)) {
-            _continuation_required  = false;
-            _continuation_stream_id = 0;
-        }
+        track_header_block_after_dispatch();
         return true;
     }
 
