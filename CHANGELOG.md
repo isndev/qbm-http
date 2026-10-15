@@ -115,6 +115,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 keeps the received compression state in step (Huly QB-533, QB-534).** A header block
+  the HPACK decoder could not decode reset only its stream, and the connection decoded on with a
+  dynamic table possibly changed by the fields ahead of the failure; it is now a connection
+  `COMPRESSION_ERROR` (RFC 9113 §4.3). A field that decodes but breaks an HTTP/2 rule still only
+  resets its stream. A header block refused without decoding -- over the concurrency cap, during
+  shutdown, on a closed or reset stream, after END_STREAM, on both the server and the client --
+  left the table behind the peer's encoder, so the next block referencing its entries failed or
+  decoded to other fields; refused blocks are now assembled across their CONTINUATION frames,
+  decoded and dropped, never routed. Witnesses in `tests/unit/http2/http2-server-protocol.cpp`
+  and `http2-client-protocol.cpp`.
 - **HTTP/2 header blocks respect the peer's frame size and request trailers follow the body
   (Huly QB-522, QB-521).** Request trailers (explicit and automatic), response trailers and
   PUSH_PROMISE blocks were each written as one frame whatever their size; a block larger than the

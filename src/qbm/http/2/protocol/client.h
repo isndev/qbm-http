@@ -136,6 +136,7 @@ private:
     qb::unordered_map<uint32_t, Http2ClientStream> _pending_pushed_streams;
 
     uint32_t _active_header_block_stream_id = 0;
+    bool     _discarding_header_block       = false; ///< The block in assembly is refused: decode it, drop its fields
 
     // Server-flood guards (mirror the server, hostile-server threat): a peer can flood a client with
     // PING / empty-SETTINGS frames — each begets a PONG / ACK that is exempt from flow control, so
@@ -457,9 +458,11 @@ public:
                 return;
             }
 
-            // Unknown stream - send RST_STREAM
+            // Unknown stream - send RST_STREAM, and still decode the block (HPACK state, QB-534)
             LOG_HTTP_WARN_PA(headers_event.header.get_stream_id(), "Client: Received HEADERS for unknown/closed stream. Sending RST_STREAM.");
             this->send_rst_stream(headers_event.header.get_stream_id(), ErrorCode::STREAM_CLOSED, "HEADERS on unknown/closed stream");
+            begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment,
+                                         (headers_event.header.flags & FLAG_END_HEADERS) != 0);
             return;
         }
         Http2ClientStream &stream = *stream_ptr;
@@ -475,6 +478,18 @@ public:
     on(Http2FrameData<ContinuationFrame> continuation_event) noexcept {
         if (_active_header_block_stream_id == 0 || _active_header_block_stream_id != continuation_event.header.get_stream_id()) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "CONTINUATION for unexpected stream.");
+            return;
+        }
+
+        if (_discarding_header_block) {
+            // The rest of a refused block: decoded for the HPACK table, never dispatched.
+            if (++_continuation_frame_count > qb::http2::protocol_limits::MAX_CONTINUATION_FRAMES) {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive CONTINUATION frames (server flood)");
+                clear_header_assembly_state();
+                return;
+            }
+            append_discarded_header_fragment(continuation_event.payload.header_block_fragment,
+                                             (continuation_event.header.flags & FLAG_END_HEADERS) != 0);
             return;
         }
 
@@ -1390,6 +1405,52 @@ private:
         _current_header_block_fragment.clear();
         _active_header_block_stream_id = 0;
         _continuation_frame_count      = 0; // per-header-block CONTINUATION flood budget
+        _discarding_header_block       = false;
+    }
+
+    /**
+     * @brief Start a header block the client refuses (a stream it already reset or closed, a
+     *        block it does not expect): it is decoded, and its fields dropped.
+     * @details The server's encoder indexed the block's fields in the connection's one dynamic
+     *          table whether or not the client wants them, and its later blocks reference them
+     *          (RFC 9113 §4.3, Huly QB-534). The block is assembled across its CONTINUATION
+     *          frames under the usual limits; one that does not decode is a connection
+     *          COMPRESSION_ERROR.
+     */
+    void
+    begin_discarded_header_block(uint32_t stream_id, const std::vector<uint8_t> &fragment, bool end_headers) noexcept {
+        if (!this->ok() || !_connection_active) {
+            return; // the connection is going away: its compression state no longer matters
+        }
+        _current_header_block_fragment.clear();
+        _active_header_block_stream_id = stream_id;
+        _discarding_header_block       = true;
+        _continuation_frame_count      = 0;
+        append_discarded_header_fragment(fragment, end_headers);
+    }
+
+    /**
+     * @brief Add a fragment to the refused block in assembly; at END_HEADERS decode it through
+     *        the connection's decoder and drop the fields.
+     */
+    void
+    append_discarded_header_fragment(const std::vector<uint8_t> &fragment, bool end_headers) noexcept {
+        _current_header_block_fragment.insert(_current_header_block_fragment.end(), fragment.begin(), fragment.end());
+        if (_current_header_block_fragment.size() > qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 header block exceeds configured limit");
+            clear_header_assembly_state();
+            return;
+        }
+        if (!end_headers) {
+            return;
+        }
+        std::vector<hpack::HeaderField> dropped;
+        bool                            incomplete = false;
+        const bool                      decoded    = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete) && !incomplete;
+        clear_header_assembly_state();
+        if (!decoded) {
+            this->send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decoding error.");
+        }
     }
 
     /**
@@ -2069,13 +2130,18 @@ private:
      */
     void
     process_incoming_headers(Http2ClientStream &stream, const Http2FrameData<HeadersFrame> &headers_event) {
+        const bool end_headers = (headers_event.header.flags & FLAG_END_HEADERS) != 0;
         if (stream.end_stream_received && !stream.trailers_expected) {
-            send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "HEADERS after END_STREAM without trailers");
+            const uint32_t stream_id = stream.id; // send_rst_stream() erases the stream
+            send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HEADERS after END_STREAM without trailers");
+            begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
 
         if (stream.headers_received_main && !stream.trailers_expected) {
-            send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Multiple HEADERS frames not as trailers");
+            const uint32_t stream_id = stream.id; // send_rst_stream() erases the stream
+            send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "Multiple HEADERS frames not as trailers");
+            begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
 

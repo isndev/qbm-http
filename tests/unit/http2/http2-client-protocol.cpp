@@ -41,6 +41,7 @@ using qb::http::test::make_headers_frame;
 using qb::http::test::peek_frame_header;
 using qb::http::test::pump;
 using qb::http::test::push_bytes;
+using qb::http::test::push_frame;
 
 namespace h2 = qb::protocol::http2;
 
@@ -1498,6 +1499,46 @@ TEST(HTTP2ClientProtocol, AutomaticTrailerNamesAreSentLowercase) {
     EXPECT_TRUE(server.ok());
     ASSERT_EQ(server_io.request_count, 1) << "the trailer block was refused";
     EXPECT_EQ(server_io.last_request->body().as<std::string>(), "ab");
+}
+
+// ===========================================================================
+// A header block arriving on a stream the client already reset -- here the
+// server's trailers, in flight when the client refused the response's headers
+// -- is still decoded: the server's encoder indexed its fields in the shared
+// dynamic table and its next block references them (RFC 9113 §4.3). The client
+// used to answer RST_STREAM without decoding, and the next response was read
+// against a table out of step (Huly QB-534, client side).
+// ===========================================================================
+TEST(HTTP2ClientProtocol, HeaderBlockOnAResetStreamStillFeedsTheHpackTable) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::protocol::hpack::Encoder               server_encoder; // one encoder: the server's
+
+    for (uint64_t app_id : {1u, 2u}) {
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/r" + std::to_string(app_id));
+        ASSERT_TRUE(protocol.send_request(std::move(req), app_id)); // streams 1 and 3
+    }
+
+    auto block = [&](const std::vector<qb::protocol::hpack::HeaderField> &h) {
+        std::vector<uint8_t> out;
+        EXPECT_TRUE(server_encoder.encode(h, out));
+        return out;
+    };
+    // Stream 1: a forbidden response header makes the client reset the stream.
+    push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, block({{":status", "200"}, {"connection", "close"}}));
+    // Stream 1 again: the server's trailers, already on the wire; they index "x-t: 1".
+    push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, 1, block({{"x-t", "1"}}));
+    // Stream 3: a response that references that entry.
+    push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, 3, block({{":status", "204"}, {"x-t", "1"}}));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(io.last_app_id, 2u);
+    ASSERT_TRUE(io.last_status.has_value());
+    EXPECT_EQ(*io.last_status, 204);
 }
 
 // ===========================================================================

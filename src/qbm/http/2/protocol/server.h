@@ -87,8 +87,9 @@ private:
     std::uint32_t _control_reply_count      = 0; ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
     std::uint32_t _continuation_frame_count = 0; ///< CONTINUATION frames in the current header block (flood guard)
 
-    std::vector<uint8_t> _current_header_block_fragment; ///< Header block assembly buffer
-    uint32_t             _current_header_stream_id = 0;  ///< Stream ID for header assembly
+    std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
+    uint32_t             _current_header_stream_id = 0;     ///< Stream ID for header assembly
+    bool                 _discarding_header_block  = false; ///< The block in assembly is refused: decode it, drop its fields
 
     int64_t              _connection_send_window;                                                    ///< Connection-level send window
     int64_t              _connection_receive_window          = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE; ///< Connection-level receive window
@@ -426,10 +427,12 @@ public:
         if (it == _server_streams.end()) {
             if (stream_id <= _last_client_initiated_stream_id) {
                 this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS for old/closed stream");
+                this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
             if (_graceful_shutdown_initiated) {
                 this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "New stream during graceful shutdown");
+                this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
             uint32_t active_client_streams = 0;
@@ -447,6 +450,7 @@ public:
             if (active_client_streams >= max_concurrent_from_us) {
                 LOG_HTTP_WARN_PA(stream_id, "Server: Refused new stream. Max concurrent streams limit reached: " << max_concurrent_from_us);
                 this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "Exceeded MAX_CONCURRENT_STREAMS limit");
+                this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
 
@@ -468,11 +472,13 @@ public:
         }
 
         if (stream.state == Http2StreamConcreteState::CLOSED || stream.rst_stream_received || stream.rst_stream_sent) {
+            this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
         if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE && !stream.trailers_expected) {
             this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR,
                                   "Unexpected HEADERS frame after client sent END_STREAM (no trailers expected)");
+            this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
 
@@ -549,6 +555,17 @@ public:
         if (stream_id == 0 || _current_header_stream_id == 0 || stream_id != _current_header_stream_id) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "CONTINUATION frame error (no prior HEADERS or wrong stream_id)");
             this->clear_header_assembly_state(); // Clear any partial state
+            return;
+        }
+
+        if (_discarding_header_block) {
+            // The rest of a refused block: decoded for the HPACK table, never routed.
+            if (++_continuation_frame_count > qb::http2::protocol_limits::MAX_CONTINUATION_FRAMES) {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive CONTINUATION frames in header block");
+                this->clear_header_assembly_state();
+                return;
+            }
+            this->append_discarded_header_fragment(continuation_event.payload.header_block_fragment, end_headers);
             return;
         }
 
@@ -1529,6 +1546,53 @@ private:
     clear_header_assembly_state() noexcept {
         _current_header_block_fragment.clear();
         _current_header_stream_id = 0;
+        _discarding_header_block  = false;
+    }
+
+    /**
+     * @brief Start a header block the server refuses: it is decoded, and its fields dropped.
+     * @details HPACK is one compression context per connection: the client's encoder indexed
+     *          this block's fields whether or not the request is admitted, and its later blocks
+     *          reference them. A refused HEADERS -- over the concurrency cap, during shutdown, on
+     *          a closed or reset stream, after END_STREAM -- is therefore assembled across its
+     *          CONTINUATION frames under the same size and count limits and decoded like any
+     *          other (RFC 9113 §4.3, Huly QB-534). Nothing is routed. A block that does not
+     *          decode is a connection COMPRESSION_ERROR.
+     */
+    void
+    begin_discarded_header_block(uint32_t stream_id, const std::vector<uint8_t> &fragment, bool end_headers) noexcept {
+        if (!this->ok() || !_connection_active) {
+            return; // the connection is going away: its compression state no longer matters
+        }
+        _current_header_block_fragment.clear();
+        _current_header_stream_id = stream_id;
+        _discarding_header_block  = true;
+        _continuation_frame_count = 0;
+        this->append_discarded_header_fragment(fragment, end_headers);
+    }
+
+    /**
+     * @brief Add a fragment to the refused block in assembly; at END_HEADERS decode it through
+     *        the connection's decoder and drop the fields.
+     */
+    void
+    append_discarded_header_fragment(const std::vector<uint8_t> &fragment, bool end_headers) noexcept {
+        _current_header_block_fragment.insert(_current_header_block_fragment.end(), fragment.begin(), fragment.end());
+        if (_current_header_block_fragment.size() > qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 header block exceeds configured limit");
+            this->clear_header_assembly_state();
+            return;
+        }
+        if (!end_headers) {
+            return;
+        }
+        std::vector<qb::protocol::hpack::HeaderField> dropped;
+        bool                                          incomplete = false;
+        const bool decoded = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete) && !incomplete;
+        this->clear_header_assembly_state();
+        if (!decoded) {
+            this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
+        }
     }
 
     /**
@@ -1550,15 +1614,14 @@ private:
         qb::http::Headers current_headers_decoded; // Decoded headers for this block
         bool              possibly_incomplete_hpack = false;
 
-        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)) {
-            // QB_LOG_ERROR_PA(this->getName(), "Stream " << stream.id << ": HPACK decoding failed.");
-            this->on_stream_error(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
-            return false;
-        }
-        if (possibly_incomplete_hpack) {
-            // QB_LOG_WARN_PA(this->getName(), "Stream " << stream.id << ": HPACK decoding possibly incomplete.");
-            // Decide if this is fatal. For now, treat as COMPRESSION_ERROR.
-            this->on_stream_error(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding possibly incomplete");
+        // A block that does not decode leaves the decoder's dynamic table wherever the failure
+        // stopped it -- possibly after entries the fields ahead of it added -- so the connection's
+        // compression context is no longer the client's: a connection error of type
+        // COMPRESSION_ERROR (RFC 9113 §4.3, Huly QB-533), never a stream reset that would let
+        // decoding go on. A field that decodes but is invalid stays a stream error below.
+        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)
+            || possibly_incomplete_hpack) {
+            this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
             return false;
         }
 

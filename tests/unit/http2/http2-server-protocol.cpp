@@ -442,29 +442,32 @@ TEST(HTTP2ServerProtocol, ContinuationWithoutHeadersIsConnectionProtocolError) {
 }
 
 // ---------------------------------------------------------------------------
-// A malformed HPACK header block (indexed field referencing index 0) makes the
-// decoder fail -> stream-level COMPRESSION_ERROR (RST_STREAM), connection ok.
+// A header block the HPACK decoder cannot decode is a CONNECTION error of type
+// COMPRESSION_ERROR (RFC 9113 §4.3): the decoder may already have changed its
+// dynamic table for the fields ahead of the failure, so the compression context
+// is no longer the peer's. Here a literal with incremental indexing ("x-a: 1")
+// enters the table, then an indexed field with index 0 (illegal, RFC 7541 §6.1)
+// fails the block. It used to be a stream error, the connection decoding on with
+// a table out of step (Huly QB-533). A field that decodes but is semantically
+// invalid stays a stream error (ForbiddenConnectionHeaderInRequestIsStreamError).
 // ---------------------------------------------------------------------------
 
-TEST(HTTP2ServerProtocol, MalformedHpackBlockIsCompressionStreamError) {
+TEST(HTTP2ServerProtocol, UndecodableHpackBlockIsConnectionCompressionError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     do_handshake(protocol, io);
     ASSERT_TRUE(protocol.ok());
 
-    const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
-
-    // 0x80 == Indexed Header Field with index 0, which is illegal per RFC 7541
-    // §6.1 -> _hpack_decoder.decode returns false -> on_stream_error(
-    // COMPRESSION_ERROR) -> RST_STREAM. The connection is NOT torn down.
-    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, {0x80});
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+               {0x40, 0x03, 'x', '-', 'a', 0x01, '1', 0x80});
     drive(protocol, io);
 
-    EXPECT_TRUE(protocol.ok());     // stream-level, connection survives
-    EXPECT_EQ(io.request_count, 0); // never dispatched
-    EXPECT_GT(count_frames(io.output, FrameType::RST_STREAM), rst_before);
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::COMPRESSION_ERROR);
+    EXPECT_FALSE(protocol.ok()) << "the connection must not decode on with a table out of step";
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::COMPRESSION_ERROR);
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::COMPRESSION_ERROR);
 }
 
 // ===========================================================================
@@ -2044,6 +2047,111 @@ TEST(HTTP2ServerProtocol, MaxConcurrentStreamsExceededRefusesNewStream) {
         }
     }
     EXPECT_TRUE(refused_on_new);
+}
+
+// ---------------------------------------------------------------------------
+// A header block the server REFUSES -- a stream over the concurrency cap, a
+// HEADERS on a closed stream, a second block after END_STREAM -- is still
+// decoded: the client's encoder added its entries to the shared dynamic table
+// and later blocks reference them (RFC 9113 §4.3, §5.1). The refused request
+// is never routed. The client side of these tests uses ONE encoder for the whole
+// connection, as a real client does. Huly QB-534.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct SharedClientEncoder {
+    qb::protocol::hpack::Encoder encoder;
+
+    std::vector<uint8_t>
+    block(const std::vector<qb::protocol::hpack::HeaderField> &headers) {
+        std::vector<uint8_t> out;
+        EXPECT_TRUE(encoder.encode(headers, out));
+        return out;
+    }
+};
+
+std::vector<qb::protocol::hpack::HeaderField>
+request_with(const std::string &method, const std::string &path, std::vector<qb::protocol::hpack::HeaderField> extra = {}) {
+    std::vector<qb::protocol::hpack::HeaderField> h = {
+        {":method", method}, {":scheme", "https"}, {":authority", "example.test"}, {":path", path}
+    };
+    h.insert(h.end(), extra.begin(), extra.end());
+    return h;
+}
+} // namespace
+
+TEST(HTTP2ServerProtocol, RefusedOverCapHeaderBlockStillFeedsTheHpackTable) {
+    for (const bool fragmented : {false, true}) {
+        Http2FakeIO         io;
+        ServerProtocol      protocol(io);
+        SharedClientEncoder client;
+        do_handshake(protocol, io);
+
+        uint32_t sid = 1;
+        for (int i = 0; i < 50; ++i, sid += 2) { // the server's SETTINGS_MAX_CONCURRENT_STREAMS
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid, client.block(request_with("POST", "/c")));
+        }
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+
+        // Stream 101 is refused; its block indexes "x-refused: r1" on both ends.
+        const auto refused = client.block(request_with("GET", "/r", {{"x-refused", "r1"}}));
+        if (fragmented) {
+            const std::vector<uint8_t> head(refused.begin(), refused.begin() + 3), tail(refused.begin() + 3, refused.end());
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_STREAM, sid, head);
+            push_frame(io, FrameType::CONTINUATION, qb::protocol::http2::FLAG_END_HEADERS, sid, tail);
+        } else {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, refused);
+        }
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok()) << "fragmented=" << fragmented;
+        EXPECT_EQ(last_rst_stream_error(io.output, sid), ErrorCode::REFUSED_STREAM);
+        EXPECT_EQ(io.request_count, 0) << "a refused request is never routed";
+        sid += 2;
+
+        // The client cancels stream 1, freeing a slot, then reuses the entry: the block is the
+        // one-octet indexed field 0xBE for "x-refused: r1".
+        push_frame(io, FrameType::RST_STREAM, 0, 1, {0x00, 0x00, 0x00, 0x08});
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   client.block(request_with("GET", "/ok", {{"x-refused", "r1"}})));
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok()) << "fragmented=" << fragmented;
+        ASSERT_EQ(io.request_count, 1) << "fragmented=" << fragmented;
+        EXPECT_EQ(std::string(io.last_request->uri().path()), "/ok");
+        EXPECT_EQ(io.last_request->header("x-refused"), "r1");
+    }
+}
+
+TEST(HTTP2ServerProtocol, HeaderBlockOnAClosedOrEndedStreamStillFeedsTheHpackTable) {
+    for (const bool stream_answered : {true, false}) {
+        Http2FakeIO         io;
+        ServerProtocol      protocol(io);
+        SharedClientEncoder client;
+        do_handshake(protocol, io);
+
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   client.block(request_with("GET", "/first")));
+        drive(protocol, io);
+        ASSERT_EQ(io.request_count, 1);
+        if (stream_answered) { // closed and erased: a later HEADERS on it is STREAM_CLOSED
+            qb::http::Response response;
+            response.status() = qb::http::status::NO_CONTENT;
+            ASSERT_TRUE(protocol.send_response(1, response));
+        } // else half-closed (remote) with no trailers expected: a second block is refused
+
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   client.block({{"x-late", "v"}}));
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok()) << "answered=" << stream_answered;
+        ASSERT_TRUE(last_rst_stream_error(io.output, 1).has_value()) << "answered=" << stream_answered;
+
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 3,
+                   client.block(request_with("GET", "/next", {{"x-late", "v"}})));
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok()) << "answered=" << stream_answered;
+        ASSERT_EQ(io.request_count, 2) << "answered=" << stream_answered;
+        EXPECT_EQ(io.last_request->header("x-late"), "v");
+    }
 }
 
 // ---------------------------------------------------------------------------
