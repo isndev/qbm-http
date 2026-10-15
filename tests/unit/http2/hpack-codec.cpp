@@ -400,6 +400,37 @@ TEST(HPACK_Huffman, ValidateEncodedData) {
     EXPECT_FALSE(validate_huffman_encoded_data(invalid_data));
 }
 
+// The helper's verdict is the decoder's: no byte-pattern heuristic on top. '0' (0x30) is the
+// 5-bit code 00000, so eight of them fill exactly 40 bits -- five zero octets, no padding, a
+// valid string the decoder accepts. Three zero octets stay invalid for the decoder's own reason
+// (24 bits = four symbols + 4 zero bits of padding, not all ones). Huly QB-524.
+TEST(HPACK_Huffman, ValidateEncodedDataAgreesWithTheDecoder) {
+    const std::vector<uint8_t> five_zeros = {0x00, 0x00, 0x00, 0x00, 0x00};
+    std::string                decoded;
+    ASSERT_TRUE(huffman_decode(five_zeros.data(), five_zeros.size(), decoded));
+    EXPECT_EQ(decoded, "00000000");
+    EXPECT_TRUE(validate_huffman_encoded_data(five_zeros));
+
+    std::vector<uint8_t> eight_zero_digits;
+    ASSERT_TRUE(huffman_encode("00000000", eight_zero_digits));
+    EXPECT_EQ(eight_zero_digits, five_zeros) << "the encoder emits exactly these five octets";
+
+    // Same verdict as huffman_decode on valid, badly padded, EOS-carrying and empty inputs.
+    std::vector<std::vector<uint8_t>> samples = {five_zeros, {0x00, 0x00, 0x00}, {0x00}, {0xFF, 0xFF, 0xFF, 0xFF}, {}};
+    for (const char *text : {"a", "www.example.com", "no-cache", "0"}) {
+        std::vector<uint8_t> enc;
+        ASSERT_TRUE(huffman_encode(text, enc));
+        samples.push_back(enc);
+        enc.push_back(0xFF); // eight more padding bits
+        samples.push_back(enc);
+    }
+    for (const auto &sample : samples) {
+        std::string out;
+        EXPECT_EQ(validate_huffman_encoded_data(sample), huffman_decode(sample.data(), sample.size(), out))
+            << "sample of " << sample.size() << " octets";
+    }
+}
+
 TEST(HPACK_Huffman, GlobalStatsResetIsZeroed) {
     auto &global_stats               = get_global_huffman_stats();
     global_stats.encoding_operations = 5;
@@ -1363,13 +1394,17 @@ TEST(HPACK_EncoderEdge, NameInDynamicTableButFieldTooBigUsesWithoutIndexing) {
     ASSERT_TRUE(encoder.encode(headers, out));
     ASSERT_FALSE(out.empty());
 
-    // The emitted representation is "Literal Header Field without Indexing"
-    // (top 4 bits 0000) referencing the *dynamic* name index 62 (= 61 static
-    // entries + slot 1). encode_integer(prefix 0x00, N=4, 62) maxes the 4-bit
-    // prefix (0x0F) then encodes the remainder 62-15=47 in the next octet.
-    EXPECT_EQ(out[0], 0x0F);
-    ASSERT_GE(out.size(), 2u);
-    EXPECT_EQ(out[1], 47u);
+    // The block opens with the Dynamic Table Size Update announcing the shrink
+    // to 40 (RFC 7541 §6.3): 0x20|31 == 0x3F, then 40-31 == 9. The emitted
+    // representation is then "Literal Header Field without Indexing" (top 4 bits
+    // 0000) referencing the *dynamic* name index 62 (= 61 static entries + slot
+    // 1). encode_integer(prefix 0x00, N=4, 62) maxes the 4-bit prefix (0x0F) then
+    // encodes the remainder 62-15=47 in the next octet.
+    ASSERT_GE(out.size(), 4u);
+    EXPECT_EQ(out[0], 0x3F);
+    EXPECT_EQ(out[1], 0x09);
+    EXPECT_EQ(out[2], 0x0F);
+    EXPECT_EQ(out[3], 47u);
 
     // The header was NOT re-added to the dynamic table (still just the seed).
     EXPECT_EQ(encoder.get_dynamic_table_entry_count(), 1u);

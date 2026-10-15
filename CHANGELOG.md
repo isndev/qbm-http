@@ -38,6 +38,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **`hpack::convenience::encode_headers` throws on an invalid field (Huly QB-563).** It used to return
+  the bytes of the fields ahead of the invalid one as if they were the whole block; it now throws
+  `std::invalid_argument` and never returns a partial block. An empty list still returns an empty
+  block. The `Encoder` class also gained private state for pending table-size updates: rebuild
+  translation units that embed an `Encoder` (the HTTP/2 protocol templates) together.
+
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -109,6 +115,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HPACK encoder keeps one compression state with the peer (Huly QB-520, QB-526, QB-563, QB-523,
+  QB-524).** A table size change -- the peer lowering `SETTINGS_HEADER_TABLE_SIZE`, or the
+  encoder's own capacity -- is announced by a Dynamic Table Size Update at the start of the next
+  block, the smallest size reached first (RFC 7541 §4.2, §6.3); the table never exceeds the peer's
+  limit. A list with an invalid field is refused whole, with nothing appended and the table
+  untouched, so the next block cannot reference an entry the peer never received. A field marked
+  never-indexed stays a never-indexed literal on an exact table match (RFC 7541 §6.2.3). Value
+  octets 0x80-0xFF are accepted whatever the signedness of `char` (they killed the connection on
+  x86-64 GCC/Clang and MSVC builds). `validate_huffman_encoded_data` returns the decoder's verdict:
+  eight `'0'` symbols, five zero octets, are valid. Witnesses in
+  `tests/unit/http2/hpack-encoder-strategy.cpp`, `hpack-codec.cpp` and `http2-protocol-roundtrip.cpp`.
 - **API documentation checks reject comment-only names and invalid later citations (Huly QB-561, QB-562).**
   The shipped guard indexes C++ code without comments or literals and examines every
   citation on a line before accepting it.

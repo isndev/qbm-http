@@ -233,7 +233,8 @@ double estimate_huffman_efficiency(const std::string &input);
 /**
  * @brief Validate that encoded data can be properly decoded with strict padding rules
  * @param encoded_data Encoded data to validate
- * @return true if data is valid
+ * @return true if data is valid: exactly the verdict of huffman_decode() (no EOS symbol, at
+ *         most 7 bits of padding, padding a prefix of EOS -- RFC 7541 §5.2)
  */
 bool validate_huffman_encoded_data(const std::vector<uint8_t> &encoded_data);
 

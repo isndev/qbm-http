@@ -259,51 +259,13 @@ estimate_huffman_efficiency(const std::string &input) {
 
 bool
 validate_huffman_encoded_data(const std::vector<uint8_t> &encoded_data) {
-    if (encoded_data.empty()) {
-        return true; // Empty data is valid
-    }
-
-    // First, try basic decoding
+    // The decoder is the rule: it refuses an EOS symbol, a padding longer than 7 bits and a
+    // padding that is not a prefix of EOS (RFC 7541 §5.2). The byte-pattern heuristics that
+    // used to sit on top -- "a trailing 0xFF", "three or more zero octets" -- were either the
+    // decoder's own verdict again or wrong: eight '0' symbols are five legitimate zero octets
+    // (Huly QB-524).
     std::string decoded;
-    if (!huffman_decode(encoded_data.data(), encoded_data.size(), decoded)) {
-        return false; // Basic decoding failed
-    }
-
-    // Check for specific corruption patterns that the test expects to fail
-
-    // Pattern 1: Check for excessive padding (full byte of 0xFF appended)
-    // This is the specific case the test creates: valid encoding + 0xFF byte
-    if (encoded_data.size() >= 2 && encoded_data.back() == 0xFF) {
-        // If the last byte is all 1s, check if this creates excessive padding
-        // We need to simulate decoding to see if we end up with > 7 padding bits
-
-        // Try decoding without the last byte
-        std::vector<uint8_t> without_last(encoded_data.begin(), encoded_data.end() - 1);
-        std::string          decoded_partial;
-
-        if (huffman_decode(without_last.data(), without_last.size(), decoded_partial)) {
-            // If the data without the last 0xFF byte decodes successfully,
-            // then the 0xFF byte represents 8 bits of padding, which is excessive
-            return false;
-        }
-    }
-
-    // Pattern 2: Check for all-zero patterns (the test case with {0x00, 0x00, 0x00})
-    bool all_zeros = true;
-    for (uint8_t byte : encoded_data) {
-        if (byte != 0x00) {
-            all_zeros = false;
-            break;
-        }
-    }
-
-    if (all_zeros && encoded_data.size() >= 3) {
-        // The test expects {0x00, 0x00, 0x00} to be invalid
-        // This would represent 24 bits of all zeros, which is likely invalid padding
-        return false;
-    }
-
-    return true;
+    return huffman_decode(encoded_data.data(), encoded_data.size(), decoded);
 }
 
 std::pair<double, double>

@@ -45,6 +45,7 @@
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <qb/io/crypto.h>
@@ -94,6 +95,30 @@ roundtrip_single(const std::vector<uint8_t> &encoded) {
     EXPECT_FALSE(incomplete);
     EXPECT_EQ(out.size(), 1u) << "expected exactly one header: " << ll_bytes_to_hex(encoded);
     return out.empty() ? HeaderField{} : out.front();
+}
+
+// Encode `headers` as one block with `encoder` and decode that block with `decoder`, the
+// two ends of one connection. Returns the block. RFC 7541 keeps ONE dynamic table state
+// shared by both ends, so after every block the encoder's table and the decoder's table must
+// hold the same entries: the byte size and the entry count are compared after each block.
+std::vector<uint8_t>
+encode_then_decode(Encoder &encoder, Decoder &decoder, const std::vector<HeaderField> &headers) {
+    std::vector<uint8_t> block;
+    EXPECT_TRUE(encoder.encode(headers, block));
+    std::vector<HeaderField> out;
+    bool                     incomplete = false;
+    EXPECT_TRUE(decoder.decode(block, out, incomplete)) << "decode failed: " << ll_bytes_to_hex(block);
+    EXPECT_FALSE(incomplete);
+    EXPECT_EQ(out.size(), headers.size());
+    EXPECT_EQ(decoder.get_dynamic_table_size(), encoder.get_dynamic_table_size()) << "dynamic tables diverged";
+    EXPECT_EQ(decoder.get_dynamic_table_entry_count(), encoder.get_dynamic_table_entry_count()) << "dynamic tables diverged";
+    return block;
+}
+
+// True when `block` starts with a Dynamic Table Size Update (001xxxxx, RFC 7541 §6.3).
+bool
+starts_with_size_update(const std::vector<uint8_t> &block) {
+    return !block.empty() && (block[0] & 0xE0) == 0x20;
 }
 
 } // namespace
@@ -295,6 +320,84 @@ TEST(HPACK_LL_EncoderStrategy, NeverIndexedPseudoHeaderNewNameNoHuffman) {
     EXPECT_EQ(enc[1], 0x09);
 }
 
+// A field the caller marked never-indexed keeps a never-indexed representation even when an
+// identical (name, value) pair sits in the static table (RFC 7541 §6.2.3: the marker tells every
+// intermediary to keep it out of any table; an indexed representation drops it). Static exact
+// match "accept-encoding: gzip, deflate" is index 16 -> literal never indexed with that name
+// index: encode_integer(0x10, 4, 16) == {0x1F, 0x01}. Huly QB-526.
+TEST(HPACK_LL_EncoderStrategy, NeverIndexedMarkerWinsOverStaticExactMatch) {
+    Encoder                  encoder;
+    std::vector<HeaderField> headers = {HeaderField("accept-encoding", "gzip, deflate", /*sensitive=*/true)};
+    std::vector<uint8_t>     enc;
+    ASSERT_TRUE(encoder.encode(headers, enc));
+
+    ASSERT_GE(enc.size(), 2u) << ll_bytes_to_hex(enc);
+    EXPECT_EQ(enc[0], 0x1F) << ll_bytes_to_hex(enc);
+    EXPECT_EQ(enc[1], 0x01) << ll_bytes_to_hex(enc);
+    const HeaderField hf = roundtrip_single(enc);
+    EXPECT_EQ(hf.name, "accept-encoding");
+    EXPECT_EQ(hf.value, "gzip, deflate");
+    EXPECT_TRUE(hf.sensitive);
+
+    // Control: the same pair WITHOUT the marker is the one-octet indexed field 0x80|16.
+    std::vector<uint8_t> plain;
+    ASSERT_TRUE(encoder.encode({{"accept-encoding", "gzip, deflate"}}, plain));
+    ASSERT_EQ(plain.size(), 1u);
+    EXPECT_EQ(plain[0], 0x90);
+}
+
+// Same rule against a DYNAMIC exact match: the pair was indexed earlier without the marker, the
+// marked occurrence must not reuse that entry as an indexed field. It may still name-index it:
+// encode_integer(0x10, 4, 62) == {0x1F, 0x2F}.
+TEST(HPACK_LL_EncoderStrategy, NeverIndexedMarkerWinsOverDynamicExactMatch) {
+    Encoder encoder;
+    Decoder decoder;
+
+    encode_then_decode(encoder, decoder, {{"x-token", "abc"}}); // indexed at 62
+    ASSERT_EQ(encoder.get_dynamic_table_entry_count(), 1u);
+
+    std::vector<uint8_t> enc;
+    ASSERT_TRUE(encoder.encode({HeaderField("x-token", "abc", /*sensitive=*/true)}, enc));
+    ASSERT_GE(enc.size(), 2u) << ll_bytes_to_hex(enc);
+    EXPECT_EQ(enc[0], 0x1F) << ll_bytes_to_hex(enc);
+    EXPECT_EQ(enc[1], 0x2F) << ll_bytes_to_hex(enc);
+
+    std::vector<HeaderField> out;
+    bool                     incomplete = false;
+    ASSERT_TRUE(decoder.decode(enc, out, incomplete));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].value, "abc");
+    EXPECT_TRUE(out[0].sensitive);
+}
+
+// A proxy that decodes a never-indexed field and re-encodes it must keep the marker, even
+// through an encoder whose table already holds the pair unmarked.
+TEST(HPACK_LL_EncoderStrategy, NeverIndexedMarkerSurvivesDecodeReencode) {
+    Encoder upstream;
+    Decoder proxy_in;
+    Encoder proxy_out;
+    Decoder downstream;
+
+    std::vector<uint8_t> wire;
+    ASSERT_TRUE(upstream.encode({HeaderField("x-secret", "s3cr3t", /*sensitive=*/true)}, wire));
+    std::vector<HeaderField> decoded;
+    bool                     incomplete = false;
+    ASSERT_TRUE(proxy_in.decode(wire, decoded, incomplete));
+    ASSERT_EQ(decoded.size(), 1u);
+    ASSERT_TRUE(decoded[0].sensitive);
+
+    encode_then_decode(proxy_out, downstream, {{"x-secret", "s3cr3t"}}); // unmarked copy indexed at 62
+
+    std::vector<uint8_t> reencoded;
+    ASSERT_TRUE(proxy_out.encode(decoded, reencoded));
+    ASSERT_FALSE(reencoded.empty());
+    EXPECT_EQ(reencoded[0] & 0xF0, 0x10) << "re-encoded as never indexed: " << ll_bytes_to_hex(reencoded);
+    std::vector<HeaderField> out;
+    ASSERT_TRUE(downstream.decode(reencoded, out, incomplete));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_TRUE(out[0].sensitive);
+}
+
 // ====================================================================
 // Encoder strategy: literal WITHOUT indexing (over-budget header)
 // ====================================================================
@@ -302,7 +405,8 @@ TEST(HPACK_LL_EncoderStrategy, NeverIndexedPseudoHeaderNewNameNoHuffman) {
 // When a non-sensitive, non-pseudo header is larger than the dynamic table
 // budget it cannot be added, so it falls to LITERAL_WITHOUT_INDEXING
 // (0x00, N=4). With a brand-new name and index 0:
-// encode_integer(0x00, 4, 0) == 0x00.
+// encode_integer(0x00, 4, 0) == 0x00. The block first announces the shrunk
+// table (RFC 7541 §6.3): 0x20 | 20 == 0x34.
 TEST(HPACK_LL_EncoderStrategy, WithoutIndexingNewNameWhenOverBudget) {
     Encoder encoder;
     encoder.set_max_capacity(20); // hpack_size("xyz","value")=3+5+32=40 > 20
@@ -311,9 +415,10 @@ TEST(HPACK_LL_EncoderStrategy, WithoutIndexingNewNameWhenOverBudget) {
     std::vector<uint8_t>     enc;
     ASSERT_TRUE(encoder.encode(headers, enc));
 
-    ASSERT_FALSE(enc.empty());
-    EXPECT_EQ(enc[0] & 0xF0, 0x00) << "top four bits 0000 (without indexing)";
-    EXPECT_EQ(enc[0], 0x00) << "index 0 -> literal name follows";
+    ASSERT_GE(enc.size(), 2u);
+    EXPECT_EQ(enc[0], 0x34) << "Dynamic Table Size Update to 20 comes first";
+    EXPECT_EQ(enc[1] & 0xF0, 0x00) << "top four bits 0000 (without indexing)";
+    EXPECT_EQ(enc[1], 0x00) << "index 0 -> literal name follows";
     // Over-budget header is not stored.
     EXPECT_EQ(encoder.get_dynamic_table_entry_count(), 0u);
 
@@ -326,7 +431,7 @@ TEST(HPACK_LL_EncoderStrategy, WithoutIndexingNewNameWhenOverBudget) {
 // Without-indexing carrying a STATIC name index. With max_capacity 0 every
 // header is over budget. "accept-encoding" (static idx 16), value differs:
 // encode_integer(0x00, 4, 16): 16 >= 15 -> first byte 0x00 | 15 == 0x0F,
-// continuation 16 - 15 == 1 -> 0x01.
+// continuation 16 - 15 == 1 -> 0x01. The size update to 0 (0x20) leads.
 TEST(HPACK_LL_EncoderStrategy, WithoutIndexingStaticNameWhenOverBudget) {
     Encoder encoder;
     encoder.set_max_capacity(0);
@@ -335,10 +440,11 @@ TEST(HPACK_LL_EncoderStrategy, WithoutIndexingStaticNameWhenOverBudget) {
     std::vector<uint8_t>     enc;
     ASSERT_TRUE(encoder.encode(headers, enc));
 
-    ASSERT_GE(enc.size(), 2u);
-    EXPECT_EQ(enc[0] & 0xF0, 0x00);
-    EXPECT_EQ(enc[0], 0x0F); // saturated prefix
-    EXPECT_EQ(enc[1], 0x01); // 16 - 15
+    ASSERT_GE(enc.size(), 3u);
+    EXPECT_EQ(enc[0], 0x20) << "Dynamic Table Size Update to 0 comes first";
+    EXPECT_EQ(enc[1] & 0xF0, 0x00);
+    EXPECT_EQ(enc[1], 0x0F); // saturated prefix
+    EXPECT_EQ(enc[2], 0x01); // 16 - 15
     EXPECT_EQ(encoder.get_dynamic_table_entry_count(), 0u);
 
     const HeaderField hf = roundtrip_single(enc);
@@ -383,6 +489,90 @@ TEST(HPACK_LL_EncoderStrategy, SetPeerMaxDynamicTableSizeNoEvictWhenRaised) {
 
     encoder.set_peer_max_dynamic_table_size(8192); // larger than current 40
     EXPECT_EQ(encoder.get_dynamic_table_entry_count(), 1u) << "raising peer max must not evict";
+}
+
+// ====================================================================
+// Dynamic Table Size Update emission (RFC 7541 §4.2, §6.3) — Huly QB-520
+// ====================================================================
+
+// A peer that lowers SETTINGS_HEADER_TABLE_SIZE below what our encoder holds forces an
+// eviction here; the peer's decoder learns of it only through a Dynamic Table Size Update at
+// the start of the next header block. Without it the decoder keeps evicting by the old
+// budget and the two tables diverge (a strict decoder — nghttp2 — rejects the block outright).
+// 40 with a 5-bit prefix: 0x20|31 == 0x3F, 40-31 == 9 -> {0x3F, 0x09}.
+TEST(HPACK_LL_EncoderStrategy, PeerTableSizeReductionIsAnnouncedAtNextBlock) {
+    Encoder encoder;
+    Decoder decoder; // the peer: its own table follows the updates we send
+
+    encode_then_decode(encoder, decoder, {{"a", "1"}, {"b", "2"}}); // 2 x 34 octets
+    ASSERT_EQ(encoder.get_dynamic_table_entry_count(), 2u);
+
+    encoder.set_peer_max_dynamic_table_size(40); // room for one entry: "a" is evicted here
+    const auto block = encode_then_decode(encoder, decoder, {{"a", "1"}});
+    ASSERT_GE(block.size(), 2u);
+    EXPECT_EQ(block[0], 0x3F) << ll_bytes_to_hex(block);
+    EXPECT_EQ(block[1], 0x09) << ll_bytes_to_hex(block);
+    EXPECT_LE(decoder.get_dynamic_table_size(), 40u);
+
+    // The update is announced once: the block after carries none.
+    const auto next = encode_then_decode(encoder, decoder, {{"a", "1"}});
+    EXPECT_FALSE(starts_with_size_update(next)) << ll_bytes_to_hex(next);
+}
+
+// Several changes between two blocks: the smallest size, then the final one (RFC 7541 §4.2),
+// so the decoder evicts as deep as the encoder did. 0 -> {0x20}; 4096: 0x3F, then 4096-31 ==
+// 4065 == 31*128 + 97 -> {0xE1, 0x1F}.
+TEST(HPACK_LL_EncoderStrategy, SeveralSizeChangesAnnounceMinimumThenFinal) {
+    Encoder encoder;
+    Decoder decoder;
+
+    encode_then_decode(encoder, decoder, {{"x-one", "1"}, {"x-two", "2"}});
+    ASSERT_EQ(encoder.get_dynamic_table_entry_count(), 2u);
+
+    encoder.set_peer_max_dynamic_table_size(0);    // evicts everything
+    encoder.set_peer_max_dynamic_table_size(4096); // back to the default before any block
+    const auto block = encode_then_decode(encoder, decoder, {{"x-three", "3"}});
+    ASSERT_GE(block.size(), 4u);
+    EXPECT_EQ(block[0], 0x20) << ll_bytes_to_hex(block);
+    EXPECT_EQ(block[1], 0x3F) << ll_bytes_to_hex(block);
+    EXPECT_EQ(block[2], 0xE1) << ll_bytes_to_hex(block);
+    EXPECT_EQ(block[3], 0x1F) << ll_bytes_to_hex(block);
+    EXPECT_EQ(decoder.get_dynamic_table_entry_count(), 1u) << "only x-three survives the eviction to 0";
+}
+
+// Controls: a peer limit at or above what the encoder uses changes nothing, so nothing is
+// announced; and our own capacity can never exceed the peer's limit (RFC 9113 §6.5.2).
+TEST(HPACK_LL_EncoderStrategy, NoSizeUpdateWithoutEffectiveChange) {
+    Encoder encoder;
+    Decoder decoder;
+
+    encoder.set_peer_max_dynamic_table_size(4096);  // unchanged
+    encoder.set_peer_max_dynamic_table_size(65536); // a raise the encoder need not follow
+    const auto first = encode_then_decode(encoder, decoder, {{"x-k", "v"}});
+    EXPECT_FALSE(starts_with_size_update(first)) << ll_bytes_to_hex(first);
+}
+
+TEST(HPACK_LL_EncoderStrategy, OwnCapacityIsBoundedByPeerLimitAndAnnounced) {
+    Encoder encoder;
+    Decoder decoder; // the peer advertised the default 4096
+
+    // Asking for a larger own table than the peer allows stays at the peer's 4096: an
+    // encoder that indexed past it would make the decoder evict entries it still references.
+    encoder.set_max_capacity(8192);
+    std::vector<HeaderField> many;
+    for (int i = 0; i < 64; ++i) {
+        many.emplace_back("x-fill-" + std::to_string(i), std::string(64, 'v')); // ~103 octets each
+    }
+    const auto filled = encode_then_decode(encoder, decoder, many);
+    EXPECT_FALSE(starts_with_size_update(filled)) << "no effective change, nothing to announce";
+    EXPECT_LE(encoder.get_dynamic_table_size(), 4096u);
+
+    // Our own smaller capacity is a change too, announced like the peer's.
+    encoder.set_max_capacity(100);
+    const auto shrunk = encode_then_decode(encoder, decoder, {{"x-k", "v"}});
+    ASSERT_GE(shrunk.size(), 2u);
+    EXPECT_EQ(shrunk[0], 0x3F) << ll_bytes_to_hex(shrunk); // 100 = 31 + 69
+    EXPECT_EQ(shrunk[1], 69u) << ll_bytes_to_hex(shrunk);
 }
 
 // ====================================================================
@@ -579,6 +769,44 @@ TEST(HPACK_LL_Convenience, EncodeDecodeHeadersRoundTrip) {
     }
 }
 
+// A header list with an invalid field is refused WHOLE: nothing is appended to the output and
+// the dynamic table is untouched, so the encoder stays in step with the peer's decoder, which
+// never sees the refused block. Before Huly QB-563 the valid fields ahead of the bad one were
+// encoded and indexed, and the next block referenced an entry the peer never received.
+TEST(HPACK_LL_Encoder, InvalidFieldRefusesTheWholeBlockAndLeavesTheTableUntouched) {
+    Encoder encoder;
+    Decoder decoder;
+
+    std::vector<uint8_t> out = {0xAA}; // bytes already in the caller's buffer stay as they were
+    EXPECT_FALSE(encoder.encode({{"x-valid", "1"}, {"", "bad"}}, out));
+    EXPECT_EQ(out, std::vector<uint8_t>({0xAA})) << ll_bytes_to_hex(out);
+    EXPECT_EQ(encoder.get_dynamic_table_entry_count(), 0u);
+    EXPECT_EQ(encoder.get_stats().headers_encoded, 0u);
+
+    // The peer saw nothing; the next block must decode against its empty table.
+    encode_then_decode(encoder, decoder, {{"x-valid", "1"}});
+
+    // A pending table size update is not consumed by a refused block either.
+    encoder.set_peer_max_dynamic_table_size(64);
+    std::vector<uint8_t> refused;
+    EXPECT_FALSE(encoder.encode({{"x-other", "2"}, {"bad name", "v"}}, refused));
+    EXPECT_TRUE(refused.empty());
+    const auto announced = encode_then_decode(encoder, decoder, {{"x-other", "2"}});
+    EXPECT_TRUE(starts_with_size_update(announced)) << ll_bytes_to_hex(announced);
+}
+
+// encode_headers() returns the block only when it is complete: an invalid field anywhere in the
+// list throws instead of returning a prefix that looks whole. An empty list is a valid, empty
+// block. Huly QB-563.
+TEST(HPACK_LL_Convenience, EncodeHeadersThrowsOnAnInvalidFieldInsteadOfReturningAPrefix) {
+    EXPECT_THROW((void) convenience::encode_headers({{"x-valid", "1"}, {"", "v"}}), std::invalid_argument);
+    EXPECT_THROW((void) convenience::encode_headers({{"bad name", "v"}}), std::invalid_argument);
+    EXPECT_THROW((void) convenience::encode_headers({{"x-ok", std::string("a\nb", 3)}}), std::invalid_argument);
+    std::vector<uint8_t> empty;
+    EXPECT_NO_THROW(empty = convenience::encode_headers({}));
+    EXPECT_TRUE(empty.empty());
+}
+
 // decode_headers returns nullopt on a malformed (truncated) block.
 TEST(HPACK_LL_Convenience, DecodeHeadersNulloptOnMalformed) {
     // Index 0 in an indexed field is illegal per RFC 7541.
@@ -621,6 +849,29 @@ TEST(HPACK_LL_Validation, HeaderValueRules) {
     EXPECT_FALSE(is_valid_header_value(std::string("a\x7f"
                                                    "b",
                                                    3))); // DEL
+}
+
+// Octets 0x80-0xFF are field-value bytes (obs-text, UTF-8), not controls, whatever the
+// signedness of `char`: compared as a signed char they read as negative and fell under the
+// `< 0x20` control test on x86-64 GCC/Clang and MSVC. The control policy itself is unchanged
+// (C0 but TAB, and DEL, refused); names keep their ASCII token grammar. Huly QB-523.
+TEST(HPACK_LL_Validation, HighOctetsAreValidValueBytesOnEverySignedness) {
+    using namespace header_validation;
+
+    const std::string utf8("caf\xC3\xA9", 5);
+    EXPECT_TRUE(is_valid_header_value(utf8));
+    EXPECT_TRUE(is_valid_header_value(std::string("\x80", 1)));
+    EXPECT_TRUE(is_valid_header_value(std::string("\xFF", 1)));
+    EXPECT_FALSE(is_valid_header_value(std::string("\x7F", 1)));
+    EXPECT_FALSE(is_valid_header_value(std::string("\x1F", 1)));
+    EXPECT_FALSE(is_valid_header_name(utf8)) << "names stay ASCII tokens";
+
+    // The encoder accepts it and the octets travel unchanged.
+    Encoder              encoder;
+    std::vector<uint8_t> enc;
+    ASSERT_TRUE(encoder.encode({{"x-name", utf8}}, enc));
+    const HeaderField hf = roundtrip_single(enc);
+    EXPECT_EQ(hf.value, utf8);
 }
 
 TEST(HPACK_LL_Validation, EncoderRejectsInvalidName) {

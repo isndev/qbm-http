@@ -67,7 +67,9 @@ HTTP/2 compresses header blocks with HPACK (RFC 7541), implemented in `qb::proto
 
 - A **61-entry static table** holds common fields (`:method: GET`, `accept-encoding: gzip`, …); lookup uses a compile-time open-addressing index (F33).
 - A per-connection **dynamic table**, a ring buffer (F34), stores recently sent fields. Its size is bounded by `SETTINGS_HEADER_TABLE_SIZE`, which each peer advertises for its own decoder. Per RFC 7541 §4.4, an entry larger than the whole table budget clears the table and is *not* inserted.
-- The encoder **never indexes sensitive headers** (`authorization`, `cookie`, `proxy-authorization`, `set-cookie`) or pseudo-headers; they are emitted as *Literal Never Indexed* so intermediaries cannot cache them. Only non-sensitive, non-pseudo fields that fit the table are added with incremental indexing.
+- The encoder **never indexes sensitive headers** (`authorization`, `cookie`, `proxy-authorization`, `set-cookie`, and any `HeaderField` marked `sensitive`) or pseudo-headers; they are emitted as *Literal Never Indexed* so intermediaries cannot cache them. A field marked `sensitive` keeps that representation even when the same name and value already sit in the static or dynamic table. Only non-sensitive, non-pseudo fields that fit the table are added with incremental indexing.
+- The encoder's table never exceeds the peer's `SETTINGS_HEADER_TABLE_SIZE`. When that limit (or the encoder's own capacity) changes the table size, the next header block opens with a *Dynamic Table Size Update* — the smallest size reached first, then the final one (RFC 7541 §4.2) — so the peer's decoder evicts exactly as the encoder did.
+- A header list with an invalid field is refused whole: nothing is sent and the dynamic table is untouched, so the connection's compression state stays in step.
 - String literals may be Huffman-coded for further size reduction.
 <!-- src: qbm/http/src/qbm/http/2/protocol/hpack.h:100-170,302-426,481-485; FACTBOOK F33/F34/F35 -->
 
