@@ -115,6 +115,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 batch failure answers its unanswered members with 503 (Huly QB-495).** A failure pass
+  (explicit `disconnect()`, connection loss, exhausted reconnection run) detached the batch registry before
+  failing the members, so their failures found no batch and recorded nothing, and the final pass
+  only answered slots whose status was 0 while an unanswered slot held a default `Response`, a
+  `200`: the batch callback (and its coroutine overload) reported those members as empty
+  successes. An unanswered slot now holds status 0 until a response fills it; the failure pass
+  answers exactly those with `503` and the failure reason, keeps every received response (an
+  empty `200` included) and the admission `400`s, and still calls back once.
+  `BatchRequestContext`'s layout is unchanged. Witnesses in
+  `tests/unit/http2/http2-client-validation.cpp` and `tests/system/http2/http2-client.cpp`.
 - **HTTP/2 client renews a connection whose stream identifiers are exhausted (Huly QB-525).** The
   client stream counter grew past 2^31-1: the next id carried the reserved bit, the frame header
   masked it to stream 1 on the wire while the stream map kept the unmasked key, and the request

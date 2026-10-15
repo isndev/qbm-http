@@ -191,9 +191,10 @@ llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:232-236	889fc62c5cea	Client:
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client::connect(ConnectionCallback callback) {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:358-370	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:448-494	51b878e29227	void
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:460-468	0efd396defa1	if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:309-316	bc81daa2929c	batch_context->responses.resize(batch_context->requests.size());
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:365-377	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:455-501	51b878e29227	void
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:467-475	0efd396defa1	if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:163-163	b5d9130b44cc	class Client
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:457-482	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:93-93	99ed1922a069	using RetryPolicy = qb::http::RetryPolicy;
@@ -284,8 +285,8 @@ llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client::con
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:690-749	9b0d7a6bfc68	Client::handle_connection_failure(std::string const &error) {
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:358-370	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:448-494	51b878e29227	void
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:365-377	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:455-501	51b878e29227	void
 llm/qbm-http.llm.md	src/qbm/http/2/client.h:457-482	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:120-175	dcec662d7684	reclaim_completed_stream_contexts() noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:181-188	5d21e024e005	on_peer_stream_reset(uint32_t stream_id) noexcept {

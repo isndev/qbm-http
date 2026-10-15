@@ -1172,6 +1172,49 @@ TEST_F(Http2ClientTest, BatchWithInvalidMemberPreservesOrderAndErrors) {
     client->disconnect();
 }
 
+// A batch the connection fails under keeps what it received and answers the rest
+// with 503, through ONE callback: the empty 200 the server sent stays a 200, the
+// invalid member keeps its 400, the member never answered gets 503. The failure
+// pass used to hand that member over as a default-constructed Response -- a 200
+// with no body, indistinguishable from a success (Huly QB-495).
+TEST_F(Http2ClientTest, BatchFailureKeepsReceivedResponsesAndAnswersTheRestWith503) {
+    auto client = make_test_client();
+
+    std::vector<qb::http::Request> reqs(3);
+    reqs[0].method() = qb::http::Method::HEAD;
+    reqs[0].uri()    = qb::io::uri("/api/head-metadata"); // answered: 200, no body
+    reqs[1].method() = qb::http::Method::GET;
+    reqs[1].uri()    = qb::io::uri("https://example.invalid:8443/api/test"); // refused: 400
+    reqs[2].method() = qb::http::Method::GET;
+    reqs[2].uri()    = qb::io::uri("/api/hang"); // never answered
+
+    std::atomic<int>                calls{0};
+    std::vector<qb::http::Response> out;
+    ASSERT_TRUE(client->push_requests(std::move(reqs), [&](std::vector<qb::http::Response> rs) {
+        out = std::move(rs);
+        ++calls;
+    }));
+    client->connect(nullptr);
+
+    // The HEAD answer is in (one request still active) and the hang is routed.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == 1 && client->get_active_request_count() == 1; }));
+    EXPECT_EQ(calls.load(), 0);
+    client->disconnect();
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return calls.load() == 1; }));
+    for (int pass = 0; pass < 50; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls.load(), 1);
+    ASSERT_EQ(out.size(), 3u);
+    EXPECT_EQ(out[0].status(), qb::http::status::OK);
+    EXPECT_EQ(out[0].header("x-protocol"), "HTTP/2") << "the 200 the server sent";
+    EXPECT_TRUE(out[0].body().empty());
+    EXPECT_EQ(out[1].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(out[2].status(), qb::http::status::SERVICE_UNAVAILABLE) << "an unanswered member is not a 200";
+    EXPECT_FALSE(out[2].body().template as<std::string>().empty());
+}
+
 // With the concurrent-stream cap set to 1, three requests drain one at a time:
 // process_pending_requests submits a single stream, then re-drives from
 // complete_request as each response lands (the _active_requests.size() <

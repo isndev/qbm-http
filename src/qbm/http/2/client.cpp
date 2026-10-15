@@ -307,6 +307,13 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     batch_context->callback   = callback;
     batch_context->created_at = std::chrono::steady_clock::now();
     batch_context->responses.resize(batch_context->requests.size());
+    // A slot not answered yet holds status 0, which no response carries (a received :status is
+    // 100..999 and every synthesized one is a real code): a failure pass answers exactly those
+    // with its 503 and keeps the received ones, an empty 200 included. A default Response is a
+    // 200 -- the unanswered members used to reach the callback as successes (Huly QB-495).
+    for (auto &slot : batch_context->responses) {
+        slot.status() = 0;
+    }
 
     // Reject the whole batch up-front if it would exceed the outstanding-request bound (DoS guard).
     if (_pending_requests.size() + _active_requests.size() + batch_context->requests.size() > _max_pending_requests) {
@@ -715,9 +722,10 @@ Client::fail_all_requests(const std::string &error_message) {
         if (!batch_context->all_completed) {
             LOG_HTTP_WARN_PA(_client_id, "Failing incomplete batch " << batch_id);
 
-            // Fill remaining responses with errors
+            // Answer the members still unanswered (status 0, see push_requests): their own failures
+            // above found no batch -- this pass detached the registry -- and recorded nothing.
             for (size_t i = 0; i < batch_context->responses.size(); ++i) {
-                if (batch_context->responses[i].status().code() == 0) { // Not set yet
+                if (batch_context->responses[i].status().code() == 0) {
                     batch_context->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message);
                 }
             }
