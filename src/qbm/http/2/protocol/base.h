@@ -210,7 +210,8 @@ public:
      * @brief Validate a single setting entry
      * @param id Setting identifier
      * @param value Setting value
-     * @param is_from_client Whether setting came from client (affects validation)
+     * @param is_from_client Whether setting came from client (affects validation: a server may
+     *                       send SETTINGS_ENABLE_PUSH only as 0, RFC 9113 §6.5.2)
      * @return Validation result
      */
     static ValidationResult validate_setting(Http2SettingIdentifier id, uint32_t value, bool is_from_client);
@@ -330,6 +331,91 @@ public:
      */
     static SettingsHelper::ValidationResult validate_response_pseudo_headers(const std::vector<qb::protocol::hpack::HeaderField> &headers);
 };
+
+/**
+ * @brief The lowercased field names a message announces in its `trailer` header (RFC 9110
+ *        §6.6.2): the fields its sender puts in the trailer section, after the body.
+ * @tparam Message `qb::http::Request` or `qb::http::Response`.
+ * @param message Message to inspect.
+ * @return The announced names, empty when the message has no `trailer` header.
+ */
+template <typename Message>
+std::vector<std::string>
+announced_trailer_names(const Message &message) {
+    std::vector<std::string> names;
+    // A scan rather than find(): find() builds and hashes a lowercased key for every message,
+    // which costs more than walking its few header names, and nearly no message has trailers.
+    for (const auto &[header_name, values] : message.headers()) {
+        if (header_name.size() != 7 || !qb::http::utility::iequals(header_name, "trailer")) {
+            continue;
+        }
+        for (const auto &value : values) {
+            for (auto &name : qb::http::utility::split_and_trim_header_list(value, ',')) {
+                std::transform(name.begin(), name.end(), name.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
+                names.push_back(std::move(name));
+            }
+        }
+    }
+    return names;
+}
+
+/**
+ * @brief True when a field travels in the trailer section: its @p name_lower is announced by the
+ *        `trailer` header and allowed in trailers. A field that is announced but forbidden there
+ *        (`content-length`, `trailer` itself, a connection header) stays in the leading HEADERS,
+ *        so every field is sent exactly once.
+ */
+inline bool
+is_trailer_field(std::string_view name_lower, const std::vector<std::string> &announced) {
+    return !announced.empty() && !name_lower.empty() && name_lower.front() != ':'
+           && std::find(announced.begin(), announced.end(), name_lower) != announced.end()
+           && !HeaderValidator::is_forbidden_trailer_header(name_lower);
+}
+
+/**
+ * @brief A message's trailer section: the fields its `trailer` header announces that trailers
+ *        allow, set on the message, names lowercased, invalid fields left out. What the leading
+ *        HEADERS leave out (is_trailer_field) is exactly what this sends -- for a response
+ *        (ServerHttp2Protocol, Huly QB-1058) as for a request (ClientHttp2Protocol, Huly QB-1061),
+ *        the contract HTTP/3 follows.
+ * @tparam Message `qb::http::Request` or `qb::http::Response`.
+ */
+template <typename Message>
+std::vector<qb::protocol::hpack::HeaderField>
+announced_trailer_fields(const Message &message) {
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+    const auto                                    announced = announced_trailer_names(message);
+    if (announced.empty()) {
+        return fields;
+    }
+    for (const auto &[name, values] : message.headers()) {
+        std::string name_lower(name.data(), name.size());
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
+        if (!is_trailer_field(name_lower, announced)) {
+            continue;
+        }
+        for (const auto &value : values) {
+            if (HeaderValidator::is_valid_header_field(name_lower, value)) {
+                fields.emplace_back(name_lower, std::string(value.data(), value.size()));
+            }
+        }
+    }
+    return fields;
+}
+
+/**
+ * @brief Take out of a leading header block the fields @p message announces as trailers
+ *        (is_trailer_field): they leave in its trailer section (announced_trailer_fields). Called
+ *        only for a message that carries a `trailer` header, so a message without one pays nothing.
+ */
+template <typename Message>
+void
+remove_announced_trailer_fields(std::vector<qb::protocol::hpack::HeaderField> &leading, const Message &message) {
+    const auto announced = announced_trailer_names(message);
+    if (!announced.empty()) {
+        std::erase_if(leading, [&](const qb::protocol::hpack::HeaderField &f) { return is_trailer_field(f.name, announced); });
+    }
+}
 
 /**
  * @brief Helper class for HTTP/2 error handling and reporting
@@ -712,48 +798,89 @@ public:
     }
 
 protected:
+    /**
+     * @brief Send one header block as a HEADERS frame followed by as many CONTINUATION frames as
+     *        the peer's SETTINGS_MAX_FRAME_SIZE requires (RFC 9113 §4.2, §6.10).
+     * @details @p first_frame_flags (END_STREAM, typically) ride the HEADERS frame; END_HEADERS
+     *          is set on the last frame of the block only. An empty block is one empty HEADERS
+     *          frame. The frames are written back to back, so nothing can interleave with them.
+     *          Every header block this protocol sends -- request and response headers, both
+     *          sides' trailers -- goes through here (Huly QB-522).
+     */
     [[nodiscard]] bool
     send_headers_with_continuation(uint32_t stream_id, uint8_t first_frame_flags, std::vector<uint8_t> &&encoded_header_block) noexcept {
-        const auto  max_fragment_size = static_cast<std::size_t>(std::max<uint32_t>(1, this->get_peer_max_frame_size()));
-        std::size_t offset            = 0;
-        bool        first_frame       = true;
+        const auto        max_fragment_size = static_cast<std::size_t>(std::max<uint32_t>(1, this->get_peer_max_frame_size()));
+        const std::size_t first_size        = std::min(max_fragment_size, encoded_header_block.size());
+        const bool        last_fragment     = first_size == encoded_header_block.size();
 
-        do {
-            const std::size_t remaining      = encoded_header_block.size() - offset;
-            const std::size_t fragment_size  = std::min(max_fragment_size, remaining);
+        Http2FrameData<HeadersFrame> headers_frame_data;
+        headers_frame_data.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
+        headers_frame_data.header.flags = first_frame_flags;
+        if (last_fragment) {
+            headers_frame_data.header.flags |= FLAG_END_HEADERS;
+        } else {
+            headers_frame_data.header.flags &= static_cast<uint8_t>(~FLAG_END_HEADERS);
+        }
+        headers_frame_data.header.set_stream_id(stream_id);
+        headers_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
+        this->_io << headers_frame_data;
+        if (!this->ok()) {
+            return false;
+        }
+        return send_continuation_frames(stream_id, encoded_header_block, first_size);
+    }
+
+    /**
+     * @brief Send a PUSH_PROMISE header block: the PUSH_PROMISE frame (promised stream id + the
+     *        first fragment) followed by CONTINUATION frames, each within the peer's
+     *        SETTINGS_MAX_FRAME_SIZE (RFC 9113 §6.6, §6.10).
+     * @details The 4-octet promised stream id counts against the first frame's size.
+     */
+    [[nodiscard]] bool
+    send_push_promise_with_continuation(uint32_t associated_stream_id, uint32_t promised_stream_id,
+                                        std::vector<uint8_t> &&encoded_header_block) noexcept {
+        const auto max_frame_size =
+            static_cast<std::size_t>(std::max<uint32_t>(PUSH_PROMISE_MIN_PAYLOAD_SIZE + 1, this->get_peer_max_frame_size()));
+        const std::size_t first_size = std::min(max_frame_size - PUSH_PROMISE_MIN_PAYLOAD_SIZE, encoded_header_block.size());
+
+        Http2FrameData<PushPromiseFrame> push_promise_frame_data;
+        push_promise_frame_data.header.type  = static_cast<uint8_t>(FrameType::PUSH_PROMISE);
+        push_promise_frame_data.header.flags = first_size == encoded_header_block.size() ? FLAG_END_HEADERS : 0;
+        push_promise_frame_data.header.set_stream_id(associated_stream_id);
+        push_promise_frame_data.payload.promised_stream_id = promised_stream_id;
+        push_promise_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
+        this->_io << push_promise_frame_data;
+        if (!this->ok()) {
+            return false;
+        }
+        return send_continuation_frames(associated_stream_id, encoded_header_block, first_size);
+    }
+
+    /**
+     * @brief The CONTINUATION frames carrying @p encoded_header_block from @p offset on, each at
+     *        most the peer's SETTINGS_MAX_FRAME_SIZE, END_HEADERS on the last one. Nothing is sent
+     *        when the first frame already carried the whole block.
+     */
+    [[nodiscard]] bool
+    send_continuation_frames(uint32_t stream_id, const std::vector<uint8_t> &encoded_header_block, std::size_t offset) noexcept {
+        const auto max_fragment_size = static_cast<std::size_t>(std::max<uint32_t>(1, this->get_peer_max_frame_size()));
+        while (offset < encoded_header_block.size()) {
+            const std::size_t fragment_size  = std::min(max_fragment_size, encoded_header_block.size() - offset);
             const bool        last_fragment  = (offset + fragment_size) == encoded_header_block.size();
-            const auto        fragment_begin = encoded_header_block.begin() + offset;
-            const auto        fragment_end   = fragment_begin + fragment_size;
+            const auto        fragment_begin = encoded_header_block.begin() + static_cast<std::ptrdiff_t>(offset);
 
-            if (first_frame) {
-                Http2FrameData<HeadersFrame> headers_frame_data;
-                headers_frame_data.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
-                headers_frame_data.header.flags = first_frame_flags;
-                if (last_fragment) {
-                    headers_frame_data.header.flags |= FLAG_END_HEADERS;
-                } else {
-                    headers_frame_data.header.flags &= static_cast<uint8_t>(~FLAG_END_HEADERS);
-                }
-                headers_frame_data.header.set_stream_id(stream_id);
-                headers_frame_data.payload.header_block_fragment.assign(fragment_begin, fragment_end);
-                this->_io << headers_frame_data;
-            } else {
-                Http2FrameData<ContinuationFrame> continuation_frame_data;
-                continuation_frame_data.header.type  = static_cast<uint8_t>(FrameType::CONTINUATION);
-                continuation_frame_data.header.flags = last_fragment ? FLAG_END_HEADERS : 0;
-                continuation_frame_data.header.set_stream_id(stream_id);
-                continuation_frame_data.payload.header_block_fragment.assign(fragment_begin, fragment_end);
-                this->_io << continuation_frame_data;
-            }
-
+            Http2FrameData<ContinuationFrame> continuation_frame_data;
+            continuation_frame_data.header.type  = static_cast<uint8_t>(FrameType::CONTINUATION);
+            continuation_frame_data.header.flags = last_fragment ? FLAG_END_HEADERS : 0;
+            continuation_frame_data.header.set_stream_id(stream_id);
+            continuation_frame_data.payload.header_block_fragment.assign(fragment_begin,
+                                                                         fragment_begin + static_cast<std::ptrdiff_t>(fragment_size));
+            this->_io << continuation_frame_data;
             if (!this->ok()) {
                 return false;
             }
-
             offset += fragment_size;
-            first_frame = false;
-        } while (offset < encoded_header_block.size());
-
+        }
         return true;
     }
 
@@ -985,6 +1112,31 @@ protected:
 
 private:
     /**
+     * @brief The header-block state a HEADERS, PUSH_PROMISE or CONTINUATION frame leaves the
+     *        framer in, once the side protocol has taken its fragment.
+     * @details RFC 9113 §6.10: until a frame carrying END_HEADERS, the next frame on the
+     *          connection must be a CONTINUATION on the same stream; END_HEADERS ends the block.
+     *          The fragment's size plays no part: an EMPTY fragment opens or closes a block
+     *          exactly like a non-empty one. One transition for every such frame and both
+     *          dispatch paths (zero-length payload or not), so an empty final CONTINUATION no
+     *          longer leaves the framer waiting for another one (Huly QB-497) and an empty
+     *          HEADERS without END_HEADERS no longer escapes the CONTINUATION gate.
+     */
+    void
+    track_header_block_after_dispatch() noexcept {
+        if (!this->ok()) {
+            return;
+        }
+        if (_current_frame_header.flags & FLAG_END_HEADERS) {
+            _continuation_required  = false;
+            _continuation_stream_id = 0;
+        } else {
+            _continuation_required  = true;
+            _continuation_stream_id = _current_frame_header.get_stream_id();
+        }
+    }
+
+    /**
      * @brief Handle frames with zero payload
      */
     void
@@ -1016,6 +1168,7 @@ private:
                 Http2FrameData<HeadersFrame> hf;
                 hf.header = _current_frame_header;
                 static_cast<SideProtocol *>(this)->on(std::move(hf));
+                track_header_block_after_dispatch(); // an empty fragment opens a block too
             } break;
 
             case FrameType::DATA: {
@@ -1054,6 +1207,7 @@ private:
                 Http2FrameData<ContinuationFrame> cf;
                 cf.header = _current_frame_header;
                 static_cast<SideProtocol *>(this)->on(std::move(cf));
+                track_header_block_after_dispatch(); // an empty final fragment ends the block too
             } break;
 
             default:
@@ -1174,10 +1328,7 @@ private:
         std::size_t header_block_size = p_len - pad_length;
         headers_f.payload.header_block_fragment.assign(p_data, p_data + header_block_size);
         static_cast<SideProtocol *>(this)->on(std::move(headers_f));
-        if (this->ok()) {
-            _continuation_required  = (_current_frame_header.flags & FLAG_END_HEADERS) == 0;
-            _continuation_stream_id = _continuation_required ? _current_frame_header.get_stream_id() : 0;
-        }
+        track_header_block_after_dispatch();
         return true;
     }
 
@@ -1278,10 +1429,7 @@ private:
         pp_f.payload.header_block_fragment.assign(p_data, p_data + (p_len - pad_length));
 
         static_cast<SideProtocol *>(this)->on(std::move(pp_f));
-        if (this->ok()) {
-            _continuation_required  = (_current_frame_header.flags & FLAG_END_HEADERS) == 0;
-            _continuation_stream_id = _continuation_required ? _current_frame_header.get_stream_id() : 0;
-        }
+        track_header_block_after_dispatch();
         return true;
     }
 
@@ -1366,10 +1514,7 @@ private:
         cont_f.payload.header_block_fragment.assign(payload_data, payload_data + payload_size);
 
         static_cast<SideProtocol *>(this)->on(std::move(cont_f));
-        if (this->ok() && (_current_frame_header.flags & FLAG_END_HEADERS)) {
-            _continuation_required  = false;
-            _continuation_stream_id = 0;
-        }
+        track_header_block_after_dispatch();
         return true;
     }
 

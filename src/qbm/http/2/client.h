@@ -229,6 +229,11 @@ private:
     bool        _reconnect_firing       = false;
     bool        _in_failure_pass        = false;
     bool        _intentional_disconnect = false; ///< disconnect() was asked: the disconnected that follows starts no run (as http1)
+    // An explicit disconnect() of a live connection delivers GOAWAY(NO_ERROR) before the socket
+    // closes (Huly QB-1059): `_graceful_close_pending` while that delivery runs, bounded by
+    // GOAWAY_FLUSH_LIMIT; the epoch ties the limit's timer to the close that armed it.
+    bool                                  _graceful_close_pending = false;
+    std::uint64_t                         _graceful_close_epoch   = 0;
     std::chrono::steady_clock::time_point _reconnect_started_at{};
     qb::duration                          _reconnect_delay{};
 
@@ -298,8 +303,18 @@ public:
      */
     [[nodiscard]] qb::http::async::awaiter<ConnectResult> connect();
 
+    /// How long an explicit disconnect() waits for its GOAWAY to be delivered -- behind whatever the
+    /// connection still had to send -- before it ends the connection anyway: a peer that stopped
+    /// reading cannot hold the close longer (Huly QB-1059).
+    static constexpr qb::duration GOAWAY_FLUSH_LIMIT = std::chrono::seconds(1);
+
     /**
      * @brief Disconnect from server
+     * @details The outstanding requests fail at once (`503`, "Connection closed"). A live connection
+     *          is announced to the server first, as RFC 9113 §6.8 asks: GOAWAY(NO_ERROR) leaves after
+     *          what the connection still had to send, then the sending side is shut down (qb-io ends
+     *          the transport, Huly QB-1060) -- at the latest after GOAWAY_FLUSH_LIMIT, when the
+     *          server no longer reads.
      */
     void disconnect();
 

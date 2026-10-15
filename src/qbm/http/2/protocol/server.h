@@ -87,8 +87,9 @@ private:
     std::uint32_t _control_reply_count      = 0; ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
     std::uint32_t _continuation_frame_count = 0; ///< CONTINUATION frames in the current header block (flood guard)
 
-    std::vector<uint8_t> _current_header_block_fragment; ///< Header block assembly buffer
-    uint32_t             _current_header_stream_id = 0;  ///< Stream ID for header assembly
+    std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
+    uint32_t             _current_header_stream_id = 0;     ///< Stream ID for header assembly
+    bool                 _discarding_header_block  = false; ///< The block in assembly is refused: decode it, drop its fields
 
     int64_t              _connection_send_window;                                                    ///< Connection-level send window
     int64_t              _connection_receive_window          = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE; ///< Connection-level receive window
@@ -426,10 +427,12 @@ public:
         if (it == _server_streams.end()) {
             if (stream_id <= _last_client_initiated_stream_id) {
                 this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS for old/closed stream");
+                this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
             if (_graceful_shutdown_initiated) {
                 this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "New stream during graceful shutdown");
+                this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
             uint32_t active_client_streams = 0;
@@ -447,6 +450,7 @@ public:
             if (active_client_streams >= max_concurrent_from_us) {
                 LOG_HTTP_WARN_PA(stream_id, "Server: Refused new stream. Max concurrent streams limit reached: " << max_concurrent_from_us);
                 this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "Exceeded MAX_CONCURRENT_STREAMS limit");
+                this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
 
@@ -468,11 +472,16 @@ public:
         }
 
         if (stream.state == Http2StreamConcreteState::CLOSED || stream.rst_stream_received || stream.rst_stream_sent) {
+            this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
-        if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE && !stream.trailers_expected) {
-            this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR,
-                                  "Unexpected HEADERS frame after client sent END_STREAM (no trailers expected)");
+        if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
+            // The client ended its side (END_STREAM): a trailer section would have had to come
+            // before it, and nothing but WINDOW_UPDATE, PRIORITY or RST_STREAM may follow -- a
+            // stream error of type STREAM_CLOSED (RFC 9113 §5.1). It used to be PROTOCOL_ERROR
+            // (Huly QB-1058).
+            this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS frame after the client ended the stream");
+            this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
 
@@ -549,6 +558,17 @@ public:
         if (stream_id == 0 || _current_header_stream_id == 0 || stream_id != _current_header_stream_id) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "CONTINUATION frame error (no prior HEADERS or wrong stream_id)");
             this->clear_header_assembly_state(); // Clear any partial state
+            return;
+        }
+
+        if (_discarding_header_block) {
+            // The rest of a refused block: decoded for the HPACK table, never routed.
+            if (++_continuation_frame_count > qb::http2::protocol_limits::MAX_CONTINUATION_FRAMES) {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive CONTINUATION frames in header block");
+                this->clear_header_assembly_state();
+                return;
+            }
+            this->append_discarded_header_fragment(continuation_event.payload.header_block_fragment, end_headers);
             return;
         }
 
@@ -817,94 +837,61 @@ public:
                                                                                           << static_cast<int>(goaway_event.payload.error_code)
                                                                                           << ", Debug: " << debug_data_str);
 
-        _graceful_shutdown_initiated = true;
-        FramerBase::set_last_peer_initiated_stream_id_processed_in_goaway(goaway_event.payload.last_stream_id);
+        // RFC 9113 §6.8: the last-stream-id of a GOAWAY a CLIENT sends is the highest
+        // SERVER-initiated stream -- a push -- it processed or might process. It says nothing
+        // about the client's own requests: their sender still expects their responses. A NO_ERROR
+        // GOAWAY therefore closes the pushes above that bound (never processed) and stops new
+        // streams, and every request already accepted is answered; the connection closes when
+        // the last stream has finished (try_close_stream_context). An error GOAWAY ends the
+        // connection and every stream with it. This used to apply the bound to the CLIENT's
+        // requests, closing the ones above it -- every request, for last-stream-id 0 -- and the
+        // connection before their responses (Huly QB-530).
+        _graceful_shutdown_initiated         = true;
+        const uint32_t last_pushed_stream_id = goaway_event.payload.last_stream_id;
+        FramerBase::set_last_peer_initiated_stream_id_processed_in_goaway(last_pushed_stream_id);
         const ErrorCode error_code = goaway_event.payload.error_code;
 
-        Http2GoAwayEvent event_to_dispatch{error_code, goaway_event.payload.last_stream_id, debug_data_str};
+        Http2GoAwayEvent event_to_dispatch{error_code, last_pushed_stream_id, debug_data_str};
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             this->get_io_handler().on(event_to_dispatch);
         }
 
-        for (auto it_stream = _server_streams.begin(); it_stream != _server_streams.end();) {
-            if (it_stream->first % 2 == 0) { // Server-pushed stream
-                Http2ServerStream &pushed_stream_ref   = it_stream->second;
-                bool               close_pushed_stream = false;
-
-                if (pushed_stream_ref.id > FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway()
-                    && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() != 0) {
-                    // This condition might be too aggressive. GOAWAY's last_stream_id refers to peer-initiated streams.
-                    // A pushed stream (server-initiated) is primarily affected if its *parent* client stream is affected.
-                }
-
-                // More accurately, close pushed stream if its parent client stream is > last_stream_id sent by client in GOAWAY
-                // or if the parent stream is now closed/reset due to this GOAWAY.
-                if (pushed_stream_ref.parent_stream_id > goaway_event.payload.last_stream_id && goaway_event.payload.last_stream_id != 0) {
-                    close_pushed_stream = true;
-                }
-                // Additionally, if the parent stream itself is being cleaned up because it *is* one of the closed client streams:
-                auto parent_client_stream_iter = _server_streams.find(pushed_stream_ref.parent_stream_id);
-                if (parent_client_stream_iter != _server_streams.end()) {
-                    // If parent client stream ID is > last_stream_id from GOAWAY (and it's a client stream)
-                    if (parent_client_stream_iter->first % 2 != 0 && parent_client_stream_iter->first > goaway_event.payload.last_stream_id) {
-                        // This parent client stream will be closed by other logic handling GOAWAY for client streams.
-                        // So, the pushed stream associated with it should also be closed.
-                        close_pushed_stream = true;
-                    }
-                } else {
-                    // Parent stream doesn't exist anymore, so this pushed stream is orphaned.
-                    close_pushed_stream = true;
-                }
-
-                if (close_pushed_stream && pushed_stream_ref.state != Http2StreamConcreteState::CLOSED) {
-                    // QB_LOG_WARN_PA(this->getName(), "Server: Pushed stream " << pushed_stream_ref.id << " (parent: " <<
-                    // pushed_stream_ref.parent_stream_id
-                    //                << ") being closed due to GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id <<
-                    //                ").");
-                    pushed_stream_ref.state      = Http2StreamConcreteState::CLOSED;
-                    pushed_stream_ref.error_code = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::CANCEL : error_code;
-                    Http2StreamErrorEvent push_stream_error{
-                        pushed_stream_ref.id, pushed_stream_ref.error_code, "Pushed stream implicitly closed due to client GOAWAY"
-                    };
-                    if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
-                        this->get_io_handler().on(push_stream_error);
-                    }
-                    it_stream = _server_streams.erase(it_stream); // Erase and advance iterator
-                    continue;
-                }
-            } else if (it_stream->first % 2 != 0) { // Client-initiated stream
-                Http2ServerStream &client_stream_ref = it_stream->second;
-                if (client_stream_ref.id > goaway_event.payload.last_stream_id && client_stream_ref.state != Http2StreamConcreteState::IDLE
-                    && // Don't try to error out streams that never fully started
-                    client_stream_ref.state != Http2StreamConcreteState::CLOSED) {
-                    // QB_LOG_WARN_PA(this->getName(), "Server: Client stream " << client_stream_ref.id
-                    //                << " implicitly closed by GOAWAY from client (last_stream_id: " << goaway_event.payload.last_stream_id <<
-                    //                ").");
-                    client_stream_ref.state               = Http2StreamConcreteState::CLOSED;
-                    client_stream_ref.rst_stream_received = true; // Treat as if RST received from client perspective for this stream
-                    client_stream_ref.error_code          = (error_code == ErrorCode::NO_ERROR) ? ErrorCode::STREAM_CLOSED : error_code;
-                    Http2StreamErrorEvent client_stream_error{
-                        client_stream_ref.id, client_stream_ref.error_code, "Client stream implicitly closed by client GOAWAY"
-                    };
-                    if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
-                        this->get_io_handler().on(client_stream_error);
-                    }
-                    it_stream = _server_streams.erase(it_stream); // Erase and advance iterator
-                    continue;
-                }
+        // Collect first, then close each by fresh lookup: the application observer may act on
+        // the protocol (respond, reset) while we notify it.
+        std::vector<uint32_t> ids_to_close;
+        for (const auto &[sid, stream] : _server_streams) {
+            if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::CLOSED) {
+                continue;
             }
-            ++it_stream;
+            const bool pushed = (sid % 2) == 0;
+            if (error_code != ErrorCode::NO_ERROR || (pushed && sid > last_pushed_stream_id)) {
+                ids_to_close.push_back(sid);
+            }
+        }
+        for (const uint32_t sid : ids_to_close) {
+            auto it = _server_streams.find(sid);
+            if (it == _server_streams.end() || it->second.state == Http2StreamConcreteState::CLOSED) {
+                continue;
+            }
+            const bool      pushed       = (sid % 2) == 0;
+            const ErrorCode stream_error = error_code != ErrorCode::NO_ERROR ? error_code : ErrorCode::CANCEL;
+            // Erased before the observer runs, so nothing it does can reach a dangling stream.
+            _server_streams.erase(it);
+            Http2StreamErrorEvent stream_event{
+                sid, stream_error, pushed ? "Pushed stream not processed by the client (GOAWAY)" : "Stream closed by the client's GOAWAY"
+            };
+            if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
+                this->get_io_handler().on(stream_event);
+            }
         }
 
         if (error_code != ErrorCode::NO_ERROR) {
             _connection_active = false;
             this->not_ok(error_code); // Signal specific error
-        } else {
-            // For NO_ERROR GOAWAY, connection closes once all relevant streams are done.
-            if (this->are_all_relevant_streams_closed(FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway())) {
-                _connection_active = false;
-                this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
-            }
+        } else if (_connection_active && this->are_all_relevant_streams_closed(last_pushed_stream_id)) {
+            // Nothing left to finish: the graceful shutdown is complete at once.
+            _connection_active = false;
+            this->not_ok(ErrorCode::NO_ERROR);
         }
     }
 
@@ -987,8 +974,7 @@ public:
             }
 
             stream.peer_window_size += window_increment;
-            // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " peer window updated from " << old_stream_peer_window << " to
-            // " << stream.peer_window_size);
+            stream.progressed_since_idle_sweep = true; // the client is reading this stream
 
             if (stream.has_pending_data_to_send) {
                 // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " has pending data. Attempting to send.");
@@ -1093,10 +1079,18 @@ public:
         stream.response_to_send   = http_response;
         stream.send_buffer_offset = 0;
 
-        if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
-            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on stream in IDLE or RESERVED_LOCAL state");
+        if (stream.state == Http2StreamConcreteState::IDLE) {
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on stream in IDLE state");
             this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Sending response on stream in invalid state for response.");
             return false;
+        }
+        if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
+            // A promised stream (send_push_promise) is answered here, its documented next step:
+            // sending its HEADERS moves it to half-closed (remote) -- the client never sends on a
+            // pushed stream -- and the response's END_STREAM closes it (RFC 9113 §5.1, §8.4; Huly
+            // QB-529).
+            stream.state               = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+            stream.end_stream_received = true;
         }
 
         if (stream.state == Http2StreamConcreteState::CLOSED || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
@@ -1108,6 +1102,7 @@ public:
         std::vector<qb::protocol::hpack::HeaderField> hf_vector;
         hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
         std::optional<std::uint64_t> declared_content_length;
+        bool                         announces_trailers = false;
         for (const auto &header_item : http_response.headers()) { // Assuming http_response.headers() gives iterable key-value pairs
             std::string name_lower = header_item.first;
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
@@ -1137,12 +1132,13 @@ public:
                 }
                 hf_vector.emplace_back(name_lower, value);
             }
-            // Record headers sent in this initial HEADERS frame so the trailer
-            // pass (which iterates the same response headers and skips those
-            // present here, keyed by original name) does not re-send them as
-            // trailers. Previously this set was never populated, so every
-            // response header was duplicated into the trailers.
-            stream.headers_sent_in_initial_frame.insert(header_item.first);
+            announces_trailers = announces_trailers || name_lower == qb::http::well_known::TRAILER_SV;
+        }
+        // The fields the `trailer` header announces leave in the trailer section after the body
+        // (try_send_pending_data_for_stream), not here: they used to be sent in this block, and
+        // the trailer block then went out empty (Huly QB-1058). Same contract as HTTP/3.
+        if (announces_trailers) {
+            remove_announced_trailer_fields(hf_vector, http_response);
         }
 
         const auto &body_pipe        = http_response.body().raw();
@@ -1174,7 +1170,10 @@ public:
         }
         uint8_t header_flags = 0;
 
-        bool has_body = !body_pipe.empty();
+        // A response to HEAD carries the representation's metadata -- content-length included --
+        // and no content (RFC 9110 §9.3.2): its HEADERS end the stream even when the handler filled
+        // the body to compute that metadata, as the HTTP/1.1 and HTTP/3 paths do (Huly QB-527).
+        bool has_body = !body_pipe.empty() && !response_to_head;
 
         if (!has_body) {
             header_flags |= FLAG_END_STREAM; // No body, HEADERS ends the stream
@@ -1187,6 +1186,7 @@ public:
             LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Failed to send response HEADERS");
             return false;
         }
+        stream.progressed_since_idle_sweep = true;
 
         // Update stream state AFTER successful send of HEADERS frame
         if (header_flags & FLAG_END_STREAM) {
@@ -1274,6 +1274,8 @@ public:
         Http2ServerStream promised_stream(promised_stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
         promised_stream.state            = Http2StreamConcreteState::RESERVED_LOCAL;
         promised_stream.parent_stream_id = associated_stream_id;
+        // The promised request's method: send_response() reads it (a pushed HEAD gets no body).
+        promised_stream.assembled_request.method() = promised_request_pseudo_headers.method();
 
         // Emplace the stream
         auto emp_res = _server_streams.emplace(promised_stream_id, std::move(promised_stream));
@@ -1281,9 +1283,6 @@ public:
             // QB_LOG_ERROR_PA(this->getName(), "Server: Failed to emplace promised stream " << promised_stream_id << " context.");
             return PushPromiseFailureReason::INTERNAL_ERROR;
         }
-
-        Http2FrameData<PushPromiseFrame> pp_frame_data;
-        pp_frame_data.payload.promised_stream_id = promised_stream_id;
 
         std::vector<hpack::HeaderField> hf_vector;
         // According to RFC 7540 Section 8.2:
@@ -1340,16 +1339,10 @@ public:
             return PushPromiseFailureReason::INTERNAL_HPACK_ERROR;
         }
 
-        pp_frame_data.payload.header_block_fragment = std::move(encoded_headers);
-
-        FrameHeader header_to_send;
-        header_to_send.type  = static_cast<uint8_t>(FrameType::PUSH_PROMISE);
-        header_to_send.flags = FLAG_END_HEADERS; // PUSH_PROMISE contains a full header block, so END_HEADERS implicitly
-        header_to_send.set_stream_id(associated_stream_id);
-        pp_frame_data.header = header_to_send;
-        this->_io << pp_frame_data;
-
-        if (!this->ok()) {                             // Check if the send operation itself failed (e.g. underlying transport error)
+        // The promised request's header block, split over CONTINUATION frames past the peer's
+        // SETTINGS_MAX_FRAME_SIZE like every other header block (Huly QB-522).
+        if (!this->send_push_promise_with_continuation(associated_stream_id, promised_stream_id, std::move(encoded_headers))
+            || !this->ok()) {                          // Check if the send operation itself failed (e.g. underlying transport error)
             _server_streams.erase(promised_stream_id); // Clean up if send failed
             // The not_ok() might have been set by the transport, leading to CONNECTION_INACTIVE on next attempt
             return PushPromiseFailureReason::CONNECTION_INACTIVE; // Or a more generic send error
@@ -1364,13 +1357,20 @@ public:
      * Removes streams that have been idle for too long or incomplete for too long.
      * This prevents resource exhaustion from malicious clients opening many streams.
      *
+     * A stream's idle time runs from its last real progress -- response HEADERS or DATA sent, a
+     * stream WINDOW_UPDATE received -- as seen by the sweep that observed it (the frame path only
+     * marks the stream, the sweep stamps the time): a response still progressing is not idle
+     * (Huly QB-531). A request not yet complete is also bounded by its age since the stream
+     * opened, whatever happened on it, so a slow upload cannot hold a stream indefinitely.
+     *
      * @param max_idle Maximum idle time before cleanup (default: 30s)
-     * @param max_incomplete Maximum time for incomplete streams (default: 10s)
+     * @param max_incomplete Maximum age of a stream whose request is not complete (default: 10s)
      * @return Number of streams cleaned up
      */
     uint32_t
     cleanup_idle_streams(qb::duration max_idle = std::chrono::seconds(30), qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
-        uint32_t cleaned_count = 0;
+        uint32_t   cleaned_count = 0;
+        const auto now           = std::chrono::steady_clock::now();
 
         for (auto it = _server_streams.begin(); it != _server_streams.end();) {
             auto    &stream    = it->second;
@@ -1382,8 +1382,12 @@ public:
                 continue;
             }
 
-            auto idle_time         = stream.get_idle_time();
-            auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
+            if (stream.progressed_since_idle_sweep) {
+                stream.progressed_since_idle_sweep = false;
+                stream.last_activity               = now;
+            }
+            const auto idle_time         = now - stream.last_activity;
+            const auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
 
             // Check for incomplete streams (not dispatched yet)
             bool is_incomplete = !stream.request_dispatched
@@ -1391,7 +1395,7 @@ public:
 
             // Check for idle timeout
             bool should_cleanup = false;
-            if (is_incomplete && idle_time > max_incomplete) {
+            if (is_incomplete && now - stream.created_at > max_incomplete) {
                 LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << idle_time_seconds << "s)");
                 should_cleanup = true;
             } else if (idle_time > max_idle) {
@@ -1538,6 +1542,53 @@ private:
     clear_header_assembly_state() noexcept {
         _current_header_block_fragment.clear();
         _current_header_stream_id = 0;
+        _discarding_header_block  = false;
+    }
+
+    /**
+     * @brief Start a header block the server refuses: it is decoded, and its fields dropped.
+     * @details HPACK is one compression context per connection: the client's encoder indexed
+     *          this block's fields whether or not the request is admitted, and its later blocks
+     *          reference them. A refused HEADERS -- over the concurrency cap, during shutdown, on
+     *          a closed or reset stream, after END_STREAM -- is therefore assembled across its
+     *          CONTINUATION frames under the same size and count limits and decoded like any
+     *          other (RFC 9113 §4.3, Huly QB-534). Nothing is routed. A block that does not
+     *          decode is a connection COMPRESSION_ERROR.
+     */
+    void
+    begin_discarded_header_block(uint32_t stream_id, const std::vector<uint8_t> &fragment, bool end_headers) noexcept {
+        if (!this->ok() || !_connection_active) {
+            return; // the connection is going away: its compression state no longer matters
+        }
+        _current_header_block_fragment.clear();
+        _current_header_stream_id = stream_id;
+        _discarding_header_block  = true;
+        _continuation_frame_count = 0;
+        this->append_discarded_header_fragment(fragment, end_headers);
+    }
+
+    /**
+     * @brief Add a fragment to the refused block in assembly; at END_HEADERS decode it through
+     *        the connection's decoder and drop the fields.
+     */
+    void
+    append_discarded_header_fragment(const std::vector<uint8_t> &fragment, bool end_headers) noexcept {
+        _current_header_block_fragment.insert(_current_header_block_fragment.end(), fragment.begin(), fragment.end());
+        if (_current_header_block_fragment.size() > qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 header block exceeds configured limit");
+            this->clear_header_assembly_state();
+            return;
+        }
+        if (!end_headers) {
+            return;
+        }
+        std::vector<qb::protocol::hpack::HeaderField> dropped;
+        bool                                          incomplete = false;
+        const bool decoded = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete) && !incomplete;
+        this->clear_header_assembly_state();
+        if (!decoded) {
+            this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
+        }
     }
 
     /**
@@ -1559,15 +1610,14 @@ private:
         qb::http::Headers current_headers_decoded; // Decoded headers for this block
         bool              possibly_incomplete_hpack = false;
 
-        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)) {
-            // QB_LOG_ERROR_PA(this->getName(), "Stream " << stream.id << ": HPACK decoding failed.");
-            this->on_stream_error(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
-            return false;
-        }
-        if (possibly_incomplete_hpack) {
-            // QB_LOG_WARN_PA(this->getName(), "Stream " << stream.id << ": HPACK decoding possibly incomplete.");
-            // Decide if this is fatal. For now, treat as COMPRESSION_ERROR.
-            this->on_stream_error(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding possibly incomplete");
+        // A block that does not decode leaves the decoder's dynamic table wherever the failure
+        // stopped it -- possibly after entries the fields ahead of it added -- so the connection's
+        // compression context is no longer the client's: a connection error of type
+        // COMPRESSION_ERROR (RFC 9113 §4.3, Huly QB-533), never a stream reset that would let
+        // decoding go on. A field that decodes but is invalid stays a stream error below.
+        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)
+            || possibly_incomplete_hpack) {
+            this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
             return false;
         }
 
@@ -1834,6 +1884,7 @@ private:
                 return false;                            // Indicate send failure
             }
 
+            stream.progressed_since_idle_sweep = true;
             if (header_to_send.flags & FLAG_END_STREAM) {
                 stream.end_stream_sent = true;
                 stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
@@ -1981,20 +2032,13 @@ private:
                 _server_streams.erase(it);
                 LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Stream context cleaned up successfully");
 
-                if (_graceful_shutdown_initiated && this->_last_peer_initiated_stream_id_processed_in_goaway != 0) {
-                    LOG_HTTP_DEBUG("ServerHttp2Protocol: Checking if graceful shutdown can complete after stream " << stream_id << " cleanup");
-                    if (this->are_all_relevant_streams_closed(FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway())) {
-                        _connection_active = false;
-                        LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all relevant streams closed");
-                        this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
-                    }
-                } else if (_graceful_shutdown_initiated && _server_streams.empty()
-                           && FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway() == 0) {
-                    // We initiated GOAWAY (so last_peer_id_processed might be 0 from our side if we didn't process any from peer before
-                    // deciding to goaway) and all our streams are now gone.
+                // The drain a client's NO_ERROR GOAWAY started completes with the last stream it
+                // left us, whatever its id (our own GOAWAY deactivated the connection when sent).
+                if (_graceful_shutdown_initiated && _connection_active
+                    && this->are_all_relevant_streams_closed(FramerBase::get_last_peer_initiated_stream_id_processed_in_goaway())) {
                     _connection_active = false;
                     LOG_HTTP_INFO("ServerHttp2Protocol: Graceful shutdown complete - all streams closed");
-                    // this->not_ok() was already called by send_goaway_and_close.
+                    this->not_ok(ErrorCode::NO_ERROR); // Graceful shutdown complete
                 }
             } else {
                 LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream not ready for cleanup yet");
@@ -2106,7 +2150,7 @@ private:
         // This `new_size` is client's SETTINGS_INITIAL_WINDOW_SIZE
         // It affects how much data *we* (server) can send on *new* streams initiated by client
         // or on PUSH_PROMISE streams we initiate.
-        int64_t delta             = static_cast<int64_t>(new_size) - static_cast<int64_t>(_initial_peer_window_size);
+        const uint32_t old_size   = _initial_peer_window_size;
         _initial_peer_window_size = new_size;
 
         // Snapshot stream ids first: try_send_pending_data_for_stream may flush a
@@ -2122,14 +2166,15 @@ private:
             if (it == _server_streams.end())
                 continue; // erased by an earlier flush in this loop
             Http2ServerStream &stream = it->second;
-            // Affects streams where server is sending data: OPEN, HALF_CLOSED_LOCAL (server sending, client receiving), RESERVED_LOCAL (for
-            // PUSH)
-            if (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL
-                || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
-                int64_t old_stream_peer_window = stream.peer_window_size;
-                stream.peer_window_size += delta;
+            // RFC 9113 §6.9.2 adjusts EVERY stream window the endpoint maintains, and the one that
+            // matters most is the stream answering a request that has already ended:
+            // HALF_CLOSED_REMOTE, the state of nearly every response. It used to be skipped, so a
+            // response waiting for credit stayed stuck until a stream WINDOW_UPDATE the client had
+            // no reason to send (Huly QB-528). Only a closed or reset stream sends nothing more.
+            if (stream.state != Http2StreamConcreteState::CLOSED && !stream.rst_stream_sent && !stream.rst_stream_received) {
+                const int64_t old_stream_peer_window = stream.peer_window_size;
 
-                if (stream.peer_window_size > static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT)) {
+                if (!stream.update_peer_window_size(new_size, old_size)) {
                     this->send_rst_stream(stream.id, ErrorCode::FLOW_CONTROL_ERROR,
                                           "Stream window overflow (server side) due to client SETTINGS_INITIAL_WINDOW_SIZE change");
                     this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR,
@@ -2265,6 +2310,7 @@ private:
                 // Decrement flow control windows by actual data chunk size
                 stream.peer_window_size -= current_chunk_size;
                 this->_connection_send_window -= current_chunk_size;
+                stream.progressed_since_idle_sweep = true;
                 // REVERTED PADDING LOGIC (flow control decrement)
 
                 if (data_frame_event.header.flags & FLAG_END_STREAM) {
@@ -2284,50 +2330,19 @@ private:
         if (body_fully_sent_or_empty && stream.is_trailers && !stream.end_stream_sent) {
             // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": All body sent, proceeding to send trailers.");
 
-            std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers;
-            const qb::http::Response                     &original_response = stream.response_to_send;
+            // Exactly the fields the `trailer` header announces, which send_response() kept out of
+            // the leading HEADERS (Huly QB-1058).
+            std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers = announced_trailer_fields(stream.response_to_send);
 
-            for (const auto &header_item : original_response.headers()) {
-                if (stream.headers_sent_in_initial_frame.count(header_item.first))
-                    continue;
-                std::string name_lower = header_item.first;
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-
-                // Standard pseudo-headers and connection-specific headers are forbidden in trailers
-                if (header_item.first.empty() || header_item.first[0] == ':'
-                    || HeaderValidator::is_forbidden_trailer_header(name_lower)) { // The "Trailer" header itself shouldn't be a trailer
-                    continue;
-                }
-                for (const auto &value : header_item.second) {
-                    if (!HeaderValidator::is_valid_header_field(header_item.first, value)) {
-                        continue;
-                    }
-                    hf_vector_trailers.push_back({std::string(header_item.first), value});
-                }
+            // Trailers always end the stream; a block larger than the peer's frame size is split
+            // over CONTINUATION frames (Huly QB-522).
+            std::vector<uint8_t> encoded_trailers;
+            if (!hf_vector_trailers.empty() && !_hpack_encoder.encode(hf_vector_trailers, encoded_trailers)) {
+                send_rst_stream(stream_id_param, ErrorCode::INTERNAL_ERROR, "HPACK trailer encoding error");
+                return; // Stop processing for this stream
             }
 
-            Http2FrameData<HeadersFrame> trailers_frame_event;
-            trailers_frame_event.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
-            trailers_frame_event.header.flags = FLAG_END_HEADERS | FLAG_END_STREAM; // Trailers always end the stream
-            trailers_frame_event.header.set_stream_id(stream_id_param);
-
-            if (!hf_vector_trailers.empty()) {
-                // QB_LOG_TRACE_PA(this->getName(), "Server Stream " << stream_id_param << ": Encoding " << hf_vector_trailers.size() << "
-                // trailer fields.");
-                if (_hpack_encoder.encode(hf_vector_trailers, trailers_frame_event.payload.header_block_fragment)) {
-                    // Successfully encoded trailers
-                } else {
-                    // QB_LOG_ERROR_PA(this->getName(), "Server Stream " << stream_id_param << ": HPACK trailer encoding error.");
-                    send_rst_stream(stream_id_param, ErrorCode::INTERNAL_ERROR, "HPACK trailer encoding error");
-                    return; // Stop processing for this stream
-                }
-            } else {
-                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": No actual trailer fields to send, sending empty
-                // HEADERS with END_STREAM for trailers."); Payload remains empty for empty trailers frame
-            }
-
-            this->_io << trailers_frame_event;
-            if (this->ok()) {
+            if (this->send_headers_with_continuation(stream_id_param, FLAG_END_STREAM, std::move(encoded_trailers))) {
                 stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
                 stream.end_stream_sent = true;
                 stream.is_trailers     = false; // Trailers have been handled
@@ -2414,23 +2429,21 @@ private:
      * @return true if all relevant streams are closed
      */
     [[nodiscard]] bool
-    are_all_relevant_streams_closed(uint32_t last_known_stream_id) const noexcept {
-        // Specific implementation for server-side graceful shutdown.
-        // Checks if all streams up to and including last_known_stream_id that were
-        // initiated by the peer (client) are in a closed state.
+    are_all_relevant_streams_closed(uint32_t /*last_known_stream_id*/) const noexcept {
+        // During the drain a client's NO_ERROR GOAWAY starts, everything still open must finish:
+        // the client's requests whatever their id -- the GOAWAY's last-stream-id bounds the
+        // server's own streams, not them -- and the pushes at or below that bound, the ones above
+        // it having been closed on receipt (Huly QB-530).
         if (_graceful_shutdown_initiated) {
             for (const auto &pair : _server_streams) {
                 const Http2ServerStream &stream = pair.second;
-                // Check client-initiated streams (odd IDs) up to the last ID client acknowledged processing.
-                if (stream.id % 2 != 0 && stream.id <= last_known_stream_id) {
-                    if (stream.state != Http2StreamConcreteState::CLOSED && stream.state != Http2StreamConcreteState::IDLE
-                        && // IDLE might be considered effectively closed for new work
-                        !stream.rst_stream_sent && !stream.rst_stream_received) {
-                        return false; // Found an active client-initiated stream that should be closed.
-                    }
+                if (stream.state != Http2StreamConcreteState::CLOSED && stream.state != Http2StreamConcreteState::IDLE
+                    && // IDLE might be considered effectively closed for new work
+                    !stream.rst_stream_sent && !stream.rst_stream_received) {
+                    return false; // A stream is still to finish.
                 }
             }
-            return true; // All relevant client-initiated streams are closed.
+            return true;
         }
         return false; // Not in graceful shutdown or no streams to check in that context
     }

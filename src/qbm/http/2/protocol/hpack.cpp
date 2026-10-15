@@ -20,6 +20,8 @@
  */
 #include "./hpack.h"
 
+#include <algorithm>
+
 namespace qb::protocol::hpack {
 
 DynamicTable::AddResult
@@ -410,21 +412,55 @@ Encoder::encode_string_literal(std::vector<uint8_t> &buffer, std::string_view st
     _stats.bytes_encoded += str.length();
 }
 
+void
+Encoder::apply_table_size() {
+    const std::size_t size = std::min(_own_max_dynamic_table_octets, _peer_max_dynamic_table_octets);
+    if (size == _dynamic_table.max_byte_size()) {
+        return; // nothing changed, nothing to announce
+    }
+    _stats.dynamic_table_evictions += _dynamic_table.set_max_byte_size(size);
+    _pending_min_table_size    = _table_size_update_pending ? std::min(_pending_min_table_size, size) : size;
+    _table_size_update_pending = true;
+}
+
 bool
 Encoder::encode(const std::vector<HeaderField> &headers_to_encode, std::vector<uint8_t> &out_buffer) {
+    // Validate the whole list before writing a byte or touching the table: a refused list must
+    // leave the encoder exactly as the peer's decoder, which never receives it, believes it is
+    // (Huly QB-563). The fields below are then known valid.
+    for (const auto &header_field : headers_to_encode) {
+        if (!header_validation::is_valid_header_field(header_field)) [[unlikely]] {
+            return false;
+        }
+    }
+
     std::size_t initial_size = out_buffer.size();
+
+    // RFC 7541 §4.2: a table size change since the previous block is announced at the start of
+    // this one -- the smallest size reached first when the size moved more than once.
+    if (_table_size_update_pending) [[unlikely]] {
+        const std::size_t final_size = _dynamic_table.max_byte_size();
+        if (_pending_min_table_size < final_size) {
+            encode_integer(out_buffer, static_cast<uint8_t>(InstructionType::DYNAMIC_TABLE_SIZE_UPDATE), 5, _pending_min_table_size);
+        }
+        encode_integer(out_buffer, static_cast<uint8_t>(InstructionType::DYNAMIC_TABLE_SIZE_UPDATE), 5, final_size);
+        _table_size_update_pending = false;
+    }
 
     for (const auto &header_field : headers_to_encode) {
         const std::string &name  = header_field.name;
         const std::string &value = header_field.value;
 
-        // Validate header field
-        if (!header_validation::is_valid_header_field(header_field)) {
-            return false;
-        }
+        // A field the caller marked never-indexed stays a literal never indexed whatever the
+        // tables hold: an indexed representation would drop the marker every intermediary must
+        // keep (RFC 7541 §6.2.3, Huly QB-526). So an exact match is used only for an unmarked
+        // field -- tested on the match, off the common path. (A default-sensitive name needs no
+        // such test: it is never inserted in the dynamic table, and its static entries only match
+        // an empty value, which hides nothing.)
+        const bool marked_never_indexed = header_field.sensitive;
 
         // Try to find exact match in static table
-        if (auto static_index = static_table::find_exact_match(name, value)) {
+        if (auto static_index = static_table::find_exact_match(name, value); static_index && !marked_never_indexed) {
             encode_integer(out_buffer, static_cast<uint8_t>(InstructionType::INDEXED_HEADER_FIELD), 7, *static_index);
             _stats.static_table_hits++;
             continue;
@@ -441,7 +477,7 @@ Encoder::encode(const std::vector<HeaderField> &headers_to_encode, std::vector<u
         for (size_t i = 0; i < _dynamic_table.size(); ++i) {
             if (_dynamic_table[i].name == name) {
                 dynamic_name_idx = STATIC_TABLE.size() + i + 1;
-                if (_dynamic_table[i].value == value) {
+                if (_dynamic_table[i].value == value && !marked_never_indexed) {
                     // Exact match found - can stop here
                     encode_integer(out_buffer, static_cast<uint8_t>(InstructionType::INDEXED_HEADER_FIELD), 7, STATIC_TABLE.size() + i + 1);
                     found_in_dynamic_full = true;
@@ -454,7 +490,7 @@ Encoder::encode(const std::vector<HeaderField> &headers_to_encode, std::vector<u
             continue;
 
         // Determine encoding strategy
-        bool is_sensitive          = header_field.sensitive || header_field.is_sensitive_by_default();
+        bool is_sensitive          = marked_never_indexed || header_field.is_sensitive_by_default();
         bool is_pseudo             = header_field.is_pseudo_header();
         bool use_never_indexed     = is_sensitive || is_pseudo;
         bool can_be_added_to_table = header_field.hpack_size() <= _dynamic_table.max_byte_size() && !is_sensitive && !is_pseudo;

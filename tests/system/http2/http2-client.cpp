@@ -51,6 +51,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -61,6 +62,7 @@
 #include <qbm/http/http.h> // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
 
 #include <qb/io/tcp/listener.h>
+#include <qb/io/tcp/ssl/listener.h>
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
@@ -894,7 +896,7 @@ TEST_F(Http2ClientTest, Http1FallbackPostEchoesBodyOverAlpn) {
 // `on(disconnected&&)` must cancel every still-open stream context and clear
 // the context map. We force an in-flight stream by issuing a request whose
 // handler the server never completes, wait until that Context is retained,
-// then drop the transport from under it.
+// then disconnect the client from under it.
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
@@ -918,9 +920,9 @@ TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
     EXPECT_EQ(client->get_active_request_count(), 1u);
     EXPECT_EQ(response_count.load(), 0);
 
-    // A high-level disconnect schedules local disposal; explicitly shut down
-    // the transport to deliver peer EOF for this server-side cancellation test.
-    ASSERT_EQ(client->transport().disconnect(), 0);
+    // disconnect() alone: its deferred disposal closes the transport, the peer sees EOF and
+    // cancels the stream. It used to leave the socket open -- and the server's context alive --
+    // until the client connected again or was destroyed (Huly QB-1021).
     client->disconnect();
 
     ASSERT_TRUE(ServerThread::pump_until([&] {
@@ -935,11 +937,62 @@ TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
     EXPECT_FALSE(response.body().template as<std::string>().empty());
 }
 
-// A batch whose size exceeds the outstanding-request bound is rejected up-front:
-// the call returns false and the callback fires synchronously with a 503 per
-// request (no connection, no event loop needed). Mirrors the single-request
-// limit guard, on the batch path.
-TEST_F(Http2ClientTest, BatchExceedingPendingLimitIsRejectedWith503) {
+} // namespace
+
+// Test seam (declared by the protocol): jump the client stream-id counter to the 31-bit bound.
+template <>
+struct qb::protocol::http2::ProtocolTestPeer<qb::http2::Client::H2Protocol> {
+    static void
+    set_next_stream_id(qb::http2::Client::H2Protocol &protocol, uint32_t id) {
+        protocol._next_client_stream_id = id;
+    }
+};
+
+namespace {
+
+// A connection that has used its last client stream id (2^31-1, RFC 9113 §5.1.1)
+// is drained like a graceful GOAWAY: the request on the last id is answered on it,
+// the next one waits and is sent on stream 1 of a new connection (Huly QB-525).
+// It used to go out as stream 2^31+1, masked to 1 on the wire: the server reset a
+// stream it had already seen and the request never completed.
+TEST_F(Http2ClientTest, ExhaustedStreamIdsRenewTheConnection) {
+    auto client    = make_test_client();
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+
+    auto *protocol = dynamic_cast<qb::http2::Client::H2Protocol *>(client->protocol());
+    ASSERT_NE(protocol, nullptr);
+    qb::protocol::http2::ProtocolTestPeer<qb::http2::Client::H2Protocol>::set_next_stream_id(*protocol, 0x7FFFFFFFu);
+
+    std::vector<qb::http::Response> responses;
+    for (int i = 0; i < 2; ++i) {
+        qb::http::Request request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri("/api/test");
+        ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) { responses.push_back(std::move(r)); }));
+    }
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return responses.size() == 2; })) << responses.size() << " response(s)";
+    for (const auto &r : responses) {
+        EXPECT_EQ(r.status(), qb::http::status::OK);
+        EXPECT_EQ(r.body().template as<std::string>(), "HTTP/2 GET Success");
+    }
+    ASSERT_TRUE(ServerThread::pump_until([&] { return client->is_connected(); }));
+    auto *renewed = dynamic_cast<qb::http2::Client::H2Protocol *>(client->protocol());
+    ASSERT_NE(renewed, nullptr);
+    EXPECT_EQ(renewed->last_initiated_stream_id(), 1u) << "the second request opened stream 1 of a new connection";
+    client->disconnect();
+}
+
+// A batch is admitted member by member, as push_request admits one: the members
+// within the outstanding-request bound are sent, a member past it is answered
+// 503 at its index before anything exists for it, and the callback runs once,
+// with every response in request order. push_requests returns false, as
+// push_request does for a request the bound refuses. The whole batch used to be
+// refused up front, its admissible members included (Huly QB-1063): HTTP/1 and
+// HTTP/3 (Huly QB-499) admit member by member.
+TEST_F(Http2ClientTest, BatchPastThePendingLimitRefusesOnlyTheMembersOverIt) {
     auto client = make_test_client();
     client->set_max_pending_requests(2);
 
@@ -951,17 +1004,28 @@ TEST_F(Http2ClientTest, BatchExceedingPendingLimitIsRejectedWith503) {
         reqs.push_back(std::move(r));
     }
 
-    bool                            done = false;
+    int                             calls = 0;
     std::vector<qb::http::Response> out;
     EXPECT_FALSE(client->push_requests(reqs, [&](std::vector<qb::http::Response> rs) {
-        out  = std::move(rs);
-        done = true;
-    }));
-    ASSERT_TRUE(done); // rejection callback is synchronous
+        out = std::move(rs);
+        ++calls;
+    })) << "one member was refused by the bound";
+    EXPECT_EQ(calls, 0) << "two members were admitted: the batch waits for their responses";
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return calls > 0; }));
     ASSERT_EQ(out.size(), 3u);
-    for (auto &r : out) {
-        EXPECT_EQ(r.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    for (std::size_t i = 0; i < 2; ++i) {
+        EXPECT_EQ(out[i].status(), qb::http::status::OK) << "member " << i;
+        EXPECT_EQ(out[i].body().template as<std::string>(), "HTTP/2 GET Success") << "member " << i;
     }
+    EXPECT_EQ(out[2].status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(out[2].body().template as<std::string>(), "HTTP/2 client pending request limit reached");
+    for (int pass = 0; pass < 20; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls, 1);
+    client->disconnect();
 }
 
 // Connecting to a port with no listener fails via the transport connect-completion
@@ -991,7 +1055,7 @@ TEST_F(Http2ClientTest, ConnectToRefusedPortFails) {
 
 // A single request that would exceed the outstanding-request bound is rejected
 // synchronously with a 503 and push_request returns false — the single-request
-// twin of BatchExceedingPendingLimitIsRejectedWith503.
+// twin of BatchPastThePendingLimitRefusesOnlyTheMembersOverIt.
 TEST_F(Http2ClientTest, SingleRequestOverPendingLimitIsRejectedWith503) {
     auto client = make_test_client();
     client->set_max_pending_requests(0); // the very first push already exceeds the bound
@@ -1122,6 +1186,49 @@ TEST_F(Http2ClientTest, BatchWithInvalidMemberPreservesOrderAndErrors) {
     EXPECT_EQ(out[1].status(), qb::http::status::OK);
     EXPECT_EQ(out[1].body().template as<std::string>(), "HTTP/2 GET Success");
     client->disconnect();
+}
+
+// A batch the connection fails under keeps what it received and answers the rest
+// with 503, through ONE callback: the empty 200 the server sent stays a 200, the
+// invalid member keeps its 400, the member never answered gets 503. The failure
+// pass used to hand that member over as a default-constructed Response -- a 200
+// with no body, indistinguishable from a success (Huly QB-495).
+TEST_F(Http2ClientTest, BatchFailureKeepsReceivedResponsesAndAnswersTheRestWith503) {
+    auto client = make_test_client();
+
+    std::vector<qb::http::Request> reqs(3);
+    reqs[0].method() = qb::http::Method::HEAD;
+    reqs[0].uri()    = qb::io::uri("/api/head-metadata"); // answered: 200, no body
+    reqs[1].method() = qb::http::Method::GET;
+    reqs[1].uri()    = qb::io::uri("https://example.invalid:8443/api/test"); // refused: 400
+    reqs[2].method() = qb::http::Method::GET;
+    reqs[2].uri()    = qb::io::uri("/api/hang"); // never answered
+
+    std::atomic<int>                calls{0};
+    std::vector<qb::http::Response> out;
+    ASSERT_TRUE(client->push_requests(std::move(reqs), [&](std::vector<qb::http::Response> rs) {
+        out = std::move(rs);
+        ++calls;
+    }));
+    client->connect(nullptr);
+
+    // The HEAD answer is in (one request still active) and the hang is routed.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == 1 && client->get_active_request_count() == 1; }));
+    EXPECT_EQ(calls.load(), 0);
+    client->disconnect();
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return calls.load() == 1; }));
+    for (int pass = 0; pass < 50; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls.load(), 1);
+    ASSERT_EQ(out.size(), 3u);
+    EXPECT_EQ(out[0].status(), qb::http::status::OK);
+    EXPECT_EQ(out[0].header("x-protocol"), "HTTP/2") << "the 200 the server sent";
+    EXPECT_TRUE(out[0].body().empty());
+    EXPECT_EQ(out[1].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(out[2].status(), qb::http::status::SERVICE_UNAVAILABLE) << "an unanswered member is not a 200";
+    EXPECT_FALSE(out[2].body().template as<std::string>().empty());
 }
 
 // With the concurrent-stream cap set to 1, three requests drain one at a time:
@@ -2630,3 +2737,451 @@ TEST(Http2ServerLifecycle, DrainReclaimsMoreThanFiftyContextsFromValidWavesAcros
     client->disconnect();
     ServerThread::pump_until([&] { return !client->is_connected(); });
 }
+
+// ===========================================================================
+// An explicit disconnect() announces the close (RFC 9113 §6.8): the peer reads
+// GOAWAY(NO_ERROR) before the end of the connection (Huly QB-1059). A peer that
+// has stopped reading cannot hold the close: it ends within the flush limit.
+// Both run against a minimal TLS + h2 peer whose reads the test controls.
+// ===========================================================================
+namespace http2_client_goaway_test {
+
+/// One-connection TLS + h2 peer on its own thread (non-blocking sockets, polled, every wait bounded):
+/// it negotiates ALPN h2, answers the client's SETTINGS with its own -- in Silent mode a 2^31-1 initial
+/// window and connection window, so the client can queue far more than the socket buffers hold -- and
+/// then records every frame until EOF (Reading) or stops reading once its SETTINGS are acknowledged
+/// (Silent) until released. Once the client's GOAWAY has arrived, the end of the connection is read
+/// from the socket itself, so a clean EOF (the client's FIN) and a reset are told apart. Silent also
+/// accepts the client's next connection and completes its TLS handshake, so the moment the client
+/// reconnects after a disconnect() -- after its previous transport was disposed -- is observable.
+class RawH2Peer {
+public:
+    enum class Mode { Reading, Silent };
+    struct Frame {
+        uint8_t              type      = 0;
+        uint8_t              flags     = 0;
+        uint32_t             stream_id = 0;
+        std::vector<uint8_t> payload;
+    };
+
+    explicit RawH2Peer(Mode mode)
+        : _mode(mode) {
+        _listener.init(qb::io::ssl::Context::server(qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()).alpn({"h2"}));
+        if (_listener.listen_v4(0, "127.0.0.1") != 0) {
+            return;
+        }
+        _listener.set_nonblocking(true);
+        _port   = _listener.local_endpoint().port();
+        _thread = std::thread([this] { run(); });
+    }
+    ~RawH2Peer() {
+        _release = true;
+        if (_thread.joinable()) {
+            _thread.join();
+        }
+    }
+    RawH2Peer(const RawH2Peer &)            = delete;
+    RawH2Peer &operator=(const RawH2Peer &) = delete;
+
+    [[nodiscard]] uint16_t
+    port() const noexcept {
+        return _port;
+    }
+    /// The client acknowledged the peer's SETTINGS: it has applied them.
+    [[nodiscard]] bool
+    settings_acked() const noexcept {
+        return _settings_acked.load();
+    }
+    [[nodiscard]] bool
+    eof() const noexcept {
+        return _eof.load();
+    }
+    /// The connection ended with a reset (ECONNRESET), not the client's FIN.
+    [[nodiscard]] bool
+    reset() const noexcept {
+        return _reset.load();
+    }
+    /// Ask the peer to send the client a PING (frames the client will have left unread if it stops
+    /// reading before they are processed).
+    void
+    send_ping() noexcept {
+        _ping_requested = true;
+    }
+    [[nodiscard]] bool
+    ping_sent() const noexcept {
+        return _ping_sent.load();
+    }
+    [[nodiscard]] std::vector<Frame>
+    frames() const {
+        std::lock_guard lock(_mutex);
+        return _frames;
+    }
+    [[nodiscard]] std::size_t
+    count(uint8_t type) const {
+        std::lock_guard lock(_mutex);
+        return static_cast<std::size_t>(std::count_if(_frames.begin(), _frames.end(), [&](const Frame &f) { return f.type == type; }));
+    }
+
+private:
+    static void
+    append_frame(std::vector<uint8_t> &out, uint8_t type, uint8_t flags, uint32_t stream_id, const std::vector<uint8_t> &payload) {
+        const auto n = static_cast<uint32_t>(payload.size());
+        out.insert(out.end(), {static_cast<uint8_t>(n >> 16), static_cast<uint8_t>(n >> 8), static_cast<uint8_t>(n), type, flags,
+                               static_cast<uint8_t>(stream_id >> 24), static_cast<uint8_t>(stream_id >> 16),
+                               static_cast<uint8_t>(stream_id >> 8), static_cast<uint8_t>(stream_id)});
+        out.insert(out.end(), payload.begin(), payload.end());
+    }
+
+    bool
+    write_all(qb::io::tcp::ssl::socket &sock, const std::vector<uint8_t> &bytes) {
+        std::size_t off = 0;
+        while (off < bytes.size() && !_release) {
+            const int n = sock.write(bytes.data() + off, bytes.size() - off);
+            if (n < 0) {
+                return false;
+            }
+            if (n == 0) {
+                std::this_thread::sleep_for(1ms);
+            }
+            off += static_cast<std::size_t>(n);
+        }
+        return off == bytes.size();
+    }
+
+    void
+    run() {
+        const auto               deadline = std::chrono::steady_clock::now() + 30s;
+        qb::io::tcp::ssl::socket sock;
+        while (!_release && std::chrono::steady_clock::now() < deadline) {
+            if (_listener.accept(sock) == 0 && sock.is_open()) {
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        if (!sock.is_open()) {
+            return;
+        }
+        sock.set_nonblocking(true);
+
+        constexpr std::size_t    preface_size = 24;
+        std::vector<uint8_t>     in;
+        bool                     preface_seen = false;
+        bool                     answered     = false;
+        char                     buffer[16384];
+        bool                     goaway_seen = false;
+        qb::io::tcp::ssl::socket next; // Silent: the client's next connection
+        while (!_release && std::chrono::steady_clock::now() < deadline) {
+            if (_ping_requested && !_ping_sent && answered) {
+                std::vector<uint8_t> ping;
+                append_frame(ping, 0x6, 0, 0, {1, 2, 3, 4, 5, 6, 7, 8});
+                if (!write_all(sock, ping)) {
+                    _eof = true;
+                    break;
+                }
+                _ping_sent = true;
+            }
+            if (_mode == Mode::Silent && _settings_acked) {
+                // Reads nothing more on this connection: the client's sends pile up. Its next
+                // connection is accepted and its TLS handshake driven.
+                if (!next.is_open()) {
+                    if (_listener.accept(next) == 0 && next.is_open()) {
+                        next.set_nonblocking(true);
+                    }
+                } else {
+                    static_cast<void>(next.read(buffer, sizeof(buffer)));
+                }
+                std::this_thread::sleep_for(1ms);
+                continue;
+            }
+            if (goaway_seen) {
+                // The client's GOAWAY is in: what ends the connection is read from the socket itself
+                // -- 0, the client's FIN; an error, a reset. A FIN followed by a reset still reads 0, so
+                // the peer then answers with its own GOAWAY, twice: a client that only shut its sending
+                // side down still receives it, one that closed its socket resets it.
+                const auto raw = ::recv(sock.native_handle(), buffer, static_cast<int>(sizeof(buffer)), 0);
+                if (raw == 0) {
+                    std::vector<uint8_t> reply;
+                    append_frame(reply, 0x7, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0});
+                    for (int attempt = 0; attempt < 2 && !_reset; ++attempt) {
+                        std::this_thread::sleep_for(20ms);
+                        _reset = !write_all(sock, reply);
+                    }
+                    _eof = true;
+                    break;
+                }
+                if (raw < 0) {
+                    const int err = qb::io::socket::get_last_errno();
+                    if (qb::io::socket::not_recv_error(err)) {
+                        std::this_thread::sleep_for(1ms);
+                        continue;
+                    }
+                    _reset = true;
+                    _eof   = true;
+                    break;
+                }
+                continue; // a TLS record after the GOAWAY: ignored
+            }
+            const int n = sock.read(buffer, sizeof(buffer));
+            if (n < 0) {
+                _eof = true;
+                break;
+            }
+            if (n == 0) {
+                std::this_thread::sleep_for(1ms);
+                continue;
+            }
+            in.insert(in.end(), buffer, buffer + n);
+            if (!preface_seen) {
+                if (in.size() < preface_size) {
+                    continue;
+                }
+                in.erase(in.begin(), in.begin() + preface_size);
+                preface_seen = true;
+            }
+            while (in.size() >= 9) {
+                const std::size_t length = (std::size_t{in[0]} << 16) | (std::size_t{in[1]} << 8) | in[2];
+                if (in.size() < 9 + length) {
+                    break;
+                }
+                Frame f;
+                f.type      = in[3];
+                f.flags     = in[4];
+                f.stream_id = ((uint32_t{in[5]} << 24) | (uint32_t{in[6]} << 16) | (uint32_t{in[7]} << 8) | in[8]) & 0x7FFFFFFFu;
+                f.payload.assign(in.begin() + 9, in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+                in.erase(in.begin(), in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+                if (f.type == 0x4 && (f.flags & 0x1)) {
+                    _settings_acked = true;
+                } else if (f.type == 0x7) {
+                    goaway_seen = true;
+                } else if (f.type == 0x4 && !answered) {
+                    std::vector<uint8_t> reply;
+                    if (_mode == Mode::Silent) {
+                        append_frame(reply, 0x4, 0, 0, {0x00, 0x04, 0x7F, 0xFF, 0xFF, 0xFF}); // INITIAL_WINDOW_SIZE 2^31-1
+                        const uint32_t inc = 0x7FFFFFFFu - 65535u;
+                        append_frame(reply, 0x8, 0, 0,
+                                     {static_cast<uint8_t>(inc >> 24), static_cast<uint8_t>(inc >> 16), static_cast<uint8_t>(inc >> 8),
+                                      static_cast<uint8_t>(inc)}); // connection window 2^31-1
+                    } else {
+                        append_frame(reply, 0x4, 0, 0, {});
+                    }
+                    append_frame(reply, 0x4, 0x1, 0, {}); // SETTINGS ACK
+                    if (!write_all(sock, reply)) {
+                        _eof = true;
+                        return;
+                    }
+                    answered = true;
+                }
+                std::lock_guard lock(_mutex);
+                _frames.push_back(std::move(f));
+            }
+        }
+        while (!_release && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms); // Silent: hold the connection until released
+        }
+        sock.disconnect();
+        sock.close();
+    }
+
+    Mode                       _mode;
+    qb::io::tcp::ssl::listener _listener;
+    uint16_t                   _port = 0;
+    std::atomic<bool>          _release{false};
+    std::atomic<bool>          _settings_acked{false};
+    std::atomic<bool>          _eof{false};
+    std::atomic<bool>          _reset{false};
+    std::atomic<bool>          _ping_requested{false};
+    std::atomic<bool>          _ping_sent{false};
+    mutable std::mutex         _mutex;
+    std::vector<Frame>         _frames;
+    std::thread                _thread;
+};
+
+class Http2ClientGoawayTest : public ::testing::Test {
+protected:
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        qb::io::async::init();
+    }
+
+    [[nodiscard]] static std::shared_ptr<qb::http2::Client>
+    make_client(uint16_t port) {
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        return client;
+    }
+};
+
+TEST_F(Http2ClientGoawayTest, ExplicitDisconnectSendsGoawayBeforeClosing) {
+    RawH2Peer peer(RawH2Peer::Mode::Reading);
+    ASSERT_NE(peer.port(), 0);
+    auto client    = make_client(peer.port());
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
+
+    qb::http::Request request; // one the peer never answers
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/pending");
+    std::optional<qb::http::Response> response;
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) { response = std::move(r); }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return peer.count(0x1) == 1; })); // its HEADERS arrived
+
+    client->disconnect();
+    ASSERT_TRUE(response.has_value()) << "the outstanding request fails at once";
+    EXPECT_EQ(response->status(), qb::http::status::SERVICE_UNAVAILABLE);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return peer.eof(); }));
+    const auto frames = peer.frames();
+    ASSERT_FALSE(frames.empty());
+    const auto &last = frames.back();
+    ASSERT_EQ(last.type, 0x7) << "the connection ended without a GOAWAY";
+    ASSERT_GE(last.payload.size(), 8u);
+    const uint32_t last_stream_id =
+        ((uint32_t{last.payload[0]} << 24) | (uint32_t{last.payload[1]} << 16) | (uint32_t{last.payload[2]} << 8) | last.payload[3])
+        & 0x7FFFFFFFu;
+    const uint32_t error_code =
+        (uint32_t{last.payload[4]} << 24) | (uint32_t{last.payload[5]} << 16) | (uint32_t{last.payload[6]} << 8) | last.payload[7];
+    EXPECT_EQ(error_code, 0u) << "NO_ERROR";
+    EXPECT_EQ(last_stream_id, 0u) << "a client's last-stream-id names server-initiated streams: none were accepted";
+    EXPECT_EQ(last.stream_id, 0u);
+    EXPECT_FALSE(peer.reset()) << "the connection ended with a reset, not the client's FIN";
+}
+
+// The server's own bytes may still sit unread in the client's socket when it closes -- here a PING
+// that arrives after the client stopped reading. The connection must still end with the GOAWAY then
+// the client's FIN: qb-io ends a connection the object ended by shutting its sending side down (Huly
+// QB-1060), and the client no longer closes the socket outright on dispose, which, with those bytes
+// unread, made the kernel answer with a reset (Huly QB-1021, QB-1059).
+TEST_F(Http2ClientGoawayTest, ExplicitDisconnectEndsWithGoawayThenEofEvenWithUnreadServerBytes) {
+    RawH2Peer peer(RawH2Peer::Mode::Reading);
+    ASSERT_NE(peer.port(), 0);
+    auto client    = make_client(peer.port());
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
+
+    // The PING reaches the client's socket while its loop does not run: it stays unread.
+    peer.send_ping();
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!peer.ping_sent() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(peer.ping_sent());
+    std::this_thread::sleep_for(50ms);
+
+    client->disconnect();
+    ASSERT_TRUE(ServerThread::pump_until([&] { return peer.eof(); }));
+    const auto frames = peer.frames();
+    ASSERT_FALSE(frames.empty());
+    EXPECT_EQ(frames.back().type, 0x7) << "the GOAWAY, then the end of the connection";
+    EXPECT_FALSE(peer.reset()) << "the connection ended with a reset: the client closed with the server's bytes unread";
+}
+
+TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinTheFlushLimit) {
+    RawH2Peer peer(RawH2Peer::Mode::Silent);
+    ASSERT_NE(peer.port(), 0);
+    auto client    = make_client(peer.port());
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
+
+    // The windows allow 2^31-1: the whole body is framed at once, far more than the socket buffers hold.
+    qb::http::Request request;
+    request.method() = qb::http::Method::POST;
+    request.uri()    = qb::io::uri("/upload");
+    request.body()   = std::string(32u << 20, 'u');
+    ASSERT_TRUE(client->push_request(std::move(request), [](qb::http::Response) {}));
+    const auto settle = std::chrono::steady_clock::now() + 300ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_NOWAIT); // the io writes until the socket refuses
+    }
+    ASSERT_GT(client->out().size(), 0u) << "the socket buffers absorbed the whole body: nothing would wait for the peer";
+
+    // A connect() asked while the transport closes starts once its dispose() has run: the moment
+    // the client reconnects is the moment the close was done.
+    const auto started = std::chrono::steady_clock::now();
+    client->disconnect();
+    bool reconnected = false;
+    client->connect([&](bool ok, const std::string &) { reconnected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return reconnected; }, 10s)) << "a peer that stopped reading held the close";
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_GE(elapsed, qb::http2::Client::GOAWAY_FLUSH_LIMIT - 100ms) << "the GOAWAY was given its chance to be delivered";
+    EXPECT_LE(elapsed, qb::http2::Client::GOAWAY_FLUSH_LIMIT + 2s) << "the close is bounded by the flush limit";
+}
+
+} // namespace http2_client_goaway_test
+
+// ===========================================================================
+// A request whose `Trailer` header announces a field it sets ends with that
+// field as its trailer section as soon as the body is out -- here a body that
+// fits the windows at once. The trailer block used to wait for a WINDOW_UPDATE
+// the server had no reason to send: the request never ended and never got its
+// response (Huly QB-1061).
+// ===========================================================================
+namespace http2_client_trailers_test {
+
+TEST_F(Http2ClientTest, RequestSettingItsAnnouncedTrailersCompletesOnce) {
+    auto client = make_test_client();
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::POST;
+    request.uri()    = qb::io::uri("/api/data");
+    request.body()   = R"({"t":1})";
+    request.set_header("trailer", "X-Checksum");
+    request.set_header("x-checksum", "cafe");
+
+    std::optional<qb::http::Response> response;
+    int                               calls = 0;
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response = std::move(r);
+        ++calls;
+    }));
+    client->connect(nullptr);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); })) << "the request never ended";
+    EXPECT_EQ(response->status(), qb::http::status::CREATED);
+    EXPECT_EQ(response->body().template as<std::string>(), R"(Data received: {"t":1} - created successfully)");
+    for (int pass = 0; pass < 20; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls, 1);
+    client->disconnect();
+}
+
+// The high-level client never calls send_request_trailers(): a request that
+// announces trailers without setting them ends its stream once the body is out,
+// with an empty trailer block, rather than waiting for its request timeout. The
+// protocol keeps that stream open for send_request_trailers(), and the client
+// used to inherit it: the request never ended (Huly QB-1061).
+TEST_F(Http2ClientTest, RequestAnnouncingUnsetTrailersCompletesPromptly) {
+    auto client = make_test_client();
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::POST;
+    request.uri()    = qb::io::uri("/api/data");
+    request.body()   = R"({"t":2})";
+    request.set_header("trailer", "X-Checksum"); // announced, never set
+
+    std::optional<qb::http::Response> response;
+    int                               calls = 0;
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response = std::move(r);
+        ++calls;
+    }));
+    client->connect(nullptr);
+
+    const auto started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); })) << "the request waited for trailers no one would send";
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 2s) << "completed by the body, not by a timeout";
+    EXPECT_EQ(response->status(), qb::http::status::CREATED);
+    EXPECT_EQ(response->body().template as<std::string>(), R"(Data received: {"t":2} - created successfully)");
+    for (int pass = 0; pass < 20; ++pass) {
+        qb::io::async::run(EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls, 1);
+    client->disconnect();
+}
+
+} // namespace http2_client_trailers_test

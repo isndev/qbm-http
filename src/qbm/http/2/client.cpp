@@ -153,6 +153,12 @@ Client::disconnect() {
 void
 Client::close_connection(const std::string &error_message) {
     const bool was_connecting = _is_connecting;
+    // An explicit disconnect() of a live connection announces the close (RFC 9113 §6.8): the
+    // protocol queues GOAWAY(NO_ERROR) and stops, and the io delivers it -- after what it still
+    // held -- before it closes. It used to close at once, with no GOAWAY (Huly QB-1059). Not from
+    // the destructor (no owner left): the io goes with the object, nothing could deliver it.
+    const bool announce =
+        _intentional_disconnect && _is_connected && _h2_protocol && !weak_from_this().expired() && _h2_protocol->send_shutdown_goaway();
     _transport_closing        = _transport_closing || _transport_started; // the disconnected the close raises is this transport's
     _transport_started        = false;
     _is_connected             = false;
@@ -185,6 +191,23 @@ Client::close_connection(const std::string &error_message) {
         run_failure_pass(error_message);
     }
     _preserve_pending_on_next_disconnect = true;
+
+    if (announce) {
+        // The io ends the connection once the GOAWAY is out (dispose() shuts the sending side
+        // down, Huly QB-1060). A server that stopped reading never lets it out: the limit ends it
+        // anyway, so the close is bounded.
+        _graceful_close_pending = true;
+        qb::io::async::callback(
+            [weak_self = weak_from_this(), epoch = ++_graceful_close_epoch] {
+                auto self = weak_self.lock();
+                if (self && self->_graceful_close_pending && self->_graceful_close_epoch == epoch) {
+                    LOG_HTTP_WARN_PA(self->_client_id, "GOAWAY not delivered within the flush limit: closing the connection anyway");
+                    self->BaseTcpClient::disconnect();
+                }
+            },
+            GOAWAY_FLUSH_LIMIT);
+        return;
+    }
 
     // Close transport
     BaseTcpClient::disconnect();
@@ -307,20 +330,16 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     batch_context->callback   = callback;
     batch_context->created_at = std::chrono::steady_clock::now();
     batch_context->responses.resize(batch_context->requests.size());
-
-    // Reject the whole batch up-front if it would exceed the outstanding-request bound (DoS guard).
-    if (_pending_requests.size() + _active_requests.size() + batch_context->requests.size() > _max_pending_requests) {
-        _failed_requests += batch_context->requests.size();
-        std::vector<qb::http::Response> responses;
-        responses.reserve(batch_context->requests.size());
-        for (size_t i = 0; i < batch_context->requests.size(); ++i) {
-            responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/2 client pending request limit reached"));
-        }
-        callback(std::move(responses));
-        return false;
+    // A slot not answered yet holds status 0, which no response carries (a received :status is
+    // 100..999 and every synthesized one is a real code): a failure pass answers exactly those
+    // with its 503 and keeps the received ones, an empty 200 included. A default Response is a
+    // 200 -- the unanswered members used to reach the callback as successes (Huly QB-495).
+    for (auto &slot : batch_context->responses) {
+        slot.status() = 0;
     }
 
-    uint64_t batch_id = _next_batch_id++;
+    uint64_t batch_id     = _next_batch_id++;
+    bool     admitted_all = true;
 
     LOG_HTTP_DEBUG_PA(_client_id,
                       "Queuing batch request with " << batch_context->requests.size() << " requests (batch ID: " << batch_id << ")");
@@ -333,6 +352,18 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
             ++_failed_requests;
             batch_context->responses[i] = std::move(*error);
             ++batch_context->completed_count;
+            continue;
+        }
+        // Each member is admitted as push_request() admits one, against the outstanding
+        // (pending + active) bound: a member past it is answered 503 at its index before its
+        // context exists. The whole batch used to be refused, its admissible members included;
+        // HTTP/1 and HTTP/3 (Huly QB-499) admit member by member (Huly QB-1063).
+        if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
+            ++_failed_requests;
+            batch_context->responses[i] =
+                create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/2 client pending request limit reached");
+            ++batch_context->completed_count;
+            admitted_all = false;
             continue;
         }
 
@@ -377,7 +408,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     if (batch_context->completed_count == batch_context->requests.size()) {
         batch_context->all_completed = true;
         batch_context->callback(std::move(batch_context->responses));
-        return true;
+        return admitted_all;
     }
 
     // Store batch context
@@ -391,7 +422,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         connect(nullptr);
     }
 
-    return true;
+    return admitted_all;
 }
 
 void
@@ -457,6 +488,15 @@ Client::process_pending_requests() {
     // so every iteration must recheck the connection whose protocol we use.
     while (is_connected() && _h2_protocol && !_received_graceful_goaway && !_pending_requests.empty()
            && _active_requests.size() < _max_concurrent_streams) {
+        if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
+            // This connection has opened its last stream (2^31-1, RFC 9113 §5.1.1): drain it like a
+            // graceful GOAWAY -- the active requests finish on it, the pending ones wait for the
+            // next connection, which the drain's close opens through the reconnection logic (Huly
+            // QB-525).
+            _received_graceful_goaway = true;
+            finish_graceful_goaway_if_drained();
+            return;
+        }
         auto context = std::move(_pending_requests.front());
         _pending_requests.pop_front();
 
@@ -642,13 +682,14 @@ Client::finish_graceful_goaway_if_drained() {
 
     LOG_HTTP_INFO_PA(_client_id, "Graceful GOAWAY drain complete");
 
-    _received_graceful_goaway = false;
-    _is_connected             = false;
-    _is_connecting            = false;
-    _handshake_completed      = false;
-    _h2_protocol              = nullptr;
-    _transport_closing        = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
-    _transport_started        = false;
+    const bool stream_ids_exhausted = _h2_protocol && _h2_protocol->stream_ids_exhausted();
+    _received_graceful_goaway       = false;
+    _is_connected                   = false;
+    _is_connecting                  = false;
+    _handshake_completed            = false;
+    _h2_protocol                    = nullptr;
+    _transport_closing = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
+    _transport_started = false;
 
     if (!_pending_requests.empty() && _auto_reconnect) {
         _preserve_pending_on_next_disconnect = true;
@@ -657,7 +698,8 @@ Client::finish_graceful_goaway_if_drained() {
     }
 
     if (!_pending_requests.empty()) {
-        fail_all_requests("Server sent GOAWAY and automatic reconnection is disabled");
+        fail_all_requests(stream_ids_exhausted ? "HTTP/2 connection used its last stream identifier and automatic reconnection is disabled"
+                                               : "Server sent GOAWAY and automatic reconnection is disabled");
     }
 
     _preserve_pending_on_next_disconnect = true;
@@ -704,9 +746,10 @@ Client::fail_all_requests(const std::string &error_message) {
         if (!batch_context->all_completed) {
             LOG_HTTP_WARN_PA(_client_id, "Failing incomplete batch " << batch_id);
 
-            // Fill remaining responses with errors
+            // Answer the members still unanswered (status 0, see push_requests): their own failures
+            // above found no batch -- this pass detached the registry -- and recorded nothing.
             for (size_t i = 0; i < batch_context->responses.size(); ++i) {
-                if (batch_context->responses[i].status().code() == 0) { // Not set yet
+                if (batch_context->responses[i].status().code() == 0) {
                     batch_context->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message);
                 }
             }
@@ -904,6 +947,10 @@ Client::on(qb::io::async::event::handshake &&) {
         _h2_protocol = this->template switch_protocol<H2Protocol>(*this, nullptr);
         if (_h2_protocol) {
             LOG_HTTP_DEBUG_PA(_client_id, "HTTP/2 protocol switched successfully");
+            // This client never hands trailers over with send_request_trailers(): a request that
+            // announces trailer fields it does not set ends once its body is out, rather than
+            // waiting for its request timeout (Huly QB-1061).
+            _h2_protocol->set_explicit_request_trailers(false);
 
             // ✅ Let the framework handle the preface automatically
             // The framework will send the HTTP/2 connection preface when appropriate
@@ -988,6 +1035,7 @@ Client::on(qb::io::async::event::timeout const &) {
 void
 Client::on(qb::io::async::event::disconnected const &event) {
     LOG_HTTP_INFO_PA(_client_id, "Disconnected (reason: " << event.reason << ")");
+    _graceful_close_pending = false; // the transport is closing: the GOAWAY limit has nothing left to bound
 
     std::string error_msg = "Connection lost";
     if (event.reason != 0) {
@@ -1062,6 +1110,11 @@ Client::on(qb::io::async::event::dispose const &) {
     // (a second failure pass over the work the disconnected callbacks had just re-queued, a state
     // reset that clobbered a reconnection already started) is that handler's, once.
     LOG_HTTP_DEBUG_PA(_client_id, "Client disposal event");
+    // The transport is not touched here: dispose() has already ended it (Huly QB-1060) -- closed
+    // when the server ended the connection, its sending side shut down when this client did, so the
+    // server reads everything queued, the GOAWAY last, then EOF (Huly QB-1021, QB-1059). Closing it
+    // here as well reset a server whose bytes this client had left unread, and refused what the
+    // server still sent: its next send failed.
 }
 
 // Factory functions

@@ -229,12 +229,23 @@ TEST(HTTP2StreamBase, UpdatePeerWindowSizeAppliesNegativeDelta) {
     EXPECT_EQ(s.peer_window_size, 600);
 }
 
-TEST(HTTP2StreamBase, UpdatePeerWindowSizeNegativeDeltaDrivingWindowBelowZeroFails) {
-    // peer window only 100; shrinking the initial size by 400 drives it to -300,
-    // which the function reports as a failure (return false) per RFC 6.9.2.
+TEST(HTTP2StreamBase, UpdatePeerWindowSizeNegativeDeltaMayDriveWindowBelowZero) {
+    // peer window only 100; shrinking the initial size by 400 drives it to -300.
+    // RFC 9113 §6.9.2: "A change to SETTINGS_INITIAL_WINDOW_SIZE can cause the
+    // available space in a flow-control window to become negative. A sender MUST
+    // track the negative flow-control window" -- a debt, not an error (Huly QB-532;
+    // this oracle used to require a failure).
     Http2StreamBase s(1, /*peer=*/100, kInitWin);
-    EXPECT_FALSE(s.update_peer_window_size(600, 1000));
-    EXPECT_LT(s.peer_window_size, 0);
+    EXPECT_TRUE(s.update_peer_window_size(600, 1000));
+    EXPECT_EQ(s.peer_window_size, -300);
+    EXPECT_FALSE(s.can_send_data() && s.peer_window_size > 0) << "no credit to send";
+}
+
+TEST(HTTP2StreamBase, UpdatePeerWindowSizeReductionNearTheMaximumIsNotAnOverflow) {
+    // A decrease can never overflow; the old check added |delta| and refused it.
+    Http2StreamBase s(1, /*peer=*/h2::MAX_WINDOW_SIZE_LIMIT, kInitWin);
+    EXPECT_TRUE(s.update_peer_window_size(/*new=*/0, /*old=*/1000));
+    EXPECT_EQ(s.peer_window_size, static_cast<int64_t>(h2::MAX_WINDOW_SIZE_LIMIT) - 1000);
 }
 
 TEST(HTTP2StreamBase, UpdatePeerWindowSizePositiveDeltaOverflowFails) {
@@ -243,6 +254,14 @@ TEST(HTTP2StreamBase, UpdatePeerWindowSizePositiveDeltaOverflowFails) {
     EXPECT_FALSE(s.update_peer_window_size(/*new=*/1000, /*old=*/0));
     // On overflow the window is left unchanged (function returned before assigning).
     EXPECT_EQ(s.peer_window_size, static_cast<int64_t>(h2::MAX_WINDOW_SIZE_LIMIT));
+
+    // The largest legal raise lands exactly on the maximum; one more octet overflows.
+    Http2StreamBase exact(1, /*peer=*/0, kInitWin);
+    EXPECT_TRUE(exact.update_peer_window_size(h2::MAX_WINDOW_SIZE_LIMIT, 0));
+    EXPECT_EQ(exact.peer_window_size, static_cast<int64_t>(h2::MAX_WINDOW_SIZE_LIMIT));
+    Http2StreamBase over(1, /*peer=*/1, kInitWin);
+    EXPECT_FALSE(over.update_peer_window_size(h2::MAX_WINDOW_SIZE_LIMIT, 0));
+    EXPECT_EQ(over.peer_window_size, 1);
 }
 
 // ===========================================================================
@@ -552,6 +571,22 @@ TEST(HTTP2StreamManager, UpdateAllStreamWindowsAppliesDeltaAndCountsOverflows) {
     EXPECT_EQ(map.at(1).peer_window_size, 2000); // +1000 applied
     EXPECT_TRUE(map.at(3).rst_stream_received);  // marked reset on overflow
     EXPECT_EQ(map.at(3).error_code, h2::ErrorCode::FLOW_CONTROL_ERROR);
+}
+
+TEST(HTTP2StreamManager, UpdateAllStreamWindowsReductionLeavesDebtWithoutResets) {
+    ServerMap map;
+    auto     &a        = add_stream(map, 1, State::OPEN);
+    a.peer_window_size = 100;
+    auto &b            = add_stream(map, 3, State::HALF_CLOSED_REMOTE);
+    b.peer_window_size = h2::MAX_WINDOW_SIZE_LIMIT;
+
+    ServerManager mgr(map);
+    // Lower the initial window by 1000 (new 0, old 1000): debt on 1, a decrease on 3.
+    EXPECT_EQ(mgr.update_all_stream_windows(/*new=*/0, /*old=*/1000), 0u);
+    EXPECT_EQ(map.at(1).peer_window_size, -900);
+    EXPECT_FALSE(map.at(1).rst_stream_received);
+    EXPECT_EQ(map.at(3).peer_window_size, static_cast<int64_t>(h2::MAX_WINDOW_SIZE_LIMIT) - 1000);
+    EXPECT_FALSE(map.at(3).rst_stream_received);
 }
 
 TEST(HTTP2StreamManager, FindStreamsNeedingWindowUpdate) {

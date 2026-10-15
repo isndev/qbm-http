@@ -38,6 +38,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **`hpack::convenience::encode_headers` throws on an invalid field (Huly QB-563).** It used to return
+  the bytes of the fields ahead of the invalid one as if they were the whole block; it now throws
+  `std::invalid_argument` and never returns a partial block. An empty list still returns an empty
+  block. The `Encoder` class also gained private state for pending table-size updates: rebuild
+  translation units that embed an `Encoder` (the HTTP/2 protocol templates) together.
+
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -109,6 +115,149 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 batch admits its members one by one against the pending bound (Huly QB-1063).**
+  `qb::http2::Client::push_requests` refused a whole batch with 503s when it would exceed
+  `set_max_pending_requests`, its admissible members included. Each member is now admitted as
+  `push_request` admits one, as the HTTP/1.1 and HTTP/3 clients do (QB-499). A member past the
+  bound gets `503` at its index before anything is allocated for it, the others are sent, and the
+  callback runs once, in request order. `push_requests` returns `false` when a member was
+  refused, as `push_request` does.
+- **HTTP/2 client request trailers are sent once, and always (Huly QB-1061).** The fields a
+  request's `Trailer` header announces went out in the leading HEADERS and again in the trailer
+  block. When the body fit the flow-control windows, or there was none, that trailer block waited
+  for a WINDOW_UPDATE the server had no reason to send, so the request never ended. The client now
+  follows the QB-1058 contract, through the same helpers (`announced_trailer_names`,
+  `is_trailer_field`, `announced_trailer_fields` in `protocol/base.h`, shared with the server). The
+  announced fields leave only in the trailer block, which `send_request` sends as soon as the body
+  is out. A request that announces fields without setting them waits, on `ClientHttp2Protocol`,
+  for `send_request_trailers`; `qb::http2::Client`, which never calls it, sets the new
+  `set_explicit_request_trailers(false)`, so the stream ends after the body with an empty trailer
+  block instead of waiting for the request timeout. `Http2ClientStream::_expected_trailer_names`
+  is gone.
+- **HTTP/2 client completes a response that announced trailers and sent none (Huly QB-1061).** A
+  response whose `Trailer` header announced fields but whose last DATA frame ended the stream was
+  never dispatched: the client waited for a trailer block that could no longer come. END_STREAM on
+  DATA now completes it, with no trailer fields, once.
+- **HTTP/2 client announces an explicit disconnect with GOAWAY (Huly QB-1059).**
+  `qb::http2::Client::disconnect()` closed a live connection with no GOAWAY. It now queues
+  `GOAWAY(NO_ERROR)` behind what the connection still had to send, through the new
+  `ClientHttp2Protocol::send_shutdown_goaway()`, and lets the io deliver it before the connection
+  ends -- its sending side shut down, the server reading the GOAWAY then EOF; a server that stopped
+  reading holds that end at most `Client::GOAWAY_FLUSH_LIMIT` (1 s). Every GOAWAY the client sends now names the last stream the
+  server initiated that the client accepted (0 while push is disabled), as RFC 9113 §6.8 defines
+  it for the sender, instead of the client's own last request.
+- **HTTP/2 server sends response trailers in the trailer block (Huly QB-1058).** Every response
+  header, announced trailer fields included, went out in the leading HEADERS, and the trailer
+  block that ended the stream was empty. The fields a response's `Trailer` header names now leave
+  only in the trailer block, after the body; a field trailers forbid stays in the leading block.
+  Same contract as HTTP/3. The per-response set that recorded every header sent
+  (`Http2ServerStream::headers_sent_in_initial_frame`) is gone.
+- **HTTP/2 server answers HEADERS after END_STREAM with STREAM_CLOSED (Huly QB-1058).** A
+  HEADERS frame on a stream the client had ended was reset with `PROTOCOL_ERROR`; RFC 9113 §5.1
+  prescribes a stream error of type `STREAM_CLOSED`. The client now applies a
+  `SETTINGS_INITIAL_WINDOW_SIZE` change through the same `Http2StreamBase` rule as the server.
+- **HTTP/2 client's disconnect reaches the server as EOF (Huly QB-1021).** The client is the io of
+  every connection it makes, and qb-io's `dispose()` used to stop a standalone client's watcher and
+  leave its transport as it was: after an explicit `disconnect()` (or a drained GOAWAY) the socket
+  stayed open, and the server kept the connection and its routed contexts alive until the client
+  connected again or was destroyed. qb-io's `dispose()` now ends the transport itself (qb QB-1060):
+  a connection the client ended has its sending side shut down, so the server reads everything
+  queued, then EOF, with no reset. The client relies on it; it does not close the socket itself, a
+  full close that reset a server whose bytes it had left unread. The system test
+  `AbruptDisconnectWithInflightStreamsIsClean` no longer closes the transport by hand.
+- **HTTP/2 batch failure answers its unanswered members with 503 (Huly QB-495).** A failure pass
+  (explicit `disconnect()`, connection loss, exhausted reconnection run) detached the batch registry before
+  failing the members, so their failures found no batch and recorded nothing, and the final pass
+  only answered slots whose status was 0 while an unanswered slot held a default `Response`, a
+  `200`: the batch callback (and its coroutine overload) reported those members as empty
+  successes. An unanswered slot now holds status 0 until a response fills it; the failure pass
+  answers exactly those with `503` and the failure reason, keeps every received response (an
+  empty `200` included) and the admission `400`s, and still calls back once.
+  `BatchRequestContext`'s layout is unchanged. Witnesses in
+  `tests/unit/http2/http2-client-validation.cpp` and `tests/system/http2/http2-client.cpp`.
+- **HTTP/2 client renews a connection whose stream identifiers are exhausted (Huly QB-525).** The
+  client stream counter grew past 2^31-1: the next id carried the reserved bit, the frame header
+  masked it to stream 1 on the wire while the stream map kept the unmasked key, and the request
+  never completed. `ClientHttp2Protocol::send_request` now refuses once the last identifier is
+  used (`stream_ids_exhausted()`), and `qb::http2::Client` drains that connection like a graceful
+  GOAWAY and sends its pending requests on a new one (RFC 9113 §5.1.1). A reset protocol counts
+  from 1 again. Witnesses in `tests/unit/http2/http2-client-protocol.cpp` and
+  `tests/system/http2/http2-client.cpp`; they reach the bound through `ProtocolTestPeer`, a
+  test-only friend the protocol declares.
+- **HTTP/2 idle sweep measures idleness from the last progress (Huly QB-531).** Nothing on the
+  server ever refreshed a stream's activity time, so the sweep compared every stream's age with
+  the 30 s idle budget and cancelled a response still sending like a dead one. Response HEADERS or
+  DATA sent and a stream WINDOW_UPDATE received now mark the stream (a flag store on the frame
+  path), and the sweep -- which already reads the clock -- stamps the time it observed them; idle
+  time runs from there. A request not yet complete keeps an absolute age bound
+  (`STREAM_INCOMPLETE_TIMEOUT`), so a slow upload cannot hold a stream. Witnesses in
+  `tests/unit/http2/http2-server-protocol.cpp`.
+- **A client's graceful GOAWAY lets the server answer its requests (Huly QB-530).** The server
+  applied the last-stream-id of a client's GOAWAY to the client's own requests, closing every
+  request above it -- all of them for the common `last_stream_id = 0` -- and then the connection,
+  before their responses. That id bounds the server-initiated streams the client processed
+  (RFC 9113 §6.8): a `NO_ERROR` GOAWAY now drops only the pushes above it and refuses new streams,
+  every accepted request is answered, and the connection closes once the last stream finishes. An
+  error GOAWAY closes every stream and the connection. Witnesses in
+  `tests/unit/http2/http2-server-protocol.cpp`.
+- **HTTP/2 server responses: HEAD sends no DATA; a promised stream can be answered (Huly QB-527,
+  QB-529).** `send_response` took the body of a HEAD response as content and sent it in DATA
+  frames, while HTTP/1.1 and HTTP/3 strip it; a HEAD response now ends the stream on its HEADERS,
+  keeping the representation's `content-length` (RFC 9110 §9.3.2). After a successful
+  `send_push_promise`, its documented next step -- `send_response` on the promised stream --
+  refused the reserved state and reset the stream, so no promise could be fulfilled; the response
+  HEADERS now move the promised stream to half-closed (remote) and its end closes it (RFC 9113
+  §5.1, §8.4). The push API itself is unchanged (QB-102). Witnesses in
+  `tests/unit/http2/http2-protocol-state.cpp` and `http2-server-coverage-deep.cpp`.
+- **HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE reaches every sending stream; negative windows are a debt
+  (Huly QB-528, QB-532).** The server applied a change of the peer's initial window size to OPEN,
+  half-closed (local) and reserved streams but not to half-closed (remote) ones -- the state of a
+  response to a finished request -- so a response waiting for credit stayed stuck until a stream
+  WINDOW_UPDATE the client had no reason to send. Every stream that can still send now moves by
+  the delta (RFC 9113 §6.9.2), through `Http2StreamBase::update_peer_window_size`, which no longer
+  refuses a legal negative result nor a decrease near the 2^31-1 maximum; only a window pushed past
+  the maximum fails, unchanged. Witnesses in `tests/unit/http2/http2-server-protocol.cpp` and
+  `http2-stream-state.cpp`.
+- **HTTP/2 keeps the received compression state in step (Huly QB-533, QB-534).** A header block
+  the HPACK decoder could not decode reset only its stream, and the connection decoded on with a
+  dynamic table possibly changed by the fields ahead of the failure; it is now a connection
+  `COMPRESSION_ERROR` (RFC 9113 §4.3). A field that decodes but breaks an HTTP/2 rule still only
+  resets its stream. A header block refused without decoding -- over the concurrency cap, during
+  shutdown, on a closed or reset stream, after END_STREAM, on both the server and the client --
+  left the table behind the peer's encoder, so the next block referencing its entries failed or
+  decoded to other fields; refused blocks are now assembled across their CONTINUATION frames,
+  decoded and dropped, never routed. Witnesses in `tests/unit/http2/http2-server-protocol.cpp`
+  and `http2-client-protocol.cpp`.
+- **HTTP/2 header blocks respect the peer's frame size and request trailers follow the body
+  (Huly QB-522, QB-521).** Request trailers (explicit and automatic), response trailers and
+  PUSH_PROMISE blocks were each written as one frame whatever their size; a block larger than the
+  peer's `SETTINGS_MAX_FRAME_SIZE` was refused with FRAME_SIZE_ERROR. Every header block now
+  leaves through one emitter that splits it over CONTINUATION frames. Trailers handed to
+  `send_request_trailers` while the body still waited for window credit went out at once with
+  END_STREAM, and the resumed body followed the end of the stream: the server dispatched a
+  truncated request. They now wait for the last DATA frame; a second trailer section is refused,
+  and a stream that has sent END_STREAM sends nothing more. Automatic trailer names taken from
+  the `Trailer` header value are sent lowercase. Witnesses in
+  `tests/unit/http2/http2-client-protocol.cpp` and `http2-server-protocol.cpp`.
+- **HTTP/2 framer ends and opens header blocks on empty fragments too; ENABLE_PUSH checked by role
+  (Huly QB-497, QB-567).** An empty final CONTINUATION carrying END_HEADERS left the framer
+  expecting another CONTINUATION, so the next ordinary frame (a PING, a new request) killed the
+  connection with PROTOCOL_ERROR; an empty HEADERS without END_HEADERS escaped the CONTINUATION
+  gate. One end-of-block transition now follows every HEADERS, PUSH_PROMISE and CONTINUATION
+  frame, empty or not, on both roles (RFC 9113 §6.10). A server's `SETTINGS_ENABLE_PUSH = 1` is a
+  connection PROTOCOL_ERROR at the client (RFC 9113 §6.5.2); 0 stays accepted. Witnesses in
+  `tests/unit/http2/http2-frame-layer.cpp` and `http2-client-protocol.cpp`.
+- **HPACK encoder keeps one compression state with the peer (Huly QB-520, QB-526, QB-563, QB-523,
+  QB-524).** A table size change -- the peer lowering `SETTINGS_HEADER_TABLE_SIZE`, or the
+  encoder's own capacity -- is announced by a Dynamic Table Size Update at the start of the next
+  block, the smallest size reached first (RFC 7541 §4.2, §6.3); the table never exceeds the peer's
+  limit. A list with an invalid field is refused whole, with nothing appended and the table
+  untouched, so the next block cannot reference an entry the peer never received. A field marked
+  never-indexed stays a never-indexed literal on an exact table match (RFC 7541 §6.2.3). Value
+  octets 0x80-0xFF are accepted whatever the signedness of `char` (they killed the connection on
+  x86-64 GCC/Clang and MSVC builds). `validate_huffman_encoded_data` returns the decoder's verdict:
+  eight `'0'` symbols, five zero octets, are valid. Witnesses in
+  `tests/unit/http2/hpack-encoder-strategy.cpp`, `hpack-codec.cpp` and `http2-protocol-roundtrip.cpp`.
 - **API documentation checks reject comment-only names and invalid later citations (Huly QB-561, QB-562).**
   The shipped guard indexes C++ code without comments or literals and examines every
   citation on a line before accepting it.

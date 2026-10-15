@@ -598,7 +598,7 @@ is_valid_header_name(const std::string &name) {
     if (name.empty())
         return false;
 
-    for (char c : name) {
+    for (unsigned char c : name) {
         if (c < 0x21 || c > 0x7E || c == ':' || c == ' ' || c == '\t') {
             // Allow ':' only for pseudo-headers at the beginning
             if (c == ':' && name[0] == ':')
@@ -611,12 +611,14 @@ is_valid_header_name(const std::string &name) {
 
 /**
  * @brief Check if header value is valid according to RFC 7230
+ * @details Refuses the C0 controls but TAB, and DEL. Octets are read unsigned: 0x80-0xFF
+ *          (obs-text, UTF-8) are value bytes whatever the signedness of `char`.
  * @param value Header field value to validate
  * @return true if value is valid
  */
 [[nodiscard]] inline bool
 is_valid_header_value(const std::string &value) {
-    for (char c : value) {
+    for (unsigned char c : value) {
         if (c < 0x20 && c != '\t')
             return false;
         if (c == 0x7F)
@@ -776,8 +778,11 @@ public:
 class Encoder {
 private:
     DynamicTable       _dynamic_table;                                                ///< Dynamic header table (F34 ring buffer)
-    std::size_t        _peer_max_dynamic_table_octets = HPACK_DEFAULT_MAX_TABLE_SIZE; ///< Peer's max table size
-    mutable HpackStats _stats;                                                        ///< Encoding statistics
+    std::size_t        _peer_max_dynamic_table_octets = HPACK_DEFAULT_MAX_TABLE_SIZE; ///< Peer's SETTINGS_HEADER_TABLE_SIZE
+    std::size_t        _own_max_dynamic_table_octets  = HPACK_DEFAULT_MAX_TABLE_SIZE; ///< The size this encoder asks for (set_max_capacity)
+    std::size_t        _pending_min_table_size        = 0;     ///< Smallest size reached since the last block (valid while pending)
+    bool               _table_size_update_pending     = false; ///< A size change awaits its Dynamic Table Size Update
+    mutable HpackStats _stats;                                 ///< Encoding statistics
 
     /**
      * @brief Encode an integer in HPACK format (RFC 7541, Section 5.1)
@@ -815,44 +820,80 @@ private:
         }
     }
 
+    /**
+     * @brief Resize the dynamic table to min(own capacity, peer limit) and, when that changes
+     *        it, record the change for the next block's Dynamic Table Size Update.
+     *
+     * RFC 7541 §4.2: the decoder learns every change of the table size from the encoder, at
+     * the start of the first block after it -- the smallest size reached since the previous
+     * block first when it differs from the final one, so the decoder evicts as deep as the
+     * encoder did. Without it the two ends of one compression context evict by different
+     * budgets (Huly QB-520).
+     */
+    void apply_table_size();
+
 public:
     Encoder() = default;
 
     /**
      * @brief Encode a list of header fields into an HPACK header block.
      *
-     * Chooses the most compact representation for each field: indexed when an
-     * exact static/dynamic match exists, otherwise a literal (never indexed
-     * for sensitive or pseudo-headers, incremental indexing when the field is
-     * eligible for the dynamic table, plain literal otherwise). The dynamic
-     * table is updated for incrementally-indexed fields. Encoded bytes are
-     * appended to @p out_buffer.
+     * Every field is validated before anything is written: a refused list appends nothing to
+     * @p out_buffer and leaves the dynamic table, a pending size update and the statistics as
+     * they were, so the encoder stays in step with the peer's decoder, which never sees the
+     * refused block.
+     *
+     * The block starts with the Dynamic Table Size Update(s) a size change since the previous
+     * block calls for (see set_peer_max_dynamic_table_size()). Each field then takes the most
+     * compact representation: a field the caller marked @c sensitive is always a literal never
+     * indexed (RFC 7541 §6.2.3), even when an identical pair sits in a table; otherwise indexed
+     * when an exact static/dynamic match exists, else a literal (never indexed for pseudo-headers
+     * and default-sensitive names, see HeaderField::is_sensitive_by_default(); incremental
+     * indexing when the field fits the dynamic table, plain literal otherwise). The
+     * dynamic table is updated for incrementally-indexed fields. Encoded bytes are appended to
+     * @p out_buffer.
      *
      * @param headers_to_encode List of header fields to encode.
      * @param out_buffer        Buffer the encoded block is appended to.
-     * @return true on success, false if any field fails validation.
+     * @return true on success, false if any field fails validation (nothing appended then).
      */
     bool encode(const std::vector<HeaderField> &headers_to_encode, std::vector<uint8_t> &out_buffer);
 
+    /**
+     * @brief Apply the peer's SETTINGS_HEADER_TABLE_SIZE: the dynamic table never exceeds it.
+     * @details A size this changes is evicted to at once and announced at the start of the
+     *          next block. A raise above the encoder's own capacity changes nothing.
+     */
     void
     set_peer_max_dynamic_table_size(uint32_t max_size) {
         _peer_max_dynamic_table_octets = max_size;
-        // Clamp our local budget so we never advertise more than the peer
-        // allows. Evictions happen inside `DynamicTable::set_max_byte_size`.
-        if (_dynamic_table.max_byte_size() > _peer_max_dynamic_table_octets) {
-            _stats.dynamic_table_evictions += _dynamic_table.set_max_byte_size(_peer_max_dynamic_table_octets);
-        }
+        apply_table_size();
     }
 
+    /**
+     * @brief Set the table size this encoder asks for; the table uses min(capacity, peer limit).
+     * @details Like a peer limit, a change it makes is announced at the start of the next block.
+     */
     void
     set_max_capacity(uint32_t max_capacity) {
-        _stats.dynamic_table_evictions += _dynamic_table.set_max_byte_size(max_capacity);
+        _own_max_dynamic_table_octets = max_capacity;
+        apply_table_size();
     }
 
+    /**
+     * @brief Start a new compression context: empty table at the protocol's initial size
+     *        (RFC 7541 §4.2, 4096), the peer limit back to that default, statistics cleared.
+     *        The own capacity is configuration and is kept; when it is below 4096 the first
+     *        block announces it.
+     */
     void
     reset() {
         _dynamic_table.clear();
         _stats.reset();
+        _peer_max_dynamic_table_octets = HPACK_DEFAULT_MAX_TABLE_SIZE;
+        _table_size_update_pending     = false;
+        (void) _dynamic_table.set_max_byte_size(HPACK_DEFAULT_MAX_TABLE_SIZE);
+        apply_table_size();
     }
 
     [[nodiscard]] const HpackStats &
@@ -902,13 +943,17 @@ namespace convenience {
 /**
  * @brief Encode headers directly to bytes
  * @param headers Header fields to encode
- * @return Encoded HPACK bytes
+ * @return The complete HPACK block (empty for an empty list)
+ * @throws std::invalid_argument if a field fails validation -- never a partial block that
+ *         would read as complete (Huly QB-563)
  */
 inline std::vector<uint8_t>
 encode_headers(const std::vector<HeaderField> &headers) {
     Encoder              encoder;
     std::vector<uint8_t> result;
-    encoder.encode(headers, result);
+    if (!encoder.encode(headers, result)) {
+        throw std::invalid_argument("hpack::convenience::encode_headers: invalid header field");
+    }
     return result;
 }
 

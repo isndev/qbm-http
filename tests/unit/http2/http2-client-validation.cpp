@@ -362,17 +362,21 @@ TEST(Http2ClientReentrancyTest, BatchCallbackMayQueueAnotherBatchAcrossFailurePa
         return req;
     };
 
-    bool        first_batch_callback_called  = false;
-    bool        second_batch_callback_called = false;
-    std::size_t second_batch_response_count  = 0;
+    bool             first_batch_callback_called  = false;
+    bool             second_batch_callback_called = false;
+    std::size_t      second_batch_response_count  = 0;
+    qb::http::Status first_batch_status{0}; // 0: no callback yet
+    qb::http::Status second_batch_status{0};
 
     ASSERT_TRUE(client->push_requests({make_get_request("/first")}, [&](std::vector<qb::http::Response> responses) {
         first_batch_callback_called = true;
         EXPECT_EQ(responses.size(), 1u);
+        first_batch_status = responses.empty() ? qb::http::Status{0} : responses[0].status();
         // Re-enter from inside the failure callback: queue a fresh batch.
         ASSERT_TRUE(client->push_requests({make_get_request("/second")}, [&](std::vector<qb::http::Response> second_responses) {
             second_batch_callback_called = true;
             second_batch_response_count  = second_responses.size();
+            second_batch_status          = second_responses.empty() ? qb::http::Status{0} : second_responses[0].status();
         }));
     }));
 
@@ -381,11 +385,52 @@ TEST(Http2ClientReentrancyTest, BatchCallbackMayQueueAnotherBatchAcrossFailurePa
     client->on(qb::io::async::event::disconnected{1});
     EXPECT_TRUE(first_batch_callback_called);
     EXPECT_FALSE(second_batch_callback_called);
+    EXPECT_EQ(first_batch_status, qb::http::status::SERVICE_UNAVAILABLE) << "an unanswered member is a 503, not a 200";
 
     // A subsequent failure pass observes and completes the queued batch.
     client->on(qb::io::async::event::disconnected{1});
     EXPECT_TRUE(second_batch_callback_called);
     EXPECT_EQ(second_batch_response_count, 1u);
+    EXPECT_EQ(second_batch_status, qb::http::status::SERVICE_UNAVAILABLE);
+}
+
+// ---------------------------------------------------------------------------
+// A failure pass answers every batch member still unanswered with 503 and keeps
+// the members already answered -- here the 400 an invalid member got at
+// admission -- through exactly one batch callback. The unanswered slots used to
+// reach the callback as default-constructed Responses, 200 with an empty body:
+// the members' own failures looked their batch up in the registry the pass had
+// just emptied (Huly QB-495).
+// ---------------------------------------------------------------------------
+
+TEST(Http2ClientReentrancyTest, FailurePassAnswersUnansweredBatchMembersWith503) {
+    auto client = qb::http2::make_client("https://localhost:1");
+    client->set_auto_reconnect(false);
+
+    std::vector<qb::http::Request> requests;
+    requests.emplace_back(qb::io::uri("https://localhost:1/first"));
+    requests.emplace_back(qb::io::uri("http://localhost:1/plain")); // refused at admission: 400
+    requests.emplace_back(qb::io::uri("https://localhost:1/third"));
+
+    int                             calls = 0;
+    std::vector<qb::http::Response> responses;
+    ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
+        responses = std::move(res);
+        ++calls;
+    }));
+    EXPECT_EQ(calls, 0);
+
+    client->on(qb::io::async::event::disconnected{1});
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(responses.size(), 3u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_FALSE(responses[0].body().template as<std::string>().empty()) << "the failure reason";
+    EXPECT_EQ(responses[1].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(responses[1].body().template as<std::string>(), "HTTP/2 request URI must use https");
+    EXPECT_EQ(responses[2].status(), qb::http::status::SERVICE_UNAVAILABLE);
+
+    client->on(qb::io::async::event::disconnected{1}); // nothing left for a later pass
+    EXPECT_EQ(calls, 1);
 }
 
 // ---------------------------------------------------------------------------

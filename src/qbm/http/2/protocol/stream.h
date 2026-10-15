@@ -240,10 +240,12 @@ public:
     }
 
     /**
-     * @brief Update peer window size safely
+     * @brief Apply a SETTINGS_INITIAL_WINDOW_SIZE change to this stream's send window
+     * @details The window moves by `new - old`; a decrease may leave it negative, a legal debt
+     *          (RFC 9113 §6.9.2) during which nothing is sent.
      * @param new_initial_size New initial window size
      * @param old_initial_size Old initial window size
-     * @return true if update successful, false if overflow
+     * @return true if applied, false if the window would exceed 2^31-1 (it is then unchanged)
      */
     bool update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept;
 
@@ -287,10 +289,12 @@ struct Http2ClientStream : public Http2StreamBase {
     bool               client_will_send_trailers = false; ///< Client intends to send trailers for the current request
 
     // For sending request body
-    bool                     has_pending_data_to_send = false; ///< True if original_request_to_send.body() has data remaining.
-    qb::http::Request        original_request_to_send;         ///< Stores the original request if its body needs to be sent progressively.
-    size_t                   send_buffer_offset = 0;           ///< Current offset in original_request_to_send.body().raw()
-    std::vector<std::string> _expected_trailer_names;          ///< Names of headers expected in the trailer part, parsed from "Trailer" header.
+    bool              has_pending_data_to_send = false; ///< True if original_request_to_send.body() has data remaining.
+    qb::http::Request original_request_to_send;         ///< Stores the original request if its body needs to be sent progressively.
+    size_t            send_buffer_offset = 0;           ///< Current offset in original_request_to_send.body().raw()
+    /// Trailer fields handed to send_request_trailers() while the body still waited for
+    /// flow-control credit: they leave after its last DATA frame and carry END_STREAM.
+    std::optional<std::vector<qb::protocol::hpack::HeaderField>> queued_trailer_fields;
 
     std::vector<qb::protocol::hpack::HeaderField> synthetic_request_headers; ///< For PUSH_PROMISE validation/info by app
     bool                                          request_sent = false;      ///< Initial HEADERS frame for the request
@@ -325,8 +329,7 @@ struct Http2ServerStream : public Http2StreamBase {
     std::string       method;                     ///< HTTP method from request
 
     // Response sending state for the current response_to_send
-    size_t                         send_buffer_offset = 0;        ///< Current offset in response_to_send.body().raw()
-    qb::unordered_set<std::string> headers_sent_in_initial_frame; ///< Headers already sent in the first HEADERS frame for this response
+    size_t send_buffer_offset = 0; ///< Current offset in response_to_send.body().raw()
 
     // Push promise support
     uint32_t parent_stream_id =
@@ -345,6 +348,10 @@ struct Http2ServerStream : public Http2StreamBase {
     bool has_pending_data_to_send = false;  ///< True if response_to_send.body() has data remaining or if trailers are pending after body.
     qb::http::Response response_to_send;    ///< The complete response object being sent (headers, body, trailers).
     bool               is_trailers = false; ///< True if response_to_send includes trailers that need to be sent after the body.
+    /// Real progress since the server's last idle sweep: response HEADERS or DATA sent, a stream
+    /// WINDOW_UPDATE received. A store on the frame path; the sweep, which reads the clock anyway,
+    /// turns it into `last_activity` (ServerHttp2Protocol::cleanup_idle_streams).
+    bool progressed_since_idle_sweep = false;
 
     /**
      * @brief Construct a new server stream

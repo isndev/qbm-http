@@ -97,7 +97,7 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:721-727,789-799; qbm/http/src/qbm/http/1.1/client.cpp:149-163,369-387; qbm/http/src/qbm/http/headers.cpp:306-311 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:225-238,564-579; qbm/http/src/qbm/http/3/client.cpp:193-205,739-748; qbm/http/src/qbm/http/body.h:291-312 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:248-261,604-619; qbm/http/src/qbm/http/3/client.cpp:193-205,739-748; qbm/http/src/qbm/http/body.h:291-312 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:765-772; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
@@ -306,7 +306,7 @@ HTTP/2 is TLS-only with ALPN. The client advertises only `h2` and fails the conn
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,277-417,457-482,647 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,282-432,472-497,662 -->
 ```cpp
 namespace qb::http2 {
     struct ConnectResult {
@@ -359,7 +359,7 @@ Two cautions unique to the HTTP/2 client:
 
 - **`connect(nullptr)` for fire-and-forget.** The callback `connect` has no default-argument overload, so the coroutine `connect()` stays unambiguous. Call `connect(nullptr)` when you do not need a connection callback.
 
-  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:352-356 -->
+  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:354-358 -->
   ```cpp
   http2_client->connect(nullptr);  // queue requests now, flush on handshake
   ```
@@ -370,7 +370,7 @@ Two cautions unique to the HTTP/2 client:
 
 A connection loss fails every outstanding request with a `503` whose body says why (`"Connection lost"`, `"Connection closed"`, `"Connection failed: ..."`), once. What the failure callbacks push back — the retry pattern — is what the automatic reconnection reconnects for, and it does so as a **run** shaped by a `qb::http::RetryPolicy` (`qb::http2::RetryPolicy` is the same type; the shape is `qb::redis::RetryPolicy`'s): attempt 1 at once, attempt 2 after `initial_delay`, every further one after a wait multiplied by `multiplier` up to `max_delay`, each wait jittered by up to a quarter either way, `on_retry(attempt, next_delay)` told before each wait how many attempts have failed. `max_attempts` bounds the run: exhausted, the waiting requests get `503` with the body `"Reconnection attempts exhausted (N)"` and the client stays down until the next `connect()` — explicit, or the auto-connect of a request pushed afterwards — which starts a fresh run. A connection that comes up ends the run and resets its count, as do an explicit `connect()` and an explicit `disconnect()` — which also cancels the scheduled attempt and starts no run: the user asked out, the outstanding work fails with `"Connection closed"`, and only a request pushed afterwards (from that verdict's callback included) connects again, on its own, exactly as on the HTTP/1.1 client.
 
-<!-- src: qbm/http/src/qbm/http/retry_policy.h:34-40; qbm/http/src/qbm/http/2/client.h:457-482 -->
+<!-- src: qbm/http/src/qbm/http/retry_policy.h:34-40; qbm/http/src/qbm/http/2/client.h:472-497 -->
 ```cpp
 client->enable_auto_reconnect(qb::http2::RetryPolicy{}
                                   .with_initial_delay(100ms)   // before attempt 2; attempt 1 is immediate

@@ -306,6 +306,47 @@ TEST(HTTP2RoundTrip, PostRequestBodyAndResponseBodyRoundTrip) {
 }
 
 // ===========================================================================
+// Field values carrying octets 0x80-0xFF (UTF-8, obs-text) cross both directions
+// unchanged. The protocol-level validator reads unsigned octets; the HPACK
+// encoder used to read signed `char` and refuse them, which killed the client
+// connection (GOAWAY INTERNAL_ERROR) and the server one (COMPRESSION_ERROR) on
+// every x86-64 GCC/Clang and MSVC build. Huly QB-523.
+// ===========================================================================
+
+TEST(HTTP2RoundTrip, HighOctetFieldValuesCrossRequestAndResponse) {
+    RichClientIO   client_io;
+    ClientProtocol client(client_io);
+    Http2FakeIO    server_io;
+    ServerProtocol server(server_io);
+    mutual_handshake(client, client_io, server, server_io);
+
+    const std::string utf8("d\xC3\xA9j\xC3\xA0 vu \xE2\x9C\x93", 13);
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/accents");
+    req.set_header("x-note", utf8);
+    ASSERT_TRUE(client.send_request(std::move(req), /*app_id=*/31));
+    ASSERT_TRUE(client.ok());
+
+    pump(server, server_io, client_io);
+    ASSERT_TRUE(server.ok());
+    ASSERT_EQ(server_io.request_count, 1);
+    EXPECT_EQ(server_io.last_request->header("x-note"), utf8);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("x-reply", utf8);
+    ASSERT_TRUE(server.send_response(server_io.last_request_stream_id, response));
+    ASSERT_TRUE(server.ok());
+
+    pump(client, client_io, server_io);
+    EXPECT_TRUE(client.ok());
+    const auto *resp = client_io.find(31);
+    ASSERT_NE(resp, nullptr);
+    EXPECT_EQ(resp->header("x-reply"), utf8);
+}
+
+// ===========================================================================
 // Several concurrent streams interleaved through one connection.
 // ===========================================================================
 

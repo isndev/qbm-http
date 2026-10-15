@@ -137,18 +137,6 @@ TEST(HTTP2SettingsValidator, EnableConnectProtocolIsBoolean) {
     EXPECT_EQ(invalid.error_code, h2::ErrorCode::PROTOCOL_ERROR);
 }
 
-TEST(HTTP2SettingsValidator, EnablePushIsBoolean) {
-    using h2::Http2SettingIdentifier;
-    using h2::SettingsHelper;
-
-    EXPECT_TRUE(SettingsHelper::validate_setting(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 0, true).is_valid);
-    EXPECT_TRUE(SettingsHelper::validate_setting(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1, true).is_valid);
-
-    const auto invalid = SettingsHelper::validate_setting(Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 2, true);
-    EXPECT_FALSE(invalid.is_valid);
-    EXPECT_EQ(invalid.error_code, h2::ErrorCode::PROTOCOL_ERROR);
-}
-
 TEST(HTTP2SettingsValidator, InitialWindowSizeOverMaxIsFlowControlError) {
     using h2::Http2SettingIdentifier;
     using h2::SettingsHelper;

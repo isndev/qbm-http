@@ -367,12 +367,15 @@ TEST(HTTP2ServerCoverageDeep, TrailersContentLengthMismatchIsProtocolError) {
 }
 
 // ===========================================================================
-// send_response invalid-state guard: RESERVED_LOCAL (a server-pushed stream that
-// has not yet sent its response headers). Distinct from the unknown-stream and
-// closed/half-closed-local arms covered elsewhere.
+// send_push_promise() reserves the promised stream (RESERVED_LOCAL) and its
+// documented next step is send_response() on that stream: the response HEADERS
+// move it to half-closed (remote) -- the client never sends on a pushed stream --
+// and the body's END_STREAM closes it (RFC 9113 §5.1, §8.4). send_response()
+// used to refuse RESERVED_LOCAL and reset the promised stream, so a successful
+// promise could never be fulfilled (Huly QB-529; this oracle pinned the refusal).
 // ===========================================================================
 
-TEST(HTTP2ServerCoverageDeep, SendResponseOnReservedLocalPushStreamIsStreamError) {
+TEST(HTTP2ServerCoverageDeep, PromisedStreamIsAnsweredThroughSendResponse) {
     Http2FakeIO    io;
     ServerProtocol server(io);
     // Enable push so send_push_promise can create a RESERVED_LOCAL stream.
@@ -394,16 +397,28 @@ TEST(HTTP2ServerCoverageDeep, SendResponseOnReservedLocalPushStreamIsStreamError
     const auto failure = server.send_push_promise(1, 2, std::move(promised));
     ASSERT_FALSE(failure.has_value()) << "PUSH_PROMISE should succeed when peer allows push";
 
-    // Attempt to send a response on the RESERVED_LOCAL promised stream BEFORE its
-    // headers were sent -> the IDLE/RESERVED_LOCAL guard rejects with PROTOCOL_ERROR.
+    // The promised response: HEADERS on stream 2, then its body with END_STREAM.
     const std::size_t  before = io.output.size();
     qb::http::Response response;
     response.status() = qb::http::status::OK;
+    response.body()   = "body{}";
+    response.set_header("content-length", "6");
+    EXPECT_TRUE(server.send_response(2, response));
+    EXPECT_TRUE(server.ok());
+    EXPECT_EQ(io.stream_error_count, 0);
+    EXPECT_EQ(find_frame_offset(io.output, FrameType::RST_STREAM, before), SIZE_MAX) << "no reset of the promised stream";
+
+    bool headers_on_2 = false, data_end_on_2 = false;
+    for (const auto &f : parse_emitted_frames(io.output)) {
+        headers_on_2  = headers_on_2 || (f.type == FrameType::HEADERS && f.stream_id == 2);
+        data_end_on_2 = data_end_on_2 || (f.type == FrameType::DATA && f.stream_id == 2 && (f.flags & h2::FLAG_END_STREAM));
+    }
+    EXPECT_TRUE(headers_on_2);
+    EXPECT_TRUE(data_end_on_2);
+    EXPECT_TRUE(server.is_stream_closed(2)) << "the fulfilled push is closed and reclaimed";
+
+    // A second response on the same promise is refused: the stream is gone.
     EXPECT_FALSE(server.send_response(2, response));
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
-    // The stream-error path emits an RST_STREAM on the offending stream.
-    EXPECT_NE(find_frame_offset(io.output, FrameType::RST_STREAM, before), SIZE_MAX);
 }
 
 // ===========================================================================
