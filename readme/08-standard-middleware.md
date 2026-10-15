@@ -102,7 +102,9 @@ requests, enumerate the origins explicitly with `CorsOptions::secure(...)` / `co
 - **Requires:** `QB_HAS_SSL` (the header includes `<qb/io/crypto_jwt.h>`).
 - **Purpose:** extract a JSON Web Token from a header, cookie, or query parameter, verify it, and stash the decoded payload in the context.
 
-On success the middleware stores the decoded payload under the context key `"jwt_payload"` as a `qb::json` and continues the chain; on failure it produces an error response (overridable via `with_error_handler`).
+On success the middleware stores the decoded payload under the context key `"jwt_payload"` as a `qb::json` and continues the chain. `qb::jwt` hands every claim over as text; the middleware gives back JSON booleans and numbers for claims that read as such (`"true"`, `"5"`, `"3.14"`), except the textual claims `is_textual_claim` names — `iss`, `sub`, `aud`, `jti` (RFC 7519 StringOrURI) and `username` — which stay the strings that were signed, so a subject `"123"` reaches an `AuthMiddleware` as the subject `"123"`. <!-- src: qbm/http/src/qbm/http/middleware/jwt.h:345-351, qbm/http/src/qbm/http/middleware/jwt.h:418-420 -->
+
+On failure it produces an error response (overridable via `with_error_handler`).
 
 Configuration is the `qb::http::JwtOptions` struct:
 
@@ -164,7 +166,9 @@ Configuration is `qb::http::RateLimitOptions`:
 | Client identifier | `client_id_extractor(fn)` | the socket peer IP |
 | Trust proxy headers | `trust_forwarded_headers(bool)` | `false` — **opt-in** |
 
-The window is a **`qb::duration`**. With no `client_id_extractor`, the default extractor keys on the **socket peer IP** — the actual TCP source, which cannot be forged, so a client cannot mint a fresh bucket per request by inventing a header. It reads the forwarding headers **only** when you opt in with `trust_forwarded_headers(true)` (or when the session type exposes no `ip()`, as a test mock may not).
+The window is a **`qb::duration`**, and it is honoured at the clock's own resolution: the reset, the stale-entry sweep and `X-RateLimit-Reset` compare the elapsed `now - last_reset_time` with the window without rounding it to whole milliseconds first, so a 500 µs window ends after 500 µs. <!-- src: qbm/http/src/qbm/http/middleware/rate_limit.h:438, qbm/http/src/qbm/http/middleware/rate_limit.h:568, qbm/http/src/qbm/http/middleware/rate_limit.h:600 -->
+
+With no `client_id_extractor`, the default extractor keys on the **socket peer IP** — the actual TCP source, which cannot be forged, so a client cannot mint a fresh bucket per request by inventing a header. It reads the forwarding headers **only** when you opt in with `trust_forwarded_headers(true)` (or when the session type exposes no `ip()`, as a test mock may not).
 
 > **Behind a reverse proxy this is the setting you must change.** nginx / ALB / Cloudflare terminate the connection, so the peer IP is the *proxy's* — every request in the fleet lands in one bucket and a single busy tenant 429s everyone. Call `trust_forwarded_headers(true)`, and only where the proxy is genuinely trusted: the headers are client-supplied on a direct connection.
 
@@ -275,6 +279,8 @@ The freshness lifetime is **not** a duration type: `with_cache_control` takes a 
 
 For GET and HEAD, a present `If-None-Match` takes precedence over `If-Modified-Since`; a differing ETag serves the representation even when the supplied date is newer. A directory's configured index file is checked against the canonical root and the `reject_symlinks` option before serving it. Its `Content-Type` follows the configured index filename, including when that filename is a symlink to a file with another extension.
 
+A filesystem root (`/`, `C:\`) is a valid root: its canonical form already ends with the separator, and the containment check accepts what lies below it, while a sibling that merely shares an ordinary root's string prefix (`www` and `www_old`) stays refused. The directory listing writes the request path into each link escaped for the HTML attribute (`&` becomes `&amp;`, percent-encodings are left as they are), and each entry name percent-encoded. <!-- src: qbm/http/src/qbm/http/middleware/static_files.cpp:138-155, qbm/http/src/qbm/http/middleware/static_files.cpp:306-314 -->
+
 `root_directory` is a `std::filesystem::path`, and a **relative** root is resolved through `qb::io::sys::resolve_resource` when the middleware is constructed: it is looked up against the current working directory first (historical behaviour), then against the executable's own directory, before being canonicalised. A binary shipped next to its asset directory therefore serves them from **any** working directory — no `cd`, no environment setup. An **absolute** root is used unchanged. The root must exist and be a directory at construction time, or the constructor throws.
 
 ```cpp
@@ -367,6 +373,8 @@ Configuration is `qb::http::SecurityHeadersOptions`, a builder of optional strin
 | `Cross-Origin-Embedder-Policy` | `with_cross_origin_embedder_policy(std::string)` |
 | `Cross-Origin-Resource-Policy` | `with_cross_origin_resource_policy(std::string)` |
 
+**HSTS follows the connection, not the request target** (RFC 6797 §7.1, §7.2): `Strict-Transport-Security` is sent on a response that leaves over secure transport and never over plain TCP. For an HTTP/1.1 or HTTP/2 session the middleware asks the session's transport (`is_secure()`, a compile-time property of `tcp` and `stcp`), so an ordinary origin-form request on a TLS connection — whose URI carries no scheme — gets the header, and an absolute-form `https://` target sent on a plain socket does not. A session without a transport (an HTTP/3 stream session, whose URI is rebuilt from `:scheme`, or a test double) falls back to the scheme of the request URI. <!-- src: qbm/http/src/qbm/http/middleware/security_headers.h:51-71, qbm/http/src/qbm/http/middleware/security_headers.h:337 -->
+
 `SecurityHeadersOptions::secure_defaults()` is a strong baseline: HSTS `max-age=31536000; includeSubDomains`, `nosniff`, `X-Frame-Options: SAMEORIGIN`, a restrictive CSP, `Referrer-Policy: strict-origin-when-cross-origin`, `Cross-Origin-Opener-Policy: same-origin`, and `X-Permitted-Cross-Domain-Policies: none`. COEP and `Permissions-Policy` are left unset because they are application-specific.
 
 ```cpp
@@ -379,7 +387,7 @@ auto sec = qb::http::security_headers_middleware<MySession>(
     qb::http::SecurityHeadersOptions::secure_defaults());
 router.use(sec);
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/security_headers.h:408 -->
+<!-- src: qbm/http/src/qbm/http/middleware/security_headers.h:433 -->
 
 > **CSP nonce gate.** `with_csp_nonce(true)` requires `QB_HAS_SSL` — the per-request nonce comes from the framework CSPRNG. In a plain-HTTP build, leave nonce generation off; constructing the middleware with it enabled throws `std::logic_error`. The middleware itself remains available without SSL as long as you do not request nonces.
 
@@ -413,7 +421,9 @@ Configuration is `qb::http::RecaptchaOptions` (secret key, minimum score, etc.).
 | `recaptcha_v3_middleware<S>(secret_key, min_score = 0.5f)` | reCAPTCHA v3 preset |
 | `recaptcha_strict_middleware<S>(secret_key)` | strict preset |
 
-<!-- src: qbm/http/src/qbm/http/middleware/recaptcha.h:579-633 -->
+<!-- src: qbm/http/src/qbm/http/middleware/recaptcha.h:596-650 -->
+
+The verification result is stored in the context under `"recaptcha_result"` as a `qb::http::RecaptchaResult`. Its `challenge_ts` is the instant Google announces — the RFC 3339 timestamp of the reply (`2026-01-02T03:04:05Z`, a fraction and a numeric offset accepted), converted to UTC — and `has_challenge_ts` says whether the reply carried a readable one, as `has_score` does for the score. An absent or unreadable timestamp leaves `challenge_ts` at the epoch; it never decides the verdict. <!-- src: qbm/http/src/qbm/http/middleware/recaptcha.h:248-260, qbm/http/src/qbm/http/middleware/recaptcha.h:542-549, qbm/http/src/qbm/http/middleware/recaptcha.cpp:32-113 -->
 
 Construction throws `std::invalid_argument` if the secret key is empty. The free factories and class compile without any define once `<qbm/http/middleware/recaptcha.h>` is included; only the `make` tags for them are gated behind `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`.
 

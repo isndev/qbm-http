@@ -342,6 +342,14 @@ private:
         return std::nullopt;
     }
 
+    /// Claims whose value is text whatever it looks like, never coerced to a JSON number, boolean
+    /// or null: the StringOrURI claims of RFC 7519 section 4.1 (`iss`, `sub`, `aud`, `jti`) and
+    /// `username`, the textual identifier auth::User is rebuilt from (Huly QB-553).
+    [[nodiscard]] static bool
+    is_textual_claim(std::string_view name) noexcept {
+        return name == "iss" || name == "sub" || name == "aud" || name == "jti" || name == "username";
+    }
+
     std::optional<qb::json>
     verify_token(const std::string &token, JwtErrorInfo &error_info) const {
         const auto parse_int64_claim = [](const qb::json &claim) -> std::optional<int64_t> {
@@ -407,7 +415,10 @@ private:
         if (result.is_valid()) {
             qb::json payload_json = qb::json::object();
             for (const auto &pair : result.payload) {
-                if (pair.second == "true") {
+                if (is_textual_claim(pair.first)) {
+                    // Text whatever it looks like: "123" stays the subject "123" (Huly QB-553).
+                    payload_json[pair.first] = pair.second;
+                } else if (pair.second == "true") {
                     payload_json[pair.first] = true;
                 } else if (pair.second == "false") {
                     payload_json[pair.first] = false;

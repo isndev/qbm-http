@@ -35,6 +35,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -757,6 +758,29 @@ TEST_F(JwtMiddlewareTest, BooleanAndDecimalClaimsAreCoercedToNativeJsonTypes) {
     EXPECT_FALSE(payload.at("is_guest").get<bool>());
     ASSERT_TRUE(payload.at("ratio").is_number_float());
     EXPECT_DOUBLE_EQ(payload.at("ratio").get<double>(), 3.14);
+}
+
+// The coercion stops at the textual claims (Huly QB-553): `iss`, `sub`, `aud` and `jti` are
+// StringOrURI values (RFC 7519 section 4.1) and `username` is the User model's textual identifier,
+// so an identifier that merely looks like a number, a boolean or null stays the string that was
+// signed -- the AuthMiddleware reading "jwt_payload" only takes a string `sub`/`username` and
+// would otherwise lose the user. Every other claim keeps its coercion.
+TEST_F(JwtMiddlewareTest, TextualClaimsStayStringsWhileOthersAreCoerced) {
+    const std::string token = make_token(
+        {{"sub", "123"}, {"username", "true"}, {"jti", "null"}, {"aud", "42"}, {"iss", "-1.5"}, {"is_admin", "true"}, {"count", "5"}});
+    run(_jwt_mw, bearer(token));
+
+    ASSERT_EQ(status(), qb::http::status::OK) << "Body: " << body();
+    ASSERT_TRUE(_session->_jwt_payload_in_context.has_value());
+    const auto &payload = *_session->_jwt_payload_in_context;
+    for (auto const &[claim, text] : std::vector<std::pair<std::string, std::string>>{
+             {"sub", "123"}, {"username", "true"}, {"jti", "null"}, {"aud", "42"}, {"iss", "-1.5"}
+         }) {
+        ASSERT_TRUE(payload.at(claim).is_string()) << claim << " became " << payload.at(claim).dump();
+        EXPECT_EQ(payload.at(claim).get<std::string>(), text) << claim;
+    }
+    EXPECT_TRUE(payload.at("is_admin").is_boolean());
+    EXPECT_TRUE(payload.at("count").is_number_integer());
 }
 
 // ---------------------------------------------------------------------------

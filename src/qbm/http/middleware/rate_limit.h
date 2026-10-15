@@ -432,8 +432,10 @@ public:
         } else {
             ClientData &current_client_record = _client_data[client_id]; // Creates if not exist
 
-            // Check if the window has reset for this client
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - current_client_record.last_reset_time) >= _options->get_window()) {
+            // Check if the window has reset for this client. Compared in the clock's own units: a
+            // cast to whole milliseconds first read every elapsed time under 1 ms as 0 and kept a
+            // sub-millisecond window from ever ending (Huly QB-536).
+            if (now - current_client_record.last_reset_time >= _options->get_window()) {
                 current_client_record.request_count   = 0;
                 current_client_record.last_reset_time = now;
             }
@@ -563,7 +565,7 @@ private:
     evict_stale_entries_internal(std::chrono::steady_clock::time_point now) noexcept {
         const auto window = _options->get_window();
         for (auto it = _client_data.begin(); it != _client_data.end();) {
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.last_reset_time) >= window) {
+            if (now - it->second.last_reset_time >= window) {
                 it = _client_data.erase(it);
             } else {
                 ++it;
@@ -594,10 +596,9 @@ private:
             (_options->get_max_requests() > client_record.request_count) ? (_options->get_max_requests() - client_record.request_count) : 0;
         response.set_header("X-RateLimit-Remaining", std::to_string(remaining_requests));
 
-        auto now               = std::chrono::steady_clock::now();
-        auto elapsed_in_window = std::chrono::duration_cast<std::chrono::milliseconds>(now - client_record.last_reset_time);
-        auto time_until_reset  = _options->get_window() - elapsed_in_window;
-        if (time_until_reset.count() < 0) {
+        const auto   now              = std::chrono::steady_clock::now();
+        qb::duration time_until_reset = _options->get_window() - (now - client_record.last_reset_time);
+        if (time_until_reset < qb::duration::zero()) {
             time_until_reset = qb::duration::zero();
         }
         response.set_header("X-RateLimit-Reset", std::to_string(std::chrono::duration_cast<std::chrono::seconds>(time_until_reset).count()));

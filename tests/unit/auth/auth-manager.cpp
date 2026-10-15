@@ -32,6 +32,8 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -145,6 +147,33 @@ TEST(AuthManagerRoundTrip, ValidHmacTokenRoundTrips) {
     EXPECT_FALSE(out->has_role("superadmin"));
     EXPECT_EQ(out->metadata.at("dept"), "eng");
     EXPECT_EQ(out->metadata.at("tier"), "gold");
+}
+
+// A verified token gives back the User it was issued for, byte for byte (Huly QB-553). The textual
+// identifiers are strings in the token; re-reading each claim of the verified map as JSON turned
+// "123" into a number, "true" into a boolean, "null" into null and "\"q\"" into q, so the id or the
+// username vanished and a token whose two identifiers looked like JSON was refused outright.
+// Structured claims (roles, metadata) keep their decoding.
+TEST(AuthManagerRoundTrip, TextualIdentifiersSurviveVerificationVerbatim) {
+    Manager mgr(hmac_options());
+    for (auto const &[id, username] : std::vector<std::pair<std::string, std::string>>{
+             {"123", "alice"}, {"user-1", "true"}, {"null", "0"}, {"false", "-12.5e3"}, {"\"quoted\"", "[\"x\"]"}, {"{}", "{\"a\":1}"}
+         }) {
+        User user;
+        user.id               = id;
+        user.username         = username;
+        user.roles            = {"123", "admin"};
+        user.metadata["tier"] = "42";
+        user.metadata["flag"] = "true";
+
+        const auto out = mgr.verify_token(mgr.generate_token(user));
+        ASSERT_TRUE(out.has_value()) << "id=" << id << " username=" << username << ": a verified token must yield its user";
+        EXPECT_EQ(out->id, id);
+        EXPECT_EQ(out->username, username);
+        EXPECT_EQ(out->roles, user.roles) << "id=" << id;
+        EXPECT_EQ(out->metadata.at("tier"), "42");
+        EXPECT_EQ(out->metadata.at("flag"), "true");
+    }
 }
 
 TEST(AuthManagerRoundTrip, HmacSha384AndSha512RoundTrip) {

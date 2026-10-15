@@ -9,6 +9,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **`RecaptchaResult::has_challenge_ts` (Huly QB-537).** Whether Google's reply carried a
+  readable `challenge_ts`, beside `has_score`; appended after `challenge_ts`, so positional
+  aggregate initialisation keeps compiling.
 - **HTTP/3 active cancellation retains the client through its callback (Huly QB-960).** A
   cancellation callback may release the last external `shared_ptr`; the client stays alive until
   the active stream has been reset and the pending queue has resumed.
@@ -38,6 +41,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **`JwtMiddleware` textual claims and HSTS are corrected observably (Huly QB-553, QB-539).** No
+  signature changes. `"jwt_payload"` holds `iss`, `sub`, `aud`, `jti` and `username` as the strings
+  that were signed (a numeric-looking `sub` was a JSON number); HSTS is no longer sent on a plain-TCP
+  connection for an absolute-form `https://` request target.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -109,6 +116,34 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A sub-millisecond rate-limit window ends at its own length (Huly QB-536).** The reset, the
+  stale-entry sweep and `X-RateLimit-Reset` compared the elapsed time truncated to whole
+  milliseconds, so a 500 us window never ended before 1 ms. They compare in the clock's own units.
+- **reCAPTCHA `challenge_ts` is the announced instant (Huly QB-537).** The result recorded the
+  parsing time. The RFC 3339 timestamp Google sends is now parsed (fraction, `Z` or numeric offset)
+  and converted to UTC; an absent or unreadable value leaves `challenge_ts` at the epoch with
+  `has_challenge_ts == false`. The verification verdict never depends on it.
+- **HSTS follows the connection (Huly QB-539).** `SecurityHeadersMiddleware` decided from the
+  request URI's scheme, which an ordinary origin-form request on an HTTP/1.1 TLS connection does
+  not carry: configured HSTS was missing on HTTPS. The decision is now the session transport's
+  `is_secure()` for HTTP/1.1 and HTTP/2 sessions (RFC 6797 sections 7.1, 7.2), falling back to the
+  URI scheme only for a session without a transport (HTTP/3 stream sessions, test doubles).
+- **Static files under a filesystem root are served (Huly QB-542).** A root that already ends with
+  a separator (`/`, `C:\`) refused every descendant: the containment check demanded a second
+  separator. A prefix-sharing sibling of an ordinary root stays refused.
+- **The directory listing escapes its link prefix (Huly QB-543).** The request path was written
+  raw into `href`, so a legal `&copy;` in it became a character reference. The prefix is now
+  escaped for the attribute; percent-encodings are left as they are.
+- **One schema-nesting budget per validation (Huly QB-552).** `additionalProperties` and
+  `propertyNames` validated through a fresh `SchemaValidator` whose count restarted at zero, so a
+  chain of them never met the 64-level bound that `properties`, `items` and the combinators
+  enforce. They validate in place now, under the same budget, with the cached rules and without
+  copying the sub-schema. The standalone `PropertyNamesRule` is unchanged.
+- **A verified token gives back its `User` verbatim (Huly QB-553).** `auth::Manager::verify_token`
+  re-read every verified claim as JSON, so an id or username such as `"123"`, `"true"` or `"null"`
+  vanished, and a token whose two identifiers looked like JSON was refused. The signed branch now
+  reads the token's own payload, as the unsigned branch already did. `JwtMiddleware` keeps its
+  claim coercion except for the textual claims (`iss`, `sub`, `aud`, `jti`, `username`).
 - **API documentation checks reject comment-only names and invalid later citations (Huly QB-561, QB-562).**
   The shipped guard indexes C++ code without comments or literals and examines every
   citation on a line before accepting it.

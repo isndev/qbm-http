@@ -266,8 +266,8 @@ Usage: `router.use(qb::http::cors_secure_middleware<S>({"https://app"}));`
 ### `qb::http::JwtMiddleware<S>` — `jwt.h:90`
 `explicit JwtMiddleware(const std::string& secret, const std::string& algorithm="HS256"); explicit JwtMiddleware(JwtOptions);`
 Fluent (each returns `JwtMiddleware&`): `from_header(name,scheme="Bearer") / from_cookie(name) / from_query(name); require_claims(vector); with_validator(Validator) / with_error_handler(ErrorHandler) / with_success_handler(SuccessHandler) / with_options(const JwtOptions&)`.
-`using Validator=std::function<bool(const qb::json&,JwtErrorInfo&)>; using ErrorHandler=std::function<void(ContextPtr,const JwtErrorInfo&)>; using SuccessHandler=std::function<void(ContextPtr,const qb::json&)>`. On success stores decoded payload in context under key `"jwt_payload"`. On failure replies 401. Statics: `create(secret,algorithm="HS256")`, `create_with_options(options)`.
-Factories (`jwt.h:531`): `jwt_middleware<S>(secret, algorithm="HS256")`, `jwt_middleware_with_options<S>(options)`.
+`using Validator=std::function<bool(const qb::json&,JwtErrorInfo&)>; using ErrorHandler=std::function<void(ContextPtr,const JwtErrorInfo&)>; using SuccessHandler=std::function<void(ContextPtr,const qb::json&)>`. On success stores decoded payload in context under key `"jwt_payload"`: claims that read as JSON booleans or numbers are coerced, except the textual `iss`, `sub`, `aud`, `jti`, `username`, which stay the signed strings (`src/qbm/http/middleware/jwt.h:345-351`). On failure replies 401. Statics: `create(secret,algorithm="HS256")`, `create_with_options(options)`.
+Factories (`jwt.h:542`): `jwt_middleware<S>(secret, algorithm="HS256")`, `jwt_middleware_with_options<S>(options)`.
 Usage: `router.use(qb::http::jwt_middleware<S>(secret));`
 
 ## Auth (token + roles) — `src/qbm/http/middleware/auth.h` · **needs `QB_HAS_SSL`**
@@ -286,7 +286,7 @@ Usage: `auto opt = qb::http::RateLimitOptions().max_requests(60).window(std::chr
 ### `qb::http::RateLimitMiddleware<S>` — `rate_limit.h:348`
 `explicit RateLimitMiddleware(name="RateLimitMiddleware"); RateLimitMiddleware(RateLimitOptions, name); RateLimitMiddleware& reset_all_clients() noexcept; RateLimitMiddleware& reset_client(const std::string&); std::size_t evict_stale_entries_now();`
 Adds `X-RateLimit-*` headers; over-limit replies with configured status (default 429). Stale-entry cleanup interval `rate_limit_security::STALE_ENTRY_CLEANUP_INTERVAL = std::chrono::minutes{1}` (`rate_limit.h:51`).
-Factories (`rate_limit.h:618`): `rate_limit_middleware<S>(options=RateLimitOptions(), name)`, `rate_limit_dev_middleware<S>(name)`, `rate_limit_secure_middleware<S>(name)`.
+Factories (`rate_limit.h:619`): `rate_limit_middleware<S>(options=RateLimitOptions(), name)`, `rate_limit_dev_middleware<S>(name)`, `rate_limit_secure_middleware<S>(name)`.
 Usage: `router.use(qb::http::rate_limit_secure_middleware<S>());`
 
 ## Compression — `src/qbm/http/middleware/compression.h` · response/request compression gated on `QB_HAS_COMPRESSION`
@@ -313,27 +313,27 @@ Usage: `router.use(qb::http::timing_middleware<S>([](auto ms){ LOG(ms.count()); 
 
 ### `qb::http::StaticFilesMiddleware<S>` — `static_files.h:281`
 `explicit StaticFilesMiddleware(StaticFilesOptions options, std::string name="StaticFilesMiddleware");`
-Serves GET/HEAD; path-traversal hardened (canonicalised, symlink-escape rejected), including configured directory index files; supports ETag/If-None-Match, Last-Modified/If-Modified-Since (`If-None-Match` takes precedence when present), `Range`/`206`/`416`, optional directory listing. **Ctor anchors a relative `root_directory` via `qb::io::sys::resolve_resource` (cwd then exe dir), then requires it to exist and canonicalise.** Throws `std::invalid_argument` if root empty, `std::runtime_error` if root (after resolution) missing/not a directory or not canonicalisable.
+Serves GET/HEAD; path-traversal hardened (canonicalised, symlink-escape rejected), including configured directory index files; supports ETag/If-None-Match, Last-Modified/If-Modified-Since (`If-None-Match` takes precedence when present), `Range`/`206`/`416`, optional directory listing (links escape the request path for the HTML attribute). A filesystem root (`/`, `C:\`) is a valid root: `internal::sanitize_and_resolve_path` accepts its descendants and still refuses a prefix-sharing sibling (`src/qbm/http/middleware/static_files.cpp:92-158`). **Ctor anchors a relative `root_directory` via `qb::io::sys::resolve_resource` (cwd then exe dir), then requires it to exist and canonicalise.** Throws `std::invalid_argument` if root empty, `std::runtime_error` if root (after resolution) missing/not a directory or not canonicalisable.
 Factory (`static_files.h:807`): `static_files_middleware<S>(options, name="StaticFilesMiddleware")`.
 Usage: `router.use(qb::http::static_files_middleware<S>(qb::http::StaticFilesOptions{"public"}.with_path_prefix_to_strip("/static")));  // "public" found relative to cwd or the executable's dir`
 
 ## Security headers — `src/qbm/http/middleware/security_headers.h`
-### `qb::http::SecurityHeadersOptions` — `security_headers.h:53`
+### `qb::http::SecurityHeadersOptions` — `security_headers.h:78`
 `SecurityHeadersOptions();` Fluent (return `SecurityHeadersOptions&`): `with_hsts(value)/without_hsts(); with_x_content_type_options_nosniff(bool=true); with_x_frame_options(value)/without_x_frame_options(); with_content_security_policy(value)/without...; with_content_security_policy_report_only(value)/without...; with_referrer_policy(value)/without...; with_permissions_policy(value)/without...; with_cross_origin_opener_policy(value)/without...; with_cross_origin_embedder_policy(value)/without...; with_cross_origin_resource_policy(value)/without...; with_x_permitted_cross_domain_policies(value)/without...; with_csp_nonce(bool=true);` Preset: `static SecurityHeadersOptions secure_defaults()` (HSTS 1y, nosniff, `X-Frame-Options: SAMEORIGIN`, a default CSP, `Referrer-Policy`, COOP `same-origin`, `X-Permitted-Cross-Domain-Policies: none`).
 
-### `qb::http::SecurityHeadersMiddleware<S>` — `security_headers.h:283`
+### `qb::http::SecurityHeadersMiddleware<S>` — `security_headers.h:308`
 `SecurityHeadersMiddleware(const SecurityHeadersOptions&, name); void update_options(const SecurityHeadersOptions&);`
 Adds the configured security headers to every response.
-Factory (`security_headers.h:408`): `security_headers_middleware<S>(options=SecurityHeadersOptions::secure_defaults(), name)`.
+Factory (`security_headers.h:433`): `security_headers_middleware<S>(options=SecurityHeadersOptions::secure_defaults(), name)`.
 Usage: `router.use(qb::http::security_headers_middleware<S>());`
 
 ## reCAPTCHA — `src/qbm/http/middleware/recaptcha.h` · **needs `QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`**
-### `qb::http::RecaptchaOptions` — `recaptcha.h:58`
-`RecaptchaOptions()=default; explicit RecaptchaOptions(std::string secret_key);` Fluent: `min_score(float) noexcept; challenge_type(ChallengeType) noexcept; from_header(...) / from_body(...) / from_query(...);` `enum class TokenLocation{Header,Body,Query}; enum class ChallengeType{V2,V3,Auto};` Presets: `static RecaptchaOptions v3(secret, min_score=0.5f); v2(secret); strict(secret)`. Getters `get_min_score()/get_token_location()/get_challenge_type()`. `struct RecaptchaResult` carries `score`, `challenge_ts` (`std::chrono::system_clock::time_point`), etc.
+### `qb::http::RecaptchaOptions` — `recaptcha.h:72`
+`RecaptchaOptions()=default; explicit RecaptchaOptions(std::string secret_key);` Fluent: `min_score(float) noexcept; challenge_type(ChallengeType) noexcept; from_header(...) / from_body(...) / from_query(...);` `enum class TokenLocation{Header,Body,Query}; enum class ChallengeType{V2,V3,Auto};` Presets: `static RecaptchaOptions v3(secret, min_score=0.5f); v2(secret); strict(secret)`. Getters `get_min_score()/get_token_location()/get_challenge_type()`. `struct RecaptchaResult` carries `success`, `score` + `has_score`, `action`, `hostname`, `error_codes`, `challenge_ts` (`std::chrono::system_clock::time_point`: the RFC 3339 instant Google announces, in UTC) + `has_challenge_ts` (false, and `challenge_ts` at the epoch, when absent or unreadable) (`src/qbm/http/middleware/recaptcha.h:248-260`).
 
-### `qb::http::RecaptchaMiddleware<S>` — `recaptcha.h:264`
+### `qb::http::RecaptchaMiddleware<S>` — `recaptcha.h:280`
 `using VerificationCallback=std::function<void(qb::http::async::Reply&&)>; using VerificationClient=std::function<void(qb::http::Request, VerificationCallback)>; explicit RecaptchaMiddleware(RecaptchaOptions, name); RecaptchaMiddleware(const std::string& secret, float min_score=0.5f, name);` Statics `v3(secret,min_score=0.5f,name)`, `strict(secret,name)`. Verifies the token against Google (async); rejects below `min_score`.
-Factories (`recaptcha.h:584`): `recaptcha_middleware<S>(RecaptchaOptions, name)`, `recaptcha_middleware<S>(secret, min_score=0.5f, name)`, `recaptcha_v3_middleware<S>(secret, min_score=0.5f, name)`, `recaptcha_strict_middleware<S>(secret, name)`. All throw `std::invalid_argument` on empty secret.
+Factories (`recaptcha.h:601`): `recaptcha_middleware<S>(RecaptchaOptions, name)`, `recaptcha_middleware<S>(secret, min_score=0.5f, name)`, `recaptcha_v3_middleware<S>(secret, min_score=0.5f, name)`, `recaptcha_strict_middleware<S>(secret, name)`. All throw `std::invalid_argument` on empty secret.
 
 ## Logging — `src/qbm/http/middleware/logging.h`
 ### `qb::http::LoggingMiddleware<S>` — `logging.h:52`
@@ -414,10 +414,10 @@ Usage: `qb::http::auth::Manager m{o}; auto tok = m.generate_token(user); auto u 
 - `class IRule { virtual bool validate(const qb::json&, const std::string& field_path, Result&) const=0; virtual std::string rule_name() const=0; }` (`rule.h:39`).
 - `TypeRule(DataType)` (+ `static std::string data_type_to_string(DataType) noexcept`), `RequiredRule`, `MinLengthRule(size_t)`, `MaxLengthRule(size_t)`, `PatternRule(std::string)` (ctor throws `std::invalid_argument` on >1024-char/invalid), `MinimumRule(double,exclusive=false)` / `MaximumRule(double,exclusive=false)` (also `qb::json` and integral bounds), `EnumRule(qb::json)` (ctor throws if not array), `UniqueItemsRule`, `MinItemsRule(size_t)`, `MaxItemsRule(size_t)`, `MinPropertiesRule(size_t)`, `MaxPropertiesRule(size_t)`, `PropertyNamesRule(const qb::json&)`, `ItemsRule(ItemsRuleLogic, additional_items_policy=true)`, `CustomRule(CustomValidateFn, std::string rule_name)`.
 - String lengths count Unicode code points in valid UTF-8; malformed programmatic strings fail without copying them into an error. Numeric bounds retain signed/unsigned integer precision, and `EnumRule` / `UniqueItemsRule` compare JSON numbers exactly at every nesting level. A numeric `exclusiveMinimum` / `exclusiveMaximum` stands alone; the earlier boolean form beside `minimum` / `maximum` remains supported.
-- `using ItemsRuleLogic=std::variant<std::shared_ptr<SchemaValidator>, std::vector<std::shared_ptr<SchemaValidator>>>` (`rule.h:367`); `using CustomValidateFn=std::function<bool(const qb::json&,const std::string&,Result&)>` (`rule.h:397`).
+- `using ItemsRuleLogic=std::variant<std::shared_ptr<SchemaValidator>, std::vector<std::shared_ptr<SchemaValidator>>>` (`rule.h:373`); `using CustomValidateFn=std::function<bool(const qb::json&,const std::string&,Result&)>` (`rule.h:403`).
 
 ### `qb::http::validation::SchemaValidator` — `src/qbm/http/validation/schema_validator.h:33`
-`explicit SchemaValidator(const qb::json& schema);` (throws `std::invalid_argument` if not an object) `bool validate(const qb::json& data, Result&) const; SchemaValidator& set_error_value_policy(ErrorValuePolicy, preview_bytes=256) noexcept; std::optional<qb::json> make_offending_value(const qb::json&) const;` `enum class ErrorValuePolicy{Full,Preview,None}`.
+`explicit SchemaValidator(const qb::json& schema);` (throws `std::invalid_argument` if not an object) `bool validate(const qb::json& data, Result&) const; SchemaValidator& set_error_value_policy(ErrorValuePolicy, preview_bytes=256) noexcept; std::optional<qb::json> make_offending_value(const qb::json&) const;` `enum class ErrorValuePolicy{Full,Preview,None}`. Nesting bound: 64 sub-schemas per validation, one budget shared by every keyword that holds a sub-schema (`properties`, `items`, `additionalItems`, `additionalProperties`, `propertyNames`, `allOf`/`anyOf`/`oneOf`/`not`); past it, error `schemaTooDeep` (`src/qbm/http/validation/schema_validator.h:162-168`).
 Usage: `qb::http::validation::SchemaValidator v{schema}; qb::http::validation::Result r; v.validate(data, r);`
 
 ### Parameters — `src/qbm/http/validation/parameter_validator.h`

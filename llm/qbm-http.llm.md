@@ -258,7 +258,7 @@ router().use<HeaderGuard>();                  // in-place construction, forwards
 - Adapters wrap `process()` in try/catch: an uncaught exception becomes a 500 + `ERROR` (so prefer not to throw deliberately — call `complete(ERROR)` with a set status instead).
 - Async middleware: capture `ctx` (shared_ptr), call `complete()` exactly once, guard `ctx->is_cancelled()` in the callback.
 - Global middleware **is** prepended to 404/405 chains, but **not** to the user-defined error chain (`Router::set_error_task_chain`) — add cross-cutting concerns there explicitly.
-- Built-in middleware (`<qbm/http/middleware/all.h>`) factories: `qb::http::cors_middleware<S>(CorsOptions::permissive())`, `compression_middleware<S>(...)`, `security_headers_middleware<S>(...)`, `rate_limit_middleware<S>(...)`, static files (`StaticFilesMiddleware`), plus the auth/validation/jwt factories below. There is also `qb::http::conditional_middleware<S>(predicate, if_mw[, else_mw])`.
+- Built-in middleware (`<qbm/http/middleware/all.h>`) factories: `qb::http::cors_middleware<S>(CorsOptions::permissive())`, `compression_middleware<S>(...)`, `security_headers_middleware<S>(...)`, `rate_limit_middleware<S>(...)`, static files (`StaticFilesMiddleware`), plus the auth/validation/jwt factories below. There is also `qb::http::conditional_middleware<S>(predicate, if_mw[, else_mw])`. `SecurityHeadersMiddleware` sends HSTS by the connection (the session transport's `is_secure()` for HTTP/1.1 and HTTP/2), never by the request URI's scheme.
 - **Static files serve from any cwd.** `StaticFilesOptions`'s `root_directory` is a `std::filesystem::path` (string literals convert implicitly); a **relative** root is resolved by the middleware ctor via `qb::io::sys::resolve_resource` (cwd first, then the executable's own directory), so `static_files_middleware<S>(StaticFilesOptions{"public"})` finds assets bundled next to the binary regardless of where the process is launched. Absolute roots are used unchanged; the resolved root must exist or the ctor throws.
 
 ## Authentication & JWT (needs `QB_HAS_SSL`)
@@ -292,7 +292,7 @@ router().get("/admin", [](auto ctx) {
 });
 ```
 
-Auth factories (`<S>`-templated): `auth_middleware`, `jwt_auth_middleware(secret, algo="HS256")`, `role_auth_middleware(roles, require_all=false)`, `optional_auth_middleware`. `JwtMiddleware` (`<qbm/http/middleware/jwt.h>`) stores the raw payload as `qb::json` under `"jwt_payload"` (no `User`); `JwtOptions::leeway` is `std::chrono::seconds`. Never ship `require_signature_verification(false)` or `verify_expiration(false)`.
+Auth factories (`<S>`-templated): `auth_middleware`, `jwt_auth_middleware(secret, algo="HS256")`, `role_auth_middleware(roles, require_all=false)`, `optional_auth_middleware`. `JwtMiddleware` (`<qbm/http/middleware/jwt.h>`) stores the raw payload as `qb::json` under `"jwt_payload"` (no `User`); claims that read as JSON booleans/numbers are coerced there, but `iss`/`sub`/`aud`/`jti`/`username` stay the signed strings, and `auth::Manager::verify_token` rebuilds the `User` from the token's own JSON payload, so a textual id such as `"123"` survives both; `JwtOptions::leeway` is `std::chrono::seconds`. Never ship `require_signature_verification(false)` or `verify_expiration(false)`.
 
 ## Validation (always available)
 

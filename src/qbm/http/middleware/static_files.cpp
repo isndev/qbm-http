@@ -135,15 +135,21 @@ sanitize_and_resolve_path(const std::filesystem::path &base_path, std::string_vi
         return {};
     }
 
-    // (5) Prefix check with separator boundary.
+    // (5) Prefix check with separator boundary. A base that already ends with a separator -- a
+    //     filesystem root, "/" or "C:\" -- carries the boundary itself: the character after it
+    //     starts the child's name, and demanding another separator there refused every file
+    //     below a root (Huly QB-542).
     const std::string resolved_str = fully_resolved_path.string();
     const std::string base_str     = canonical_base_path.string();
+    const auto        is_separator = [](char c) noexcept {
+        return c == '/' || c == std::filesystem::path::preferred_separator;
+    };
 
     if (std::string_view(resolved_str).starts_with(base_str)) {
         if (resolved_str.length() == base_str.length()) {
             return fully_resolved_path; // base itself
         }
-        if (resolved_str.length() > base_str.length() && resolved_str[base_str.length()] == std::filesystem::path::preferred_separator) {
+        if (is_separator(base_str.back()) || is_separator(resolved_str[base_str.length()])) {
             return fully_resolved_path;
         }
     }
@@ -297,11 +303,15 @@ generate_directory_listing_html(const std::filesystem::path &directory_path,
          << "<h1>Index of " << utility::escape_html(dir_display_name_str) << "</h1>\n"
          << "<table>\n<tr><th>Name</th><th>Size</th><th>Last Modified</th></tr>\n";
 
-    // Normalize request_uri_path: ensure it ends with a slash for correct relative links
+    // Normalize request_uri_path: ensure it ends with a slash for correct relative links. The
+    // path is the request's own (already percent-encoded) bytes and may legally hold '&': it is
+    // escaped for the attribute it is written into, '%' untouched, so `&copy;` stays a path and
+    // never becomes a character reference (Huly QB-543).
     std::string base_link_path = std::string(request_uri_path);
     if (base_link_path.empty() || base_link_path.back() != '/') {
         base_link_path += '/';
     }
+    base_link_path = utility::escape_html(base_link_path);
 
     // Parent directory link, if not at the root_directory of the options
     if (directory_path != opts.root_directory && directory_path.has_parent_path()) {

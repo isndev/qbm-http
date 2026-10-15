@@ -343,7 +343,13 @@ public:
 // Forward declaration
 class SchemaValidator;
 
-/** @brief Validates the names of properties in an object against a sub-schema. */
+/**
+ * @brief Validates the names of properties in an object against a sub-schema.
+ *
+ * A standalone rule: it validates through a SchemaValidator of its own, whose nesting budget
+ * starts afresh. A SchemaValidator does not use it for the `propertyNames` keyword of its own
+ * schema; it validates the names itself, inside the one depth budget of that validation.
+ */
 class PropertyNamesRule : public IRule {
 private:
     qb::json _name_schema_definition_copy; // Store the schema definition itself

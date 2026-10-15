@@ -156,7 +156,7 @@ SchemaValidator::build_rules_for_schema_node(const qb::json &schema_node) {
             rules.push_back(std::make_shared<MaxPropertiesRule>(static_cast<size_t>(val)));
         }
     }
-    // PropertyNamesRule is handled structurally in validate_recursive
+    // propertyNames is handled structurally in validate_recursive (validate_property_names_keyword)
     return rules;
 }
 
@@ -246,8 +246,7 @@ SchemaValidator::validate_recursive(const qb::json &current_value, const qb::jso
             }
 
             if (current_schema.contains("propertyNames") && current_schema["propertyNames"].is_object()) {
-                PropertyNamesRule prop_names_rule(current_schema["propertyNames"]);
-                if (!prop_names_rule.validate(current_value, current_path, result)) {
+                if (!validate_property_names_keyword(current_value, current_schema["propertyNames"], current_path, result)) {
                     property_names_check_passed = false;
                 }
             }
@@ -492,29 +491,11 @@ SchemaValidator::validate_additional_properties_keyword(const qb::json &value, c
                 is_valid = false;
             }
         } else if (additional_props_def.is_object()) {
-            SchemaValidator additional_validator(additional_props_def);
-            additional_validator.set_error_value_policy(_error_value_policy, _offending_value_preview_bytes);
-            Result sub_result;
-            if (!additional_validator.validate(val, sub_result)) {
-                for (const auto &err : sub_result.errors()) {
-                    std::string new_path = prop_path;
-                    if (!err.field_path.empty()) {
-                        if (prop_path.length() > 0 && prop_path.back() == '.' && err.field_path.front() == '.') {
-                            new_path += err.field_path.substr(1);
-                        } else if (prop_path.length() > 0 && err.field_path.length() > 0 && prop_path.back() != '.'
-                                   && err.field_path.front() != '.') {
-                            new_path += ".";
-                            new_path += err.field_path;
-                        } else {
-                            new_path += err.field_path;
-                        }
-                    }
-                    // The nested Result has already applied the value policy.
-                    // Re-path its Error without previewing the shaped value again.
-                    Error repathed      = err;
-                    repathed.field_path = std::move(new_path);
-                    result.add_error(std::move(repathed));
-                }
+            // The sub-schema is a node of this validator's own schema: validated in place, under the
+            // same depth budget, with the cached rules and the active value policy. A fresh
+            // SchemaValidator per value copied the sub-schema and restarted the depth count at zero,
+            // so a chain of additionalProperties never met MAX_SCHEMA_DEPTH (Huly QB-552).
+            if (!validate_recursive(val, additional_props_def, prop_path, result)) {
                 is_valid = false;
             }
         } else {
@@ -524,6 +505,28 @@ SchemaValidator::validate_additional_properties_keyword(const qb::json &value, c
         }
     }
     return is_valid;
+}
+
+bool
+SchemaValidator::validate_property_names_keyword(const qb::json &value, const qb::json &names_schema, const std::string &path,
+                                                 Result &result) const {
+    if (!value.is_object())
+        return true;
+
+    bool all_names_valid = true;
+    for (auto const &[prop_name, _] : value.items()) {
+        const qb::json name = prop_name;
+        Result         name_result;
+        if (validate_recursive(name, names_schema, "", name_result))
+            continue;
+        all_names_valid             = false;
+        const std::string name_path = path.empty() ? "<propertyName:" + prop_name + ">" : path + ".<propertyName:" + prop_name + ">";
+        for (const auto &err : name_result.errors()) {
+            result.add_error(name_path + (err.field_path.empty() ? "" : "." + err.field_path), err.rule_violated,
+                             "Property name '" + prop_name + "' failed validation: " + err.message, std::make_optional(name));
+        }
+    }
+    return all_names_valid;
 }
 
 bool

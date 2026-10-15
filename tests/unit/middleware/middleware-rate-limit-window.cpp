@@ -12,7 +12,9 @@
  *   - same-window counting, separated from real-time expiry so no request is
  *     required to arrive before a short scheduler deadline;
  *   - the F41 opportunistic periodic cleanup recovering capacity once short
- *     windows have genuinely elapsed.
+ *     windows have genuinely elapsed;
+ *   - a sub-millisecond window ending at its own length, in the sweep and in
+ *     the reset (Huly QB-536).
  *
  * Expiry cases use short windows only with lower-bound sleeps: extra scheduler
  * delay can never make them fail. Same-window cases use a 24-hour window and
@@ -146,6 +148,39 @@ TEST_F(RateLimitWindowTest, OpportunisticCleanupRecoversCapacityAfterWindowElaps
     const auto evicted = mw->evict_stale_entries_now();
     EXPECT_EQ(evicted, static_cast<std::size_t>(kBurst));
     EXPECT_EQ(mw->tracked_client_count(), 0U);
+}
+
+// A window shorter than a millisecond is a window of its own length (Huly QB-536): the elapsed
+// time is compared in the clock's units, never truncated to whole milliseconds first. Each
+// phase waits past 1.5 windows on the steady clock itself, a LOWER bound only; a truncating
+// comparison reads every elapsed time under 1 ms as 0 ms and so never sees such a window end,
+// neither in the sweep nor in the reset. Spinning on the clock, not sleep_for: a sleep rounds up
+// to the platform tick (about a millisecond on Windows) and would hide exactly that truncation.
+TEST_F(RateLimitWindowTest, SubMillisecondWindowElapsesAtItsOwnLength) {
+    using clock               = std::chrono::steady_clock;
+    constexpr auto kWindow    = std::chrono::microseconds(100);
+    const auto     spin_until = [](clock::time_point deadline) {
+        while (clock::now() < deadline) {
+        }
+    };
+    qb::http::RateLimitOptions options;
+    options.max_requests(1).window(kWindow);
+    auto mw = qb::http::rate_limit_middleware<MockMiddlewareSession>(options);
+
+    // Eviction: an entry whose sub-millisecond window has passed is stale.
+    configure_router_and_run(mw, request_for("/mw_test", "sub_ms"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    spin_until(clock::now() + kWindow * 3 / 2);
+    EXPECT_EQ(mw->evict_stale_entries_now(), 1U) << "a 100 us window that has elapsed must make its entry stale";
+    EXPECT_EQ(mw->tracked_client_count(), 0U);
+
+    // Reset: the exhausted client starts a fresh window once its sub-millisecond window has passed.
+    configure_router_and_run(mw, request_for("/mw_test", "sub_ms"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    spin_until(clock::now() + kWindow * 3 / 2);
+    configure_router_and_run(mw, request_for("/mw_test", "sub_ms"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "a 100 us window that has elapsed must reset the counter";
+    EXPECT_EQ(header_value(_session->_response, "X-RateLimit-Remaining"), "0");
 }
 
 // An immediate sweep keeps a fresh client and its counter. Stale eviction is

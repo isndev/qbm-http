@@ -270,7 +270,7 @@ If the selected child remains pending, `ctx->cancel()` notifies that child once,
 #include <qbm/http/http.h>
 #include <qbm/http/middleware/all.h>   // required: http.h declares no middleware factory
 
-// Pattern: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:656-662 (ConditionalMiddleware tests)
+// Pattern: qbm/http/tests/system/middleware/middleware-pipeline-system.cpp:754-760 (ConditionalMiddleware tests)
 auto predicate = [](const std::shared_ptr<qb::http::Context<MySession>> &ctx) -> bool {
     return ctx->request().uri().path().starts_with("/admin");
 };

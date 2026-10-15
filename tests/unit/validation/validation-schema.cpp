@@ -13,6 +13,7 @@
  * @ingroup Http
  */
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -906,6 +907,58 @@ TEST_F(ValidationSchemaTest, AdditionalPropertiesSchemaValidatesDynamicValues) {
     ASSERT_FALSE(result.success());
     ASSERT_GE(result.errors().size(), 1u);
     EXPECT_NE(result.errors()[0].field_path.find("tag"), std::string::npos);
+}
+
+// The nesting bound is ONE budget for one validation (Huly QB-552). additionalProperties and
+// propertyNames used to validate through a fresh SchemaValidator whose own validate() restarts
+// the depth count at zero, so a chain of them never reached the bound that properties, items and
+// the combinators enforce. The same nesting now gets the same verdict whatever keyword carries it,
+// at the boundary (63 levels pass, 64 is too deep) and far beyond it.
+TEST_F(ValidationSchemaTest, NestingDepthIsOneBudgetAcrossEveryKeyword) {
+    const auto via_properties = [](int levels) {
+        qb::json schema = {{"type", "string"}};
+        for (int i = 0; i < levels; ++i)
+            schema = qb::json{{"type", "object"}, {"properties", {{"a", schema}}}};
+        return schema;
+    };
+    const auto via_additional = [](int levels) {
+        qb::json schema = {{"type", "string"}};
+        for (int i = 0; i < levels; ++i)
+            schema = qb::json{{"type", "object"}, {"additionalProperties", schema}};
+        return schema;
+    };
+    const auto nested_value = [](int levels) {
+        qb::json value = "leaf";
+        for (int i = 0; i < levels; ++i)
+            value = qb::json{{"a", value}};
+        return value;
+    };
+    const auto too_deep = [](Result const &r) {
+        return std::any_of(r.errors().begin(), r.errors().end(), [](Error const &e) { return e.rule_violated == "schemaTooDeep"; });
+    };
+
+    for (const int levels : {62, 63, 64, 65, 200}) {
+        Result     by_properties;
+        Result     by_additional;
+        const bool properties_ok = SchemaValidator(via_properties(levels)).validate(nested_value(levels), by_properties);
+        const bool additional_ok = SchemaValidator(via_additional(levels)).validate(nested_value(levels), by_additional);
+        EXPECT_EQ(additional_ok, properties_ok) << levels << " levels: " << validation_errors_to_json(by_additional.errors()).dump();
+        EXPECT_EQ(too_deep(by_additional), too_deep(by_properties)) << levels << " levels";
+        EXPECT_EQ(properties_ok, levels < 64) << levels << " levels: the bound itself moved";
+    }
+
+    // propertyNames: a name schema nested 40 levels deep, under an object nested 40 levels deep, is
+    // 80 levels of one validation and must hit the same bound.
+    qb::json name_schema = {{"type", "string"}};
+    for (int i = 0; i < 40; ++i)
+        name_schema = qb::json{{"allOf", qb::json::array({name_schema})}};
+    qb::json schema = {{"type", "object"}, {"propertyNames", name_schema}};
+    for (int i = 0; i < 40; ++i)
+        schema = qb::json{{"type", "object"}, {"properties", {{"a", schema}}}};
+    Result     by_names;
+    const bool names_ok = SchemaValidator(schema).validate(nested_value(41), by_names);
+    EXPECT_FALSE(names_ok);
+    EXPECT_TRUE(too_deep(by_names)) << validation_errors_to_json(by_names.errors()).dump();
 }
 
 TEST_F(ValidationSchemaTest, UnicodeStringLengthUsesCodePoints) {

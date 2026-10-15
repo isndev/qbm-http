@@ -192,6 +192,8 @@ if (validator.validate(data, result)) {
 
 > **Use one `SchemaValidator` per core.** Internally it caches the compiled `IRule` list lazily in an unsynchronised `std::unordered_map`, and every recursive validation also increments and decrements the validator's ordinary mutable `_recursion_depth` counter. Warming the cache removes neither that write nor its data race. Do not share one validator across cores without external serialization.
 
+> **One nesting budget per validation.** A validation stops descending past 64 nested sub-schemas and reports `schemaTooDeep` where it stopped. Every keyword that holds a sub-schema — `properties`, `items`, `additionalItems`, `additionalProperties`, `propertyNames` and the four combinators — is validated in place and draws on that one budget, so the same nesting gets the same verdict whatever keyword carries it. (A standalone `PropertyNamesRule` validates through a `SchemaValidator` of its own, with a budget of its own.) <!-- src: qbm/http/src/qbm/http/validation/schema_validator.h:162-168, qbm/http/src/qbm/http/validation/schema_validator.cpp:494-500, qbm/http/src/qbm/http/validation/schema_validator.cpp:511-530 -->
+
 > **Combinators short-circuit and aggregate.** `anyOf`/`oneOf`/`not` are evaluated only if earlier combinators passed. They validate sub-schemas against throwaway `Result`s, so a failure surfaces a single aggregate error (`"anyOf"`, `"oneOf"`, `"not"`) rather than the per-branch detail. Expect one error per failed combinator, not a tree.
 
 ## Parameter validation

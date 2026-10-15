@@ -324,14 +324,16 @@ Manager::verify_token(const std::string &token) const {
             return std::nullopt;
         }
 
-        payload_json = json::object();
-        for (const auto &[key, value] : result.payload) {
-            try {
-                payload_json[key] = json::parse(value);
-            } catch (...) {
-                payload_json[key] = value;
-            }
+        // The signature holds: read the claims from the token's own payload JSON, as the
+        // unverified branch below does, with their real types. The verified map flattens every
+        // claim to text, and parsing each value back as JSON turned the textual identifiers of a
+        // User ("123", "true", "null") into a number, a boolean or null, so the id or the
+        // username vanished (Huly QB-553). roles and metadata keep their decoding below.
+        auto verified_payload = decode_unverified_payload(token);
+        if (!verified_payload || !verified_payload->is_object()) {
+            return std::nullopt;
         }
+        payload_json = std::move(*verified_payload);
     } else {
         auto payload_opt = decode_unverified_payload(token);
         if (!payload_opt || !payload_opt->is_object()) {

@@ -47,6 +47,20 @@ namespace detail {
  */
 [[nodiscard]] std::string build_recaptcha_verification_body(std::string_view secret, std::string_view response,
                                                             std::optional<std::string_view> remote_ip = std::nullopt);
+
+/**
+ * @brief Parses the @c challenge_ts timestamp of a siteverify reply into a UTC instant.
+ *
+ * Google documents the field as an ISO 8601 timestamp and sends the RFC 3339 profile of it
+ * (@c "2026-01-02T03:04:05Z"). Accepted, strictly: @c YYYY-MM-DD, @c T or @c t, @c hh:mm:ss
+ * with an optional fraction (kept to the nanosecond), then @c Z, @c z or a numeric offset
+ * @c +hh:mm / @c -hh:mm (the colon may be omitted). Every field is range-checked and the date
+ * must exist; a leap second (@c :60) is the following second, as in POSIX time.
+ *
+ * @param value The @c challenge_ts string.
+ * @return The instant it denotes, or @c std::nullopt when it is not such a timestamp.
+ */
+[[nodiscard]] std::optional<std::chrono::system_clock::time_point> parse_recaptcha_challenge_ts(std::string_view value) noexcept;
 } // namespace detail
 
 /**
@@ -240,7 +254,9 @@ struct RecaptchaResult {
     std::string error_codes;
     ///< Comma-separated list of error codes if success is false (e.g., "missing-input-secret", "invalid-input-response").
     std::chrono::system_clock::time_point challenge_ts;
-    ///< Timestamp of the challenge load (when the reCAPTCHA was solved). Populated if available from Google's response.
+    ///< Instant the challenge was loaded, as Google announces it (converted to UTC). Meaningful only when has_challenge_ts.
+    bool has_challenge_ts = false;
+    ///< Whether Google's response carried a readable challenge_ts. When false, challenge_ts stays at the epoch.
 };
 
 /**
@@ -524,11 +540,12 @@ private:
                 result.hostname = json_body["hostname"].get<std::string>();
             }
             if (json_body.contains("challenge_ts") && json_body["challenge_ts"].is_string()) {
-                // Basic ISO 8601 string to time_point conversion is non-trivial and platform-dependent.
-                // For now, we don't parse it. A dedicated date/time library would be needed for robust parsing.
-                // Example: result.challenge_ts = parse_iso8601_string(json_body["challenge_ts"].get<std::string>());
-                // Placeholder: use current time if parsing is not implemented.
-                result.challenge_ts = std::chrono::system_clock::now();
+                // The announced instant, never the parsing time: an unreadable value leaves the
+                // field absent rather than inventing one (Huly QB-537).
+                if (const auto announced = detail::parse_recaptcha_challenge_ts(json_body["challenge_ts"].get_ref<const std::string &>())) {
+                    result.challenge_ts     = *announced;
+                    result.has_challenge_ts = true;
+                }
             }
             if (json_body.contains("error-codes") && json_body["error-codes"].is_array()) {
                 std::string error_concat;
