@@ -1273,6 +1273,33 @@ public:
     }
 
     /**
+     * @brief Announce a close the application asked for (RFC 9113 §6.8): queue GOAWAY(NO_ERROR)
+     *        behind whatever the connection still has to send, and stop the protocol, so the io
+     *        delivers that output, the GOAWAY last, and then closes (close-after-deliver). The
+     *        last-stream-id is the last promised stream, 0 while push stays disabled. No GOAWAY
+     *        event is dispatched: the caller is the one closing (Huly QB-1059).
+     * @return true if the GOAWAY was queued; false if the connection was no longer live.
+     */
+    bool
+    send_shutdown_goaway() noexcept {
+        if (!this->ok() || !_connection_active) {
+            return false;
+        }
+        Http2FrameData<GoAwayFrame> goaway_frame;
+        goaway_frame.header.type  = static_cast<uint8_t>(FrameType::GOAWAY);
+        goaway_frame.header.flags = 0;
+        goaway_frame.header.set_stream_id(0);
+        goaway_frame.payload.last_stream_id = _last_promised_stream_id;
+        goaway_frame.payload.error_code     = ErrorCode::NO_ERROR;
+        this->_io << goaway_frame;
+
+        _connection_active           = false;
+        _graceful_shutdown_initiated = true;
+        this->FramerBase::not_ok(ErrorCode::NO_ERROR);
+        return true;
+    }
+
+    /**
      * @brief Send trailer headers for a request
      * @details The request must have announced a trailer section (a "Trailer" header): otherwise
      *          the stream is reset with PROTOCOL_ERROR. The trailer block carries the stream's
@@ -1851,14 +1878,10 @@ private:
 
         LOG_HTTP_WARN_PA(0, "Client: Sending GOAWAY frame. Error: " << static_cast<int>(error_code) << ", Message: " << debug_message);
 
-        uint32_t last_stream_id_to_report = 0; // Default to 0 if no streams
-        // Determine the maximum stream ID initiated by this client that might have been processed by the server.
-        // If we are initiating GOAWAY, it usually means we won't process further *new* incoming streams.
-        // The last_stream_id in GOAWAY indicates the highest stream ID for which this endpoint *might* have taken action.
-        // For client sending GOAWAY, it's often the highest stream ID it has *initiated*.
-        if (!_client_streams.empty()) {
-            last_stream_id_to_report = _last_initiated_stream_id;
-        }
+        // The last-stream-id of a GOAWAY names the highest stream the SENDER's peer initiated that the
+        // sender processed or might process (RFC 9113 §6.8): for a client, the last promised stream
+        // -- 0 while push stays disabled. It used to name the client's own last request (Huly QB-1059).
+        const uint32_t last_stream_id_to_report = _last_promised_stream_id;
 
         Http2FrameData<GoAwayFrame> goaway_frame;
         goaway_frame.header.type  = static_cast<uint8_t>(FrameType::GOAWAY);

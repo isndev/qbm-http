@@ -115,6 +115,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 client announces an explicit disconnect with GOAWAY (Huly QB-1059).**
+  `qb::http2::Client::disconnect()` closed a live connection with no GOAWAY. It now queues
+  `GOAWAY(NO_ERROR)` behind what the connection still had to send, through the new
+  `ClientHttp2Protocol::send_shutdown_goaway()`, and lets the io deliver it before the socket
+  closes; a server that stopped reading holds the close at most
+  `Client::GOAWAY_FLUSH_LIMIT` (1 s). Every GOAWAY the client sends now names the last stream the
+  server initiated that the client accepted (0 while push is disabled), as RFC 9113 §6.8 defines
+  it for the sender, instead of the client's own last request.
 - **HTTP/2 server sends response trailers in the trailer block (Huly QB-1058).** Every response
   header, announced trailer fields included, went out in the leading HEADERS, and the trailer
   block that ended the stream was empty. The fields a response's `Trailer` header names now leave

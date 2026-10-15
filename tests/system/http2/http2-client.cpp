@@ -51,6 +51,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -61,6 +62,7 @@
 #include <qbm/http/http.h> // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
 
 #include <qb/io/tcp/listener.h>
+#include <qb/io/tcp/ssl/listener.h>
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
@@ -2721,3 +2723,273 @@ TEST(Http2ServerLifecycle, DrainReclaimsMoreThanFiftyContextsFromValidWavesAcros
     client->disconnect();
     ServerThread::pump_until([&] { return !client->is_connected(); });
 }
+
+// ===========================================================================
+// An explicit disconnect() announces the close (RFC 9113 §6.8): the peer reads
+// GOAWAY(NO_ERROR) before the end of the connection (Huly QB-1059). A peer that
+// has stopped reading cannot hold the close: it ends within the flush limit.
+// Both run against a minimal TLS + h2 peer whose reads the test controls.
+// ===========================================================================
+namespace http2_client_goaway_test {
+
+/// One-connection TLS + h2 peer on its own thread (non-blocking sockets, polled, every wait bounded):
+/// it negotiates ALPN h2, answers the client's SETTINGS with its own -- in Silent mode a 2^31-1 initial
+/// window and connection window, so the client can queue far more than the socket buffers hold -- and
+/// then records every frame until EOF (Reading) or stops reading once its SETTINGS are acknowledged
+/// (Silent) until released.
+class RawH2Peer {
+public:
+    enum class Mode { Reading, Silent };
+    struct Frame {
+        uint8_t              type      = 0;
+        uint8_t              flags     = 0;
+        uint32_t             stream_id = 0;
+        std::vector<uint8_t> payload;
+    };
+
+    explicit RawH2Peer(Mode mode)
+        : _mode(mode) {
+        _listener.init(qb::io::ssl::Context::server(qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()).alpn({"h2"}));
+        if (_listener.listen_v4(0, "127.0.0.1") != 0) {
+            return;
+        }
+        _listener.set_nonblocking(true);
+        _port   = _listener.local_endpoint().port();
+        _thread = std::thread([this] { run(); });
+    }
+    ~RawH2Peer() {
+        _release = true;
+        if (_thread.joinable()) {
+            _thread.join();
+        }
+    }
+    RawH2Peer(const RawH2Peer &)            = delete;
+    RawH2Peer &operator=(const RawH2Peer &) = delete;
+
+    [[nodiscard]] uint16_t
+    port() const noexcept {
+        return _port;
+    }
+    /// The client acknowledged the peer's SETTINGS: it has applied them.
+    [[nodiscard]] bool
+    settings_acked() const noexcept {
+        return _settings_acked.load();
+    }
+    [[nodiscard]] bool
+    eof() const noexcept {
+        return _eof.load();
+    }
+    [[nodiscard]] std::vector<Frame>
+    frames() const {
+        std::lock_guard lock(_mutex);
+        return _frames;
+    }
+    [[nodiscard]] std::size_t
+    count(uint8_t type) const {
+        std::lock_guard lock(_mutex);
+        return static_cast<std::size_t>(std::count_if(_frames.begin(), _frames.end(), [&](const Frame &f) { return f.type == type; }));
+    }
+
+private:
+    static void
+    append_frame(std::vector<uint8_t> &out, uint8_t type, uint8_t flags, uint32_t stream_id, const std::vector<uint8_t> &payload) {
+        const auto n = static_cast<uint32_t>(payload.size());
+        out.insert(out.end(), {static_cast<uint8_t>(n >> 16), static_cast<uint8_t>(n >> 8), static_cast<uint8_t>(n), type, flags,
+                               static_cast<uint8_t>(stream_id >> 24), static_cast<uint8_t>(stream_id >> 16),
+                               static_cast<uint8_t>(stream_id >> 8), static_cast<uint8_t>(stream_id)});
+        out.insert(out.end(), payload.begin(), payload.end());
+    }
+
+    bool
+    write_all(qb::io::tcp::ssl::socket &sock, const std::vector<uint8_t> &bytes) {
+        std::size_t off = 0;
+        while (off < bytes.size() && !_release) {
+            const int n = sock.write(bytes.data() + off, bytes.size() - off);
+            if (n < 0) {
+                return false;
+            }
+            if (n == 0) {
+                std::this_thread::sleep_for(1ms);
+            }
+            off += static_cast<std::size_t>(n);
+        }
+        return off == bytes.size();
+    }
+
+    void
+    run() {
+        const auto               deadline = std::chrono::steady_clock::now() + 30s;
+        qb::io::tcp::ssl::socket sock;
+        while (!_release && std::chrono::steady_clock::now() < deadline) {
+            if (_listener.accept(sock) == 0 && sock.is_open()) {
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        if (!sock.is_open()) {
+            return;
+        }
+        sock.set_nonblocking(true);
+
+        constexpr std::size_t preface_size = 24;
+        std::vector<uint8_t>  in;
+        bool                  preface_seen = false;
+        bool                  answered     = false;
+        char                  buffer[16384];
+        while (!_release && std::chrono::steady_clock::now() < deadline) {
+            if (_mode == Mode::Silent && _settings_acked) {
+                std::this_thread::sleep_for(1ms); // reads nothing more: the client's sends pile up
+                continue;
+            }
+            const int n = sock.read(buffer, sizeof(buffer));
+            if (n < 0) {
+                _eof = true;
+                break;
+            }
+            if (n == 0) {
+                std::this_thread::sleep_for(1ms);
+                continue;
+            }
+            in.insert(in.end(), buffer, buffer + n);
+            if (!preface_seen) {
+                if (in.size() < preface_size) {
+                    continue;
+                }
+                in.erase(in.begin(), in.begin() + preface_size);
+                preface_seen = true;
+            }
+            while (in.size() >= 9) {
+                const std::size_t length = (std::size_t{in[0]} << 16) | (std::size_t{in[1]} << 8) | in[2];
+                if (in.size() < 9 + length) {
+                    break;
+                }
+                Frame f;
+                f.type      = in[3];
+                f.flags     = in[4];
+                f.stream_id = ((uint32_t{in[5]} << 24) | (uint32_t{in[6]} << 16) | (uint32_t{in[7]} << 8) | in[8]) & 0x7FFFFFFFu;
+                f.payload.assign(in.begin() + 9, in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+                in.erase(in.begin(), in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+                if (f.type == 0x4 && (f.flags & 0x1)) {
+                    _settings_acked = true;
+                } else if (f.type == 0x4 && !answered) {
+                    std::vector<uint8_t> reply;
+                    if (_mode == Mode::Silent) {
+                        append_frame(reply, 0x4, 0, 0, {0x00, 0x04, 0x7F, 0xFF, 0xFF, 0xFF}); // INITIAL_WINDOW_SIZE 2^31-1
+                        const uint32_t inc = 0x7FFFFFFFu - 65535u;
+                        append_frame(reply, 0x8, 0, 0,
+                                     {static_cast<uint8_t>(inc >> 24), static_cast<uint8_t>(inc >> 16), static_cast<uint8_t>(inc >> 8),
+                                      static_cast<uint8_t>(inc)}); // connection window 2^31-1
+                    } else {
+                        append_frame(reply, 0x4, 0, 0, {});
+                    }
+                    append_frame(reply, 0x4, 0x1, 0, {}); // SETTINGS ACK
+                    if (!write_all(sock, reply)) {
+                        _eof = true;
+                        return;
+                    }
+                    answered = true;
+                }
+                std::lock_guard lock(_mutex);
+                _frames.push_back(std::move(f));
+            }
+        }
+        while (!_release && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms); // Silent: hold the connection until released
+        }
+        sock.disconnect();
+        sock.close();
+    }
+
+    Mode                       _mode;
+    qb::io::tcp::ssl::listener _listener;
+    uint16_t                   _port = 0;
+    std::atomic<bool>          _release{false};
+    std::atomic<bool>          _settings_acked{false};
+    std::atomic<bool>          _eof{false};
+    mutable std::mutex         _mutex;
+    std::vector<Frame>         _frames;
+    std::thread                _thread;
+};
+
+class Http2ClientGoawayTest : public ::testing::Test {
+protected:
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        qb::io::async::init();
+    }
+
+    [[nodiscard]] static std::shared_ptr<qb::http2::Client>
+    make_client(uint16_t port) {
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        return client;
+    }
+};
+
+TEST_F(Http2ClientGoawayTest, ExplicitDisconnectSendsGoawayBeforeClosing) {
+    RawH2Peer peer(RawH2Peer::Mode::Reading);
+    ASSERT_NE(peer.port(), 0);
+    auto client    = make_client(peer.port());
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
+
+    qb::http::Request request; // one the peer never answers
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/pending");
+    std::optional<qb::http::Response> response;
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) { response = std::move(r); }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return peer.count(0x1) == 1; })); // its HEADERS arrived
+
+    client->disconnect();
+    ASSERT_TRUE(response.has_value()) << "the outstanding request fails at once";
+    EXPECT_EQ(response->status(), qb::http::status::SERVICE_UNAVAILABLE);
+
+    ASSERT_TRUE(ServerThread::pump_until([&] { return peer.eof(); }));
+    const auto frames = peer.frames();
+    ASSERT_FALSE(frames.empty());
+    const auto &last = frames.back();
+    ASSERT_EQ(last.type, 0x7) << "the connection ended without a GOAWAY";
+    ASSERT_GE(last.payload.size(), 8u);
+    const uint32_t last_stream_id =
+        ((uint32_t{last.payload[0]} << 24) | (uint32_t{last.payload[1]} << 16) | (uint32_t{last.payload[2]} << 8) | last.payload[3])
+        & 0x7FFFFFFFu;
+    const uint32_t error_code =
+        (uint32_t{last.payload[4]} << 24) | (uint32_t{last.payload[5]} << 16) | (uint32_t{last.payload[6]} << 8) | last.payload[7];
+    EXPECT_EQ(error_code, 0u) << "NO_ERROR";
+    EXPECT_EQ(last_stream_id, 0u) << "a client's last-stream-id names server-initiated streams: none were accepted";
+    EXPECT_EQ(last.stream_id, 0u);
+}
+
+TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinTheFlushLimit) {
+    RawH2Peer peer(RawH2Peer::Mode::Silent);
+    ASSERT_NE(peer.port(), 0);
+    auto client    = make_client(peer.port());
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
+
+    // The windows allow 2^31-1: the whole body is framed at once, far more than the socket buffers hold.
+    qb::http::Request request;
+    request.method() = qb::http::Method::POST;
+    request.uri()    = qb::io::uri("/upload");
+    request.body()   = std::string(32u << 20, 'u');
+    ASSERT_TRUE(client->push_request(std::move(request), [](qb::http::Response) {}));
+    const auto settle = std::chrono::steady_clock::now() + 300ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_NOWAIT); // the io writes until the socket refuses
+    }
+    ASSERT_GT(client->out().size(), 0u) << "the socket buffers absorbed the whole body: nothing would wait for the peer";
+    ASSERT_TRUE(client->transport().is_open());
+
+    const auto started = std::chrono::steady_clock::now();
+    client->disconnect();
+    ASSERT_TRUE(ServerThread::pump_until([&] { return !client->transport().is_open(); }, 10s)) << "a peer that stopped reading held the close";
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_GE(elapsed, qb::http2::Client::GOAWAY_FLUSH_LIMIT - 100ms) << "the GOAWAY was given its chance to be delivered";
+    EXPECT_LE(elapsed, qb::http2::Client::GOAWAY_FLUSH_LIMIT + 2s) << "the close is bounded by the flush limit";
+}
+
+} // namespace http2_client_goaway_test

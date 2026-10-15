@@ -153,6 +153,12 @@ Client::disconnect() {
 void
 Client::close_connection(const std::string &error_message) {
     const bool was_connecting = _is_connecting;
+    // An explicit disconnect() of a live connection announces the close (RFC 9113 §6.8): the
+    // protocol queues GOAWAY(NO_ERROR) and stops, and the io delivers it -- after what it still
+    // held -- before it closes. It used to close at once, with no GOAWAY (Huly QB-1059). Not from
+    // the destructor (no owner left): the io goes with the object, nothing could deliver it.
+    const bool announce =
+        _intentional_disconnect && _is_connected && _h2_protocol && !weak_from_this().expired() && _h2_protocol->send_shutdown_goaway();
     _transport_closing        = _transport_closing || _transport_started; // the disconnected the close raises is this transport's
     _transport_started        = false;
     _is_connected             = false;
@@ -185,6 +191,22 @@ Client::close_connection(const std::string &error_message) {
         run_failure_pass(error_message);
     }
     _preserve_pending_on_next_disconnect = true;
+
+    if (announce) {
+        // The io closes once the GOAWAY is out. A server that stopped reading never lets it out:
+        // the limit closes the socket anyway, so the close is bounded.
+        _graceful_close_pending = true;
+        qb::io::async::callback(
+            [weak_self = weak_from_this(), epoch = ++_graceful_close_epoch] {
+                auto self = weak_self.lock();
+                if (self && self->_graceful_close_pending && self->_graceful_close_epoch == epoch) {
+                    LOG_HTTP_WARN_PA(self->_client_id, "GOAWAY not delivered within the flush limit: closing the connection anyway");
+                    self->BaseTcpClient::disconnect();
+                }
+            },
+            GOAWAY_FLUSH_LIMIT);
+        return;
+    }
 
     // Close transport
     BaseTcpClient::disconnect();
@@ -1007,6 +1029,7 @@ Client::on(qb::io::async::event::timeout const &) {
 void
 Client::on(qb::io::async::event::disconnected const &event) {
     LOG_HTTP_INFO_PA(_client_id, "Disconnected (reason: " << event.reason << ")");
+    _graceful_close_pending = false; // the transport is closing: the GOAWAY limit has nothing left to bound
 
     std::string error_msg = "Connection lost";
     if (event.reason != 0) {
