@@ -14,6 +14,7 @@
  * @ingroup Http
  */
 #include <gtest/gtest.h>
+#include <optional>
 #include <string>
 
 #include <qb/json.h>
@@ -57,6 +58,67 @@ TEST_F(ValidationResultTest, ValidationResultBehavesCorrectly) {
     result.clear();
     EXPECT_TRUE(result.success());
     EXPECT_TRUE(result.errors().empty());
+}
+
+// Every form a rule passes its offending value in compiles, under nlohmann 3.11 and 3.12 alike, and
+// stores that value (Huly QB-1008). A `const qb::json &` -- what a CustomRule receives -- did not
+// compile under 3.12: json's conversion operator to std::optional<json> competes with the optional's
+// constructor. The qb::json overload takes json lvalues and rvalues only; std::nullopt, an omitted
+// value, a std::optional and a value of another type (a string, a number, a literal: what qbm-http's
+// own validators pass) keep the optional overload, and its behaviour -- a plain `const qb::json &`
+// overload made those ambiguous.
+TEST_F(ValidationResultTest, AddErrorTakesEveryOffendingValueForm) {
+    const qb::json          received      = qb::json{{"k", 7}};
+    qb::json                mutable_value = 8;
+    std::optional<qb::json> maybe         = qb::json("o");
+    const std::string       text          = "s";
+    result.add_error("a", "rule", "const lvalue", received);
+    result.add_error("b", "rule", "lvalue", mutable_value);
+    result.add_error("c", "rule", "prvalue", qb::json(42));
+    result.add_error("d", "rule", "nullopt", std::nullopt);
+    result.add_error("e", "rule", "optional prvalue", std::optional<qb::json>(received));
+    result.add_error("f", "rule", "optional lvalue", maybe);
+    result.add_error("g", "rule", "omitted");
+    result.add_error("h", "rule", "string", text);
+    result.add_error("i", "rule", "number", 42);
+    result.add_error("j", "rule", "literal", "lit");
+
+    const auto &errors = result.errors();
+    ASSERT_EQ(errors.size(), 10u);
+    ASSERT_TRUE(errors[7].offending_value.has_value());
+    EXPECT_EQ(*errors[7].offending_value, qb::json("s"));
+    ASSERT_TRUE(errors[8].offending_value.has_value());
+    EXPECT_EQ(*errors[8].offending_value, qb::json(42));
+    ASSERT_TRUE(errors[9].offending_value.has_value());
+    EXPECT_EQ(*errors[9].offending_value, qb::json("lit"));
+    ASSERT_TRUE(errors[0].offending_value.has_value());
+    EXPECT_EQ(*errors[0].offending_value, received);
+    EXPECT_EQ(errors[0].field_path, "a");
+    EXPECT_EQ(errors[0].message, "const lvalue");
+    ASSERT_TRUE(errors[1].offending_value.has_value());
+    EXPECT_EQ(*errors[1].offending_value, qb::json(8));
+    ASSERT_TRUE(errors[2].offending_value.has_value());
+    EXPECT_EQ(*errors[2].offending_value, qb::json(42));
+    EXPECT_FALSE(errors[3].offending_value.has_value());
+    ASSERT_TRUE(errors[4].offending_value.has_value());
+    EXPECT_EQ(*errors[4].offending_value, received);
+    ASSERT_TRUE(errors[5].offending_value.has_value());
+    EXPECT_EQ(*errors[5].offending_value, qb::json("o"));
+    EXPECT_FALSE(errors[6].offending_value.has_value());
+
+    // The qb::json form is shaped by the policy as the optional form is.
+    Result dropped;
+    dropped.set_error_value_policy(Result::ErrorValuePolicy::None);
+    dropped.add_error("a", "rule", "const lvalue", received);
+    ASSERT_EQ(dropped.errors().size(), 1u);
+    EXPECT_FALSE(dropped.errors().front().offending_value.has_value());
+    Result previewed;
+    previewed.set_error_value_policy(Result::ErrorValuePolicy::Preview, 16);
+    const qb::json long_text = std::string(64, 'x');
+    previewed.add_error("a", "rule", "const lvalue", long_text);
+    ASSERT_EQ(previewed.errors().size(), 1u);
+    ASSERT_TRUE(previewed.errors().front().offending_value.has_value());
+    EXPECT_EQ(previewed.errors().front().offending_value->get<std::string>(), std::string(16, 'x'));
 }
 
 // --- F48: Error-value policy -------------------------------------------------

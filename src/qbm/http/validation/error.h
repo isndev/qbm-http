@@ -14,8 +14,11 @@
  */
 #pragma once
 
+#include <concepts> // std::same_as (the qb::json add_error, Huly QB-1008)
 #include <optional>
 #include <string>
+#include <type_traits> // std::remove_cvref_t
+#include <utility>     // std::move, std::forward
 #include <vector>
 #include <qb/json.h> // Added for qb::json in ValidationError
 
@@ -128,6 +131,30 @@ public:
      */
     void add_error(std::string field_path, std::string rule_violated, std::string message,
                    std::optional<qb::json> offending_value = std::nullopt);
+
+    /**
+     * @brief Appends a validation error with the `qb::json` value that failed, applying the active
+     *        error-value policy -- the call a rule makes with the `const qb::json &` it received.
+     *
+     * The same as passing `std::optional<qb::json>(offending_value)` (a json rvalue is moved). Without
+     * it, a `const` json lvalue did not compile under nlohmann 3.12: its conversion operator to
+     * `std::optional<json>` competes with the optional's own constructor, an ambiguous conversion
+     * (Huly QB-1008). It takes a `qb::json` argument only, of any value category: any other value --
+     * a `std::string`, a number, a literal, `std::nullopt`, a `std::optional<qb::json>` -- selects the
+     * overload above, as before. A plain `const qb::json &` parameter would have made every one of
+     * those an ambiguous call, under nlohmann 3.11 and 3.12 alike.
+     * @param field_path      Dotted path of the field that failed validation.
+     * @param rule_violated   Identifier of the rule that was violated.
+     * @param message         Human-readable description of the violation.
+     * @param offending_value The offending value, shaped by the active policy.
+     */
+    template <typename Json>
+    requires std::same_as<std::remove_cvref_t<Json>, qb::json>
+    void
+    add_error(std::string field_path, std::string rule_violated, std::string message, Json &&offending_value) {
+        add_error(std::move(field_path), std::move(rule_violated), std::move(message),
+                  std::optional<qb::json>(std::forward<Json>(offending_value)));
+    }
 
     /**
      * @brief Appends a pre-constructed Error object without touching its

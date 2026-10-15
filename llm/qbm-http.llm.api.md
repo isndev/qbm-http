@@ -404,11 +404,12 @@ Usage: `qb::http::auth::Manager m{o}; auto tok = m.generate_token(user); auto u 
 
 # Namespace `qb::http::validation` — request validation (validation/)
 
-### `qb::http::validation::Error` — `src/qbm/http/validation/error.h:28`
+### `qb::http::validation::Error` — `src/qbm/http/validation/error.h:31`
 `struct Error { std::string field_path, rule_violated, message; std::optional<qb::json> offending_value; Error(path, rule, msg, value=std::nullopt); }`
 
-### `qb::http::validation::Result` — `src/qbm/http/validation/error.h:59`
-`class Result { enum class ErrorValuePolicy{Full,Preview,None}; Result& set_error_value_policy(ErrorValuePolicy, std::size_t preview_bytes=256) noexcept; bool success() const; const std::vector<Error>& errors() const; void add_error(path,rule,msg,value=std::nullopt); void add_error(Error); void clear(); void merge(const Result&); Result make_child() const; }`
+### `qb::http::validation::Result` — `src/qbm/http/validation/error.h:62`
+`class Result { enum class ErrorValuePolicy{Full,Preview,None}; Result& set_error_value_policy(ErrorValuePolicy, std::size_t preview_bytes=256) noexcept; bool success() const; const std::vector<Error>& errors() const; void add_error(path,rule,msg,std::optional<qb::json> value=std::nullopt); template<class Json> requires std::same_as<std::remove_cvref_t<Json>, qb::json> void add_error(path,rule,msg,Json&& value); void add_error(Error); void clear(); void merge(const Result&); Result make_child() const; }`
+The `qb::json` overload (`src/qbm/http/validation/error.h:152-157`, Huly QB-1008) takes the `const qb::json&` a `CustomRule` receives, which nlohmann 3.12 cannot convert to `std::optional<qb::json>` implicitly; it delegates to the optional form. Any other value (a string, a number, `std::nullopt`, a `std::optional`) takes the optional form, as before.
 `success() == errors().empty()`; `preview_bytes` clamped to `[16, 64*1024]`.
 `Preview` keeps the longest complete UTF-8 prefix within the byte budget for strings and serialized compound values.
 

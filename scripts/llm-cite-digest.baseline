@@ -272,8 +272,9 @@ llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:38-38	f49eddea4f10	enum cla
 llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:53-53	145e7e92714c	enum class AsyncTaskResult {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:54-54	b5a87ac4eb82	#undef ERROR
 llm/qbm-http.llm.api.md	src/qbm/http/routing/types.h:83-83	8de1c720f27c	using RouteHandlerFn = std::function<void(std::shared_ptr<Context<Ses...
-llm/qbm-http.llm.api.md	src/qbm/http/validation/error.h:28-28	ab8076413e30	struct Error {
-llm/qbm-http.llm.api.md	src/qbm/http/validation/error.h:59-59	eb7ef79c20cd	class Result {
+llm/qbm-http.llm.api.md	src/qbm/http/validation/error.h:152-157	c331ff5d0f11	requires std::same_as<std::remove_cvref_t<Json>, qb::json>
+llm/qbm-http.llm.api.md	src/qbm/http/validation/error.h:31-31	ab8076413e30	struct Error {
+llm/qbm-http.llm.api.md	src/qbm/http/validation/error.h:62-62	eb7ef79c20cd	class Result {
 llm/qbm-http.llm.api.md	src/qbm/http/validation/request_validator.h:34-34	b035530a66ac	class RequestValidator {
 llm/qbm-http.llm.api.md	src/qbm/http/validation/schema_validator.h:162-168	971b4a08b5a3	/// Maximum schema nesting depth accepted by validate_recursive. Guar...
 llm/qbm-http.llm.api.md	src/qbm/http/validation/schema_validator.h:33-33	c7376d87da39	class SchemaValidator {

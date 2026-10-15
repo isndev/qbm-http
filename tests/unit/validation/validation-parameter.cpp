@@ -310,8 +310,9 @@ TEST_F(ValidationParameterTest, CustomRuleKeepsExplicitErrorAndAcceptsSuccess) {
         [](const qb::json &value, const std::string &path, Result &result) {
             if (value == "allow")
                 return true;
-            // nlohmann >= 3.12 cannot copy-initialise std::optional<json> from a json lvalue: pass the optional.
-            result.add_error(path, "specificDenial", "Token denied.", std::optional<qb::json>(value));
+            // The natural call with the value the rule received: nlohmann 3.12 refused it until the
+            // qb::json overload (Huly QB-1008).
+            result.add_error(path, "specificDenial", "Token denied.", value);
             return false;
         },
         "tokenDenied")));
@@ -327,4 +328,6 @@ TEST_F(ValidationParameterTest, CustomRuleKeepsExplicitErrorAndAcceptsSuccess) {
     EXPECT_FALSE(validator.validate(params, rejected, "header"));
     ASSERT_EQ(rejected.errors().size(), 1u);
     EXPECT_EQ(rejected.errors()[0].rule_violated, "specificDenial");
+    ASSERT_TRUE(rejected.errors()[0].offending_value.has_value());
+    EXPECT_EQ(*rejected.errors()[0].offending_value, qb::json("deny"));
 }

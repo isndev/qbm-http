@@ -9,6 +9,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **`validation::Result::add_error(path, rule, message, qb::json)` (Huly QB-1008).** The call a
+  `CustomRule` makes with the `const qb::json &` it received did not compile under nlohmann 3.12
+  (vcpkg, Homebrew): json's conversion operator to `std::optional<json>` competes with the optional's
+  constructor. A member template constrained to a `qb::json` argument, of any value category,
+  delegates to the `std::optional` form; any other value -- a string, a number, `std::nullopt`, a
+  `std::optional` -- keeps that form and its behaviour. A plain `const qb::json &` overload, the
+  first design, made each of those calls ambiguous under nlohmann 3.11 and 3.12 alike, this module's
+  own parameter validator included.
 - **`RecaptchaResult::has_challenge_ts` (Huly QB-537).** Whether Google's reply carried a
   readable `challenge_ts`, beside `has_score`; appended after `challenge_ts`, so positional
   aggregate initialisation keeps compiling.

@@ -131,6 +131,9 @@ auto even_only = std::make_shared<CustomRule>(
     "evenOnly");
 ```
 
+`add_error(path, rule, message, value)` with the `const qb::json &` the rule received selects the `qb::json` overload, which delegates to the `std::optional<qb::json>` form: under nlohmann 3.12 that call did not compile, the conversion of a `const` json to `std::optional<json>` being ambiguous there (Huly QB-1008). Any other value -- a string, a number, `std::nullopt`, a `std::optional` -- takes the optional form.
+<!-- src: qbm/http/src/qbm/http/validation/error.h:132-157 -->
+
 If a parameter rule returns `false` without adding an error, `ParameterValidator` records one using the rule's `rule_name()` and a generic message. An error supplied by the rule is kept as-is, without a duplicate generic error.
 
 > **Most primitive rules are type-gated and pass silently for the wrong kind.** Numeric rules pass for non-numbers, item/array rules pass for non-arrays, property-count rules pass for non-objects, and `PatternRule` passes for non-strings. Absence of an error therefore does **not** mean the constraint was checked — it may mean the value was the wrong kind. Always pair a constraint with a `type` keyword (in a schema) or `set_type(...)` (in a parameter rule set) so the kind is asserted first.
