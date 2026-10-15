@@ -291,6 +291,9 @@ struct Http2ClientStream : public Http2StreamBase {
     qb::http::Request        original_request_to_send;         ///< Stores the original request if its body needs to be sent progressively.
     size_t                   send_buffer_offset = 0;           ///< Current offset in original_request_to_send.body().raw()
     std::vector<std::string> _expected_trailer_names;          ///< Names of headers expected in the trailer part, parsed from "Trailer" header.
+    /// Trailer fields handed to send_request_trailers() while the body still waited for
+    /// flow-control credit: they leave after its last DATA frame and carry END_STREAM.
+    std::optional<std::vector<qb::protocol::hpack::HeaderField>> queued_trailer_fields;
 
     std::vector<qb::protocol::hpack::HeaderField> synthetic_request_headers; ///< For PUSH_PROMISE validation/info by app
     bool                                          request_sent = false;      ///< Initial HEADERS frame for the request

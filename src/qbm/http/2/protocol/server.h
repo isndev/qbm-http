@@ -1282,9 +1282,6 @@ public:
             return PushPromiseFailureReason::INTERNAL_ERROR;
         }
 
-        Http2FrameData<PushPromiseFrame> pp_frame_data;
-        pp_frame_data.payload.promised_stream_id = promised_stream_id;
-
         std::vector<hpack::HeaderField> hf_vector;
         // According to RFC 7540 Section 8.2:
         // PUSH_PROMISE frames MUST include pseudo-header fields for :method, :scheme, :authority, and :path.
@@ -1340,16 +1337,10 @@ public:
             return PushPromiseFailureReason::INTERNAL_HPACK_ERROR;
         }
 
-        pp_frame_data.payload.header_block_fragment = std::move(encoded_headers);
-
-        FrameHeader header_to_send;
-        header_to_send.type  = static_cast<uint8_t>(FrameType::PUSH_PROMISE);
-        header_to_send.flags = FLAG_END_HEADERS; // PUSH_PROMISE contains a full header block, so END_HEADERS implicitly
-        header_to_send.set_stream_id(associated_stream_id);
-        pp_frame_data.header = header_to_send;
-        this->_io << pp_frame_data;
-
-        if (!this->ok()) {                             // Check if the send operation itself failed (e.g. underlying transport error)
+        // The promised request's header block, split over CONTINUATION frames past the peer's
+        // SETTINGS_MAX_FRAME_SIZE like every other header block (Huly QB-522).
+        if (!this->send_push_promise_with_continuation(associated_stream_id, promised_stream_id, std::move(encoded_headers))
+            || !this->ok()) {                          // Check if the send operation itself failed (e.g. underlying transport error)
             _server_streams.erase(promised_stream_id); // Clean up if send failed
             // The not_ok() might have been set by the transport, leading to CONNECTION_INACTIVE on next attempt
             return PushPromiseFailureReason::CONNECTION_INACTIVE; // Or a more generic send error
@@ -2291,7 +2282,8 @@ private:
                 if (stream.headers_sent_in_initial_frame.count(header_item.first))
                     continue;
                 std::string name_lower = header_item.first;
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
+                               [](char c) { return qb::http::utility::ascii_to_lower(c); });
 
                 // Standard pseudo-headers and connection-specific headers are forbidden in trailers
                 if (header_item.first.empty() || header_item.first[0] == ':'
@@ -2299,35 +2291,24 @@ private:
                     continue;
                 }
                 for (const auto &value : header_item.second) {
-                    if (!HeaderValidator::is_valid_header_field(header_item.first, value)) {
+                    // HTTP/2 field names are lowercase (RFC 9113 §8.2.1): validated and sent as such,
+                    // like the response's own headers in send_response().
+                    if (!HeaderValidator::is_valid_header_field(name_lower, value)) {
                         continue;
                     }
-                    hf_vector_trailers.push_back({std::string(header_item.first), value});
+                    hf_vector_trailers.push_back({name_lower, value});
                 }
             }
 
-            Http2FrameData<HeadersFrame> trailers_frame_event;
-            trailers_frame_event.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
-            trailers_frame_event.header.flags = FLAG_END_HEADERS | FLAG_END_STREAM; // Trailers always end the stream
-            trailers_frame_event.header.set_stream_id(stream_id_param);
-
-            if (!hf_vector_trailers.empty()) {
-                // QB_LOG_TRACE_PA(this->getName(), "Server Stream " << stream_id_param << ": Encoding " << hf_vector_trailers.size() << "
-                // trailer fields.");
-                if (_hpack_encoder.encode(hf_vector_trailers, trailers_frame_event.payload.header_block_fragment)) {
-                    // Successfully encoded trailers
-                } else {
-                    // QB_LOG_ERROR_PA(this->getName(), "Server Stream " << stream_id_param << ": HPACK trailer encoding error.");
-                    send_rst_stream(stream_id_param, ErrorCode::INTERNAL_ERROR, "HPACK trailer encoding error");
-                    return; // Stop processing for this stream
-                }
-            } else {
-                // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": No actual trailer fields to send, sending empty
-                // HEADERS with END_STREAM for trailers."); Payload remains empty for empty trailers frame
+            // Trailers always end the stream; a block larger than the peer's frame size is split
+            // over CONTINUATION frames (Huly QB-522).
+            std::vector<uint8_t> encoded_trailers;
+            if (!hf_vector_trailers.empty() && !_hpack_encoder.encode(hf_vector_trailers, encoded_trailers)) {
+                send_rst_stream(stream_id_param, ErrorCode::INTERNAL_ERROR, "HPACK trailer encoding error");
+                return; // Stop processing for this stream
             }
 
-            this->_io << trailers_frame_event;
-            if (this->ok()) {
+            if (this->send_headers_with_continuation(stream_id_param, FLAG_END_STREAM, std::move(encoded_trailers))) {
                 stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
                 stream.end_stream_sent = true;
                 stream.is_trailers     = false; // Trailers have been handled

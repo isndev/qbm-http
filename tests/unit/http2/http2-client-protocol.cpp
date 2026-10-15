@@ -34,6 +34,7 @@ using qb::http::test::default_request_headers;
 using qb::http::test::encode_hpack_headers;
 using qb::http::test::find_frame_offset;
 using qb::http::test::Http2ClientFakeIO;
+using qb::http::test::Http2FakeIO;
 using qb::http::test::Http2PeerFakeIO;
 using qb::http::test::make_data_frame;
 using qb::http::test::make_headers_frame;
@@ -1344,6 +1345,159 @@ TEST(HTTP2ClientProtocol, AnnouncedTrailersAreSentViaSendRequestTrailers) {
     EXPECT_EQ(trailer_fh.get_stream_id(), 1u);
     EXPECT_TRUE(trailer_fh.flags & h2::FLAG_END_STREAM);
     EXPECT_TRUE(trailer_fh.flags & h2::FLAG_END_HEADERS);
+}
+
+// ===========================================================================
+// Announced trailers handed over while the body still waits for flow-control
+// credit leave AFTER its last DATA frame, carrying the stream's single
+// END_STREAM (Huly QB-521). They used to go out at once with END_STREAM, and
+// the window update then sent the rest of the body behind the end of the
+// stream: the server dispatched a request truncated to the first window.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, AnnouncedTrailersWaitForTheBlockedBodyAndEndTheStreamOnce) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    Http2FakeIO                                server_io;
+    h2::ServerHttp2Protocol<Http2FakeIO>       server(server_io);
+
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 4}}));
+    ASSERT_TRUE(protocol.ok());
+    const std::size_t before = io.output.size();
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/upload");
+    req.body()   = "0123456789"; // only 4 octets fit the stream window
+    req.set_header("trailer", "x-checksum");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 21));
+
+    qb::http::headers trailers;
+    trailers.add_header("x-checksum", "cafe");
+    ASSERT_TRUE(protocol.send_request_trailers(1, trailers)) << "accepted, kept behind the blocked body";
+    EXPECT_EQ(count_frames_from(io.output, h2::FrameType::HEADERS, before), 1u) << "only the request HEADERS so far";
+    EXPECT_FALSE(protocol.send_request_trailers(1, trailers)) << "one trailer section per request";
+
+    protocol.on(make_window_update_frame(1, 100));
+    ASSERT_TRUE(protocol.ok());
+    EXPECT_FALSE(protocol.send_request_trailers(1, trailers)) << "the stream has ended";
+
+    // Exact order on the wire: request HEADERS, DATA(4), DATA(6), trailer HEADERS + END_STREAM.
+    std::vector<std::pair<h2::FrameType, uint8_t>> frames;
+    std::vector<uint32_t>                          lengths;
+    for (std::size_t off = before; off + h2::FRAME_HEADER_SIZE <= io.output.size();) {
+        const auto fh = peek_frame_header(io.output, off);
+        if (fh.get_stream_id() == 1) {
+            frames.emplace_back(fh.get_type(), fh.flags);
+            lengths.push_back(fh.get_payload_length());
+        }
+        off += h2::FRAME_HEADER_SIZE + fh.get_payload_length();
+    }
+    ASSERT_EQ(frames.size(), 4u);
+    EXPECT_EQ(frames[0].first, h2::FrameType::HEADERS);
+    EXPECT_EQ(frames[1].first, h2::FrameType::DATA);
+    EXPECT_EQ(lengths[1], 4u);
+    EXPECT_EQ(frames[2].first, h2::FrameType::DATA);
+    EXPECT_EQ(lengths[2], 6u);
+    EXPECT_EQ(frames[3].first, h2::FrameType::HEADERS);
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_FALSE(frames[i].second & h2::FLAG_END_STREAM) << "END_STREAM before the last frame, at " << i;
+    }
+    EXPECT_TRUE(frames[3].second & h2::FLAG_END_STREAM);
+    EXPECT_TRUE(frames[3].second & h2::FLAG_END_HEADERS);
+
+    // A real server reassembles the whole body and the trailer.
+    pump(server, server_io, io);
+    EXPECT_TRUE(server.ok());
+    ASSERT_EQ(server_io.request_count, 1);
+    EXPECT_EQ(server_io.last_request->body().as<std::string>(), "0123456789");
+    EXPECT_EQ(server_io.last_request->header("x-checksum"), "cafe");
+}
+
+// ===========================================================================
+// A request trailer block larger than the peer's SETTINGS_MAX_FRAME_SIZE (16384)
+// is split over CONTINUATION frames like any header block (Huly QB-522); it used
+// to go out as ONE HEADERS frame, which the peer refuses with FRAME_SIZE_ERROR.
+// Exact threshold: {"x-a": V octets of '{'} encodes as a literal without
+// indexing of V + 8 octets ('{' has a 15-bit Huffman code, so the value stays
+// raw; "x-a" too) -> V = 16376 fills one frame exactly, V = 16377 needs two.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, RequestTrailerBlockIsSplitAtThePeerMaxFrameSize) {
+    for (const std::size_t value_size : {std::size_t{16376}, std::size_t{16377}}) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        Http2FakeIO                                server_io;
+        h2::ServerHttp2Protocol<Http2FakeIO>       server(server_io);
+
+        qb::http::Request req;
+        req.method() = qb::http::method::POST;
+        req.uri()    = qb::io::uri("https://example.test/big-trailer");
+        req.body()   = "b";
+        req.set_header("trailer", "x-a");
+        ASSERT_TRUE(protocol.send_request(std::move(req), 5));
+        const std::size_t before = io.output.size();
+
+        const std::string value(value_size, '{');
+        qb::http::headers trailers;
+        trailers.add_header("x-a", value);
+        ASSERT_TRUE(protocol.send_request_trailers(1, trailers));
+        ASSERT_TRUE(protocol.ok());
+
+        std::vector<h2::FrameHeader> block;
+        for (std::size_t off = before; off + h2::FRAME_HEADER_SIZE <= io.output.size();) {
+            const auto fh = peek_frame_header(io.output, off);
+            block.push_back(fh);
+            off += h2::FRAME_HEADER_SIZE + fh.get_payload_length();
+        }
+        const std::size_t expected_frames = value_size == 16376 ? 1u : 2u;
+        ASSERT_EQ(block.size(), expected_frames) << "value " << value_size;
+        EXPECT_EQ(block[0].get_type(), h2::FrameType::HEADERS);
+        EXPECT_EQ(block[0].get_payload_length(), 16384u);
+        EXPECT_TRUE(block[0].flags & h2::FLAG_END_STREAM);
+        EXPECT_EQ(static_cast<bool>(block[0].flags & h2::FLAG_END_HEADERS), expected_frames == 1);
+        if (expected_frames == 2) {
+            EXPECT_EQ(block[1].get_type(), h2::FrameType::CONTINUATION);
+            EXPECT_EQ(block[1].get_payload_length(), 1u);
+            EXPECT_TRUE(block[1].flags & h2::FLAG_END_HEADERS);
+            EXPECT_FALSE(block[1].flags & h2::FLAG_END_STREAM);
+        }
+
+        pump(server, server_io, io);
+        EXPECT_TRUE(server.ok()) << "value " << value_size;
+        ASSERT_EQ(server_io.request_count, 1) << "value " << value_size;
+        EXPECT_EQ(server_io.last_request->header("x-a"), value);
+    }
+}
+
+// ===========================================================================
+// Automatic trailers: a body that waited for flow-control credit is followed by
+// the request headers the "Trailer" header names. Those names come from the
+// header's VALUE, as written ("X-Checksum"), and HTTP/2 field names must be
+// lowercase (RFC 9113 §8.2.1): sent as written, the server refused the trailer
+// block and the request was never dispatched.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, AutomaticTrailerNamesAreSentLowercase) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    Http2FakeIO                                server_io;
+    h2::ServerHttp2Protocol<Http2FakeIO>       server(server_io);
+
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1}}));
+    ASSERT_TRUE(protocol.ok());
+
+    qb::http::Request req;
+    req.method() = qb::http::method::POST;
+    req.uri()    = qb::io::uri("https://example.test/auto-trailers");
+    req.body()   = "ab"; // one octet fits, one waits
+    req.set_header("trailer", "X-Checksum");
+    req.set_header("x-checksum", "cafe");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 8));
+    protocol.on(make_window_update_frame(1, 10)); // the rest of the body, then the trailers
+    ASSERT_TRUE(protocol.ok());
+
+    pump(server, server_io, io);
+    EXPECT_TRUE(server.ok());
+    ASSERT_EQ(server_io.request_count, 1) << "the trailer block was refused";
+    EXPECT_EQ(server_io.last_request->body().as<std::string>(), "ab");
 }
 
 // ===========================================================================

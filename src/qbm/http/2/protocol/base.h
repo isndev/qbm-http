@@ -713,48 +713,89 @@ public:
     }
 
 protected:
+    /**
+     * @brief Send one header block as a HEADERS frame followed by as many CONTINUATION frames as
+     *        the peer's SETTINGS_MAX_FRAME_SIZE requires (RFC 9113 §4.2, §6.10).
+     * @details @p first_frame_flags (END_STREAM, typically) ride the HEADERS frame; END_HEADERS
+     *          is set on the last frame of the block only. An empty block is one empty HEADERS
+     *          frame. The frames are written back to back, so nothing can interleave with them.
+     *          Every header block this protocol sends -- request and response headers, both
+     *          sides' trailers -- goes through here (Huly QB-522).
+     */
     [[nodiscard]] bool
     send_headers_with_continuation(uint32_t stream_id, uint8_t first_frame_flags, std::vector<uint8_t> &&encoded_header_block) noexcept {
-        const auto  max_fragment_size = static_cast<std::size_t>(std::max<uint32_t>(1, this->get_peer_max_frame_size()));
-        std::size_t offset            = 0;
-        bool        first_frame       = true;
+        const auto        max_fragment_size = static_cast<std::size_t>(std::max<uint32_t>(1, this->get_peer_max_frame_size()));
+        const std::size_t first_size        = std::min(max_fragment_size, encoded_header_block.size());
+        const bool        last_fragment     = first_size == encoded_header_block.size();
 
-        do {
-            const std::size_t remaining      = encoded_header_block.size() - offset;
-            const std::size_t fragment_size  = std::min(max_fragment_size, remaining);
+        Http2FrameData<HeadersFrame> headers_frame_data;
+        headers_frame_data.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
+        headers_frame_data.header.flags = first_frame_flags;
+        if (last_fragment) {
+            headers_frame_data.header.flags |= FLAG_END_HEADERS;
+        } else {
+            headers_frame_data.header.flags &= static_cast<uint8_t>(~FLAG_END_HEADERS);
+        }
+        headers_frame_data.header.set_stream_id(stream_id);
+        headers_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
+        this->_io << headers_frame_data;
+        if (!this->ok()) {
+            return false;
+        }
+        return send_continuation_frames(stream_id, encoded_header_block, first_size);
+    }
+
+    /**
+     * @brief Send a PUSH_PROMISE header block: the PUSH_PROMISE frame (promised stream id + the
+     *        first fragment) followed by CONTINUATION frames, each within the peer's
+     *        SETTINGS_MAX_FRAME_SIZE (RFC 9113 §6.6, §6.10).
+     * @details The 4-octet promised stream id counts against the first frame's size.
+     */
+    [[nodiscard]] bool
+    send_push_promise_with_continuation(uint32_t associated_stream_id, uint32_t promised_stream_id,
+                                        std::vector<uint8_t> &&encoded_header_block) noexcept {
+        const auto max_frame_size =
+            static_cast<std::size_t>(std::max<uint32_t>(PUSH_PROMISE_MIN_PAYLOAD_SIZE + 1, this->get_peer_max_frame_size()));
+        const std::size_t first_size = std::min(max_frame_size - PUSH_PROMISE_MIN_PAYLOAD_SIZE, encoded_header_block.size());
+
+        Http2FrameData<PushPromiseFrame> push_promise_frame_data;
+        push_promise_frame_data.header.type  = static_cast<uint8_t>(FrameType::PUSH_PROMISE);
+        push_promise_frame_data.header.flags = first_size == encoded_header_block.size() ? FLAG_END_HEADERS : 0;
+        push_promise_frame_data.header.set_stream_id(associated_stream_id);
+        push_promise_frame_data.payload.promised_stream_id = promised_stream_id;
+        push_promise_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
+        this->_io << push_promise_frame_data;
+        if (!this->ok()) {
+            return false;
+        }
+        return send_continuation_frames(associated_stream_id, encoded_header_block, first_size);
+    }
+
+    /**
+     * @brief The CONTINUATION frames carrying @p encoded_header_block from @p offset on, each at
+     *        most the peer's SETTINGS_MAX_FRAME_SIZE, END_HEADERS on the last one. Nothing is sent
+     *        when the first frame already carried the whole block.
+     */
+    [[nodiscard]] bool
+    send_continuation_frames(uint32_t stream_id, const std::vector<uint8_t> &encoded_header_block, std::size_t offset) noexcept {
+        const auto max_fragment_size = static_cast<std::size_t>(std::max<uint32_t>(1, this->get_peer_max_frame_size()));
+        while (offset < encoded_header_block.size()) {
+            const std::size_t fragment_size  = std::min(max_fragment_size, encoded_header_block.size() - offset);
             const bool        last_fragment  = (offset + fragment_size) == encoded_header_block.size();
-            const auto        fragment_begin = encoded_header_block.begin() + offset;
-            const auto        fragment_end   = fragment_begin + fragment_size;
+            const auto        fragment_begin = encoded_header_block.begin() + static_cast<std::ptrdiff_t>(offset);
 
-            if (first_frame) {
-                Http2FrameData<HeadersFrame> headers_frame_data;
-                headers_frame_data.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
-                headers_frame_data.header.flags = first_frame_flags;
-                if (last_fragment) {
-                    headers_frame_data.header.flags |= FLAG_END_HEADERS;
-                } else {
-                    headers_frame_data.header.flags &= static_cast<uint8_t>(~FLAG_END_HEADERS);
-                }
-                headers_frame_data.header.set_stream_id(stream_id);
-                headers_frame_data.payload.header_block_fragment.assign(fragment_begin, fragment_end);
-                this->_io << headers_frame_data;
-            } else {
-                Http2FrameData<ContinuationFrame> continuation_frame_data;
-                continuation_frame_data.header.type  = static_cast<uint8_t>(FrameType::CONTINUATION);
-                continuation_frame_data.header.flags = last_fragment ? FLAG_END_HEADERS : 0;
-                continuation_frame_data.header.set_stream_id(stream_id);
-                continuation_frame_data.payload.header_block_fragment.assign(fragment_begin, fragment_end);
-                this->_io << continuation_frame_data;
-            }
-
+            Http2FrameData<ContinuationFrame> continuation_frame_data;
+            continuation_frame_data.header.type  = static_cast<uint8_t>(FrameType::CONTINUATION);
+            continuation_frame_data.header.flags = last_fragment ? FLAG_END_HEADERS : 0;
+            continuation_frame_data.header.set_stream_id(stream_id);
+            continuation_frame_data.payload.header_block_fragment.assign(fragment_begin,
+                                                                         fragment_begin + static_cast<std::ptrdiff_t>(fragment_size));
+            this->_io << continuation_frame_data;
             if (!this->ok()) {
                 return false;
             }
-
             offset += fragment_size;
-            first_frame = false;
-        } while (offset < encoded_header_block.size());
-
+        }
         return true;
     }
 

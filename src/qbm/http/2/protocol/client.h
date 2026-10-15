@@ -1229,14 +1229,22 @@ public:
 
     /**
      * @brief Send trailer headers for a request
+     * @details The request must have announced a trailer section (a "Trailer" header): otherwise
+     *          the stream is reset with PROTOCOL_ERROR. The trailer block carries the stream's
+     *          END_STREAM and always follows the LAST DATA frame of the body: while part of the
+     *          body still waits for flow-control credit, the trailers are kept and leave right
+     *          after it (Huly QB-521). A block larger than the peer's SETTINGS_MAX_FRAME_SIZE is
+     *          split over CONTINUATION frames (Huly QB-522). Field names are sent lowercase.
      * @param stream_id Stream ID
      * @param trailers Trailer headers to send
-     * @return true if trailers were sent, false on error
+     * @return true if the trailers were sent or queued behind the body; false if the stream is
+     *         unknown or already ended, a trailer section was already handed over, or a field
+     *         was refused (the stream is then reset).
      */
     [[nodiscard]] bool
     send_request_trailers(uint32_t stream_id, const qb::http::headers &trailers) {
         auto *stream_ptr = get_stream_by_id(stream_id);
-        if (!stream_ptr || stream_ptr->end_stream_sent) {
+        if (!stream_ptr || stream_ptr->end_stream_sent || stream_ptr->queued_trailer_fields) {
             return false;
         }
         Http2ClientStream &stream = *stream_ptr;
@@ -1255,7 +1263,8 @@ public:
             }
 
             std::string name_lower = header_item.first;
-            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
+                           [](char c) { return qb::http::utility::ascii_to_lower(c); });
 
             if (HeaderValidator::is_forbidden_trailer_header(name_lower)) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + header_item.first);
@@ -1264,43 +1273,21 @@ public:
 
             // Handle multi-value headers: iterate over all values in the vector
             for (const auto &value : header_item.second) {
-                if (!HeaderValidator::is_valid_header_field(header_item.first, value)) {
+                if (!HeaderValidator::is_valid_header_field(name_lower, value)) {
                     send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid trailer header field format: " + header_item.first);
                     return false;
                 }
-                trailer_fields.emplace_back(header_item.first, value);
+                trailer_fields.emplace_back(name_lower, value);
             }
         }
 
-        // Encode trailers
-        std::vector<uint8_t> encoded_trailers;
-        if (!_hpack_encoder.encode(trailer_fields, encoded_trailers)) {
-            send_rst_stream(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
-            return false;
+        if (stream.has_pending_data_to_send) {
+            // Part of the body still waits for flow-control credit: the trailer block must follow
+            // its last DATA frame, so try_send_pending_data_for_stream() sends it then.
+            stream.queued_trailer_fields = std::move(trailer_fields);
+            return true;
         }
-
-        // Send trailers as HEADERS frame with END_STREAM
-        Http2FrameData<HeadersFrame> trailers_frame;
-        trailers_frame.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
-        trailers_frame.header.flags = FLAG_END_HEADERS | FLAG_END_STREAM;
-        trailers_frame.header.set_stream_id(stream_id);
-        trailers_frame.payload.header_block_fragment = std::move(encoded_trailers);
-
-        this->_io << trailers_frame;
-        stream.end_stream_sent = true;
-
-        // Update stream state
-        if (stream.state == Http2StreamConcreteState::OPEN) {
-            stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
-        } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
-            stream.state = Http2StreamConcreteState::CLOSED;
-        }
-
-        if (stream.state == Http2StreamConcreteState::CLOSED) {
-            try_close_stream_context_by_id(stream.id, ErrorCode::NO_ERROR);
-        }
-
-        return true;
+        return send_request_trailer_block(stream, std::move(trailer_fields));
     }
 
     /**
@@ -2310,24 +2297,58 @@ private:
         return true;
     }
 
+    /**
+     * @brief Send a request's trailer section: one header block carrying END_STREAM, split over
+     *        CONTINUATION frames past the peer's SETTINGS_MAX_FRAME_SIZE (Huly QB-522).
+     * @details Called only once the body's last DATA frame is out. The stream may be erased by
+     *          the time this returns (closed after END_STREAM): callers do not touch it again.
+     * @return false if encoding or sending failed (the stream is reset on an encoding failure).
+     */
+    [[nodiscard]] bool
+    send_request_trailer_block(Http2ClientStream &stream, std::vector<hpack::HeaderField> &&trailer_fields) noexcept {
+        const uint32_t       stream_id = stream.id;
+        std::vector<uint8_t> encoded_trailers;
+        if (!trailer_fields.empty() && !_hpack_encoder.encode(trailer_fields, encoded_trailers)) {
+            // send_rst_stream() closes/erases the stream context.
+            send_rst_stream(stream_id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
+            return false;
+        }
+        if (!this->send_headers_with_continuation(stream_id, FLAG_END_STREAM, std::move(encoded_trailers))) {
+            return false;
+        }
+
+        stream.end_stream_sent           = true;
+        stream.client_will_send_trailers = false;
+        stream.queued_trailer_fields.reset();
+        if (stream.state == Http2StreamConcreteState::OPEN) {
+            stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+        } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
+            stream.state = Http2StreamConcreteState::CLOSED;
+        }
+        if (stream.state == Http2StreamConcreteState::CLOSED) {
+            try_close_stream_context_by_id(stream_id, ErrorCode::NO_ERROR);
+        }
+        return true;
+    }
+
     // This method is called when a WINDOW_UPDATE is received or to resume sending.
     void
     try_send_pending_data_for_stream(uint32_t /*stream_id_param*/, Http2ClientStream &active_stream) noexcept {
         if (!this->ok() || !_connection_active) {
-            // QB_LOG_WARN_PA(this->getName(), "Client Stream " << stream_id_param << ": try_send_pending_data called but connection not OK or
-            // inactive.");
             return;
         }
 
-        if (active_stream.state != Http2StreamConcreteState::OPEN && active_stream.state != Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
-            // QB_LOG_DEBUG_PA(this->getName(), "Client Stream " << stream_id_param << ": try_send_pending_data called but stream not in OPEN or
-            // HALF_CLOSED_LOCAL state. State: " << static_cast<int>(active_stream.state));
-            return; // Can only send data/trailers in these states
+        // Only a stream whose request is not finished sends: OPEN, or HALF_CLOSED_REMOTE when the
+        // server answered before the request ended (RFC 9113 §8.1 lets it; the client still
+        // sends the rest). After END_STREAM -- HALF_CLOSED_LOCAL -- nothing more may follow on
+        // this stream: resuming there emitted DATA behind a trailer block (Huly QB-521).
+        if (active_stream.end_stream_sent
+            || (active_stream.state != Http2StreamConcreteState::OPEN && active_stream.state != Http2StreamConcreteState::HALF_CLOSED_REMOTE)) {
+            return;
         }
 
         // Attempt to send pending body data first
         if (active_stream.has_pending_data_to_send) {
-            // QB_LOG_DEBUG_PA(this->getName(), "Client Stream " << stream_id_param << ": Resuming send for pending body data.");
             if (!this->_send_request_body_data_internal(active_stream)) {
                 // A connection/protocol error occurred during body send.
                 if (active_stream.state == Http2StreamConcreteState::CLOSED) { // Check if _send_request_body_data_internal closed it
@@ -2337,89 +2358,47 @@ private:
                 return;
             }
             if (active_stream.has_pending_data_to_send) {
-                // QB_LOG_DEBUG_PA(this->getName(), "Client Stream " << stream_id_param << ": Body data still pending after
-                // try_send_body_data_internal (flow control). Offset: " << active_stream.send_buffer_offset);
                 return; // Still blocked by flow control for body
             }
         }
 
-        // If we reach here, all body data (if any) has been successfully sent from original_request_to_send.body(),
-        // or there was no body data pending initially (has_pending_data_to_send is false).
-        // Now, check if trailers need to be sent.
+        // All body data (if any) is out. The trailer section, when announced, ends the stream:
+        // the fields handed to send_request_trailers() while the body was blocked, else the
+        // request headers the "Trailer" header names.
         if (active_stream.client_will_send_trailers && !active_stream.end_stream_sent) {
-            // QB_LOG_DEBUG_PA(this->getName(), "Client Stream " << active_stream.id << ": Body fully sent or no body to send, proceeding to
-            // send trailers.");
-
             std::vector<hpack::HeaderField> trailer_fields_to_send;
-
-            if (!active_stream._expected_trailer_names.empty()) {
-                // QB_LOG_DEBUG_PA(this->getName(), "Client Stream " << active_stream.id << ": Preparing " <<
-                // active_stream._expected_trailer_names.size() << " expected trailer fields.");
+            if (active_stream.queued_trailer_fields) {
+                trailer_fields_to_send = std::move(*active_stream.queued_trailer_fields);
+            } else {
                 for (const std::string &trailer_name_str : active_stream._expected_trailer_names) {
                     if (trailer_name_str.empty() || trailer_name_str[0] == ':') {
-                        // QB_LOG_WARN_PA(this->getName(), "Client Stream " << active_stream.id << ": Pseudo-header or empty name '" <<
-                        // trailer_name_str << "' listed in Trailer, ignoring for trailer section.");
-                        continue;
+                        continue; // a pseudo-header or an empty name listed in "Trailer"
                     }
 
                     const auto &header_map       = active_stream.original_request_to_send.headers();
                     auto        it_header_values = header_map.find(trailer_name_str);
+                    if (it_header_values == header_map.end()) {
+                        continue; // listed in "Trailer" but absent from the request headers
+                    }
+                    std::string name_lower = trailer_name_str;
+                    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
+                                   [](char c) { return qb::http::utility::ascii_to_lower(c); });
+                    for (const auto &value_type : it_header_values->second) {
+                        std::string value_std_str;
+                        using OriginalReqStringType = typename qb::http::Request::string_type;
 
-                    if (it_header_values != header_map.end()) {
-                        for (const auto &value_type : it_header_values->second) {
-                            std::string value_std_str;
-                            using OriginalReqStringType = typename qb::http::Request::string_type;
-
-                            if constexpr (std::is_same_v<OriginalReqStringType, std::string_view>) {
-                                value_std_str.assign(value_type.data(), value_type.length());
-                            } else {
-                                value_std_str = value_type;
-                            }
-                            trailer_fields_to_send.emplace_back(trailer_name_str, value_std_str);
+                        if constexpr (std::is_same_v<OriginalReqStringType, std::string_view>) {
+                            value_std_str.assign(value_type.data(), value_type.length());
+                        } else {
+                            value_std_str = value_type;
                         }
-                    } else {
-                        // QB_LOG_WARN_PA(this->getName(), "Client Stream " << active_stream.id << ": Trailer field '" << trailer_name_str << "'
-                        // listed in Trailer header but not found in original request headers.");
+                        trailer_fields_to_send.emplace_back(name_lower, std::move(value_std_str));
                     }
                 }
-            } else if (active_stream.client_will_send_trailers) {
-                // QB_LOG_DEBUG_PA(this->getName(), "Client Stream " << active_stream.id << ": 'Trailer' header was present but listed no
-                // specific fields (or all were invalid). Sending empty trailer block.");
             }
-
-            Http2FrameData<HeadersFrame> trailers_frame_data;
-            trailers_frame_data.header.type  = static_cast<uint8_t>(FrameType::HEADERS);
-            trailers_frame_data.header.flags = FLAG_END_HEADERS | FLAG_END_STREAM;
-            trailers_frame_data.header.set_stream_id(active_stream.id);
-
-            if (!trailer_fields_to_send.empty()) {
-                if (!_hpack_encoder.encode(trailer_fields_to_send, trailers_frame_data.payload.header_block_fragment)) {
-                    // QB_LOG_ERROR_PA(this->getName(), "Client Stream " << active_stream.id << ": HPACK encoding failed for trailers.");
-                    // send_rst_stream() closes/erases the stream context; the `active_stream`
-                    // reference is dangling afterward, so do not re-inspect or re-close it.
-                    send_rst_stream(active_stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
-                    return;
-                }
-            }
-
-            this->_io << trailers_frame_data;
-            if (this->ok()) {
-                active_stream.end_stream_sent = true;
-                if (active_stream.state == Http2StreamConcreteState::OPEN
-                    || active_stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
-                    active_stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
-                } else if (active_stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
-                    active_stream.state = Http2StreamConcreteState::CLOSED;
-                }
-                active_stream.client_will_send_trailers = false;
-                // QB_LOG_DEBUG_PA(this->getName(), "Client Stream " << active_stream.id << ": Trailers sent with END_STREAM. State: " <<
-                // static_cast<int>(active_stream.state) );
-            } else {
-                // QB_LOG_ERROR_PA(this->getName(), "Client Stream " << active_stream.id << ": Send failed for trailers frame.");
-                if (active_stream.client_will_send_trailers) {
-                    active_stream.has_pending_data_to_send = true;
-                }
-            }
+            // The stream may be closed and erased past this call: nothing below touches it.
+            (void) send_request_trailer_block(active_stream, std::move(trailer_fields_to_send));
+            return;
         }
 
         if (active_stream.state == Http2StreamConcreteState::CLOSED) {

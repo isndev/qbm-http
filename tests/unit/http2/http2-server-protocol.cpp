@@ -1013,6 +1013,53 @@ TEST(HTTP2ServerProtocol, SendPushPromiseSucceedsWhenPeerAllowsPush) {
     EXPECT_EQ(pp->stream_id, 1u);
 }
 
+// A promised request whose header block exceeds the peer's SETTINGS_MAX_FRAME_SIZE
+// (16384) is split into PUSH_PROMISE + CONTINUATION frames, each within the limit,
+// END_HEADERS on the last one only (RFC 9113 §6.6, §6.10; Huly QB-522 class). It
+// used to be one oversized PUSH_PROMISE frame the peer refuses with FRAME_SIZE_ERROR.
+TEST(HTTP2ServerProtocol, LargePushPromiseHeaderBlockIsSplitAtThePeerMaxFrameSize) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}}));
+    drive(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+    io.output.reset();
+
+    const std::string big(20000, '{'); // 15-bit Huffman code: stays a raw 20000-octet literal
+    qb::http::Request promised{qb::io::uri{"https://example.test/asset.css"}};
+    promised.method() = qb::http::method::GET;
+    promised.set_header("x-big", big);
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, std::move(promised)).has_value());
+
+    const auto frames = parse_emitted_frames(io.output);
+    ASSERT_GE(frames.size(), 2u);
+    EXPECT_EQ(frames.front().type, FrameType::PUSH_PROMISE);
+    EXPECT_FALSE(frames.front().flags & qb::protocol::http2::FLAG_END_HEADERS);
+    std::vector<uint8_t> block;
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        EXPECT_LE(frames[i].payload_length, 16384u) << "frame " << i;
+        EXPECT_EQ(frames[i].stream_id, 1u);
+        if (i > 0) {
+            EXPECT_EQ(frames[i].type, FrameType::CONTINUATION);
+            EXPECT_EQ(static_cast<bool>(frames[i].flags & qb::protocol::http2::FLAG_END_HEADERS), i + 1 == frames.size());
+        }
+        const auto payload = emitted_payload(io.output, frames[i]);
+        block.insert(block.end(), payload.begin() + (i == 0 ? 4 : 0), payload.end()); // skip the promised id
+    }
+
+    qb::protocol::hpack::Decoder                  decoder;
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+    bool                                          incomplete = false;
+    ASSERT_TRUE(decoder.decode(block, fields, incomplete));
+    bool found = false;
+    for (const auto &f : fields) {
+        found = found || (f.name == "x-big" && f.value == big);
+    }
+    EXPECT_TRUE(found) << "the reassembled block carries the promised request's header";
+}
+
 TEST(HTTP2ServerProtocol, SendPushPromiseRejectedWhenPeerDisablesPush) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);

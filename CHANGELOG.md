@@ -115,6 +115,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 header blocks respect the peer's frame size and request trailers follow the body
+  (Huly QB-522, QB-521).** Request trailers (explicit and automatic), response trailers and
+  PUSH_PROMISE blocks were each written as one frame whatever their size; a block larger than the
+  peer's `SETTINGS_MAX_FRAME_SIZE` was refused with FRAME_SIZE_ERROR. Every header block now
+  leaves through one emitter that splits it over CONTINUATION frames. Trailers handed to
+  `send_request_trailers` while the body still waited for window credit went out at once with
+  END_STREAM, and the resumed body followed the end of the stream: the server dispatched a
+  truncated request. They now wait for the last DATA frame; a second trailer section is refused,
+  and a stream that has sent END_STREAM sends nothing more. Automatic trailer names taken from
+  the `Trailer` header value are sent lowercase. Witnesses in
+  `tests/unit/http2/http2-client-protocol.cpp` and `http2-server-protocol.cpp`.
 - **HTTP/2 framer ends and opens header blocks on empty fragments too; ENABLE_PUSH checked by role
   (Huly QB-497, QB-567).** An empty final CONTINUATION carrying END_HEADERS left the framer
   expecting another CONTINUATION, so the next ordinary frame (a PING, a new request) killed the
